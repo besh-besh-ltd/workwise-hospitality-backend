@@ -1,0 +1,33 @@
+<table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
+  <tr>
+    <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
+          <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+          <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
+          <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
+            Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
+      </table></td>
+  </tr>
+  <tr>
+  <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:5px 5px; background:#fff; line-height:1.5;'>
+  	<strong>Dear [name],</strong><br>
+    
+    </td>
+  </tr>
+  <tr>
+    <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>Congratulation! You account is pending for admin approval. Admin will review and approve the account soon. </td>
+    
+  </tr>
+    
+  
+  <tr>
+    <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#000; font-weight:normal; padding:5px; background:#efefef; line-height:30px;'><div>
+        <div>
+          <div>
+            <div>
+              <p>© WorkWise. All Rights Reserved.</p>
+            </div>
+          </div>
+        </div>
+      </div></td>
+  </tr>
+</table>
