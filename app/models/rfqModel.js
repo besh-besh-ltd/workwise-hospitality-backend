@@ -400,23 +400,13 @@ const rfqModel = {
               SELECT json_build_object('id', TQ.id ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id      
             ) AS "quotes",            
             ARRAY(
-              SELECT 
-              json_build_object(
-                  'total_vendors',  COUNT(TRPV.*),
-                  'quote_received', (
-                      SELECT total_vendors_applied
-                      FROM (
-                          SELECT COUNT(TQ.*) AS total_vendors_applied
-                          FROM tbl_quotes TQ 
-                          WHERE TQ.rfq_id = RFQ.id
-                      ) AS subquery
-                  )
-              ) AS "vendors"
-          FROM 
-              tbl_rfq_product_vendors TRPV 
-          WHERE 
-              TRPV.rfq_id = RFQ.id   
-            ) AS "vendors",
+              SELECT json_build_object( 'total_vendors', COUNT(DISTINCT TRPV.user_id), 'quote_received', 
+                (SELECT COUNT(DISTINCT TQ.created_by)
+                FROM tbl_quotes TQ
+                WHERE TQ.rfq_id = RFQ.id ) ) AS "vendors"
+            FROM tbl_rfq_product_vendors TRPV
+            WHERE TRPV.rfq_id = RFQ.id
+            GROUP BY  TRPV.rfq_id ) AS "vendors",
             ARRAY(
                 SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_id,
                     'product_specs', (
@@ -632,7 +622,7 @@ const rfqModel = {
                   )                  
                   ) FROM tbl_quotes TQ WHERE TQ.id = TQI.quote_id AND TQ.rfq_id = ${id}
                 )      
-          ) FROM tbl_quote_items TQI WHERE TQI.rfq_id = ${id} AND TQI.product_id = TRF.product_id ORDER BY TQI.total_price ASC
+          ) FROM tbl_quote_items TQI WHERE TQI.rfq_id = ${id} AND TQI.product_id = TRF.product_id 
           
         ) AS "quotations"
         FROM tbl_rfq_products TRF WHERE TRF.rfq_id = ${id}`
@@ -665,8 +655,20 @@ const rfqModel = {
   gerRFQVendors: async (id) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT user_id FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = ${id}`
+        `SELECT DISTINCT  user_id FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = ${id} `
       )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  quoteVendor: async (id) => {
+    return new Promise(function (resolve, reject) {
+      db.query(`SELECT created_by  FROM "tbl_quotes" WHERE "rfq_id" = ${id}`)
         .then(function (data) {
           resolve(data);
         })

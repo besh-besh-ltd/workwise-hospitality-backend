@@ -118,7 +118,7 @@ const cmsModel = {
         WHEN tbl_vendor_approve.vendor_logo IS NULL THEN
         NULL
         ELSE tbl_vendor_approve.vendor_logo
-        END AS image_url from tbl_vendor_approve  WHERE status = 1  order by id desc`
+        END AS image_url from tbl_vendor_approve  WHERE status = 1 AND show_in_website = 1  order by id desc`
       )
         .then(function (data) {
           resolve(data);

@@ -1815,7 +1815,17 @@ const rfqController = {
     const { organization_name, name } = req.user;
 
     try {
-      const vendors = await rfqModel.gerRFQVendors(rfq_id);
+      let vendors = await rfqModel.gerRFQVendors(rfq_id);
+      // console.log('vendors ==>>>>', vendors);
+      const quote_vendor = await rfqModel.quoteVendor(rfq_id);
+
+      const createdByIds = new Set(quote_vendor.map((item) => item.created_by));
+
+      const unmatchedVendors = vendors.filter(
+        (vendor) => !createdByIds.has(vendor.user_id)
+      );
+      vendors = unmatchedVendors;
+      // console.log('vendors ==>>>>', vendors);
 
       let org_name = organization_name ? organization_name : name;
       Promise.all(vendors.map((item) => sendReminderRFQMAIL(item, org_name)))

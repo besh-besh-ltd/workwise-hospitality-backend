@@ -130,6 +130,9 @@ const schemas = {
     qap: Joi.string().optional(),
     status: Joi.string()
       .optional()
+      .regex(/^[0|1]$/, 'numeric values only'),
+    show_in_website: Joi.string()
+      .optional()
       .regex(/^[0|1]$/, 'numeric values only')
   })
 };

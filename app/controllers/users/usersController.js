@@ -2325,6 +2325,8 @@ const UsersController = {
         );
         data.pending_responses =
           parseInt(active_rfqs.count) - parseInt(pending_responses.count);
+        data.pending_responses =
+          data.pending_responses < 0 ? 0 : data.pending_responses;
         data.quote_received = parseInt(pending_responses.count);
         let rfq_data_for_notificaton = await rfqModel.getAllBuyerRfq(
           5,
