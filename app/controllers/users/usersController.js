@@ -1345,10 +1345,10 @@ const UsersController = {
     let user = "";
     try {
       // let user_id = req.user.id;
-      if (!req.is_verified) {
+      if (!req.is_verified || !req.user.subscription_plan_id) {
         user = await userModel.vendorinfo(user_id);
       } else {
-
+        
         user = await userModel.vendorinfo(req.user.id, user_id);
       }
       if (user) {
