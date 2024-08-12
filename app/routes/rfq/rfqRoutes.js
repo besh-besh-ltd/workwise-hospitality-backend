@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import rfqController from '../../controllers/rfq/rfqController.js';
+import noLogin from '../../middleware/noLogin.js';
 import {
   validateBody,
   validateParam,
@@ -123,8 +124,7 @@ RfqRoutes.post(
 
 RfqRoutes.post(
   '/search-vendor',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
+  noLogin.customer_auth,
   rfqController.searchVendor
 );
 RfqRoutes.get(

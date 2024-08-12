@@ -378,6 +378,92 @@ const rfqModel = {
         });
     });
   },
+  searchVendorWithoutLogin: async (
+    search_key,
+    category_id,
+    approved_by_id,
+    state,
+    city
+  ) => {
+    // Query to fetch the total count of vendors
+    let countQuery = `
+      WITH vendor_data AS (
+        SELECT DISTINCT tu.id
+        FROM tbl_product p
+        JOIN tbl_product_categories pc ON p.id = pc.product_id
+        JOIN tbl_category c ON pc.category_id = c.id
+        JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
+        LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+        ${
+          approved_by_id != ''
+            ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
+            : ``
+        }
+        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
+        ${state != '' ? `AND tu.state = ${state}` : ``}
+        ${city != '' ? `AND tu.city = ${city}` : ``}
+        ${category_id != '' ? `AND c.id = ${category_id}` : ``}
+        ${
+          approved_by_id != ''
+            ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
+            : ``
+        }
+      )
+      SELECT COUNT(*) AS total FROM vendor_data;
+    `;
+  
+    // Query to fetch only one vendor
+    let dataQuery = `
+      WITH vendor_data AS (
+        SELECT DISTINCT tu.id, tu.name as vendor_name, tu.organization_name as company_name,
+        tu.address, tc.profile as about, tc.website, tc.company_name,
+        CASE
+            WHEN tu.new_profile_image IS NULL THEN
+            NULL
+            ELSE tu.new_profile_image
+        END AS image_url
+        FROM tbl_product p
+        JOIN tbl_product_categories pc ON p.id = pc.product_id
+        JOIN tbl_category c ON pc.category_id = c.id
+        JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
+        LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+        ${
+          approved_by_id != ''
+            ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
+            : ``
+        }
+        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
+        ${state != '' ? `AND tu.state = ${state}` : ``}
+        ${city != '' ? `AND tu.city = ${city}` : ``}
+        ${category_id != '' ? `AND c.id = ${category_id}` : ``}
+        ${
+          approved_by_id != ''
+            ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
+            : ``
+        }
+      )
+      SELECT * FROM vendor_data ORDER BY vendor_name ASC LIMIT 1;
+    `;
+  
+    
+    try {
+      // Execute the count query
+      const countResult = await db.query(countQuery);
+      const totalCount = countResult[0].total;
+  
+      // Execute the data query
+      const dataResult = await db.query(dataQuery);
+       console.log(dataResult);
+  
+      return {
+        total: totalCount,
+        vendor: dataResult.length > 0 ? dataResult[0] : null
+      };
+    } catch (err) {
+      console.error('Error in searchVendor:', err);
+      throw new Error(err);
+    }
+  },
   getUserProducts: async (rfq_id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
