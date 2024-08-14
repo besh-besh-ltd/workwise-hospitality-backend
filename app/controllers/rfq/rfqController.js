@@ -2115,15 +2115,15 @@ const rfqController = {
          )
            .then((result) => {
              shuffleArray(result);
-             Array.apply(null, { length: rest_items }).map((item) => {
-               result.push({total:total_items});
-             });
+            //  Array.apply(null, { length: rest_items }).map((item) => {
+            //    result.push({total:total_items});
+            //  });
 
              res
                .status(200)
                .json({
                  status: 1,
-                 data: result,
+                 data: result.push({total:total_items}),
                  subscription:false,
                  logged_In:true,
                })
