@@ -889,6 +889,12 @@ const UsersController = {
   },
   get_profile: async (req, res, next) => {
     try {
+      if (!req.is_verified) {
+        return res.status(200).json({
+          status: 1,
+          message: 'User is not logged in.'
+        }).end();
+      }
       let user_id = req.user.id;
       const user = await userModel.userinfo(user_id);
       if (user) {
