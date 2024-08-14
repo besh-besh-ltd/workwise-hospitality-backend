@@ -2036,8 +2036,8 @@ const rfqController = {
          
          // Send the response with the vendor data and the total count
        return  res.status(200).json({
-           success: true,
-           vendor: vendorData,
+           status: 1,
+           data: vendorData,
            total: totalCount,
            logged_In:false,
            subscription:false
@@ -2045,7 +2045,7 @@ const rfqController = {
        } else {
          // No data found
          res.status(404).json({
-           success: false,
+           status: 0,
            message: 'No vendor found matching the criteria',
            logged_In:false,
            subscription:false,
