@@ -2118,14 +2118,15 @@ const rfqController = {
              Array.apply(null, { length: rest_items }).map((item) => {
               
              });
-
+           
              res
                .status(200)
                .json({
                  status: 1,
-                 data: result.push({total:total_items}),
+                 data: result,
                  subscription:false,
                  logged_In:true,
+                 total:total_items
                })
                .end();
            })
