@@ -2116,7 +2116,7 @@ const rfqController = {
            .then((result) => {
              shuffleArray(result);
              Array.apply(null, { length: rest_items }).map((item) => {
-               result.push();
+              
              });
 
              res
