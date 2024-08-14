@@ -7,7 +7,7 @@ const noLogin = {
     customer_auth: async (req, res, next) => {
         try {
             if (req.headers.authorization) {
-                console.log(req.headers.authorization);
+              
 
                 // Call passportSignIn and pass a custom 'next' function
                 passportSignIn(req, res, (err) => {
