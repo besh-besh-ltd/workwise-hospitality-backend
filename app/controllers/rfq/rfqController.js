@@ -2039,12 +2039,16 @@ const rfqController = {
            success: true,
            vendor: vendorData,
            total: totalCount,
+           logged_In:false,
+           subscription:false
          });
        } else {
          // No data found
          res.status(404).json({
            success: false,
            message: 'No vendor found matching the criteria',
+           logged_In:false,
+           subscription:false,
          });
        }
      } catch (error) {
@@ -2119,7 +2123,9 @@ const rfqController = {
                .status(200)
                .json({
                  status: 1,
-                 data: result
+                 data: result,
+                 subscription:false,
+                 logged_In:true,
                })
                .end();
            })
@@ -2134,7 +2140,9 @@ const rfqController = {
                .status(200)
                .json({
                  status: 1,
-                 data: result
+                 data: result,
+                 logged_In:true,
+                 subscription:true
                })
                .end();
            })
