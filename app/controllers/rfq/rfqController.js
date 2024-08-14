@@ -1950,8 +1950,6 @@ const rfqController = {
     }
   },
   searchProduct: async (req, res, next) => {
-    let user = req.user;
-    if (user && user.user_type != 3) {
       let search_key = '';
       let category_id = '';
       let approved_by_id = '';
@@ -2006,15 +2004,7 @@ const rfqController = {
           })
           .end();
       }
-    } else {
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: "You don't have permission to perform this action!"
-        })
-        .end();
-    }
+    
   },
   searchVendor: async (req, res, next) => {
 

@@ -22,7 +22,6 @@ productRoutes.post(
 );
 productRoutes.get(
   '/category-list',
-  passportSignIn,
   productController.categoryList
 );
 productRoutes.get(
