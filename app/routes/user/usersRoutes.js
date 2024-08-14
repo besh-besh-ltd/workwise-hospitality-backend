@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import UsersController from '../../controllers/users/usersController.js';
+import noLogin from '../../middleware/noLogin.js';
 import {
   validateBody,
   validateParam,
@@ -119,8 +120,7 @@ UsersRoutes.post(
 );
 UsersRoutes.get(
   '/vendor-profile/:vendor_id',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
+  noLogin.customer_auth,
   UsersController.vendor_profile
 );
 UsersRoutes.post(

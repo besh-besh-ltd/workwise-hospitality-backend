@@ -1341,11 +1341,16 @@ const UsersController = {
     }
   },
   vendor_profile: async (req, res, next) => {
+    let user_id = req.params.vendor_id;
+    let user = "";
     try {
       // let user_id = req.user.id;
-      let user_id = req.params.vendor_id;
-      const user = await userModel.vendorinfo(req.user.id, user_id);
-
+      if (!req.is_verified || !req.user.subscription_plan_id) {
+        user = await userModel.vendorinfo(user_id);
+      } else {
+        
+        user = await userModel.vendorinfo(req.user.id, user_id);
+      }
       if (user) {
         res
           .status(200)
