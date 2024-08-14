@@ -857,7 +857,7 @@ const rfqModel = {
         ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
         : ``
     }
-     ORDER BY tu.name ASC;`;
+     ORDER BY RANDOM();`;
 
     console.log('QUERY======', q);
 
