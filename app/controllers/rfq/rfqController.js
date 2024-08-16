@@ -271,13 +271,13 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
 
     Promise.all(
       vendors &
-        vendors
-          .map(async (vendorsItem) => {
-            let user_details = await userModel.user_profile_detail(
-              vendorsItem.user_id
-            );
-            if (user_details.length > 0) {
-              let dynamicHTML = `
+      vendors
+        .map(async (vendorsItem) => {
+          let user_details = await userModel.user_profile_detail(
+            vendorsItem.user_id
+          );
+          if (user_details.length > 0) {
+            let dynamicHTML = `
                 <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
                   <tr>
                     <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
@@ -295,7 +295,7 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
                   </tr>
                   <tr>
                     <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>You have a new RFQ from ${organization_name}. Review now to submit your quotation.
-                    <a href="${process.env.FRONT_END_WBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}">Click here to view RFQ</a></td>
+                    <a href="${process.env.FRONT_END_WBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&userId=${user_details[0].id}">Click here to view RFQ</a></td>
                     
                   </tr>
                     
@@ -313,39 +313,39 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
                   </tr>
                   </table>`;
 
-              sendMail({
-                from: Config.webmasterMail, // sender address
-                to: user_details[0]?.email, // list of receivers
-                subject: `Work Wise | New RFQ Alert`, // Subject line
-                html: dynamicHTML // plain text body
-              });
-              const notificationData = {
-                type: 'RFQ create',
-                title: `RFQ created`,
-                message: `RFQ created successfully`,
-                additional_data: {
-                  user_type: user_details[0].user_type
-                }
-              };
-              // const receiverUserIds = [req.params.id];
-              // await sendNotification(user_id[0].id, '', notificationData);
-              const payload = {
-                title: `Hello ${user_details[0].name}`,
-                body: `You've got a new RFQ from ${user.organization_name}`
-              };
-              const ss = JSON.parse(user_details[0].endpoint);
-              sendNotification(
-                user_details[0].id,
-                '',
-                notificationData,
-                payload,
-                ss
-              );
-            }
-          })
-          .then((result) => {
-            return {};
-          })
+            sendMail({
+              from: Config.webmasterMail, // sender address
+              to: user_details[0]?.email, // list of receivers
+              subject: `Work Wise | New RFQ Alert`, // Subject line
+              html: dynamicHTML // plain text body
+            });
+            const notificationData = {
+              type: 'RFQ create',
+              title: `RFQ created`,
+              message: `RFQ created successfully`,
+              additional_data: {
+                user_type: user_details[0].user_type
+              }
+            };
+            // const receiverUserIds = [req.params.id];
+            // await sendNotification(user_id[0].id, '', notificationData);
+            const payload = {
+              title: `Hello ${user_details[0].name}`,
+              body: `You've got a new RFQ from ${user.organization_name}`
+            };
+            const ss = JSON.parse(user_details[0].endpoint);
+            sendNotification(
+              user_details[0].id,
+              '',
+              notificationData,
+              payload,
+              ss
+            );
+          }
+        })
+        .then((result) => {
+          return {};
+        })
     );
   } catch (error) {
     console.error('Error inserting data:', error);
@@ -370,7 +370,7 @@ const sendMailtoVendors = async (req, rfqNumber) => {
 
 const sendQuotationMailToBuyer = async (req, rfqNumber) => {
   // send mail to vendors
-  const { name, email } = req.user;
+  const { name, email, id } = req.user;
   let dynamicHTML = `
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
@@ -388,7 +388,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
       </td>
     </tr>
     <tr>
-      <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>Your RFQ has been successfully shared with vendors.<a href="${process.env.FRONT_END_WBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}">Click here to view </a></td>
+      <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>Your RFQ has been successfully shared with vendors.<a href="${process.env.FRONT_END_WBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}&userId=${id}">Click here to view </a></td>
       
     </tr>
       
@@ -434,11 +434,10 @@ const sendQuoteNotificationToVendor = async (req) => {
     </tr>
     <tr>
       <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>
-      ${
-        req.body.is_regret && req.body.is_regret == 1
-          ? 'Your regret concern has been sent to the buyer.'
-          : 'Your quotation has been submitted to the buyer.'
-      }
+      ${req.body.is_regret && req.body.is_regret == 1
+      ? 'Your regret concern has been sent to the buyer.'
+      : 'Your quotation has been submitted to the buyer.'
+    }
       
       </td>
       
@@ -566,9 +565,8 @@ const sendQuoteNotificationEmail = async (req) => {
           </td>
         </tr>
         <tr>
-          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${
-            vendor.name
-          }</u> on <a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</u> </a>for bellow products:
+          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${vendor.name
+        }</u> on <a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</u> </a>for bellow products:
           ${getProducts()}
           
           </td>
@@ -608,9 +606,8 @@ const sendQuoteNotificationEmail = async (req) => {
           </tr>
           <tr>
             <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>
-            <u>${
-              vendor.name
-            }</u> is declined the RFQ request (<a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
+            <u>${vendor.name
+          }</u> is declined the RFQ request (<a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
              ${getProducts()}            
             
             </td>
@@ -1075,6 +1072,18 @@ const rfqController = {
   },
   getRfqById: async (req, res, next) => {
     let id = req.params.id;
+    // Determine the user ID to check based on the verification status
+    const withoutLoginUserID = !req.is_verified ? req.query.userId : null;
+
+    // Check if the user exists in the "tbl_users" table if the user is not verified
+    const withoutLoginUserData = withoutLoginUserID
+      ? await rfqModel.checkIfExists("tbl_users", `id = ${withoutLoginUserID}`)
+      : [];
+
+    // Ensure req.user is assigned with data either from middleware or from the DB check
+    if (!req.user && withoutLoginUserData.length > 0) {
+      req.user = withoutLoginUserData[0]; // Assign the first result to req.user
+    }
 
     try {
       if (req.user.user_type == 2) {
@@ -1489,8 +1498,22 @@ const rfqController = {
       globalPaymentTerms,
       globalComment
     } = req.body;
-    const user = req.user;
 
+    // Determine the user ID to check based on the verification status
+    const withoutLoginUserID = !req.is_verified ? req.query.userId : null;
+
+    // Check if the user exists in the "tbl_users" table if the user is not verified
+    const withoutLoginUserData = withoutLoginUserID
+      ? await rfqModel.checkIfExists("tbl_users", `id = ${withoutLoginUserID}`)
+      : [];
+
+    // Ensure req.user is assigned with data either from middleware or from the DB check
+    if (!req.user && withoutLoginUserData.length > 0) {
+      req.user = withoutLoginUserData[0]; // Assign the first result to req.user
+    }
+
+    const user = req.user;
+    
     if (user && user.user_type != 3 && user.user_type != 4) {
       res
         .status(400)
@@ -2019,160 +2042,160 @@ const rfqController = {
   searchVendor: async (req, res, next) => {
 
     // Extracting parameters from the request
-      // const { search_key, category_id, approved_by_id, state, city } = req.query;
-   let search_key = '';
-   let category_id = '';
-   let approved_by_id = '';
-   let state = '';
-   let city = '';
-   search_key = req.body?.search_key ? req.body?.search_key : '';
-   category_id = req.body?.category_id ? req.body?.category_id : '';
-   approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
-   state = req.body?.state ? req.body?.state : '';
-   city = req.body?.city ? req.body?.city : '';
+    // const { search_key, category_id, approved_by_id, state, city } = req.query;
+    let search_key = '';
+    let category_id = '';
+    let approved_by_id = '';
+    let state = '';
+    let city = '';
+    search_key = req.body?.search_key ? req.body?.search_key : '';
+    category_id = req.body?.category_id ? req.body?.category_id : '';
+    approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
+    state = req.body?.state ? req.body?.state : '';
+    city = req.body?.city ? req.body?.city : '';
 
-   // If user is not logged in
-   if(!req.is_verified){
-     try {
-      
-       // Call the searchVendor method
-       const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
-   console.log(vendorResult);
-   
-       // Check if vendorResult is not empty and has the expected structure
-       if (vendorResult && vendorResult.total && vendorResult.vendor) {
-         const vendorData = vendorResult.vendor; // First query result
-         const totalCount = vendorResult.total; // Second query result: total count
-         
-         // Send the response with the vendor data and the total count
-       return  res.status(200).json({
-           success: true,
-           vendor: vendorData,
-           total: totalCount,
-         });
-       } else {
-         // No data found
-         res.status(404).json({
-           success: false,
-           message: 'No vendor found matching the criteria',
-         });
-       }
-     } catch (error) {
-       console.error('Error in searchVendorController:', error);
-       logError(error);
-       // Error handling and response
-       res.status(500).json({
-         success: false,
-         message: 'An error occurred while searching for the vendor',
-         error: error.message,
-       });
-     }
-   }else{
+    // If user is not logged in
+    if (!req.is_verified) {
+      try {
 
-     // if user is not logged!
-   let user = req.user;
-   if (user && user.user_type != 3) {
+        // Call the searchVendor method
+        const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
+        console.log(vendorResult);
 
-     try {
-       const vendorResult = await rfqModel.searchVendor(
-         search_key,
-         category_id,
-         approved_by_id,
-         state,
-         city
-       );
+        // Check if vendorResult is not empty and has the expected structure
+        if (vendorResult && vendorResult.total && vendorResult.vendor) {
+          const vendorData = vendorResult.vendor; // First query result
+          const totalCount = vendorResult.total; // Second query result: total count
 
-       let dummyOBJ = {
-         sp: false,
-         id: '**',
-         vendor_name: '***** ******',
-         email: '********@*****.***',
-         mobile: '**********',
-         company_name: '******',
-         address: '******** ******* ** ****** **** ******** ****',
-         image_url: null,
-         vendor_approved: [
-           {
-             id: '**',
-             vendor_approve: '****'
-           },
-           {
-             id: '**',
-             vendor_approve: '**** **'
-           },
-           {
-             id: '**',
-             vendor_approve: '****'
-           }
-         ]
-       };
-       let items_to_show = 1;
-       let total_items = vendorResult.length;
-       let rest_items = 0;
-       let items_to_sent = vendorResult;
+          // Send the response with the vendor data and the total count
+          return res.status(200).json({
+            success: true,
+            vendor: vendorData,
+            total: totalCount,
+          });
+        } else {
+          // No data found
+          res.status(404).json({
+            success: false,
+            message: 'No vendor found matching the criteria',
+          });
+        }
+      } catch (error) {
+        console.error('Error in searchVendorController:', error);
+        logError(error);
+        // Error handling and response
+        res.status(500).json({
+          success: false,
+          message: 'An error occurred while searching for the vendor',
+          error: error.message,
+        });
+      }
+    } else {
 
-       if (!user.subscription_plan_id) {
-         rest_items =
-           total_items > items_to_show ? total_items - items_to_show : 0;
-         items_to_sent = vendorResult.slice(0, items_to_show);
+      // if user is not logged!
+      let user = req.user;
+      if (user && user.user_type != 3) {
 
-         Promise.all(
-           items_to_sent.map((item) => getVendorDetails(item, false))
-         )
-           .then((result) => {
-             shuffleArray(result);
-             Array.apply(null, { length: rest_items }).map((item) => {
-               result.push({total:total_items});
-             });
+        try {
+          const vendorResult = await rfqModel.searchVendor(
+            search_key,
+            category_id,
+            approved_by_id,
+            state,
+            city
+          );
 
-             res
-               .status(200)
-               .json({
-                 status: 1,
-                 data: result
-               })
-               .end();
-           })
-           .catch((error) => {
-             console.error('Error inserting data:', error);
-           });
-       } else {
-         Promise.all(vendorResult.map((item) => getVendorDetails(item, true)))
-           .then((result) => {
-             shuffleArray(result);
-             res
-               .status(200)
-               .json({
-                 status: 1,
-                 data: result
-               })
-               .end();
-           })
-           .catch((error) => {
-             console.error('Error inserting data:', error);
-           });
-       }
-     } catch (error) {
-       logError(error);
-       res
-         .status(400)
-         .json({
-           status: 3,
-           message: Config.errorText.value
-         })
-         .end();
-     }
-   } else {
-     res
-       .status(400)
-       .json({
-         status: 3,
-         message: "You don't have permission to perform this action!"
-       })
-       .end();
-   }
- }
-},
+          let dummyOBJ = {
+            sp: false,
+            id: '**',
+            vendor_name: '***** ******',
+            email: '********@*****.***',
+            mobile: '**********',
+            company_name: '******',
+            address: '******** ******* ** ****** **** ******** ****',
+            image_url: null,
+            vendor_approved: [
+              {
+                id: '**',
+                vendor_approve: '****'
+              },
+              {
+                id: '**',
+                vendor_approve: '**** **'
+              },
+              {
+                id: '**',
+                vendor_approve: '****'
+              }
+            ]
+          };
+          let items_to_show = 1;
+          let total_items = vendorResult.length;
+          let rest_items = 0;
+          let items_to_sent = vendorResult;
+
+          if (!user.subscription_plan_id) {
+            rest_items =
+              total_items > items_to_show ? total_items - items_to_show : 0;
+            items_to_sent = vendorResult.slice(0, items_to_show);
+
+            Promise.all(
+              items_to_sent.map((item) => getVendorDetails(item, false))
+            )
+              .then((result) => {
+                shuffleArray(result);
+                Array.apply(null, { length: rest_items }).map((item) => {
+                  result.push({ total: total_items });
+                });
+
+                res
+                  .status(200)
+                  .json({
+                    status: 1,
+                    data: result
+                  })
+                  .end();
+              })
+              .catch((error) => {
+                console.error('Error inserting data:', error);
+              });
+          } else {
+            Promise.all(vendorResult.map((item) => getVendorDetails(item, true)))
+              .then((result) => {
+                shuffleArray(result);
+                res
+                  .status(200)
+                  .json({
+                    status: 1,
+                    data: result
+                  })
+                  .end();
+              })
+              .catch((error) => {
+                console.error('Error inserting data:', error);
+              });
+          }
+        } catch (error) {
+          logError(error);
+          res
+            .status(400)
+            .json({
+              status: 3,
+              message: Config.errorText.value
+            })
+            .end();
+        }
+      } else {
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: "You don't have permission to perform this action!"
+          })
+          .end();
+      }
+    }
+  },
   getPastRFQs: async (req, res, next) => {
     let vendor_id = req.params.id;
     const { id } = req.user;
