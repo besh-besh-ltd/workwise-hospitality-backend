@@ -2037,7 +2037,7 @@ const rfqController = {
          // Send the response with the vendor data and the total count
        return  res.status(200).json({
            status: 1,
-           data: vendorData,
+           data: [vendorData],
            total: totalCount,
            logged_In:false,
            subscription:false
