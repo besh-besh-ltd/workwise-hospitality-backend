@@ -375,7 +375,7 @@ const sendMailtoVendors = async (req, rfqNumber) => {
 
 const sendQuotationMailToBuyer = async (req, rfqNumber) => {
   // send mail to vendors
-  const { name, email, id } = req.user;
+  const { name, email } = req.user;
   let dynamicHTML = `
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
