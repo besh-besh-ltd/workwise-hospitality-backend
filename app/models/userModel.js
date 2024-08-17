@@ -611,12 +611,12 @@ const userModel = {
     });
   },
 
-  vendorinfo: async (user_id, current_user=null) => {
-   
+  vendorinfo: async (user_id, current_user = null) => {
+
     return new Promise(function (resolve, reject) {
-      if(current_user===null){
-       // console.log("jey=======================================================================");
-        
+      if (current_user === null) {
+        // console.log("jey=======================================================================");
+
         db.one(
           `SELECT tbl_users.id as user_id,
                   tbl_users.name as vendor_name,
@@ -682,16 +682,16 @@ const userModel = {
           LEFT JOIN tbl_company ON tbl_users.id = tbl_company.user_id
           WHERE tbl_users.id = $1`,
           [user_id]
-      )
-      .then(function (data) {
-        resolve(data);
-      })
-      .catch(function (err) {
-        let error = new Error(err);
-        reject(error);
-      });
-      
-      }else{
+        )
+          .then(function (data) {
+            resolve(data);
+          })
+          .catch(function (err) {
+            let error = new Error(err);
+            reject(error);
+          });
+
+      } else {
         db.one(
           `SELECT tbl_users.id as user_id,tbl_users.name as vendor_name,
           tbl_users.new_profile_image as profile_image,
@@ -744,17 +744,17 @@ const userModel = {
            where tbl_users.id = $1`,
           [user_id]
         )
-     
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
+
+          .then(function (data) {
+            resolve(data);
+          })
+          .catch(function (err) {
+            let error = new Error(err);
+            reject(error);
+          });
       }
     });
-  
+
   },
 
   /*   vendorinfo: async (user_id) => {
@@ -2765,13 +2765,10 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
           resolve(row_counts[0]?.id);
         } else {
           // insert into
-          query = `insert into Users(fname, lname, email, mobile, password,  role_id, admin_approval_status, agent_id, created_by) values( '${
-            name[0]
-          }', '${name.length > 0 ? name[1] : ''}', '${usrobj.email}', '${
-            usrobj.phone
-          }', '${
-            usrobj.password
-          }',3,'verified', ${created_by_user},${created_by_user})`;
+          query = `insert into Users(fname, lname, email, mobile, password,  role_id, admin_approval_status, agent_id, created_by) values( '${name[0]
+            }', '${name.length > 0 ? name[1] : ''}', '${usrobj.email}', '${usrobj.phone
+            }', '${usrobj.password
+            }',3,'verified', ${created_by_user},${created_by_user})`;
           db.query(query, function (error, results, fields) {
             if (error) throw error;
             resolve(results.insertId);
@@ -3086,7 +3083,37 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
           reject(err);
         });
     });
+  },
+  insertBuyerPrivateVendor: async (buyerId, vendorName, email, phone, productList) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        // Check if a vendor with the same email already exists for the given buyerId
+        const existingVendor = await db.any(
+          `SELECT * FROM tbl_temp_user 
+           WHERE buyer_id = $1 AND email = $2`,
+          [buyerId, email]
+        );
+  
+        if (existingVendor.length > 0) {
+          return reject(new Error('Vendor_In_Review'));
+        }
+  
+        // Insert the new vendor record
+        const result = await db.any(
+          `INSERT INTO tbl_temp_user 
+          (buyer_id, vendor_name, email, phone, product_list, status, reject_reason, created_date, updated_date) 
+          VALUES 
+          ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) 
+          RETURNING *`,
+          [buyerId, vendorName, email, phone, productList, 0, null]
+        );
+        resolve(result);
+      } catch (err) {
+        reject(err);
+      }
+    });
   }
+
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];
 
