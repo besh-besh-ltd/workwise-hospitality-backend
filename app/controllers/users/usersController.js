@@ -2567,6 +2567,24 @@ const UsersController = {
         })
         .end();
     }
+  },
+  getBuyerPrivateVendors: async (req, res, next) => {
+    try {
+      const buyerId = req.user.id; // Getting buyerId from the authenticated user
+  
+      // Fetch the vendor details from the model
+      const vendors = await userModel.getBuyerPrivateVendors(buyerId);
+  
+      // Sending the response back to the client
+      res.status(200).json({
+        status: 1,
+        message: 'Vendor details retrieved successfully.',
+        data: vendors,
+      });
+    } catch (error) {
+      next(error); // Pass the error to the error-handling middleware
+    }
   }
+
 };
 export default UsersController;

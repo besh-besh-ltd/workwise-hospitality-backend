@@ -3112,6 +3112,22 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         reject(err);
       }
     });
+  },
+  getBuyerPrivateVendors: async (buyerId) => {
+    return new Promise((resolve, reject) => {
+      db.any(
+        `SELECT * 
+         FROM tbl_temp_user 
+         WHERE buyer_id = $1`,
+        [buyerId]
+      )
+        .then((data) => {
+          resolve(data);
+        })
+        .catch((err) => {
+          reject(err);
+        });
+    });
   }
 
   /*  uploadFiles: async (files, user_id, doc_type) => {
