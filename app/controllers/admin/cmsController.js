@@ -1077,6 +1077,7 @@ const cmsController = {
         title: title,
         description: description,
         url: url,
+        page_id: req.body.pageId ? req.body.pageId : findOneTestimonial[0]?.page_id,
         status: status,
         thumbnail_image:
           req?.files?.image?.length > 0
