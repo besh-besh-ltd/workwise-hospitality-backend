@@ -14,6 +14,7 @@ import { sendNotification } from '../../services/notificationService.js';
 import excelJS from 'exceljs';
 import xlsx from 'xlsx';
 
+
 const getNextRfQNumber = async () => {
   // get last rfq
   return new Promise(async function (resolve, reject) {
@@ -263,6 +264,7 @@ const getQUOTES = async ({ id }, user_id) => {
   }
 };
 const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
+
   console.log('===========', vendors);
   try {
     let organization_name = user.organization_name
@@ -277,6 +279,11 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
             vendorsItem.user_id
           );
           if (user_details.length > 0) {
+
+
+            // Insert the token and related data into the table
+            const token = await rfqModel.insertVendorRfqToken(user_details[0].id, rfqNumber);
+
             let dynamicHTML = `
                 <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
                   <tr>
@@ -295,7 +302,7 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
                   </tr>
                   <tr>
                     <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>You have a new RFQ from ${organization_name}. Review now to submit your quotation.
-                    <a href="${process.env.FRONT_END_WBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&userId=${user_details[0].id}">Click here to view RFQ</a></td>
+                    <a href="${process.env.FRONT_END_WBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}">Click here to view RFQ</a></td>
                     
                   </tr>
                     
@@ -1073,17 +1080,43 @@ const rfqController = {
   getRfqById: async (req, res, next) => {
     let id = req.params.id;
     // Determine the user ID to check based on the verification status
-    const withoutLoginUserID = !req.is_verified ? req.query.userId : null;
+    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
 
-    // Check if the user exists in the "tbl_users" table if the user is not verified
-    const withoutLoginUserData = withoutLoginUserID
-      ? await rfqModel.checkIfExists("tbl_users", `id = ${withoutLoginUserID}`)
-      : [];
-
-    // Ensure req.user is assigned with data either from middleware or from the DB check
-    if (!req.user && withoutLoginUserData.length > 0) {
-      req.user = withoutLoginUserData[0]; // Assign the first result to req.user
+    if (withoutLoginUserToken) {
+      // Check if the token exists
+      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+    
+      if (!tokenData || tokenData.length === 0) {
+        // Token is not valid
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'Invalid or expired token!'
+          })
+          .end();
+      }
+    
+      // Retrieve user data associated with the token
+      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+    
+      if (!userData || userData.length === 0) {
+        // User data is not valid
+        return res
+          .status(404)
+          .json({
+            status: 0,
+            message: 'User not found!'
+          })
+          .end();
+      }    
+      // Remove password from user data
+      const { password, ...userWithoutPassword } = userData[0];    
+      // Assign the user data to req.user
+      req.user = userWithoutPassword;
+  
     }
+  
 
     try {
       if (req.user.user_type == 2) {
@@ -1499,21 +1532,44 @@ const rfqController = {
       globalComment
     } = req.body;
 
-    // Determine the user ID to check based on the verification status
-    const withoutLoginUserID = !req.is_verified ? req.query.userId : null;
+    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
 
-    // Check if the user exists in the "tbl_users" table if the user is not verified
-    const withoutLoginUserData = withoutLoginUserID
-      ? await rfqModel.checkIfExists("tbl_users", `id = ${withoutLoginUserID}`)
-      : [];
-
-    // Ensure req.user is assigned with data either from middleware or from the DB check
-    if (!req.user && withoutLoginUserData.length > 0) {
-      req.user = withoutLoginUserData[0]; // Assign the first result to req.user
-    }
-
-    const user = req.user;
+    if (withoutLoginUserToken) {
+      // Check if the token exists
+      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
     
+      if (!tokenData || tokenData.length === 0) {
+        // Token is not valid
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'Invalid or expired token!'
+          })
+          .end();
+      }
+    
+      // Retrieve user data associated with the token
+      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+    
+      if (!userData || userData.length === 0) {
+        // User data is not valid
+        return res
+          .status(404)
+          .json({
+            status: 0,
+            message: 'User not found!'
+          })
+          .end();
+      }
+      // Remove password from user data
+      const { password, ...userWithoutPassword } = userData[0];
+      // Assign the user data to req.user
+      req.user = userWithoutPassword;
+    }
+    
+    const user = req.user;
+
     if (user && user.user_type != 3 && user.user_type != 4) {
       res
         .status(400)
