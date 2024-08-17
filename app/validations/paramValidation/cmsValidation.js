@@ -260,6 +260,7 @@ const schemas = {
     created_name: Joi.string().trim().required(),
     description: Joi.string().trim().required(),
     url: Joi.string().trim().required(),
+    pageId:Joi.string().trim(),
     status: Joi.string()
       .required()
       .regex(/^[0|1]$/, 'numeric values only'),

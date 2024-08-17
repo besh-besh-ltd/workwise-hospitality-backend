@@ -129,6 +129,14 @@ cmsRoutes.post(
   cmsController.createFaq
 );
 
+cmsRoutes.post(
+  '/media-section',
+  passportSignIn,
+  // validateBody(schemas.create_faq),
+  cmsController.create_media_section
+);
+
+
 cmsRoutes.get('/faq-list', passportSignIn, cmsController.faqList);
 cmsRoutes.get(
   '/faq-detail/:id',

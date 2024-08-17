@@ -299,9 +299,14 @@ const CmsController = {
     }
   },
   media_section: async (req, res, next) => {
+    let media;
     try {
-      let media = await cmsModel.mediaListing();
-      if (media != '') {
+      const { id } = req.params;
+      if (id) {
+        media = await cmsModel.mediaListing(id);
+      }
+      media = await cmsModel.mediaListing();
+      if (media) {
         res
           .status(200)
           .json({
@@ -362,8 +367,15 @@ const CmsController = {
     }
   },
   testimonial_list: async (req, res, next) => {
+    let testimonialListing;
     try {
-      let testimonialListing = await cmsModel.testimonialListing();
+      const { id } = req.params;
+      if (id) {
+        testimonialListing = await cmsModel.testimonialListing(id);
+      } else {
+        testimonialListing = await cmsModel.testimonialListing();
+      }
+
 
       if (testimonialListing != '') {
         res
@@ -392,7 +404,8 @@ const CmsController = {
         })
         .end();
     }
-  },
+  }
+  ,
   product_list: async (req, res, next) => {
     try {
       let productListing = await cmsModel.productListing();

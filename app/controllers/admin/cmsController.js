@@ -32,6 +32,52 @@ const cmsController = {
         .end();
     }
   },
+  create_media_section: async (req, res, next) => {
+    try {
+      const created_by = req.user.id;
+      const {
+        title = null,
+        url = null,
+        thumbnail_image = null,
+        pageId = null
+      } = req.body;
+
+      const dataToInsert = {
+        title: title,
+        url: url,
+        thumbnail_image: thumbnail_image,
+        pageId: pageId
+      };
+      const mediaList = await cmsModel.mediaSectionInsert(dataToInsert)
+      if (mediaList) {
+        res
+          .status(200)
+          .json({
+            status: 1,
+            message: 'Media addead'
+          })
+          .end();
+      } else {
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: Config.errorText.value
+          })
+          .end();
+      }
+    } catch (error) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+
+    }
+  },
   create_banner: async (req, res, next) => {
     try {
       let created_by = req.user.id;
@@ -536,9 +582,8 @@ const cmsController = {
         .status(200)
         .json({
           status: 1,
-          message: `Page section successfully ${
-            status == 0 ? 'Inactive' : 'Active'
-          }`
+          message: `Page section successfully ${status == 0 ? 'Inactive' : 'Active'
+            }`
         })
         .end();
     } catch (error) {
@@ -914,7 +959,7 @@ const cmsController = {
   createTestimonial: async (req, res, next) => {
     try {
       let createdBy = req.user.id;
-      const { title, description, url, status, created_name } = req.body;
+      const { title, description, url, status, created_name, pageId } = req.body;
       // let filename = req.file.filename;
       // let original_filename = req.file.originalname;
 
@@ -923,6 +968,7 @@ const cmsController = {
         description: description,
         created_by: createdBy,
         url: url,
+        page_id: pageId,
         status: status,
         thumbnail_image:
           req?.files?.image?.length > 0
