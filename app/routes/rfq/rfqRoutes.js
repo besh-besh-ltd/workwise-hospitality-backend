@@ -115,8 +115,6 @@ RfqRoutes.post(
 
 RfqRoutes.post(
   '/search-product',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
   rfqController.searchProduct
 );
 

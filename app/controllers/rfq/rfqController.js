@@ -2027,8 +2027,6 @@ const rfqController = {
     }
   },
   searchProduct: async (req, res, next) => {
-    let user = req.user;
-    if (user && user.user_type != 3) {
       let search_key = '';
       let category_id = '';
       let approved_by_id = '';
@@ -2083,173 +2081,176 @@ const rfqController = {
           })
           .end();
       }
-    } else {
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: "You don't have permission to perform this action!"
-        })
-        .end();
-    }
+    
   },
   searchVendor: async (req, res, next) => {
 
     // Extracting parameters from the request
-    // const { search_key, category_id, approved_by_id, state, city } = req.query;
-    let search_key = '';
-    let category_id = '';
-    let approved_by_id = '';
-    let state = '';
-    let city = '';
-    search_key = req.body?.search_key ? req.body?.search_key : '';
-    category_id = req.body?.category_id ? req.body?.category_id : '';
-    approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
-    state = req.body?.state ? req.body?.state : '';
-    city = req.body?.city ? req.body?.city : '';
 
-    // If user is not logged in
-    if (!req.is_verified) {
-      try {
+      // const { search_key, category_id, approved_by_id, state, city } = req.query;
+   let search_key = '';
+   let category_id = '';
+   let approved_by_id = '';
+   let state = '';
+   let city = '';
+   search_key = req.body?.search_key ? req.body?.search_key : '';
+   category_id = req.body?.category_id ? req.body?.category_id : '';
+   approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
+   state = req.body?.state ? req.body?.state : '';
+   city = req.body?.city ? req.body?.city : '';
 
-        // Call the searchVendor method
-        const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
-        console.log(vendorResult);
+   // If user is not logged in
+   if(!req.is_verified){
+     try {
+      
+       // Call the searchVendor method
+       const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
+   console.log(vendorResult);
+   
+       // Check if vendorResult is not empty and has the expected structure
+       if (vendorResult && vendorResult.total && vendorResult.vendor) {
+         const vendorData = vendorResult.vendor; // First query result
+         const totalCount = vendorResult.total; // Second query result: total count
+         
+         // Send the response with the vendor data and the total count
+       return  res.status(200).json({
+           status: 1,
+           data: [vendorData],
+           total: totalCount,
+           logged_In:false,
+           subscription:false
+         });
+       } else {
+         // No data found
+         res.status(404).json({
+           status: 0,
+           message: 'No vendor found matching the criteria',
+           logged_In:false,
+           subscription:false,
+         });
+       }
+     } catch (error) {
+       console.error('Error in searchVendorController:', error);
+       logError(error);
+       // Error handling and response
+       res.status(500).json({
+         success: false,
+         message: 'An error occurred while searching for the vendor',
+         error: error.message,
+       });
+     }
+   }else{
 
-        // Check if vendorResult is not empty and has the expected structure
-        if (vendorResult && vendorResult.total && vendorResult.vendor) {
-          const vendorData = vendorResult.vendor; // First query result
-          const totalCount = vendorResult.total; // Second query result: total count
+     // if user is not logged!
+   let user = req.user;
+   if (user && user.user_type != 3) {
 
-          // Send the response with the vendor data and the total count
-          return res.status(200).json({
-            success: true,
-            vendor: vendorData,
-            total: totalCount,
-          });
-        } else {
-          // No data found
-          res.status(404).json({
-            success: false,
-            message: 'No vendor found matching the criteria',
-          });
-        }
-      } catch (error) {
-        console.error('Error in searchVendorController:', error);
-        logError(error);
-        // Error handling and response
-        res.status(500).json({
-          success: false,
-          message: 'An error occurred while searching for the vendor',
-          error: error.message,
-        });
-      }
-    } else {
+     try {
+       const vendorResult = await rfqModel.searchVendor(
+         search_key,
+         category_id,
+         approved_by_id,
+         state,
+         city
+       );
 
-      // if user is not logged!
-      let user = req.user;
-      if (user && user.user_type != 3) {
+       let dummyOBJ = {
+         sp: false,
+         id: '**',
+         vendor_name: '***** ******',
+         email: '********@*****.***',
+         mobile: '**********',
+         company_name: '******',
+         address: '******** ******* ** ****** **** ******** ****',
+         image_url: null,
+         vendor_approved: [
+           {
+             id: '**',
+             vendor_approve: '****'
+           },
+           {
+             id: '**',
+             vendor_approve: '**** **'
+           },
+           {
+             id: '**',
+             vendor_approve: '****'
+           }
+         ]
+       };
+       let items_to_show = 1;
+       let total_items = vendorResult.length;
+       let rest_items = 0;
+       let items_to_sent = vendorResult;
 
-        try {
-          const vendorResult = await rfqModel.searchVendor(
-            search_key,
-            category_id,
-            approved_by_id,
-            state,
-            city
-          );
+       if (!user.subscription_plan_id) {
+         rest_items =
+           total_items > items_to_show ? total_items - items_to_show : 0;
+         items_to_sent = vendorResult.slice(0, items_to_show);
 
-          let dummyOBJ = {
-            sp: false,
-            id: '**',
-            vendor_name: '***** ******',
-            email: '********@*****.***',
-            mobile: '**********',
-            company_name: '******',
-            address: '******** ******* ** ****** **** ******** ****',
-            image_url: null,
-            vendor_approved: [
-              {
-                id: '**',
-                vendor_approve: '****'
-              },
-              {
-                id: '**',
-                vendor_approve: '**** **'
-              },
-              {
-                id: '**',
-                vendor_approve: '****'
-              }
-            ]
-          };
-          let items_to_show = 1;
-          let total_items = vendorResult.length;
-          let rest_items = 0;
-          let items_to_sent = vendorResult;
+         Promise.all(
+           items_to_sent.map((item) => getVendorDetails(item, false))
+         )
+           .then((result) => {
+             shuffleArray(result);
+             Array.apply(null, { length: rest_items }).map((item) => {
+              
+             });
+           
+             res
+               .status(200)
+               .json({
+                 status: 1,
+                 data: result,
+                 subscription:false,
+                 logged_In:true,
+                 total:total_items
+               })
+               .end();
+           })
+           .catch((error) => {
+             console.error('Error inserting data:', error);
+           });
+       } else {
+         Promise.all(vendorResult.map((item) => getVendorDetails(item, true)))
+           .then((result) => {
+             shuffleArray(result);
+             res
+               .status(200)
+               .json({
+                 status: 1,
+                 data: result,
+                 logged_In:true,
+                 subscription:true
+               })
+               .end();
+           })
+           .catch((error) => {
+             console.error('Error inserting data:', error);
+           });
+       }
+     } catch (error) {
+       logError(error);
+       res
+         .status(400)
+         .json({
+           status: 3,
+           message: Config.errorText.value
+         })
+         .end();
+     }
+   } else {
+     res
+       .status(400)
+       .json({
+         status: 3,
+         message: "You don't have permission to perform this action!"
+       })
+       .end();
+   }
+ }
+},
 
-          if (!user.subscription_plan_id) {
-            rest_items =
-              total_items > items_to_show ? total_items - items_to_show : 0;
-            items_to_sent = vendorResult.slice(0, items_to_show);
-
-            Promise.all(
-              items_to_sent.map((item) => getVendorDetails(item, false))
-            )
-              .then((result) => {
-                shuffleArray(result);
-                Array.apply(null, { length: rest_items }).map((item) => {
-                  result.push({ total: total_items });
-                });
-
-                res
-                  .status(200)
-                  .json({
-                    status: 1,
-                    data: result
-                  })
-                  .end();
-              })
-              .catch((error) => {
-                console.error('Error inserting data:', error);
-              });
-          } else {
-            Promise.all(vendorResult.map((item) => getVendorDetails(item, true)))
-              .then((result) => {
-                shuffleArray(result);
-                res
-                  .status(200)
-                  .json({
-                    status: 1,
-                    data: result
-                  })
-                  .end();
-              })
-              .catch((error) => {
-                console.error('Error inserting data:', error);
-              });
-          }
-        } catch (error) {
-          logError(error);
-          res
-            .status(400)
-            .json({
-              status: 3,
-              message: Config.errorText.value
-            })
-            .end();
-        }
-      } else {
-        res
-          .status(400)
-          .json({
-            status: 3,
-            message: "You don't have permission to perform this action!"
-          })
-          .end();
-      }
-    }
-  },
   getPastRFQs: async (req, res, next) => {
     let vendor_id = req.params.id;
     const { id } = req.user;

@@ -85,8 +85,7 @@ UsersRoutes.post(
 );
 UsersRoutes.get(
   '/get-profile',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
+  noLogin.customer_auth,
   UsersController.get_profile
 );
 UsersRoutes.get(

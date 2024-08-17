@@ -414,36 +414,37 @@ const rfqModel = {
   
     // Query to fetch only one vendor
     let dataQuery = `
-      WITH vendor_data AS (
-        SELECT DISTINCT tu.id, tu.name as vendor_name, tu.organization_name as company_name,
-        tu.address, tc.profile as about, tc.website, tc.company_name,
-        CASE
-            WHEN tu.new_profile_image IS NULL THEN
-            NULL
-            ELSE tu.new_profile_image
-        END AS image_url
-        FROM tbl_product p
-        JOIN tbl_product_categories pc ON p.id = pc.product_id
-        JOIN tbl_category c ON pc.category_id = c.id
-        JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
-        LEFT JOIN tbl_company tc ON tc.user_id = tu.id
-        ${
-          approved_by_id != ''
-            ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
-            : ``
-        }
-        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
-        ${state != '' ? `AND tu.state = ${state}` : ``}
-        ${city != '' ? `AND tu.city = ${city}` : ``}
-        ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-        ${
-          approved_by_id != ''
-            ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
-            : ``
-        }
-      )
-      SELECT * FROM vendor_data ORDER BY vendor_name ASC LIMIT 1;
-    `;
+    WITH vendor_data AS (
+      SELECT DISTINCT tu.id, tu.name as vendor_name, tu.organization_name as company_name,
+      tu.address, tc.profile as about, tc.website, tc.company_name,
+      CASE
+          WHEN tu.new_profile_image IS NULL THEN
+          NULL
+          ELSE tu.new_profile_image
+      END AS image_url
+      FROM tbl_product p
+      JOIN tbl_product_categories pc ON p.id = pc.product_id
+      JOIN tbl_category c ON pc.category_id = c.id
+      JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
+      LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+      ${
+        approved_by_id != ''
+          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
+          : ``
+      }
+      WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
+      ${state != '' ? `AND tu.state = ${state}` : ``}
+      ${city != '' ? `AND tu.city = ${city}` : ``}
+      ${category_id != '' ? `AND c.id = ${category_id}` : ``}
+      ${
+        approved_by_id != ''
+          ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
+          : ``
+      }
+    )
+    SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 1;
+  `;
+  
   
     
     try {
@@ -829,34 +830,30 @@ const rfqModel = {
     state,
     city
   ) => {
-    let q = `SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,tu.address,tc.profile as about, tc.website,tc.company_name,
-    CASE
-        WHEN tu.new_profile_image IS NULL THEN
-        NULL
-        ELSE tu.new_profile_image
-        END AS image_url
-    FROM tbl_product p
-    ${`JOIN tbl_product_categories pc ON p.id = pc.product_id`}
-    ${`JOIN tbl_category c ON pc.category_id = c.id`}
-    ${`JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)`}
-    LEFT JOIN tbl_company tc ON tc.user_id = tu.id
-    ${
-      approved_by_id != ''
-        ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
-        : ``
-    }
-    WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
-    AND tu.email IS NOT NULL
-    /*AND tu.organization_name IS NOT NULL*/
-    ${state != '' ? `AND tu.state = ${state}` : ``}
-    ${city != '' ? `AND tu.city = ${city}` : ``}
-    ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-    ${
-      approved_by_id != ''
-        ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
-        : ``
-    }
-     ORDER BY tu.name ASC;`;
+    let q = `
+    SELECT * FROM (
+        SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
+               tu.address, tc.profile as about, tc.website, tc.company_name,
+               CASE
+                   WHEN tu.new_profile_image IS NULL THEN NULL
+                   ELSE tu.new_profile_image
+               END AS image_url
+        FROM tbl_product p
+        JOIN tbl_product_categories pc ON p.id = pc.product_id
+        JOIN tbl_category c ON pc.category_id = c.id
+        JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
+        LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+        ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
+          AND p.name ILIKE '%${search_key}%' AND tu.email IS NOT NULL
+          ${state != '' ? `AND tu.state = ${state}` : ``}
+          ${city != '' ? `AND tu.city = ${city}` : ``}
+          ${category_id != '' ? `AND c.id = ${category_id}` : ``}
+          ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``}
+    ) AS distinct_vendors
+    ORDER BY RANDOM();
+    `;
+    
 
     console.log('QUERY======', q);
 
