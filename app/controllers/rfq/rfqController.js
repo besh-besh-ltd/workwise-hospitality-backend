@@ -279,8 +279,6 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
             vendorsItem.user_id
           );
           if (user_details.length > 0) {
-
-
             // Insert the token and related data into the table
             const token = await rfqModel.insertVendorRfqToken(user_details[0].id, rfqNumber);
 
@@ -395,7 +393,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
       </td>
     </tr>
     <tr>
-      <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>Your RFQ has been successfully shared with vendors.<a href="${process.env.FRONT_END_WBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}&userId=${id}">Click here to view </a></td>
+      <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>Your RFQ has been successfully shared with vendors.<a href="${process.env.FRONT_END_WBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}">Click here to view </a></td>
       
     </tr>
       
