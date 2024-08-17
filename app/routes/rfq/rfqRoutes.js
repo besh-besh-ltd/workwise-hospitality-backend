@@ -41,8 +41,7 @@ RfqRoutes.get(
 
 RfqRoutes.get(
   '/getRfqById/:id',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
+  noLogin.customer_auth,
   rfqController.getRfqById
 );
 
@@ -78,8 +77,7 @@ RfqRoutes.post(
 
 RfqRoutes.post(
   '/quote/create',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
+  noLogin.customer_auth,
   rfqController.createQuote
 );
 RfqRoutes.get(

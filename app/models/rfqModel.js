@@ -1150,7 +1150,45 @@ WHERE created_by = $1 AND status = $2`,
           reject(error);
         });
     });
+  },
+  insertVendorRfqToken: async (vendorId, rfqNumber) => {
+    // Function to generate a unique token as BIGINT
+    const generateUniqueToken = () => {
+      const timestamp = Date.now(); // Current timestamp in milliseconds
+      const randomNumber = Math.floor(Math.random() * 1000000); // 6-digit random number
+      return parseInt((timestamp + randomNumber).toString().substring(0, 16)); // Ensure it's a BIGINT
+    };
+  
+    let token;
+    let insertedData;
+  
+    // SQL query to insert the token and related data
+    const query = `
+      INSERT INTO tbl_vendor_rfq_tokens_non_login (token, vendor_id, rfq_no)
+      VALUES ($1, $2, $3)
+      RETURNING *`;
+  
+    while (true) {
+      token = generateUniqueToken(); // Generate a unique token
+  
+      try {
+        // Attempt to insert the token into the database
+        insertedData = await db.any(query, [token, vendorId, rfqNumber]);
+        break; // Exit the loop if insertion is successful
+      } catch (err) {
+        // Handle unique constraint violation
+        if (err.code === '23505') { // PostgreSQL unique violation error code
+          // Retry with a new token if there is a token collision
+          continue;
+        }
+        // Throw other errors
+        throw err;
+      }
+    }
+  
+    return token; // Return the successfully inserted token
   }
+
 };
 
 export default rfqModel;

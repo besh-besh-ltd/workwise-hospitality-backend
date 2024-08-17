@@ -14,6 +14,7 @@ import { sendNotification } from '../../services/notificationService.js';
 import excelJS from 'exceljs';
 import xlsx from 'xlsx';
 
+
 const getNextRfQNumber = async () => {
   // get last rfq
   return new Promise(async function (resolve, reject) {
@@ -263,6 +264,7 @@ const getQUOTES = async ({ id }, user_id) => {
   }
 };
 const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
+
   console.log('===========', vendors);
   try {
     let organization_name = user.organization_name
@@ -271,13 +273,16 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
 
     Promise.all(
       vendors &
-        vendors
-          .map(async (vendorsItem) => {
-            let user_details = await userModel.user_profile_detail(
-              vendorsItem.user_id
-            );
-            if (user_details.length > 0) {
-              let dynamicHTML = `
+      vendors
+        .map(async (vendorsItem) => {
+          let user_details = await userModel.user_profile_detail(
+            vendorsItem.user_id
+          );
+          if (user_details.length > 0) {
+            // Insert the token and related data into the table
+            const token = await rfqModel.insertVendorRfqToken(user_details[0].id, rfqNumber);
+
+            let dynamicHTML = `
                 <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
                   <tr>
                     <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
@@ -295,7 +300,7 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
                   </tr>
                   <tr>
                     <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>You have a new RFQ from ${organization_name}. Review now to submit your quotation.
-                    <a href="${process.env.FRONT_END_WBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}">Click here to view RFQ</a></td>
+                    <a href="${process.env.FRONT_END_WBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}">Click here to view RFQ</a></td>
                     
                   </tr>
                     
@@ -313,39 +318,39 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
                   </tr>
                   </table>`;
 
-              sendMail({
-                from: Config.webmasterMail, // sender address
-                to: user_details[0]?.email, // list of receivers
-                subject: `Work Wise | New RFQ Alert`, // Subject line
-                html: dynamicHTML // plain text body
-              });
-              const notificationData = {
-                type: 'RFQ create',
-                title: `RFQ created`,
-                message: `RFQ created successfully`,
-                additional_data: {
-                  user_type: user_details[0].user_type
-                }
-              };
-              // const receiverUserIds = [req.params.id];
-              // await sendNotification(user_id[0].id, '', notificationData);
-              const payload = {
-                title: `Hello ${user_details[0].name}`,
-                body: `You've got a new RFQ from ${user.organization_name}`
-              };
-              const ss = JSON.parse(user_details[0].endpoint);
-              sendNotification(
-                user_details[0].id,
-                '',
-                notificationData,
-                payload,
-                ss
-              );
-            }
-          })
-          .then((result) => {
-            return {};
-          })
+            sendMail({
+              from: Config.webmasterMail, // sender address
+              to: user_details[0]?.email, // list of receivers
+              subject: `Work Wise | New RFQ Alert`, // Subject line
+              html: dynamicHTML // plain text body
+            });
+            const notificationData = {
+              type: 'RFQ create',
+              title: `RFQ created`,
+              message: `RFQ created successfully`,
+              additional_data: {
+                user_type: user_details[0].user_type
+              }
+            };
+            // const receiverUserIds = [req.params.id];
+            // await sendNotification(user_id[0].id, '', notificationData);
+            const payload = {
+              title: `Hello ${user_details[0].name}`,
+              body: `You've got a new RFQ from ${user.organization_name}`
+            };
+            const ss = JSON.parse(user_details[0].endpoint);
+            sendNotification(
+              user_details[0].id,
+              '',
+              notificationData,
+              payload,
+              ss
+            );
+          }
+        })
+        .then((result) => {
+          return {};
+        })
     );
   } catch (error) {
     console.error('Error inserting data:', error);
@@ -434,11 +439,10 @@ const sendQuoteNotificationToVendor = async (req) => {
     </tr>
     <tr>
       <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>
-      ${
-        req.body.is_regret && req.body.is_regret == 1
-          ? 'Your regret concern has been sent to the buyer.'
-          : 'Your quotation has been submitted to the buyer.'
-      }
+      ${req.body.is_regret && req.body.is_regret == 1
+      ? 'Your regret concern has been sent to the buyer.'
+      : 'Your quotation has been submitted to the buyer.'
+    }
       
       </td>
       
@@ -566,9 +570,8 @@ const sendQuoteNotificationEmail = async (req) => {
           </td>
         </tr>
         <tr>
-          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${
-            vendor.name
-          }</u> on <a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</u> </a>for bellow products:
+          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${vendor.name
+        }</u> on <a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</u> </a>for bellow products:
           ${getProducts()}
           
           </td>
@@ -608,9 +611,8 @@ const sendQuoteNotificationEmail = async (req) => {
           </tr>
           <tr>
             <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>
-            <u>${
-              vendor.name
-            }</u> is declined the RFQ request (<a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
+            <u>${vendor.name
+          }</u> is declined the RFQ request (<a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
              ${getProducts()}            
             
             </td>
@@ -1075,6 +1077,44 @@ const rfqController = {
   },
   getRfqById: async (req, res, next) => {
     let id = req.params.id;
+    // Determine the user ID to check based on the verification status
+    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
+
+    if (withoutLoginUserToken) {
+      // Check if the token exists
+      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+    
+      if (!tokenData || tokenData.length === 0) {
+        // Token is not valid
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'Invalid or expired token!'
+          })
+          .end();
+      }
+    
+      // Retrieve user data associated with the token
+      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+    
+      if (!userData || userData.length === 0) {
+        // User data is not valid
+        return res
+          .status(404)
+          .json({
+            status: 0,
+            message: 'User not found!'
+          })
+          .end();
+      }    
+      // Remove password from user data
+      const { password, ...userWithoutPassword } = userData[0];    
+      // Assign the user data to req.user
+      req.user = userWithoutPassword;
+  
+    }
+  
 
     try {
       if (req.user.user_type == 2) {
@@ -1489,6 +1529,43 @@ const rfqController = {
       globalPaymentTerms,
       globalComment
     } = req.body;
+
+    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
+
+    if (withoutLoginUserToken) {
+      // Check if the token exists
+      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+    
+      if (!tokenData || tokenData.length === 0) {
+        // Token is not valid
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'Invalid or expired token!'
+          })
+          .end();
+      }
+    
+      // Retrieve user data associated with the token
+      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+    
+      if (!userData || userData.length === 0) {
+        // User data is not valid
+        return res
+          .status(404)
+          .json({
+            status: 0,
+            message: 'User not found!'
+          })
+          .end();
+      }
+      // Remove password from user data
+      const { password, ...userWithoutPassword } = userData[0];
+      // Assign the user data to req.user
+      req.user = userWithoutPassword;
+    }
+    
     const user = req.user;
 
     if (user && user.user_type != 3 && user.user_type != 4) {
@@ -2009,6 +2086,7 @@ const rfqController = {
   searchVendor: async (req, res, next) => {
 
     // Extracting parameters from the request
+
       // const { search_key, category_id, approved_by_id, state, city } = req.query;
    let search_key = '';
    let category_id = '';
@@ -2172,6 +2250,7 @@ const rfqController = {
    }
  }
 },
+
   getPastRFQs: async (req, res, next) => {
     let vendor_id = req.params.id;
     const { id } = req.user;
