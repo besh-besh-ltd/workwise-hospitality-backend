@@ -79,4 +79,7 @@ buyerRoutes.post(
   buyerController.reviewBuyerPrivateVendors
 )
 
+//  get the list of vendor to review.
+buyerRoutes.get('/buyer-private-vendor-list', passportSignIn, buyerController.getBuyerPrivateVendorList);
+
 export default buyerRoutes;

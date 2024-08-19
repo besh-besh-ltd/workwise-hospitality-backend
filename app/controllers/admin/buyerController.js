@@ -400,6 +400,30 @@ const buyerController = {
         })
         .end();
     }
+  },
+  getBuyerPrivateVendorList: async (req, res, next) => {
+    try {
+
+      const vendorsList = await rfqModel.checkIfExists('tbl_temp_user', '1=1');
+
+      return res
+        .status(200)
+        .json({
+          status: 1,
+          data: vendorsList
+        })
+        .end();
+
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
   }
   /*  buyerDetails: async (req, res, next) => {
     try {
