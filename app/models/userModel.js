@@ -3085,6 +3085,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     });
   },
   insertBuyerPrivateVendor: async (buyerId, vendorName, email, phone, productList) => {
+    // this function insert user info in a temp user table for admin review, once admin review we will delete user from here 
     return new Promise(async (resolve, reject) => {
       try {
         // Check if a vendor with the same email already exists for the given buyerId
@@ -3093,11 +3094,11 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
            WHERE buyer_id = $1 AND email = $2`,
           [buyerId, email]
         );
-  
+
         if (existingVendor.length > 0) {
           return reject(new Error('Vendor_In_Review'));
         }
-  
+
         // Insert the new vendor record
         const result = await db.any(
           `INSERT INTO tbl_temp_user 
@@ -3114,6 +3115,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     });
   },
   getBuyerPrivateVendors: async (buyerId) => {
+    // get a list of buyer private vendor from temp_user table
     return new Promise((resolve, reject) => {
       db.any(
         `SELECT * 
@@ -3128,7 +3130,57 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
           reject(err);
         });
     });
+  },
+  deleteVendorFromTempUserTable: async (vendorTempId) => {
+    // delete user from temp_user table, by id
+    return new Promise((resolve, reject) => {
+      db.none(
+        `DELETE FROM tbl_temp_user 
+         WHERE id = $1`,
+        [vendorTempId]
+      )
+        .then(() => {
+          resolve({ message: 'Vendor successfully deleted' });
+        })
+        .catch((err) => {
+          reject(err);
+        });
+    });
+  },
+  updateStatusInTempUserTable: async (vendorTempId, status, reject_reason) => {
+    //  change status, 0 pending, 1 reject, 2 success
+    return new Promise((resolve, reject) => {
+      db.none(
+        `UPDATE tbl_temp_user 
+         SET status = $2, reject_reason = $3, updated_date = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [vendorTempId, status, reject_reason]
+      )
+        .then(() => {
+          resolve({ message: 'Vendor successfully updated' });
+        })
+        .catch((err) => {
+          reject(err);
+        });
+    });
+  },  
+  mapBuyerToVendor: async (buyerId, vendorId) => {
+    // Map buyers to vendors and prioritize these vendors in search results for the buyer
+    return new Promise((resolve, reject) => {
+      db.none(
+        `INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, created_date, updated_date)
+         VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [buyerId, vendorId]
+      )
+        .then(() => {
+          resolve({ message: 'Buyer and Vendor successfully mapped' });
+        })
+        .catch((err) => {
+          reject(err);
+        });
+    });
   }
+
 
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];
