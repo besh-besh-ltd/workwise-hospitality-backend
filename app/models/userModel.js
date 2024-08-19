@@ -3102,11 +3102,12 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         // Insert the new vendor record
         const result = await db.any(
           `INSERT INTO tbl_temp_user 
-          (buyer_id, vendor_name, email, phone, product_list, status, reject_reason, created_date, updated_date) 
+          (buyer_id, vendor_name, email, mobile, product_list, status, reject_reason, created_date, updated_date) 
           VALUES 
           ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) 
           RETURNING *`,
-          [buyerId, vendorName, email, phone, productList, 0, null]
+          [buyerId, vendorName, email, phone, productList, -1, null]
+          // status -1 pending review, 0 disable user profile, 1 active user, 2 rejected  
         );
         resolve(result);
       } catch (err) {
@@ -3115,22 +3116,35 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     });
   },
   getBuyerPrivateVendors: async (buyerId) => {
-    // get a list of buyer private vendor from temp_user table
-    return new Promise((resolve, reject) => {
-      db.any(
-        `SELECT * 
-         FROM tbl_temp_user 
-         WHERE buyer_id = $1`,
+    try {
+      // Step 1: Get data from tbl_temp_user for the given buyerId
+      const tempUserData = await db.any(
+        `SELECT vendor_name AS name, email, status, mobile FROM tbl_temp_user WHERE buyer_id = $1`,
         [buyerId]
-      )
-        .then((data) => {
-          resolve(data);
-        })
-        .catch((err) => {
-          reject(err);
-        });
-    });
-  },
+      );
+
+      // Step 2: Get vendor IDs from tbl_buyer_private_vendors_mapping
+      const vendorIds = await db.any(
+        `SELECT vendor_id FROM tbl_buyer_private_vendors_mapping WHERE buyer_id = $1`,
+        [buyerId]
+      );
+
+      // Extract vendor IDs into a list
+      const vendorIdList = vendorIds.map(v => v.vendor_id);
+
+      // Step 3: Use the vendor IDs to get the corresponding vendors from tbl_users
+      const vendorDetails = await db.any(
+        `SELECT name, email, mobile, status FROM tbl_users WHERE id IN ($1:csv)`,
+        [vendorIdList]
+      );
+
+      return [...tempUserData, ...vendorDetails];
+
+    } catch (err) {
+      throw new Error(err);
+    }
+  }
+  ,
   deleteVendorFromTempUserTable: async (vendorTempId) => {
     // delete user from temp_user table, by id
     return new Promise((resolve, reject) => {
@@ -3148,7 +3162,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     });
   },
   updateStatusInTempUserTable: async (vendorTempId, status, reject_reason) => {
-    //  change status, 0 pending, 1 reject, 2 success
+    //  change status, 0 pending, 2 reject, 1 success
     return new Promise((resolve, reject) => {
       db.none(
         `UPDATE tbl_temp_user 
@@ -3163,7 +3177,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
           reject(err);
         });
     });
-  },  
+  },
   mapBuyerToVendor: async (buyerId, vendorId) => {
     // Map buyers to vendors and prioritize these vendors in search results for the buyer
     return new Promise((resolve, reject) => {

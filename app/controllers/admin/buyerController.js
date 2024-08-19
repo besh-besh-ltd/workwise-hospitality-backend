@@ -290,7 +290,7 @@ const buyerController = {
     try {
       let createdBy = req.user.id;
 
-      // status types, 0=pending, 1=rejected, 2=success 
+      // status -1 pending review, 0 disable user profile, 1 active user, 2 rejected  
       const { vendorTempId, status, reject_reason, buyerName } = req.body
 
       const userDetails = await rfqModel.checkIfExists('tbl_temp_user', `id = ${vendorTempId}`);
@@ -304,22 +304,32 @@ const buyerController = {
           .end();
       }
 
-      //  reject user is status is 1
-      if (status == 1) {
+      // status -1 pending review, 0 disable user profile, 1 active user, 2 rejected  
+      if (status == 2) {
         const rejectUser = await userModel.updateStatusInTempUserTable(vendorTempId, status, reject_reason)
         return res
           .status(200)
           .json({
             status: 1,
             data: rejectUser,
-            message:"User Rejected"
+            message: "User Rejected"
+          })
+          .end();
+      }
+
+      if (status !== 1) {
+        return res
+          .status(400)
+          .json({
+            status: 3,
+            message: "Invalid status"
           })
           .end();
       }
 
       let orgChar = userDetails[0].vendor_name.match(/[a-zA-Z]/g).join('').toLowerCase();
       let capitalizeFourOrganizationLetter = `${orgChar.charAt(0).toUpperCase()}${orgChar.substring(1, 4)}`;
-      let password = `${capitalizeFourOrganizationLetter}@${userDetails[0].phone.substring(
+      let password = `${capitalizeFourOrganizationLetter}@${userDetails[0].mobile.substring(
         6,
         10
       )}`;
@@ -327,7 +337,7 @@ const buyerController = {
       let vendorObj = {
         name: userDetails[0].vendor_name || null,
         email: userDetails[0].email || null,
-        mobile: userDetails[0].phone || null,
+        mobile: userDetails[0].mobile || null,
         user_type: '3',
         password: generatePassword(password),
         status: '1',
@@ -337,7 +347,7 @@ const buyerController = {
 
       let companyObj = {
         email: userDetails[0].email || null,
-        mobile: userDetails[0].phone || null,
+        mobile: userDetails[0].mobile || null,
         company_name: userDetails[0].vendor_name || null,
       };
 
