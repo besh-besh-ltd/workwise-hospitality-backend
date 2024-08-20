@@ -3211,7 +3211,17 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
   getVendorsWithBuyerNames: async () => {
     //  this query will get list of buyers vendor for review and with buyer id it will also return buyer name
     const query = `
-        SELECT tu.*, u.name AS buyer_name
+        SELECT 
+            tu.id, 
+            tu.vendor_name, 
+            tu.email, 
+            tu.mobile, 
+            tu.product_list, 
+            tu.status, 
+            tu.reject_reason, 
+            tu.created_date, 
+            tu.updated_date, 
+            u.name AS buyer_name
         FROM tbl_temp_user AS tu
         LEFT JOIN tbl_users AS u ON tu.buyer_id = u.id
     `;
