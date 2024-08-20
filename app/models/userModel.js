@@ -3181,20 +3181,46 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
   mapBuyerToVendor: async (buyerId, vendorId) => {
     // Map buyers to vendors and prioritize these vendors in search results for the buyer
     return new Promise((resolve, reject) => {
-      db.none(
-        `INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, created_date, updated_date)
-         VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        [buyerId, vendorId]
-      )
-        .then(() => {
-          resolve({ message: 'Buyer and Vendor successfully mapped' });
+      
+      // check if buyer already mapped with vendor
+      db.oneOrNone(`SELECT 1 FROM tbl_buyer_private_vendors_mapping WHERE buyer_id = $1 AND vendor_id = $2`, [buyerId, vendorId])
+        .then((result) => {
+          if (result) {
+            // If the mapping already exists, resolve without doing anything
+            resolve({ message: 'Mapping already exists. No changes made.' });
+          } else {
+            // If not, create the new mapping
+            db.none(
+              `INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, created_date, updated_date)
+               VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+              [buyerId, vendorId]
+            )
+              .then(() => {
+                resolve({ message: 'Buyer and Vendor successfully mapped' });
+              })
+              .catch((err) => {
+                reject(err);
+              });
+          }
         })
         .catch((err) => {
           reject(err);
         });
+    })
+  },
+  getVendorsWithBuyerNames: async () => {
+    //  this query will get list of buyers vendor for review and with buyer id it will also return buyer name
+    const query = `
+        SELECT tu.*, u.name AS buyer_name
+        FROM tbl_temp_user AS tu
+        LEFT JOIN tbl_users AS u ON tu.buyer_id = u.id
+    `;
+    return new Promise((resolve, reject) => {
+        db.any(query)
+            .then(data => resolve(data))
+            .catch(err => reject(new Error(err)));
     });
-  }
-
+}
 
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];

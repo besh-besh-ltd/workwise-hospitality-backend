@@ -404,8 +404,8 @@ const buyerController = {
   getBuyerPrivateVendorList: async (req, res, next) => {
     try {
 
-      const vendorsList = await rfqModel.checkIfExists('tbl_temp_user', '1=1');
-
+      const vendorsList = await userModel.getVendorsWithBuyerNames();
+      
       return res
         .status(200)
         .json({
