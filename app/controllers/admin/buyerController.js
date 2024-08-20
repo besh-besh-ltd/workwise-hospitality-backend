@@ -317,7 +317,7 @@ const buyerController = {
           .end();
       }
 
-      if (status !== 1) {
+      if (status != 1) {
         return res
           .status(400)
           .json({

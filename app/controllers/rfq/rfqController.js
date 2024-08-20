@@ -279,8 +279,10 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
             vendorsItem.user_id
           );
           if (user_details.length > 0) {
+
             // Insert the token and related data into the table
             const token = await rfqModel.insertVendorRfqToken(user_details[0].id, rfqNumber);
+            const data1 = await userModel.mapBuyerToVendor(user.id, user_details[0].id);
 
             let dynamicHTML = `
                 <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
@@ -885,7 +887,10 @@ const rfqController = {
               // console.log('Data inserted successfully:', results);
               response[0].otherDetails = results;
               response[0].terms = rfqtermsRsp;
+
+              // sendMailtoVendors => in this function we are also generating token for vendor so he weill quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
               await sendMailtoVendors(req, response[0].id);
+              
               await sendQuotationMailToBuyer(req, response[0].id);
 
               res
@@ -1083,7 +1088,7 @@ const rfqController = {
     if (withoutLoginUserToken) {
       // Check if the token exists
       const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
-    
+
       if (!tokenData || tokenData.length === 0) {
         // Token is not valid
         return res
@@ -1094,10 +1099,10 @@ const rfqController = {
           })
           .end();
       }
-    
+
       // Retrieve user data associated with the token
       const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
-    
+
       if (!userData || userData.length === 0) {
         // User data is not valid
         return res
@@ -1107,14 +1112,14 @@ const rfqController = {
             message: 'User not found!'
           })
           .end();
-      }    
+      }
       // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];    
+      const { password, ...userWithoutPassword } = userData[0];
       // Assign the user data to req.user
       req.user = userWithoutPassword;
-  
+
     }
-  
+
 
     try {
       if (req.user.user_type == 2) {
@@ -1535,7 +1540,7 @@ const rfqController = {
     if (withoutLoginUserToken) {
       // Check if the token exists
       const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
-    
+
       if (!tokenData || tokenData.length === 0) {
         // Token is not valid
         return res
@@ -1546,10 +1551,10 @@ const rfqController = {
           })
           .end();
       }
-    
+
       // Retrieve user data associated with the token
       const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
-    
+
       if (!userData || userData.length === 0) {
         // User data is not valid
         return res
@@ -1565,7 +1570,7 @@ const rfqController = {
       // Assign the user data to req.user
       req.user = userWithoutPassword;
     }
-    
+
     const user = req.user;
 
     if (user && user.user_type != 3 && user.user_type != 4) {
@@ -2027,229 +2032,229 @@ const rfqController = {
     }
   },
   searchProduct: async (req, res, next) => {
-      let search_key = '';
-      let category_id = '';
-      let approved_by_id = '';
-      search_key = req.body?.search_key ? req.body?.search_key : '';
-      category_id = req.body?.category_id ? req.body?.category_id : '';
-      approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
+    let search_key = '';
+    let category_id = '';
+    let approved_by_id = '';
+    search_key = req.body?.search_key ? req.body?.search_key : '';
+    category_id = req.body?.category_id ? req.body?.category_id : '';
+    approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
 
-      try {
-        const productResult = await rfqModel.searchProduct(
-          search_key,
-          category_id,
-          approved_by_id
-        );
+    try {
+      const productResult = await rfqModel.searchProduct(
+        search_key,
+        category_id,
+        approved_by_id
+      );
 
-        let dummyOBJ = {
-          product_id: '***',
-          product_name: '**** ****',
-          description:
-            '******* ***** ****** ***** ************* ***** ****** ***** ************* ***** ****** ***** ******',
-          category_name: '*******',
-          vendor_name: '***** ********'
-        };
-        let items_to_show = 5;
-        let total_items = productResult.length;
-        let rest_items = 0;
-        let items_to_sent = productResult;
+      let dummyOBJ = {
+        product_id: '***',
+        product_name: '**** ****',
+        description:
+          '******* ***** ****** ***** ************* ***** ****** ***** ************* ***** ****** ***** ******',
+        category_name: '*******',
+        vendor_name: '***** ********'
+      };
+      let items_to_show = 5;
+      let total_items = productResult.length;
+      let rest_items = 0;
+      let items_to_sent = productResult;
 
-        // if (!user.subscription_plan_id || user.subscription_plan_id == 0) {
-        //   rest_items =
-        //     total_items > items_to_show ? total_items - items_to_show : 0;
-        //   items_to_sent = productResult.slice(0, items_to_show);
+      // if (!user.subscription_plan_id || user.subscription_plan_id == 0) {
+      //   rest_items =
+      //     total_items > items_to_show ? total_items - items_to_show : 0;
+      //   items_to_sent = productResult.slice(0, items_to_show);
 
-        //   Array.apply(null, { length: rest_items }).map((item) => {
-        //     items_to_sent.push(dummyOBJ);
-        //   });
-        // }
+      //   Array.apply(null, { length: rest_items }).map((item) => {
+      //     items_to_sent.push(dummyOBJ);
+      //   });
+      // }
 
-        res
-          .status(200)
-          .json({
-            status: 1,
-            data: removeDuplicates(items_to_sent)
-          })
-          .end();
-      } catch (error) {
-        logError(error);
-        res
-          .status(400)
-          .json({
-            status: 3,
-            message: Config.errorText.value
-          })
-          .end();
-      }
-    
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: removeDuplicates(items_to_sent)
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+
   },
   searchVendor: async (req, res, next) => {
 
     // Extracting parameters from the request
 
-      // const { search_key, category_id, approved_by_id, state, city } = req.query;
-   let search_key = '';
-   let category_id = '';
-   let approved_by_id = '';
-   let state = '';
-   let city = '';
-   search_key = req.body?.search_key ? req.body?.search_key : '';
-   category_id = req.body?.category_id ? req.body?.category_id : '';
-   approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
-   state = req.body?.state ? req.body?.state : '';
-   city = req.body?.city ? req.body?.city : '';
+    // const { search_key, category_id, approved_by_id, state, city } = req.query;
+    let search_key = '';
+    let category_id = '';
+    let approved_by_id = '';
+    let state = '';
+    let city = '';
+    search_key = req.body?.search_key ? req.body?.search_key : '';
+    category_id = req.body?.category_id ? req.body?.category_id : '';
+    approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
+    state = req.body?.state ? req.body?.state : '';
+    city = req.body?.city ? req.body?.city : '';
 
-   // If user is not logged in
-   if(!req.is_verified){
-     try {
-      
-       // Call the searchVendor method
-       const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
-   console.log(vendorResult);
-   
-       // Check if vendorResult is not empty and has the expected structure
-       if (vendorResult && vendorResult.total && vendorResult.vendor) {
-         const vendorData = vendorResult.vendor; // First query result
-         const totalCount = vendorResult.total; // Second query result: total count
-         
-         // Send the response with the vendor data and the total count
-       return  res.status(200).json({
-           status: 1,
-           data: [vendorData],
-           total: totalCount,
-           logged_In:false,
-           subscription:false
-         });
-       } else {
-         // No data found
-         res.status(404).json({
-           status: 0,
-           message: 'No vendor found matching the criteria',
-           logged_In:false,
-           subscription:false,
-         });
-       }
-     } catch (error) {
-       console.error('Error in searchVendorController:', error);
-       logError(error);
-       // Error handling and response
-       res.status(500).json({
-         success: false,
-         message: 'An error occurred while searching for the vendor',
-         error: error.message,
-       });
-     }
-   }else{
+    // If user is not logged in
+    if (!req.is_verified) {
+      try {
 
-     // if user is not logged!
-   let user = req.user;
-   if (user && user.user_type != 3) {
+        // Call the searchVendor method
+        const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
+        console.log(vendorResult);
 
-     try {
-       const vendorResult = await rfqModel.searchVendor(
-         search_key,
-         category_id,
-         approved_by_id,
-         state,
-         city
-       );
+        // Check if vendorResult is not empty and has the expected structure
+        if (vendorResult && vendorResult.total && vendorResult.vendor) {
+          const vendorData = vendorResult.vendor; // First query result
+          const totalCount = vendorResult.total; // Second query result: total count
 
-       let dummyOBJ = {
-         sp: false,
-         id: '**',
-         vendor_name: '***** ******',
-         email: '********@*****.***',
-         mobile: '**********',
-         company_name: '******',
-         address: '******** ******* ** ****** **** ******** ****',
-         image_url: null,
-         vendor_approved: [
-           {
-             id: '**',
-             vendor_approve: '****'
-           },
-           {
-             id: '**',
-             vendor_approve: '**** **'
-           },
-           {
-             id: '**',
-             vendor_approve: '****'
-           }
-         ]
-       };
-       let items_to_show = 1;
-       let total_items = vendorResult.length;
-       let rest_items = 0;
-       let items_to_sent = vendorResult;
+          // Send the response with the vendor data and the total count
+          return res.status(200).json({
+            status: 1,
+            data: [vendorData],
+            total: totalCount,
+            logged_In: false,
+            subscription: false
+          });
+        } else {
+          // No data found
+          res.status(404).json({
+            status: 0,
+            message: 'No vendor found matching the criteria',
+            logged_In: false,
+            subscription: false,
+          });
+        }
+      } catch (error) {
+        console.error('Error in searchVendorController:', error);
+        logError(error);
+        // Error handling and response
+        res.status(500).json({
+          success: false,
+          message: 'An error occurred while searching for the vendor',
+          error: error.message,
+        });
+      }
+    } else {
 
-       if (!user.subscription_plan_id) {
-         rest_items =
-           total_items > items_to_show ? total_items - items_to_show : 0;
-         items_to_sent = vendorResult.slice(0, items_to_show);
+      // if user is not logged!
+      let user = req.user;
+      if (user && user.user_type != 3) {
 
-         Promise.all(
-           items_to_sent.map((item) => getVendorDetails(item, false))
-         )
-           .then((result) => {
-             shuffleArray(result);
-             Array.apply(null, { length: rest_items }).map((item) => {
-              
-             });
-           
-             res
-               .status(200)
-               .json({
-                 status: 1,
-                 data: result,
-                 subscription:false,
-                 logged_In:true,
-                 total:total_items
-               })
-               .end();
-           })
-           .catch((error) => {
-             console.error('Error inserting data:', error);
-           });
-       } else {
-         Promise.all(vendorResult.map((item) => getVendorDetails(item, true)))
-           .then((result) => {
-             shuffleArray(result);
-             res
-               .status(200)
-               .json({
-                 status: 1,
-                 data: result,
-                 logged_In:true,
-                 subscription:true
-               })
-               .end();
-           })
-           .catch((error) => {
-             console.error('Error inserting data:', error);
-           });
-       }
-     } catch (error) {
-       logError(error);
-       res
-         .status(400)
-         .json({
-           status: 3,
-           message: Config.errorText.value
-         })
-         .end();
-     }
-   } else {
-     res
-       .status(400)
-       .json({
-         status: 3,
-         message: "You don't have permission to perform this action!"
-       })
-       .end();
-   }
- }
-},
+        try {
+          const vendorResult = await rfqModel.searchVendor(
+            search_key,
+            category_id,
+            approved_by_id,
+            state,
+            city
+          );
+
+          let dummyOBJ = {
+            sp: false,
+            id: '**',
+            vendor_name: '***** ******',
+            email: '********@*****.***',
+            mobile: '**********',
+            company_name: '******',
+            address: '******** ******* ** ****** **** ******** ****',
+            image_url: null,
+            vendor_approved: [
+              {
+                id: '**',
+                vendor_approve: '****'
+              },
+              {
+                id: '**',
+                vendor_approve: '**** **'
+              },
+              {
+                id: '**',
+                vendor_approve: '****'
+              }
+            ]
+          };
+          let items_to_show = 1;
+          let total_items = vendorResult.length;
+          let rest_items = 0;
+          let items_to_sent = vendorResult;
+
+          if (!user.subscription_plan_id) {
+            rest_items =
+              total_items > items_to_show ? total_items - items_to_show : 0;
+            items_to_sent = vendorResult.slice(0, items_to_show);
+
+            Promise.all(
+              items_to_sent.map((item) => getVendorDetails(item, false))
+            )
+              .then((result) => {
+                shuffleArray(result);
+                Array.apply(null, { length: rest_items }).map((item) => {
+
+                });
+
+                res
+                  .status(200)
+                  .json({
+                    status: 1,
+                    data: result,
+                    subscription: false,
+                    logged_In: true,
+                    total: total_items
+                  })
+                  .end();
+              })
+              .catch((error) => {
+                console.error('Error inserting data:', error);
+              });
+          } else {
+            Promise.all(vendorResult.map((item) => getVendorDetails(item, true)))
+              .then((result) => {
+                shuffleArray(result);
+                res
+                  .status(200)
+                  .json({
+                    status: 1,
+                    data: result,
+                    logged_In: true,
+                    subscription: true
+                  })
+                  .end();
+              })
+              .catch((error) => {
+                console.error('Error inserting data:', error);
+              });
+          }
+        } catch (error) {
+          logError(error);
+          res
+            .status(400)
+            .json({
+              status: 3,
+              message: Config.errorText.value
+            })
+            .end();
+        }
+      } else {
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: "You don't have permission to perform this action!"
+          })
+          .end();
+      }
+    }
+  },
 
   getPastRFQs: async (req, res, next) => {
     let vendor_id = req.params.id;
