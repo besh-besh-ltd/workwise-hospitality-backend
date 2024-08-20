@@ -73,7 +73,7 @@ buyerRoutes.delete(
 );
 
 // in this route we will do final review of buyer private vendors and move them temp_user_table to to user_table, and delete data from current table
-buyerRoutes.post(
+buyerRoutes.put(
   '/review-buyers-private-vendor',
   passportSignIn,
   buyerController.reviewBuyerPrivateVendors
