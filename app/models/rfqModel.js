@@ -824,6 +824,7 @@ const rfqModel = {
     });
   },
   searchVendor: async (
+    buyerId,
     search_key,
     category_id,
     approved_by_id,
@@ -831,29 +832,34 @@ const rfqModel = {
     city
   ) => {
     let q = `
-    SELECT * FROM (
-        SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
-               tu.address, tc.profile as about, tc.website, tc.company_name,
-               CASE
-                   WHEN tu.new_profile_image IS NULL THEN NULL
-                   ELSE tu.new_profile_image
-               END AS image_url
-        FROM tbl_product p
-        JOIN tbl_product_categories pc ON p.id = pc.product_id
-        JOIN tbl_category c ON pc.category_id = c.id
-        JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
-        LEFT JOIN tbl_company tc ON tc.user_id = tu.id
-        ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
-        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
-          AND p.name ILIKE '%${search_key}%' AND tu.email IS NOT NULL
-          ${state != '' ? `AND tu.state = ${state}` : ``}
-          ${city != '' ? `AND tu.city = ${city}` : ``}
-          ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-          ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``}
-    ) AS distinct_vendors
-    ORDER BY RANDOM();
+SELECT * FROM (
+    SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
+           tu.address, tc.profile as about, tc.website, tc.company_name,
+           CASE
+               WHEN tu.new_profile_image IS NULL THEN NULL
+               ELSE tu.new_profile_image
+           END AS image_url,
+           CASE
+               WHEN bvm.vendor_id IS NOT NULL THEN 1
+               ELSE 0
+           END AS is_linked_with_buyer
+    FROM tbl_product p
+    JOIN tbl_product_categories pc ON p.id = pc.product_id
+    JOIN tbl_category c ON pc.category_id = c.id
+    JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
+    LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+    LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+    ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+    WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
+      AND p.name ILIKE '%${search_key}%' AND tu.email IS NOT NULL
+      ${state != '' ? `AND tu.state = ${state}` : ``}
+      ${city != '' ? `AND tu.city = ${city}` : ``}
+      ${category_id != '' ? `AND c.id = ${category_id}` : ``}
+      ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``}
+) AS distinct_vendors
+ORDER BY is_linked_with_buyer DESC, RANDOM();
     `;
-    
+
 
     console.log('QUERY======', q);
 

@@ -2152,6 +2152,7 @@ const rfqController = {
 
         try {
           const vendorResult = await rfqModel.searchVendor(
+            req.user.id,
             search_key,
             category_id,
             approved_by_id,
@@ -2219,7 +2220,7 @@ const rfqController = {
           } else {
             Promise.all(vendorResult.map((item) => getVendorDetails(item, true)))
               .then((result) => {
-                shuffleArray(result);
+                // shuffleArray(result);
                 res
                   .status(200)
                   .json({
