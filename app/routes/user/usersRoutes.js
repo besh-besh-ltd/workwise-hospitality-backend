@@ -182,6 +182,18 @@ UsersRoutes.get(
   UsersController.getDashboardData
 );
 
+UsersRoutes.post(
+  '/buyer-private-vendor',
+  passportSignIn,
+  validateBody(schemas.buyer_private_vendor),
+  UsersController.addPrivateVendor
+);
+
+UsersRoutes.get(
+  '/buyer-private-vendor',
+  passportSignIn,
+  UsersController.getBuyerPrivateVendors
+);
 //End API
 
 export default UsersRoutes;

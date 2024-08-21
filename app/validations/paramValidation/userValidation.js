@@ -383,7 +383,13 @@ const schemas = {
   buyer_coupon_check: Joi.object().keys({
     coupon_code: Joi.string().trim().required(),
     sub_id: Joi.number().required()
-  })
+  }),
+  buyer_private_vendor: Joi.object().keys({
+    vendorName: Joi.string().required().trim().max(60),  // Required, trimmed, and max length of 60 characters
+    email: Joi.string().required().email().trim().max(50),  // Required, valid email, trimmed, and max length of 50 characters
+    phone: Joi.string().required().trim().max(20),  // Required, trimmed, and max length of 20 characters
+    productList: Joi.string().required().trim().max(300),  // Required, trimmed, and max length of 300 characters
+}),
 };
 
 const schema_posts = {

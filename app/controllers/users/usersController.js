@@ -2539,6 +2539,52 @@ const UsersController = {
         })
         .end();
     }
+  },
+  addPrivateVendor: async (req, res, next) => {
+    try {
+      const { vendorName, email, phone, productList } = req.body;
+      const buyerId = req.user.id; // Getting buyerId from the authenticated user
+
+      // If user does not exist, proceed with inserting data into the tbl_temp_user table
+      const result = await userModel.insertBuyerPrivateVendor(buyerId, vendorName, email, phone, productList);
+
+      // Sending the response back to the client
+      res.status(201).json({
+        status: 1,
+        message: 'Vendor successfully added. Please wait for vendor review.',
+        data: result
+      });
+
+    } catch (error) {
+      logError(error);
+      let message = error == "Error: Vendor_In_Review" ? "This vendor has already been added by you. Please wait while we review the vendor details" : Config.errorText.value;
+
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: message
+        })
+        .end();
+    }
+  },
+  getBuyerPrivateVendors: async (req, res, next) => {
+    try {
+      const buyerId = req.user.id; // Getting buyerId from the authenticated user
+
+      // Fetch the vendor details from the model
+      const data = await userModel.getBuyerPrivateVendors(buyerId);
+      
+      // Sending the response back to the client
+      res.status(200).json({
+        status: 1,
+        message: 'Vendor details retrieved successfully.',
+        data: data
+      });
+    } catch (error) {
+      next(error); // Pass the error to the error-handling middleware
+    }
   }
+
 };
 export default UsersController;
