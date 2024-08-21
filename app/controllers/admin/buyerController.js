@@ -369,14 +369,18 @@ const buyerController = {
         sendMail({
           from: Config.webmasterMail, // sender address
           to: userDetails[0].email, // list of receivers
-          subject: `Workwise | Vendor Registration and Login Details`, // Subject line
-          html: `Dear ${userDetails[0].vendor_name},<br><br>
-                 We are pleased to inform you that you have been added as a vendor by one of our buyers <strong> ${buyerName} </strong> on the Workwise portal.<br><br>
-                 The buyer has also shared a list of products they are interested in procuring from you. Please log in to your account to view the details and manage your products <strong> ${userDetails[0].product_list} </strong> <br><br>
-                 Your login credentials are as follows:<br>
+          subject: `${buyerName} Added You on Workwise`, // Subject line
+          html: `To  ${userDetails[0].vendor_name},<br><br>
+
+          We are pleased to inform you that <Buyer Firm Name> has added you as a preferred vendor on the Workwise platform. Going forward, ${buyerName} will manage their procurement activities through Workwise. <br><br>
+          To ensure you receive all enquiries promptly, please complete your registration with us. Your login credentials are provided below:<br><br>
                  <strong>Email:</strong> ${userDetails[0].email}<br>
-                 <strong>Password:</strong> ${password}<br><br>
+                 <strong>Password:</strong> ${password}<br>
                  We recommend changing your password after your first login for security reasons.<br><br>
+          We look forward to supporting your business growth.<br><br>
+         Best regards, <br>
+        The Workwise Team<br>
+        <a href="https://letsworkwise.com"> https://letsworkwise.com </a>   <br>     
                  Best regards,<br>
                  The Workwise Team`
         });
@@ -405,7 +409,7 @@ const buyerController = {
     try {
 
       const vendorsList = await userModel.getVendorsWithBuyerNames();
-      
+
       return res
         .status(200)
         .json({
