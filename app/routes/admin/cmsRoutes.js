@@ -174,7 +174,7 @@ cmsRoutes.post(
 );
 
 cmsRoutes.get(
-  '/testimonial-list',
+  '/testimonial-list/:id',
   passportSignIn,
   cmsController.testimonialList
 );

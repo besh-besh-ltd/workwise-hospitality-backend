@@ -1003,6 +1003,17 @@ const cmsController = {
   },
   testimonialList: async (req, res, next) => {
     try {
+      let id=req.params.id
+      if(!id){
+        logError("no page id is provided");
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: "no page id is provided "
+          })
+          .end();
+      }
       let page, limit, offset;
       if (req.query.page && req.query.page > 0) {
         page = req.query.page;
@@ -1018,7 +1029,8 @@ const cmsController = {
       let testimonialList = await cmsModel.getAllTestimonial(
         limit,
         offset,
-        search
+        search,
+        id
       );
       let testimonialCount = await cmsModel.getAllTestimonialCount(search);
       res
@@ -1069,6 +1081,17 @@ const cmsController = {
   updateTestimonial: async (req, res, next) => {
     try {
       const testimonialId = req.params.id;
+      if(!testimonialId){
+        logError("testimonialId is not given");
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: "testimonialId is not given"
+          })
+          .end();
+      }
+      
       const { title, description, url, status, created_name } = req.body;
 
       const findOneTestimonial = await cmsModel.checkTestimonial(testimonialId);

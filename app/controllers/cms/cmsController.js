@@ -28,7 +28,15 @@ const CmsController = {
   homeBanner: async (req, res, next) => {
     try {
       let page_id = req.params.page_id;
-      // return false;
+    if(!page_id){
+      res
+          .status(400)
+          .json({
+            status: 2,
+            message: 'page id not given'
+          })
+          .end();
+    }
 
       const bannerList = await cmsModel.homeBanner(page_id);
       if (bannerList && bannerList.length > 0) {
@@ -62,7 +70,15 @@ const CmsController = {
   cms_data: async (req, res, next) => {
     try {
       let page_id = req.params.page_id;
-
+      if(!page_id){
+        res
+            .status(400)
+            .json({
+              status: 2,
+              message: 'page id not given'
+            })
+            .end();
+      }
       let page_sections = await cmsModel.pageSectionContent(page_id);
       // console.log('page_sections-->', page_sections);
       // return false;

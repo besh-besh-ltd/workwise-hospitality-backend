@@ -1986,7 +1986,7 @@ const cmsModel = {
         });
     });
   },
-  getAllTestimonial: async (limit, offset, search) => {
+  getAllTestimonial: async (limit, offset, search, id) => {
     return new Promise(function (resolve, reject) {
       let query = ``;
       if (search) {
@@ -2000,7 +2000,7 @@ const cmsModel = {
               ELSE tbl_testimonials.thumbnail_image
               END AS image_url
           FROM tbl_testimonials
-          WHERE status != 2 ${query}
+          WHERE status != 2 ${query} AND id=${id}
           ORDER BY  "createdAt" DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
       )
