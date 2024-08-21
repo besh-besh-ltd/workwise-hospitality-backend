@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import UsersController from '../../controllers/users/usersController.js';
+import noLogin from '../../middleware/noLogin.js';
 import {
   validateBody,
   validateParam,
@@ -84,8 +85,7 @@ UsersRoutes.post(
 );
 UsersRoutes.get(
   '/get-profile',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
+  noLogin.customer_auth,
   UsersController.get_profile
 );
 UsersRoutes.get(
@@ -119,8 +119,7 @@ UsersRoutes.post(
 );
 UsersRoutes.get(
   '/vendor-profile/:vendor_id',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
+  noLogin.customer_auth,
   UsersController.vendor_profile
 );
 UsersRoutes.post(
@@ -183,6 +182,18 @@ UsersRoutes.get(
   UsersController.getDashboardData
 );
 
+UsersRoutes.post(
+  '/buyer-private-vendor',
+  passportSignIn,
+  validateBody(schemas.buyer_private_vendor),
+  UsersController.addPrivateVendor
+);
+
+UsersRoutes.get(
+  '/buyer-private-vendor',
+  passportSignIn,
+  UsersController.getBuyerPrivateVendors
+);
 //End API
 
 export default UsersRoutes;

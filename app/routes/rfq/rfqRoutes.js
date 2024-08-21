@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import rfqController from '../../controllers/rfq/rfqController.js';
+import noLogin from '../../middleware/noLogin.js';
 import {
   validateBody,
   validateParam,
@@ -40,8 +41,7 @@ RfqRoutes.get(
 
 RfqRoutes.get(
   '/getRfqById/:id',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
+  noLogin.customer_auth,
   rfqController.getRfqById
 );
 
@@ -77,8 +77,7 @@ RfqRoutes.post(
 
 RfqRoutes.post(
   '/quote/create',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
+  noLogin.customer_auth,
   rfqController.createQuote
 );
 RfqRoutes.get(
@@ -116,15 +115,12 @@ RfqRoutes.post(
 
 RfqRoutes.post(
   '/search-product',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
   rfqController.searchProduct
 );
 
 RfqRoutes.post(
   '/search-vendor',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
+  noLogin.customer_auth,
   rfqController.searchVendor
 );
 RfqRoutes.get(

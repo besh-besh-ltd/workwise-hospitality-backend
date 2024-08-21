@@ -889,6 +889,12 @@ const UsersController = {
   },
   get_profile: async (req, res, next) => {
     try {
+      if (!req.is_verified) {
+        return res.status(200).json({
+          status: 1,
+          message: 'User is not logged in.'
+        }).end();
+      }
       let user_id = req.user.id;
       const user = await userModel.userinfo(user_id);
       if (user) {
@@ -1341,17 +1347,30 @@ const UsersController = {
     }
   },
   vendor_profile: async (req, res, next) => {
+    let user_id = req.params.vendor_id;
+    let user = "";
+
     try {
       // let user_id = req.user.id;
-      let user_id = req.params.vendor_id;
-      const user = await userModel.vendorinfo(req.user.id, user_id);
+      let subscription = false;
+      if (!req.is_verified || !req.user.subscription_plan_id) {
 
+        user = await userModel.vendorinfo(user_id);
+      } else {
+
+        subscription = true;
+
+
+        user = await userModel.vendorinfo(user_id, req.user.id);
+      }
       if (user) {
         res
           .status(200)
           .json({
             status: 1,
-            data: user
+            data: user,
+            subscription: subscription,
+            logged_In: req.is_verified
           })
           .end();
       } else {
@@ -1704,7 +1723,7 @@ const UsersController = {
 
           let totalDiscount = Math.round(
             parseFloat(paymentUpdate[0].offer_price) +
-              parseFloat(paymentUpdate[0].coupon_price)
+            parseFloat(paymentUpdate[0].coupon_price)
           );
           console.log(
             'totalDiscount====>>>>>>>>>>>>>',
@@ -1719,23 +1738,22 @@ const UsersController = {
           <tbody>
             <tr>
               <td style="padding: 10px 0 5px; font-weight: bold;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Invoice number</td>
-              <td style="padding: 10px 0 5px; font-weight: bold;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${
-                orderEntity.receipt
-              }</td>
+              <td style="padding: 10px 0 5px; font-weight: bold;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${orderEntity.receipt
+            }</td>
             </tr>
             <tr>
               <td style="font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Date of issue</td>
               <td style="font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${dateFormat(
-                userSubscription[0].start_date,
-                'yyyy-mm-dd'
-              )}</td>
+              userSubscription[0].start_date,
+              'yyyy-mm-dd'
+            )}</td>
             </tr>
             <tr>
               <td style="font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Date due</td>
               <td style="font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${dateFormat(
-                userSubscription[0].end_date,
-                'yyyy-mm-dd'
-              )}</td>
+              userSubscription[0].end_date,
+              'yyyy-mm-dd'
+            )}</td>
             </tr>
           </tbody>
         </table>
@@ -1777,60 +1795,53 @@ const UsersController = {
       </td>
       <td style="padding:10px 0 0;font-size: 14px;font-weight: bold; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;"> Bill to <table width="100%" border="0" cellspacing="0" cellpadding="0" align="center">
           <tbody>
-            ${
-              userDetails.company_name
-                ? `<tr>
+            ${userDetails.company_name
+              ? `<tr>
               <td style="padding: 10px 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${userDetails.company_name}</td>
             </tr>`
-                : ''
+              : ''
             }
-            ${
-              userDetails.name
-                ? `<tr>
+            ${userDetails.name
+              ? `<tr>
               <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${userDetails.name}</td>
             </tr>`
-                : ''
+              : ''
             }
-            ${
-              userDetails.address
-                ? `<tr>
+            ${userDetails.address
+              ? `<tr>
             <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${userDetails.address}</td>
           </tr>`
-                : ''
+              : ''
             }
-            ${
-              userDetails.city_name
-                ? `<tr>
+            ${userDetails.city_name
+              ? `<tr>
             <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${userDetails.city_name}</td>
           </tr>`
-                : ''
+              : ''
             }
-            ${
-              userDetails.state_name
-                ? `<tr>
+            ${userDetails.state_name
+              ? `<tr>
             <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${userDetails.state_name}</td>
           </tr>`
-                : ''
+              : ''
             }            
             <tr>
               <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">India</td>
             </tr>
-            ${
-              userDetails.email
-                ? `<tr>
+            ${userDetails.email
+              ? `<tr>
             <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">
               <a style="text-decoration: none;color: #000000;" href="mailto:${userDetails.email}">${userDetails.email}</a>
             </td>
           </tr>`
-                : ''
+              : ''
             }
-          ${
-            userDetails.gstin
+          ${userDetails.gstin
               ? `<tr>
           <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">IN GST ${userDetails.gstin}</td>
         </tr>`
               : ''
-          }
+            }
             
           </tbody>
         </table>
@@ -1852,15 +1863,12 @@ const UsersController = {
         </thead>
         <tbody>
           <tr>
-            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #979797;">${
-              planDetails[0].plan_name
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #979797;">${planDetails[0].plan_name
             } </td>
             <td style="padding:10px 0;font-size: 12px;font-weight: normal;text-align: center; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #979797;">1</td>
-            <td style="padding:10px 0;font-size: 12px;font-weight: normal;font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: center;border-top: 1px solid #979797;">₹ ${
-              paymentUpdate[0].subscription_charge
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal;font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: center;border-top: 1px solid #979797;">₹ ${paymentUpdate[0].subscription_charge
             }</td>
-            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: right;border-top: 1px solid #979797;">₹ ${
-              paymentUpdate[0].subscription_charge
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: right;border-top: 1px solid #979797;">₹ ${paymentUpdate[0].subscription_charge
             }</td>
           </tr>
         </tbody>
@@ -1874,9 +1882,8 @@ const UsersController = {
     <td style="width:365px;padding-top: 20px">
       <table width="100%" border="0" cellspacing="0" cellpadding="0" align="center">
         <tbody>
-        ${
-          totalDiscount > 0
-            ? `<tr>
+        ${totalDiscount > 0
+              ? `<tr>
               <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #d3d3d3;">
                 Discount
               </td>
@@ -1884,12 +1891,11 @@ const UsersController = {
                 ₹ ${totalDiscount}
               </td>
             </tr>`
-            : ''
-        }
+              : ''
+            }
           <tr>
             <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #d3d3d3;">Total</td>
-            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #d3d3d3;text-align: right;">₹ ${
-              paymentUpdate[0].amount
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #d3d3d3;text-align: right;">₹ ${paymentUpdate[0].amount
             }</td>
           </tr>
         </tbody>
@@ -2533,6 +2539,52 @@ const UsersController = {
         })
         .end();
     }
+  },
+  addPrivateVendor: async (req, res, next) => {
+    try {
+      const { vendorName, email, phone, productList } = req.body;
+      const buyerId = req.user.id; // Getting buyerId from the authenticated user
+
+      // If user does not exist, proceed with inserting data into the tbl_temp_user table
+      const result = await userModel.insertBuyerPrivateVendor(buyerId, vendorName, email, phone, productList);
+
+      // Sending the response back to the client
+      res.status(201).json({
+        status: 1,
+        message: 'Vendor successfully added. Please wait for vendor review.',
+        data: result
+      });
+
+    } catch (error) {
+      logError(error);
+      let message = error == "Error: Vendor_In_Review" ? "This vendor has already been added by you. Please wait while we review the vendor details" : Config.errorText.value;
+
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: message
+        })
+        .end();
+    }
+  },
+  getBuyerPrivateVendors: async (req, res, next) => {
+    try {
+      const buyerId = req.user.id; // Getting buyerId from the authenticated user
+
+      // Fetch the vendor details from the model
+      const data = await userModel.getBuyerPrivateVendors(buyerId);
+      
+      // Sending the response back to the client
+      res.status(200).json({
+        status: 1,
+        message: 'Vendor details retrieved successfully.',
+        data: data
+      });
+    } catch (error) {
+      next(error); // Pass the error to the error-handling middleware
+    }
   }
+
 };
 export default UsersController;

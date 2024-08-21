@@ -23,9 +23,9 @@ CmsRoutes.get(
 );
 CmsRoutes.get('/faq-listing', CmsController.faq_listing);
 CmsRoutes.get('/blog-listing', CmsController.blog_listing);
-CmsRoutes.get('/media-section', CmsController.media_section);
+CmsRoutes.get('/media-section/:id?', CmsController.media_section);
 CmsRoutes.get('/company-list', CmsController.company_list);
-CmsRoutes.get('/testimonial-list', CmsController.testimonial_list);
+CmsRoutes.get('/testimonial-list/:id?', CmsController.testimonial_list);
 CmsRoutes.get('/product-list', CmsController.product_list);
 CmsRoutes.get(
   '/subscription-list',
