@@ -50,18 +50,26 @@ const cmsModel = {
         });
     });
   },
-  mediaListing: async () => {
+  mediaListing: async (pageId) => {
     return new Promise(function (resolve, reject) {
       db.one(
-        `select *,
-      CASE
-      WHEN tbl_media.thumbnail_image IS NULL THEN
-      NULL
-      ELSE tbl_media.thumbnail_image
-      END AS thumbnail_url from tbl_media where is_featured ='1'`
+        `SELECT *,
+            CASE
+                WHEN tbl_media.thumbnail_image IS NULL THEN NULL
+                ELSE tbl_media.thumbnail_image
+            END AS thumbnail_url 
+        FROM tbl_media 
+        WHERE is_featured = '1' 
+        ${pageId ? 'AND page_id = $1' : ''}`,
+        pageId ? [pageId] : []
       )
         .then(function (data) {
-          resolve(data);
+          if (data) {
+            resolve(data);
+          } else {
+            resolve(null);
+          }
+
         })
         .catch(function (err) {
           let error = new Error(err);
@@ -155,23 +163,37 @@ const cmsModel = {
         });
     });
   }, */
-  testimonialListing: async () => {
+  testimonialListing: async (pageId = null) => {
     return new Promise(function (resolve, reject) {
+
       db.any(
-        `select tbl_testimonials.*,tbl_users.new_profile_image,tbl_users.user_type,tbl_users.name,
-        CASE
-        WHEN tbl_testimonials.created_image IS NULL THEN
-        NULL
-        ELSE tbl_testimonials.created_image
-        END AS created_image_url,
-        CASE
-        WHEN tbl_testimonials.thumbnail_image IS NULL THEN
-        NULL
-        ELSE tbl_testimonials.thumbnail_image
-        END AS image_url from tbl_testimonials LEFT JOIN tbl_users on tbl_users.id = tbl_testimonials.created_by 
-        WHERE tbl_testimonials.status = 1
-        order by title asc`
+        `SELECT 
+              tbl_testimonials.*,
+              tbl_users.new_profile_image,
+              tbl_users.user_type,
+              tbl_users.name,
+              CASE
+                  WHEN tbl_testimonials.created_image IS NULL THEN NULL
+                  ELSE tbl_testimonials.created_image
+              END AS created_image_url,
+              CASE
+                  WHEN tbl_testimonials.thumbnail_image IS NULL THEN NULL
+                  ELSE tbl_testimonials.thumbnail_image
+              END AS image_url 
+          FROM 
+              tbl_testimonials 
+          LEFT JOIN 
+              tbl_users 
+          ON 
+              tbl_users.id = tbl_testimonials.created_by 
+          WHERE 
+              tbl_testimonials.status = 1 
+              ${pageId ? 'AND tbl_testimonials.page_id = $1' : ''}
+          ORDER BY 
+              title ASC`,
+        pageId ? [pageId] : []
       )
+
         .then(function (data) {
           resolve(data);
         })
@@ -181,6 +203,7 @@ const cmsModel = {
         });
     });
   },
+
   productListing: async () => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -241,6 +264,28 @@ const cmsModel = {
           contactObj.subject,
           contactObj.comment,
           contactObj.submitted_from
+        ]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  mediaSectionInsert: async (mediaobj) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `insert into tbl_media( name, url, is_featured, thumbnail_image, page_id) 
+        values($1,$2,1,$4,$5) returning id`,
+        [
+          mediaobj.name,
+          mediaobj.url,
+          mediaobj.is_featured,
+          mediaobj.thumbnail_image,
+          mediaobj.page_id
         ]
       )
         .then(function (data) {
@@ -791,9 +836,9 @@ const cmsModel = {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				tbl_users set 
-				otp = '${updateOtp.otp}'
-       	where email= '${updateOtp.email}'`,
+        tbl_users set 
+        otp = '${updateOtp.otp}'
+          where email= '${updateOtp.email}'`,
         function (error, results, fields) {
           if (error) throw error;
           resolve(results);
@@ -847,9 +892,9 @@ const cmsModel = {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				tbl_users set 
-				password = '${password}'
-       	where otp= '${otp}'`,
+        tbl_users set 
+        password = '${password}'
+          where otp= '${otp}'`,
         function (error, results, fields) {
           if (error) throw error;
           resolve(results);
@@ -880,9 +925,9 @@ const cmsModel = {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				tbl_users set 
-				otp = ''
-       	where otp= '${otp}'`,
+        tbl_users set 
+        otp = ''
+          where otp= '${otp}'`,
         function (error, results, fields) {
           if (error) throw error;
           resolve(results);
@@ -932,15 +977,15 @@ const cmsModel = {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
-				dob = '${userObj.dob}',
-				nationality = '${userObj.nationality}',
-				qualification_id = '${userObj.qualification_id}',
-				filename = '${userObj.filename}',
-				original_filename = '${userObj.original_filename}',
-				area_of_interest = '${userObj.area_of_interest}',
-				term_condition = '${userObj.term_condition}'
-       	where id= '${userObj.user_id}'`,
+        Users set 
+        dob = '${userObj.dob}',
+        nationality = '${userObj.nationality}',
+        qualification_id = '${userObj.qualification_id}',
+        filename = '${userObj.filename}',
+        original_filename = '${userObj.original_filename}',
+        area_of_interest = '${userObj.area_of_interest}',
+        term_condition = '${userObj.term_condition}'
+          where id= '${userObj.user_id}'`,
         function (error, results, fields) {
           if (error) throw error;
           resolve(results);
@@ -1008,10 +1053,10 @@ const cmsModel = {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
-				filename = '${filename}',
-				original_filename = '${original_filename}'
-       	where id = '${user_id}'`,
+        Users set 
+        filename = '${filename}',
+        original_filename = '${original_filename}'
+          where id = '${user_id}'`,
         function (error, results, fields) {
           if (error) throw error;
           resolve(results);
@@ -1066,9 +1111,9 @@ const cmsModel = {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
-				password = '${password}'
-       	where id = '${user_id}'`,
+        Users set 
+        password = '${password}'
+          where id = '${user_id}'`,
         function (error, results, fields) {
           if (error) throw error;
           resolve(results);
@@ -1941,7 +1986,7 @@ const cmsModel = {
         });
     });
   },
-  getAllTestimonial: async (limit, offset, search) => {
+  getAllTestimonial: async (limit, offset, search, id) => {
     return new Promise(function (resolve, reject) {
       let query = ``;
       if (search) {
@@ -1955,7 +2000,7 @@ const cmsModel = {
               ELSE tbl_testimonials.thumbnail_image
               END AS image_url
           FROM tbl_testimonials
-          WHERE status != 2 ${query}
+          WHERE status != 2 ${query} AND id=${id}
           ORDER BY  "createdAt" DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
       )
