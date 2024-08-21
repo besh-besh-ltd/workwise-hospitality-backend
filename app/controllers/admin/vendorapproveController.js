@@ -341,7 +341,7 @@ const vendorController = {
   },
   addVendorApprove: async (req, res, next) => {
     try {
-      const { name, status } = req.body;
+      const { name, status, show_in_website } = req.body;
       // console.log('Files-->', req.files);
       let vendorApproveObj = {
         vendor_approve: name,
@@ -350,6 +350,7 @@ const vendorController = {
             ? `${Config.download_url}/vendor_approve/${req.files.logo[0].filename}`
             : null,
         status: status || 1,
+        show_in_website: show_in_website || 1,
         datasheet_file:
           req?.files?.tds?.length > 0
             ? `${Config.download_url}/vendor_approve/${req.files.tds[0].filename}`
@@ -384,11 +385,12 @@ const vendorController = {
   updateVendorApprove: async (req, res, next) => {
     try {
       let vendorApproveID = req.params.id;
-      const { name, status } = req.body;
+      const { name, status, show_in_website } = req.body;
       const checkVendorApproveID =
         await vendorapproveModel.vendorApproveIDExist(vendorApproveID);
       let vendorApproveObj = {
         vendor_approve: name,
+        show_in_website: show_in_website || 1,
         vendor_logo:
           req?.files?.logo?.length > 0
             ? `${Config.download_url}/vendor_approve/${req.files.logo[0].filename}`

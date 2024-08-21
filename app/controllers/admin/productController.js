@@ -528,7 +528,7 @@ const productController = {
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
       // const firstHeaderData = xlsx.utils.sheet_to_json(sheet, { header: 1 });
-
+      // console.log('firstHeaderData==>>>>>>>>', firstHeaderData);
       // const options = {
       //   header: 1, // Treat the first row as header
       //   defval: '', // Replace undefined or null values with an empty string
@@ -554,15 +554,21 @@ const productController = {
           let vendor_id = '';
           let password = value['Vendor Name'].replace(/\s+/g, '');
           let orgChar = password.match(/[a-zA-Z]/g).join('');
+          orgChar = orgChar.toLowerCase();
           let capitalizeFourOrganizationLetter = `${orgChar
             .charAt(0)
             .toUpperCase()}${orgChar.substring(1, 4)}`;
-          password = `${capitalizeFourOrganizationLetter}@${
-            value['Vendor company owner/hr/official contact number']
+          /* password = `${capitalizeFourOrganizationLetter}@${
+            value['Vendor company owner/hr/official contact number'].length >= 8
               ? value['Vendor company owner/hr/official contact number']
                   .toString()
                   .substring(6, 10)
               : 1234
+          }`; */
+          password = `${capitalizeFourOrganizationLetter}@${
+            value['Vendor company owner/hr/official contact number'].length < 8
+              ? 1234
+              : value['Vendor company owner/hr/official contact number'] % 10000
           }`;
 
           let vendor_email = value['Vendor Email'];
@@ -576,6 +582,7 @@ const productController = {
             let vendorObj = {
               name: value['Vendor Name'],
               email: value['Vendor Email'],
+              organization_name: value['Contact Person Name'],
               address: value['Address'] || null,
               city: checkCity.length > 0 ? checkCity[0].id : null,
               state: checkState.length > 0 ? checkState[0].id : null,
@@ -586,17 +593,18 @@ const productController = {
               website: value['Website'] || null,
               postal_code: value['Postal Code'] || null,
               user_type: '3',
-              status: '1'
+              status: '1',
+              new_profile_image: value['Logo\r\n(file)'] || null
             };
 
             let companyObj = {
               profile: value['About Vendor Company'] || null,
-              logo: value['Logo\n(file)'] || null,
+              logo: value['Logo\r\n(file)'] || null,
               email: value['Vendor Email'] || null,
               mobile:
                 value['Vendor company owner/hr/official contact number'] ||
                 null,
-              company_name: null,
+              company_name: value['Vendor Name'],
               nature_of_business:
                 value['Nature of Business\r\n(drop down)'] || null,
               established_year: value['Established Year'] || null,
@@ -816,12 +824,11 @@ const productController = {
               availability: 0,
               sku: productDetails[0].name,
               created_by: vendor_id,
-              vendor_id: vendor_id,
               added_by: req.user.id,
               is_approve: 1
             };
 
-            let product = await productModel.createProduct(productObj);
+            product = await productModel.createProduct(productObj);
 
             // ---------------- categories ---------------
             // console.log(categories);
@@ -951,6 +958,7 @@ const productController = {
               productObj,
               prodNameExists[0].id
             );
+            // console.log('product===============>>>>>>>>>>>>', product);
             //After update product mappings are deleted
             // Delete variants
             await productModel.deleteProductVariants(prodNameExists[0].id);
@@ -1016,7 +1024,7 @@ const productController = {
           //   await productModel.createProductCategory(categoryObj);
           // }
         }
-
+        // console.log('productId ==>>>>>>>>', productId);
         if (productId > 0) {
           if (value['Specification Key'] && value['Specification Value']) {
             let varientObj = {
@@ -1081,6 +1089,7 @@ const productController = {
               let vendorApproveId = 0;
               let findVendorApprove =
                 await vendorapproveModel.findVendorApproveBulkByName(element);
+              // console.log('findVendorApprove--->', findVendorApprove);
               if (findVendorApprove.length == 0) {
                 let vendorApproveObj = {
                   vendor_approve: element,
@@ -1099,6 +1108,7 @@ const productController = {
                 vendor_approve_id: vendorApproveId
               });
             }
+            // console.log('vendorApproveArrayId ==>>>>>', vendorApproveArrayId);
             await productModel.addProductApproveBy(
               vendorApproveArrayId,
               productId

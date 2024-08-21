@@ -28,7 +28,15 @@ const CmsController = {
   homeBanner: async (req, res, next) => {
     try {
       let page_id = req.params.page_id;
-      // return false;
+    if(!page_id){
+      res
+          .status(400)
+          .json({
+            status: 2,
+            message: 'page id not given'
+          })
+          .end();
+    }
 
       const bannerList = await cmsModel.homeBanner(page_id);
       if (bannerList && bannerList.length > 0) {
@@ -62,7 +70,15 @@ const CmsController = {
   cms_data: async (req, res, next) => {
     try {
       let page_id = req.params.page_id;
-
+      if(!page_id){
+        res
+            .status(400)
+            .json({
+              status: 2,
+              message: 'page id not given'
+            })
+            .end();
+      }
       let page_sections = await cmsModel.pageSectionContent(page_id);
       // console.log('page_sections-->', page_sections);
       // return false;
@@ -299,9 +315,23 @@ const CmsController = {
     }
   },
   media_section: async (req, res, next) => {
+    let media;
     try {
-      let media = await cmsModel.mediaListing();
-      if (media != '') {
+      const { id } = req.params;
+     if(!id){
+      logError( "page id not given");
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: "page id not given"
+        })
+        .end();
+    
+     }
+        media = await cmsModel.mediaListing(id);
+     
+      if (media) {
         res
           .status(200)
           .json({
@@ -309,6 +339,7 @@ const CmsController = {
             data: media
           })
           .end();
+        
       } else {
         res
           .status(400)
@@ -318,6 +349,7 @@ const CmsController = {
           })
           .end();
       }
+    
     } catch (error) {
       logError(error);
       res
@@ -362,8 +394,15 @@ const CmsController = {
     }
   },
   testimonial_list: async (req, res, next) => {
+    let testimonialListing;
     try {
-      let testimonialListing = await cmsModel.testimonialListing();
+      const { id } = req.params;
+      if (id) {
+        testimonialListing = await cmsModel.testimonialListing(id);
+      } else {
+        testimonialListing = await cmsModel.testimonialListing();
+      }
+
 
       if (testimonialListing != '') {
         res
@@ -392,7 +431,8 @@ const CmsController = {
         })
         .end();
     }
-  },
+  }
+  ,
   product_list: async (req, res, next) => {
     try {
       let productListing = await cmsModel.productListing();
