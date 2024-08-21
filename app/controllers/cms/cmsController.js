@@ -318,10 +318,19 @@ const CmsController = {
     let media;
     try {
       const { id } = req.params;
-      if (id) {
+     if(!id){
+      logError( "page id not given");
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: "page id not given"
+        })
+        .end();
+    
+     }
         media = await cmsModel.mediaListing(id);
-      }
-      media = await cmsModel.mediaListing();
+     
       if (media) {
         res
           .status(200)
@@ -330,6 +339,7 @@ const CmsController = {
             data: media
           })
           .end();
+        
       } else {
         res
           .status(400)
@@ -339,6 +349,7 @@ const CmsController = {
           })
           .end();
       }
+    
     } catch (error) {
       logError(error);
       res
