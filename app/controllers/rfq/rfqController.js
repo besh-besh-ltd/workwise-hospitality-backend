@@ -185,6 +185,7 @@ function processQuotCompare(data) {
 const insertProduct = async (
   {
     product_id,
+    variant,
     comment,
     datasheet,
     spec_file,
@@ -199,6 +200,7 @@ const insertProduct = async (
   try {
     let tbl_rfq_products_data = {
       product_id,
+      variant,
       comment,
       datasheet,
       spec_file,
@@ -210,16 +212,18 @@ const insertProduct = async (
     let spec_array = spec.map((item) => {
       item.rfq_id = created_rfq_id;
       item.product_id = product_id;
+      item.variant=variant;
       return item;
     });
-    const spec_keys = ['title', 'value', 'rfq_id', 'product_id'];
+    const spec_keys = ['title', 'value', 'rfq_id', 'product_id','variant'];
 
-    const vendor_keys = ['user_id', 'rfq_id', 'product_id'];
+    const vendor_keys = ['user_id', 'rfq_id', 'product_id','variant'];
     var vendor_array = [];
     if (vendors.length > 0) {
       vendor_array = vendors.map((item) => {
         item.rfq_id = created_rfq_id;
         item.product_id = product_id;
+        item.variant=variant;
         return item;
       });
     }
