@@ -1963,7 +1963,7 @@ const rfqController = {
   },
   finalize: async (req, res, next) => {
     const { organization_name, name } = req.user;
-    const { product_id, vendor_id, rfq_id, rfq_no, quote_id } = req.body;
+    const { product_id, vendor_id, rfq_id, rfq_no, quote_id, variant } = req.body;
     try {
       const vendor_details = await userModel.user_profile_detail(vendor_id);
       const rfQItem = await rfqModel.getRfqById(rfq_id, vendor_id);
@@ -2007,7 +2007,8 @@ const rfqController = {
             product_id,
             vendor_id,
             quote_id,
-            created_by: req.user.id
+            created_by: req.user.id,
+            variant
           };
 
           const response = await rfqModel.insert(
