@@ -1667,7 +1667,8 @@ const rfqController = {
                 total_price,
                 comment,
                 delivery_period,
-                quantity
+                quantity,
+                variant
               }) => {
                 quote_items_data.push({
                   rfq_id,
@@ -1682,7 +1683,8 @@ const rfqController = {
                   total_price,
                   comment,
                   delivery_period,
-                  quantity
+                  quantity,
+                  variant
                 });
               }
             );
@@ -1700,7 +1702,8 @@ const rfqController = {
               'total_price',
               'comment',
               'delivery_period',
-              'quantity'
+              'quantity',
+              'variant'
             ];
             let quotes_items = await rfqModel.insertArray(
               quote_items_data,
