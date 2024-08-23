@@ -28,6 +28,9 @@ const getNextRfQNumber = async () => {
 };
 
 const removeSpecsDynamically = (data) => {
+// modified my mukul on 23-AUG
+// No longer use of this function
+
   const groupedData = data.reduce((acc, item) => {
     acc[item.product_id] = acc[item.product_id] || [];
     acc[item.product_id].push(item);
@@ -37,12 +40,12 @@ const removeSpecsDynamically = (data) => {
   Object.keys(groupedData).forEach((product_id) => {
     const items = groupedData[product_id];
     items.forEach((item, idx) => {
-      const totalSets = Math.floor(item.product_specs.length / 3);
+      const totalSets = Math.floor(item.product_specs.length / 4);
       const setToKeep = totalSets - idx;
 
       if (setToKeep > 0 && setToKeep <= totalSets) {
-        const start = (setToKeep - 1) * 3;
-        item.product_specs = item.product_specs.slice(start, start + 3);
+        const start = (setToKeep - 1) * 4;
+        item.product_specs = item.product_specs.slice(start, start + 4);
       } else if (setToKeep <= 0) {
         item.product_specs = [];
       }
@@ -212,18 +215,18 @@ const insertProduct = async (
     let spec_array = spec.map((item) => {
       item.rfq_id = created_rfq_id;
       item.product_id = product_id;
-      item.variant=variant;
+      item.variant = variant;
       return item;
     });
-    const spec_keys = ['title', 'value', 'rfq_id', 'product_id','variant'];
+    const spec_keys = ['title', 'value', 'rfq_id', 'product_id', 'variant'];
 
-    const vendor_keys = ['user_id', 'rfq_id', 'product_id','variant'];
+    const vendor_keys = ['user_id', 'rfq_id', 'product_id', 'variant'];
     var vendor_array = [];
     if (vendors.length > 0) {
       vendor_array = vendors.map((item) => {
         item.rfq_id = created_rfq_id;
         item.product_id = product_id;
-        item.variant=variant;
+        item.variant = variant;
         return item;
       });
     }
@@ -894,7 +897,7 @@ const rfqController = {
 
               // sendMailtoVendors => in this function we are also generating token for vendor so he weill quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
               await sendMailtoVendors(req, response[0].id);
-              
+
               await sendQuotationMailToBuyer(req, response[0].id);
 
               res
@@ -1178,25 +1181,35 @@ const rfqController = {
           userProducts.map((prod_item) => {
             prod_item.product_id;
             rfQItem[0].products.map((pintem) => {
-              if (prod_item.product_id == pintem.product_id) {
+              console.log("pintem", pintem)
+              if (prod_item.product_id == pintem.product_id && prod_item.variant == pintem.variant ) {
+                pintem.vendor_details = pintem.vendor_details.filter(vendor => vendor.user_id === req.user.id);
                 fproducts.push(pintem);
               }
             });
           });
 
-          rfQItem[0].products = await removeSpecsDynamically(fproducts); // remove duplicate specs from products
-          // rfQItem[0].products = fproducts;
-        }
-      } else {
-        for await (let i of rfQItem) {
-          if (i.products.length > 0) {
-            i.product = await removeSpecsDynamically(i.products);
-            // for await (let j of i.products) {
-            //   j.specs = await removeSpecsDynamically(j.specs);
-            // }
-          }
+          // changes done by mukul, no need to remove duplicate specs, they are already product and variant specific
+          // rfQItem[0].products =  await removeSpecsDynamically(fproducts); // remove duplicate specs from products
+          rfQItem[0].products = fproducts;
         }
       }
+
+      // else block commented by by mukul jatav
+      // else {
+        // no use of removeSpecsDynamically here, 
+
+        // for await (let i of rfQItem) {
+        //   if (i.products.length > 0) {
+        //     // console.log("mukul ji", i.products)
+        //     // i.product = await removeSpecsDynamically(i.products);
+        //     for await (let j of i.products) {
+        //       console.log("ok ",j.product_specs)
+        //       //  j.specs = await removeSpecsDynamically(j.product_specs);
+        //      }
+        //   }
+        // }
+      // }
 
       res
         .status(200)
