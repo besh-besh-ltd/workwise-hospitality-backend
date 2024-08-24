@@ -655,7 +655,7 @@ LIMIT 1;`;
               'quote_details', (
                   SELECT json_agg(json_build_object('product_id', TQI.product_id,'product_name', TQI.product_name, 'unit_price', TQI.unit_price,'total_price', TQI.total_price, 'comment', TQI.comment, 'delivery_period', TQI.delivery_period,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'comment', TQI.comment,'quantity',TQI.quantity,
                   'rfq_details', (
-                      SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TQI.product_id AND TPS.rfq_id = ${id}
+                      SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = ${id}
                   )    
                   )) FROM tbl_quote_items TQI WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id AND TQI.product_id = TRP.product_id
               )  
@@ -684,7 +684,7 @@ LIMIT 1;`;
           SELECT json_build_object(              
               'product_name', TP.name ,
               'rfq_details', (
-                  SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TRF.product_id AND TPS.rfq_id = ${id}
+                  SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TRF.product_id AND TPS.variant = TRF.variant AND TPS.rfq_id = ${id}
               )     
           ) FROM tbl_product TP WHERE TP.id = TRF.product_id      
         ) AS "product_details",
@@ -705,7 +705,7 @@ LIMIT 1;`;
                     (
                       SELECT json_build_object('id', TUU.id, 'name' , TUU.name, 'email', TUU.email,'mobile' , TUU.mobile,'address' , TUU.address,'organization_name' , TUU.organization_name) FROM tbl_users TUU WHERE TUU.id = TQF.vendor_id
                     )
-                  ) FROM tbl_quote_finalization TQF WHERE TQF.quote_id = TQI.quote_id AND TQF.product_id = TQI.product_id
+                  ) FROM tbl_quote_finalization TQF WHERE TQF.quote_id = TQI.quote_id AND TQF.product_id = TQI.product_id AND TQF.variant = TQI.variant
                 ),              
                 'quote_details', (
                   SELECT json_build_object('status' , TQ.status, 'created_by' , TQ.created_by,'is_regret', TQ.is_regret,
