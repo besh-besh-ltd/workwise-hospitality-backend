@@ -259,90 +259,92 @@ const rfqModel = {
     });
   },
   getRfqById: async (id, user_id, user_type) => {
-    let q = `SELECT RFQ.*,
+
+//  query changed by mukul, 
+  let q = `SELECT RFQ.*,
     ARRAY(
-      SELECT json_build_object('id', TQF.id,'product_id',TQF.product_id, 'timestamp',TQF.timestamp,
-      'winning_vendor', 
-        (
-          SELECT json_build_object('id', TUU.id, 'name' , TUU.name, 'email', TUU.email,'mobile' , TUU.mobile,'address' , TUU.address,'organization_name' , TUU.organization_name) FROM tbl_users TUU WHERE TUU.id = TQF.vendor_id
-        ),
-      'product_details', (
-          SELECT json_build_object('id', TPP.id,'name', TPP.name, 'description', TPP.description, 'manufacturer', TPP.manufacturer, 'availability', TPP.availability, 'description', TPP.description ) FROM tbl_product TPP WHERE TPP.id = TQF.product_id
+      SELECT json_build_object('id', TQF.id,'product_id',TQF.product_id, 'timestamp', TQF.timestamp,'variant', TQF.variant,
+        'winning_vendor', 
+          (
+            SELECT json_build_object( 'id', TUU.id, 'name', TUU.name, 'email', TUU.email, 'mobile', TUU.mobile, 'address', TUU.address, 'organization_name', TUU.organization_name ) FROM tbl_users TUU WHERE TUU.id = TQF.vendor_id
+          ),
+        'product_details', (
+          SELECT json_build_object( 'id', TPP.id, 'name', TPP.name, 'description', TPP.description, 'manufacturer', TPP.manufacturer, 'availability', TPP.availability, 'description', TPP.description ) FROM tbl_product TPP WHERE TPP.id = TQF.product_id
         )
       ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id
   ) AS "finalizations",
     ARRAY(
       SELECT json_build_object('id', RFQ_TM.id,
-      'content', (
+        'content', (
           SELECT json_agg(json_build_object('title', RFQ_T.term_content))
           FROM tbl_rfq_terms RFQ_T
           WHERE CAST(RFQ_TM.terms_id AS INTEGER) = RFQ_T.id
-      )
+        )
       ) FROM tbl_rfq_terms_map RFQ_TM WHERE RFQ_TM.rfq_id = RFQ.id
     ) AS "terms",
     ARRAY(
       SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
-      'products', (
-        SELECT json_agg(json_build_object('product_id', TQI.product_id,'product_name', TQI.product_name,'unit_price', TQI.unit_price,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'total_price', TQI.total_price,'comment', TQI.comment,'delivery_period', TQI.delivery_period))
-        FROM tbl_quote_items TQI
-        WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id
-    )
+        'products', (
+          SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name,'unit_price', TQI.unit_price,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'total_price', TQI.total_price,'comment', TQI.comment,'delivery_period', TQI.delivery_period))
+          FROM tbl_quote_items TQI
+          WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id
+        )
       ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = ${user_id}
     ) AS "quotations",
     ARRAY(
-        SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_id, 'comment', RFQ_P.comment, 'spec_file', RFQ_P.spec_file,'qap', RFQ_P.qap, 'qap_file', RFQ_P.qap_file,'datasheet_file', RFQ_P.datasheet_file,
-            'datasheet', (
-                SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
+        SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_id, 'variant', RFQ_P.variant, 'comment', RFQ_P.comment, 'spec_file', RFQ_P.spec_file, 'qap', RFQ_P.qap, 'qap_file', RFQ_P.qap_file, 'datasheet_file', RFQ_P.datasheet_file,
+          'datasheet', (
+            SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
                 CASE
-                WHEN TVA.datasheet_file IS NULL THEN
-                NULL
-                ELSE TVA.datasheet_file
+                  WHEN TVA.datasheet_file IS NULL THEN 
+                  NULL
+                  ELSE TVA.datasheet_file
                 END
-                ))
-                FROM tbl_vendor_approve TVA
-                WHERE CAST(RFQ_P.datasheet AS INTEGER) = TVA.id
-            ),
-            'qap', (
-              SELECT json_agg(json_build_object('name', TVA.vendor_approve,'qap_link', CASE
-              WHEN TVA.qap_file IS NULL THEN
-              NULL
-              ELSE TVA.qap_file
-              END))
-              FROM tbl_vendor_approve TVA
-                WHERE CAST(RFQ_P.qap AS INTEGER) = TVA.id
-            ),
-            'product_specs', (
-                SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'product_id', RFQ_P_SPEC.product_id, 'rfq_id', RFQ_P_SPEC.rfq_id))
-                FROM tbl_rfq_products_specs RFQ_P_SPEC
-                WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
-            ),
-            'product_details', (
-              SELECT json_agg(json_build_object('id', T_P.id,'name', T_P.name, 'description', T_P.description, 'manufacturer', T_P.manufacturer, 'availability', T_P.availability, 'description', T_P.description,
-              'predefined_tds_file',
-               CASE
-              WHEN T_P.tds_new_file_name IS NULL THEN NULL
-              ELSE T_P.tds_new_file_name END,
-              'predefined_qap_file',
-              CASE
-              WHEN T_P.qap_new_file_name IS NULL THEN NULL
-              ELSE T_P.qap_new_file_name END))
-              FROM tbl_product T_P
-              WHERE RFQ_P.product_id = T_P.id
-            ),
-            'vendor_details', (
-              SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id,
-              'user_details', (
-                SELECT json_build_object(
+              ))
+            FROM tbl_vendor_approve TVA
+            WHERE CAST(RFQ_P.datasheet AS INTEGER) = TVA.id
+          ),
+          'qap', (
+            SELECT json_agg(json_build_object('name', TVA.vendor_approve,'qap_link', CASE
+                  WHEN TVA.qap_file IS NULL THEN
+                  NULL
+                  ELSE TVA.qap_file
+                END))
+            FROM tbl_vendor_approve TVA
+            WHERE CAST(RFQ_P.qap AS INTEGER) = TVA.id
+          ),
+          'product_specs', (
+            SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title,'value', RFQ_P_SPEC.value,'id', RFQ_P_SPEC.id,'product_id', RFQ_P_SPEC.product_id,'rfq_id', RFQ_P_SPEC.rfq_id,'variant', RFQ_P_SPEC.variant))
+            FROM tbl_rfq_products_specs RFQ_P_SPEC
+            WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id AND RFQ_P.variant = RFQ_P_SPEC.variant
+          ),
+          'product_details', (
+            SELECT json_agg(json_build_object('id', T_P.id,'name', T_P.name, 'description', T_P.description, 'manufacturer', T_P.manufacturer, 'availability', T_P.availability, 'description', T_P.description,
+                'predefined_tds_file',
+                CASE
+                  WHEN T_P.tds_new_file_name IS NULL THEN NULL
+                  ELSE T_P.tds_new_file_name END,
+                'predefined_qap_file',
+                CASE
+                  WHEN T_P.qap_new_file_name IS NULL THEN NULL
+                  ELSE T_P.qap_new_file_name END))
+            FROM tbl_product T_P
+            WHERE RFQ_P.product_id = T_P.id
+          ),
+          'vendor_details', (
+            SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id, 'variant', RFQ_P_V.variant,
+                'user_details', (
+                  SELECT json_build_object(
                     'user_id', U.id,
                     'name', U.name,
                     'email', U.email
+                  )
+                  FROM tbl_users U
+                  WHERE RFQ_P_V.user_id = U.id
                 )
-                FROM tbl_users U
-                WHERE RFQ_P_V.user_id = U.id
-            )
               ))
-              FROM tbl_rfq_product_vendors RFQ_P_V
-              WHERE RFQ_P.product_id = RFQ_P_V.product_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
+            FROM tbl_rfq_product_vendors RFQ_P_V
+            WHERE RFQ_P.product_id = RFQ_P_V.product_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id AND RFQ_P.variant = RFQ_P_V.variant
           )
         )
         FROM tbl_rfq_products RFQ_P        
@@ -350,9 +352,13 @@ const rfqModel = {
        
     ) AS "products"
     
-    FROM tbl_rfq RFQ WHERE id=${id}
-    ORDER BY RFQ.id DESC
-    LIMIT 1;`;
+FROM tbl_rfq RFQ WHERE id=${id}
+ORDER BY RFQ.id DESC
+LIMIT 1;`;
+
+
+    // MODIFIED ON 23TH AUG MUKUL
+    // modified query for veriants
 
     // MODIFIED ON 28TH MAY RANIT
     // ${
@@ -468,7 +474,7 @@ const rfqModel = {
   getUserProducts: async (rfq_id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `select DISTINCT product_id from tbl_rfq_product_vendors where rfq_id = ${rfq_id} AND user_id=${user_id}`
+        `select DISTINCT product_id, variant from tbl_rfq_product_vendors where rfq_id = ${rfq_id} AND user_id=${user_id}`
       )
         .then(function (data) {
           resolve(data);
@@ -649,7 +655,7 @@ const rfqModel = {
               'quote_details', (
                   SELECT json_agg(json_build_object('product_id', TQI.product_id,'product_name', TQI.product_name, 'unit_price', TQI.unit_price,'total_price', TQI.total_price, 'comment', TQI.comment, 'delivery_period', TQI.delivery_period,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'comment', TQI.comment,'quantity',TQI.quantity,
                   'rfq_details', (
-                      SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TQI.product_id AND TPS.rfq_id = ${id}
+                      SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = ${id}
                   )    
                   )) FROM tbl_quote_items TQI WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id AND TQI.product_id = TRP.product_id
               )  
@@ -678,7 +684,7 @@ const rfqModel = {
           SELECT json_build_object(              
               'product_name', TP.name ,
               'rfq_details', (
-                  SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TRF.product_id AND TPS.rfq_id = ${id}
+                  SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TRF.product_id AND TPS.variant = TRF.variant AND TPS.rfq_id = ${id}
               )     
           ) FROM tbl_product TP WHERE TP.id = TRF.product_id      
         ) AS "product_details",
@@ -699,7 +705,7 @@ const rfqModel = {
                     (
                       SELECT json_build_object('id', TUU.id, 'name' , TUU.name, 'email', TUU.email,'mobile' , TUU.mobile,'address' , TUU.address,'organization_name' , TUU.organization_name) FROM tbl_users TUU WHERE TUU.id = TQF.vendor_id
                     )
-                  ) FROM tbl_quote_finalization TQF WHERE TQF.quote_id = TQI.quote_id AND TQF.product_id = TQI.product_id
+                  ) FROM tbl_quote_finalization TQF WHERE TQF.quote_id = TQI.quote_id AND TQF.product_id = TQI.product_id AND TQF.variant = TQI.variant
                 ),              
                 'quote_details', (
                   SELECT json_build_object('status' , TQ.status, 'created_by' , TQ.created_by,'is_regret', TQ.is_regret,
