@@ -799,7 +799,7 @@ LIMIT 1;`;
         img.new_image_name AS image_url
         FROM tbl_product p
     ${`JOIN tbl_product_categories pc ON p.id = pc.product_id`}
-    ${`JOIN tbl_product_images img ON p.id = img.product_id AND img.is_featured = 1`}
+    ${`LEFT JOIN tbl_product_images img ON p.id = img.product_id`}
     ${`JOIN tbl_category c ON pc.category_id = c.id`}
     ${`JOIN tbl_users u ON u.id = p.created_by`}
     ${
