@@ -308,7 +308,7 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
                   </tr>
                   <tr>
                     <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>You have a new RFQ from ${organization_name}. Review now to submit your quotation.
-                    <a href="${process.env.FRONT_END_WBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}">Click here to view RFQ</a></td>
+                    <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}">Click here to view RFQ</a></td>
                     
                   </tr>
                     
@@ -2023,10 +2023,7 @@ const rfqController = {
             winning_vendor_name
           );
 
-          // map(buyerid, vendorid)
-          let data1 = await userModel.mapBuyerToVendor(req.user.id, vendor_id);
-          console.log("mukuk ",req.user.id,vendor_id,  data1)
-
+          await userModel.mapBuyerToVendor(req.user.id, vendor_id);
 
           res
             .status(200)
@@ -2130,7 +2127,6 @@ const rfqController = {
     state = req.body?.state ? req.body?.state : '';
     city = req.body?.city ? req.body?.city : '';
 
-    console.log("Imtiaj - ", req)
     // If user is not logged in
     if (!req.is_verified) {
       try {
