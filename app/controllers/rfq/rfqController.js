@@ -28,8 +28,8 @@ const getNextRfQNumber = async () => {
 };
 
 const removeSpecsDynamically = (data) => {
-// modified my mukul on 23-AUG
-// No longer use of this function
+  // modified my mukul on 23-AUG
+  // No longer use of this function
 
   const groupedData = data.reduce((acc, item) => {
     acc[item.product_id] = acc[item.product_id] || [];
@@ -289,7 +289,6 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
 
             // Insert the token and related data into the table
             const token = await rfqModel.insertVendorRfqToken(user_details[0].id, rfqNumber);
-            const data1 = await userModel.mapBuyerToVendor(user.id, user_details[0].id);
 
             let dynamicHTML = `
                 <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
@@ -309,7 +308,7 @@ const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
                   </tr>
                   <tr>
                     <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>You have a new RFQ from ${organization_name}. Review now to submit your quotation.
-                    <a href="${process.env.FRONT_END_WBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}">Click here to view RFQ</a></td>
+                    <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}">Click here to view RFQ</a></td>
                     
                   </tr>
                     
@@ -402,7 +401,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
       </td>
     </tr>
     <tr>
-      <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>Your RFQ has been successfully shared with vendors.<a href="${process.env.FRONT_END_WBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}">Click here to view </a></td>
+      <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>Your RFQ has been successfully shared with vendors.<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}">Click here to view </a></td>
       
     </tr>
       
@@ -891,11 +890,11 @@ const rfqController = {
             products.map((item) => insertProduct(item, created_rfq_id))
           )
             .then(async (results) => {
-              // console.log('Data inserted successfully:', results);
+              console.log('Data inserted successfully:', results);
               response[0].otherDetails = results;
               response[0].terms = rfqtermsRsp;
 
-              // sendMailtoVendors => in this function we are also generating token for vendor so he weill quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
+              // sendMailtoVendors => in this function we are also generating token for vendor so he will quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
               await sendMailtoVendors(req, response[0].id);
 
               await sendQuotationMailToBuyer(req, response[0].id);
@@ -1182,7 +1181,7 @@ const rfqController = {
             prod_item.product_id;
             rfQItem[0].products.map((pintem) => {
               console.log("pintem", pintem)
-              if (prod_item.product_id == pintem.product_id && prod_item.variant == pintem.variant ) {
+              if (prod_item.product_id == pintem.product_id && prod_item.variant == pintem.variant) {
                 pintem.vendor_details = pintem.vendor_details.filter(vendor => vendor.user_id === req.user.id);
                 fproducts.push(pintem);
               }
@@ -1197,18 +1196,18 @@ const rfqController = {
 
       // else block commented by by mukul jatav
       // else {
-        // no use of removeSpecsDynamically here, 
+      // no use of removeSpecsDynamically here, 
 
-        // for await (let i of rfQItem) {
-        //   if (i.products.length > 0) {
-        //     // console.log("mukul ji", i.products)
-        //     // i.product = await removeSpecsDynamically(i.products);
-        //     for await (let j of i.products) {
-        //       console.log("ok ",j.product_specs)
-        //       //  j.specs = await removeSpecsDynamically(j.product_specs);
-        //      }
-        //   }
-        // }
+      // for await (let i of rfQItem) {
+      //   if (i.products.length > 0) {
+      //     // console.log("mukul ji", i.products)
+      //     // i.product = await removeSpecsDynamically(i.products);
+      //     for await (let j of i.products) {
+      //       console.log("ok ",j.product_specs)
+      //       //  j.specs = await removeSpecsDynamically(j.product_specs);
+      //      }
+      //   }
+      // }
       // }
 
       res
@@ -1964,6 +1963,7 @@ const rfqController = {
   finalize: async (req, res, next) => {
     const { organization_name, name } = req.user;
     const { product_id, vendor_id, rfq_id, rfq_no, quote_id, variant } = req.body;
+
     try {
       const vendor_details = await userModel.user_profile_detail(vendor_id);
       const rfQItem = await rfqModel.getRfqById(rfq_id, vendor_id);
@@ -2022,6 +2022,8 @@ const rfqController = {
             winning_vendor_email,
             winning_vendor_name
           );
+
+          await userModel.mapBuyerToVendor(req.user.id, vendor_id);
 
           res
             .status(200)
@@ -2150,6 +2152,8 @@ const rfqController = {
           // No data found
           res.status(404).json({
             status: 0,
+            data: [],
+            total: 0,
             message: 'No vendor found matching the criteria',
             logged_In: false,
             subscription: false,
