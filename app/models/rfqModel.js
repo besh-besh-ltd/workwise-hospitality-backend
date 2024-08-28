@@ -260,8 +260,8 @@ const rfqModel = {
   },
   getRfqById: async (id, user_id, user_type) => {
 
-//  query changed by mukul, 
-  let q = `SELECT RFQ.*,
+    //  query changed by mukul, 
+    let q = `SELECT RFQ.*,
     ARRAY(
       SELECT json_build_object('id', TQF.id,'product_id',TQF.product_id, 'timestamp', TQF.timestamp,'variant', TQF.variant,
         'winning_vendor', 
@@ -401,23 +401,23 @@ LIMIT 1;`;
         JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
         LEFT JOIN tbl_company tc ON tc.user_id = tu.id
         ${
-          approved_by_id != ''
-            ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
-            : ``
-        }
+        approved_by_id != ''
+        ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
+        : ``
+      }
         WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
         ${state != '' ? `AND tu.state = ${state}` : ``}
         ${city != '' ? `AND tu.city = ${city}` : ``}
         ${category_id != '' ? `AND c.id = ${category_id}` : ``}
         ${
-          approved_by_id != ''
-            ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
-            : ``
-        }
+        approved_by_id != ''
+        ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
+        : ``
+      }
       )
       SELECT COUNT(*) AS total FROM vendor_data;
     `;
-  
+
     // Query to fetch only one vendor
     let dataQuery = `
     WITH vendor_data AS (
@@ -434,34 +434,34 @@ LIMIT 1;`;
       JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
       LEFT JOIN tbl_company tc ON tc.user_id = tu.id
       ${
-        approved_by_id != ''
-          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
-          : ``
+      approved_by_id != ''
+        ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
+        : ``
       }
       WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
       ${state != '' ? `AND tu.state = ${state}` : ``}
       ${city != '' ? `AND tu.city = ${city}` : ``}
       ${category_id != '' ? `AND c.id = ${category_id}` : ``}
       ${
-        approved_by_id != ''
-          ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
-          : ``
+      approved_by_id != ''
+        ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
+        : ``
       }
     )
     SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 1;
   `;
-  
-  
-    
+
+
+
     try {
       // Execute the count query
       const countResult = await db.query(countQuery);
       const totalCount = countResult[0].total;
-  
+
       // Execute the data query
       const dataResult = await db.query(dataQuery);
-       console.log(dataResult);
-  
+      console.log(dataResult);
+
       return {
         total: totalCount,
         vendor: dataResult.length > 0 ? dataResult[0] : null
@@ -789,37 +789,44 @@ LIMIT 1;`;
     });
   },
   searchProduct: async (search_key, category_id, approved_by_id) => {
-    let q = `SELECT DISTINCT p.id as product_id, p.name as product_name,p.description, c.title as category_name,c.id as category_id,
-        CASE
-        WHEN p.tds_new_file_name IS NULL THEN NULL
-        ELSE p.tds_new_file_name END AS pd_tds_file_url,
-        CASE
-        WHEN p.qap_new_file_name IS NULL THEN NULL
-        ELSE p.qap_new_file_name END AS pd_qap_file_url ,
-        img.new_image_name AS image_url
-        FROM tbl_product p
-    ${`JOIN tbl_product_categories pc ON p.id = pc.product_id`}
-    ${`LEFT JOIN tbl_product_images img ON p.id = img.product_id`}
-    ${`JOIN tbl_category c ON pc.category_id = c.id`}
-    ${`JOIN tbl_users u ON u.id = p.created_by`}
-    ${
-      approved_by_id != ''
-        ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
-        : ``
-    }
-    WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve =1 AND u.is_deleted = 0 AND u.status = 1 AND p.name ILIKE '%${search_key}%'
-    ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-    ${
-      approved_by_id != ''
-        ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
-        : ``
-    }
-     ORDER BY p.name ASC;`;
+    
+    let q = `
+      SELECT DISTINCT p.id AS product_id,
+                      p.name AS product_name,
+                      p.description,
+                      c.title AS category_name,
+                      c.id AS category_id,
+                      c.parent_id AS parent_category_id,
+                      CASE WHEN p.tds_new_file_name IS NULL THEN NULL ELSE p.tds_new_file_name END AS pd_tds_file_url,
+                      CASE WHEN p.qap_new_file_name IS NULL THEN NULL ELSE p.qap_new_file_name END AS pd_qap_file_url,
+                      img.new_image_name AS image_url,
+                      similarity(p.name, $1) AS similarity_score,
+                      ts_rank_cd(to_tsvector('english', p.name), plainto_tsquery('english', $1)) AS rank
+      FROM tbl_product p
+      JOIN tbl_product_categories pc ON p.id = pc.product_id
+      LEFT JOIN tbl_product_images img ON p.id = img.product_id
+      JOIN tbl_category c ON pc.category_id = c.id
+      JOIN tbl_users u ON u.id = p.created_by
+      ${approved_by_id ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+      WHERE p.status = 1 
+        AND p.is_deleted = 0 
+        AND p.is_review = 0 
+        AND p.is_approve = 1 
+        AND u.is_deleted = 0 
+        AND u.status = 1 
+        AND (
+          to_tsvector('english', p.name) @@ plainto_tsquery('english', $1) 
+          OR similarity(p.name, $1) > 0.1
+        )
+        ${category_id ? `AND c.id = $2` : ``}
+        ${approved_by_id ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)` : ``}
+      ORDER BY rank DESC, similarity_score DESC, p.name ASC;`;
 
     console.log('QUERY======', q);
 
+    // Assuming db.query can handle parameterized queries:
     return new Promise(function (resolve, reject) {
-      db.query(q)
+      db.query(q, [search_key, category_id, approved_by_id].filter(Boolean)) // Filters out any undefined or empty values
         .then(function (data) {
           resolve(data);
         })
@@ -828,7 +835,8 @@ LIMIT 1;`;
           reject(error);
         });
     });
-  },
+  }
+  ,
   searchVendor: async (
     buyerId,
     search_key,
@@ -1170,19 +1178,19 @@ WHERE created_by = $1 AND status = $2`,
       const randomNumber = Math.floor(Math.random() * 1000000); // 6-digit random number
       return parseInt((timestamp + randomNumber).toString().substring(0, 16)); // Ensure it's a BIGINT
     };
-  
+
     let token;
     let insertedData;
-  
+
     // SQL query to insert the token and related data
     const query = `
       INSERT INTO tbl_vendor_rfq_tokens_non_login (token, vendor_id, rfq_no)
       VALUES ($1, $2, $3)
       RETURNING *`;
-  
+
     while (true) {
       token = generateUniqueToken(); // Generate a unique token
-  
+
       try {
         // Attempt to insert the token into the database
         insertedData = await db.any(query, [token, vendorId, rfqNumber]);
@@ -1197,7 +1205,7 @@ WHERE created_by = $1 AND status = $2`,
         throw err;
       }
     }
-  
+
     return token; // Return the successfully inserted token
   }
 

@@ -771,7 +771,12 @@ const getVendorDetails = async (item, user_has_subscription) => {
 
 const removeDuplicates = (products) => {
   const uniqueItems = {};
-  const filteredData = products.filter((item) => {
+
+  // changes by Mukul jatav 28-08-2024
+  // removed products when parent id is not equals to 0
+  const productList = products.filter(item => item.parent_category_id === 0);
+
+  const filteredData = productList.filter((item) => {
     const key = `${item.product_name}_${item.category_id}`;
     if (!uniqueItems[key]) {
       uniqueItems[key] = true;
