@@ -2063,7 +2063,7 @@ const rfqController = {
     let search_key = '';
     let category_id = '';
     let approved_by_id = '';
-    search_key = req.body?.search_key ? req.body?.search_key : '';
+    search_key = req.body?.search_key ? req.body?.search_key : ' ';
     category_id = req.body?.category_id ? req.body?.category_id : '';
     approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
 

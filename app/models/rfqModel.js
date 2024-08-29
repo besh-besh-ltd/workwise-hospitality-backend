@@ -789,7 +789,8 @@ LIMIT 1;`;
     });
   },
   searchProduct: async (search_key, category_id, approved_by_id) => {
-    
+
+    // query change by mukul 28-08-2024
     let q = `
       SELECT DISTINCT p.id AS product_id,
                       p.name AS product_name,
