@@ -1993,13 +1993,17 @@ const rfqController = {
         winning_vendor_organization &&
         winning_vendor_email
       ) {
+        // changes by Mukul Jatav 30-08-2024
+        // removed  AND quote_id=${quote_id} condition from query, 
+        // return 09 Conflict status code if vendor already exist for same product + variant, 
+
         let alreadyExists = await rfqModel.checkIfExists(
           'tbl_quote_finalization',
-          `rfq_id=${rfq_id} AND quote_id=${quote_id}  AND product_id=${product_id} AND created_by=${req.user.id} LIMIT 1`
+          `rfq_id=${rfq_id} AND product_id=${product_id} AND variant=${variant} AND created_by=${req.user.id} LIMIT 1`
         );
         if (alreadyExists.length > 0) {
           res
-            .status(200)
+            .status(409)
             .json({
               status: 1,
               message: "You've already finalized a vendor for this product!"
