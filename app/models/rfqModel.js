@@ -391,6 +391,10 @@ LIMIT 1;`;
     state,
     city
   ) => {
+
+    // query changes by mukul jatav 30-08-2024, 
+    // include city and state name in response, left join of tbl_location_states and tbl_location_cities
+
     // Query to fetch the total count of vendors
     let countQuery = `
       WITH vendor_data AS (
@@ -422,7 +426,7 @@ LIMIT 1;`;
     let dataQuery = `
     WITH vendor_data AS (
       SELECT DISTINCT tu.id, tu.name as vendor_name, tu.organization_name as company_name,
-      tu.address, tc.profile as about, tc.website, tc.company_name,
+      tu.address, tc.profile as about, tc.website, tc.company_name, lc.city_name, ls.state_name,
       CASE
           WHEN tu.new_profile_image IS NULL THEN
           NULL
@@ -433,6 +437,8 @@ LIMIT 1;`;
       JOIN tbl_category c ON pc.category_id = c.id
       JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
       LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+      LEFT JOIN tbl_location_cities lc ON tu.city = lc.id 
+      LEFT JOIN tbl_location_states ls ON tu.state = ls.id 
       ${
       approved_by_id != ''
         ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
@@ -671,7 +677,7 @@ LIMIT 1;`;
           ) AS "quotations"
           
           FROM tbl_rfq_products TRP WHERE TRP.rfq_id=${id}`
-    )
+      )
         .then(function (data) {
           resolve(data);
         })
@@ -854,10 +860,13 @@ LIMIT 1;`;
     state,
     city
   ) => {
+
+    // query changes by mukul jatav30-08-2024, 
+    // include city and state name in response, left join of tbl_location_states and tbl_location_cities
     let q = `
 SELECT * FROM (
     SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
-           tu.address, tc.profile as about, tc.website, tc.company_name,
+           tu.address, tc.profile as about, tc.website, tc.company_name, lc.city_name, ls.state_name,
            CASE
                WHEN tu.new_profile_image IS NULL THEN NULL
                ELSE tu.new_profile_image
@@ -872,6 +881,8 @@ SELECT * FROM (
     JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
     LEFT JOIN tbl_company tc ON tc.user_id = tu.id
     LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+    LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
+    LEFT JOIN tbl_location_states ls ON tu.state = ls.id
     ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
     WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
       AND p.name ILIKE '%${search_key}%' AND tu.email IS NOT NULL
