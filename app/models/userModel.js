@@ -610,152 +610,115 @@ const userModel = {
         });
     });
   },
-
   vendorinfo: async (user_id, current_user = null) => {
-
     return new Promise(function (resolve, reject) {
-      if (current_user === null) {
-        // console.log("jey=======================================================================");
 
-        db.one(
-          `SELECT tbl_users.id as user_id,
-                  tbl_users.name as vendor_name,
-                  tbl_users.new_profile_image as profile_image,
-                  tbl_users.address,
-                  tbl_users.dob,
-                  tbl_users.nationality,
-                  tbl_users.status,
-                  tbl_company.id as company_id,
-                  tbl_company.gstin,
-                  tbl_company.cin,
-                  tbl_company.website,
-                  tbl_company.nature_of_business,
-                  tbl_company.type_of_business,
-                  tbl_company.turnover,
-                  tbl_company.no_of_employess,
-                  tbl_company.import_export_code,
-                  tbl_company.certifications,
-                  tbl_company.company_name,
-                  tbl_company.profile,
-                  tbl_company.location,
-                  ARRAY(
-                      SELECT json_build_object(
-                          'vendor_approve', tbl_vendor_approve.vendor_approve,
-                          'id', tbl_vendor_approve.id,
-                          'vendor_approve_url', CASE
-                              WHEN tbl_vendor_approve.vendor_logo IS NULL THEN
-                                  NULL
-                              ELSE tbl_vendor_approve.vendor_logo
-                          END
-                      )
-                      FROM tbl_vendorapprove_user_mapping VM
-                      LEFT JOIN tbl_vendor_approve ON tbl_vendor_approve.id = VM.vendor_approve_id
-                      WHERE tbl_users.id = VM.user_id
-                  ) AS "vendor_approve",
-                  ARRAY(
-                      SELECT json_build_object(
-                          'brochure', tbl_files.file_name,
-                          'brochure_url', tbl_files.file_path
-                      )
-                      FROM tbl_files
-                      WHERE tbl_files.user_id = tbl_users.id
-                  ) AS "brochure",
-                  ARRAY(
-                      SELECT json_build_object(
-                          'product_image', tbl_product_images.new_image_name,
-                          'product_image_url', CASE
-                              WHEN tbl_product_images.new_image_name IS NULL THEN
-                                  NULL
-                              ELSE tbl_product_images.new_image_name
-                          END
-                      )
-                      FROM tbl_product P
-                      LEFT JOIN tbl_product_images ON P.id = tbl_product_images.product_id
-                      WHERE P.vendor = tbl_users.id
-                  ) AS "product_images",
-                  CASE
-                      WHEN tbl_users.new_profile_image IS NULL THEN
-                          NULL
-                      ELSE tbl_users.new_profile_image
-                  END AS profile_image_url
-          FROM tbl_users
-          LEFT JOIN tbl_company ON tbl_users.id = tbl_company.user_id
-          WHERE tbl_users.id = $1`,
-          [user_id]
-        )
-          .then(function (data) {
-            resolve(data);
-          })
-          .catch(function (err) {
-            let error = new Error(err);
-            reject(error);
-          });
+      // query changes by Mukul Jatav 30-08-2024, 
+      // rewrited query to reduce duplication, and included product name along with product images
 
-      } else {
-        db.one(
-          `SELECT tbl_users.id as user_id,tbl_users.name as vendor_name,
-          tbl_users.new_profile_image as profile_image,
-          tbl_users.address,
-          tbl_users.dob,
-          tbl_users.nationality,
-          tbl_users.status,
-          tbl_company.id as company_id,
-          tbl_company.gstin,
-          tbl_company.cin,
-          tbl_company.website,
-          tbl_company.nature_of_business,
-          tbl_company.type_of_business,
-          tbl_company.turnover,
-          tbl_company.no_of_employess,
-          tbl_company.import_export_code,
-          tbl_company.certifications,
-          tbl_company.mobile,
-          tbl_company.email,
-          tbl_company.company_name,
-          tbl_company.profile,
-          tbl_company.location,
-          ARRAY
-          (SELECT json_build_object('vendor_approve', tbl_vendor_approve.vendor_approve,'vendor_approve', tbl_vendor_approve.vendor_approve,'id',tbl_vendor_approve.id, 'vendor_approve_url',  CASE
-          WHEN tbl_vendor_approve.vendor_logo IS NULL THEN
-          NULL
-          ELSE tbl_vendor_approve.vendor_logo
-          END)
-            FROM tbl_vendorapprove_user_mapping VM left join tbl_vendor_approve on tbl_vendor_approve.id = VM.vendor_approve_id  WHERE  tbl_users.id = VM.user_id) AS "vendor_approve",
-          ARRAY
-            (SELECT json_build_object('brochure',tbl_files.file_name,'brochure_url', tbl_files.file_path )
-              FROM tbl_files  WHERE  tbl_files.user_id = tbl_users.id) AS "brochure",
-          ARRAY
-            (SELECT json_build_object('reviewed_by',tbl_vendor_reviews.reviewed_by,'review_date',tbl_vendor_reviews.review_date,'rating',tbl_vendor_reviews.rating,'description',tbl_vendor_reviews.description,'buyer',BU.name,'buyer_email',BU.email )
-              FROM tbl_vendor_reviews  left join tbl_users BU on BU.id = tbl_vendor_reviews.reviewed_by  WHERE  tbl_vendor_reviews.reviewed_to = tbl_users.id AND tbl_vendor_reviews.reviewed_by = ${current_user}) AS "reviews",
-          ARRAY
-            (SELECT json_build_object('product_image', tbl_product_images.new_image_name,'product_image_url',  CASE
-            WHEN tbl_product_images.new_image_name IS NULL THEN
-            NULL
-            ELSE tbl_product_images.new_image_name
-            END)
-              FROM tbl_product P left join tbl_product_images on P.id = tbl_product_images.product_id  WHERE  P.vendor = tbl_users.id) AS "product_images",
-          CASE
-          WHEN tbl_users.new_profile_image IS NULL THEN
-          NULL
-          ELSE tbl_users.new_profile_image
-          END AS profile_image_url
-          from tbl_users 
-          left join tbl_company on tbl_users.id = tbl_company.user_id 
-           where tbl_users.id = $1`,
-          [user_id]
-        )
+      // Base query with common fields
+      let baseQuery = `
+      SELECT tbl_users.id as user_id,
+             tbl_users.name as vendor_name,
+             tbl_users.new_profile_image as profile_image,
+             tbl_users.address,
+             tbl_users.dob,
+             tbl_users.nationality,
+             tbl_users.status,
+             tbl_company.id as company_id,
+             tbl_company.gstin,
+             tbl_company.cin,
+             tbl_company.website,
+             tbl_company.nature_of_business,
+             tbl_company.type_of_business,
+             tbl_company.turnover,
+             tbl_company.no_of_employess,
+             tbl_company.import_export_code,
+             tbl_company.certifications,
+             tbl_company.company_name,
+             tbl_company.profile,
+             tbl_company.location,
+             ARRAY(
+                 SELECT json_build_object(
+                     'vendor_approve', tbl_vendor_approve.vendor_approve,
+                     'id', tbl_vendor_approve.id,
+                     'vendor_approve_url', CASE
+                         WHEN tbl_vendor_approve.vendor_logo IS NULL THEN
+                             NULL
+                         ELSE tbl_vendor_approve.vendor_logo
+                     END
+                 )
+                 FROM tbl_vendorapprove_user_mapping VM
+                 LEFT JOIN tbl_vendor_approve ON tbl_vendor_approve.id = VM.vendor_approve_id
+                 WHERE tbl_users.id = VM.user_id
+             ) AS "vendor_approve",
+             ARRAY(
+                 SELECT json_build_object(
+                     'brochure', tbl_files.file_name,
+                     'brochure_url', tbl_files.file_path
+                 )
+                 FROM tbl_files
+                 WHERE tbl_files.user_id = tbl_users.id
+             ) AS "brochure",
+             ARRAY(
+                 SELECT json_build_object(
+                 'product_name', P.name, 
+                     'product_image', tbl_product_images.new_image_name,
+                     'product_image_url', CASE
+                         WHEN tbl_product_images.new_image_name IS NULL THEN
+                             NULL
+                         ELSE tbl_product_images.new_image_name
+                     END
+                 )
+                 FROM tbl_product P
+                 LEFT JOIN tbl_product_images ON P.id = tbl_product_images.product_id
+                 WHERE P.vendor = tbl_users.id
+             ) AS "product_images",
+             CASE
+                 WHEN tbl_users.new_profile_image IS NULL THEN
+                     NULL
+                 ELSE tbl_users.new_profile_image
+             END AS profile_image_url`;
 
-          .then(function (data) {
-            resolve(data);
-          })
-          .catch(function (err) {
-            let error = new Error(err);
-            reject(error);
-          });
+      // Additional fields if current_user is not null
+      if (current_user !== null) {
+        baseQuery += `,
+             tbl_company.mobile,
+             tbl_company.email,
+             ARRAY(
+                 SELECT json_build_object(
+                     'reviewed_by', tbl_vendor_reviews.reviewed_by,
+                     'review_date', tbl_vendor_reviews.review_date,
+                     'rating', tbl_vendor_reviews.rating,
+                     'description', tbl_vendor_reviews.description,
+                     'buyer', BU.name,
+                     'buyer_email', BU.email
+                 )
+                 FROM tbl_vendor_reviews
+                 LEFT JOIN tbl_users BU ON BU.id = tbl_vendor_reviews.reviewed_by
+                 WHERE tbl_vendor_reviews.reviewed_to = tbl_users.id
+                 AND tbl_vendor_reviews.reviewed_by = ${current_user}
+             ) AS "reviews"`;
       }
-    });
 
+      // Completing the query with the FROM clause
+      baseQuery += `
+      FROM tbl_users
+      LEFT JOIN tbl_company ON tbl_users.id = tbl_company.user_id
+      WHERE tbl_users.id = $1`;
+
+      // Execute the query
+      db.one(baseQuery, [user_id])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
   },
+
 
   /*   vendorinfo: async (user_id) => {
     return new Promise(function (resolve, reject) {
@@ -3181,7 +3144,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
   mapBuyerToVendor: async (buyerId, vendorId) => {
     // Map buyers to vendors and prioritize these vendors in search results for the buyer
     return new Promise((resolve, reject) => {
-      
+
       // check if buyer already mapped with vendor
       db.oneOrNone(`SELECT 1 FROM tbl_buyer_private_vendors_mapping WHERE buyer_id = $1 AND vendor_id = $2`, [buyerId, vendorId])
         .then((result) => {
@@ -3226,11 +3189,11 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         LEFT JOIN tbl_users AS u ON tu.buyer_id = u.id
     `;
     return new Promise((resolve, reject) => {
-        db.any(query)
-            .then(data => resolve(data))
-            .catch(err => reject(new Error(err)));
+      db.any(query)
+        .then(data => resolve(data))
+        .catch(err => reject(new Error(err)));
     });
-}
+  }
 
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];
