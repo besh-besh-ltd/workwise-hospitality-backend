@@ -628,6 +628,9 @@ LIMIT 1;`;
   },
   getQuotesByRfqByIdByProduct: async (id, user_id) => {
     return new Promise(function (resolve, reject) {
+
+      // changes by Mukul Jatav 30/08/2024,
+      // finding finalized_vendor for each product 
       db.query(
         `SELECT TRP.product_id, TRP.rfq_id,
           ARRAY(
@@ -658,12 +661,17 @@ LIMIT 1;`;
                       SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = ${id}
                   )    
                   )) FROM tbl_quote_items TQI WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id AND TQI.product_id = TRP.product_id
-              )  
+              ),
+              'finalized_vendor', (
+                  SELECT json_build_object('vendor_id', TQF.vendor_id, 'timestamp', TQF.timestamp) 
+                  FROM tbl_quote_finalization TQF 
+                  WHERE TQF.product_id = TRP.product_id AND TQF.variant = TQI.variant AND TQF.rfq_id = ${id}
+              )
             )  FROM tbl_quotes TQ LEFT JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id WHERE TQ.rfq_id = ${id} AND TQI.product_id = TRP.product_id ORDER BY TQ.created_by ASC
           ) AS "quotations"
           
           FROM tbl_rfq_products TRP WHERE TRP.rfq_id=${id}`
-      )
+    )
         .then(function (data) {
           resolve(data);
         })
