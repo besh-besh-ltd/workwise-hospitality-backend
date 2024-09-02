@@ -6,9 +6,28 @@ import portalTourController from '../../controllers/portalTour/portalTourControl
 
 const portalTourRoutes = Router();
 
+// get tour coontent by page id
 portalTourRoutes.get('/content/:id',
     passportSignIn,
     portalTourController.getPageTourContent
+);
+
+// get user tour progress by page id
+portalTourRoutes.get('/user-tour-progress/:id',
+    passportSignIn,
+    portalTourController.getUserTourProgrs
+);
+
+// upload user tour progress
+portalTourRoutes.post('/upload-tour-progress',
+    passportSignIn,
+    portalTourController.uploadUserTourProgress
+);
+
+// update user tour progress
+portalTourRoutes.patch('/update-tour-progress',
+    passportSignIn,
+    portalTourController.updateUserTourProgress
 );
 
 export default portalTourRoutes;
