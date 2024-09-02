@@ -6,36 +6,29 @@ const portalTourController = {
     // get tour content by page id
     getPageTourContent: async (req, res, next) => {
         try {
+            const page_id = req.params.id;
+            const user_id = req.user.id;
 
-            const page_id = req.params.id
+            const pageTourContent = await portalTourModel.getPageTourContent(page_id, user_id);
 
-            const getPageTourContent = await portalTourModel.getPageTourContent(page_id);
-
-            if (getPageTourContent) {
-                res
-                    .status(200)
-                    .json({
-                        status: 1,
-                        data: getPageTourContent
-                    })
-                    .end();
+            if (pageTourContent) {
+                res.status(200).json({
+                    status: 1,
+                    message: "Let's start portal tour",
+                    data: pageTourContent
+                }).end();
+            } else {
+                res.status(200).json({
+                    status: 1,
+                    message: 'Tour already completed'
+                }).end();
             }
-            else {
-                res.status(404).json({
-                    status: 0,
-                    message: 'Page tour content not found'
-                });
-            }
-
         } catch (error) {
             logError(error);
-            res
-                .status(400)
-                .json({
-                    status: 3,
-                    message: Config.errorText.value
-                })
-                .end();
+            res.status(400).json({
+                status: 3,
+                message: Config.errorText.value
+            }).end();
         }
     },
 

@@ -5,20 +5,43 @@ import Config from '../config/app.config.js';
 const portalTourModel = {
 
     // get page tour content
-    getPageTourContent: async (page_id) => {
-        return new Promise((resolve, reject) => {
-            db.one(
-                `SELECT * FROM tbl_portal_tour_content WHERE page_id=$1`,
-                [page_id]
-            )
-                .then(function (data) {
-                    resolve(data);
-                })
-                .catch(function (err) {
-                    let error = new Error(err);
-                    reject(error);
-                });
-        })
+    getPageTourContent: async (page_id, user_id) => {
+        return new Promise(async (resolve, reject) => {
+            try {
+                // Check if the user has tour progress for the page
+                const userTourStatus = await db.oneOrNone(
+                    `SELECT * FROM tbl_portal_tour_progress WHERE page_id=$1 AND user_id=$2`,
+                    [page_id, user_id]
+                );
+
+                // If user tour status doesn't exist, create one with completed=false
+                if (!userTourStatus) {
+                    await db.one(
+                        `INSERT INTO tbl_portal_tour_progress (user_id, page_id, completed) 
+                         VALUES ($1, $2, $3) 
+                         RETURNING *`,
+                        [user_id, page_id, false]
+                    );
+                }
+
+                // Fetch the tour content only if the tour is not completed
+                if (!userTourStatus || !userTourStatus.completed) {
+                    const pageTourContent = await db.oneOrNone(
+                        `SELECT * FROM tbl_portal_tour_content WHERE page_id=$1`,
+                        [page_id]
+                    );
+                    if (pageTourContent) {
+                        resolve(pageTourContent);
+                    } else {
+                        reject(new Error('Page tour content not found'));
+                    }
+                } else {
+                    resolve(null); // Tour is already completed, no need to fetch content
+                }
+            } catch (err) {
+                reject(new Error(err));
+            }
+        });
     },
     // get user tour progress by page ID and user ID
     getUserTourStatus: async (page_id, user_id) => {
