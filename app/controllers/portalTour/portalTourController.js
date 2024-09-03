@@ -8,14 +8,39 @@ const portalTourController = {
         try {
             const page_id = req.params.id;
             const user_id = req.user.id;
-
+            const user_type = req.user.user_type;
+    
+            // Get the main requested page tour content
             const pageTourContent = await portalTourModel.getPageTourContent(page_id, user_id);
-
-            if (pageTourContent) {
+    
+            // Initialize an array to hold additional content based on user_type
+            let additionalContent = [];
+    
+            // Check user type and fetch additional content if necessary
+            if (user_type === 2) {
+                const additionalPageContent = await portalTourModel.getPageTourContent(1, user_id);
+                if (additionalPageContent) {
+                    additionalContent.push(additionalPageContent);
+                }
+            } else if (user_type === 3) {
+                const additionalPageContent = await portalTourModel.getPageTourContent(2, user_id);
+                if (additionalPageContent) {
+                    additionalContent.push(additionalPageContent);
+                }
+            }
+    
+            // Combine the requested page content with any additional content
+            const data = {
+                navbarContent: additionalContent,
+                pageContent: pageTourContent
+            };
+    
+            // Check if the main content exists
+            if (pageTourContent || additionalContent.length > 0) {
                 res.status(200).json({
                     status: 1,
-                    message: "Let's start portal tour",
-                    data: pageTourContent
+                    message: "Let's start the portal tour",
+                    data: data
                 }).end();
             } else {
                 res.status(200).json({
