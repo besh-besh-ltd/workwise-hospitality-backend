@@ -85,6 +85,27 @@ const UsersController = {
       let user_id = await userModel.user_register(userObj);
       // console.log('test user id', user_id);
 
+      // create company profile if user type is vendor 
+      if (user_id && register_as == '3') {
+        const cmpObj = {
+          company_name: userObj.name,
+          location: null,
+          email: userObj.email,
+          mobile: userObj.mobile,
+          gstin: null,
+          cin: null,
+          profile: null,
+          nature_of_business: null,
+          type_of_business: null,
+          turnover: null,
+          no_of_employess: null,
+          certifications: null,
+          import_export_code: null,
+        }
+
+        await userModel.companyProfileCreate(cmpObj, user_id[0].id);
+      }
+
       if (user_id) {
         let html_variables = [{ name: name }];
         let dynamic_html = '';
@@ -2574,7 +2595,7 @@ const UsersController = {
 
       // Fetch the vendor details from the model
       const data = await userModel.getBuyerPrivateVendors(buyerId);
-      
+
       // Sending the response back to the client
       res.status(200).json({
         status: 1,

@@ -391,6 +391,10 @@ LIMIT 1;`;
     state,
     city
   ) => {
+
+    // query changes by mukul jatav 30-08-2024, 
+    // include city and state name in response, left join of tbl_location_states and tbl_location_cities
+
     // Query to fetch the total count of vendors
     let countQuery = `
       WITH vendor_data AS (
@@ -422,7 +426,7 @@ LIMIT 1;`;
     let dataQuery = `
     WITH vendor_data AS (
       SELECT DISTINCT tu.id, tu.name as vendor_name, tu.organization_name as company_name,
-      tu.address, tc.profile as about, tc.website, tc.company_name,
+      tu.address, tc.profile as about, tc.website, tc.company_name, lc.city_name, ls.state_name,
       CASE
           WHEN tu.new_profile_image IS NULL THEN
           NULL
@@ -433,6 +437,8 @@ LIMIT 1;`;
       JOIN tbl_category c ON pc.category_id = c.id
       JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
       LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+      LEFT JOIN tbl_location_cities lc ON tu.city = lc.id 
+      LEFT JOIN tbl_location_states ls ON tu.state = ls.id 
       ${
       approved_by_id != ''
         ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
@@ -628,6 +634,9 @@ LIMIT 1;`;
   },
   getQuotesByRfqByIdByProduct: async (id, user_id) => {
     return new Promise(function (resolve, reject) {
+
+      // changes by Mukul Jatav 30/08/2024,
+      // finding finalized_vendor for each product 
       db.query(
         `SELECT TRP.product_id, TRP.rfq_id,
           ARRAY(
@@ -658,7 +667,12 @@ LIMIT 1;`;
                       SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = ${id}
                   )    
                   )) FROM tbl_quote_items TQI WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id AND TQI.product_id = TRP.product_id
-              )  
+              ),
+              'finalized_vendor', (
+                  SELECT json_build_object('vendor_id', TQF.vendor_id, 'timestamp', TQF.timestamp) 
+                  FROM tbl_quote_finalization TQF 
+                  WHERE TQF.product_id = TRP.product_id AND TQF.variant = TQI.variant AND TQF.rfq_id = ${id}
+              )
             )  FROM tbl_quotes TQ LEFT JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id WHERE TQ.rfq_id = ${id} AND TQI.product_id = TRP.product_id ORDER BY TQ.created_by ASC
           ) AS "quotations"
           
@@ -846,10 +860,13 @@ LIMIT 1;`;
     state,
     city
   ) => {
+
+    // query changes by mukul jatav30-08-2024, 
+    // include city and state name in response, left join of tbl_location_states and tbl_location_cities
     let q = `
 SELECT * FROM (
     SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
-           tu.address, tc.profile as about, tc.website, tc.company_name,
+           tu.address, tc.profile as about, tc.website, tc.company_name, lc.city_name, ls.state_name,
            CASE
                WHEN tu.new_profile_image IS NULL THEN NULL
                ELSE tu.new_profile_image
@@ -864,6 +881,8 @@ SELECT * FROM (
     JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
     LEFT JOIN tbl_company tc ON tc.user_id = tu.id
     LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+    LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
+    LEFT JOIN tbl_location_states ls ON tu.state = ls.id
     ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
     WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
       AND p.name ILIKE '%${search_key}%' AND tu.email IS NOT NULL
