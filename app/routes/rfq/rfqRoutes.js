@@ -1,18 +1,15 @@
 import { Router } from 'express';
 import rfqController from '../../controllers/rfq/rfqController.js';
 import noLogin from '../../middleware/noLogin.js';
-import {
-  validateBody,
-  validateParam,
-  schemas,
-  schema_posts
-} from '../../validations/paramValidation/userValidation.js';
+import { validateBody } from '../../validations/paramValidation/userValidation.js';
 import { validateDbBody } from '../../validations/dbValidation/userDbValidation.js';
 import passport from '../../middleware/passport.js';
 import { rfqSchemas } from '../../validations/paramValidation/rfqValidation.js';
 const passportLogIn = passport.authenticate('localUsr', { session: false });
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 import { acl } from '../../helper/common.js';
+import { schema_posts } from '../../validations/paramValidation/productValidation.js';
+
 
 const RfqRoutes = Router();
 
@@ -133,5 +130,9 @@ RfqRoutes.get(
 RfqRoutes.post('/rfq-list', passportSignIn, rfqController.rfqList);
 
 RfqRoutes.get('/save-state-cities', rfqController.saveStateCities);
+
+RfqRoutes.post('/megic-search-rfq-create', passportSignIn,  schema_posts.productBulkUpload,
+  rfqController.megicSearchRfqCreate);
+
 
 export default RfqRoutes;

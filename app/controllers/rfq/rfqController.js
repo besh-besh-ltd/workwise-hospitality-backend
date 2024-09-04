@@ -3590,6 +3590,205 @@ const rfqController = {
         })
         .end();
     }
+  },
+  megicSearchRfqCreate: async (req, res, next) => {
+    try {
+      let file = req.file;
+      const user = req.user;
+      const comment = req.body.comment;
+      const response_email = user.email;
+      const contact_name = user.name;
+      const contact_number = user.mobile;
+      const company_name = user.organization_name || user.name;
+      const location = "";
+      const bid_end_date = "";
+
+      const workbook = xlsx.readFile(file.path);
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const jsonData = xlsx.utils.sheet_to_json(sheet);
+
+      const termList = await rfqModel.getAllTerms();
+      const transformedTermList = termList.map(term => ({ id: term.id }));
+
+      const products = [];
+
+      for await (const value of jsonData) {
+        const searchObj = {
+          search_key: value["Product Name"],
+          category_id: "",
+          approved_by_id: ""
+        };
+
+        const searchedPro = await rfqModel.searchProduct(
+          searchObj.search_key,
+          searchObj.category_id,
+          searchObj.approved_by_id
+        );
+
+        const uniqueProducts = removeDuplicates(searchedPro);
+        let search_key = uniqueProducts[0];
+        const spec = [
+          { title: "Size", value: value["Size"] },
+          { title: "Spec", value: value["specifications"] },
+          { title: "Quantity", value: String(value["Quantity"]) },
+          { title: "Unit", value: value["Unit"] }
+        ];
+
+        const vendorResult = await rfqModel.searchVendor(
+          user.id,
+          search_key.product_name,
+          searchObj.category_id,
+          searchObj.approved_by_id,
+          "",
+          ""
+        );
+
+        const transformedVendorResult = vendorResult.map(({ id }) => ({ user_id: id }));
+
+        // Initialize the variant to 0
+        let variant = 0;
+
+        // Iterate over the existing products array to find the same product name and increment the variant
+        products.forEach((product) => {
+          if (product.name === search_key.product_name && product.product_id === search_key.product_id) {
+            variant = Math.max(variant, product.variant + 1);
+          }
+        });
+
+        const product = {
+          product_id: search_key.product_id,
+          predefined_tds_file: search_key.pd_tds_file_url,
+          predefined_qap_file: search_key.pd_qap_file_url,
+          name: search_key.product_name,
+          variant: variant,
+          spec: spec,
+          vendors: transformedVendorResult,
+          comment: value["Comments"] || "",
+          defaultSelectedVAB: "",
+          datasheet: "0",
+          datasheet_file: "",
+          spec_file: "",
+          qap: "0",
+          qap_file: "",
+          user_selected_predefined_tds: false,
+          user_selected_predefined_qap: false
+        };
+
+        products.push(product);
+      }
+
+      req.products = products
+
+      const finalObject = {
+        is_published: 1,
+        comment: comment,
+        response_email: response_email,
+        contact_name: contact_name,
+        contact_number: contact_number,
+        location: location,
+        bid_end_date: bid_end_date,
+        company_name: company_name,
+        products: products,
+        terms: transformedTermList
+      };
+
+      // Step 2: Generate the next RFQ number
+      const nextRFQNumber = await getNextRfQNumber();
+
+      // Step 3: Insert the RFQ data into the database
+      const tbl_rfq_data = {
+        comment: finalObject.comment,
+        company_name: finalObject.company_name,
+        response_email: finalObject.response_email,
+        contact_name: finalObject.contact_name,
+        contact_number: finalObject.contact_number,
+        bid_end_date: finalObject.bid_end_date,
+        location: finalObject.location,
+        is_published: finalObject.is_published,
+        rfq_no: nextRFQNumber,
+        created_by: user.id,
+        updated_by: user.id
+      };
+
+      const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
+      var rfqtermsRsp = null;
+
+      if (response.length > 0) {
+        const created_rfq_id = response[0].id;
+
+        // Step 4: Insert the terms into the RFQ terms mapping table
+        if (finalObject.terms.length > 0) {
+          var tbl_rfq_terms_map_array = [];
+
+          finalObject.terms.map((item) => {
+            tbl_rfq_terms_map_array.push({
+              rfq_id: created_rfq_id,
+              terms_id: item.id
+            });
+          });
+          const tbl_rfq_terms_map_keys = ['rfq_id', 'terms_id'];
+          rfqtermsRsp = await rfqModel.insertArray(
+            tbl_rfq_terms_map_array,
+            tbl_rfq_terms_map_keys,
+            'tbl_rfq_terms_map'
+          );
+        }
+
+        // Step 5: Insert the products into the RFQ products table
+        Promise.all(
+          finalObject.products.map((item) => insertProduct(item, created_rfq_id))
+        )
+          .then(async (results) => {
+            console.log('Data inserted successfully:', results);
+            response[0].otherDetails = results;
+            response[0].terms = rfqtermsRsp;
+
+            // Step 6: Send emails to vendors and buyer
+            // await sendMailtoVendors(req, response[0].id);
+            // await sendQuotationMailToBuyer(req, response[0].id);
+
+            // Step 7: Send the final response back to the client
+            res
+              .status(200)
+              .json({
+                status: 1,
+                data: response[0]
+              })
+              .end();
+          })
+          .catch((error) => {
+            console.error('Error inserting data:', error);
+            res
+              .status(500)
+              .json({
+                success: false,
+                message: 'Error inserting RFQ data',
+                error: error.message
+              })
+              .end();
+          });
+      } else {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            data: response
+          })
+          .end();
+      }
+    } catch (error) {
+      logError(error);
+      res
+        .status(500)
+        .json({
+          success: false,
+          message: 'Megic search failed to complete the action, Please try again.',
+          error: error.message,
+        });
+    }
   }
+
+
 };
 export default rfqController;
