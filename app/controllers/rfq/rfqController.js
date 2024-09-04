@@ -3613,7 +3613,30 @@ const rfqController = {
 
       const products = [];
 
+    const validationErrors = [];
+
       for await (const value of jsonData) {
+
+        const productName = (value["Product Name"] || "").trim();
+        const size = (value["Size"] || "").trim();
+        const specifications = (value["specifications"] || "").trim();
+        const quantity = (String(value["Quantity"]) || "").trim();
+        const unit = (value["Unit"] || "").trim();
+
+        if (!productName || !size || !specifications || !quantity || !unit) {
+          validationErrors.push({
+            row: jsonData.indexOf(value) + 1, // Assuming rows start at 1
+            errors: {
+              product_name: !productName ? "Missing product name" : null,
+              size: !size ? "Missing size" : null,
+              specifications: !specifications ? "Missing specifications" : null,
+              quantity: !quantity ? "Missing quantity" : null,
+              unit: !unit ? "Missing unit" : null
+            }
+          });
+          continue; // Skip this product
+        }
+
         const searchObj = {
           search_key: value["Product Name"],
           category_id: "",
@@ -3629,10 +3652,10 @@ const rfqController = {
         const uniqueProducts = removeDuplicates(searchedPro);
         let search_key = uniqueProducts[0];
         const spec = [
-          { title: "Size", value: value["Size"] },
-          { title: "Spec", value: value["specifications"] },
-          { title: "Quantity", value: String(value["Quantity"]) },
-          { title: "Unit", value: value["Unit"] }
+          { title: "Size", value: size },
+          { title: "Spec", value: specifications },
+          { title: "Quantity", value: quantity },
+          { title: "Unit", value: unit }
         ];
 
         const vendorResult = await rfqModel.searchVendor(
@@ -3677,7 +3700,7 @@ const rfqController = {
 
         products.push(product);
       }
-
+      
       req.products = products
 
       const finalObject = {
@@ -3736,11 +3759,8 @@ const rfqController = {
         }
 
         // Step 5: Insert the products into the RFQ products table
-        Promise.all(
-          finalObject.products.map((item) => insertProduct(item, created_rfq_id))
-        )
+        Promise.all(finalObject.products.map((item) => insertProduct(item, created_rfq_id)))
           .then(async (results) => {
-            console.log('Data inserted successfully:', results);
             response[0].otherDetails = results;
             response[0].terms = rfqtermsRsp;
 
@@ -3753,7 +3773,8 @@ const rfqController = {
               .status(200)
               .json({
                 status: 1,
-                data: response[0]
+                data: response[0],
+                validation_errors: validationErrors.length ? validationErrors : null
               })
               .end();
           })
