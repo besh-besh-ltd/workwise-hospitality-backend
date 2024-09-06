@@ -3624,11 +3624,11 @@ const rfqController = {
       for await (const value of jsonData) {
 
         // trim all inputs
-        const productName = (String(value["Product Name"]) || "").trim();
-        const size = (String(value["Size"]) || "").trim();
-        const specifications = (String(value["specifications"]) || "").trim();
+        const productName = (value["Product Name"] || "").trim();
+        const size = (value["Size"] || "").trim();
+        const specifications = (value["specifications"] || "").trim();
         const quantity = (String(value["Quantity"]) || "").trim();
-        const unit = (String(value["Unit"]) || "").trim();
+        const unit = (value["Unit"] || "").trim();
 
         // check if all required fileds are present
         if (!productName || !size || !specifications || !quantity || !unit) {
@@ -3637,7 +3637,7 @@ const rfqController = {
           validationErrors.push({
             row: jsonData.indexOf(value) + 1, // Assuming rows start at 1
             errors: {
-              product_name: !productName ? "Missing product name" : null,
+              product_name: !productName ? "Missing product name" : productName,
               size: !size ? "Missing size" : null,
               specifications: !specifications ? "Missing specifications" : null,
               quantity: !quantity ? "Missing quantity" : null,
@@ -3654,7 +3654,9 @@ const rfqController = {
           // push error in validation array
           validationErrors.push({
             row: jsonData.indexOf(value) + 1,
-            errors: { quantity: "Quantity must be a valid number greater than zero" }
+            errors: { 
+              product_name: productName,
+              quantity: "Quantity must be a valid number greater than zero" }
           });
           continue; // Skip this product
         }
