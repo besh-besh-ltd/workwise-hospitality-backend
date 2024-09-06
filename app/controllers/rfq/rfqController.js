@@ -3591,7 +3591,7 @@ const rfqController = {
         .end();
     }
   },
-  megicSearchRfqCreate: async (req, res, next) => {
+  magicSearchRfqCreate: async (req, res, next) => {
     try {
       let file = req.file;
       const user = req.user;
@@ -3603,27 +3603,37 @@ const rfqController = {
       const location = "";
       const bid_end_date = "";
 
+      // convert excel to json
       const workbook = xlsx.readFile(file.path);
       const sheetName = workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
       const jsonData = xlsx.utils.sheet_to_json(sheet);
 
+      // get all terms list
       const termList = await rfqModel.getAllTerms();
       const transformedTermList = termList.map(term => ({ id: term.id }));
 
+      // product error
       const products = [];
 
-    const validationErrors = [];
+      // validation error array ko keep monitor all products
+      const validationErrors = [];
 
+
+      // run loop on excel data 
       for await (const value of jsonData) {
 
-        const productName = (value["Product Name"] || "").trim();
-        const size = (value["Size"] || "").trim();
-        const specifications = (value["specifications"] || "").trim();
+        // trim all inputs
+        const productName = (String(value["Product Name"]) || "").trim();
+        const size = (String(value["Size"]) || "").trim();
+        const specifications = (String(value["specifications"]) || "").trim();
         const quantity = (String(value["Quantity"]) || "").trim();
-        const unit = (value["Unit"] || "").trim();
+        const unit = (String(value["Unit"]) || "").trim();
 
+        // check if all required fileds are present
         if (!productName || !size || !specifications || !quantity || !unit) {
+
+          // push errors in validation array
           validationErrors.push({
             row: jsonData.indexOf(value) + 1, // Assuming rows start at 1
             errors: {
@@ -3637,20 +3647,44 @@ const rfqController = {
           continue; // Skip this product
         }
 
+        // Check if quantity is a valid number
+        const parsedQuantity = parseFloat(quantity);
+        if (isNaN(parsedQuantity) || parsedQuantity <= 0) {
+
+          // push error in validation array
+          validationErrors.push({
+            row: jsonData.indexOf(value) + 1,
+            errors: { quantity: "Quantity must be a valid number greater than zero" }
+          });
+          continue; // Skip this product
+        }
+
+        // search product in our database
         const searchObj = {
           search_key: value["Product Name"],
           category_id: "",
           approved_by_id: ""
         };
-
         const searchedPro = await rfqModel.searchProduct(
           searchObj.search_key,
           searchObj.category_id,
           searchObj.approved_by_id
         );
 
+        // break if no product found
+        if (!searchedPro || searchedPro.length === 0) {
+          validationErrors.push({
+            row: jsonData.indexOf(value) + 1,
+            errors: { product: `No product found for "${productName}"` }
+          });
+          continue; // Skip this product
+        }
+
+        // check for unique product, and select first unique product from the list
         const uniqueProducts = removeDuplicates(searchedPro);
         let search_key = uniqueProducts[0];
+
+        // product spec object
         const spec = [
           { title: "Size", value: size },
           { title: "Spec", value: specifications },
@@ -3658,6 +3692,7 @@ const rfqController = {
           { title: "Unit", value: unit }
         ];
 
+        // seacrch vendor for the selected product
         const vendorResult = await rfqModel.searchVendor(
           user.id,
           search_key.product_name,
@@ -3667,6 +3702,16 @@ const rfqController = {
           ""
         );
 
+        // if no vendor found for the product, push error in validation array
+        if (!vendorResult || vendorResult.length === 0) {
+          validationErrors.push({
+            row: jsonData.indexOf(value) + 1,
+            errors: { vendor: `No vendor found for product "${productName}"` }
+          });
+          continue; // Skip this product
+        }
+
+        // transform vendor to required form
         const transformedVendorResult = vendorResult.map(({ id }) => ({ user_id: id }));
 
         // Initialize the variant to 0
@@ -3679,6 +3724,7 @@ const rfqController = {
           }
         });
 
+        // create product object and push in products array
         const product = {
           product_id: search_key.product_id,
           predefined_tds_file: search_key.pd_tds_file_url,
@@ -3698,11 +3744,13 @@ const rfqController = {
           user_selected_predefined_qap: false
         };
 
+        // push in products array
         products.push(product);
       }
-      
-      req.products = products
+      // json data loop end here
 
+
+      // final data for fuuther processing
       const finalObject = {
         is_published: 1,
         comment: comment,
@@ -3734,9 +3782,24 @@ const rfqController = {
         updated_by: user.id
       };
 
+      // check if all row are failed in our validation
+      if (validationErrors.length === jsonData.length) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message: "All rows have validation errors. Please check your data and try again.",
+            validationErrors: validationErrors,
+          })
+          .end();
+        // Exit early if every row has an error
+      }
+
+      // insert basic rfq info in database
       const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
       var rfqtermsRsp = null;
 
+      // if basic info successfully inserted in database
       if (response.length > 0) {
         const created_rfq_id = response[0].id;
 
@@ -3765,8 +3828,9 @@ const rfqController = {
             response[0].terms = rfqtermsRsp;
 
             // Step 6: Send emails to vendors and buyer
-            // await sendMailtoVendors(req, response[0].id);
-            // await sendQuotationMailToBuyer(req, response[0].id);
+            req.body.products = products
+            await sendMailtoVendors(req, response[0].id);
+            await sendQuotationMailToBuyer(req, response[0].id);
 
             // Step 7: Send the final response back to the client
             res
@@ -3804,7 +3868,7 @@ const rfqController = {
         .status(500)
         .json({
           success: false,
-          message: 'Megic search failed to complete the action, Please try again.',
+          message: 'Magic search failed to complete the action, Please try again.',
           error: error.message,
         });
     }

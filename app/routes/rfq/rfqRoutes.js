@@ -131,8 +131,13 @@ RfqRoutes.post('/rfq-list', passportSignIn, rfqController.rfqList);
 
 RfqRoutes.get('/save-state-cities', rfqController.saveStateCities);
 
-RfqRoutes.post('/megic-search-rfq-create', passportSignIn,  schema_posts.productBulkUpload,
-  rfqController.megicSearchRfqCreate);
+RfqRoutes.post('/magic-search-rfq-create',
+  passportSignIn, 
+  validateDbBody.user_id_profileexists,
+  acl([2]),
+  schema_posts.magicSearchExcelUpload,
+  rfqController.magicSearchRfqCreate
+);
 
 
 export default RfqRoutes;
