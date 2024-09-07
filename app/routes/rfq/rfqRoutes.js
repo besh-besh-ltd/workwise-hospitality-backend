@@ -116,6 +116,11 @@ RfqRoutes.post(
 );
 
 RfqRoutes.post(
+  '/search-product-by-category',
+  rfqController.searchProductByCategory
+);
+
+RfqRoutes.post(
   '/search-vendor',
   noLogin.customer_auth,
   rfqController.searchVendor

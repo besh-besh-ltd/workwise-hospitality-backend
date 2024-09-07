@@ -805,6 +805,7 @@ LIMIT 1;`;
   searchProduct: async (search_key, category_id, approved_by_id) => {
 
     // query change by mukul 28-08-2024
+    // query change by mukul 08-09-2024, added one more filter for created by 1 or 111 to exclude product for them
     let q = `
       SELECT DISTINCT p.id AS product_id,
                       p.name AS product_name,
@@ -827,6 +828,7 @@ LIMIT 1;`;
         AND p.is_deleted = 0 
         AND p.is_review = 0 
         AND p.is_approve = 1 
+        AND p.created_by NOT IN (1, 111) 
         AND u.is_deleted = 0 
         AND u.status = 1 
         AND (
@@ -871,6 +873,64 @@ LIMIT 1;`;
 
     return new Promise(function (resolve, reject) {
       db.query(q, [search_key])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  getSubcategories: async (categoryIds) => {
+
+    const q = `
+       WITH RECURSIVE category_tree AS (
+          -- Start with the given category ID
+          SELECT id, title, parent_id
+          FROM tbl_category
+          WHERE id = $1
+
+          UNION ALL
+
+          -- Recursively find all child categories
+          SELECT c.id, c.title, c.parent_id
+          FROM tbl_category c
+          INNER JOIN category_tree ct ON c.parent_id = ct.id
+      )
+      -- Return id and name for all categories found in the recursive tree
+      SELECT id, title FROM category_tree;
+`;
+    return new Promise(function (resolve, reject) {
+      db.query(q, [categoryIds])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  getProductsByCategories: async (categories) => {
+
+    // Extract category IDs from the array of objects
+    const categoryIds = categories.map(category => category.id);
+
+    const q = `
+      SELECT p.name, p.id
+      FROM tbl_product p
+      INNER JOIN tbl_product_categories pc ON p.id = pc.product_id
+      WHERE pc.category_id IN ($1:csv)  -- Dynamically insert the list of category IDs
+        AND p.status = 1 
+        AND p.is_deleted = 0 
+        AND p.is_review = 0 
+        AND p.is_approve = 1
+  AND p.created_by NOT IN (1, 111)  -- Exclude created_by = 1 or 111
+    `;
+
+    return new Promise(function (resolve, reject) {
+      db.query(q, [categoryIds])
         .then(function (data) {
           resolve(data);
         })
