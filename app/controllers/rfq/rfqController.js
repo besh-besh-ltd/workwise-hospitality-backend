@@ -2078,6 +2078,8 @@ const rfqController = {
         approved_by_id
       );
 
+      const categoryResult = await rfqModel.getCategoryList(search_key);
+
       let dummyOBJ = {
         product_id: '***',
         product_name: '**** ****',
@@ -2105,7 +2107,8 @@ const rfqController = {
         .status(200)
         .json({
           status: 1,
-          data: removeDuplicates(items_to_sent)
+          // data: removeDuplicates(items_to_sent),
+          categoryData:categoryResult
         })
         .end();
     } catch (error) {

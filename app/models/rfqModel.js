@@ -850,6 +850,35 @@ LIMIT 1;`;
           reject(error);
         });
     });
+  },
+  getCategoryList: async (search_key) => {
+    let q = `
+   SELECT DISTINCT c.id AS category_id,
+                    c.title AS category_name,
+                    c.parent_id AS parent_category_id,
+                    pc.title AS parent_category_name, -- Join to get parent category title
+                    similarity(c.title, $1) AS similarity_score,
+                    ts_rank_cd(to_tsvector('english', c.title), plainto_tsquery('english', $1)) AS rank
+    FROM tbl_category c
+    LEFT JOIN tbl_category pc ON c.parent_id = pc.id -- Join to get parent category details
+    WHERE c.status = 1 
+      AND c.is_deleted = 0 
+      AND (
+        to_tsvector('english', c.title) @@ plainto_tsquery('english', $1)
+        OR similarity(c.title, $1) > 0.1
+      )
+    ORDER BY rank DESC, similarity_score DESC, c.title ASC;`;
+
+    return new Promise(function (resolve, reject) {
+      db.query(q, [search_key])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
   }
   ,
   searchVendor: async (
