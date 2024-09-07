@@ -2078,6 +2078,8 @@ const rfqController = {
         approved_by_id
       );
 
+      const categoryResult = await rfqModel.getCategoryList(search_key);
+
       let dummyOBJ = {
         product_id: '***',
         product_name: '**** ****',
@@ -2105,7 +2107,8 @@ const rfqController = {
         .status(200)
         .json({
           status: 1,
-          data: removeDuplicates(items_to_sent)
+          data: removeDuplicates(items_to_sent),
+          categoryData: categoryResult
         })
         .end();
     } catch (error) {
@@ -2119,6 +2122,35 @@ const rfqController = {
         .end();
     }
 
+  },
+  searchProductByCategory: async (req, res, next) => {
+    try {
+      const category_id = req.body?.category_id ? req.body?.category_id : '';
+
+      const subCategoryList = await rfqModel.getSubcategories(category_id)
+      const productList = await rfqModel.getProductsByCategories(subCategoryList)
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          productList: productList,
+          totalProduct:productList.length,
+          subCategoryList:subCategoryList,
+          totalCategory:subCategoryList.length
+        })
+        .end();
+
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
   },
   searchVendor: async (req, res, next) => {
 
@@ -3654,9 +3686,10 @@ const rfqController = {
           // push error in validation array
           validationErrors.push({
             row: jsonData.indexOf(value) + 1,
-            errors: { 
+            errors: {
               product_name: productName,
-              quantity: "Quantity must be a valid number greater than zero" }
+              quantity: "Quantity must be a valid number greater than zero"
+            }
           });
           continue; // Skip this product
         }
