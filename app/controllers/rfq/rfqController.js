@@ -2078,6 +2078,8 @@ const rfqController = {
         approved_by_id
       );
 
+      const categoryResult = await rfqModel.getCategoryList(search_key);
+
       let dummyOBJ = {
         product_id: '***',
         product_name: '**** ****',
@@ -2105,7 +2107,8 @@ const rfqController = {
         .status(200)
         .json({
           status: 1,
-          data: removeDuplicates(items_to_sent)
+          data: removeDuplicates(items_to_sent),
+          categoryData: categoryResult
         })
         .end();
     } catch (error) {
@@ -2119,6 +2122,35 @@ const rfqController = {
         .end();
     }
 
+  },
+  searchProductByCategory: async (req, res, next) => {
+    try {
+      const category_id = req.body?.category_id ? req.body?.category_id : '';
+
+      const subCategoryList = await rfqModel.getSubcategories(category_id)
+      const productList = await rfqModel.getProductsByCategories(subCategoryList)
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          productList: productList,
+          totalProduct:productList.length,
+          subCategoryList:subCategoryList,
+          totalCategory:subCategoryList.length
+        })
+        .end();
+
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
   },
   searchVendor: async (req, res, next) => {
 
@@ -3590,6 +3622,293 @@ const rfqController = {
         })
         .end();
     }
+  },
+  magicSearchRfqCreate: async (req, res, next) => {
+    try {
+      let file = req.file;
+      const user = req.user;
+      const comment = req.body.comment;
+      const response_email = user.email;
+      const contact_name = user.name;
+      const contact_number = user.mobile;
+      const company_name = user.organization_name || user.name;
+      const location = "";
+      const bid_end_date = "";
+
+      // convert excel to json
+      const workbook = xlsx.readFile(file.path);
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const jsonData = xlsx.utils.sheet_to_json(sheet);
+
+      // get all terms list
+      const termList = await rfqModel.getAllTerms();
+      const transformedTermList = termList.map(term => ({ id: term.id }));
+
+      // product error
+      const products = [];
+
+      // validation error array ko keep monitor all products
+      const validationErrors = [];
+
+
+      // run loop on excel data 
+      for await (const value of jsonData) {
+
+        // trim all inputs
+        const productName = (value["Product Name"] || "").trim();
+        const size = (value["Size"] || "").trim();
+        const specifications = (value["specifications"] || "").trim();
+        const quantity = (String(value["Quantity"]) || "").trim();
+        const unit = (value["Unit"] || "").trim();
+
+        // check if all required fileds are present
+        if (!productName || !size || !specifications || !quantity || !unit) {
+
+          // push errors in validation array
+          validationErrors.push({
+            row: jsonData.indexOf(value) + 1, // Assuming rows start at 1
+            errors: {
+              product_name: !productName ? "Missing product name" : productName,
+              size: !size ? "Missing size" : null,
+              specifications: !specifications ? "Missing specifications" : null,
+              quantity: !quantity ? "Missing quantity" : null,
+              unit: !unit ? "Missing unit" : null
+            }
+          });
+          continue; // Skip this product
+        }
+
+        // Check if quantity is a valid number
+        const parsedQuantity = parseFloat(quantity);
+        if (isNaN(parsedQuantity) || parsedQuantity <= 0) {
+
+          // push error in validation array
+          validationErrors.push({
+            row: jsonData.indexOf(value) + 1,
+            errors: {
+              product_name: productName,
+              quantity: "Quantity must be a valid number greater than zero"
+            }
+          });
+          continue; // Skip this product
+        }
+
+        // search product in our database
+        const searchObj = {
+          search_key: value["Product Name"],
+          category_id: "",
+          approved_by_id: ""
+        };
+        const searchedPro = await rfqModel.searchProduct(
+          searchObj.search_key,
+          searchObj.category_id,
+          searchObj.approved_by_id
+        );
+
+        // break if no product found
+        if (!searchedPro || searchedPro.length === 0) {
+          validationErrors.push({
+            row: jsonData.indexOf(value) + 1,
+            errors: { product: `No product found for "${productName}"` }
+          });
+          continue; // Skip this product
+        }
+
+        // check for unique product, and select first unique product from the list
+        const uniqueProducts = removeDuplicates(searchedPro);
+        let search_key = uniqueProducts[0];
+
+        // product spec object
+        const spec = [
+          { title: "Size", value: size },
+          { title: "Spec", value: specifications },
+          { title: "Quantity", value: quantity },
+          { title: "Unit", value: unit }
+        ];
+
+        // seacrch vendor for the selected product
+        const vendorResult = await rfqModel.searchVendor(
+          user.id,
+          search_key.product_name,
+          searchObj.category_id,
+          searchObj.approved_by_id,
+          "",
+          ""
+        );
+
+        // if no vendor found for the product, push error in validation array
+        if (!vendorResult || vendorResult.length === 0) {
+          validationErrors.push({
+            row: jsonData.indexOf(value) + 1,
+            errors: { vendor: `No vendor found for product "${productName}"` }
+          });
+          continue; // Skip this product
+        }
+
+        // transform vendor to required form
+        const transformedVendorResult = vendorResult.map(({ id }) => ({ user_id: id }));
+
+        // Initialize the variant to 0
+        let variant = 0;
+
+        // Iterate over the existing products array to find the same product name and increment the variant
+        products.forEach((product) => {
+          if (product.name === search_key.product_name && product.product_id === search_key.product_id) {
+            variant = Math.max(variant, product.variant + 1);
+          }
+        });
+
+        // create product object and push in products array
+        const product = {
+          product_id: search_key.product_id,
+          predefined_tds_file: search_key.pd_tds_file_url,
+          predefined_qap_file: search_key.pd_qap_file_url,
+          name: search_key.product_name,
+          variant: variant,
+          spec: spec,
+          vendors: transformedVendorResult,
+          comment: value["Comments"] || "",
+          defaultSelectedVAB: "",
+          datasheet: "0",
+          datasheet_file: "",
+          spec_file: "",
+          qap: "0",
+          qap_file: "",
+          user_selected_predefined_tds: false,
+          user_selected_predefined_qap: false
+        };
+
+        // push in products array
+        products.push(product);
+      }
+      // json data loop end here
+
+
+      // final data for fuuther processing
+      const finalObject = {
+        is_published: 1,
+        comment: comment,
+        response_email: response_email,
+        contact_name: contact_name,
+        contact_number: contact_number,
+        location: location,
+        bid_end_date: bid_end_date,
+        company_name: company_name,
+        products: products,
+        terms: transformedTermList
+      };
+
+      // Step 2: Generate the next RFQ number
+      const nextRFQNumber = await getNextRfQNumber();
+
+      // Step 3: Insert the RFQ data into the database
+      const tbl_rfq_data = {
+        comment: finalObject.comment,
+        company_name: finalObject.company_name,
+        response_email: finalObject.response_email,
+        contact_name: finalObject.contact_name,
+        contact_number: finalObject.contact_number,
+        bid_end_date: finalObject.bid_end_date,
+        location: finalObject.location,
+        is_published: finalObject.is_published,
+        rfq_no: nextRFQNumber,
+        created_by: user.id,
+        updated_by: user.id
+      };
+
+      // check if all row are failed in our validation
+      if (validationErrors.length === jsonData.length) {
+        return res
+          .status(400)
+          .json({
+            success: false,
+            message: "All rows have validation errors. Please check your data and try again.",
+            validationErrors: validationErrors,
+          })
+          .end();
+        // Exit early if every row has an error
+      }
+
+      // insert basic rfq info in database
+      const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
+      var rfqtermsRsp = null;
+
+      // if basic info successfully inserted in database
+      if (response.length > 0) {
+        const created_rfq_id = response[0].id;
+
+        // Step 4: Insert the terms into the RFQ terms mapping table
+        if (finalObject.terms.length > 0) {
+          var tbl_rfq_terms_map_array = [];
+
+          finalObject.terms.map((item) => {
+            tbl_rfq_terms_map_array.push({
+              rfq_id: created_rfq_id,
+              terms_id: item.id
+            });
+          });
+          const tbl_rfq_terms_map_keys = ['rfq_id', 'terms_id'];
+          rfqtermsRsp = await rfqModel.insertArray(
+            tbl_rfq_terms_map_array,
+            tbl_rfq_terms_map_keys,
+            'tbl_rfq_terms_map'
+          );
+        }
+
+        // Step 5: Insert the products into the RFQ products table
+        Promise.all(finalObject.products.map((item) => insertProduct(item, created_rfq_id)))
+          .then(async (results) => {
+            response[0].otherDetails = results;
+            response[0].terms = rfqtermsRsp;
+
+            // Step 6: Send emails to vendors and buyer
+            req.body.products = products
+            await sendMailtoVendors(req, response[0].id);
+            await sendQuotationMailToBuyer(req, response[0].id);
+
+            // Step 7: Send the final response back to the client
+            res
+              .status(200)
+              .json({
+                status: 1,
+                data: response[0],
+                validation_errors: validationErrors.length ? validationErrors : null
+              })
+              .end();
+          })
+          .catch((error) => {
+            console.error('Error inserting data:', error);
+            res
+              .status(500)
+              .json({
+                success: false,
+                message: 'Error inserting RFQ data',
+                error: error.message
+              })
+              .end();
+          });
+      } else {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            data: response
+          })
+          .end();
+      }
+    } catch (error) {
+      logError(error);
+      res
+        .status(500)
+        .json({
+          success: false,
+          message: 'Magic search failed to complete the action, Please try again.',
+          error: error.message,
+        });
+    }
   }
+
+
 };
 export default rfqController;
