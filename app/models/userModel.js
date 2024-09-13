@@ -641,6 +641,9 @@ const userModel = {
              tbl_company.company_name,
              tbl_company.profile,
              tbl_company.location,
+             cl.city_name,  
+             sl.state_name,
+               
              ARRAY(
                  SELECT json_build_object(
                      'vendor_approve', tbl_vendor_approve.vendor_approve,
@@ -713,6 +716,8 @@ const userModel = {
       baseQuery += `
       FROM tbl_users
       LEFT JOIN tbl_company ON tbl_users.id = tbl_company.user_id
+      LEFT JOIN tbl_location_cities cl ON cl.id = tbl_users.city
+      LEFT JOIN tbl_location_states sl ON sl.id = tbl_users.state     
       WHERE tbl_users.id = $1`;
 
       // Execute the query
