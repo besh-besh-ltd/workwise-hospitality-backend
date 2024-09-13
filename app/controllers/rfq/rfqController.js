@@ -821,7 +821,6 @@ const rfqController = {
         products,
         terms
       } = req.body;
-      console.log('RFQ products==>', products);
       if (rfq_id && rfq_id != '' && rfq_id != null) {
         // Updating existing RFQ
 
@@ -3632,8 +3631,8 @@ const rfqController = {
       const contact_name = user.name;
       const contact_number = user.mobile;
       const company_name = user.organization_name || user.name;
-      const location = "";
-      const bid_end_date = "";
+      const location = req.body.delivery_location || "";
+      const bid_end_date = req.body.bid_end_date || "";
 
       // convert excel to json
       const workbook = xlsx.readFile(file.path);
