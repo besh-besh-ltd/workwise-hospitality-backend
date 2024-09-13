@@ -663,14 +663,16 @@ const userModel = {
                  FROM tbl_files
                  WHERE tbl_files.user_id = tbl_users.id
              ) AS "brochure",
-         ARRAY(
+            ARRAY(
            SELECT json_build_object(
                'product_name', P.name, 
                'product_description', P.description, 
                'product_id', P.id,
                'approved_by', ARRAY(
                    SELECT json_build_object(
+                       'vendor_approve_id', VA.id,
                        'vendor_name', VA.vendor_approve,
+                       'approved_at', VM.created_at
                    )
                    FROM tbl_vendorapprove_product_mapping VM
                    LEFT JOIN tbl_vendor_approve VA ON VA.id = VM.vendor_approve_id
@@ -679,7 +681,7 @@ const userModel = {
            )
            FROM tbl_product P
            WHERE P.created_by = tbl_users.id
-          ) AS "product_list",
+       ) AS "product_list",
              CASE
                  WHEN tbl_users.new_profile_image IS NULL THEN
                      NULL
