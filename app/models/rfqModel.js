@@ -918,13 +918,16 @@ LIMIT 1;`;
     const categoryIds = categories.map(category => category.id);
 
     const q = `
-    SELECT DISTINCT p.id AS product_id,
-                    p.name AS product_name,
-                    p.description,
-                    pc.category_name AS category_name,
-                    pc.category_id AS category_id,
-                    CASE WHEN p.tds_new_file_name IS NULL THEN NULL ELSE p.tds_new_file_name END AS pd_tds_file_url,
-                    CASE WHEN p.qap_new_file_name IS NULL THEN NULL ELSE p.qap_new_file_name END AS pd_qap_file_url
+WITH RankedProducts AS (
+    SELECT 
+        p.id AS product_id,
+        p.name AS product_name,
+        p.description,
+        pc.category_name AS category_name,
+        pc.category_id AS category_id,
+        CASE WHEN p.tds_new_file_name IS NULL THEN NULL ELSE p.tds_new_file_name END AS pd_tds_file_url,
+        CASE WHEN p.qap_new_file_name IS NULL THEN NULL ELSE p.qap_new_file_name END AS pd_qap_file_url,
+        ROW_NUMBER() OVER (PARTITION BY p.name, pc.category_id ORDER BY p.id) AS row_num
     FROM tbl_product p
     INNER JOIN tbl_product_categories pc ON p.id = pc.product_id
     WHERE pc.category_id IN ($1:csv)  -- Dynamically insert the list of category IDs
@@ -932,8 +935,13 @@ LIMIT 1;`;
       AND p.is_deleted = 0 
       AND p.is_review = 0 
       AND p.is_approve = 1
-AND p.created_by NOT IN (1, 111)  -- Exclude created_by = 1 or 111
-  `;
+      AND p.created_by NOT IN (1, 111)  -- Exclude created_by = 1 or 111
+)
+SELECT 
+    product_id, product_name, description, category_name, category_id, pd_tds_file_url, pd_qap_file_url
+FROM RankedProducts
+WHERE row_num = 1;  -- Select only the first unique product per category_id and product_name
+`;
 
     return new Promise(function (resolve, reject) {
       db.query(q, [categoryIds])
