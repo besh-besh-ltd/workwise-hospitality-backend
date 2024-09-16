@@ -32,6 +32,44 @@ const generatePassword = (password) => {
   return hash;
 };
 
+// validate bulk produts and vendor add inputs
+// created by mukul jatav 11/sep/2024
+const validateBulkProductVendorInputs = (value) => {
+  let errors = [];
+
+  const isValidEmail = (email) => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  };
+
+  const isValidPhoneNumber = (phone) => {
+    return phone.toString().length > 15 ? true : false;
+  };
+
+  if (!(value['Vendor Name'] || "").trim()) {
+    errors.push('vendor name is missing');
+  }
+
+  if (!isValidEmail(value['Vendor Email'])) {
+    errors.push('Invalid/missing vendor email');
+  }
+
+  const vendorContactNumber = value['Vendor company owner/hr/official contact number'] || "";
+  if (!vendorContactNumber) {
+    errors.push('Vendor contact number is missing');
+  } else if (isValidPhoneNumber(vendorContactNumber)) {
+    errors.push('Invalid vendor contact number (not more then 15 digit)');
+  }
+
+  const spocMobile = value['Sales SPOC Mobile'] || "";
+  if (isValidPhoneNumber(spocMobile)) {
+    errors.push('Invalid Sales SPOC mobile number (not more then 15 digit)');
+  }
+
+  return errors;
+};
+
+
 const productController = {
   createCategory: async (req, res, next) => {
     try {
@@ -517,6 +555,12 @@ const productController = {
   },
   productBulkUpload: async (req, res, next) => {
     try {
+
+      // edit by mukul - 11/sep/2024
+      // we will validate vendor name, email and mobile if not foun d creating an error object and include this in api response
+      // Logic change: If a product is not found in our master data (i.e., products added by the admin), we will not add that product to our database.
+      // not deleting just Commenting out the lines that are no longer needed
+
       let file = req.file;
       let adm_id = req.user.id;
       // console.log(adm_id);
@@ -545,14 +589,34 @@ const productController = {
       let isMaster = 0;
       let previousCategory = '';
 
+      let errorsObj = []
+
       for await (const [index, value] of jsonData.entries()) {
-        if (value['Product Name']) {
+
+        const productName = (value['Product Name'] || "").trim()
+
+        if (productName) {
+
+          //  check input validatation for vendor name number and email 
+          const errors = validateBulkProductVendorInputs(value);
+          if (errors.length > 0) {
+            const errObj = {
+              vendorName: value['Vendor Name'] || null,
+              vendorEmail: value['Vendor Email'] || null,
+              productName: productName,
+              Row: index + 1,
+              errors: errors
+            }
+            errorsObj.push(errObj)
+            continue
+          }
+
           // check vendor exist or not
           previousCategory = '';
           let userExist = '';
           let vendor = '';
           let vendor_id = '';
-          let password = value['Vendor Name'].replace(/\s+/g, '');
+          let password = (value['Vendor Name'] || "").trim().replace(/\s+/g, '');
           let orgChar = password.match(/[a-zA-Z]/g).join('');
           orgChar = orgChar.toLowerCase();
           let capitalizeFourOrganizationLetter = `${orgChar
@@ -565,13 +629,12 @@ const productController = {
                   .substring(6, 10)
               : 1234
           }`; */
-          password = `${capitalizeFourOrganizationLetter}@${
-            value['Vendor company owner/hr/official contact number'].length < 8
-              ? 1234
-              : value['Vendor company owner/hr/official contact number'] % 10000
-          }`;
+          password = `${capitalizeFourOrganizationLetter}@${value['Vendor company owner/hr/official contact number'].length < 8
+            ? 1234
+            : value['Vendor company owner/hr/official contact number'] % 10000
+            }`;
 
-          let vendor_email = value['Vendor Email'];
+          let vendor_email = (value['Vendor Email'] || "").trim();
 
           if (vendor_email != undefined && vendor_email != '') {
             let checkState = await vendorModel.checkState(
@@ -582,7 +645,7 @@ const productController = {
             let vendorObj = {
               name: value['Vendor Name'],
               email: value['Vendor Email'],
-              organization_name: value['Contact Person Name'],
+              organization_name: value['Vendor Name'],
               address: value['Address'] || null,
               city: checkCity.length > 0 ? checkCity[0].id : null,
               state: checkState.length > 0 ? checkState[0].id : null,
@@ -698,9 +761,6 @@ const productController = {
                   .clone()
                   .add(billingCycleMonths, 'months');
 
-                // console.log('Start Date:', startDate.format('YYYY-MM-DD'));
-                // console.log('End Date:', endDate.format('YYYY-MM-DD'));
-                // console.log('Renew Date:', renewDate.format('YYYY-MM-DD'));
 
                 let UserSubscriptionObj = {
                   user_id: vendor[0].id,
@@ -724,10 +784,7 @@ const productController = {
                   await subscriptionModel.getSubscriptionMappingDetails(
                     checkFreeSubscription[0].id
                   );
-                // console.log(
-                //   'subscriptionMappingDetails==>>>>',
-                //   subscriptionMappingDetails
-                // );
+
                 for await (const {
                   allocated_feature,
                   feature_id
@@ -793,18 +850,26 @@ const productController = {
           }
 
           let prodNameExists = await productModel.checkProductExists(
-            value['Product Name'],
+            productName,
             vendor_id
           );
-          //    console.log('prodNameExists--->', prodNameExists);
-          // return false;
+
           let productObj = '';
 
           let check_master_exist = await productModel.checkMasterNameExist(
-            value['Product Name']
+            productName
           );
           if (check_master_exist.length == 0) {
-            isMaster = 0;
+            const errObj = {
+              vendorName: value['Vendor Name'] || null,
+              vendorEmail: value['Vendor Email'] || null,
+              productName: productName,
+              Row: index + 1,
+              errors: "product name not found in master database"
+            }
+            errorsObj.push(errObj)
+            continue
+            // isMaster = 0;
           } else {
             isMaster = 1;
           }
@@ -857,172 +922,72 @@ const productController = {
             }
           }
 
-          if (
-            prodNameExists &&
-            prodNameExists.length == 0 &&
-            vendor_id &&
-            isMaster == 0
-          ) {
-            productObj = {
-              name: value['Product Name'],
-              description: value['Product description'] || null,
-              manufacturer: value['Manufacturer'] || null,
-              availability:
-                value['Product Availability'] == 'Available' ? 1 : 0,
-              slug: titleToSlug(value['Product Name']),
-              sku: value['Product Name'],
-              // vendor_approved_by: vendorApproveId == 0 ? null : vendorApproveId,
-              status: 1,
-              created_by: vendor_id,
-              vendor: vendor_id,
-              is_review: 1,
-              added_by: adm_id,
-              is_approve: 1,
-              brochure_file: value['Product Brochure\r\n(file)'] || null
-            };
-            product = await productModel.createProduct(productObj);
+          // if (
+          //   prodNameExists &&
+          //   prodNameExists.length == 0 &&
+          //   vendor_id &&
+          //   isMaster == 0
+          // ) {
+          //   productObj = {
+          //     name: productName,
+          //     description: value['Product description'] || null,
+          //     manufacturer: value['Manufacturer'] || null,
+          //     availability:
+          //       value['Product Availability'] == 'Available' ? 1 : 0,
+          //     slug: titleToSlug(productName),
+          //     sku: productName,
+          //     // vendor_approved_by: vendorApproveId == 0 ? null : vendorApproveId,
+          //     status: 1,
+          //     created_by: vendor_id,
+          //     vendor: vendor_id,
+          //     is_review: 1,
+          //     added_by: adm_id,
+          //     is_approve: 1,
+          //     brochure_file: value['Product Brochure\r\n(file)'] || null
+          //   };
+          //   product = await productModel.createProduct(productObj);
 
-            /*  if (value['Vendor Approved By']) {
-              // let vendorApproveArray = value['Vendor Approved By'].split(',');
-              let vendorApproveArray = [value['Vendor Approved By']];
-              let vendorApproveArrayId = [];
-              for (let index = 0; index < vendorApproveArray.length; index++) {
-                const element = vendorApproveArray[index];
-                let vendorApproveId = 0;
-                let findVendorApprove =
-                  await vendorapproveModel.findVendorApproveByName(element);
-                if (findVendorApprove.length == 0) {
-                  let vendorApproveObj = {
-                    vendor_approve: element,
-                    status: 1
-                  };
-                  let createVendorApprove =
-                    await vendorapproveModel.createVendorApprove(
-                      vendorApproveObj
-                    );
-                  vendorApproveId = createVendorApprove.id;
-                } else {
-                  vendorApproveId = findVendorApprove[0].id;
-                }
-                vendorApproveArrayId.push({
-                  product_id: product.id,
-                  vendor_approve_id: vendorApproveId
-                });
-              }
-              await productModel.addProductApproveBy(
-                vendorApproveArrayId,
-                product.id
-              );
-            } */
 
-            /* let checkApprove = await userModel.checkVendorApproveDetail(
-                vendor_id,
-                vendorApproveId
-              );
-              if (checkApprove.length == 0) {
-                await userModel.vendorApproveUserMap(
-                  vendor_id,
-                  vendorApproveId
-                );
-              } */
+          //   //  await productModel.createProduct(productObj);
+          // } else if (vendor_id && isMaster == 0) {
 
-            //  await productModel.createProduct(productObj);
-          } else if (vendor_id && isMaster == 0) {
-            /* let checkApprove = await userModel.checkVendorApproveDetail(
-              vendor_id,
-              vendorApproveId
-            );
-            if (checkApprove.length == 0) {
-              await userModel.vendorApproveUserMap(vendor_id, vendorApproveId);
-            } */
 
-            productObj = {
-              description: value['Product description'] || null,
-              manufacturer: value['Manufacturer'] || null,
-              availability:
-                value['Product Availability'] == 'Available' ? 1 : 0,
-              slug: titleToSlug(value['Product Name']),
-              sku: value['Product Name'],
-              // vendor_approved_by: vendorApproveId == 0 ? null : vendorApproveId,
-              status: 1,
-              created_by: vendor_id,
-              vendor: vendor_id,
-              is_review: prodNameExists[0].is_review,
-              is_approve: prodNameExists[0].is_approve,
-              brochure_file:
-                value['Product Brochure\r\n(file)'] ||
-                prodNameExists[0].brochure_file
-            };
+          //   productObj = {
+          //     description: value['Product description'] || null,
+          //     manufacturer: value['Manufacturer'] || null,
+          //     availability:
+          //       value['Product Availability'] == 'Available' ? 1 : 0,
+          //     slug: titleToSlug(productName),
+          //     sku: productName,
+          //     // vendor_approved_by: vendorApproveId == 0 ? null : vendorApproveId,
+          //     status: 1,
+          //     created_by: vendor_id,
+          //     vendor: vendor_id,
+          //     is_review: prodNameExists[0].is_review,
+          //     is_approve: prodNameExists[0].is_approve,
+          //     brochure_file:
+          //       value['Product Brochure\r\n(file)'] ||
+          //       prodNameExists[0].brochure_file
+          //   };
 
-            product = await productModel.updateProduct(
-              productObj,
-              prodNameExists[0].id
-            );
-            // console.log('product===============>>>>>>>>>>>>', product);
-            //After update product mappings are deleted
-            // Delete variants
-            await productModel.deleteProductVariants(prodNameExists[0].id);
-            // Delete product category
-            await productModel.deleteProductCategory(prodNameExists[0].id);
-            // delete product approved by
-            await productModel.deleteProductApproveBy(prodNameExists[0].id);
+          //   product = await productModel.updateProduct(
+          //     productObj,
+          //     prodNameExists[0].id
+          //   );
+          //   // console.log('product===============>>>>>>>>>>>>', product);
+          //   //After update product mappings are deleted
+          //   // Delete variants
+          //   await productModel.deleteProductVariants(prodNameExists[0].id);
+          //   // Delete product category
+          //   await productModel.deleteProductCategory(prodNameExists[0].id);
+          //   // delete product approved by
+          //   await productModel.deleteProductApproveBy(prodNameExists[0].id);
 
-            /* if (value['Vendor Approved By']) {
-              let vendorApproveArray = [value['Vendor Approved By']];
-              // let vendorApproveArray = value['Vendor Approved By'].split(',');
-              let vendorApproveArrayId = [];
-              for (let index = 0; index < vendorApproveArray.length; index++) {
-                const element = vendorApproveArray[index];
-                let vendorApproveId = 0;
-                let findVendorApprove =
-                  await vendorapproveModel.findVendorApproveByName(element);
-                if (findVendorApprove.length == 0) {
-                  let vendorApproveObj = {
-                    vendor_approve: element,
-                    status: 0
-                  };
-                  let createVendorApprove =
-                    await vendorapproveModel.createVendorApprove(
-                      vendorApproveObj
-                    );
-                  vendorApproveId = createVendorApprove.id;
-                } else {
-                  vendorApproveId = findVendorApprove[0].id;
-                }
-                vendorApproveArrayId.push({
-                  product_id: prodNameExists[0].id,
-                  vendor_approve_id: vendorApproveId
-                });
-              }
-              // console.log('vendorApproveArrayId ==>>>>>', vendorApproveArrayId);
-              await productModel.addProductApproveBy(
-                vendorApproveArrayId,
-                prodNameExists[0].id
-              );
-            } */
-          }
+          // }
 
           // console.log('product ==>>>>>>>>', product);
           productId = product.id;
 
-          // if (value['Specification Key'] && value['Specification Value']) {
-          //   let varientObj = {
-          //     product_id: productId,
-          //     variant_name: value['Specification Key'],
-          //     variant_value: value['Specification Value']
-          //   };
-          //   // console.log(categoryObj);
-
-          //   await productModel.createProductveriants(varientObj);
-          // }
-
-          // if (value['Category']) {
-          //   let categoryObj = {
-          //     product_id: productId,
-          //     category_name: value['Category']
-          //   };
-          //   await productModel.createProductCategory(categoryObj);
-          // }
         }
         // console.log('productId ==>>>>>>>>', productId);
         if (productId > 0) {
@@ -1038,47 +1003,47 @@ const productController = {
           }
 
           //return false;
-          if (value['Category'] && isMaster == 0) {
-            let catNameExists = [];
-            if (previousCategory) {
-              catNameExists = await productModel.topParentparentCatExists(
-                value['Category'],
-                previousCategory
-              );
-            } else {
-              catNameExists = await productModel.topParentparentNameExists(
-                value['Category']
-              );
-            }
-            console.log(catNameExists);
-            let category_id = '';
-            if (catNameExists.length > 0) {
-              category_id = { id: catNameExists[0].id };
-            } else {
-              console.log('test--->', value['Category']);
-              //  return false;
-              let catObj = {
-                title: value['Category'],
-                parent_id: previousCategory || '0',
-                slug:
-                  value['Category'] == undefined
-                    ? ''
-                    : titleToSlug(value['Category']),
-                status: '1',
-                adm_id: adm_id
-              };
-              category_id = await productModel.addCategory(catObj);
-              // console.log('category_id--', category_id);
-              // return false;
-            }
-            previousCategory = category_id.id;
-            let categoryObj = {
-              product_id: productId,
-              category_name: value['Category'],
-              category_id: category_id.id
-            };
-            await productModel.createProductCategory(categoryObj);
-          }
+          // if (value['Category'] && isMaster == 0) {
+          //   let catNameExists = [];
+          //   if (previousCategory) {
+          //     catNameExists = await productModel.topParentparentCatExists(
+          //       value['Category'],
+          //       previousCategory
+          //     );
+          //   } else {
+          //     catNameExists = await productModel.topParentparentNameExists(
+          //       value['Category']
+          //     );
+          //   }
+          //   console.log(catNameExists);
+          //   let category_id = '';
+          //   if (catNameExists.length > 0) {
+          //     category_id = { id: catNameExists[0].id };
+          //   } else {
+          //     console.log('test--->', value['Category']);
+          //     //  return false;
+          //     let catObj = {
+          //       title: value['Category'],
+          //       parent_id: previousCategory || '0',
+          //       slug:
+          //         value['Category'] == undefined
+          //           ? ''
+          //           : titleToSlug(value['Category']),
+          //       status: '1',
+          //       adm_id: adm_id
+          //     };
+          //     category_id = await productModel.addCategory(catObj);
+          //     // console.log('category_id--', category_id);
+          //     // return false;
+          //   }
+          //   previousCategory = category_id.id;
+          //   let categoryObj = {
+          //     product_id: productId,
+          //     category_name: value['Category'],
+          //     category_id: category_id.id
+          //   };
+          //   await productModel.createProductCategory(categoryObj);
+          // }
 
           if (value['Vendor Approved By']) {
             let vendorApproveArray = [value['Vendor Approved By']];
@@ -1117,11 +1082,25 @@ const productController = {
         }
       }
 
+      // check if all row are failed in our validation
+      if (errorsObj.length === jsonData.length) {
+        return res
+          .status(400)
+          .json({
+            status: 3,
+            message: "All rows have validation errors. Please check your data and try again.",
+            errorsObj: errorsObj
+          })
+          .end();
+        // Exit early if every row has an error
+      }
+
       res
         .status(200)
         .json({
           status: 1,
-          message: 'Product Added'
+          message: 'Product Added',
+          errorsObj: errorsObj
         })
         .end();
     } catch (err) {
@@ -1469,8 +1448,8 @@ const productController = {
               is_featured: 1,
               original_image_name: value['Product Featured Image\r\n(file)']
                 ? await getFileNameFromUrl(
-                    value['Product Featured Image\r\n(file)']
-                  )
+                  value['Product Featured Image\r\n(file)']
+                )
                 : null,
               new_image_name: value['Product Featured Image\r\n(file)'] || null
             };
@@ -1941,8 +1920,8 @@ const productController = {
         prod.vendor_approve =
           prod.product_approve_by.length > 0
             ? prod.product_approve_by
-                .map((item) => item.vendor_approve_name)
-                .join(',')
+              .map((item) => item.vendor_approve_name)
+              .join(',')
             : '';
         prod.specification_value =
           prod.product_variants[0]?.variant_value || '';
@@ -2341,9 +2320,8 @@ const productController = {
         .status(200)
         .json({
           status: 1,
-          message: `Product successfully ${
-            status == 0 ? 'Disapproved' : 'Approved'
-          }`
+          message: `Product successfully ${status == 0 ? 'Disapproved' : 'Approved'
+            }`
         })
         .end();
     } catch (error) {

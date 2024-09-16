@@ -918,16 +918,22 @@ LIMIT 1;`;
     const categoryIds = categories.map(category => category.id);
 
     const q = `
-      SELECT p.name, p.id
-      FROM tbl_product p
-      INNER JOIN tbl_product_categories pc ON p.id = pc.product_id
-      WHERE pc.category_id IN ($1:csv)  -- Dynamically insert the list of category IDs
-        AND p.status = 1 
-        AND p.is_deleted = 0 
-        AND p.is_review = 0 
-        AND p.is_approve = 1
-  AND p.created_by NOT IN (1, 111)  -- Exclude created_by = 1 or 111
-    `;
+    SELECT DISTINCT p.id AS product_id,
+                    p.name AS product_name,
+                    p.description,
+                    pc.category_name AS category_name,
+                    pc.category_id AS category_id,
+                    CASE WHEN p.tds_new_file_name IS NULL THEN NULL ELSE p.tds_new_file_name END AS pd_tds_file_url,
+                    CASE WHEN p.qap_new_file_name IS NULL THEN NULL ELSE p.qap_new_file_name END AS pd_qap_file_url
+    FROM tbl_product p
+    INNER JOIN tbl_product_categories pc ON p.id = pc.product_id
+    WHERE pc.category_id IN ($1:csv)  -- Dynamically insert the list of category IDs
+      AND p.status = 1 
+      AND p.is_deleted = 0 
+      AND p.is_review = 0 
+      AND p.is_approve = 1
+AND p.created_by NOT IN (1, 111)  -- Exclude created_by = 1 or 111
+  `;
 
     return new Promise(function (resolve, reject) {
       db.query(q, [categoryIds])
