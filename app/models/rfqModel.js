@@ -885,21 +885,47 @@ LIMIT 1;`;
   getSubcategories: async (categoryIds) => {
 
     const q = `
-       WITH RECURSIVE category_tree AS (
-          -- Start with the given category ID
-          SELECT id, title, parent_id
-          FROM tbl_category
-          WHERE id = $1
-
-          UNION ALL
-
-          -- Recursively find all child categories
-          SELECT c.id, c.title, c.parent_id
-          FROM tbl_category c
-          INNER JOIN category_tree ct ON c.parent_id = ct.id
+WITH RECURSIVE category_tree AS (
+    SELECT
+        c.id,
+        c.title,
+        c.parent_id
+    FROM tbl_category c
+    WHERE c.id = $1
+      AND EXISTS (  -- Ensure there are active products for this category
+          SELECT 1
+          FROM tbl_product p
+          INNER JOIN tbl_product_categories pc ON p.id = pc.product_id
+          WHERE pc.category_id = c.id
+            AND p.status = 1 
+            AND p.is_deleted = 0 
+            AND p.is_review = 0 
+            AND p.is_approve = 1
+            AND p.created_by NOT IN (1, 111)  -- Ensure product is linked to a valid vendor
       )
-      -- Return id and name for all categories found in the recursive tree
-      SELECT id, title FROM category_tree;
+    UNION ALL
+    -- Recursively find all child categories with active products and valid vendors
+    SELECT
+        c.id,
+        c.title,
+        c.parent_id
+    FROM tbl_category c
+    INNER JOIN category_tree ct ON c.parent_id = ct.id
+    WHERE EXISTS (
+        SELECT 1
+        FROM tbl_product p
+        INNER JOIN tbl_product_categories pc ON p.id = pc.product_id
+        WHERE pc.category_id = c.id
+          AND p.status = 1 
+          AND p.is_deleted = 0 
+          AND p.is_review = 0 
+          AND p.is_approve = 1
+          AND p.created_by NOT IN (1, 111)
+    )
+)
+-- Return id and title for all categories found in the recursive tree with active products and valid vendors
+SELECT id, title FROM category_tree;
+
 `;
     return new Promise(function (resolve, reject) {
       db.query(q, [categoryIds])
