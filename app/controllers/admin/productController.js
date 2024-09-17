@@ -1082,6 +1082,19 @@ const productController = {
         }
       }
 
+      // check if all row are failed in our validation
+      if (errorsObj.length === jsonData.length) {
+        return res
+          .status(400)
+          .json({
+            status: 3,
+            message: "All rows have validation errors. Please check your data and try again.",
+            errorsObj: errorsObj
+          })
+          .end();
+        // Exit early if every row has an error
+      }
+
       res
         .status(200)
         .json({

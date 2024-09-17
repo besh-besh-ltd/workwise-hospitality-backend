@@ -616,6 +616,9 @@ const userModel = {
       // query changes by Mukul Jatav 30-08-2024, 
       // rewrited query to reduce duplication, and included product name along with product images
 
+      // query changes by Mukul Jatav 13-09-2024, 
+      //  Remove product_images and added product_list with approved vendor list for each product in /vendor-profile/id API
+
       // Base query with common fields
       let baseQuery = `
       SELECT tbl_users.id as user_id,
@@ -638,6 +641,9 @@ const userModel = {
              tbl_company.company_name,
              tbl_company.profile,
              tbl_company.location,
+             cl.city_name,  
+             sl.state_name,
+               
              ARRAY(
                  SELECT json_build_object(
                      'vendor_approve', tbl_vendor_approve.vendor_approve,
@@ -660,20 +666,25 @@ const userModel = {
                  FROM tbl_files
                  WHERE tbl_files.user_id = tbl_users.id
              ) AS "brochure",
-             ARRAY(
-                 SELECT json_build_object(
-                 'product_name', P.name, 
-                     'product_image', tbl_product_images.new_image_name,
-                     'product_image_url', CASE
-                         WHEN tbl_product_images.new_image_name IS NULL THEN
-                             NULL
-                         ELSE tbl_product_images.new_image_name
-                     END
-                 )
-                 FROM tbl_product P
-                 LEFT JOIN tbl_product_images ON P.id = tbl_product_images.product_id
-                 WHERE P.vendor = tbl_users.id
-             ) AS "product_images",
+            ARRAY(
+           SELECT json_build_object(
+               'product_name', P.name, 
+               'product_description', P.description, 
+               'product_id', P.id,
+               'approved_by', ARRAY(
+                   SELECT json_build_object(
+                       'vendor_approve_id', VA.id,
+                       'vendor_name', VA.vendor_approve,
+                       'approved_at', VM.created_at
+                   )
+                   FROM tbl_vendorapprove_product_mapping VM
+                   LEFT JOIN tbl_vendor_approve VA ON VA.id = VM.vendor_approve_id
+                   WHERE VM.product_id = P.id
+               )
+           )
+           FROM tbl_product P
+           WHERE P.created_by = tbl_users.id
+       ) AS "product_list",
              CASE
                  WHEN tbl_users.new_profile_image IS NULL THEN
                      NULL
@@ -705,6 +716,8 @@ const userModel = {
       baseQuery += `
       FROM tbl_users
       LEFT JOIN tbl_company ON tbl_users.id = tbl_company.user_id
+      LEFT JOIN tbl_location_cities cl ON cl.id = tbl_users.city
+      LEFT JOIN tbl_location_states sl ON sl.id = tbl_users.state     
       WHERE tbl_users.id = $1`;
 
       // Execute the query

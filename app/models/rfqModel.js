@@ -885,21 +885,47 @@ LIMIT 1;`;
   getSubcategories: async (categoryIds) => {
 
     const q = `
-       WITH RECURSIVE category_tree AS (
-          -- Start with the given category ID
-          SELECT id, title, parent_id
-          FROM tbl_category
-          WHERE id = $1
-
-          UNION ALL
-
-          -- Recursively find all child categories
-          SELECT c.id, c.title, c.parent_id
-          FROM tbl_category c
-          INNER JOIN category_tree ct ON c.parent_id = ct.id
+WITH RECURSIVE category_tree AS (
+    SELECT
+        c.id,
+        c.title,
+        c.parent_id
+    FROM tbl_category c
+    WHERE c.id = $1
+      AND EXISTS (  -- Ensure there are active products for this category
+          SELECT 1
+          FROM tbl_product p
+          INNER JOIN tbl_product_categories pc ON p.id = pc.product_id
+          WHERE pc.category_id = c.id
+            AND p.status = 1 
+            AND p.is_deleted = 0 
+            AND p.is_review = 0 
+            AND p.is_approve = 1
+            AND p.created_by NOT IN (1, 111)  -- Ensure product is linked to a valid vendor
       )
-      -- Return id and name for all categories found in the recursive tree
-      SELECT id, title FROM category_tree;
+    UNION ALL
+    -- Recursively find all child categories with active products and valid vendors
+    SELECT
+        c.id,
+        c.title,
+        c.parent_id
+    FROM tbl_category c
+    INNER JOIN category_tree ct ON c.parent_id = ct.id
+    WHERE EXISTS (
+        SELECT 1
+        FROM tbl_product p
+        INNER JOIN tbl_product_categories pc ON p.id = pc.product_id
+        WHERE pc.category_id = c.id
+          AND p.status = 1 
+          AND p.is_deleted = 0 
+          AND p.is_review = 0 
+          AND p.is_approve = 1
+          AND p.created_by NOT IN (1, 111)
+    )
+)
+-- Return id and title for all categories found in the recursive tree with active products and valid vendors
+SELECT id, title FROM category_tree;
+
 `;
     return new Promise(function (resolve, reject) {
       db.query(q, [categoryIds])
@@ -918,16 +944,40 @@ LIMIT 1;`;
     const categoryIds = categories.map(category => category.id);
 
     const q = `
-      SELECT p.name, p.id
-      FROM tbl_product p
-      INNER JOIN tbl_product_categories pc ON p.id = pc.product_id
-      WHERE pc.category_id IN ($1:csv)  -- Dynamically insert the list of category IDs
-        AND p.status = 1 
-        AND p.is_deleted = 0 
-        AND p.is_review = 0 
-        AND p.is_approve = 1
-  AND p.created_by NOT IN (1, 111)  -- Exclude created_by = 1 or 111
-    `;
+WITH RankedProducts AS (
+    SELECT 
+        p.id AS product_id,
+        p.name AS product_name,
+        p.description,
+        pc.category_name AS category_name,
+        pc.category_id AS category_id,
+        CASE WHEN p.tds_new_file_name IS NULL THEN NULL ELSE p.tds_new_file_name END AS pd_tds_file_url,
+        CASE WHEN p.qap_new_file_name IS NULL THEN NULL ELSE p.qap_new_file_name END AS pd_qap_file_url,
+        -- Generate a row number for each unique product name within each category,
+        -- but also treat same product ID across categories as a single entry
+        ROW_NUMBER() OVER (
+            PARTITION BY p.name, pc.category_id 
+            ORDER BY p.id
+        ) AS row_num_by_name_category,
+        ROW_NUMBER() OVER (
+            PARTITION BY p.id
+            ORDER BY pc.category_id
+        ) AS row_num_by_id
+    FROM tbl_product p
+    INNER JOIN tbl_product_categories pc ON p.id = pc.product_id
+    WHERE pc.category_id IN ($1:csv)  -- Dynamically insert the list of category IDs
+      AND p.status = 1 
+      AND p.is_deleted = 0 
+      AND p.is_review = 0 
+      AND p.is_approve = 1
+      AND p.created_by NOT IN (1, 111)  -- Exclude specific creators
+)
+SELECT 
+    product_id, product_name, description, category_name, category_id, pd_tds_file_url, pd_qap_file_url
+FROM RankedProducts
+WHERE row_num_by_name_category = 1
+  AND row_num_by_id = 1;  -- Ensure unique products both by ID and by name/category combination
+`;
 
     return new Promise(function (resolve, reject) {
       db.query(q, [categoryIds])
