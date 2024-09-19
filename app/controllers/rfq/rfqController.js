@@ -2077,7 +2077,7 @@ const rfqController = {
         approved_by_id
       );
 
-      const categoryResult = await rfqModel.getCategoryList(search_key);
+      const categoryResult = (search_key && search_key.length > 0) ? await rfqModel.getCategoryList(search_key): [];
 
       let dummyOBJ = {
         product_id: '***',

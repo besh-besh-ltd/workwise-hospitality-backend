@@ -854,32 +854,55 @@ LIMIT 1;`;
     });
   },
   getCategoryList: async (search_key) => {
-    let q = `
-   SELECT DISTINCT c.id AS category_id,
-                    c.title AS category_name,
+  //   let q = `
+  //  SELECT DISTINCT c.id AS category_id,
+  //                   c.title AS category_name,
+  //                   c.parent_id AS parent_category_id,
+  //                   pc.title AS parent_category_name, -- Join to get parent category title
+  //                   similarity(c.title, $1) AS similarity_score,
+  //                   ts_rank_cd(to_tsvector('english', c.title), plainto_tsquery('english', $1)) AS rank
+  //   FROM tbl_category c
+  //   LEFT JOIN tbl_category pc ON c.parent_id = pc.id -- Join to get parent category details
+  //   WHERE c.status = 1 
+  //     AND c.is_deleted = 0 
+  //     AND (
+  //       to_tsvector('english', c.title) @@ plainto_tsquery('english', $1)
+  //       OR similarity(c.title, $1) > 0.1
+  //     )
+  //   ORDER BY rank DESC, similarity_score DESC, c.title ASC;`;
+
+  const q = `
+    SELECT DISTINCT c.id AS category_id, 
+                    c.title AS category_name, 
                     c.parent_id AS parent_category_id,
-                    pc.title AS parent_category_name, -- Join to get parent category title
+                    pc.title AS parent_category_name,
                     similarity(c.title, $1) AS similarity_score,
                     ts_rank_cd(to_tsvector('english', c.title), plainto_tsquery('english', $1)) AS rank
     FROM tbl_category c
-    LEFT JOIN tbl_category pc ON c.parent_id = pc.id -- Join to get parent category details
+    LEFT JOIN tbl_category pc ON c.parent_id = pc.id
+    INNER JOIN tbl_product_categories pcats ON c.id = pcats.category_id
+    INNER JOIN tbl_product p ON pcats.product_id = p.id
     WHERE c.status = 1 
       AND c.is_deleted = 0 
-      AND (
-        to_tsvector('english', c.title) @@ plainto_tsquery('english', $1)
-        OR similarity(c.title, $1) > 0.1
-      )
-    ORDER BY rank DESC, similarity_score DESC, c.title ASC;`;
+      AND p.status = 1 
+      AND p.is_deleted = 0 
+      AND p.is_review = 0 
+      AND p.is_approve = 1 
+      AND p.created_by NOT IN (1, 111)
+      -- Only apply search filtering when searchTerm is provided (not null or empty)
+      AND (to_tsvector('english', c.title) @@ plainto_tsquery('english', $1)
+          OR similarity(c.title, $1) > 0.1)
+    ORDER BY rank DESC, similarity_score DESC, c.title ASC;
+`;
 
-    return new Promise(function (resolve, reject) {
-      db.query(q, [search_key])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
+    return new Promise(async function (resolve, reject) {
+      try {
+        const data = await db.query(q, [search_key]);
+        resolve(data);
+      } catch (err) {
+        const error = new Error(err);
+        reject(error);
+      }
     });
   },
   getSubcategories: async (categoryIds) => {
@@ -925,7 +948,6 @@ WITH RECURSIVE category_tree AS (
 )
 -- Return id and title for all categories found in the recursive tree with active products and valid vendors
 SELECT id, title FROM category_tree;
-
 `;
     return new Promise(function (resolve, reject) {
       db.query(q, [categoryIds])
