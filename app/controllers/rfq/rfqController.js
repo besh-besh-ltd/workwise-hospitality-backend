@@ -1917,11 +1917,29 @@ const rfqController = {
   },
   sendReminder: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { organization_name, name } = req.user;
+    const { organization_name, name, id } = req.user;
 
     try {
+      const lastActivity = await rfqModel.getRFQActivity(rfq_id, id);
+      const rfq_activity_id = lastActivity[0]?.id || null;
+
+      if (rfq_activity_id) {
+        // check when the last reminder was sent
+        const lastSentAt = lastActivity[0].last_reminder_sent;
+        const today = new Date().toISOString().slice(0, 10); 
+        const lastSentDate = new Date(lastSentAt).toISOString().slice(0, 10);
+
+        if (today === lastSentDate)
+          return res
+            .status(403)
+            .json({
+              status: 1,
+              message: "You have already sent a reminder today for this RFQ!"
+            })
+            .end();
+      }
+
       let vendors = await rfqModel.gerRFQVendors(rfq_id);
-      // console.log('vendors ==>>>>', vendors);
       const quote_vendor = await rfqModel.quoteVendor(rfq_id);
 
       const createdByIds = new Set(quote_vendor.map((item) => item.created_by));
@@ -1930,18 +1948,25 @@ const rfqController = {
         (vendor) => !createdByIds.has(vendor.user_id)
       );
       vendors = unmatchedVendors;
-      // console.log('vendors ==>>>>', vendors);
 
       let org_name = organization_name ? organization_name : name;
       Promise.all(vendors.map((item) => sendReminderRFQMAIL(item, org_name)))
-        .then(() => {
-          res
-            .status(200)
-            .json({
-              status: 1,
-              message: 'Reminder has been sent successfully!'
-            })
-            .end();
+        .then(async () => {
+          try {
+            await rfqModel.updateRFQActivity(rfq_id, id, rfq_activity_id);
+          }
+          catch (error) {
+            throw new Error(error)
+          }
+          finally {
+            res
+              .status(200)
+              .json({
+                status: 1,
+                message: 'Reminder has been sent successfully!'
+              })
+              .end();
+          }
         })
         .catch((error) => {
           logError(error);
@@ -2077,7 +2102,7 @@ const rfqController = {
         approved_by_id
       );
 
-      const categoryResult = (search_key && search_key.length > 0) ? await rfqModel.getCategoryList(search_key): [];
+      const categoryResult = (search_key && search_key.length > 0) ? await rfqModel.getCategoryList(search_key) : [];
 
       let dummyOBJ = {
         product_id: '***',
@@ -2134,9 +2159,9 @@ const rfqController = {
         .json({
           status: 1,
           productList: productList,
-          totalProduct:productList.length,
-          subCategoryList:subCategoryList,
-          totalCategory:subCategoryList.length
+          totalProduct: productList.length,
+          subCategoryList: subCategoryList,
+          totalCategory: subCategoryList.length
         })
         .end();
 
