@@ -15,6 +15,16 @@ const generalModel = {
         });
     });
   },
+  getAllCities: async ()=> {
+    try {
+      const data = db.any(
+        `SELECT * FROM tbl_location_cities ORDER BY city_name ASC` 
+      )
+      return data;
+    } catch (error) {
+      throw new Error(error);
+    }
+  },
   getCities: async (state_id) => {
     return new Promise(function (resolve, reject) {
       db.any(

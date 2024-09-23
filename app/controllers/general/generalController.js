@@ -10,7 +10,28 @@ const generalController = {
         .status(200)
         .json({
           status: 1,
-          data: states 
+          data: states
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  getAllCities: async (req, res, next) => {
+    try {
+      const allCities = await generalModel.getAllCities();
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: allCities
         })
         .end();
     } catch (error) {
@@ -45,6 +66,6 @@ const generalController = {
         })
         .end();
     }
-  } 
+  }
 };
 export default generalController;
