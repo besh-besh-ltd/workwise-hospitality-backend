@@ -10,7 +10,7 @@ const generalController = {
         .status(200)
         .json({
           status: 1,
-          data: states 
+          data: states
         })
         .end();
     } catch (error) {
@@ -36,6 +36,7 @@ const generalController = {
         })
         .end();
     } catch (error) {
+      console.log(error)
       logError(error);
       res
         .status(400)
@@ -45,6 +46,6 @@ const generalController = {
         })
         .end();
     }
-  } 
+  }
 };
 export default generalController;

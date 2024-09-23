@@ -404,8 +404,7 @@ LIMIT 1;`;
         JOIN tbl_category c ON pc.category_id = c.id
         JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
         LEFT JOIN tbl_company tc ON tc.user_id = tu.id
-        ${
-        approved_by_id != ''
+        ${approved_by_id != ''
         ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
         : ``
       }
@@ -413,8 +412,7 @@ LIMIT 1;`;
         ${state != '' ? `AND tu.state = ${state}` : ``}
         ${city != '' ? `AND tu.city = ${city}` : ``}
         ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-        ${
-        approved_by_id != ''
+        ${approved_by_id != ''
         ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
         : ``
       }
@@ -439,8 +437,7 @@ LIMIT 1;`;
       LEFT JOIN tbl_company tc ON tc.user_id = tu.id
       LEFT JOIN tbl_location_cities lc ON tu.city = lc.id 
       LEFT JOIN tbl_location_states ls ON tu.state = ls.id 
-      ${
-      approved_by_id != ''
+      ${approved_by_id != ''
         ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
         : ``
       }
@@ -448,8 +445,7 @@ LIMIT 1;`;
       ${state != '' ? `AND tu.state = ${state}` : ``}
       ${city != '' ? `AND tu.city = ${city}` : ``}
       ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-      ${
-      approved_by_id != ''
+      ${approved_by_id != ''
         ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
         : ``
       }
@@ -511,7 +507,7 @@ LIMIT 1;`;
                     'product_specs', (
                         SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'product_id', RFQ_P_SPEC.product_id, 'rfq_id', RFQ_P_SPEC.rfq_id))
                         FROM tbl_rfq_products_specs RFQ_P_SPEC
-                        WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
+                        WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id AND RFQ_P.variant = RFQ_P_SPEC.variant
                     ),
                     'product_details', (
                       SELECT json_agg(json_build_object('id', T_P.id,'name', T_P.name, 'description', T_P.description, 'manufacturer', T_P.manufacturer, 'availability', T_P.availability, 'description', T_P.description ))
@@ -531,7 +527,7 @@ LIMIT 1;`;
                     )
                       ))
                       FROM tbl_rfq_product_vendors RFQ_P_V
-                      WHERE RFQ_P.product_id = RFQ_P_V.product_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
+                      WHERE RFQ_P.product_id = RFQ_P_V.product_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id AND RFQ_P.variant = RFQ_P_V.variant
                   )
                 )
                 FROM tbl_rfq_products RFQ_P
@@ -802,6 +798,48 @@ LIMIT 1;`;
         });
     });
   },
+  // function created by Imtiaj for getting RFQ activity 20/09/2024
+  getRFQActivity: async (rfq_id, user_id) => {
+    try {
+      const result = await db.query(
+        `SELECT *
+         FROM tbl_rfq_activity
+         WHERE rfq_id = ${rfq_id} AND user_id = ${user_id}`
+      );
+      return result;
+
+    } catch (error) {
+      throw new Error(error);
+    }
+  },
+
+  // function created by Imtiaj for updating RFQ activity 20/09/2024
+  updateRFQActivity: async (rfq_id, user_id, rfq_activity_id) => {
+    try {
+      if (!rfq_activity_id) {
+        //insert new data
+        const insertQuery = `
+          INSERT INTO tbl_rfq_activity (rfq_id, user_id, last_reminder_sent)
+          VALUES ($1, $2, CURRENT_TIMESTAMP)
+          RETURNING *;
+        `;
+        await db.query(insertQuery, [rfq_id, user_id]);
+      }
+      else {
+        // update existing row
+        const updateQuery = `
+        UPDATE tbl_rfq_activity
+        SET last_reminder_sent = CURRENT_TIMESTAMP
+        WHERE id = $1
+        RETURNING *;
+      `;
+        await db.query(updateQuery, [rfq_activity_id]);
+      }
+    } catch (error) {
+      throw new Error(error);
+    }
+  },
+
   searchProduct: async (search_key, category_id, approved_by_id) => {
 
     // query change by mukul 28-08-2024
@@ -854,32 +892,55 @@ LIMIT 1;`;
     });
   },
   getCategoryList: async (search_key) => {
-    let q = `
-   SELECT DISTINCT c.id AS category_id,
-                    c.title AS category_name,
+    //   let q = `
+    //  SELECT DISTINCT c.id AS category_id,
+    //                   c.title AS category_name,
+    //                   c.parent_id AS parent_category_id,
+    //                   pc.title AS parent_category_name, -- Join to get parent category title
+    //                   similarity(c.title, $1) AS similarity_score,
+    //                   ts_rank_cd(to_tsvector('english', c.title), plainto_tsquery('english', $1)) AS rank
+    //   FROM tbl_category c
+    //   LEFT JOIN tbl_category pc ON c.parent_id = pc.id -- Join to get parent category details
+    //   WHERE c.status = 1 
+    //     AND c.is_deleted = 0 
+    //     AND (
+    //       to_tsvector('english', c.title) @@ plainto_tsquery('english', $1)
+    //       OR similarity(c.title, $1) > 0.1
+    //     )
+    //   ORDER BY rank DESC, similarity_score DESC, c.title ASC;`;
+
+    const q = `
+    SELECT DISTINCT c.id AS category_id, 
+                    c.title AS category_name, 
                     c.parent_id AS parent_category_id,
-                    pc.title AS parent_category_name, -- Join to get parent category title
+                    pc.title AS parent_category_name,
                     similarity(c.title, $1) AS similarity_score,
                     ts_rank_cd(to_tsvector('english', c.title), plainto_tsquery('english', $1)) AS rank
     FROM tbl_category c
-    LEFT JOIN tbl_category pc ON c.parent_id = pc.id -- Join to get parent category details
+    LEFT JOIN tbl_category pc ON c.parent_id = pc.id
+    INNER JOIN tbl_product_categories pcats ON c.id = pcats.category_id
+    INNER JOIN tbl_product p ON pcats.product_id = p.id
     WHERE c.status = 1 
       AND c.is_deleted = 0 
-      AND (
-        to_tsvector('english', c.title) @@ plainto_tsquery('english', $1)
-        OR similarity(c.title, $1) > 0.1
-      )
-    ORDER BY rank DESC, similarity_score DESC, c.title ASC;`;
+      AND p.status = 1 
+      AND p.is_deleted = 0 
+      AND p.is_review = 0 
+      AND p.is_approve = 1 
+      AND p.created_by NOT IN (1, 111)
+      -- Only apply search filtering when searchTerm is provided (not null or empty)
+      AND (to_tsvector('english', c.title) @@ plainto_tsquery('english', $1)
+          OR similarity(c.title, $1) > 0.1)
+    ORDER BY rank DESC, similarity_score DESC, c.title ASC;
+`;
 
-    return new Promise(function (resolve, reject) {
-      db.query(q, [search_key])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
+    return new Promise(async function (resolve, reject) {
+      try {
+        const data = await db.query(q, [search_key]);
+        resolve(data);
+      } catch (err) {
+        const error = new Error(err);
+        reject(error);
+      }
     });
   },
   getSubcategories: async (categoryIds) => {
@@ -925,7 +986,6 @@ WITH RECURSIVE category_tree AS (
 )
 -- Return id and title for all categories found in the recursive tree with active products and valid vendors
 SELECT id, title FROM category_tree;
-
 `;
     return new Promise(function (resolve, reject) {
       db.query(q, [categoryIds])

@@ -16,14 +16,17 @@ const generalModel = {
     });
   },
   getCities: async (state_id) => {
+    let q = `SELECT * FROM tbl_location_cities ORDER BY city_name ASC`;
+    if(state_id)
+        q = `SELECT * FROM tbl_location_cities where state_id=${state_id} ORDER BY city_name ASC`;
+
     return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT id, city_name FROM tbl_location_cities WHERE state_id = ${state_id} ORDER BY city_name ASC`
-      )
+      db.any(q)
         .then(function (data) {
           resolve(data);
         })
         .catch(function (err) {
+          console.log(err)
           let error = new Error(err);
           reject(error);
         });
