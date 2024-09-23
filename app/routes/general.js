@@ -11,11 +11,7 @@ GeneralRoutes.get(
   generalController.getStates
 );
 GeneralRoutes.get(
-  '/cities',
-  generalController.getAllCities
-);
-GeneralRoutes.get(
-  '/cities/:id',
+  '/cities/:id?',
   generalController.getCities
 );
 
