@@ -819,7 +819,8 @@ const rfqController = {
         location,
         is_published,
         products,
-        terms
+        terms,
+        rfq_type
       } = req.body;
       if (rfq_id && rfq_id != '' && rfq_id != null) {
         // Updating existing RFQ
@@ -833,6 +834,7 @@ const rfqController = {
           bid_end_date,
           location,
           is_published: 1,
+          rfq_type,
           updated_by: user_id
         };
         const response = await rfqModel.update(
@@ -862,6 +864,7 @@ const rfqController = {
           bid_end_date,
           location,
           is_published,
+          rfq_type,
           rfq_no: nextRFQNumber,
           created_by: user_id,
           updated_by: user_id
@@ -1926,7 +1929,7 @@ const rfqController = {
       if (rfq_activity_id) {
         // check when the last reminder was sent
         const lastSentAt = lastActivity[0].last_reminder_sent;
-        const today = new Date().toISOString().slice(0, 10); 
+        const today = new Date().toISOString().slice(0, 10);
         const lastSentDate = new Date(lastSentAt).toISOString().slice(0, 10);
 
         if (today === lastSentDate)
