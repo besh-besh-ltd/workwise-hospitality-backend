@@ -47,7 +47,7 @@ export const rfqSchemas = {
     bid_end_date: Joi.string().optional().allow('').allow(null),
     location: Joi.string().optional().allow('').allow(null),
     is_published: Joi.number().integer().min(0).max(1).required(),
-    rfq_type: Joi.string().valid('firm', 'budgetary').required(),
+    rfq_type: Joi.string().valid('firm', 'budgetary'),
     products: Joi.array().items(productItems).min(1).required(),
     // products: Joi.array().optional().allow('').allow(null),
     vendors: Joi.array().items(vendorItems).allow(null).allow(''),
