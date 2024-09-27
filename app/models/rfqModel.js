@@ -331,6 +331,26 @@ const rfqModel = {
             FROM tbl_product T_P
             WHERE RFQ_P.product_id = T_P.id
           ),
+            ${
+              user_type == 3
+                ? ` 'lowest_quotation', (
+                    SELECT json_build_object(
+                        'quote_id', TQI.quote_id,
+                        'total_price', MIN(TQI.total_price)
+                        )
+                        FROM tbl_quote_items TQI
+                    WHERE TQI.product_id = RFQ_P.product_id AND TQI.variant = RFQ_P.variant
+                        AND (
+                            (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != '' AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '7 days'))
+                        OR
+                            (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = '' AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '7 days') <= CURRENT_TIMESTAMP)
+                        )
+                            GROUP BY TQI.quote_id
+                            ORDER BY MIN(TQI.total_price) ASC
+                            LIMIT 1
+                        ) ,`
+                : ''
+            }
           'vendor_details', (
             SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id, 'variant', RFQ_P_V.variant,
                 'user_details', (
