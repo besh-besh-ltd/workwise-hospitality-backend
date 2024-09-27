@@ -1446,7 +1446,57 @@ WHERE created_by = $1 AND status = $2`,
     }
 
     return token; // Return the successfully inserted token
-  }
+  },
+  checkQuoteExistence : async (quoteId) => {
+    return new Promise((resolve, reject) => {
+        const query = 'SELECT EXISTS(SELECT 1 FROM tbl_quotes WHERE id = $1)';
+        db.query(query, [quoteId])
+            .then(result => resolve(result))
+            .catch(err => reject(err));
+    });
+},
+ updateQuoteItemWithHistory :async (quoteId, product) => {
+  return new Promise(async (resolve, reject) => {
+      try {
+          // Fetch existing quote item
+          const existingItemQuery = 'SELECT * FROM tbl_quote_items WHERE quote_id = $1 AND product_id = $2 AND variant = $3';
+          const result = await db.query(existingItemQuery, [quoteId, product.product_id, product.variant]);
+          const item = result[0];
+          console.log("items  items", item)
+
+          if (item) {
+              // Move existing item to history
+              const insertHistoryQuery = `INSERT INTO tbl_quote_item_history 
+                  (quote_item_id, rfq_id, product_id, unit_price, package_price, tax, freight_price, total_price, comment, delivery_period, quantity, variant, timestamp)
+                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`;
+              await db.query(insertHistoryQuery, [
+                item.id, item.rfq_id, item.product_id, item.unit_price, item.package_price, 
+                item.tax, item.freight_price, item.total_price, item.comment, item.delivery_period, 
+                item.quantity, item.variant
+              ]);
+
+              // Update existing item with new data
+              const updateQuery = `UPDATE tbl_quote_items SET 
+                  unit_price = $1, quantity = $2, package_price = $3, tax = $4, freight_price = $5, 
+                  total_price = $6, comment = $7, delivery_period = $8, variant = $9
+                  WHERE id = $10 RETURNING *`;
+              const updatedItem = await db.query(updateQuery, [
+                product.unit_price, item.quantity, product.package_price, product.tax, 
+                product.freight_price, product.total_price, product.comment, product.delivery_period, 
+                item.variant, item.id
+              ]);
+              resolve(updatedItem[0]);
+          } 
+          
+      } catch (error) {
+          console.error('Error in updateQuoteItemWithHistory:', error);
+          reject(error);
+      }
+  });
+}
+
+
+
 
 };
 

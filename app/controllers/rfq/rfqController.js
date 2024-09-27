@@ -3934,7 +3934,37 @@ const rfqController = {
           error: error.message,
         });
     }
-  }
+  },
+  updateQuoteItems : async (req, res, next) => {
+    const { quoteId } = req.params;
+    const { products } = req.body;
+
+    // Check if all required fields are present in each product
+    if (!products.every(product => product.product_id && product.unit_price)) {
+      console.log("productproduct", products)
+        return res.status(400).json({ message: 'Missing required fields in product items.' });
+    }
+
+    try {
+        // Check if the quote exists
+        const quoteExists = await rfqModel.checkQuoteExistence(quoteId);
+        if (!quoteExists) {
+            return res.status(404).json({ message: 'Quote not found.' });
+        }
+
+        // Process each product in the request
+        const results = await Promise.all(products.map(product => {
+            return rfqModel.updateQuoteItemWithHistory(quoteId, product);
+        }));
+
+        return res.status(200).json({ message: 'Quote items updated successfully', results });
+    } catch (error) {
+        console.error('Failed to update quote items:', error);
+        return res.status(500).json({ message: 'Error updating quote items', error: error.message });
+    }
+},
+
+
 
 
 };
