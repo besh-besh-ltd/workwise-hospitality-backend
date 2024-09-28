@@ -1632,28 +1632,35 @@ const rfqController = {
             `rfq_id=${rfq_id} AND created_by=${user.id} LIMIT 1`
           );
           if (alreadyExists.length > 0) {
-            let quote_rsp = await rfqModel.update(
-              'tbl_quotes',
-              tbl_quotes_data,
-              alreadyExists[0].id
-            );
-            if (quote_rsp.length > 0) {
-              res
-                .status(200)
-                .json({
-                  status: 1,
-                  data: quote_rsp[0]
-                })
-                .end();
-            } else {
-              res
-                .status(400)
-                .json({
-                  status: 3,
-                  message: 'Unable to update quote!'
-                })
-                .end();
-            }
+            res
+            .status(400)
+            .json({
+              status: 3,
+              message: 'Quote is alredy present for this RFQ!'
+            })
+            .end();
+            // let quote_rsp = await rfqModel.update(
+            //   'tbl_quotes',
+            //   tbl_quotes_data,
+            //   alreadyExists[0].id
+            // );
+            // if (quote_rsp.length > 0) {
+            //   res
+            //     .status(200)
+            //     .json({
+            //       status: 1,
+            //       data: quote_rsp[0]
+            //     })
+            //     .end();
+            // } else {
+            //   res
+            //     .status(400)
+            //     .json({
+            //       status: 3,
+            //       message: 'Unable to update quote!'
+            //     })
+            //     .end();
+            // }
 
             return;
           }
