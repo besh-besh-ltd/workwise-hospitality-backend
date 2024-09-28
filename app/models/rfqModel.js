@@ -750,7 +750,27 @@ LIMIT 1;`;
                       SELECT json_build_object('id', TU.id, 'name' , TU.name, 'email', TU.email,'mobile' , TU.mobile,'address' , TU.address,'organization_name' , TU.organization_name) FROM tbl_users TU WHERE TU.id = TQ.created_by
                   )                  
                   ) FROM tbl_quotes TQ WHERE TQ.id = TQI.quote_id AND TQ.rfq_id = ${id}
-                )      
+                ),      
+                'previous_quotes', (
+              SELECT json_agg(json_build_object(
+                'id', TH.id,
+                'quote_item_id', TH.quote_item_id,
+                'rfq_id', TH.rfq_id,
+                'product_id', TH.product_id,
+                'unit_price', TH.unit_price,
+                'package_price', TH.package_price,
+                'tax', TH.tax,
+                'freight_price', TH.freight_price,
+                'total_price', TH.total_price,
+                'comment', TH.comment,
+                'delivery_period', TH.delivery_period,
+                'quantity', TH.quantity,
+                'variant', TH.variant,
+                'timestamp', TH.timestamp
+              ) ORDER BY TH.timestamp DESC)  -- Sorting by timestamp descending
+              FROM tbl_quote_item_history TH
+              WHERE TH.quote_item_id = TQI.id
+            )   
           ) FROM tbl_quote_items TQI WHERE TQI.rfq_id = ${id} AND TQI.product_id = TRF.product_id 
           
         ) AS "quotations"
