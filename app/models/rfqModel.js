@@ -260,7 +260,7 @@ const rfqModel = {
   },
   getRfqById: async (id, user_id, user_type) => {
 
-    //  query changed by mukul, 
+    //  query changed by mukul,
     let q = `SELECT RFQ.*,
     ARRAY(
       SELECT json_build_object('id', TQF.id,'product_id',TQF.product_id, 'timestamp', TQF.timestamp,'variant', TQF.variant,
@@ -418,7 +418,7 @@ LIMIT 1;`;
     city
   ) => {
 
-    // query changes by mukul jatav 30-08-2024, 
+    // query changes by mukul jatav 30-08-2024,
     // include city and state name in response, left join of tbl_location_states and tbl_location_cities
 
     // Query to fetch the total count of vendors
@@ -431,17 +431,17 @@ LIMIT 1;`;
         JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
         LEFT JOIN tbl_company tc ON tc.user_id = tu.id
         ${approved_by_id != ''
-        ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
-        : ``
-      }
+            ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
+            : ``
+        }
         WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
         ${state != '' ? `AND tu.state = ${state}` : ``}
         ${city != '' ? `AND tu.city = ${city}` : ``}
         ${category_id != '' ? `AND c.id = ${category_id}` : ``}
         ${approved_by_id != ''
-        ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
-        : ``
-      }
+            ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
+            : ``
+        }
       )
       SELECT COUNT(*) AS total FROM vendor_data;
     `;
@@ -464,16 +464,16 @@ LIMIT 1;`;
       LEFT JOIN tbl_location_cities lc ON tu.city = lc.id 
       LEFT JOIN tbl_location_states ls ON tu.state = ls.id 
       ${approved_by_id != ''
-        ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
-        : ``
+          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
+          : ``
       }
       WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
       ${state != '' ? `AND tu.state = ${state}` : ``}
       ${city != '' ? `AND tu.city = ${city}` : ``}
       ${category_id != '' ? `AND c.id = ${category_id}` : ``}
       ${approved_by_id != ''
-        ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
-        : ``
+          ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
+          : ``
       }
     )
     SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 1;
@@ -658,7 +658,7 @@ LIMIT 1;`;
     return new Promise(function (resolve, reject) {
 
       // changes by Mukul Jatav 30/08/2024,
-      // finding finalized_vendor for each product 
+      // finding finalized_vendor for each product
       db.query(
         `SELECT TRP.product_id, TRP.rfq_id,
           ARRAY(
@@ -850,7 +850,7 @@ LIMIT 1;`;
           RETURNING *;
         `;
         await db.query(insertQuery, [rfq_id, user_id]);
-      }
+      } 
       else {
         // update existing row
         const updateQuery = `
@@ -867,7 +867,6 @@ LIMIT 1;`;
   },
 
   searchProduct: async (search_key, category_id, approved_by_id) => {
-
     // query change by mukul 28-08-2024
     // query change by mukul 08-09-2024, added one more filter for created by 1 or 111 to exclude product for them
     let q = `
@@ -927,8 +926,8 @@ LIMIT 1;`;
     //                   ts_rank_cd(to_tsvector('english', c.title), plainto_tsquery('english', $1)) AS rank
     //   FROM tbl_category c
     //   LEFT JOIN tbl_category pc ON c.parent_id = pc.id -- Join to get parent category details
-    //   WHERE c.status = 1 
-    //     AND c.is_deleted = 0 
+    //   WHERE c.status = 1
+    //     AND c.is_deleted = 0
     //     AND (
     //       to_tsvector('english', c.title) @@ plainto_tsquery('english', $1)
     //       OR similarity(c.title, $1) > 0.1
@@ -1027,7 +1026,7 @@ SELECT id, title FROM category_tree;
   getProductsByCategories: async (categories) => {
 
     // Extract category IDs from the array of objects
-    const categoryIds = categories.map(category => category.id);
+    const categoryIds = categories.map((category)=> category.id);
 
     const q = `
 WITH RankedProducts AS (
@@ -1085,8 +1084,7 @@ WHERE row_num_by_name_category = 1
     state,
     city
   ) => {
-
-    // query changes by mukul jatav30-08-2024, 
+    // query changes by mukul jatav30-08-2024,
     // include city and state name in response, left join of tbl_location_states and tbl_location_cities
     let q = `
 SELECT * FROM (
@@ -1453,57 +1451,86 @@ WHERE created_by = $1 AND status = $2`,
 
     return token; // Return the successfully inserted token
   },
-  checkQuoteExistence : async (quoteId) => {
-    return new Promise((resolve, reject) => {
-        const query = 'SELECT EXISTS(SELECT 1 FROM tbl_quotes WHERE id = $1)';
-        db.query(query, [quoteId])
-            .then(result => resolve(result))
-            .catch(err => reject(err));
-    });
-},
- updateQuoteItemWithHistory :async (quoteId, product) => {
-  return new Promise(async (resolve, reject) => {
+  updateQuoteItemWithHistory: async (quoteId, product) => {
+    return new Promise(async (resolve, reject) => {
       try {
-          // Fetch existing quote item
-          const existingItemQuery = 'SELECT * FROM tbl_quote_items WHERE quote_id = $1 AND product_id = $2 AND variant = $3';
-          const result = await db.query(existingItemQuery, [quoteId, product.product_id, product.variant]);
-          const item = result[0];
-          console.log("items  items", item)
+        // Fetch existing quote item only if there are differences in specified fields
+        const existingItemQuery = `
+     SELECT * FROM tbl_quote_items
+     WHERE quote_id = $1 AND product_id = $2 AND variant = $3
+       AND (unit_price != $4 OR package_price != $5 OR tax != $6 OR freight_price != $7 OR total_price != $8 OR comment != $9 OR delivery_period != $10)
+   `;
+        const result = await db.query(existingItemQuery, [
+          quoteId,
+          product.product_id,
+          product.variant,
+          product.unit_price,
+          product.package_price,
+          product.tax,
+          product.freight_price,
+          product.total_price,
+          product.comment,
+          product.delivery_period
+        ]);
+        const item = result[0];
 
-          if (item) {
-              // Move existing item to history
-              const insertHistoryQuery = `INSERT INTO tbl_quote_item_history 
-                  (quote_item_id, rfq_id, product_id, unit_price, package_price, tax, freight_price, total_price, comment, delivery_period, quantity, variant, timestamp)
+        if (item) {
+          // Move existing quote to quote history table
+          const insertHistoryQuery = `INSERT INTO tbl_quote_item_history 
+                  (quote_item_id, rfq_id, product_id, unit_price, package_price, tax, freight_price, total_price,
+                   comment, delivery_period, quantity, variant, timestamp)
                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`;
-              await db.query(insertHistoryQuery, [
-                item.id, item.rfq_id, item.product_id, item.unit_price, item.package_price, 
-                item.tax, item.freight_price, item.total_price, item.comment, item.delivery_period, 
-                item.quantity, item.variant
-              ]);
+          await db.query(insertHistoryQuery, [
+            item.id,
+            item.rfq_id,
+            item.product_id,
+            item.unit_price,
+            item.package_price,
+            item.tax,
+            item.freight_price,
+            item.total_price,
+            item.comment,
+            item.delivery_period,
+            item.quantity,
+            item.variant
+          ]);
 
-              // Update existing item with new data
-              const updateQuery = `UPDATE tbl_quote_items SET 
-                  unit_price = $1, quantity = $2, package_price = $3, tax = $4, freight_price = $5, 
-                  total_price = $6, comment = $7, delivery_period = $8, variant = $9
-                  WHERE id = $10 RETURNING *`;
-              const updatedItem = await db.query(updateQuery, [
-                product.unit_price, item.quantity, product.package_price, product.tax, 
-                product.freight_price, product.total_price, product.comment, product.delivery_period, 
-                item.variant, item.id
-              ]);
-              resolve(updatedItem[0]);
-          } 
-          
+          // Update existing item with new data
+          const updateQuery = `UPDATE tbl_quote_items SET 
+                  unit_price = $1, package_price = $2, tax = $3, freight_price = $4, 
+                  total_price = $5, comment = $6, delivery_period = $7
+                  WHERE id = $8 RETURNING *`;
+          const updatedItem = await db.query(updateQuery, [
+            product.unit_price,
+            product.package_price,
+            product.tax,
+            product.freight_price,
+            product.total_price,
+            product.comment,
+            product.delivery_period,
+            item.id
+          ]);
+
+          // quote updated message
+          resolve({
+            quote: { product_name:updatedItem[0].product_name, product:updatedItem[0].variant },
+            changed:true,
+            message: 'Quote successfully updated with the latest changes.'
+          });
+        } else {
+          // no need to make any changes
+          resolve({
+            quote: { product_name:product.product_name, product:product.variant },
+            changed:false,
+            message: 'No updates made as the quote remains unchanged'
+          });
+        }
       } catch (error) {
-          console.error('Error in updateQuoteItemWithHistory:', error);
-          reject(error);
+        console.error('Error in updateQuoteItemWithHistory:', error);
+        reject(error);
       }
-  });
-}
-
-
-
-
+    });
+  }
 };
 
 export default rfqModel;
