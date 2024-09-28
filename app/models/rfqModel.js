@@ -333,22 +333,28 @@ const rfqModel = {
           ),
             ${
               user_type == 3
-                ? ` 'lowest_quotation', (
-                    SELECT json_build_object(
-                        'quote_id', TQI.quote_id,
-                        'total_price', MIN(TQI.total_price)
+                ? `-- Changes made by Imtiaj 28/09/2024 [Added logic to get the lowest_total from quotes for each unique product with the specified RFQ_id.] 
+                'lowest_quotation', (
+                        SELECT json_build_object(
+                            'quote_id', TQI.quote_id,
+                            'total_price', TQI.total_price
                         )
                         FROM tbl_quote_items TQI
-                    WHERE TQI.product_id = RFQ_P.product_id AND TQI.variant = RFQ_P.variant
+                        WHERE TQI.product_id = RFQ_P.product_id
+                        AND TQI.variant = RFQ_P.variant
+                        AND TQI.rfq_id = RFQ_P.rfq_id  -- Ensure you're getting quotes for the specific RFQ
+                        AND TQI.total_price > 0  -- Exclude total_price of 0 [RFQ Declined Case]
                         AND (
-                            (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != '' AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '7 days'))
+                            (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != '' 
+                            AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '7 days'))
                         OR
-                            (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = '' AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '7 days') <= CURRENT_TIMESTAMP)
+                            (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = '' 
+                            AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '7 days') <= CURRENT_TIMESTAMP)
                         )
-                            GROUP BY TQI.quote_id
-                            ORDER BY MIN(TQI.total_price) ASC
-                            LIMIT 1
-                        ) ,`
+                        ORDER BY TQI.total_price ASC  -- Get the lowest total_price
+                        LIMIT 1  -- Limit to the lowest price for that product and variant
+                    ),
+                    `
                 : ''
             }
           'vendor_details', (
