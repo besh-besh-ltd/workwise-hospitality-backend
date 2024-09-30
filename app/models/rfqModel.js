@@ -659,8 +659,11 @@ LIMIT 1;`;
 
       // changes by Mukul Jatav 30/08/2024,
       // finding finalized_vendor for each product
+      
+      // Changes by Mukul Jatav, 30/09/2024,
+      // Optimizing query to ensure matching product_id and variant across all sections.
       db.query(
-        `SELECT TRP.product_id, TRP.rfq_id,
+        `SELECT TRP.product_id, TRP.variant, TRP.rfq_id,
           ARRAY(
             SELECT json_build_object('name', TP.name,'description', TP.description) FROM tbl_product TP WHERE TP.id = TRP.product_id 
           ) AS "product_details",
@@ -669,13 +672,12 @@ LIMIT 1;`;
                 'global_payment_term', (
                     SELECT json_agg(json_build_object('details', TQ_inner.global_payment_term,'comment', TQ_inner.global_comment))
                     FROM tbl_quotes TQ_inner
-                    LEFT JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
-                    WHERE TQ_inner.rfq_id = ${id} AND TQ_inner.created_by = TU.id
+                     WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
                 )
             )
             FROM tbl_quotes TQ
             LEFT JOIN tbl_users TU ON TU.id = TQ.created_by
-            WHERE TQ.rfq_id = ${id}
+            WHERE TQ.rfq_id = TRP.rfq_id
             ORDER BY TU.id ASC
         ) AS "all_vendors",
           ARRAY(
@@ -684,18 +686,18 @@ LIMIT 1;`;
                 SELECT json_agg(json_build_object('id', TU.id, 'name' , TU.name, 'email', TU.email,'mobile' , TU.mobile,'address' , TU.address,'organization_name' , TU.organization_name)) FROM tbl_users TU WHERE TU.id = TQ.created_by
               ),
               'quote_details', (
-                  SELECT json_agg(json_build_object('product_id', TQI.product_id,'product_name', TQI.product_name, 'unit_price', TQI.unit_price,'total_price', TQI.total_price, 'comment', TQI.comment, 'delivery_period', TQI.delivery_period,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'comment', TQI.comment,'quantity',TQI.quantity,
+                SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name, 'unit_price', TQI.unit_price,'total_price', TQI.total_price, 'comment', TQI.comment, 'delivery_period', TQI.delivery_period,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'quantity',TQI.quantity,
                   'rfq_details', (
-                      SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = ${id}
+                    SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = TRP.rfq_id
                   )    
-                  )) FROM tbl_quote_items TQI WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id AND TQI.product_id = TRP.product_id
+                  )) FROM tbl_quote_items TQI WHERE TQI.quote_id = TQ.id AND TQI.product_id = TRP.product_id AND TQI.variant = TRP.variant
               ),
               'finalized_vendor', (
                   SELECT json_build_object('vendor_id', TQF.vendor_id, 'timestamp', TQF.timestamp) 
                   FROM tbl_quote_finalization TQF 
-                  WHERE TQF.product_id = TRP.product_id AND TQF.variant = TQI.variant AND TQF.rfq_id = ${id}
+                WHERE TQF.product_id = TRP.product_id AND TQF.variant = TRP.variant AND TQF.rfq_id = TRP.rfq_id
               )
-            )  FROM tbl_quotes TQ LEFT JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id WHERE TQ.rfq_id = ${id} AND TQI.product_id = TRP.product_id ORDER BY TQ.created_by ASC
+            )  FROM tbl_quotes TQ LEFT JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id WHERE TQ.rfq_id = TRP.rfq_id AND TQI.product_id = TRP.product_id AND TQI.variant = TRP.variant ORDER BY TQ.created_by ASC
           ) AS "quotations"
           
           FROM tbl_rfq_products TRP WHERE TRP.rfq_id=${id}`
@@ -710,6 +712,10 @@ LIMIT 1;`;
     });
   },
   getQuotesByRfqById2: async (id, user_id) => {
+
+      // Changes by Mukul Jatav, 30/09/2024,
+      // Optimizing query to ensure matching product_id and variant across all sections.
+
     return new Promise(function (resolve, reject) {
       db.query(
         `SELECT  TRF.* ,
@@ -771,7 +777,7 @@ LIMIT 1;`;
               FROM tbl_quote_item_history TH
               WHERE TH.quote_item_id = TQI.id
             )   
-          ) FROM tbl_quote_items TQI WHERE TQI.rfq_id = ${id} AND TQI.product_id = TRF.product_id 
+          ) FROM tbl_quote_items TQI WHERE TQI.rfq_id = ${id} AND TQI.product_id = TRF.product_id AND TQI.variant = TRF.variant
           
         ) AS "quotations"
         FROM tbl_rfq_products TRF WHERE TRF.rfq_id = ${id}`
