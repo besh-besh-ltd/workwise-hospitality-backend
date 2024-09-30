@@ -195,11 +195,11 @@ const schemas = {
     })
   }),
   vendor_review: Joi.object().keys({
-    reviewed_to: Joi.string()
-      .required()
-      .regex(/^[0-9]*$/, 'Please send proper receiver id'),
-
-    rating: Joi.number().min(1).max(5).required(),
+    reviewed_to: Joi.string().required().regex(/^[0-9]*$/, 'Please send proper receiver id'),
+    quality_of_work: Joi.number().min(1).max(5).required().label('Quality of Work'),
+    on_time_delivery: Joi.number().min(1).max(5).required().label('On Time Delivery'),
+    trustworthiness_reliability: Joi.number().min(1).max(5).required().label('Trustworthiness and Reliability'),
+    overall_rating: Joi.number().min(1).max(5).required().label('Overall Rating'),
     description: Joi.string().optional().allow(null).allow('')
   }),
   user_login: Joi.object().keys({

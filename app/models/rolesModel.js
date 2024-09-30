@@ -316,6 +316,10 @@ const rolesModel = {
         `update 
 				tbl_vendor_reviews set 
 				rating = ${reviewObj.rating},
+        quality_of_work = ${reviewObj.quality_of_work}, 
+        on_time_delivery = ${reviewObj.on_time_delivery}, 
+        trustworthiness_reliability = ${reviewObj.trustworthiness_reliability}, 
+        overall_rating = ${reviewObj.overall_rating},
 				description = '${reviewObj.description}'
        	where id=($2)`,
         [reviewObj, review_id]

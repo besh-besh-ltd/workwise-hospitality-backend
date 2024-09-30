@@ -819,7 +819,8 @@ const rfqController = {
         location,
         is_published,
         products,
-        terms
+        terms,
+        rfq_type
       } = req.body;
       if (rfq_id && rfq_id != '' && rfq_id != null) {
         // Updating existing RFQ
@@ -833,6 +834,7 @@ const rfqController = {
           bid_end_date,
           location,
           is_published: 1,
+          rfq_type,
           updated_by: user_id
         };
         const response = await rfqModel.update(
@@ -862,6 +864,7 @@ const rfqController = {
           bid_end_date,
           location,
           is_published,
+          rfq_type,
           rfq_no: nextRFQNumber,
           created_by: user_id,
           updated_by: user_id
@@ -1629,28 +1632,35 @@ const rfqController = {
             `rfq_id=${rfq_id} AND created_by=${user.id} LIMIT 1`
           );
           if (alreadyExists.length > 0) {
-            let quote_rsp = await rfqModel.update(
-              'tbl_quotes',
-              tbl_quotes_data,
-              alreadyExists[0].id
-            );
-            if (quote_rsp.length > 0) {
-              res
-                .status(200)
-                .json({
-                  status: 1,
-                  data: quote_rsp[0]
-                })
-                .end();
-            } else {
-              res
-                .status(400)
-                .json({
-                  status: 3,
-                  message: 'Unable to update quote!'
-                })
-                .end();
-            }
+            res
+            .status(400)
+            .json({
+              status: 3,
+              message: 'Quote is alredy present for this RFQ!'
+            })
+            .end();
+            // let quote_rsp = await rfqModel.update(
+            //   'tbl_quotes',
+            //   tbl_quotes_data,
+            //   alreadyExists[0].id
+            // );
+            // if (quote_rsp.length > 0) {
+            //   res
+            //     .status(200)
+            //     .json({
+            //       status: 1,
+            //       data: quote_rsp[0]
+            //     })
+            //     .end();
+            // } else {
+            //   res
+            //     .status(400)
+            //     .json({
+            //       status: 3,
+            //       message: 'Unable to update quote!'
+            //     })
+            //     .end();
+            // }
 
             return;
           }
@@ -1926,7 +1936,7 @@ const rfqController = {
       if (rfq_activity_id) {
         // check when the last reminder was sent
         const lastSentAt = lastActivity[0].last_reminder_sent;
-        const today = new Date().toISOString().slice(0, 10); 
+        const today = new Date().toISOString().slice(0, 10);
         const lastSentDate = new Date(lastSentAt).toISOString().slice(0, 10);
 
         if (today === lastSentDate)
@@ -3931,8 +3941,88 @@ const rfqController = {
           error: error.message,
         });
     }
+  },
+  updateQuoteItems: async (req, res, next) => {
+    const { quoteId } = req.params;
+    let {
+      // rfq_id,
+      // rfq_no,
+      // status,
+      products,
+      globalPaymentTerms,
+      globalComment
+    } = req.body;
+
+    // Check if all required fields are present in each product
+    if (
+      !products.every((product) => product.product_id && product.unit_price)
+    ) {
+      return res.status(400).json({
+        message: 'Missing required fields in product items.',
+        data: products
+      });
+    }
+
+    try {
+      // Check if the quote exists
+      const quoteExists = await rfqModel.checkIfExists(
+        'tbl_quotes',
+        `id = '${quoteId}'`
+      );
+      if (!quoteExists) {
+        return res.status(404).json({ message: 'Quote not found.' });
+      }
+
+      let paymentTermAndCommentChanges = false;
+
+      // update global comment and payment term
+      if (
+        globalPaymentTerms !== quoteExists[0].global_payment_term ||
+        globalComment !== quoteExists[0].global_comment
+      ) {
+        const tbl_quotes_data = {
+          rfq_id: quoteExists[0].rfq_id,
+          rfq_no: quoteExists[0].rfq_no,
+          status: quoteExists[0].status,
+          created_by: quoteExists[0].created_by,
+          updated_by: quoteExists[0].updated_by,
+          timestamp: Date.now(),
+          is_regret: 0,
+          global_payment_term: globalPaymentTerms,
+          global_comment: globalComment
+        };
+        await rfqModel.update('tbl_quotes', tbl_quotes_data, quoteId);
+
+        paymentTermAndCommentChanges = true;
+      }
+
+      // Process each product in the request
+      const quoteItemChanges = await Promise.all(
+        products.map((product) => {
+          return rfqModel.updateQuoteItemWithHistory(quoteId, product);
+        })
+      );
+
+      const anyQuoteChanged = quoteItemChanges.some((result) => result.changed);
+
+      let status = true;
+      if (!anyQuoteChanged && !paymentTermAndCommentChanges) {
+        status = false;
+      }
+      return res.status(200).json({
+        status:status,
+        message: status? 'Quote items updated successfully':"No updates made as the quotes and global terms remain unchanged",
+        data: {
+          quoteItems: quoteItemChanges,
+          globalTermComment: paymentTermAndCommentChanges?"global comment and payment term is updated": "global comment and payment term is remain unchanged"
+        }
+      });
+    } catch (error) {
+      console.error('Failed to update quote items:', error);
+      return res
+        .status(500)
+        .json({ message: 'Error updating quote items', error: error.message });
+    }
   }
-
-
 };
 export default rfqController;

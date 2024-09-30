@@ -49,32 +49,43 @@ const notificationModel = {
     });
   },
   addVendorReview: async (reviewObj) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `insert into tbl_vendor_reviews(reviewed_by, reviewed_to, rating,  description) 
-        values($1, $2,$3,$4) returning id`,
-        [
-          reviewObj.reviewed_by,
-          reviewObj.reviewed_to,
-          reviewObj.rating,
-          reviewObj.description
-        ]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
+    return new Promise((resolve, reject) => {
+        db.any(
+            `INSERT INTO tbl_vendor_reviews(
+                reviewed_by, 
+                reviewed_to, 
+                rating, 
+                description, 
+                quality_of_work, 
+                on_time_delivery, 
+                trustworthiness_reliability, 
+                overall_rating
+            ) VALUES($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+            [
+                reviewObj.reviewed_by,
+                reviewObj.reviewed_to,
+                reviewObj.rating, 
+                reviewObj.description,
+                reviewObj.quality_of_work,
+                reviewObj.on_time_delivery,
+                reviewObj.trustworthiness_reliability,
+                reviewObj.overall_rating
+            ]
+        )
+        .then(data => resolve(data))
+        .catch(err => reject(new Error(err)));
     });
-  },
+},
   updateVendorReview: async (reviewObj, review_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `update 
 				tbl_vendor_reviews set 
 				rating = ${reviewObj.rating},
+        quality_of_work = ${reviewObj.quality_of_work}, 
+        on_time_delivery = ${reviewObj.on_time_delivery}, 
+        trustworthiness_reliability = ${reviewObj.trustworthiness_reliability}, 
+        overall_rating = ${reviewObj.overall_rating},
 				description = '${reviewObj.description}'
        	where id=($2)`,
         [reviewObj, review_id]
