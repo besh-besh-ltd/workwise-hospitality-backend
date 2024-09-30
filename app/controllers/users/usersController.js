@@ -2125,28 +2125,24 @@ const UsersController = {
   createVendorReview: async (req, res, next) => {
     try {
       let user_id = req.user.id;
-      const { reviewed_to, rating, description } = req.body;
-      let reviewObj = {
-        reviewed_by: user_id,
-        reviewed_to,
-        rating,
-        description
+      const { reviewed_to, description, quality_of_work, on_time_delivery, trustworthiness_reliability, overall_rating } = req.body;
+
+      // Calculate the average rating
+      const rating = (overall_rating + trustworthiness_reliability + on_time_delivery + quality_of_work)  / 4;
+
+        let reviewObj = {
+          reviewed_by: user_id,
+          reviewed_to,
+          rating,
+          description,
+          quality_of_work,
+          on_time_delivery,
+          trustworthiness_reliability,
+          overall_rating
       };
-      // let checkReviewExists = await notificationModel.checkReviewExists(
-      //   user_id,
-      //   reviewed_to
-      // );
 
       let review = await notificationModel.addVendorReview(reviewObj);
-      // if (checkReviewExists.length > 0) {
-      //   await notificationModel.updateVendorReview(
-      //     reviewObj,
-      //     checkReviewExists[0].id
-      //   );
-      //   review = checkReviewExists[0].id;
-      // } else {
-      //   review = await notificationModel.addVendorReview(reviewObj);
-      // }
+
       if (review) {
         let findDynamicNotification =
           await notificationModel.findDynamicNotification(
