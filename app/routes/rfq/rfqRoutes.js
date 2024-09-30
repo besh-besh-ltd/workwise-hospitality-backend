@@ -77,6 +77,13 @@ RfqRoutes.post(
   noLogin.customer_auth,
   rfqController.createQuote
 );
+
+RfqRoutes.put(
+  '/quote/update/:quoteId',
+  noLogin.customer_auth,
+  rfqController.updateQuoteItems
+);
+
 RfqRoutes.get(
   '/get-quotes/:id',
   passportSignIn,

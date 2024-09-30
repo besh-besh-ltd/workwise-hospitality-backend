@@ -260,7 +260,7 @@ const rfqModel = {
   },
   getRfqById: async (id, user_id, user_type) => {
 
-    //  query changed by mukul, 
+    //  query changed by mukul,
     let q = `SELECT RFQ.*,
     ARRAY(
       SELECT json_build_object('id', TQF.id,'product_id',TQF.product_id, 'timestamp', TQF.timestamp,'variant', TQF.variant,
@@ -331,6 +331,32 @@ const rfqModel = {
             FROM tbl_product T_P
             WHERE RFQ_P.product_id = T_P.id
           ),
+            ${
+              user_type == 3
+                ? `-- Changes made by Imtiaj 28/09/2024 [Added logic to get the lowest_total from quotes for each unique product with the specified RFQ_id.] 
+                'lowest_quotation', (
+                        SELECT json_build_object(
+                            'quote_id', TQI.quote_id,
+                            'total_price', TQI.total_price
+                        )
+                        FROM tbl_quote_items TQI
+                        WHERE TQI.product_id = RFQ_P.product_id
+                        AND TQI.variant = RFQ_P.variant
+                        AND TQI.rfq_id = RFQ_P.rfq_id  -- Ensure you're getting quotes for the specific RFQ
+                        AND TQI.total_price > 0  -- Exclude total_price of 0 [RFQ Declined Case]
+                        AND (
+                            (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != '' 
+                            AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
+                        OR
+                            (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = '' 
+                            AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '2 days') <= CURRENT_TIMESTAMP)
+                        )
+                        ORDER BY TQI.total_price ASC  -- Get the lowest total_price
+                        LIMIT 1  -- Limit to the lowest price for that product and variant
+                    ),
+                    `
+                : ''
+            }
           'vendor_details', (
             SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id, 'variant', RFQ_P_V.variant,
                 'user_details', (
@@ -392,7 +418,7 @@ LIMIT 1;`;
     city
   ) => {
 
-    // query changes by mukul jatav 30-08-2024, 
+    // query changes by mukul jatav 30-08-2024,
     // include city and state name in response, left join of tbl_location_states and tbl_location_cities
 
     // Query to fetch the total count of vendors
@@ -405,17 +431,17 @@ LIMIT 1;`;
         JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
         LEFT JOIN tbl_company tc ON tc.user_id = tu.id
         ${approved_by_id != ''
-        ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
-        : ``
-      }
+            ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
+            : ``
+        }
         WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
         ${state != '' ? `AND tu.state = ${state}` : ``}
         ${city != '' ? `AND tu.city = ${city}` : ``}
         ${category_id != '' ? `AND c.id = ${category_id}` : ``}
         ${approved_by_id != ''
-        ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
-        : ``
-      }
+            ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
+            : ``
+        }
       )
       SELECT COUNT(*) AS total FROM vendor_data;
     `;
@@ -438,16 +464,16 @@ LIMIT 1;`;
       LEFT JOIN tbl_location_cities lc ON tu.city = lc.id 
       LEFT JOIN tbl_location_states ls ON tu.state = ls.id 
       ${approved_by_id != ''
-        ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
-        : ``
+          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
+          : ``
       }
       WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
       ${state != '' ? `AND tu.state = ${state}` : ``}
       ${city != '' ? `AND tu.city = ${city}` : ``}
       ${category_id != '' ? `AND c.id = ${category_id}` : ``}
       ${approved_by_id != ''
-        ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
-        : ``
+          ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
+          : ``
       }
     )
     SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 1;
@@ -632,7 +658,7 @@ LIMIT 1;`;
     return new Promise(function (resolve, reject) {
 
       // changes by Mukul Jatav 30/08/2024,
-      // finding finalized_vendor for each product 
+      // finding finalized_vendor for each product
       db.query(
         `SELECT TRP.product_id, TRP.rfq_id,
           ARRAY(
@@ -724,7 +750,27 @@ LIMIT 1;`;
                       SELECT json_build_object('id', TU.id, 'name' , TU.name, 'email', TU.email,'mobile' , TU.mobile,'address' , TU.address,'organization_name' , TU.organization_name) FROM tbl_users TU WHERE TU.id = TQ.created_by
                   )                  
                   ) FROM tbl_quotes TQ WHERE TQ.id = TQI.quote_id AND TQ.rfq_id = ${id}
-                )      
+                ),      
+                'previous_quotes', (
+              SELECT json_agg(json_build_object(
+                'id', TH.id,
+                'quote_item_id', TH.quote_item_id,
+                'rfq_id', TH.rfq_id,
+                'product_id', TH.product_id,
+                'unit_price', TH.unit_price,
+                'package_price', TH.package_price,
+                'tax', TH.tax,
+                'freight_price', TH.freight_price,
+                'total_price', TH.total_price,
+                'comment', TH.comment,
+                'delivery_period', TH.delivery_period,
+                'quantity', TH.quantity,
+                'variant', TH.variant,
+                'timestamp', TH.timestamp
+              ) ORDER BY TH.timestamp DESC)  -- Sorting by timestamp descending
+              FROM tbl_quote_item_history TH
+              WHERE TH.quote_item_id = TQI.id
+            )   
           ) FROM tbl_quote_items TQI WHERE TQI.rfq_id = ${id} AND TQI.product_id = TRF.product_id 
           
         ) AS "quotations"
@@ -824,7 +870,7 @@ LIMIT 1;`;
           RETURNING *;
         `;
         await db.query(insertQuery, [rfq_id, user_id]);
-      }
+      } 
       else {
         // update existing row
         const updateQuery = `
@@ -841,7 +887,6 @@ LIMIT 1;`;
   },
 
   searchProduct: async (search_key, category_id, approved_by_id) => {
-
     // query change by mukul 28-08-2024
     // query change by mukul 08-09-2024, added one more filter for created by 1 or 111 to exclude product for them
     let q = `
@@ -901,8 +946,8 @@ LIMIT 1;`;
     //                   ts_rank_cd(to_tsvector('english', c.title), plainto_tsquery('english', $1)) AS rank
     //   FROM tbl_category c
     //   LEFT JOIN tbl_category pc ON c.parent_id = pc.id -- Join to get parent category details
-    //   WHERE c.status = 1 
-    //     AND c.is_deleted = 0 
+    //   WHERE c.status = 1
+    //     AND c.is_deleted = 0
     //     AND (
     //       to_tsvector('english', c.title) @@ plainto_tsquery('english', $1)
     //       OR similarity(c.title, $1) > 0.1
@@ -1001,7 +1046,7 @@ SELECT id, title FROM category_tree;
   getProductsByCategories: async (categories) => {
 
     // Extract category IDs from the array of objects
-    const categoryIds = categories.map(category => category.id);
+    const categoryIds = categories.map((category)=> category.id);
 
     const q = `
 WITH RankedProducts AS (
@@ -1059,8 +1104,7 @@ WHERE row_num_by_name_category = 1
     state,
     city
   ) => {
-
-    // query changes by mukul jatav30-08-2024, 
+    // query changes by mukul jatav30-08-2024,
     // include city and state name in response, left join of tbl_location_states and tbl_location_cities
     let q = `
 SELECT * FROM (
@@ -1426,8 +1470,87 @@ WHERE created_by = $1 AND status = $2`,
     }
 
     return token; // Return the successfully inserted token
-  }
+  },
+  updateQuoteItemWithHistory: async (quoteId, product) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        // Fetch existing quote item only if there are differences in specified fields
+        const existingItemQuery = `
+     SELECT * FROM tbl_quote_items
+     WHERE quote_id = $1 AND product_id = $2 AND variant = $3
+       AND (unit_price != $4 OR package_price != $5 OR tax != $6 OR freight_price != $7 OR total_price != $8 OR comment != $9 OR delivery_period != $10)
+   `;
+        const result = await db.query(existingItemQuery, [
+          quoteId,
+          product.product_id,
+          product.variant,
+          product.unit_price,
+          product.package_price,
+          product.tax,
+          product.freight_price,
+          product.total_price,
+          product.comment,
+          product.delivery_period
+        ]);
+        const item = result[0];
 
+        if (item) {
+          // Move existing quote to quote history table
+          const insertHistoryQuery = `INSERT INTO tbl_quote_item_history 
+                  (quote_item_id, rfq_id, product_id, unit_price, package_price, tax, freight_price, total_price,
+                   comment, delivery_period, quantity, variant, timestamp)
+                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`;
+          await db.query(insertHistoryQuery, [
+            item.id,
+            item.rfq_id,
+            item.product_id,
+            item.unit_price,
+            item.package_price,
+            item.tax,
+            item.freight_price,
+            item.total_price,
+            item.comment,
+            item.delivery_period,
+            item.quantity,
+            item.variant
+          ]);
+
+          // Update existing item with new data
+          const updateQuery = `UPDATE tbl_quote_items SET 
+                  unit_price = $1, package_price = $2, tax = $3, freight_price = $4, 
+                  total_price = $5, comment = $6, delivery_period = $7
+                  WHERE id = $8 RETURNING *`;
+          const updatedItem = await db.query(updateQuery, [
+            product.unit_price,
+            product.package_price,
+            product.tax,
+            product.freight_price,
+            product.total_price,
+            product.comment,
+            product.delivery_period,
+            item.id
+          ]);
+
+          // quote updated message
+          resolve({
+            quote: { product_name:updatedItem[0].product_name, product:updatedItem[0].variant },
+            changed:true,
+            message: 'Quote successfully updated with the latest changes.'
+          });
+        } else {
+          // no need to make any changes
+          resolve({
+            quote: { product_name:product.product_name, product:product.variant },
+            changed:false,
+            message: 'No updates made as the quote remains unchanged'
+          });
+        }
+      } catch (error) {
+        console.error('Error in updateQuoteItemWithHistory:', error);
+        reject(error);
+      }
+    });
+  }
 };
 
 export default rfqModel;
