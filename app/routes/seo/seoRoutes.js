@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import seoController from '../../controllers/admin/seoController.js';
+import seoController from '../../controllers/seo/seoController.js';
 
 const seoRoutes = Router();
 
