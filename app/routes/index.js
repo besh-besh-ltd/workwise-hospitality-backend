@@ -9,6 +9,7 @@ import Admin from './admin/index.js';
 import Rfq from './rfq/rfqRoutes.js';
 import GeneralRoutes from './general.js';
 import portalTourRoutes from './portalTour/portalTourRoutes.js';
+import seoRoutes from './seo/seoRoutes.js';
 
 const v1 = Router();
 
@@ -20,5 +21,6 @@ v1.use('/products', Product);
 v1.use('/rfq', Rfq);
 v1.use('/general', GeneralRoutes);
 v1.use('/portal-tour', portalTourRoutes);
+v1.use('/seo', seoRoutes);
 
 export default v1;
