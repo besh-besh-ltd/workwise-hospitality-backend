@@ -11,6 +11,7 @@ import cmsRoutes from './cmsRoutes.js';
 import subscriptionRoutes from './subscriptionRoutes.js';
 import couponRoutes from './couponRoutes.js';
 import rolesRoutes from './rolesRoutes.js';
+import seoRoutes from './seoRoutes.js';
 // import userRoutes from './userRoutes.js';
 
 // import userRoutes from './userRoutes.js';
@@ -28,6 +29,7 @@ admin.use('/product', productRoutes);
 admin.use('/subscription', subscriptionRoutes);
 admin.use('/coupon', couponRoutes);
 admin.use('/roles', rolesRoutes);
+admin.use('/seo', seoRoutes);
 
 // admin.use('/user', userRoutes);
 
