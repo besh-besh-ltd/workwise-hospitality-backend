@@ -255,10 +255,13 @@ const config = {
     host: "smtp-relay.brevo.com",
     port: 587,
     auth: {
-      user: "prasun@talash.net",
-      pass: "O815pjTIbYX670zE",
-    },
+      // user: "prasun@talash.net",
+      // pass: "O815pjTIbYX670zE",
+      user: "b2bportal2023@gmail.com",
+      pass: "xsmtpsib-3b42f9886e4f809b920bfec2a77b5daa71c65fdcdf3e71d0c247d25261f4446e-J7znQEFTHW45M9Sw",
+    }
   },
+
   developers: [
     "Sourav Maity <sourav.maity@indusnet.co.in>",
     "Abhisek Pal <abhisek.pal@indusnet.co.in>",
