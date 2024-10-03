@@ -237,7 +237,13 @@ const rfqModel = {
                 FROM tbl_rfq_products RFQ_P
                 JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.product_id = RFQ_P.product_id
                 WHERE RFQ.id = RFQ_P.rfq_id AND trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.product_id = RFQ_P.product_id
-            ) AS "products"
+            ) AS "products" ,
+           CASE WHEN (SELECT U.user_type FROM tbl_users U WHERE U.id = ${user_id}) = 3 THEN (
+                EXISTS (
+                    SELECT 1 FROM tbl_quotes TQ
+                    WHERE TQ.rfq_id = RFQ.id AND TQ.rfq_no = RFQ.rfq_no AND TQ.created_by = ${user_id}
+                )
+            ) ELSE false END AS "quote_sent"
         FROM tbl_rfq RFQ
         WHERE EXISTS (
             SELECT 1
