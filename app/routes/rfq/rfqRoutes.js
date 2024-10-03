@@ -132,6 +132,13 @@ RfqRoutes.post(
   noLogin.customer_auth,
   rfqController.searchVendor
 );
+
+RfqRoutes.post(
+  '/product-price-stats',
+  noLogin.customer_auth,
+  rfqController.productPriceStats
+);
+
 RfqRoutes.get(
   '/get-past-rfqs/:id',
   passportSignIn,

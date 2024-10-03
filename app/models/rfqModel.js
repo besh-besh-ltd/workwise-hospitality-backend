@@ -1563,7 +1563,82 @@ WHERE created_by = $1 AND status = $2`,
         reject(error);
       }
     });
+  },
+  productPriceStats: async (product_name, user_id) => {
+    return new Promise(function (resolve, reject) {
+      db.query(`
+        WITH ProductPriceStats AS (
+           SELECT 
+             MIN(qi.unit_price) AS min_price,
+             MAX(qi.unit_price) AS max_price,
+             AVG(qi.unit_price) AS avg_price
+           FROM tbl_product AS p
+           JOIN tbl_quote_items AS qi ON p.id = qi.product_id
+           WHERE p.name = $1
+         ), RFQDetails AS (
+           SELECT
+             r.id AS rfq_id
+           FROM tbl_rfq AS r
+           WHERE r.created_by = $2
+         ), QuoteDetails AS (
+           SELECT
+             qi.product_id,
+             qi.unit_price,
+             qi.quantity,
+             q.timestamp AS last_quote_timestamp
+           FROM tbl_quote_items AS qi
+           JOIN RFQDetails ON qi.rfq_id = RFQDetails.rfq_id
+           JOIN tbl_product AS p ON p.id = qi.product_id
+           JOIN tbl_quotes AS q ON q.rfq_id = qi.rfq_id
+           WHERE p.name = $1
+           ORDER BY q.timestamp DESC
+           LIMIT 1
+         ), PriceHistory AS (
+           SELECT
+             qi.unit_price,
+             CAST(q.timestamp AS BIGINT) AS numeric_timestamp,
+             EXTRACT(YEAR FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)) AS year,
+             EXTRACT(MONTH FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)) AS month
+           FROM tbl_quote_items AS qi
+           JOIN tbl_product AS p ON p.id = qi.product_id
+           JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
+           WHERE p.name = $1 AND CAST(q.timestamp AS BIGINT) >= EXTRACT(EPOCH FROM NOW() - INTERVAL '12 months') * 1000
+         ), MonthlyPriceStats AS (
+           SELECT
+             MIN(unit_price) AS min_price,
+             AVG(unit_price) AS avg_price,
+             MAX(unit_price) AS max_price,
+             year,
+             month
+           FROM PriceHistory
+           GROUP BY year, month
+           ORDER BY year, month
+         )
+         SELECT 
+           pps.min_price,
+           pps.max_price,
+           pps.avg_price,
+           qd.product_id,
+           qd.unit_price AS last_purchase_price,
+           qd.quantity AS last_purchase_quantity,
+           qd.last_quote_timestamp AS last_purchase_date,
+           JSON_AGG(JSON_BUILD_OBJECT('min', mp.min_price, 'avg', mp.avg_price, 'max', mp.max_price, 'month', mp.month, 'year', mp.year)) AS monthly_price_stats
+         FROM ProductPriceStats AS pps
+         CROSS JOIN QuoteDetails AS qd
+         CROSS JOIN MonthlyPriceStats AS mp
+         GROUP BY pps.min_price, pps.max_price, pps.avg_price, qd.product_id, qd.unit_price, qd.quantity, qd.last_quote_timestamp`,
+        [product_name, user_id]
+      )
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
   }
+  
 };
 
 export default rfqModel;
