@@ -434,7 +434,7 @@ LIMIT 1;`;
             ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
             : ``
         }
-        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
+        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name = '${search_key}'
         ${state != '' ? `AND tu.state = ${state}` : ``}
         ${city != '' ? `AND tu.city = ${city}` : ``}
         ${category_id != '' ? `AND c.id = ${category_id}` : ``}
@@ -467,7 +467,7 @@ LIMIT 1;`;
           ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
           : ``
       }
-      WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name ILIKE '%${search_key}%'
+      WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name = '${search_key}'
       ${state != '' ? `AND tu.state = ${state}` : ``}
       ${city != '' ? `AND tu.city = ${city}` : ``}
       ${category_id != '' ? `AND c.id = ${category_id}` : ``}
@@ -899,6 +899,7 @@ LIMIT 1;`;
       SELECT DISTINCT p.id AS product_id,
                       p.name AS product_name,
                       p.description,
+                      p.slug AS slug,
                       c.title AS category_name,
                       c.id AS category_id,
                       c.parent_id AS parent_category_id,
@@ -1134,7 +1135,7 @@ SELECT * FROM (
     LEFT JOIN tbl_location_states ls ON tu.state = ls.id
     ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
     WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
-      AND p.name ILIKE '%${search_key}%' AND tu.email IS NOT NULL
+      AND p.name = '${search_key}' AND tu.email IS NOT NULL
       ${state != '' ? `AND tu.state = ${state}` : ``}
       ${city != '' ? `AND tu.city = ${city}` : ``}
       ${category_id != '' ? `AND c.id = ${category_id}` : ``}
