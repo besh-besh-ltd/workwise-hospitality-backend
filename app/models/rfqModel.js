@@ -245,7 +245,7 @@ const rfqModel = {
              ) THEN
              CASE 
              WHEN (SELECT TQ.is_regret FROM tbl_quotes TQ 
-                  WHERE TQ.rfq_id = RFQ.id AND TQ.rfq_no = RFQ.rfq_no AND TQ.created_by = ${user_id} LIMIT 1) = 1 THEN 'regret'
+                  WHERE TQ.rfq_id = RFQ.id AND TQ.rfq_no = RFQ.rfq_no AND TQ.created_by = ${user_id} LIMIT 1) = 1 THEN 'rejected'
              ELSE 'sent'
             END
             ELSE 'pending'
