@@ -355,13 +355,14 @@ const rfqModel = {
                         WHERE TQI.product_id = RFQ_P.product_id
                         AND TQI.variant = RFQ_P.variant
                         AND TQI.rfq_id = RFQ_P.rfq_id  -- Ensure you're getting quotes for the specific RFQ
-                        AND TQI.total_price > 0  -- Exclude total_price of 0 [RFQ Declined Case]
+                        AND TQI.total_price > 0 
+                        AND RFQ.reverse_auction = 1
                         AND (
                             (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != '' 
                             AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
                         OR
                             (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = '' 
-                            AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '2 days') <= CURRENT_TIMESTAMP)
+                            AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '1 days') <= CURRENT_TIMESTAMP)
                         )
                         ORDER BY TQI.total_price ASC  -- Get the lowest total_price
                         LIMIT 1  -- Limit to the lowest price for that product and variant
