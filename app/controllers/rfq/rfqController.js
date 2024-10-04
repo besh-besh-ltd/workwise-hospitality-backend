@@ -941,39 +941,39 @@ const rfqController = {
         .end();
     }
   },
-  listAll: async (req, res, next) => {
-    try {
-      let page, limit, offset;
-      if (req.query.page && req.query.page > 0) {
-        page = req.query.page;
-        limit = req.query.limit || Config.globalAdminLimit;
-        offset = (page - 1) * limit;
-      } else {
-        limit = Config.globalAdminLimit;
-        offset = 0;
-      }
+  // listAll: async (req, res, next) => {
+  //   try {
+  //     let page, limit, offset;
+  //     if (req.query.page && req.query.page > 0) {
+  //       page = req.query.page;
+  //       limit = req.query.limit || Config.globalAdminLimit;
+  //       offset = (page - 1) * limit;
+  //     } else {
+  //       limit = Config.globalAdminLimit;
+  //       offset = 0;
+  //     }
 
-      const listRfq = await rfqModel.getAll(limit, offset);
-      let count = await rfqModel.getRfqCount();
-      res
-        .status(200)
-        .json({
-          status: 1,
-          data: listRfq,
-          total_items: count.length
-        })
-        .end();
-    } catch (error) {
-      logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
+  //     const listRfq = await rfqModel.getAll(limit, offset);
+  //     let count = await rfqModel.getRfqCount();
+  //     res
+  //       .status(200)
+  //       .json({
+  //         status: 1,
+  //         data: listRfq,
+  //         total_items: count.length
+  //       })
+  //       .end();
+  //   } catch (error) {
+  //     logError(error);
+  //     res
+  //       .status(400)
+  //       .json({
+  //         status: 3,
+  //         message: Config.errorText.value
+  //       })
+  //       .end();
+  //   }
+  // },
   getTerms: async (req, res, next) => {
     try {
       const result = await rfqModel.getAllTerms();
@@ -1077,12 +1077,14 @@ const rfqController = {
       }
 
       const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id);
+      const  totalRFQ = await rfqModel.getVendorRfqCount(user_id);
 
       res
         .status(200)
         .json({
           status: 1,
-          data: listRfq
+          data: listRfq,
+          totalRFQ
         })
         .end();
     } catch (error) {

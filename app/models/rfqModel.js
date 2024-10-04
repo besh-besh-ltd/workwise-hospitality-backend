@@ -1643,6 +1643,23 @@ WHERE created_by = $1 AND status = $2`,
         reject(error);
       });
     });
+  },
+  getVendorRfqCount: async(user_id)=>{
+    return new Promise((resolve, reject) => {
+      db.one(
+        `SELECT COUNT(DISTINCT rfq_id)
+         FROM tbl_rfq_product_vendors
+         WHERE user_id = $1`, // Matching user_id in tbl_rfq_product_vendors
+        [user_id]
+      )
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    })
   }
   
 };
