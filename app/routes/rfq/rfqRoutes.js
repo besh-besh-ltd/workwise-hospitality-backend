@@ -135,7 +135,8 @@ RfqRoutes.post(
 
 RfqRoutes.post(
   '/product-price-stats',
-  noLogin.customer_auth,
+  passportSignIn,
+  acl([2]),
   rfqController.productPriceStats
 );
 
