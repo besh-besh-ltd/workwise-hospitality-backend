@@ -4023,6 +4023,34 @@ const rfqController = {
         .status(500)
         .json({ message: 'Error updating quote items', error: error.message });
     }
+  },
+  productPriceStats: async (req, res, next) => {
+    try {
+
+      const {search_key} = req.body
+      const user_id = req.user.id;
+
+      // find product price stats like, min, avg, max
+      const priceHistory = await rfqModel.productPriceStats(search_key, user_id)
+
+      res
+      .status(200)
+      .json({
+        status: 2,
+        data: priceHistory
+      })
+      .end();
+      
+    } catch (error) {
+      logError(error);
+      res
+        .status(500)
+        .json({
+          success: false,
+          message: 'error in finding product price stats',
+          error: error.message,
+        });
+    }
   }
 };
 export default rfqController;
