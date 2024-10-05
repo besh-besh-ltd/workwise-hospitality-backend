@@ -35,7 +35,13 @@ projectRoutes.get(
 )
 
 // route for updating the existing project while turing of the status off 
-
+projectRoutes.put(
+    '/update/:project_id',
+    passportSignIn,
+    validateBody(projectSchemas.update),
+    validateParam(projectSchemas.project_id), 
+    projectController.update
+)
 
 
 

@@ -9,7 +9,7 @@ const validateDbBody = {
             const user_id = req.user.id;
             let {name} = req.body;
             if(name){
-                const projectNameExist = await projectModel.project_exist(name,user_id);
+                const projectNameExist = await projectModel.projectExist(name,user_id);
                 if(projectNameExist.length > 0) {
                     err++;
                     errors.project_name = 'Project Name already Exist';

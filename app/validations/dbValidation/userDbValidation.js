@@ -5,6 +5,8 @@ import subscriptionModel from '../../models/subscriptionModel.js';
 import couponModel from '../../models/couponModel.js';
 import { encode } from 'html-entities';
 import dateFormat from 'dateformat';
+import rfqModel from '../../models/rfqModel.js';
+
 
 const validateDbBody = {
   user_exists: async (req, res, next) => {
@@ -723,6 +725,43 @@ const validateDbBody = {
         if (userAddressIdExists.length < 1) {
           err++;
           errors.mobile = 'Address ID not exists';
+        }
+      }
+
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+      } else {
+        next();
+      }
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  rfq_project_exist: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+      let { project_id } = req.body;
+      const user_id = req.user.id;
+
+      if (project_id) {
+        const rfqProjectExists = await rfqModel.rfq_project_exist(project_id,user_id);
+        if (rfqProjectExists.length < 1) {
+          err++;
+          errors.unauthorized_project = 'Project does not exist';
         }
       }
 

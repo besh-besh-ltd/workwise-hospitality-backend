@@ -51,7 +51,8 @@ export const rfqSchemas = {
     products: Joi.array().items(productItems).min(1).required(),
     // products: Joi.array().optional().allow('').allow(null),
     vendors: Joi.array().items(vendorItems).allow(null).allow(''),
-    terms: Joi.array().items(termsItems).allow(null).allow('')
+    terms: Joi.array().items(termsItems).allow(null).allow(''),
+    project_id: Joi.number().integer().required(),
   }),
   update: Joi.object().keys({
     rfq_id: Joi.number().required(),

@@ -820,7 +820,8 @@ const rfqController = {
         is_published,
         products,
         terms,
-        rfq_type
+        rfq_type,
+        project_id
       } = req.body;
       if (rfq_id && rfq_id != '' && rfq_id != null) {
         // Updating existing RFQ
@@ -835,7 +836,8 @@ const rfqController = {
           location,
           is_published: 1,
           rfq_type,
-          updated_by: user_id
+          updated_by: user_id,
+          project_id
         };
         const response = await rfqModel.update(
           'tbl_rfq',
@@ -867,7 +869,8 @@ const rfqController = {
           rfq_type,
           rfq_no: nextRFQNumber,
           created_by: user_id,
-          updated_by: user_id
+          updated_by: user_id,
+          project_id
         };
 
         const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
@@ -897,7 +900,6 @@ const rfqController = {
             products.map((item) => insertProduct(item, created_rfq_id))
           )
             .then(async (results) => {
-              console.log('Data inserted successfully:', results);
               response[0].otherDetails = results;
               response[0].terms = rfqtermsRsp;
 
@@ -3668,6 +3670,7 @@ const rfqController = {
       const company_name = user.organization_name || user.name;
       const location = req.body.delivery_location || "";
       const bid_end_date = req.body.bid_end_date || "";
+      const project_id = req.body.project_id;
 
       // convert excel to json
       const workbook = xlsx.readFile(file.path);
@@ -3848,7 +3851,8 @@ const rfqController = {
         is_published: finalObject.is_published,
         rfq_no: nextRFQNumber,
         created_by: user.id,
-        updated_by: user.id
+        updated_by: user.id,
+        project_id:project_id
       };
 
       // check if all row are failed in our validation

@@ -1643,8 +1643,24 @@ WHERE created_by = $1 AND status = $2`,
         reject(error);
       });
     });
+  },
+  rfq_project_exist: async (project_id,user_id) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT 1 
+        FROM tbl_rfq 
+        WHERE project_id = ${project_id} 
+        AND created_by = ${user_id};`
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
   }
-  
 };
 
 export default rfqModel;
