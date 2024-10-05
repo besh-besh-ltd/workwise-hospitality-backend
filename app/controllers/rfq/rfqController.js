@@ -4036,6 +4036,17 @@ const rfqController = {
     }
   },
   productPriceStats: async (req, res, next) => {
+
+    if (!req.is_verified) {
+      res
+      .status(400)
+      .json({
+        success: false,
+        message: 'you are not login',
+      })
+      .end();
+    }
+
     try {
 
       const {search_key} = req.body
