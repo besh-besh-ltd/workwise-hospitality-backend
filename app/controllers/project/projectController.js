@@ -22,8 +22,6 @@ const projectController = {
                 ended_at,
             } = req.body;
 
-            console.log(req.body+"...............................................");
-
             const user_id = req.user.id;
 
             const tbl_project_data = {
@@ -52,6 +50,84 @@ const projectController = {
             })
             .end();
           }
-    }
+    },
+    getProjectById: async(req,res,next) => {
+      if (!req.user.subscription_plan_id) {
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: 'You need to purchase subscription to create RFQ'
+          })
+          .end();
+        return;
+      }
+      try {
+        let project_id = req.params.project_id;
+        const user_id = req.user.id;
+          let page, limit, offset;
+        if (req.body.page && req.body.page > 0) {
+          page = req.body.page;
+          limit = req.body.limit || Config.globalAdminLimit;
+          offset = (page - 1) * limit;
+        } else {
+          limit = Config.globalAdminLimit;
+          offset = 0;
+        }
+        let projectDetails = await projectModel.getProjectById(project_id,user_id,limit,offset);
+        res
+        .status(200)
+        .json({
+          status: true,
+          data:projectDetails
+        })
+        .end();
+
+      } catch (error) {
+        logError(error);
+          res
+            .status(400)
+            .json({
+              status: false,
+              message: Config.errorText.value
+            })
+            .end();
+          }
+    },
+    getAllProjects: async (req, res, next) => {
+      if (!req.user.subscription_plan_id) {
+          res
+            .status(400)
+            .json({
+              status: 3,
+              message: 'You need to purchase subscription to create RFQ'
+            })
+            .end();
+          return;
+        }
+      try {
+
+          const user_id = req.user.id;
+          
+          let projects = await projectModel.getAllProjects(user_id);
+          res
+          .status(200)
+          .json({
+            status: true,
+            data:projects
+          })
+
+      } catch (err) {
+        logError(err);
+        res
+          .status(400)
+          .json({
+            status: false,
+            message: Config.errorText.value
+          })
+          .end();
+        }
+  },
+    
 }
 export default projectController;

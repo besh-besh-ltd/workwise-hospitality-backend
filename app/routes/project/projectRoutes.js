@@ -1,6 +1,6 @@
 import {Router} from 'express';
 import projectController from '../../controllers/project/projectController.js';
-import { validateBody } from '../../validations/paramValidation/userValidation.js';
+import { validateBody,validateParam } from '../../validations/paramValidation/userValidation.js';
 import { validateDbBody } from '../../validations/dbValidation/projectDbValidation.js';
 import passport from '../../middleware/passport.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
@@ -18,5 +18,26 @@ projectRoutes.post(
     validateDbBody.project_exist,
     projectController.create
 )
+
+// route for getting the project details using project id
+projectRoutes.post(
+    '/:project_id',
+    passportSignIn,
+    validateParam(projectSchemas.project_id),
+    projectController.getProjectById
+)
+
+// route for getting all Projects
+projectRoutes.get(
+    '/',
+    passportSignIn,
+    projectController.getAllProjects
+)
+
+// route for updating the existing project while turing of the status off 
+
+
+
+
 
 export default projectRoutes;
