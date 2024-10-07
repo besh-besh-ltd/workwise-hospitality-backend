@@ -526,57 +526,83 @@ LIMIT 1;`;
         });
     });
   },
-  getAllBuyerRfq: async (limit, offset, user_id) => {
+  getAllBuyerRfq: async (limit, offset, user_id, project_id,sort) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT RFQ.*,
-            ARRAY(
-              SELECT json_build_object('id', TQ.id ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id      
-            ) AS "quotes",            
-            ARRAY(
-              SELECT json_build_object( 'total_vendors', COUNT(DISTINCT TRPV.user_id), 'quote_received', 
-                (SELECT COUNT(DISTINCT TQ.created_by)
-                FROM tbl_quotes TQ
-                WHERE TQ.rfq_id = RFQ.id ) ) AS "vendors"
-            FROM tbl_rfq_product_vendors TRPV
-            WHERE TRPV.rfq_id = RFQ.id
-            GROUP BY  TRPV.rfq_id ) AS "vendors",
-            ARRAY(
-                SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_id,
-                    'product_specs', (
-                        SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'product_id', RFQ_P_SPEC.product_id, 'rfq_id', RFQ_P_SPEC.rfq_id))
-                        FROM tbl_rfq_products_specs RFQ_P_SPEC
-                        WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id AND RFQ_P.variant = RFQ_P_SPEC.variant
-                    ),
-                    'product_details', (
-                      SELECT json_agg(json_build_object('id', T_P.id,'name', T_P.name, 'description', T_P.description, 'manufacturer', T_P.manufacturer, 'availability', T_P.availability, 'description', T_P.description ))
-                      FROM tbl_product T_P
-                      WHERE RFQ_P.product_id = T_P.id
-                    ),
-                    'vendor_details', (
-                      SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id,
-                      'user_details', (
+        `SELECT 
+    RFQ.*, 
+    P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
+    ARRAY(
+        SELECT json_build_object('id', TQ.id) 
+        FROM tbl_quotes TQ 
+        WHERE TQ.rfq_id = RFQ.id
+    ) AS "quotes",            
+    ARRAY(
+        SELECT json_build_object(
+            'total_vendors', COUNT(DISTINCT TRPV.user_id), 
+            'quote_received', 
+            (SELECT COUNT(DISTINCT TQ.created_by)
+             FROM tbl_quotes TQ
+             WHERE TQ.rfq_id = RFQ.id)
+        ) AS "vendors"
+        FROM tbl_rfq_product_vendors TRPV
+        WHERE TRPV.rfq_id = RFQ.id
+        GROUP BY TRPV.rfq_id
+    ) AS "vendors",
+    ARRAY(
+        SELECT json_build_object(
+            'id', RFQ_P.id, 
+            'product_id', RFQ_P.product_id,
+            'product_specs', (
+                SELECT json_agg(json_build_object(
+                    'title', RFQ_P_SPEC.title, 
+                    'value', RFQ_P_SPEC.value, 
+                    'id', RFQ_P_SPEC.id, 
+                    'product_id', RFQ_P_SPEC.product_id, 
+                    'rfq_id', RFQ_P_SPEC.rfq_id))
+                FROM tbl_rfq_products_specs RFQ_P_SPEC
+                WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id 
+                  AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
+                  AND RFQ_P.variant = RFQ_P_SPEC.variant
+            ),
+            'product_details', (
+                SELECT json_agg(json_build_object(
+                    'id', T_P.id,
+                    'name', T_P.name, 
+                    'description', T_P.description, 
+                    'manufacturer', T_P.manufacturer, 
+                    'availability', T_P.availability))
+                FROM tbl_product T_P
+                WHERE RFQ_P.product_id = T_P.id
+            ),
+            'vendor_details', (
+                SELECT json_agg(json_build_object(
+                    'id', RFQ_P_V.id, 
+                    'user_id', RFQ_P_V.user_id,
+                    'user_details', (
                         SELECT json_build_object(
                             'user_id', U.id,
                             'name', U.name,
-                            'email', U.email
-                        )
+                            'email', U.email)
                         FROM tbl_users U
                         WHERE RFQ_P_V.user_id = U.id
-                    )
-                      ))
-                      FROM tbl_rfq_product_vendors RFQ_P_V
-                      WHERE RFQ_P.product_id = RFQ_P_V.product_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id AND RFQ_P.variant = RFQ_P_V.variant
-                  )
-                )
-                FROM tbl_rfq_products RFQ_P
-                WHERE RFQ.id = RFQ_P.rfq_id
-            ) AS "products"
-            
-            FROM tbl_rfq RFQ WHERE created_by = ${user_id}
-            ORDER BY RFQ.id DESC
-            LIMIT ${limit} OFFSET $1;`,
-        [offset]
+                    )))
+                FROM tbl_rfq_product_vendors RFQ_P_V
+                WHERE RFQ_P.product_id = RFQ_P_V.product_id 
+                  AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
+                  AND RFQ_P.variant = RFQ_P_V.variant
+            )
+        )
+        FROM tbl_rfq_products RFQ_P
+        WHERE RFQ.id = RFQ_P.rfq_id
+    ) AS "products"
+FROM tbl_rfq RFQ
+JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
+WHERE RFQ.created_by = ${user_id}
+AND (RFQ.project_id = $1 OR $1 IS NULL) 
+ORDER BY RFQ.timestamp ${sort}
+LIMIT ${limit} OFFSET $2;`,
+        [project_id,offset]
       )
         .then(function (data) {
           resolve(data);
