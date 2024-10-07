@@ -1660,7 +1660,7 @@ WHERE created_by = $1 AND status = $2`,
           let error = new Error(err);
           reject(error);
         });
-    });
+    })
   },
   getVendorRfqCount: async(user_id)=>{
     return new Promise((resolve, reject) => {
