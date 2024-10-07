@@ -1511,18 +1511,21 @@ const rfqController = {
         offset = 0;
       }
 
-      let sort = req.body.sort;
-      if(!sort || (sort!='ASC' && sort!='DESC')){
-        sort = 'DESC';
+      let {project_id,sort,reverse_auction,rfq_type} = req.body;
+      console.log("mukul ", reverse_auction)
+      if(project_id==-1){
+        project_id=null;
+      }
+      if(rfq_type==''){
+        rfq_type=null;
+      }
+      if(reverse_auction=='-1'){
+        reverse_auction=null;
       }
 
-      let {project_id} = req.body;
 
-      if(project_id==="" || project_id===null || typeof project_id != 'number'){
-        project_id = null;
-      }
+      const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort,reverse_auction,rfq_type);
 
-      const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort);
       let count = await rfqModel.getBuyerRfqCount(user_id);
       res
         .status(200)
