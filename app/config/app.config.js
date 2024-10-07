@@ -259,7 +259,6 @@ const config = {
       pass: "O815pjTIbYX670zE",
     },
   },
-
   developers: [
     "Sourav Maity <sourav.maity@indusnet.co.in>",
     "Abhisek Pal <abhisek.pal@indusnet.co.in>",
