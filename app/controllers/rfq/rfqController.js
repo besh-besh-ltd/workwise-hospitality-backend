@@ -1511,7 +1511,18 @@ const rfqController = {
         offset = 0;
       }
 
-      const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id);
+      let sort = req.body.sort;
+      if(!sort || (sort!='ASC' && sort!='DESC')){
+        sort = 'DESC';
+      }
+
+      let {project_id} = req.body;
+
+      if(project_id==="" || project_id===null || typeof project_id != 'number'){
+        project_id = null;
+      }
+
+      const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort);
       let count = await rfqModel.getBuyerRfqCount(user_id);
       res
         .status(200)
