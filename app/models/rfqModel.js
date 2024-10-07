@@ -245,7 +245,7 @@ const rfqModel = {
              ) THEN
              CASE 
              WHEN (SELECT TQ.is_regret FROM tbl_quotes TQ 
-                  WHERE TQ.rfq_id = RFQ.id AND TQ.rfq_no = RFQ.rfq_no AND TQ.created_by = ${user_id} LIMIT 1) = 1 THEN 'regret'
+                  WHERE TQ.rfq_id = RFQ.id AND TQ.rfq_no = RFQ.rfq_no AND TQ.created_by = ${user_id} LIMIT 1) = 1 THEN 'rejected'
              ELSE 'sent'
             END
             ELSE 'pending'
@@ -355,13 +355,14 @@ const rfqModel = {
                         WHERE TQI.product_id = RFQ_P.product_id
                         AND TQI.variant = RFQ_P.variant
                         AND TQI.rfq_id = RFQ_P.rfq_id  -- Ensure you're getting quotes for the specific RFQ
-                        AND TQI.total_price > 0  -- Exclude total_price of 0 [RFQ Declined Case]
+                        AND TQI.total_price > 0 
+                        AND RFQ.reverse_auction = 1
                         AND (
                             (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != '' 
                             AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
                         OR
                             (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = '' 
-                            AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '2 days') <= CURRENT_TIMESTAMP)
+                            AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '1 days') <= CURRENT_TIMESTAMP)
                         )
                         ORDER BY TQI.total_price ASC  -- Get the lowest total_price
                         LIMIT 1  -- Limit to the lowest price for that product and variant
@@ -1660,6 +1661,23 @@ WHERE created_by = $1 AND status = $2`,
           reject(error);
         });
     });
+  },
+  getVendorRfqCount: async(user_id)=>{
+    return new Promise((resolve, reject) => {
+      db.one(
+        `SELECT COUNT(DISTINCT rfq_id)
+         FROM tbl_rfq_product_vendors
+         WHERE user_id = $1`, // Matching user_id in tbl_rfq_product_vendors
+        [user_id]
+      )
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    })
   }
 };
 

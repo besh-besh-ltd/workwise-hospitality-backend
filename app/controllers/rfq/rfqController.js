@@ -821,7 +821,8 @@ const rfqController = {
         products,
         terms,
         rfq_type,
-        project_id
+        project_id,
+        reverse_auction
       } = req.body;
       if (rfq_id && rfq_id != '' && rfq_id != null) {
         // Updating existing RFQ
@@ -837,7 +838,8 @@ const rfqController = {
           is_published: 1,
           rfq_type,
           updated_by: user_id,
-          project_id
+          project_id,
+          reverse_auction
         };
         const response = await rfqModel.update(
           'tbl_rfq',
@@ -870,7 +872,8 @@ const rfqController = {
           rfq_no: nextRFQNumber,
           created_by: user_id,
           updated_by: user_id,
-          project_id
+          project_id,
+          reverse_auction
         };
 
         const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
@@ -940,39 +943,39 @@ const rfqController = {
         .end();
     }
   },
-  listAll: async (req, res, next) => {
-    try {
-      let page, limit, offset;
-      if (req.query.page && req.query.page > 0) {
-        page = req.query.page;
-        limit = req.query.limit || Config.globalAdminLimit;
-        offset = (page - 1) * limit;
-      } else {
-        limit = Config.globalAdminLimit;
-        offset = 0;
-      }
+  // listAll: async (req, res, next) => {
+  //   try {
+  //     let page, limit, offset;
+  //     if (req.query.page && req.query.page > 0) {
+  //       page = req.query.page;
+  //       limit = req.query.limit || Config.globalAdminLimit;
+  //       offset = (page - 1) * limit;
+  //     } else {
+  //       limit = Config.globalAdminLimit;
+  //       offset = 0;
+  //     }
 
-      const listRfq = await rfqModel.getAll(limit, offset);
-      let count = await rfqModel.getRfqCount();
-      res
-        .status(200)
-        .json({
-          status: 1,
-          data: listRfq,
-          total_items: count.length
-        })
-        .end();
-    } catch (error) {
-      logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
+  //     const listRfq = await rfqModel.getAll(limit, offset);
+  //     let count = await rfqModel.getRfqCount();
+  //     res
+  //       .status(200)
+  //       .json({
+  //         status: 1,
+  //         data: listRfq,
+  //         total_items: count.length
+  //       })
+  //       .end();
+  //   } catch (error) {
+  //     logError(error);
+  //     res
+  //       .status(400)
+  //       .json({
+  //         status: 3,
+  //         message: Config.errorText.value
+  //       })
+  //       .end();
+  //   }
+  // },
   getTerms: async (req, res, next) => {
     try {
       const result = await rfqModel.getAllTerms();
@@ -1076,12 +1079,14 @@ const rfqController = {
       }
 
       const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id);
+      const  totalRFQ = await rfqModel.getVendorRfqCount(user_id);
 
       res
         .status(200)
         .json({
           status: 1,
-          data: listRfq
+          data: listRfq,
+          totalRFQ
         })
         .end();
     } catch (error) {
@@ -3671,6 +3676,8 @@ const rfqController = {
       const location = req.body.delivery_location || "";
       const bid_end_date = req.body.bid_end_date || "";
       const project_id = req.body.project_id;
+      const rfq_type = req.body.rfq_type || "";
+      const reverse_auction = req.body.reverse_auction || "";
 
       // convert excel to json
       const workbook = xlsx.readFile(file.path);
@@ -3830,6 +3837,8 @@ const rfqController = {
         contact_name: contact_name,
         contact_number: contact_number,
         location: location,
+        rfq_type:rfq_type, 
+        reverse_auction: reverse_auction,
         bid_end_date: bid_end_date,
         company_name: company_name,
         products: products,
@@ -3848,6 +3857,8 @@ const rfqController = {
         contact_number: finalObject.contact_number,
         bid_end_date: finalObject.bid_end_date,
         location: finalObject.location,
+        rfq_type:finalObject.rfq_type, 
+        reverse_auction: finalObject.reverse_auction,
         is_published: finalObject.is_published,
         rfq_no: nextRFQNumber,
         created_by: user.id,
