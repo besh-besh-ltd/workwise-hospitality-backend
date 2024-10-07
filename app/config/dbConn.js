@@ -38,10 +38,7 @@ const cn = {
   database: process.env.DATABASE_NAME || null,
   host: process.env.HOST || null,
   port: process.env.DATABASE_PORT || null,
-  dialect: process.env.DATABASE_DIALECT || null,
-  ssl: {
-    rejectUnauthorized: false, // Use this if your database requires SSL
-  },
+  dialect: process.env.DATABASE_DIALECT || null
 };
 // const cn = 'postgres://process.env.DB_USER:process.env.DB_PASS@process.env.DB_HOST:process.env.DB_PORT/process.env.DB_NAME';
 
