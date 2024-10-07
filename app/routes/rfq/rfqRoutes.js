@@ -30,12 +30,12 @@ RfqRoutes.put(
   rfqController.create
 );
 
-RfqRoutes.get(
-  '/all',
-  // passportSignIn,
-  //validateDbBody.user_id_profileexists,
-  rfqController.listAll
-);
+// RfqRoutes.get(
+//   '/all',
+//   // passportSignIn,
+//   //validateDbBody.user_id_profileexists,
+//   rfqController.listAll
+// );
 
 RfqRoutes.get(
   '/getRfqById/:id',

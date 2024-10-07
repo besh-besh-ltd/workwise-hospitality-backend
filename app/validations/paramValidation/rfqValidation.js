@@ -48,6 +48,7 @@ export const rfqSchemas = {
     location: Joi.string().optional().allow('').allow(null),
     is_published: Joi.number().integer().min(0).max(1).required(),
     rfq_type: Joi.string().valid('firm', 'budgetary').allow('').allow(null),
+    reverse_auction: Joi.valid(0, 1).allow(''),
     products: Joi.array().items(productItems).min(1).required(),
     // products: Joi.array().optional().allow('').allow(null),
     vendors: Joi.array().items(vendorItems).allow(null).allow(''),
