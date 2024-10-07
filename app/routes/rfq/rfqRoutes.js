@@ -17,6 +17,7 @@ RfqRoutes.post(
   '/create',
   passportSignIn,
   validateDbBody.user_id_profileexists,
+  validateDbBody.rfq_project_exist,
   validateBody(rfqSchemas.create),
   rfqController.create
 );
@@ -155,6 +156,7 @@ RfqRoutes.post('/magic-search-rfq-create',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
   acl([2]),
+  validateDbBody.rfq_project_exist,
   schema_posts.magicSearchExcelUpload,
   rfqController.magicSearchRfqCreate
 );

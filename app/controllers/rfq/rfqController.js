@@ -821,6 +821,7 @@ const rfqController = {
         products,
         terms,
         rfq_type,
+        project_id,
         reverse_auction
       } = req.body;
       if (rfq_id && rfq_id != '' && rfq_id != null) {
@@ -837,6 +838,7 @@ const rfqController = {
           is_published: 1,
           rfq_type,
           updated_by: user_id,
+          project_id,
           reverse_auction
         };
         const response = await rfqModel.update(
@@ -870,6 +872,7 @@ const rfqController = {
           rfq_no: nextRFQNumber,
           created_by: user_id,
           updated_by: user_id,
+          project_id,
           reverse_auction
         };
 
@@ -900,7 +903,6 @@ const rfqController = {
             products.map((item) => insertProduct(item, created_rfq_id))
           )
             .then(async (results) => {
-              console.log('Data inserted successfully:', results);
               response[0].otherDetails = results;
               response[0].terms = rfqtermsRsp;
 
@@ -3673,6 +3675,7 @@ const rfqController = {
       const company_name = user.organization_name || user.name;
       const location = req.body.delivery_location || "";
       const bid_end_date = req.body.bid_end_date || "";
+      const project_id = req.body.project_id;
       const rfq_type = req.body.rfq_type || "";
       const reverse_auction = req.body.reverse_auction || "";
 
@@ -3859,7 +3862,8 @@ const rfqController = {
         is_published: finalObject.is_published,
         rfq_no: nextRFQNumber,
         created_by: user.id,
-        updated_by: user.id
+        updated_by: user.id,
+        project_id:project_id
       };
 
       // check if all row are failed in our validation
