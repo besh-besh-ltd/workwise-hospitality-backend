@@ -62,7 +62,7 @@ RfqRoutes.post(
   '/getBuyerRfq',
   passportSignIn,
   validateDbBody.user_id_profileexists,
-  validateBody(projectSchemas.temp_project_id),
+  validateBody(projectSchemas.get_buyer_body_validation),
   rfqController.getBuyerRfq
 );
 

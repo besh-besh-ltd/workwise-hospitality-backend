@@ -59,7 +59,7 @@ const projectModel = {
                 ARRAY(
                     SELECT json_build_object(
                         -- Fetch all columns of tbl_rfq
-                        'rfq', row_to_json(r),
+                        'rfq_details', row_to_json(r),
                         'no_of_quotes', (
                             SELECT COUNT(*)
                             FROM tbl_quotes tq

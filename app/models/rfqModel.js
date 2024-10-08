@@ -597,7 +597,7 @@ LIMIT 1;`;
         WHERE RFQ.id = RFQ_P.rfq_id
     ) AS "products"
 FROM tbl_rfq RFQ
-JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
+LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
 WHERE RFQ.created_by = ${user_id}
 AND (RFQ.project_id = $1 OR $1 IS NULL) 
 AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
@@ -611,6 +611,7 @@ LIMIT ${limit} OFFSET $4;`,
         })
         .catch(function (err) {
           let error = new Error(err);
+          console.log(error);
           reject(error);
         });
     });
@@ -1678,8 +1679,8 @@ WHERE created_by = $1 AND status = $2`,
       db.any(
         `SELECT 1 
         FROM tbl_projects
-        WHERE project_id = ${project_id} 
-        AND created_by = ${user_id};`
+        WHERE id = ${project_id} 
+        AND user_id = ${user_id};`
       )
         .then(function (data) {
           resolve(data);

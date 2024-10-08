@@ -821,9 +821,10 @@ const rfqController = {
         products,
         terms,
         rfq_type,
+        reverse_auction,
         project_id,
-        reverse_auction
       } = req.body;
+
       if (rfq_id && rfq_id != '' && rfq_id != null) {
         // Updating existing RFQ
 
@@ -872,10 +873,14 @@ const rfqController = {
           rfq_no: nextRFQNumber,
           created_by: user_id,
           updated_by: user_id,
-          project_id,
           reverse_auction
         };
 
+        if(project_id!=-1){
+          tbl_rfq_data.project_id=project_id;
+        }
+
+       
         const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
         var rfqtermsRsp = null;
 
@@ -1512,7 +1517,6 @@ const rfqController = {
       }
 
       let {project_id,sort,reverse_auction,rfq_type} = req.body;
-      console.log("mukul ", reverse_auction)
       if(project_id==-1){
         project_id=null;
       }
@@ -1522,7 +1526,7 @@ const rfqController = {
       if(reverse_auction=='-1'){
         reverse_auction=null;
       }
-
+      
 
       const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort,reverse_auction,rfq_type);
 

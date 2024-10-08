@@ -12,7 +12,7 @@ export const projectSchemas = {
         project_id: Joi.number().integer().required(),
     }),
 
-    temp_project_id : Joi.object().keys({
+    get_buyer_body_validation : Joi.object().keys({
         page: Joi.number().integer().required(),  // Page number for pagination
         project_id: Joi.number().integer().allow(-1),  // ID of the project
         sort: Joi.string().valid('ASC', 'DESC').required(),  // Sorting order
