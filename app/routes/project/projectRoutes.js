@@ -34,7 +34,7 @@ projectRoutes.get(
     projectController.getAllProjects
 )
 
-// route for updating the existing project while turing of the status off 
+// route for updating the existing project 
 projectRoutes.put(
     '/update/:project_id',
     passportSignIn,
