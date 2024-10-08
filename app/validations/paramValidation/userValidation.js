@@ -66,7 +66,6 @@ var validatingImage = (schema) => {
 const validateBody = (schema) => {
   return (req, res, next) => {
     const result = schema.validate(req.body, { abortEarly: false });
-
     if (result.error) {
       let err_msg = {};
       for (let counter in result.error.details) {

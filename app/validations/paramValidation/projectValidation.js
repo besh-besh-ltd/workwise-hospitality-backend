@@ -12,9 +12,14 @@ export const projectSchemas = {
         project_id: Joi.number().integer().required(),
     }),
 
-    temp_project_id:Joi.object().keys({
-        project_id: Joi.number().integer().allow(null),
+    get_buyer_body_validation : Joi.object().keys({
+        page: Joi.number().integer().required(),  // Page number for pagination
+        project_id: Joi.number().integer().allow(-1),  // ID of the project
+        sort: Joi.string().valid('ASC', 'DESC').required(),  // Sorting order
+        rfq_type: Joi.string().valid('firm', 'budgetary').allow(''),  // Type of RFQ
+        reverse_auction: Joi.valid('0', '1', '-1'),  // Reverse auction flag
     }),
+
 
     update: Joi.object().keys({
         status:Joi.number().valid(0, 1), // Status can only be 0 or 1

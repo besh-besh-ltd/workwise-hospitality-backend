@@ -59,7 +59,7 @@ const projectModel = {
                 ARRAY(
                     SELECT json_build_object(
                         -- Fetch all columns of tbl_rfq
-                        'rfq', row_to_json(r),
+                        'rfq_details', row_to_json(r),
                         'no_of_quotes', (
                             SELECT COUNT(*)
                             FROM tbl_quotes tq
@@ -175,7 +175,28 @@ const projectModel = {
               reject(error);
             });
       })
-  }
+  },
+
+  getIdAndNameOfProjects: async (user_id) => {
+    return new Promise(function (resolve, reject) {
+        db.any(
+            `SELECT 
+                p.id,
+                p.name 
+            FROM 
+                tbl_projects p 
+            WHERE 
+                p.user_id = ${user_id}`,
+        )
+            .then(function (data) {
+            resolve(data);
+          })
+           .catch(function (err) {
+            let error = new Error(err);
+            reject(error);
+          });
+    })
+}
 
 }
 export default projectModel;

@@ -757,7 +757,7 @@ const validateDbBody = {
       let { project_id } = req.body;
       const user_id = req.user.id;
 
-      if (project_id) {
+      if (project_id && project_id!=-1) {
         const rfqProjectExists = await rfqModel.rfq_project_exist(project_id,user_id);
         if (rfqProjectExists.length < 1) {
           err++;

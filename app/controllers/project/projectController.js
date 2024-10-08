@@ -52,16 +52,6 @@ const projectController = {
           }
     },
     getProjectById: async(req,res,next) => {
-      if (!req.user.subscription_plan_id) {
-        res
-          .status(400)
-          .json({
-            status: 3,
-            message: 'You need to purchase subscription to create RFQ'
-          })
-          .end();
-        return;
-      }
       try {
         let project_id = req.params.project_id;
         const user_id = req.user.id;
@@ -95,16 +85,6 @@ const projectController = {
           }
     },
     getAllProjects: async (req, res, next) => {
-      if (!req.user.subscription_plan_id) {
-          res
-            .status(400)
-            .json({
-              status: 3,
-              message: 'You need to purchase subscription to create RFQ'
-            })
-            .end();
-          return;
-        }
       try {
 
           const user_id = req.user.id;
@@ -127,61 +107,74 @@ const projectController = {
           })
           .end();
         }
-  },
+    },
+    update: async (req, res, next) => {
+      try {
 
-  update: async (req, res, next) => {
-    if (!req.user.subscription_plan_id) {
-        res
-          .status(400)
-          .json({
-            status: 3,
-            message: 'You need to purchase subscription to create RFQ'
-          })
-          .end();
-        return;
-      }
-    try {
+        const {
+          description,
+          location,
+          ended_at,
+          status
+      } = req.body;
 
-      const {
+      const user_id = req.user.id;
+      const {project_id} = req.params;
+
+      const tbl_project_data = {
         description,
         location,
         ended_at,
-        status
-    } = req.body;
-
-    const user_id = req.user.id;
-    const {project_id} = req.params;
-
-    const tbl_project_data = {
-      description,
-      location,
-      ended_at,
-      status,
-      user_id:user_id,
-      project_id:project_id
-    }
-        
-        let udpatedProject = await projectModel.updateProject(tbl_project_data);
-        
-        res
-        .status(200)
-        .json({
-          status: true,
-          data:udpatedProject,
-          message:`Project ${project_id} Updated Successfully`
-        })
-
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: false,
-          message: Config.errorText.value
-        })
-        .end();
+        status,
+        user_id:user_id,
+        project_id:project_id
       }
-},
+          
+          let udpatedProject = await projectModel.updateProject(tbl_project_data);
+          
+          res
+          .status(200)
+          .json({
+            status: true,
+            data:udpatedProject,
+            message:`Project ${project_id} Updated Successfully`
+          })
+
+      } catch (err) {
+        logError(err);
+        res
+          .status(400)
+          .json({
+            status: false,
+            message: Config.errorText.value
+          })
+          .end();
+        }
+    },
+    getIdAndNameOfProjects: async (req, res, next) => {
+      try {
+
+          const user_id = req.user.id;
+          
+          let projects = await projectModel.getIdAndNameOfProjects(user_id);
+          res
+          .status(200)
+          .json({
+            status: true,
+            data:projects
+          })
+
+      } catch (err) {
+        logError(err);
+        res
+          .status(400)
+          .json({
+            status: false,
+            message: Config.errorText.value
+          })
+          .end();
+        }
+    }
     
 }
 export default projectController;
