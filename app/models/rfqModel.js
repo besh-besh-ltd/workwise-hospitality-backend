@@ -1677,7 +1677,7 @@ WHERE created_by = $1 AND status = $2`,
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT 1 
-        FROM tbl_rfq 
+        FROM tbl_projects
         WHERE project_id = ${project_id} 
         AND created_by = ${user_id};`
       )
