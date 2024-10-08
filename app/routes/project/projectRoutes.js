@@ -43,6 +43,13 @@ projectRoutes.put(
     projectController.update
 )
 
+// route for getting all projects of the user with projectid and projectName
+projectRoutes.get(
+    '/name_list',
+    passportSignIn,
+    projectController.getIdAndNameOfProjects
+)
+
 
 
 

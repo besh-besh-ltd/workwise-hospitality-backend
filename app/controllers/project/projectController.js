@@ -182,6 +182,40 @@ const projectController = {
         .end();
       }
 },
+getIdAndNameOfProjects: async (req, res, next) => {
+  if (!req.user.subscription_plan_id) {
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: 'You need to purchase subscription to create RFQ'
+        })
+        .end();
+      return;
+    }
+  try {
+
+      const user_id = req.user.id;
+      
+      let projects = await projectModel.getIdAndNameOfProjects(user_id);
+      res
+      .status(200)
+      .json({
+        status: true,
+        data:projects
+      })
+
+  } catch (err) {
+    logError(err);
+    res
+      .status(400)
+      .json({
+        status: false,
+        message: Config.errorText.value
+      })
+      .end();
+    }
+}
     
 }
 export default projectController;
