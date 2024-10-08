@@ -1610,8 +1610,11 @@ WHERE created_by = $1 AND status = $2`,
              AVG(qi.unit_price) AS avg_price
            FROM tbl_product AS p
            JOIN tbl_quote_items AS qi ON p.id = qi.product_id
+   JOIN tbl_quotes AS q ON q.rfq_id = qi.rfq_id
            WHERE p.name = $1
-         ), RFQDetails AS (
+   AND CAST(q.timestamp AS BIGINT) >= EXTRACT(EPOCH FROM NOW() - INTERVAL '12 months') * 1000
+ ) 
+        , RFQDetails AS (
            SELECT
              r.id AS rfq_id
            FROM tbl_rfq AS r
@@ -1649,6 +1652,26 @@ WHERE created_by = $1 AND status = $2`,
            FROM PriceHistory
            GROUP BY year, month
            ORDER BY year, month
+         ), FinalizedQuote AS (
+           SELECT
+             fq.product_id,
+             fq.vendor_id,
+             fq.variant,
+             fq.rfq_no,
+             fq.quote_id,
+             fq.timestamp
+           FROM tbl_quote_finalization AS fq
+           WHERE fq.product_id IN (SELECT product_id FROM QuoteDetails)
+           ORDER BY fq.timestamp DESC
+           LIMIT 1
+         ), FinalizedQuoteDetails AS (
+           SELECT 
+             qi.unit_price::NUMERIC AS finalized_unit_price,
+             qi.quantity::NUMERIC AS finalized_quantity,
+             (qi.unit_price::NUMERIC * qi.quantity::NUMERIC) AS total_price,
+             qi.quote_id  -- Include quote_id here
+           FROM tbl_quote_items AS qi
+           WHERE qi.quote_id IN (SELECT fq.quote_id FROM FinalizedQuote fq)
          )
          SELECT 
            pps.min_price,
@@ -1658,13 +1681,26 @@ WHERE created_by = $1 AND status = $2`,
            qd.unit_price AS last_purchase_price,
            qd.quantity AS last_purchase_quantity,
            qd.last_quote_timestamp AS last_purchase_date,
-           JSON_AGG(JSON_BUILD_OBJECT('min', mp.min_price, 'avg', mp.avg_price, 'max', mp.max_price, 'month', mp.month, 'year', mp.year)) AS monthly_price_stats
+           JSON_AGG(JSON_BUILD_OBJECT('min', mp.min_price, 'avg', mp.avg_price, 'max', mp.max_price, 'month', mp.month, 'year', mp.year)) AS monthly_price_stats,
+           JSON_BUILD_OBJECT(
+             'vendor_id', fq.vendor_id,
+             'variant', fq.variant,
+             'rfq_no', fq.rfq_no,
+             'quote_id', fq.quote_id,
+             'timestamp', fq.timestamp,
+             'unit_price', fqd.finalized_unit_price,
+             'quantity', fqd.finalized_quantity,
+             'total_price', fqd.total_price
+           ) AS last_finalized_quote
          FROM ProductPriceStats AS pps
          CROSS JOIN QuoteDetails AS qd
          CROSS JOIN MonthlyPriceStats AS mp
-         GROUP BY pps.min_price, pps.max_price, pps.avg_price, qd.product_id, qd.unit_price, qd.quantity, qd.last_quote_timestamp`,
-        [product_name, user_id]
-      )
+         LEFT JOIN FinalizedQuote AS fq ON fq.product_id = qd.product_id
+         LEFT JOIN FinalizedQuoteDetails AS fqd ON fq.quote_id = fqd.quote_id
+         GROUP BY pps.min_price, pps.max_price, pps.avg_price, qd.product_id, qd.unit_price, qd.quantity, qd.last_quote_timestamp, fq.vendor_id, fq.variant, fq.rfq_no, fq.quote_id, fq.timestamp, fqd.finalized_unit_price, fqd.finalized_quantity, fqd.total_price
+      `,
+      [product_name, user_id]
+    )
       .then(function (data) {
         resolve(data);
       })
