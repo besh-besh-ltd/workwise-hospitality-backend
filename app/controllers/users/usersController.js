@@ -2576,7 +2576,7 @@ const UsersController = {
       logError(error);
       let message = error == "Error: Vendor_In_Review" ? "This vendor has already been added by you. Please wait while we review the vendor details" : Config.errorText.value;
 
-      res
+     return res
         .status(400)
         .json({
           status: 3,

@@ -442,7 +442,7 @@ LIMIT 1;`;
         JOIN tbl_product_categories pc ON p.id = pc.product_id
         JOIN tbl_category c ON pc.category_id = c.id
         JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
-        LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+        LEFT JOIN tbl_company tc ON tc.user_id = tu.id AND tc.is_private = 0 
         ${approved_by_id != ''
             ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
             : ``

@@ -3072,7 +3072,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         );
 
         if (existingVendor.length > 0) {
-          return reject(new Error('Vendor_In_Review'));
+          return reject(new Error('Vendor_In_Review')); 
         }
 
         // Insert the new vendor record
@@ -3206,8 +3206,43 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         .then(data => resolve(data))
         .catch(err => reject(new Error(err)));
     });
-  }
-
+  },
+  company_exist: async (email,mobile) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT *
+        FROM tbl_company
+        WHERE email = $1
+        AND mobile = $2;`,
+        [email,mobile]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  user_exist: async (email,mobile) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT *
+        FROM tbl_users
+        WHERE email = $1
+        AND mobile = $2;`,
+        [email,mobile]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];
 

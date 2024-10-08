@@ -786,6 +786,73 @@ const validateDbBody = {
         })
         .end();
     }
+  },
+  vendor_exist: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+      let { email, phone} = req.body;
+
+      if (email && phone) {
+        const userEmailExists = await userModel.company_exist(email,phone);
+        if (userEmailExists.length > 0) {
+          // case 1 -> whethtr the vendor is public
+          console.log(userEmailExists);
+          if(userEmailExists.is_private==0){
+                 await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].user_id);
+                res
+                .status(200)
+                .json({
+                  status: 1,
+                  message:"This vendor is already registered as a PUBLIC vendor in our system. They have now been added to your preferred vendor list."
+                })
+                .end();
+                return;
+              }else{
+                // case 2 -> whether the vendor is private
+                await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].user_id);
+                res
+                .status(200)
+                .json({
+                  status: 1,
+                  message:"This vendor is already registered as a PRIVATE vendor in our system. They have now been added to your preferred vendor list."
+                })
+                .end();
+                return;
+              }  
+        }else{
+          // this is for when the buyer trying to add other buyer credentials as a vendor
+          
+          console.log("Hello from buyer credentials");
+          const buyerCredentials = await userModel.user_exist(email,phone);
+          if(buyerCredentials.length > 0){
+            err++;
+            errors.user_exist = 'Unable to add this vendor. Please ensure the credentials belong to a valid vendor account.';
+          }
+        }
+      }
+
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+      } else {
+        next();
+      }
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
   }
 };
 
