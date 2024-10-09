@@ -11,6 +11,7 @@ import { validateDbBody } from '../../validations/dbValidation/userDbValidation.
 import { acl } from '../../helper/common.js';
 import passport from '../../middleware/passport.js';
 import handle_auth from '../../helper/handleAuth.js';
+import multer from 'multer';
 
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
@@ -196,6 +197,18 @@ UsersRoutes.get(
   passportSignIn,
   UsersController.getBuyerPrivateVendors
 );
-//End API
+
+UsersRoutes.post(
+  '/magic-search-add-vendor',
+  passportSignIn,
+  acl([2]),
+  schema_posts.magicSearchExcelUpload,
+  UsersController.magicSearchAddVendor
+
+)
+
+
+
+
 
 export default UsersRoutes;

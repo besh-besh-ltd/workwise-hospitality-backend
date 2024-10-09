@@ -391,6 +391,17 @@ const schemas = {
 }),
 };
 
+let store_magic_search_vendor_file = multer.diskStorage({
+  destination: function (req, file, callback) {
+    callback ( null, Config.upload.magic_search_vendor_file)
+  },
+  filename: function (req, file, callback) {
+    var extention = path.extname(file.originalname);
+    var new_file_name = +new Date() + '-' + uuidv4() + extention;
+    callback(null, new_file_name);
+  }
+})
+
 const schema_posts = {
   add_user_profile_image: async (req, res, next) => {
     try {
@@ -806,6 +817,60 @@ const schema_posts = {
         })
         .end();
     }
+  },
+  magicSearchExcelUpload: async (req,res,next) => {
+    // if (!req.user.subscription_plan_id) {
+    //   res
+    //     .status(400)
+    //     .json({
+    //       status: 3,
+    //       message: 'You need to purchase subscription to create RFQ'
+    //     })
+    //     .end();
+    //   return;
+    // }
+
+
+    try {
+      let upload = multer({
+        storage: store_magic_search_vendor_file,
+        limits: {
+          fileSize: 2000000 // Compliant: 8MB
+        },
+        fileFilter: (req, file, cb) => {
+          let ext = path.extname(file.originalname).toLowerCase();
+
+          if ('.xlsx') {
+            cb(null, true);
+          } else {
+            cb(null, false);
+            return cb('Only .xlsx format allowed!', null);
+          }
+        }
+      }).single('file');
+      upload(req, res, async function (err) {
+        if (err) {
+          let data = {};
+          data.file = err;
+          res
+            .status(400)
+            .json({
+              status: 2,
+              errors: data
+            })
+            .end();
+        } else {
+          next();
+        }
+      });
+    } catch (err) {
+      logError(err);
+      res.status(400).json({
+        status: 3,
+        message: 'server error'
+      });
+    }
+
   }
 };
 

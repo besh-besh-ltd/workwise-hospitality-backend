@@ -32,6 +32,8 @@ import fcm from 'fcm-notification';
 import serviceAccount from '../../config/privateKey.json' assert { type: 'json' };
 const certPath = admin.credential.cert(serviceAccount);
 import JWT from 'jsonwebtoken';
+import excelJS from 'exceljs';
+import xlsx from 'xlsx';
 var FCM = new fcm(certPath);
 import child_process from 'child_process';
 
@@ -2613,6 +2615,58 @@ const UsersController = {
       });
     } catch (error) {
       next(error); // Pass the error to the error-handling middleware
+    }
+  },
+  magicSearchAddVendor: async (req, res)=> {
+    let file = req.file;
+
+    // convert excel to json
+    const workbook = xlsx.readFile(file.path);
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const jsonData = xlsx.utils.sheet_to_json(sheet);
+    // {
+    //   'Vendor Name': 'yashmukul testing vendor 2',
+    //   'About Vendor Company': 'SUDHIR SWITCHGEARS PRIVATE LIMITED Industries founded in 1968 by Mr. Radheshyam Agarwal and Mr. Sajjan Kumar Agarwal. The company started off with the manufacturing of Flameproof Industrial type Light Fittings and Switchgears.',
+    //   Address: '305/6, Apeejay House, No. 130, Bombay Samachar Marg',
+    //   'Postal Code': 400023,
+    //   City: 'Mumbai',
+    //   'State\n(drop down)': 'Maharashtra',
+    //   Country: 'India',
+    //   'Vendor company owner/hr/official contact number': 9999999909,
+    //   'Vendor Email': 'testingvendor1@gmail.com',
+    //   Website: 'https://www.sudhirswitchgears.in/',
+    //   'Nature of Business\n(drop down)': 'Manufacturer',
+    //   'Product List (ex-pipe,valve)': 'pipe,valve,cable glands'
+    // }
+     console.log(jsonData);
+   
+     // validation error array ko keep monitor all products
+    const validationErrors = [];
+
+    //  run loop on excel data
+    for await (const value of jsonData){
+
+      // trim all inputs
+      const vendorName = (value["Vendor Name"] || "").trim();
+      const email = (value["Vendor Email"] || "").trim();
+      const mobile = (value["Vendor company owner/hr/official contact number"] || "");
+      const productList = (value["Product List (ex-pipe,valve)"] || "").trim();
+
+      if (!vendorName || !email || !mobile || !productList){
+       
+        validationErrors.push({
+          row: jsonData.indexOf(value)+1,
+          errors: {
+            vendor_name: !vendorName ? "Missing Vendor Name" : vendorName ,
+            email: !email ? "Missing Email" : email, 
+            mobile: !mobile ? "Missing Contact Number" : mobile ,
+            product_list: !productList ? "Missing Product List" : productList,
+          }
+        });
+       
+        continue; //skip the product
+      }
     }
   }
 
