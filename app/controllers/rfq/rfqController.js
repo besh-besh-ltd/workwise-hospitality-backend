@@ -821,9 +821,10 @@ const rfqController = {
         products,
         terms,
         rfq_type,
+        reverse_auction,
         project_id,
-        reverse_auction
       } = req.body;
+
       if (rfq_id && rfq_id != '' && rfq_id != null) {
         // Updating existing RFQ
 
@@ -872,10 +873,14 @@ const rfqController = {
           rfq_no: nextRFQNumber,
           created_by: user_id,
           updated_by: user_id,
-          project_id,
           reverse_auction
         };
 
+        if(project_id!=-1){
+          tbl_rfq_data.project_id=project_id;
+        }
+
+       
         const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
         var rfqtermsRsp = null;
 
@@ -1511,18 +1516,20 @@ const rfqController = {
         offset = 0;
       }
 
-      let sort = req.body.sort;
-      if(!sort || (sort!='ASC' && sort!='DESC')){
-        sort = 'DESC';
+      let {project_id,sort,reverse_auction,rfq_type} = req.body;
+      if(project_id==-1){
+        project_id=null;
       }
-
-      let {project_id} = req.body;
-
-      if(project_id==="" || project_id===null || typeof project_id != 'number'){
-        project_id = null;
+      if(rfq_type==''){
+        rfq_type=null;
       }
+      if(reverse_auction=='-1'){
+        reverse_auction=null;
+      }
+      
 
-      const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort);
+      const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort,reverse_auction,rfq_type);
+
       let count = await rfqModel.getBuyerRfqCount(user_id);
       res
         .status(200)

@@ -34,13 +34,20 @@ projectRoutes.get(
     projectController.getAllProjects
 )
 
-// route for updating the existing project while turing of the status off 
+// route for updating the existing project 
 projectRoutes.put(
     '/update/:project_id',
     passportSignIn,
     validateBody(projectSchemas.update),
     validateParam(projectSchemas.project_id), 
     projectController.update
+)
+
+// route for getting all projects of the user with projectid and projectName
+projectRoutes.get(
+    '/name_list',
+    passportSignIn,
+    projectController.getIdAndNameOfProjects
 )
 
 
