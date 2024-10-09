@@ -131,7 +131,7 @@ const projectModel = {
                 GROUP BY 
                     p.id
                 ORDER BY 
-                    p.id`,
+                    p.created_at DESC`,
             )
                 .then(function (data) {
                 resolve(data);
