@@ -191,9 +191,6 @@ UsersRoutes.post(
   UsersController.addPrivateVendor
 );
 
-// email check, usertype check -> true (no user found) 
-                            // -> false (user found) -> error email already exist, mobile number already  exist, this email has been register
-
 UsersRoutes.get(
   '/buyer-private-vendor',
   passportSignIn,

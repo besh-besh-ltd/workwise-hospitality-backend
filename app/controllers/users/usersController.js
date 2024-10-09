@@ -2558,6 +2558,19 @@ const UsersController = {
     }
   },
   addPrivateVendor: async (req, res, next) => {
+
+    // adding subscription check to add private vendor
+    if (!req.user.subscription_plan_id) {
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: 'You need to purchase subscription to add vendor'
+        })
+        .end();
+      return;
+    }
+
     try {
       const { vendorName, email, phone, productList } = req.body;
       const buyerId = req.user.id; // Getting buyerId from the authenticated user
