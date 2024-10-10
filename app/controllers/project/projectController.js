@@ -28,7 +28,7 @@ const projectController = {
               name,
               description,
               location,
-              ended_at: ended_at==''?null:ended_at,
+              ended_at: ended_at === "" ? null : ended_at,
               user_id:user_id
             }
             
