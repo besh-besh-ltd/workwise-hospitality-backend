@@ -3213,7 +3213,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         `SELECT *
         FROM tbl_company
         WHERE email = $1
-        AND mobile = $2;`,
+        OR mobile = $2;`,
         [email,mobile]
       )
         .then(function (data) {

@@ -835,7 +835,6 @@ const validateDbBody = {
         }else{
           // this is for when the buyer trying to add other buyer credentials as a vendor
           
-          console.log("Hello from buyer credentials");
           const buyerCredentials = await userModel.user_exist(email,phone);
           if(buyerCredentials.length > 0){
             err++;

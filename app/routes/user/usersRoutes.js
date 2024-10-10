@@ -203,8 +203,8 @@ UsersRoutes.post(
   passportSignIn,
   acl([2]),
   schema_posts.magicSearchExcelUpload,
-  UsersController.magicSearchAddVendor
-
+  UsersController.magicSearchAddVendor,
+  
 )
 
 
