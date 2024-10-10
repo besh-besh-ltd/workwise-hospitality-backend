@@ -703,6 +703,7 @@ LIMIT ${limit} OFFSET $4;`,
         `SELECT TRP.product_id, TRP.variant, TRP.rfq_id,
         (
           SELECT json_build_object(
+           'unit_price', TQI1.unit_price,
             'package_price', TQI1.package_price,
             'tax', TQI1.tax,
             'freight_price', TQI1.freight_price,
@@ -792,6 +793,7 @@ LIMIT ${limit} OFFSET $4;`,
           ) AS "rfq",
         (
           SELECT json_build_object(
+           'unit_price', TQI1.unit_price,
             'package_price', TQI1.package_price,
             'tax', TQI1.tax,
             'freight_price', TQI1.freight_price,
