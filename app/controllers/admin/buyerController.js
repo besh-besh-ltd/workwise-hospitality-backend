@@ -349,6 +349,7 @@ const buyerController = {
         email: userDetails[0].email || null,
         mobile: userDetails[0].mobile || null,
         company_name: userDetails[0].vendor_name || null,
+        is_private: !userDetails[0].is_private ? 0: userDetails[0].is_private,
       };
 
       let vendor = await productModel.vendor_register(vendorObj);

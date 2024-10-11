@@ -10,7 +10,6 @@ import {
 import { validateDbBody } from '../../validations/dbValidation/userDbValidation.js';
 import { acl } from '../../helper/common.js';
 import passport from '../../middleware/passport.js';
-import handle_auth from '../../helper/handleAuth.js';
 
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
@@ -185,18 +184,28 @@ UsersRoutes.get(
 UsersRoutes.post(
   '/buyer-private-vendor',
   passportSignIn,
+  acl([2]),
   validateBody(schemas.buyer_private_vendor),
+  validateDbBody.vendor_exist,
   UsersController.addPrivateVendor
 );
-
-// email check, usertype check -> true (no user found) 
-                            // -> false (user found) -> error email already exist, mobile number already  exist, this email has been register
 
 UsersRoutes.get(
   '/buyer-private-vendor',
   passportSignIn,
   UsersController.getBuyerPrivateVendors
 );
-//End API
+
+UsersRoutes.post(
+  '/buyer-excel-add-vendor',
+  passportSignIn,
+  acl([2]),
+  schema_posts.buyerExcelUploadVendorFileHandler, 
+  UsersController.buyerExcelUploadVendor,
+)
+
+
+
+
 
 export default UsersRoutes;

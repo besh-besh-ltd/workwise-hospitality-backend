@@ -3060,7 +3060,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   },
-  insertBuyerPrivateVendor: async (buyerId, vendorName, email, phone, productList) => {
+  insertBuyerPrivateVendor: async ({buyerId, vendorName, email, phone, productList, is_private}) => {
     // this function insert user info in a temp user table for admin review, once admin review we will delete user from here 
     return new Promise(async (resolve, reject) => {
       try {
@@ -3072,18 +3072,19 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         );
 
         if (existingVendor.length > 0) {
-          return reject(new Error('Vendor_In_Review'));
+          return reject(new Error('Vendor_In_Review')); 
         }
 
         // Insert the new vendor record
         const result = await db.any(
           `INSERT INTO tbl_temp_user 
-          (buyer_id, vendor_name, email, mobile, product_list, status, reject_reason, created_date, updated_date) 
+          (buyer_id, vendor_name, email, mobile, product_list, status, reject_reason, created_date, updated_date,is_private) 
           VALUES 
-          ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) 
+          ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $8) 
           RETURNING *`,
-          [buyerId, vendorName, email, phone, productList, -1, null]
-          // status -1 pending review, 0 disable user profile, 1 active user, 2 rejected  
+          [buyerId, vendorName, email, phone, productList, -1, null, is_private]
+          // status -1 pending review, 0 disable user profile, 1 active user, 2 rejected
+          //  added new field  is_private , whose default value is 0, until it is manually inserted 
         );
         resolve(result);
       } catch (err) {
@@ -3206,8 +3207,43 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         .then(data => resolve(data))
         .catch(err => reject(new Error(err)));
     });
-  }
-
+  },
+  company_exist: async (email,mobile) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT *
+        FROM tbl_company
+        WHERE email = $1
+        OR mobile = $2;`,
+        [email,mobile]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  user_exist: async (email,mobile) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT *
+        FROM tbl_users
+        WHERE email = $1
+        AND mobile = $2;`,
+        [email,mobile]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];
 

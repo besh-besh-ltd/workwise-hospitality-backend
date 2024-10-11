@@ -32,6 +32,8 @@ import fcm from 'fcm-notification';
 import serviceAccount from '../../config/privateKey.json' assert { type: 'json' };
 const certPath = admin.credential.cert(serviceAccount);
 import JWT from 'jsonwebtoken';
+import excelJS from 'exceljs';
+import xlsx from 'xlsx';
 var FCM = new fcm(certPath);
 import child_process from 'child_process';
 
@@ -2128,17 +2130,17 @@ const UsersController = {
       const { reviewed_to, description, quality_of_work, on_time_delivery, trustworthiness_reliability, overall_rating } = req.body;
 
       // Calculate the average rating
-      const rating = (overall_rating + trustworthiness_reliability + on_time_delivery + quality_of_work)  / 4;
+      const rating = (overall_rating + trustworthiness_reliability + on_time_delivery + quality_of_work) / 4;
 
-        let reviewObj = {
-          reviewed_by: user_id,
-          reviewed_to,
-          rating,
-          description,
-          quality_of_work,
-          on_time_delivery,
-          trustworthiness_reliability,
-          overall_rating
+      let reviewObj = {
+        reviewed_by: user_id,
+        reviewed_to,
+        rating,
+        description,
+        quality_of_work,
+        on_time_delivery,
+        trustworthiness_reliability,
+        overall_rating
       };
 
       let review = await notificationModel.addVendorReview(reviewObj);
@@ -2558,12 +2560,34 @@ const UsersController = {
     }
   },
   addPrivateVendor: async (req, res, next) => {
+
+    // adding subscription check to add private vendor
+    if (!req.user.subscription_plan_id) {
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: 'You need to purchase subscription to add vendor'
+        })
+        .end();
+      return;
+    }
+
     try {
-      const { vendorName, email, phone, productList } = req.body;
+      const { vendorName, email, phone, productList, is_private } = req.body;
       const buyerId = req.user.id; // Getting buyerId from the authenticated user
 
+      let obj = {
+        buyerId,
+        vendorName,
+        email,
+        phone,
+        productList,
+        is_private:!(req.body.is_private) ? 0 : is_private,
+      }
+
       // If user does not exist, proceed with inserting data into the tbl_temp_user table
-      const result = await userModel.insertBuyerPrivateVendor(buyerId, vendorName, email, phone, productList);
+      const result = await userModel.insertBuyerPrivateVendor(obj);
 
       // Sending the response back to the client
       res.status(201).json({
@@ -2576,7 +2600,7 @@ const UsersController = {
       logError(error);
       let message = error == "Error: Vendor_In_Review" ? "This vendor has already been added by you. Please wait while we review the vendor details" : Config.errorText.value;
 
-      res
+      return res
         .status(400)
         .json({
           status: 3,
@@ -2601,7 +2625,241 @@ const UsersController = {
     } catch (error) {
       next(error); // Pass the error to the error-handling middleware
     }
+  },
+  buyerExcelUploadVendor: async (req, res, next) => {
+    try {
+
+      // adding subscription check to add private vendor
+      if (!req.user.subscription_plan_id) {
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: 'You need to purchase subscription to add vendor'
+          })
+          .end();
+        return;
+      }
+
+
+      let file = req.file;
+
+      // checing the is_private field
+      let is_private = parseInt(req.body.is_private);
+      console.log(typeof is_private);
+      // when is_private does not send with request
+      if(!req.body.is_private){
+        is_private = 0;
+      }
+
+      // convert excel to json
+      const workbook = xlsx.readFile(file.path);
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const jsonData = xlsx.utils.sheet_to_json(sheet);
+
+      // validation error array ko keep monitor all products
+      const validationErrors = [];
+
+      // success vendor messages
+      const vendorsMapped = [];
+
+      //  run loop on excel data
+      for await (const [index, value] of jsonData.entries()) {
+
+        // trim all inputs
+        const vendorName = (value["Vendor Name"] || "").trim();
+        const email = (value["Vendor Email"] || "").trim();
+        const mobile = (value["Vendor company owner/hr/official contact number"] || "").toString();
+        const productList = (value["Product List (ex-pipe,valve)"] || "").trim();
+
+
+        // now check validation for vendor name number and email
+
+        const errors = validateBulkVendorInputs(vendorName, email, mobile, productList);
+        if (errors.length > 0) {
+          const errObj = {
+            vendorName: vendorName,
+            vendorEmail: email,
+            Row: index + 1,
+            errors: errors
+          }
+          validationErrors.push(errObj);
+          continue;
+        }
+
+        // now these are those vendors which do not have errors 
+        // so we are moving forward for the insertion and other validation check
+
+        if (email && mobile) {
+          const userEmailExists = await userModel.company_exist(email, mobile);
+          if (userEmailExists.length > 0) {
+            // case 1 -> whethtr the vendor is public
+            if (userEmailExists.is_private == 0) {
+              await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].user_id);
+              const addVendor = {
+                "index": index + 1,
+                "email": userEmailExists.email,
+                "message": "This vendor is already registered as a PUBLIC vendor in our system. They have now been added to your preferred vendor list."
+              }
+              vendorsMapped.push(addVendor);
+              continue;
+            } else {
+              // case 2 -> whether the vendor is private
+              await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].user_id);
+              const addVendor = {
+                "index": index + 1,
+                "email": userEmailExists.email,
+                "message": "This vendor is already registered as a PRIVATE vendor in our system. They have now been added to your preferred vendor list."
+              }
+              vendorsMapped.push(addVendor);
+              continue;
+            }
+          } else {
+            // this is for when the buyer trying to add other buyer credentials as a vendor
+
+            const buyerCredentials = await userModel.user_exist(email, mobile);
+            if (buyerCredentials.length > 0) {
+              const addVendor = {
+                "index": index + 1,
+                "email": buyerCredentials.email,
+                "message": "Unable to add this vendor. Please ensure the credentials belong to a valid vendor account."
+              }
+              vendorsMapped.push(addVendor);
+              continue;
+            }
+          }
+        }
+
+        // function where new vendor is adding for review
+        try {
+
+          const buyerId = req.user.id; // Getting buyerId from the authenticated user
+
+           const obj = {
+            buyerId, 
+            vendorName, 
+            email, 
+            phone: mobile, 
+            productList, 
+            is_private
+          }
+
+          // If user does not exist, proceed with inserting data into the tbl_temp_user table
+          const result = await userModel.insertBuyerPrivateVendor(obj);
+
+          // Sending the response back to the client
+          if (result) {
+            const addVendor = {
+              "index": index+1,
+              "email": email,
+              "message": 'Vendor successfully added. Please wait for vendor review.',
+            }
+            vendorsMapped.push(addVendor);
+          }
+          
+        } catch (error) {
+          logError(error);
+          let message = error == "Error: Vendor_In_Review" ? "This vendor has already been added by you. Please wait while we review the vendor details" : Config.errorText.value;
+          const addVendor = {
+            "index": index+1,
+            "email": email,
+            "message": message,
+          }
+          vendorsMapped.push(addVendor);
+        }
+
+      }
+      // check if all row are failed in our validation
+      if (validationErrors.length === jsonData.length) {
+        return res
+          .status(400)
+          .json({
+            status: 3,
+            message: "All rows have validation errors. Please check your data and try again.",
+            errorsObj: validationErrors
+          })
+          .end();
+        // Exit early if every row has an error
+      }
+
+      res
+        .status(200)
+        .json({
+          status:1,
+          addVendor:vendorsMapped,
+          errorsObj:validationErrors,
+        })
+
+
+
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
   }
 
 };
+
+// this is the function where new vendor is adding for review 
+
+// validation check for buyer who is adding the excel sheet for adding the vendor
+const validateBulkVendorInputs = (vendorName, email, mobile, productList) => {
+  let errors = [];
+
+  // Function to validate product list format allowing a trailing comma
+ 
+
+
+  const isValidEmail = (email) => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  };
+
+  const isValidPhoneNumber = (phone) => {
+    return phone.toString().length > 15 ? true : false;
+  };
+
+  // checking the vendor name
+  if (!vendorName) {
+    errors.push("Missing Vendor Name");
+  }
+
+  // checking vendor email
+  if (!email) {
+    errors.push('Missing Vendor Email');
+  } else if (!isValidEmail(email)) {
+    errors.push('Invalid Vendor Email');
+  }
+
+  // checking mobile number
+  if (!mobile) {
+    errors.push('Missing Vendor Contact Number');
+  } else if (isValidPhoneNumber(mobile)) {
+    errors.push('Invalid Vendor Contact Number (not more then 15 digit)');
+  }
+
+  // checking product list
+  if (!productList) {
+    errors.push('Missing Product List')
+  }
+
+  // Checking product list
+  if (!productList) {
+    errors.push('Missing Product List');
+  // } else if (!isValidProductList(productList)) { // Added validation for product list
+  //   errors.push('Invalid Product List (should be a string of items separated by commas, e.g., "p1,p2,p3" or "p1,p2,p3,")');
+  // }
+  }
+
+  return errors;
+
+}
+
 export default UsersController;
