@@ -68,19 +68,10 @@ const logError = (err) => {
     let date_format = dateFormat(now, 'yyyy-mm-dd HH:MM:ss');
 
     let errMsg = `\n DateTime: ${date_format} \n ${errorText} \n Line No : ${errorLine} \n File Path: ${errorFile} \n`;
-    try {
-        fs.appendFile(config.errorFileName, errMsg, (err) => {
-            if (err) {
-                // Log to console if file writing fails
-                console.error('Failed to write to log file:', err);
-            }
-            // Optionally confirm successful write
-            // console.log('The file has been saved!');
-        });
-    } catch (fileErr) {
-        // Log any unexpected errors during the logging process
-        console.error('Unexpected error while logging:', fileErr);
-    }
+    fs.appendFile(config.errorFileName, errMsg, (err) => {
+      if (err) throw err;
+      //console.log('The file has been saved!');
+    });
   }
 };
 const currentDateTime = () => {
