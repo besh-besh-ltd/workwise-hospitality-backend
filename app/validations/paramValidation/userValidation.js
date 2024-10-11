@@ -387,13 +387,14 @@ const schemas = {
     vendorName: Joi.string().required().trim().max(60),  // Required, trimmed, and max length of 60 characters
     email: Joi.string().required().email().trim().max(50),  // Required, valid email, trimmed, and max length of 50 characters
     phone: Joi.string().required().trim().max(20),  // Required, trimmed, and max length of 20 characters
-    productList: Joi.string().required().trim().max(300),  // Required, trimmed, and max length of 300 characters
-}),
+    productList: Joi.string().required().trim().max(300),  // Required, trimmed, and max length of 300 characters,
+    is_private: Joi.number().optional().valid(0, 1),
+  }),
 };
 
-let store_magic_search_vendor_file = multer.diskStorage({
+let store_buyer_excel_upload_vendor_file = multer.diskStorage({
   destination: function (req, file, callback) {
-    callback ( null, Config.upload.magic_search_vendor_file)
+    callback(null, Config.upload.buyer_upload_vendor_file)
   },
   filename: function (req, file, callback) {
     var extention = path.extname(file.originalname);
@@ -818,22 +819,13 @@ const schema_posts = {
         .end();
     }
   },
-  magicSearchExcelUpload: async (req,res,next) => {
-    // if (!req.user.subscription_plan_id) {
-    //   res
-    //     .status(400)
-    //     .json({
-    //       status: 3,
-    //       message: 'You need to purchase subscription to create RFQ'
-    //     })
-    //     .end();
-    //   return;
-    // }
-
-
+  buyerExcelUploadVendorFileHandler: async (req, res, next) => {
     try {
+
+
+
       let upload = multer({
-        storage: store_magic_search_vendor_file,
+        storage: store_buyer_excel_upload_vendor_file,
         limits: {
           fileSize: 2000000 // Compliant: 8MB
         },
@@ -849,6 +841,22 @@ const schema_posts = {
         }
       }).single('file');
       upload(req, res, async function (err) {
+       
+      // Check for isPrivate field
+      const isPrivate = !req.body.private ? undefined : parseInt(req.body.is_private);
+      if (isPrivate !== undefined) { // Check if isPrivate is provided
+        if (isPrivate !== 0 && isPrivate !== 1) {
+          res
+          .status(400)
+          .json({
+            status: 2,
+            "message":'Invalid isPrivate value (must be either 0 or 1)' 
+          })
+          .end();
+         return 
+        }
+      }
+
         if (err) {
           let data = {};
           data.file = err;

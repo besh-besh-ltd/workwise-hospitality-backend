@@ -2574,11 +2574,20 @@ const UsersController = {
     }
 
     try {
-      const { vendorName, email, phone, productList } = req.body;
+      const { vendorName, email, phone, productList, is_private } = req.body;
       const buyerId = req.user.id; // Getting buyerId from the authenticated user
 
+      let obj = {
+        buyerId,
+        vendorName,
+        email,
+        phone,
+        productList,
+        is_private:!(req.body.is_private) ? 0 : is_private,
+      }
+
       // If user does not exist, proceed with inserting data into the tbl_temp_user table
-      const result = await userModel.insertBuyerPrivateVendor(buyerId, vendorName, email, phone, productList);
+      const result = await userModel.insertBuyerPrivateVendor(obj);
 
       // Sending the response back to the client
       res.status(201).json({
@@ -2617,7 +2626,7 @@ const UsersController = {
       next(error); // Pass the error to the error-handling middleware
     }
   },
-  magicSearchAddVendor: async (req, res, next) => {
+  buyerExcelUploadVendor: async (req, res, next) => {
     try {
 
       // adding subscription check to add private vendor
@@ -2634,6 +2643,14 @@ const UsersController = {
 
 
       let file = req.file;
+
+      // checing the is_private field
+      let is_private = parseInt(req.body.is_private);
+      console.log(typeof is_private);
+      // when is_private does not send with request
+      if(!req.body.is_private){
+        is_private = 0;
+      }
 
       // convert excel to json
       const workbook = xlsx.readFile(file.path);
@@ -2667,8 +2684,8 @@ const UsersController = {
             Row: index + 1,
             errors: errors
           }
-          validationErrors.push(errObj)
-          continue
+          validationErrors.push(errObj);
+          continue;
         }
 
         // now these are those vendors which do not have errors 
@@ -2719,8 +2736,17 @@ const UsersController = {
 
           const buyerId = req.user.id; // Getting buyerId from the authenticated user
 
+           const obj = {
+            buyerId, 
+            vendorName, 
+            email, 
+            phone: mobile, 
+            productList, 
+            is_private
+          }
+
           // If user does not exist, proceed with inserting data into the tbl_temp_user table
-          const result = await userModel.insertBuyerPrivateVendor(buyerId, vendorName, email, mobile, productList);
+          const result = await userModel.insertBuyerPrivateVendor(obj);
 
           // Sending the response back to the client
           if (result) {
@@ -2831,6 +2857,7 @@ const validateBulkVendorInputs = (vendorName, email, mobile, productList) => {
   //   errors.push('Invalid Product List (should be a string of items separated by commas, e.g., "p1,p2,p3" or "p1,p2,p3,")');
   // }
   }
+
   return errors;
 
 }

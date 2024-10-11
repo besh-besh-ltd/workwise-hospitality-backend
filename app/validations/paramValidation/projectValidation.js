@@ -17,7 +17,8 @@ export const projectSchemas = {
         project_id: Joi.number().integer().allow(-1),  // ID of the project
         sort: Joi.string().valid('ASC', 'DESC').required(),  // Sorting order
         rfq_type: Joi.string().valid('firm', 'budgetary').allow(''),  // Type of RFQ
-        reverse_auction: Joi.valid('0', '1', '-1'),  // Reverse auction flag
+        reverse_auction: Joi.valid('0', '1', '-1'),  // Reverse auction flag,
+        limit: Joi.number().integer()  // add limit
     }),
 
 

@@ -10,8 +10,6 @@ import {
 import { validateDbBody } from '../../validations/dbValidation/userDbValidation.js';
 import { acl } from '../../helper/common.js';
 import passport from '../../middleware/passport.js';
-import handle_auth from '../../helper/handleAuth.js';
-import multer from 'multer';
 
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
@@ -199,12 +197,11 @@ UsersRoutes.get(
 );
 
 UsersRoutes.post(
-  '/magic-search-add-vendor',
+  '/buyer-excel-add-vendor',
   passportSignIn,
   acl([2]),
-  schema_posts.magicSearchExcelUpload,
-  UsersController.magicSearchAddVendor,
-  
+  schema_posts.buyerExcelUploadVendorFileHandler, 
+  UsersController.buyerExcelUploadVendor,
 )
 
 
