@@ -66,7 +66,6 @@ var validatingImage = (schema) => {
 const validateBody = (schema) => {
   return (req, res, next) => {
     const result = schema.validate(req.body, { abortEarly: false });
-
     if (result.error) {
       let err_msg = {};
       for (let counter in result.error.details) {
@@ -388,9 +387,21 @@ const schemas = {
     vendorName: Joi.string().required().trim().max(60),  // Required, trimmed, and max length of 60 characters
     email: Joi.string().required().email().trim().max(50),  // Required, valid email, trimmed, and max length of 50 characters
     phone: Joi.string().required().trim().max(20),  // Required, trimmed, and max length of 20 characters
-    productList: Joi.string().required().trim().max(300),  // Required, trimmed, and max length of 300 characters
-}),
+    productList: Joi.string().required().trim().max(300),  // Required, trimmed, and max length of 300 characters,
+    is_private: Joi.number().optional().valid(0, 1),
+  }),
 };
+
+let store_buyer_excel_upload_vendor_file = multer.diskStorage({
+  destination: function (req, file, callback) {
+    callback(null, Config.upload.buyer_upload_vendor_file)
+  },
+  filename: function (req, file, callback) {
+    var extention = path.extname(file.originalname);
+    var new_file_name = +new Date() + '-' + uuidv4() + extention;
+    callback(null, new_file_name);
+  }
+})
 
 const schema_posts = {
   add_user_profile_image: async (req, res, next) => {
@@ -807,6 +818,67 @@ const schema_posts = {
         })
         .end();
     }
+  },
+  buyerExcelUploadVendorFileHandler: async (req, res, next) => {
+    try {
+
+
+
+      let upload = multer({
+        storage: store_buyer_excel_upload_vendor_file,
+        limits: {
+          fileSize: 2000000 // Compliant: 8MB
+        },
+        fileFilter: (req, file, cb) => {
+          let ext = path.extname(file.originalname).toLowerCase();
+
+          if ('.xlsx') {
+            cb(null, true);
+          } else {
+            cb(null, false);
+            return cb('Only .xlsx format allowed!', null);
+          }
+        }
+      }).single('file');
+      upload(req, res, async function (err) {
+       
+      // Check for isPrivate field
+      const isPrivate = !req.body.private ? undefined : parseInt(req.body.is_private);
+      if (isPrivate !== undefined) { // Check if isPrivate is provided
+        if (isPrivate !== 0 && isPrivate !== 1) {
+          res
+          .status(400)
+          .json({
+            status: 2,
+            "message":'Invalid isPrivate value (must be either 0 or 1)' 
+          })
+          .end();
+         return 
+        }
+      }
+
+        if (err) {
+          let data = {};
+          data.file = err;
+          res
+            .status(400)
+            .json({
+              status: 2,
+              errors: data
+            })
+            .end();
+        } else {
+          next();
+        }
+      });
+    } catch (err) {
+      logError(err);
+      res.status(400).json({
+        status: 3,
+        message: 'server error'
+      });
+    }
+
   }
 };
 

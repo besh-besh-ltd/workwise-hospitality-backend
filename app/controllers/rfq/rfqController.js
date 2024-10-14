@@ -270,115 +270,155 @@ const getQUOTES = async ({ id }, user_id) => {
     throw error;
   }
 };
-const sendMailEachVendor = async ({ vendors }, user, rfqNumber) => {
 
-  console.log('===========', vendors);
+const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
   try {
-    let organization_name = user.organization_name
-      ? user.organization_name
-      : user.name;
+    let organization_name = user.organization_name || user.name;
 
-    Promise.all(
-      vendors &
-      vendors
-        .map(async (vendorsItem) => {
-          let user_details = await userModel.user_profile_detail(
-            vendorsItem.user_id
-          );
-          if (user_details.length > 0) {
+    // Fetch user details of the vendor
+    const user_details = await userModel.user_profile_detail(vendor.user_id);
 
-            // Insert the token and related data into the table
-            const token = await rfqModel.insertVendorRfqToken(user_details[0].id, rfqNumber);
+    if (user_details.length > 0) {
+      // Insert token into the table and get the token value
+      const token = await rfqModel.insertVendorRfqToken(user_details[0].id, rfqNumber);
 
-            let dynamicHTML = `
-                <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
-                  <tr>
-                    <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                          <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
-                          <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-                          <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
-                            Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
-                      </table></td>
-                  </tr>
-                  <tr>
-                  <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:5px 5px; background:#fff; line-height:1.5;'>
-                    <strong>Dear ${user_details[0].name},</strong><br>
-                    
-                    </td>
-                  </tr>
-                  <tr>
-                    <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>You have a new RFQ from ${organization_name}. Review now to submit your quotation.
-                    <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}">Click here to view RFQ</a></td>
-                    
-                  </tr>
-                    
+      // Construct dynamic HTML for products list
+      let productHTML = products.slice(0, 3).map((product) => {
+          const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
+          return `
+            <tr>
+              <td style="font-size: 15px; padding-bottom: 3px;">${product.name}</td>
+              <td style="font-size: 15px; text-align: right; padding-bottom: 3px;">${quantitySpec.value || '--'}</td>
+            </tr>
+          `;
+        })
+        .join('');
 
-                  <tr>
-                    <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#000; font-weight:normal; padding:5px; background:#efefef; line-height:30px;'><div>
-                        <div>
-                          <div>
-                            <div>
-                              <p>© WorkWise. All Rights Reserved.</p>
-                            </div>
-                          </div>
-                        </div>
-                      </div></td>
-                  </tr>
-                  </table>`;
+        if (products.length > 3) {
+          productHTML += `
+            <tr>
+              <td colspan="2" style="text-align: right; padding-bottom: 3px;">
+                <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}
+                style="font-size: 15px; color: blue; text-decoration: none;">
+                  ...view more
+                </a>
+              </td>
+            </tr>
+          `;
+        }
 
-            sendMail({
-              from: Config.webmasterMail, // sender address
-              to: user_details[0]?.email, // list of receivers
-              subject: `Work Wise | New RFQ Alert`, // Subject line
-              html: dynamicHTML // plain text body
-            });
-            const notificationData = {
-              type: 'RFQ create',
-              title: `RFQ created`,
-              message: `RFQ created successfully`,
-              additional_data: {
-                user_type: user_details[0].user_type
-              }
-            };
-            // const receiverUserIds = [req.params.id];
-            // await sendNotification(user_id[0].id, '', notificationData);
-            const payload = {
-              title: `Hello ${user_details[0].name}`,
-              body: `You've got a new RFQ from ${user.organization_name}`
-            };
-            const ss = JSON.parse(user_details[0].endpoint);
-            sendNotification(
-              user_details[0].id,
-              '',
-              notificationData,
-              payload,
-              ss
-            );
+
+      // Construct the email content with the list of products
+      let dynamicHTML = `
+<div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background-color: #ffe4e4eb; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
+      <div>
+        <img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />
+        <p style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; font-size: 16px; font-weight: 600; color: #333333; margin-top: 10px;">
+          Suite 804, 8th Floor, Martin Burn Business Park,<br />
+          Block BP 3, Sector V, Salt Lake, Kolkata-700 091
+        </p>
+      </div>
+        <hr />
+        <h1>Hello ${user_details[0].name}</h1>
+        <p style="font-size:16px;"> Great news! You’ve received a new enquiry from ${organization_name} </p>
+       <div
+      style="border-radius: 24px; padding: 32px 16px; margin-bottom: 24px; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+      <h3 style="font-family: 'Roboto', sans-serif; text-align: center; font-size: 24px; margin-bottom: 8px;">
+        Enquiry Details
+      </h3>
+          <table style="width: 100%; padding: 8px;">
+            <tbody>
+            ${productHTML}
+            <tr>
+            <td></td>
+          </tr>
+            </tbody>
+          </table>
+
+            <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}
+        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+        Submit Your Quote Now
+      </a>
+
+        </div>
+        <hr />
+        <p style="font-size: 16px;">If you need assistance, contact us at <a href="mailto:hello@letsworkwise.com">hello@letsworkwise.com</a></p>
+        <p style="font-size: 16px;">© WorkWise. All Rights Reserved.</p>
+      </div>`;
+
+      // Send the email
+       sendMail({
+        from: Config.webmasterMail,
+        to: user_details[0].email,
+        subject: `Work Wise | New RFQ Alert`,
+        html: dynamicHTML,
+      });
+
+      // Send notification if applicable
+      if (user_details[0].endpoint) {
+        const payload = {
+          title: `Hello ${user_details[0].name}`,
+          body: `You've got a new RFQ from ${organization_name}`,
+        };
+
+        const notificationData = {
+          type: 'RFQ create',
+          title: `RFQ created`,
+          message: `RFQ created successfully`,
+          additional_data: {
+            user_type: user_details[0].user_type
           }
-        })
-        .then((result) => {
-          return {};
-        })
-    );
+        };
+
+        sendNotification(
+          user_details[0].id,
+          '',
+          notificationData,
+          payload,
+          JSON.parse(user_details[0].endpoint)
+        );
+      }
+    }
   } catch (error) {
-    console.error('Error inserting data:', error);
+    console.error('Error sending email to vendor:', error);
     throw error;
   }
 };
 
 const sendMailtoVendors = async (req, rfqNumber) => {
-  // send mail to vendors
+  // Extract products from request body
   const { products } = req.body;
 
-  Promise.all(
-    products.map((item) => sendMailEachVendor(item, req.user, rfqNumber))
-  )
-    .then((result) => {
-      return true;
-    })
-    .catch((error) => {
-      console.error('Error inserting data:', error);
+  // Create a map to group vendors and their products
+  const vendorProductMap = {};
+
+  // Iterate over products to group them by vendors
+  products.forEach((item) => {
+    item.vendors.forEach((vendor) => {
+      if (!vendorProductMap[vendor.user_id]) {
+        vendorProductMap[vendor.user_id] = {
+          vendorDetails: vendor,
+          products: [],
+        };
+      }
+      // Push product details for this vendor
+      vendorProductMap[vendor.user_id].products.push(item);
     });
+  });
+
+  // Now send mail to each vendor with the grouped products
+  try {
+    await Promise.all(
+      Object.keys(vendorProductMap).map(async (vendorId) => {
+        const vendorInfo = vendorProductMap[vendorId];
+        await sendMailEachVendor(vendorInfo.vendorDetails, req.user, rfqNumber, vendorInfo.products);
+      })
+    );
+    return true;
+  } catch (error) {
+    console.error('Error sending emails:', error);
+    throw error;
+  }
 };
 
 const sendQuotationMailToBuyer = async (req, rfqNumber) => {
@@ -388,7 +428,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
       <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
             <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
             <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
               Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -433,7 +473,7 @@ const sendQuoteNotificationToVendor = async (req) => {
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
       <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
             <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
             <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
               Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -488,7 +528,7 @@ const sendReminderRFQMAIL = async (vendoritem, org_name) => {
                   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
                     <tr>
                       <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+                            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
                             <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
                             <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
                               Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -565,7 +605,7 @@ const sendQuoteNotificationEmail = async (req) => {
       <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
         <tr>
           <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
                 <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
                 <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
                   Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -579,7 +619,7 @@ const sendQuoteNotificationEmail = async (req) => {
         </tr>
         <tr>
           <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${vendor.name
-        }</u> on <a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</u> </a>for bellow products:
+        }</u> on <a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</u> </a>for bellow products:
           ${getProducts()}
           
           </td>
@@ -605,7 +645,7 @@ const sendQuoteNotificationEmail = async (req) => {
         <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
           <tr>
             <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                  <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+                  <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
                   <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
                   <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
                     Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -620,7 +660,7 @@ const sendQuoteNotificationEmail = async (req) => {
           <tr>
             <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>
             <u>${vendor.name
-          }</u> is declined the RFQ request (<a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
+          }</u> is declined the RFQ request (<a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
              ${getProducts()}            
             
             </td>
@@ -672,7 +712,7 @@ const sendWinningNotificaion = async (
       <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
         <tr>
           <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
                 <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
                 <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
                   Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -727,7 +767,7 @@ const sendWinningNotificaion = async (
             </table>   
             <br> 
             <br> 
-            <p style="font-weight:normal;">*&nbsp;For detailed information, please <a href="http://143.110.242.57:8111">login</a> to our portal</p>        
+            <p style="font-weight:normal;">*&nbsp;For detailed information, please <a href=${process.env.FRONT_END_WEBSITE}>login</a> to our portal</p>        
           </td>
           
         </tr>
@@ -821,8 +861,10 @@ const rfqController = {
         products,
         terms,
         rfq_type,
-        reverse_auction
+        reverse_auction,
+        project_id,
       } = req.body;
+
       if (rfq_id && rfq_id != '' && rfq_id != null) {
         // Updating existing RFQ
 
@@ -837,6 +879,7 @@ const rfqController = {
           is_published: 1,
           rfq_type,
           updated_by: user_id,
+          project_id,
           reverse_auction
         };
         const response = await rfqModel.update(
@@ -873,6 +916,11 @@ const rfqController = {
           reverse_auction
         };
 
+        if(project_id!=-1){
+          tbl_rfq_data.project_id=project_id;
+        }
+
+       
         const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
         var rfqtermsRsp = null;
 
@@ -900,10 +948,8 @@ const rfqController = {
             products.map((item) => insertProduct(item, created_rfq_id))
           )
             .then(async (results) => {
-              console.log('Data inserted successfully:', results);
               response[0].otherDetails = results;
               response[0].terms = rfqtermsRsp;
-
               // sendMailtoVendors => in this function we are also generating token for vendor so he will quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
               await sendMailtoVendors(req, response[0].id);
 
@@ -1509,7 +1555,20 @@ const rfqController = {
         offset = 0;
       }
 
-      const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id);
+      let {project_id,sort,reverse_auction,rfq_type} = req.body;
+      if(project_id==-1){
+        project_id=null;
+      }
+      if(rfq_type==''){
+        rfq_type=null;
+      }
+      if(reverse_auction=='-1'){
+        reverse_auction=null;
+      }
+      
+
+      const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort,reverse_auction,rfq_type);
+
       let count = await rfqModel.getBuyerRfqCount(user_id);
       res
         .status(200)
@@ -3673,6 +3732,7 @@ const rfqController = {
       const company_name = user.organization_name || user.name;
       const location = req.body.delivery_location || "";
       const bid_end_date = req.body.bid_end_date || "";
+      const project_id = req.body.project_id;
       const rfq_type = req.body.rfq_type || "";
       const reverse_auction = req.body.reverse_auction || "";
 
@@ -3859,7 +3919,8 @@ const rfqController = {
         is_published: finalObject.is_published,
         rfq_no: nextRFQNumber,
         created_by: user.id,
-        updated_by: user.id
+        updated_by: user.id,
+        project_id:project_id
       };
 
       // check if all row are failed in our validation

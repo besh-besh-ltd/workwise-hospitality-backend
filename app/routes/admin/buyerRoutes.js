@@ -10,6 +10,7 @@ import {
   schema_posts
 } from '../../validations/paramValidation/buyerValidation.js';
 import passport from '../../middleware/passport.js';
+import { acl } from '../../helper/common.js';
 const passportSignIn = passport.authenticate('jwtAdm', { session: false });
 
 const buyerRoutes = Router();
@@ -76,6 +77,7 @@ buyerRoutes.delete(
 buyerRoutes.put(
   '/review-buyers-private-vendor',
   passportSignIn,
+  acl([1]),
   buyerController.reviewBuyerPrivateVendors
 )
 

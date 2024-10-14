@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import rfqController from '../../controllers/rfq/rfqController.js';
 import noLogin from '../../middleware/noLogin.js';
-import { validateBody } from '../../validations/paramValidation/userValidation.js';
+import { validateBody,validateParam } from '../../validations/paramValidation/userValidation.js';
 import { validateDbBody } from '../../validations/dbValidation/userDbValidation.js';
 import passport from '../../middleware/passport.js';
 import { rfqSchemas } from '../../validations/paramValidation/rfqValidation.js';
@@ -9,6 +9,7 @@ const passportLogIn = passport.authenticate('localUsr', { session: false });
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 import { acl } from '../../helper/common.js';
 import { schema_posts } from '../../validations/paramValidation/productValidation.js';
+import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
 
 
 const RfqRoutes = Router();
@@ -17,6 +18,7 @@ RfqRoutes.post(
   '/create',
   passportSignIn,
   validateDbBody.user_id_profileexists,
+  validateDbBody.rfq_project_exist,
   validateBody(rfqSchemas.create),
   rfqController.create
 );
@@ -60,6 +62,7 @@ RfqRoutes.post(
   '/getBuyerRfq',
   passportSignIn,
   validateDbBody.user_id_profileexists,
+  validateBody(projectSchemas.get_buyer_body_validation),
   rfqController.getBuyerRfq
 );
 
@@ -155,6 +158,7 @@ RfqRoutes.post('/magic-search-rfq-create',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
   acl([2]),
+  validateDbBody.rfq_project_exist,
   schema_posts.magicSearchExcelUpload,
   rfqController.magicSearchRfqCreate
 );
