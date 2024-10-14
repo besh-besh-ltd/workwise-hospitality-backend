@@ -1,11 +1,10 @@
 import { Router } from 'express';
 import rfqController from '../../controllers/admin/rfqController.js';
 import passport from '../../middleware/passport.js';
-// const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 const passportSignIn = passport.authenticate('jwtAdm', { session: false });
-
 import { validateBody, validateParam, schemas } from '../../validations/paramValidation/buyerValidation.js';
 import { rfqSchemas } from '../../validations/paramValidation/rfqValidation.js';
+
 const rfqRoutes = Router();
 
 rfqRoutes.post(
