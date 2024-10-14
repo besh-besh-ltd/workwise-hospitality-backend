@@ -3,7 +3,7 @@
     <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'>
       <table border="0" width="100%">
         <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200">
-          <img alt="Workwise" width="160" height="41" src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">
+          <img alt="Workwise" width="160" height="41" src="https://letsworkwise.com/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">
         </td>
         <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
           <p>Suite 804, 8th Floor , Martin Burn Business Park, <br /> Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091 </p>

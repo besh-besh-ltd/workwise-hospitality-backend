@@ -428,7 +428,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
       <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
             <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
             <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
               Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -473,7 +473,7 @@ const sendQuoteNotificationToVendor = async (req) => {
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
       <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
             <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
             <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
               Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -528,7 +528,7 @@ const sendReminderRFQMAIL = async (vendoritem, org_name) => {
                   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
                     <tr>
                       <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+                            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
                             <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
                             <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
                               Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -605,7 +605,7 @@ const sendQuoteNotificationEmail = async (req) => {
       <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
         <tr>
           <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
                 <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
                 <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
                   Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -619,7 +619,7 @@ const sendQuoteNotificationEmail = async (req) => {
         </tr>
         <tr>
           <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${vendor.name
-        }</u> on <a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</u> </a>for bellow products:
+        }</u> on <a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</u> </a>for bellow products:
           ${getProducts()}
           
           </td>
@@ -645,7 +645,7 @@ const sendQuoteNotificationEmail = async (req) => {
         <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
           <tr>
             <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                  <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+                  <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
                   <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
                   <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
                     Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -660,7 +660,7 @@ const sendQuoteNotificationEmail = async (req) => {
           <tr>
             <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>
             <u>${vendor.name
-          }</u> is declined the RFQ request (<a href="http://143.110.242.57:8111/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
+          }</u> is declined the RFQ request (<a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
              ${getProducts()}            
             
             </td>
@@ -712,7 +712,7 @@ const sendWinningNotificaion = async (
       <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
         <tr>
           <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src="http://143.110.242.57:8111/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75">  </td>
+                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
                 <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
                 <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
                   Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
@@ -767,7 +767,7 @@ const sendWinningNotificaion = async (
             </table>   
             <br> 
             <br> 
-            <p style="font-weight:normal;">*&nbsp;For detailed information, please <a href="http://143.110.242.57:8111">login</a> to our portal</p>        
+            <p style="font-weight:normal;">*&nbsp;For detailed information, please <a href=${process.env.FRONT_END_WEBSITE}>login</a> to our portal</p>        
           </td>
           
         </tr>

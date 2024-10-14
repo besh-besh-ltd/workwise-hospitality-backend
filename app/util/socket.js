@@ -1,7 +1,7 @@
 import { Server } from 'socket.io';
 
 export const SocketConfig = (SERVER) => {
-  const io = new Server(SERVER, { cors: ['http://143.110.242.57:8111'] });
+  const io = new Server(SERVER, { cors: ['https://letsworkwise.com'] });
   let online_users = [];
   let users = {}
 
