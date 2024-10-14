@@ -3067,7 +3067,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         // Check if a vendor with the same email already exists for the given buyerId
         const existingVendor = await db.any(
           `SELECT * FROM tbl_temp_user 
-           WHERE buyer_id = $1 AND email = $2`,
+           WHERE buyer_id = $1 OR email = $2`,
           [buyerId, email]
         );
 
@@ -3228,11 +3228,12 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
   },
   user_exist: async (email,mobile) => {
     return new Promise(function (resolve, reject) {
+      console.log(email);
       db.any(
         `SELECT *
         FROM tbl_users
         WHERE email = $1
-        AND mobile = $2;`,
+        OR mobile = $2;`,
         [email,mobile]
       )
         .then(function (data) {
