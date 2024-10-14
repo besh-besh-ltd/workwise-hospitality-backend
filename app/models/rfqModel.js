@@ -1960,6 +1960,13 @@ WHERE created_by = $1 AND status = $2`,
                 FROM tbl_quotes Q
                 JOIN tbl_quote_items QI ON Q.id = QI.quote_id
                 WHERE Q.rfq_id = RFQ.id AND Q.created_by = V.id AND QI.product_id = RFQ_P.product_id AND QI.variant = RFQ_P.variant
+              ),
+              'product_specs', (
+                SELECT json_agg(json_build_object('title', SPEC.title, 'value', SPEC.value))
+                FROM tbl_rfq_products_specs SPEC
+                WHERE SPEC.rfq_id = RFQ_P.rfq_id
+                AND SPEC.product_id = RFQ_P.product_id
+                AND SPEC.variant = RFQ_P.variant
               )
             ))
             FROM tbl_rfq_products RFQ_P
