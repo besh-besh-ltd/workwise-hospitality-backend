@@ -175,14 +175,14 @@ const vendorController = {
 
       let vendor = await productModel.vendor_register(vendorObj);
 
-              // adding spoc data only when atleast one of the below data is empty
-            if(spocObj.spoc_email || spocObj.spoc_mobile || spocObj.spoc_name || spocObj.spoc_role){
-                  // adding the vendor id to the spocObj object
-                spocObj.user_id = vendor[0].id;
+      // adding spoc data only when atleast one of the below data is empty
+      if (spocObj.spoc_email || spocObj.spoc_mobile || spocObj.spoc_name || spocObj.spoc_role) {
+        // adding the vendor id to the spocObj object
+        spocObj.user_id = vendor[0].id;
 
-                // now inserting the details of the spocObj to the table
-                await userModel.add_user_spoc(spocObj);
-            }
+        // now inserting the details of the spocObj to the table
+        await userModel.add_user_spoc(spocObj);
+      }
 
       companyObj.user_id = vendor[0].id;
       await productModel.addCompany(companyObj);
@@ -396,9 +396,8 @@ const vendorController = {
         .status(200)
         .json({
           status: 1,
-          message: `Vendor successfully ${
-            status == 1 ? 'unblocked' : 'blocked'
-          }`
+          message: `Vendor successfully ${status == 1 ? 'unblocked' : 'blocked'
+            }`
         })
         .end();
     } catch (error) {
@@ -429,10 +428,10 @@ const vendorController = {
         website,
         nature_business,
         estd_year,
-        sales_spoc_name,
-        sales_spoc_position,
-        sales_spoc_business_email,
-        sales_spoc_mobile,
+        // sales_spoc_name,
+        // sales_spoc_position,
+        // sales_spoc_business_email,
+        // sales_spoc_mobile,
         gstin,
         import_export_code,
         cin,
@@ -485,10 +484,10 @@ const vendorController = {
           nature_of_business:
             nature_business || companyDetails[0].nature_of_business,
           established_year: estd_year || companyDetails[0].established_year,
-          spoc_name: sales_spoc_name || companyDetails[0].spoc_name,
-          spoc_role: sales_spoc_position || companyDetails[0].spoc_role,
-          spoc_email: sales_spoc_business_email || companyDetails[0].spoc_email,
-          spoc_mobile: sales_spoc_mobile || companyDetails[0].spoc_mobile,
+          // spoc_name: sales_spoc_name || companyDetails[0].spoc_name,
+          // spoc_role: sales_spoc_position || companyDetails[0].spoc_role,
+          // spoc_email: sales_spoc_business_email || companyDetails[0].spoc_email,
+          // spoc_mobile: sales_spoc_mobile || companyDetails[0].spoc_mobile,
           gstin: gstin || companyDetails[0].gstin,
           import_export_code:
             import_export_code || companyDetails[0].import_export_code,
@@ -518,10 +517,10 @@ const vendorController = {
           company_name: organization_name || null,
           nature_of_business: nature_business || null,
           established_year: estd_year || null,
-          spoc_name: sales_spoc_name || null,
-          spoc_role: sales_spoc_position || null,
-          spoc_email: sales_spoc_business_email || null,
-          spoc_mobile: sales_spoc_mobile || null,
+          // spoc_name: sales_spoc_name || null,
+          // spoc_role: sales_spoc_position || null,
+          // spoc_email: sales_spoc_business_email || null,
+          // spoc_mobile: sales_spoc_mobile || null,
           gstin: gstin || null,
           import_export_code: import_export_code || null,
           cin: cin || null,
@@ -675,9 +674,8 @@ const vendorController = {
         .status(200)
         .json({
           status: 1,
-          message: `Vendor successfully ${
-            status == 0 ? 'Disapproved' : 'Approved'
-          }`
+          message: `Vendor successfully ${status == 0 ? 'Disapproved' : 'Approved'
+            }`
         })
         .end();
     } catch (error) {
@@ -757,6 +755,42 @@ const vendorController = {
           data: listRfq
         })
         .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  updateSpoc: async (req, res, next) => {
+    try {
+      console.log(".................",req.body);
+      const userId = req.params.id;
+      const spocId = req.params.spoc_id;
+
+      const {spoc_name, spoc_email, spoc_mobile, spoc_role} = req.body;
+      
+      const name = spoc_name || null;
+      const email = spoc_email || null;
+      const mobile = spoc_mobile || null;
+      const role = spoc_role || null;
+
+      const response = await vendorModel.updateUserSpoc(name, email, mobile, role, userId, spocId);
+      
+      if(response){
+        res
+        .status(200)
+        .json({
+          status: 1,
+          message: response
+        })
+        .end();
+      }
+      
     } catch (error) {
       logError(error);
       res

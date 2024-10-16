@@ -486,6 +486,40 @@ const vendorModel = {
         });
     });
   },
+
+  SpocExist: async (vendorId,spocId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        'SELECT * FROM tbl_spoc WHERE user_id = $1 AND id = $2',
+        [vendorId,spocId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  updateUserSpoc: async (name, email, mobile, role, userId, spocId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `UPDATE tbl_spoc
+         SET name = $1, email = $2, mobile = $3, role = $4, updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = $5 AND id = $6`,
+        [name, email, mobile, role, userId, spocId]
+      )
+        .then(function () {
+          resolve("spoc successfully updated");
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  }
 };
 
 export default vendorModel;
