@@ -2082,7 +2082,7 @@ const rfqController = {
       }
       if (rfQItem.length > 0 && rfQItem[0].products.length > 0) {
         winning_product = rfQItem[0].products.filter(
-          (p) => p.product_id == product_id
+          (p) => p.product_id == product_id && p.variant == variant
         );
       }
 
