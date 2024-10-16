@@ -305,6 +305,23 @@ const rfqModel = {
     ) AS "quotations",
     ARRAY(
         SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_id, 'variant', RFQ_P.variant, 'comment', RFQ_P.comment, 'spec_file', RFQ_P.spec_file, 'qap', RFQ_P.qap, 'qap_file', RFQ_P.qap_file, 'datasheet_file', RFQ_P.datasheet_file,
+       
+         'TDS_flies', (
+      SELECT json_agg(json_build_object('file_url', RPF.file_url))
+      FROM tbl_rfq_product_files RPF
+      WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
+    ),
+    'QAP_file', (
+      SELECT json_agg(json_build_object('file_url', RPF.file_url))
+      FROM tbl_rfq_product_files RPF
+      WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
+    ),
+    'SPEC_files', (
+      SELECT json_agg(json_build_object('file_url', RPF.file_url))
+      FROM tbl_rfq_product_files RPF
+      WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
+    ),
+        
           'datasheet', (
             SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
                 CASE
