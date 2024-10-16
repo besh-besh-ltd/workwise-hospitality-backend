@@ -1838,7 +1838,174 @@ WHERE created_by = $1 AND status = $2`,
         reject(error);
       });
     })
-  }
+  },
+
+  getAllRfqsForAdmin: async (limit, offset, rfqStatus, adminServiceStatus, sort) => {
+    return new Promise((resolve, reject) => {
+      db.any(`
+        SELECT 
+          RFQ.id,
+          RFQ.rfq_no,
+          RFQ.comment,
+          RFQ.company_name,
+          RFQ.response_email,
+          RFQ.contact_name,
+          RFQ.contact_number,
+          RFQ.bid_end_date,
+          RFQ.location,
+          RFQ.is_published,
+          RFQ.created_by,
+          RFQ.updated_by,
+          RFQ.timestamp,
+          RFQ.status AS rfq_status,
+          RFQ.rfq_type,
+          RFQ.reverse_auction,
+          P.id AS project_id,
+          P.name AS project_name,
+          (
+            SELECT COUNT(*)
+            FROM tbl_rfq_products RFQ_P
+            WHERE RFQ_P.rfq_id = RFQ.id
+          ) AS total_products,
+          (
+            SELECT json_build_object(
+              'quotes_received', COUNT(DISTINCT TQ.created_by),
+              'total_vendors', COUNT(DISTINCT TRPV.user_id)
+            )
+            FROM tbl_quotes TQ
+            LEFT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = RFQ.id
+            WHERE TQ.rfq_id = RFQ.id
+          ) AS stats,
+          json_build_object(
+            'id', ARS.id,
+            'subadmin_id', ARS.subadmin_id,
+            'status', ARS.status,
+            'comment', ARS.comment
+          ) AS admin_service
+        FROM tbl_rfq RFQ
+        LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
+        LEFT JOIN tbl_admin_rfq_service ARS ON RFQ.id = ARS.rfq_id
+        WHERE 
+          (${rfqStatus} IS NULL OR RFQ.status = ${rfqStatus})
+          AND (${adminServiceStatus} IS NULL OR ARS.status = ${adminServiceStatus})
+        ORDER BY RFQ.timestamp ${sort}
+        LIMIT ${limit} OFFSET ${offset}
+      `)
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
+  getTotalRfqCountForAdmin: async (rfqStatus, adminServiceStatus) => {
+    return new Promise((resolve, reject) => {
+      db.one(`
+        SELECT COUNT(*) AS total
+        FROM tbl_rfq RFQ
+        LEFT JOIN tbl_admin_rfq_service ARS ON RFQ.id = ARS.rfq_id
+        WHERE 
+          (${rfqStatus} IS NULL OR RFQ.status = ${rfqStatus})
+          AND (${adminServiceStatus} IS NULL OR ARS.status = ${adminServiceStatus})
+      `)
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
+  createOrUpdateAdminRfqService: async (rfq_id, subadmin_id, status, comment) => {
+    return new Promise((resolve, reject) => {
+      db.one(`
+        INSERT INTO tbl_admin_rfq_service (rfq_id, subadmin_id, status, comment)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (rfq_id) DO UPDATE SET
+          subadmin_id = $2,
+          status = $3,
+          comment = $4,
+          updated_at = CURRENT_TIMESTAMP
+        RETURNING *;
+      `, [rfq_id, subadmin_id, status, comment || null])
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });  
+  },
+
+  getRfqByIdForAdmin: async (id) => {
+    let q = `SELECT RFQ.*,
+      ARRAY(
+        SELECT json_build_object('vendor_id', V.id, 'vendor_name', V.name, 'vendor_email', V.email, 'vendor_mobile', V.mobile, 'vendor_organization', V.organization_name,
+          'products', (
+            SELECT json_agg(json_build_object('product_id', RFQ_P.product_id, 'variant', RFQ_P.variant, 'product_name', P.name, 'product_description', P.description, 
+              'quotation_details', (
+                SELECT json_agg(json_build_object('quote_id', Q.id, 'timestamp', Q.timestamp, 'status', Q.status, 'total_price', QI.total_price, 'unit_price', QI.unit_price, 'package_price', QI.package_price, 'freight_price', QI.freight_price, 'tax', QI.tax, 'delivery_period', QI.delivery_period,
+                  'finalization', (
+                    SELECT json_build_object('id', TQF.id, 'rfq_no', TQF.rfq_no, 'vendor_id', TQF.vendor_id, 'timestamp', TQF.timestamp)
+                    FROM tbl_quote_finalization TQF
+                    WHERE TQF.quote_id = Q.id AND TQF.product_id = RFQ_P.product_id AND TQF.variant = RFQ_P.variant
+                  ))
+                )
+                FROM tbl_quotes Q
+                JOIN tbl_quote_items QI ON Q.id = QI.quote_id
+                WHERE Q.rfq_id = RFQ.id AND Q.created_by = V.id AND QI.product_id = RFQ_P.product_id AND QI.variant = RFQ_P.variant
+              ),
+              'product_specs', (
+                SELECT json_agg(json_build_object('title', SPEC.title, 'value', SPEC.value))
+                FROM tbl_rfq_products_specs SPEC
+                WHERE SPEC.rfq_id = RFQ_P.rfq_id
+                AND SPEC.product_id = RFQ_P.product_id
+                AND SPEC.variant = RFQ_P.variant
+              )
+            ))
+            FROM tbl_rfq_products RFQ_P
+            JOIN tbl_product P ON RFQ_P.product_id = P.id
+            WHERE RFQ_P.rfq_id = RFQ.id
+            AND EXISTS (SELECT 1 FROM tbl_rfq_product_vendors RFQ_P_V WHERE RFQ_P_V.rfq_id = RFQ_P.rfq_id AND RFQ_P_V.user_id = V.id AND RFQ_P_V.product_id = RFQ_P.product_id AND RFQ_P_V.variant = RFQ_P.variant)
+          )
+        ) 
+        FROM tbl_users V
+        WHERE EXISTS (
+          SELECT 1 FROM tbl_rfq_product_vendors RFQ_P_V
+          WHERE RFQ_P_V.rfq_id = RFQ.id AND RFQ_P_V.user_id = V.id
+        )
+      ) AS "vendor_details",
+      
+      -- Fetch admin service details for this RFQ
+      (
+        SELECT json_agg(json_build_object('id', A.id, 'subadmin_id', A.subadmin_id, 'status', A.status, 'comment', A.comment, 'created_at', A.created_at, 'updated_at', A.updated_at))
+        FROM tbl_admin_rfq_service A
+        WHERE A.rfq_id = RFQ.id
+      ) AS "admin_service_details"
+      
+    FROM tbl_rfq RFQ
+    WHERE RFQ.id = ${id}
+    ORDER BY RFQ.id DESC
+    LIMIT 1;`;
+  
+    return new Promise(function (resolve, reject) {
+      db.query(q)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
 };
 
 export default rfqModel;

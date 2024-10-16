@@ -81,5 +81,18 @@ export const rfqSchemas = {
     vendor_id: Joi.number().required(),
     quote_id: Joi.number().required(),
     variant:Joi.number().required()
-  })
+  }),
+  getAllRfqsForAdminValidation: Joi.object().keys({
+    page: Joi.number().integer().optional(), 
+    limit: Joi.number().integer().optional(),
+    offset: Joi.number().integer().optional(), 
+    rfq_status: Joi.string().valid('1', '0').optional(), 
+    admin_service_status: Joi.string().valid('In Progress', 'Finalized').optional(), 
+    sort: Joi.string().valid('ASC', 'DESC').optional() 
+  }),
+  updateRfqStatusValidation: Joi.object().keys({
+    rfq_id: Joi.number().integer().required(), 
+    status: Joi.string().valid('In Progress', 'Finalized').required(),
+    comment: Joi.string().optional()
+  }),
 };
