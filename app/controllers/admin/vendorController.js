@@ -18,6 +18,7 @@ import {
 import jwtHelper from '../../helper/jwtHelper.js';
 import subscriptionModel from '../../models/subscriptionModel.js';
 import moment from 'moment';
+import userModel from '../../models/userModel.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -154,10 +155,6 @@ const vendorController = {
         company_name: organization_name || null,
         nature_of_business: nature_business || null,
         established_year: estd_year || null,
-        spoc_name: sales_spoc_name || null,
-        spoc_role: sales_spoc_position || null,
-        spoc_email: sales_spoc_business_email || null,
-        spoc_mobile: sales_spoc_mobile || null,
         gstin: gstin || null,
         import_export_code: import_export_code || null,
         cin: cin || null,
@@ -169,7 +166,23 @@ const vendorController = {
         project_end_date: ptr_project_end_date || null
       };
 
+      let spocObj = {
+        spoc_name: sales_spoc_name || null,
+        spoc_role: sales_spoc_position || null,
+        spoc_email: sales_spoc_business_email || null,
+        spoc_mobile: sales_spoc_mobile || null,
+      }
+
       let vendor = await productModel.vendor_register(vendorObj);
+
+              // adding spoc data only when atleast one of the below data is empty
+            if(spocObj.spoc_email || spocObj.spoc_mobile || spocObj.spoc_name || spocObj.spoc_role){
+                  // adding the vendor id to the spocObj object
+                spocObj.user_id = vendor[0].id;
+
+                // now inserting the details of the spocObj to the table
+                await userModel.add_user_spoc(spocObj);
+            }
 
       companyObj.user_id = vendor[0].id;
       await productModel.addCompany(companyObj);
@@ -326,6 +339,8 @@ const vendorController = {
       let vendorDetails = await vendorModel.getVendoreditDetails(vendorId);
       let companyDetails = await vendorModel.getCompanyDetails(vendorId);
       let files = await vendorModel.getFiles(vendorId);
+      let spocDetails = await vendorModel.getSpocDetails(vendorId);
+      resObj.spocDetails = spocDetails;
       resObj.vendorDetails = vendorDetails[0];
       resObj.companyDetails = companyDetails[0];
       resObj.files = files || [];

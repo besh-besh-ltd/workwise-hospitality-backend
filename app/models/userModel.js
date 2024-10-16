@@ -3247,6 +3247,25 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   },
+
+  // Inserting the new spoc with user_id
+  add_user_spoc: async (spocObj) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `INSERT INTO tbl_spoc (user_id, name, email, mobile, role, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`,
+         [spocObj.user_id, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  }
+
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];
 
@@ -3286,6 +3305,9 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   } */
-};
+
+
+
+  };
 
 export default userModel;

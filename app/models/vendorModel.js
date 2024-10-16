@@ -472,7 +472,20 @@ const vendorModel = {
           reject(error);
         });
     });
-  }
+  },
+  
+  getSpocDetails: async (id) => {
+    return new Promise(function (resolve, reject) {
+      db.any('select * from tbl_spoc where user_id = $1', [id])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
 };
 
 export default vendorModel;

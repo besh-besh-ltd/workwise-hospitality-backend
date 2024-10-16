@@ -671,10 +671,6 @@ const productController = {
               nature_of_business:
                 value['Nature of Business\r\n(drop down)'] || null,
               established_year: value['Established Year'] || null,
-              spoc_name: value['Sales SPOC Name'] || null,
-              spoc_role: value['Sales SPOC Position/Role'] || null,
-              spoc_email: value['Sales SPOC Business Email'] || null,
-              spoc_mobile: value['Sales SPOC Mobile'] || null,
               gstin: value['GSTIN'] || null,
               import_export_code: value['Import Export Code'] || null,
               cin: value['CIN'] || null,
@@ -686,6 +682,14 @@ const productController = {
               project_end_date: value['PTR- Project End Date'] || null
             };
 
+            // creating spoc object with user_id of the vendor
+            let spocObj = {
+              spoc_name: value['Sales SPOC Name'] || null,
+              spoc_role: value['Sales SPOC Position/Role'] || null,
+              spoc_email: value['Sales SPOC Business Email'] || null,
+              spoc_mobile: value['Sales SPOC Mobile'] || null,
+            }
+
             userExist = await productModel.checkVendorExist(vendor_email);
             // console.log('userExist-->', userExist);
             // console.log('webmail-->', Config.webmasterMail);
@@ -693,6 +697,17 @@ const productController = {
             if (userExist.length < 1) {
               vendorObj.password = generatePassword(password);
               vendor = await productModel.vendor_register(vendorObj);
+              
+
+              // adding spoc data only when atleast one of the below data is empty
+              if(spocObj.spoc_email || spocObj.spoc_mobile || spocObj.spoc_name || spocObj.spoc_role){
+                  // adding the vendor id to the spocObj object
+                spocObj.user_id = vendor[0].id;
+
+                // now inserting the details of the spocObj to the table
+                await userModel.add_user_spoc(spocObj);
+            }
+           
               companyObj.user_id = vendor[0].id;
               await productModel.addCompany(companyObj);
               addDefaultNotifications(vendor[0].id);
@@ -805,6 +820,17 @@ const productController = {
             } else {
               vendor = await productModel.updateVendorDetail(vendorObj);
               companyObj.user_id = vendor[0].id;
+            
+              // adding spoc data only when atleast one of the below data is empty
+              if(spocObj.spoc_email || spocObj.spoc_mobile || spocObj.spoc_name || spocObj.spoc_role){
+                  // adding the vendor id to the spocObj object
+                spocObj.user_id = vendor[0].id;
+
+                // now inserting the details of the spocObj to the table
+                await userModel.add_user_spoc(spocObj);
+              }
+             
+
               await productModel.updateCompany(companyObj);
               if (value['PTR (Past Track Record) (file)']) {
                 const urlObject = new URL(
