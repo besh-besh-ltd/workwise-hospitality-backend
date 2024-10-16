@@ -206,10 +206,10 @@ const insertProduct = async (
       variant,
       comment,
       datasheet,
-      spec_file,
-      qap_file,
+      spec_file:'',// this field we have to remove from database
+      qap_file:'',// this field we have to remove from database
       rfq_id: created_rfq_id,
-      datasheet_file,
+      datasheet_file:"",// this field we have to remove from database
       qap
     };
     let spec_array = spec.map((item) => {
@@ -248,6 +248,41 @@ const insertProduct = async (
         'tbl_rfq_product_vendors'
       );
     }
+
+// Handle multiple datasheet files
+if (datasheet_file && datasheet_file.length > 0) {
+  const fileDataArray = datasheet_file.map(url => ({
+    rfq_product_id:productResult[0].id,
+    file_type: 'TDS',
+    file_url: url
+  }));
+  for (const fileData of fileDataArray) {
+    await rfqModel.insert('tbl_rfq_product_files', fileData);
+  }
+}
+
+if (qap_file && qap_file.length > 0) {
+  const qapFiles = qap_file.map(url => ({
+    rfq_product_id:productResult[0].id,
+    file_type: 'QAP',
+    file_url: url
+  }));
+  for (const fileData of qapFiles) {
+    await rfqModel.insert('tbl_rfq_product_files', fileData);
+  }
+}
+
+if (spec_file && spec_file.length > 0) {
+  const specFiles = spec_file.map(url => ({
+    rfq_product_id:productResult[0].id,
+    file_type: 'SPEC',
+    file_url: url
+  }));
+  for (const fileData of specFiles) {
+    await rfqModel.insert('tbl_rfq_product_files', fileData);
+  }
+}
+
 
     return { product_info: productResult[0], spec_info, vendor_info };
   } catch (error) {
@@ -951,9 +986,9 @@ const rfqController = {
               response[0].otherDetails = results;
               response[0].terms = rfqtermsRsp;
               // sendMailtoVendors => in this function we are also generating token for vendor so he will quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
-              await sendMailtoVendors(req, response[0].id);
+              // await sendMailtoVendors(req, response[0].id);
 
-              await sendQuotationMailToBuyer(req, response[0].id);
+              // await sendQuotationMailToBuyer(req, response[0].id);
 
               res
                 .status(200)
