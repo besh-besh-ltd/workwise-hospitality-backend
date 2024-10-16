@@ -2337,6 +2337,7 @@ const UsersController = {
   },
   getDashboardData: async (req, res, next) => {
     let data = {};
+    const user_id = req.user.id;
     try {
       if (req.user.user_type == 2) {
         // Buyer
@@ -2353,11 +2354,33 @@ const UsersController = {
         data.pending_responses =
           data.pending_responses < 0 ? 0 : data.pending_responses;
         data.quote_received = parseInt(pending_responses.count);
-        let rfq_data_for_notificaton = await rfqModel.getAllBuyerRfq(
-          5,
-          0,
-          req.user.id
-        );
+
+        // getting the data of all rfqs of a buyer
+            let page, limit, offset;
+            if (req.body.page && req.body.page > 0) {
+              page = req.body.page;
+              limit = req.body.limit || Config.globalAdminLimit;
+              offset = (page - 1) * limit;
+            } else {
+              limit = Config.globalAdminLimit;
+              offset = 0;
+            }
+
+            let {project_id,sort,reverse_auction,rfq_type} = req.body;
+            if(project_id==-1){
+              project_id=null;
+            }
+            if(rfq_type==''){
+              rfq_type=null;
+            }
+            if(reverse_auction=='-1'){
+              reverse_auction=null;
+            }
+
+           
+            
+
+        const rfq_data_for_notificaton = await rfqModel.getAllBuyerRfq(limit, offset, user_id, project_id, sort, reverse_auction, rfq_type);
 
         let temp_rfqs = rfq_data_for_notificaton.map((item) => {
           delete item.products;
@@ -2431,7 +2454,7 @@ const UsersController = {
         });
 
         data.notificaiton_data = readable_notification_date_data;
-        let rfq_data = await rfqModel.getAllBuyerRfq(1000000, 0, req.user.id);
+        let rfq_data = await rfqModel.getAllBuyerRfq(limit, offset, user_id, project_id, sort, reverse_auction, rfq_type)
         data.rfq_data = rfq_data;
 
         let cost = await rfqModel.getAllRfqCost(req.user.id, 2);
@@ -2583,7 +2606,7 @@ const UsersController = {
         email,
         phone,
         productList,
-        is_private:!(req.body.is_private) ? 0 : is_private,
+        is_private: !(req.body.is_private) ? 0 : is_private,
       }
 
       // If user does not exist, proceed with inserting data into the tbl_temp_user table
@@ -2648,7 +2671,7 @@ const UsersController = {
       let is_private = parseInt(req.body.is_private);
       console.log(typeof is_private);
       // when is_private does not send with request
-      if(!req.body.is_private){
+      if (!req.body.is_private) {
         is_private = 0;
       }
 
@@ -2673,7 +2696,6 @@ const UsersController = {
         const mobile = (value["Vendor company owner/hr/official contact number"] || "").toString();
         const productList = (value["Product List (ex-pipe,valve)"] || "").trim();
 
-
         // now check validation for vendor name number and email
 
         const errors = validateBulkVendorInputs(vendorName, email, mobile, productList);
@@ -2692,42 +2714,44 @@ const UsersController = {
         // so we are moving forward for the insertion and other validation check
 
         if (email && mobile) {
-          const userEmailExists = await userModel.company_exist(email, mobile);
+          const userEmailExists = await userModel.user_exist(email, mobile);
           if (userEmailExists.length > 0) {
-            // case 1 -> whethtr the vendor is public
-            if (userEmailExists.is_private == 0) {
-              await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].user_id);
-              const addVendor = {
-                "index": index + 1,
-                "email": userEmailExists.email,
-                "message": "This vendor is already registered as a PUBLIC vendor in our system. They have now been added to your preferred vendor list."
+            //  check whether the user is vendor or not by checking thier user_type==3
+            if (userEmailExists[0].user_type == 3) {
+              // case 1 -> whethtr the vendor is public
+              if (userEmailExists.is_private == 0) {
+                await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].id);
+                const addVendor = {
+                  "index": index + 1,
+                  "email": userEmailExists[0].email,
+                  "phone": userEmailExists[0].mobile,
+                  "message": "This vendor is already registered as a PUBLIC vendor in our system. They have now been added to your preferred vendor list."
+                }
+                vendorsMapped.push(addVendor);
+                continue;
+              } else {
+                // case 2 -> whether the vendor is private
+                await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].id);
+                const addVendor = {
+                  "index": index + 1,
+                  "email": userEmailExists[0].email,
+                  "phone": userEmailExists[0].mobile,
+                  "message": "This vendor is already registered as a PRIVATE vendor in our system. They have now been added to your preferred vendor list."
+                }
+                vendorsMapped.push(addVendor);
+                continue;
               }
-              vendorsMapped.push(addVendor);
-              continue;
             } else {
-              // case 2 -> whether the vendor is private
-              await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].user_id);
               const addVendor = {
                 "index": index + 1,
-                "email": userEmailExists.email,
-                "message": "This vendor is already registered as a PRIVATE vendor in our system. They have now been added to your preferred vendor list."
-              }
-              vendorsMapped.push(addVendor);
-              continue;
-            }
-          } else {
-            // this is for when the buyer trying to add other buyer credentials as a vendor
-
-            const buyerCredentials = await userModel.user_exist(email, mobile);
-            if (buyerCredentials.length > 0) {
-              const addVendor = {
-                "index": index + 1,
-                "email": buyerCredentials.email,
+                "email": userEmailExists[0].email,
+                "phone": userEmailExists[0].mobile,
                 "message": "Unable to add this vendor. Please ensure the credentials belong to a valid vendor account."
               }
               vendorsMapped.push(addVendor);
               continue;
             }
+
           }
         }
 
@@ -2736,12 +2760,12 @@ const UsersController = {
 
           const buyerId = req.user.id; // Getting buyerId from the authenticated user
 
-           const obj = {
-            buyerId, 
-            vendorName, 
-            email, 
-            phone: mobile, 
-            productList, 
+          const obj = {
+            buyerId,
+            vendorName,
+            email,
+            phone: mobile,
+            productList,
             is_private
           }
 
@@ -2751,19 +2775,21 @@ const UsersController = {
           // Sending the response back to the client
           if (result) {
             const addVendor = {
-              "index": index+1,
+              "index": index + 1,
               "email": email,
+              "phone": mobile,
               "message": 'Vendor successfully added. Please wait for vendor review.',
             }
             vendorsMapped.push(addVendor);
           }
-          
+
         } catch (error) {
           logError(error);
           let message = error == "Error: Vendor_In_Review" ? "This vendor has already been added by you. Please wait while we review the vendor details" : Config.errorText.value;
           const addVendor = {
-            "index": index+1,
+            "index": index + 1,
             "email": email,
+            "phone": mobile,
             "message": message,
           }
           vendorsMapped.push(addVendor);
@@ -2786,9 +2812,9 @@ const UsersController = {
       res
         .status(200)
         .json({
-          status:1,
-          addVendor:vendorsMapped,
-          errorsObj:validationErrors,
+          status: 1,
+          addVendor: vendorsMapped,
+          errorsObj: validationErrors,
         })
 
 
@@ -2814,7 +2840,7 @@ const validateBulkVendorInputs = (vendorName, email, mobile, productList) => {
   let errors = [];
 
   // Function to validate product list format allowing a trailing comma
- 
+
 
 
   const isValidEmail = (email) => {
@@ -2853,9 +2879,9 @@ const validateBulkVendorInputs = (vendorName, email, mobile, productList) => {
   // Checking product list
   if (!productList) {
     errors.push('Missing Product List');
-  // } else if (!isValidProductList(productList)) { // Added validation for product list
-  //   errors.push('Invalid Product List (should be a string of items separated by commas, e.g., "p1,p2,p3" or "p1,p2,p3,")');
-  // }
+    // } else if (!isValidProductList(productList)) { // Added validation for product list
+    //   errors.push('Invalid Product List (should be a string of items separated by commas, e.g., "p1,p2,p3" or "p1,p2,p3,")');
+    // }
   }
 
   return errors;
