@@ -12,6 +12,7 @@ import { acl } from '../../helper/common.js';
 import passport from '../../middleware/passport.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
 
+
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
 const passportLogIn = passport.authenticate('localUsr', { session: false });
