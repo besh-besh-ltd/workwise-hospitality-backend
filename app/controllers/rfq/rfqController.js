@@ -898,6 +898,7 @@ const rfqController = {
         rfq_type,
         reverse_auction,
         project_id,
+        term_and_condition_files
       } = req.body;
 
       if (rfq_id && rfq_id != '' && rfq_id != null) {
@@ -977,6 +978,17 @@ const rfqController = {
               tbl_rfq_terms_map_keys,
               'tbl_rfq_terms_map'
             );
+          }
+
+          if (term_and_condition_files && term_and_condition_files.length > 0) {
+            const rfq_files = term_and_condition_files.map(url => ({
+              rfq_id:created_rfq_id,
+              file_type: 'term_and_condition',
+              file_url: url
+            }));
+            for (const fileData of rfq_files) {
+              await rfqModel.insert('tbl_rfq_files', fileData);
+            }
           }
 
           Promise.all(
