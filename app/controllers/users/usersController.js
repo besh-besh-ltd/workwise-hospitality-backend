@@ -2668,7 +2668,7 @@ const UsersController = {
 
       // checing the is_private field
       let is_private = parseInt(req.body.is_private);
-      console.log(typeof is_private);
+
       // when is_private does not send with request
       if (!req.body.is_private) {
         is_private = 0;
@@ -2711,7 +2711,6 @@ const UsersController = {
 
         // now these are those vendors which do not have errors 
         // so we are moving forward for the insertion and other validation check
-
         if (email && mobile) {
           const userEmailExists = await userModel.user_exist(email, mobile);
           if (userEmailExists.length > 0) {
@@ -2817,7 +2816,6 @@ const UsersController = {
         })
 
 
-
     } catch (err) {
       logError(err);
       res
@@ -2839,8 +2837,6 @@ const validateBulkVendorInputs = (vendorName, email, mobile, productList) => {
   let errors = [];
 
   // Function to validate product list format allowing a trailing comma
-
-
 
   const isValidEmail = (email) => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;

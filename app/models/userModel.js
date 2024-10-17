@@ -3066,9 +3066,11 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
       try {
         // Check if a vendor with the same email already exists for the given buyerId
         const existingVendor = await db.any(
-          `SELECT * FROM tbl_temp_user 
-           WHERE buyer_id = $1 OR email = $2`,
-          [buyerId, email]
+              `SELECT * 
+                FROM tbl_temp_user
+                WHERE buyer_id = $1 
+                AND (email = $2 OR mobile = $3)`,
+          [buyerId, email, phone]
         );
 
         if (existingVendor.length > 0) {
