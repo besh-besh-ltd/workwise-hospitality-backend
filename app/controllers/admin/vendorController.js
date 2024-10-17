@@ -768,29 +768,56 @@ const vendorController = {
   },
   updateSpoc: async (req, res, next) => {
     try {
-      console.log(".................",req.body);
+      let errors = {};
+      let err = 0;
+
       const userId = req.params.id;
       const spocId = req.params.spoc_id;
 
-      const {spoc_name, spoc_email, spoc_mobile, spoc_role} = req.body;
-      
-      const name = spoc_name || null;
-      const email = spoc_email || null;
-      const mobile = spoc_mobile || null;
-      const role = spoc_role || null;
+      const { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
+ 
+      const name = spoc_name ?? null;
+      const email = spoc_email ?? null;
+      const mobile = spoc_mobile ?? null;
+      const role = spoc_role ?? null;
+
+      if (!name && !email && !mobile && !role) {
+        err++;
+        errors.empty_fields = 'All fields are empty or missing.';
+      }
+
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+        return;
+      }
+
 
       const response = await vendorModel.updateUserSpoc(name, email, mobile, role, userId, spocId);
-      
-      if(response){
+
+      if (response.length > 0) {
         res
-        .status(200)
-        .json({
-          status: 1,
-          message: response
-        })
-        .end();
+          .status(200)
+          .json({
+            status: 1,
+            message: `spoc of ${response[0].role.toUpperCase()} ${response[0].name} updated`
+          })
+          .end();
+      } else {
+        res
+          .status(200)
+          .json({
+            status: 1,
+            message: `No Update`
+          })
+          .end();
       }
-      
+
     } catch (error) {
       logError(error);
       res

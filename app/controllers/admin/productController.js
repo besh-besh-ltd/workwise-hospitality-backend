@@ -61,13 +61,80 @@ const validateBulkProductVendorInputs = (value) => {
     errors.push('Invalid vendor contact number (not more then 15 digit)');
   }
 
-  const spocMobile = value['Sales SPOC Mobile'] || "";
-  if (isValidPhoneNumber(spocMobile)) {
-    errors.push('Invalid Sales SPOC mobile number (not more then 15 digit)');
+  // SPOC Fields validation (validate only if at least one of them is not empty)
+  const spoc_name = value['Sales SPOC Name'] || "";
+  const spoc_role = value['Sales SPOC Position/Role'] || "";
+  const spoc_email = value['Sales SPOC Business Email'] || "";
+  const spoc_mobile = value['Sales SPOC Mobile'] || "";
+
+  const isAnySPOCFieldNonEmpty = spoc_name || spoc_role || spoc_email || spoc_mobile;
+
+  if (isAnySPOCFieldNonEmpty) {
+    // Validate spoc_name if provided
+    if (!spoc_name.trim()) {
+      errors.push('SPOC name is missing');
+    }
+
+    // Validate spoc_email if provided and not empty
+    if (!isValidEmail(spoc_email)) {
+      errors.push('Invalid/Missing SPOC email');
+    }
+
+    // Validate spoc_mobile if provided and not empty
+    if (isValidPhoneNumber(vendorContactNumber)) {
+      errors.push('Invalid/Missing SPOC Mobile');
+    }
   }
 
   return errors;
 };
+
+const spocInputsValidation = (value) => {
+
+  let errors = [];
+
+  const isValidEmail = (email) => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  };
+
+  const isValidPhoneNumber = (phone) => {
+    return phone.toString().length > 15 ? true : false;
+  };
+
+  // SPOC Fields validation (validate only if at least one of them is not empty)
+  const spoc_name = value['Sales SPOC Name'] || "";
+  const spoc_role = value['Sales SPOC Position/Role'] || "";
+  const spoc_email = value['Sales SPOC Business Email'] || "";
+  const spoc_mobile = value['Sales SPOC Mobile'] || "";
+
+  const isAnySPOCFieldNonEmpty = spoc_name || spoc_role || spoc_email || spoc_mobile;
+
+  if (isAnySPOCFieldNonEmpty) {
+    // Validate spoc_name if provided
+    if (!spoc_name.trim()) {
+      errors.push('SPOC name is missing');
+    }
+
+    if (!spoc_role) {
+      errors.push("SPOC role is missing");
+    }
+
+    // Validate spoc_email if provided and not empty
+    if (!isValidEmail(spoc_email)) {
+      errors.push('Invalid/Missing SPOC email');
+    }
+
+    // Validate spoc_mobile if provided and not empty
+    if(!spoc_mobile){
+      errors.push('Missing SPOC Mobile');
+    }else if (isValidPhoneNumber(spoc_mobile)) {
+      errors.push('Invalid SPOC Mobile');
+    }
+  }
+
+  return errors;
+}
 
 
 const productController = {
@@ -590,13 +657,20 @@ const productController = {
       let previousCategory = '';
 
       let errorsObj = []
+      let vendor_id = '';
+      let vendorName = '';
+      let vendorEmail = '';
+
 
       for await (const [index, value] of jsonData.entries()) {
 
         const productName = (value['Product Name'] || "").trim()
 
+
+
         if (productName) {
 
+          
           //  check input validatation for vendor name number and email 
           const errors = validateBulkProductVendorInputs(value);
           if (errors.length > 0) {
@@ -611,11 +685,13 @@ const productController = {
             continue
           }
 
+          vendorName = value['Vendor Name'];
+          vendorEmail = value['Vendor Email'];
+
           // check vendor exist or not
           previousCategory = '';
           let userExist = '';
           let vendor = '';
-          let vendor_id = '';
           let password = (value['Vendor Name'] || "").trim().replace(/\s+/g, '');
           let orgChar = password.match(/[a-zA-Z]/g).join('');
           orgChar = orgChar.toLowerCase();
@@ -682,13 +758,7 @@ const productController = {
               project_end_date: value['PTR- Project End Date'] || null
             };
 
-            // creating spoc object with user_id of the vendor
-            let spocObj = {
-              spoc_name: value['Sales SPOC Name'] || null,
-              spoc_role: value['Sales SPOC Position/Role'] || null,
-              spoc_email: value['Sales SPOC Business Email'] || null,
-              spoc_mobile: value['Sales SPOC Mobile'] || null,
-            }
+
 
             userExist = await productModel.checkVendorExist(vendor_email);
             // console.log('userExist-->', userExist);
@@ -697,17 +767,7 @@ const productController = {
             if (userExist.length < 1) {
               vendorObj.password = generatePassword(password);
               vendor = await productModel.vendor_register(vendorObj);
-              
 
-              // adding spoc data only when atleast one of the below data is empty
-              if(spocObj.spoc_email || spocObj.spoc_mobile || spocObj.spoc_name || spocObj.spoc_role){
-                  // adding the vendor id to the spocObj object
-                spocObj.user_id = vendor[0].id;
-
-                // now inserting the details of the spocObj to the table
-                await userModel.add_user_spoc(spocObj);
-            }
-           
               companyObj.user_id = vendor[0].id;
               await productModel.addCompany(companyObj);
               addDefaultNotifications(vendor[0].id);
@@ -820,16 +880,6 @@ const productController = {
             } else {
               vendor = await productModel.updateVendorDetail(vendorObj);
               companyObj.user_id = vendor[0].id;
-            
-              // adding spoc data only when atleast one of the below data is empty
-              if(spocObj.spoc_email || spocObj.spoc_mobile || spocObj.spoc_name || spocObj.spoc_role){
-                  // adding the vendor id to the spocObj object
-                spocObj.user_id = vendor[0].id;
-
-                // now inserting the details of the spocObj to the table
-                await userModel.add_user_spoc(spocObj);
-              }
-             
 
               await productModel.updateCompany(companyObj);
               if (value['PTR (Past Track Record) (file)']) {
@@ -1070,6 +1120,48 @@ const productController = {
           //   };
           //   await productModel.createProductCategory(categoryObj);
           // }
+
+          // creating spoc object with user_id of the vendor
+          let spocObj = {
+            spoc_name: value['Sales SPOC Name'] || null,
+            spoc_role: value['Sales SPOC Position/Role'] || null,
+            spoc_email: value['Sales SPOC Business Email'] || null,
+            spoc_mobile: value['Sales SPOC Mobile'] || null,
+          }
+
+          // you can apply logic of spoc here, because it even run on if there is no product name & only approved by column
+          // adding spoc data only when atleast one of the below data is empty
+          if (spocObj.spoc_email || spocObj.spoc_mobile || spocObj.spoc_name || spocObj.spoc_role) {
+
+            const errors = spocInputsValidation(value);
+            if (errors.length > 0) {
+              const errObj = {
+                vendorName: vendorName,
+                vendorEmail: vendorEmail,
+                productName: productName,
+                Row: index + 1,
+                errors: errors
+              }
+              errorsObj.push(errObj)
+              continue;
+            } else {
+              spocObj.user_id = vendor_id;
+
+              // adding the vendor id to the spocObj object
+              spocObj.spoc_mobile = spocObj.spoc_mobile.toString();
+
+              // check for exactly same input existence
+              const response = await userModel.check_exactly_same_spoc(spocObj);
+
+              if (response.length < 1) {
+                // now inserting the details of the spocObj to the table
+                await userModel.add_user_spoc(spocObj);
+              }
+            }
+
+          }
+
+
 
           if (value['Vendor Approved By']) {
             let vendorApproveArray = [value['Vendor Approved By']];

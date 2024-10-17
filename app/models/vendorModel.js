@@ -508,11 +508,13 @@ const vendorModel = {
       db.any(
         `UPDATE tbl_spoc
          SET name = $1, email = $2, mobile = $3, role = $4, updated_at = CURRENT_TIMESTAMP
-         WHERE user_id = $5 AND id = $6`,
+         WHERE user_id = $5 AND id = $6
+         AND (name != $1 OR email != $2 OR mobile != $3 OR role != $4)
+         RETURNING *;`,
         [name, email, mobile, role, userId, spocId]
       )
-        .then(function () {
-          resolve("spoc successfully updated");
+        .then(function (data) {
+          resolve(data);
         })
         .catch(function (err) {
           let error = new Error(err);

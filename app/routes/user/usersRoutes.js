@@ -214,7 +214,16 @@ UsersRoutes.post(
   '/add-spoc',
   passportSignIn,
   validateBody(schemas.user_spoc),
-  
+  UsersController.addSpoc
+)
+
+// to update the spoc of the user
+UsersRoutes.put(
+  '/update-spoc/:spoc_id',
+  passportSignIn,
+  validateBody(schemas.user_spoc),
+  validateDbBody.spoc_id_exists,
+  UsersController.updateSpoc
 )
 
 
