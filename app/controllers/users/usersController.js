@@ -2354,33 +2354,11 @@ const UsersController = {
         data.pending_responses =
           data.pending_responses < 0 ? 0 : data.pending_responses;
         data.quote_received = parseInt(pending_responses.count);
-
-        // getting the data of all rfqs of a buyer
-            let page, limit, offset;
-            if (req.body.page && req.body.page > 0) {
-              page = req.body.page;
-              limit = req.body.limit || Config.globalAdminLimit;
-              offset = (page - 1) * limit;
-            } else {
-              limit = Config.globalAdminLimit;
-              offset = 0;
-            }
-
-            let {project_id,sort,reverse_auction,rfq_type} = req.body;
-            if(project_id==-1){
-              project_id=null;
-            }
-            if(rfq_type==''){
-              rfq_type=null;
-            }
-            if(reverse_auction=='-1'){
-              reverse_auction=null;
-            }
-
-           
-            
-
-        const rfq_data_for_notificaton = await rfqModel.getAllBuyerRfq(limit, offset, user_id, project_id, sort, reverse_auction, rfq_type);
+        let rfq_data_for_notificaton = await rfqModel.getAllBuyerRfq(
+          5,
+          0,
+          req.user.id
+        );
 
         let temp_rfqs = rfq_data_for_notificaton.map((item) => {
           delete item.products;
