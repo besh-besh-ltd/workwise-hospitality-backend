@@ -2337,6 +2337,7 @@ const UsersController = {
   },
   getDashboardData: async (req, res, next) => {
     let data = {};
+    const user_id = req.user.id;
     try {
       if (req.user.user_type == 2) {
         // Buyer
@@ -2353,11 +2354,32 @@ const UsersController = {
         data.pending_responses =
           data.pending_responses < 0 ? 0 : data.pending_responses;
         data.quote_received = parseInt(pending_responses.count);
-        let rfq_data_for_notificaton = await rfqModel.getAllBuyerRfq(
-          5,
-          0,
-          req.user.id
-        );
+         // getting the data of all rfqs of a buyer
+         let page, limit, offset;
+         if (req.body.page && req.body.page > 0) {
+           page = req.body.page;
+           limit = req.body.limit || Config.globalAdminLimit;
+           offset = (page - 1) * limit;
+         } else {
+           limit = Config.globalAdminLimit;
+           offset = 0;
+         }
+
+         let {project_id,sort,reverse_auction,rfq_type} = req.body;
+         if(project_id==-1){
+           project_id=null;
+         }
+         if(rfq_type==''){
+           rfq_type=null;
+         }
+         if(reverse_auction=='-1'){
+           reverse_auction=null;
+         }
+
+
+
+
+     const rfq_data_for_notificaton = await rfqModel.getAllBuyerRfq(limit, offset, user_id, project_id, sort, reverse_auction, rfq_type);
 
         let temp_rfqs = rfq_data_for_notificaton.map((item) => {
           delete item.products;
@@ -2431,7 +2453,7 @@ const UsersController = {
         });
 
         data.notificaiton_data = readable_notification_date_data;
-        let rfq_data = await rfqModel.getAllBuyerRfq(1000000, 0, req.user.id);
+        let rfq_data = await rfqModel.getAllBuyerRfq(limit, offset, user_id, project_id, sort, reverse_auction, rfq_type)
         data.rfq_data = rfq_data;
 
         let cost = await rfqModel.getAllRfqCost(req.user.id, 2);

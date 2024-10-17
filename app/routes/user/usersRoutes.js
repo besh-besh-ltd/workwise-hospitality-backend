@@ -10,6 +10,8 @@ import {
 import { validateDbBody } from '../../validations/dbValidation/userDbValidation.js';
 import { acl } from '../../helper/common.js';
 import passport from '../../middleware/passport.js';
+import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
+
 
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
@@ -175,9 +177,11 @@ UsersRoutes.get(
 );
 
 
-UsersRoutes.get(
+UsersRoutes.post(
   '/get-dashboard-data',
   passportSignIn,
+  validateDbBody.user_id_profileexists,
+  validateBody(projectSchemas.get_buyer_body_validation),
   UsersController.getDashboardData
 );
 
