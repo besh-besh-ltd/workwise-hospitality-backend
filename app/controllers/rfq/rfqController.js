@@ -986,9 +986,9 @@ const rfqController = {
               response[0].otherDetails = results;
               response[0].terms = rfqtermsRsp;
               // sendMailtoVendors => in this function we are also generating token for vendor so he will quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
-              // await sendMailtoVendors(req, response[0].id);
-
-              // await sendQuotationMailToBuyer(req, response[0].id);
+              await sendMailtoVendors(req, response[0].id);
+              
+              await sendQuotationMailToBuyer(req, response[0].id);
 
               res
                 .status(200)
@@ -1822,6 +1822,23 @@ const rfqController = {
               quote_items_keys,
               'tbl_quote_items'
             );
+
+         // New code to insert file links into tbl_quote_item_files
+        if (quotes_items.length > 0) {
+          quotes_items.forEach(async (item, index) => {
+          const file_links = products[index].document_files;
+            if (file_links && file_links.length > 0) {
+                const file_records = file_links.map(link => ({
+                quote_item_id: item.id,
+                file_type: "DOC",
+                file_url: link,
+                created_at: new Date()
+              }));
+              await rfqModel.insertArray( file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files'
+              );
+            }
+            }); 
+          }
 
             await sendQuoteNotificationEmail(req, rfq_id);
             await sendQuoteNotificationToVendor(req);
