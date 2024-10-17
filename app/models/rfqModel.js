@@ -274,6 +274,17 @@ const rfqModel = {
 
     //  query changed by mukul,
     let q = `SELECT RFQ.*,
+    -- Fetching global_payment_term and global_comment from tbl_quotes
+    (
+      SELECT json_build_object(
+        'global_payment_term', TQ.global_payment_term,
+        'global_comment', TQ.global_comment
+      )
+      FROM tbl_quotes TQ
+      WHERE TQ.rfq_id = RFQ.id
+        AND TQ.created_by = ${user_id}
+      LIMIT 1
+    ) AS "quote_details",
     ARRAY(
       SELECT json_build_object('id', TQF.id,'product_id',TQF.product_id, 'timestamp', TQF.timestamp,'variant', TQF.variant,
         'winning_vendor', 
@@ -342,6 +353,22 @@ const rfqModel = {
                   ELSE T_P.qap_new_file_name END))
             FROM tbl_product T_P
             WHERE RFQ_P.product_id = T_P.id
+          ),
+          -- New finalization_status field for each product (gyan - 16/10/2024)
+          'finalization_status', COALESCE(
+            (
+              SELECT 
+                CASE
+                  WHEN TQF.vendor_id = ${user_id} THEN 'You are finalized'
+                  ELSE 'Another vendor is finalized'
+                END
+              FROM tbl_quote_finalization TQF
+              WHERE TQF.rfq_id = RFQ_P.rfq_id 
+                AND TQF.product_id = RFQ_P.product_id 
+                AND TQF.variant = RFQ_P.variant
+              LIMIT 1
+            ), 
+            'No vendor finalized yet'
           ),
             ${
               user_type == 3
