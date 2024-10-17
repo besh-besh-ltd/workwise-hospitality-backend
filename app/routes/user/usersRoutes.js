@@ -199,12 +199,21 @@ UsersRoutes.get(
   UsersController.getBuyerPrivateVendors
 );
 
+// to add vendor in bulk using excel
 UsersRoutes.post(
   '/buyer-excel-add-vendor',
   passportSignIn,
   acl([2]),
   schema_posts.buyerExcelUploadVendorFileHandler, 
   UsersController.buyerExcelUploadVendor,
+)
+
+// to add spoc of any user
+UsersRoutes.post(
+  '/add-spoc',
+  passportSignIn,
+  validateBody(schemas.user_spoc),
+  
 )
 
 

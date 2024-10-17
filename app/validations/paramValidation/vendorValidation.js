@@ -143,7 +143,7 @@ const schemas = {
       .optional()
       .regex(/^[0|1]$/, 'numeric values only')
   }),
-  update_spoc:Joi.object().keys({
+  user_spoc:Joi.object().keys({
     spoc_name: Joi.string().optional().allow(null).allow(''),
     spoc_role: Joi.string().optional().allow(null).allow(''),
     spoc_email: Joi.string().optional().allow(null).allow(''),

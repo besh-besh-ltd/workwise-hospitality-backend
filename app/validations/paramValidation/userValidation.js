@@ -390,6 +390,14 @@ const schemas = {
     productList: Joi.string().required().trim().max(300),  // Required, trimmed, and max length of 300 characters,
     is_private: Joi.number().optional().valid(0, 1),
   }),
+
+  user_spoc:Joi.object().keys({
+    spoc_name: Joi.string().optional().allow(null).allow(''),
+    spoc_role: Joi.string().optional().allow(null).allow(''),
+    spoc_email: Joi.string().optional().allow(null).allow(''),
+    spoc_mobile: Joi.string().optional().allow(null).allow(''),
+  })
+
 };
 
 let store_buyer_excel_upload_vendor_file = multer.diskStorage({
