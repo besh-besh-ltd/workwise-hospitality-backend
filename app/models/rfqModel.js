@@ -906,6 +906,11 @@ LIMIT ${limit} OFFSET $4;`,
                 WHERE TQ.id = TQI.quote_id
                   AND TQ.rfq_id = ${id}
               ),
+                'document_files', (
+                SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
+                FROM tbl_quote_item_files QIF
+                WHERE QIF.quote_item_id = TQI.id
+              ),
               'previous_quotes', (
                 SELECT json_agg(
                   json_build_object(
