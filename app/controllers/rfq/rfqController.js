@@ -1666,7 +1666,8 @@ const rfqController = {
       status,
       products,
       globalPaymentTerms,
-      globalComment
+      globalComment,
+      term_and_condition_files
     } = req.body;
 
     const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
@@ -1778,7 +1779,20 @@ const rfqController = {
 
           let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
           if (quote_rsp.length > 0) {
+
             const created_quote_id = quote_rsp[0].id;
+
+            if (term_and_condition_files && term_and_condition_files.length > 0) {
+              const quote_files = term_and_condition_files.map(url => ({
+                quote_id:created_quote_id,
+                file_type: 'term_and_condition',
+                file_url: url
+              }));
+              for (const fileData of quote_files) {
+                await rfqModel.insert('tbl_quotes_files', fileData);
+              }
+            }
+
             var quote_items_data = [];
             products.map(
               ({
