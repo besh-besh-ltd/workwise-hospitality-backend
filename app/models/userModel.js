@@ -3252,7 +3252,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
   add_user_spoc: async (spocObj) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `INSERT INTO tbl_spoc (user_id, name, email, mobile, role, created_at, updated_at)
+        `INSERT INTO tbl_users_spoc (user_id, name, email, mobile, role, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
          RETURNING *;`,
          [spocObj.user_id, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role]
@@ -3273,7 +3273,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     const userId = parseInt(spocObj.user_id, 10);
 
     db.any(
-      `SELECT * FROM tbl_spoc
+      `SELECT * FROM tbl_users_spoc
         WHERE user_id = $1
         AND name = $2
         AND email = $3
@@ -3294,7 +3294,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
   updateUserSpoc: async (name, email, mobile, role, userId, spocId) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `UPDATE tbl_spoc
+        `UPDATE tbl_users_spoc
          SET name = $1, email = $2, mobile = $3, role = $4, updated_at = CURRENT_TIMESTAMP
          WHERE user_id = $5 AND id = $6
          RETURNING *;`,
