@@ -69,6 +69,15 @@ vendorRoutes.put(
   vendorController.updateVendor
 );
 vendorRoutes.put(
+  '/update-vendor/:id/update-spoc/:spoc_id',
+  passportSignIn,
+  validateParam(schemas.spoc_params),
+  validateBody(schemas.user_spoc),
+  validateDbBody.vendor_id_exists,
+  validateDbBody.spoc_id_exists,
+  vendorController.updateSpoc
+)
+vendorRoutes.put(
   '/accept-vendor/:id',
   passportSignIn,
   validateParam(schemas.id),

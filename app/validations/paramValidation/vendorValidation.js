@@ -114,6 +114,14 @@ const schemas = {
       .required()
       .regex(/^[0-9]*$/, 'Please send proper id')
   }),
+  spoc_params: Joi.object().keys({
+    id: Joi.string()
+      .required()
+      .regex(/^[0-9]*$/, 'Please send proper id'),
+    spoc_id: Joi.string()
+      .required()
+      .regex(/^[0-9]*$/, 'Please send proper id')
+  }),
   approval: Joi.object().keys({
     status: Joi.string()
       .required()
@@ -134,7 +142,27 @@ const schemas = {
     show_in_website: Joi.string()
       .optional()
       .regex(/^[0|1]$/, 'numeric values only')
-  })
+  }),
+  user_spoc: Joi.object().keys({
+    spoc_name: Joi.string()
+      .optional()
+      .allow(null, '')  // Allow null and empty string
+      .trim(),
+    spoc_role: Joi.string()
+      .optional()
+      .allow(null, ''),  // Allow null and empty string
+    spoc_email: Joi.string()
+      .optional()
+      .allow(null, '')
+      .trim()
+      .email({ tlds: { allow: false } }),  // Email validation only if non-empty
+    spoc_mobile: Joi.string()
+      .optional()
+      .allow(null, '')
+      .trim()
+      .regex(/^[0-9]*$/, 'numbers')  // Only validate if non-empty and only digits
+      .length(10)  // Ensure it's exactly 10 digits if non-empty
+  }),
 };
 
 const schema_posts = {
