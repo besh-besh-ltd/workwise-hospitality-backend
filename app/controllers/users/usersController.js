@@ -60,6 +60,7 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 import { v4 as uuidv4 } from 'uuid';
 import { log } from 'console';
 import rfqModel from '../../models/rfqModel.js';
+import vendorModel from '../../models/vendorModel.js';
 var global_subscription = '';
 const UsersController = {
   user_registration: async (req, res, next) => {
@@ -920,6 +921,8 @@ const UsersController = {
       }
       let user_id = req.user.id;
       const user = await userModel.userinfo(user_id);
+      // now getting spoc details of the user
+      const spoc = await vendorModel.getSpocDetails(user_id);
       if (user) {
         user.password = null;
         if (user.new_profile_image == '') {
@@ -936,6 +939,7 @@ const UsersController = {
 
         // return false;
         user.vendor_approve = vendor_arr;
+        user.spoc = spoc;
         // console.log('user-->', user);
         // return false;
         res
@@ -2818,6 +2822,129 @@ const UsersController = {
 
     } catch (err) {
       logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
+  addSpoc: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+  
+      const user_id = req.user.id;
+
+      let {spoc_name, spoc_email, spoc_mobile, spoc_role} = req.body;
+      
+       spoc_name = spoc_name ?? null;
+       spoc_email = spoc_email ?? null;
+       spoc_mobile = spoc_mobile ?? null;
+       spoc_role = spoc_role ?? null;
+
+      if(!spoc_name && !spoc_email && !spoc_mobile && !spoc_role){
+        err++;
+        errors.empty_fields = 'All fields are empty or missing.';
+      }
+
+      if(err>0){
+        res
+        .status(400)
+        .json({
+          status: 2,
+          errors
+        })
+        .end();
+        return;
+      }
+      
+      const spocExist = await userModel.check_exactly_same_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
+
+      if(spocExist<1){
+        const response = await userModel.add_user_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
+        res
+        .status(200)
+        .json({
+          status: 1,
+          message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to your spoc`
+        })
+        .end();
+      }else{
+        res
+        .status(200)
+        .json({
+          status: 1,
+          message: `spoc already exist`
+        })
+        .end();
+      }
+
+      
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
+  updateSpoc:  async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+  
+      const userId = req.user.id;
+      const spocId = req.params.spoc_id;
+
+      const {spoc_name, spoc_email, spoc_mobile, spoc_role} = req.body;
+      
+      const name = spoc_name ?? null;
+      const email = spoc_email ?? null;
+      const mobile = spoc_mobile ?? null;
+      const role = spoc_role ?? null;
+
+      if(!name && !email && !mobile && !role){
+        err++;
+        errors.empty_fields = 'All fields are empty or missing.';
+      }
+
+      if(err>0){
+        res
+        .status(400)
+        .json({
+          status: 2,
+          errors
+        })
+        .end();
+        return;
+      }
+
+
+      const sameSpocExist = await userModel.check_exactly_same_spoc({});
+        
+
+      const response = await userModel.updateUserSpoc(name, email, mobile, role, userId, spocId);
+      
+      if(response){
+        res
+        .status(200)
+        .json({
+          status: 1,
+           message: `spoc of ${response[0].role.toUpperCase()} ${response[0].name} updated`
+        })
+        .end();
+      }
+      
+    } catch (error) {
+      logError(error);
       res
         .status(400)
         .json({

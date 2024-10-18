@@ -6,6 +6,7 @@ import couponModel from '../../models/couponModel.js';
 import { encode } from 'html-entities';
 import dateFormat from 'dateformat';
 import rfqModel from '../../models/rfqModel.js';
+import vendorModel from '../../models/vendorModel.js';
 
 
 const validateDbBody = {
@@ -841,6 +842,44 @@ const validateDbBody = {
           }
 
 
+        }
+      }
+
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+      } else {
+        next();
+      }
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
+  spoc_id_exists: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+      let userId = req.user.id;
+      let spocId = req.params.spoc_id;
+
+      if (userId && spocId) {
+        const userIDExists = await vendorModel.SpocExist(userId,spocId);
+        if (userIDExists.length == 0) {
+          err++;
+          errors.invalid_spoc = 'User spoc not found';
         }
       }
 

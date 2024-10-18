@@ -335,6 +335,43 @@ const validateDbBody = {
         })
         .end();
     }
+  },
+  spoc_id_exists: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+      let userId = req.params.id;
+      let spocId = req.params.spoc_id;
+
+      if (userId && spocId) {
+        const vendorIDExists = await vendorModel.SpocExist(userId,spocId);
+        if (vendorIDExists.length == 0) {
+          err++;
+          errors.id = 'User spoc not found';
+        }
+      }
+
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+      } else {
+        next();
+      }
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
   }
 };
 
