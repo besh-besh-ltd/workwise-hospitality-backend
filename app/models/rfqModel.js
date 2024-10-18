@@ -1972,6 +1972,7 @@ WHERE created_by = $1 AND status = $2`,
 
   getRfqByIdForAdmin: async (id) => {
     let q = `SELECT RFQ.*,
+      P.name AS project_name,
       ARRAY(
         SELECT json_build_object('vendor_id', V.id, 'vendor_name', V.name, 'vendor_email', V.email, 'vendor_mobile', V.mobile, 'vendor_organization', V.organization_name,
           'products', (
@@ -2017,6 +2018,7 @@ WHERE created_by = $1 AND status = $2`,
       ) AS "admin_service_details"
       
     FROM tbl_rfq RFQ
+    LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
     WHERE RFQ.id = ${id}
     ORDER BY RFQ.id DESC
     LIMIT 1;`;
