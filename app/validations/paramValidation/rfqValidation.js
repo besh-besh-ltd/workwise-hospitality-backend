@@ -86,13 +86,13 @@ export const rfqSchemas = {
     page: Joi.number().integer().optional(), 
     limit: Joi.number().integer().optional(),
     offset: Joi.number().integer().optional(), 
-    rfq_status: Joi.string().valid('1', '0').optional(), 
-    admin_service_status: Joi.string().valid('In Progress', 'Finalized').optional(), 
+    rfq_status: Joi.string().valid('1', '0').allow(null).optional(), 
+    admin_service_status: Joi.string().valid('Pending', 'Working', 'Complete').allow(null).optional(), 
     sort: Joi.string().valid('ASC', 'DESC').optional() 
   }),
   updateRfqStatusValidation: Joi.object().keys({
     rfq_id: Joi.number().integer().required(), 
-    status: Joi.string().valid('In Progress', 'Finalized').required(),
+    status: Joi.string().valid('Pending', 'Working', 'Complete').required(),
     comment: Joi.string().optional()
   }),
 };

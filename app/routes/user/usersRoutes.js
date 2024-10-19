@@ -12,7 +12,6 @@ import { acl } from '../../helper/common.js';
 import passport from '../../middleware/passport.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
 
-
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
 const passportLogIn = passport.authenticate('localUsr', { session: false });
@@ -200,12 +199,30 @@ UsersRoutes.get(
   UsersController.getBuyerPrivateVendors
 );
 
+// to add vendor in bulk using excel
 UsersRoutes.post(
   '/buyer-excel-add-vendor',
   passportSignIn,
   acl([2]),
   schema_posts.buyerExcelUploadVendorFileHandler, 
   UsersController.buyerExcelUploadVendor,
+)
+
+// to add spoc of any user
+UsersRoutes.post(
+  '/add-spoc',
+  passportSignIn,
+  validateBody(schemas.user_spoc),
+  UsersController.addSpoc
+)
+
+// to update the spoc of the user
+UsersRoutes.put(
+  '/update-spoc/:spoc_id',
+  passportSignIn,
+  validateBody(schemas.user_spoc),
+  validateDbBody.spoc_id_exists,
+  UsersController.updateSpoc
 )
 
 

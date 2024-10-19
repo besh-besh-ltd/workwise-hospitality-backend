@@ -3247,6 +3247,69 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   },
+
+  // Inserting the new spoc with user_id
+  add_user_spoc: async (spocObj) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `INSERT INTO tbl_users_spoc (user_id, name, email, mobile, role, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         RETURNING *;`,
+         [spocObj.user_id, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  check_exactly_same_spoc: async (spocObj) => {
+    return new Promise(function (resolve, reject) {
+      // Convert user_id to an integer if it's supposed to be a bigint
+    const userId = parseInt(spocObj.user_id, 10);
+
+    db.any(
+      `SELECT * FROM tbl_users_spoc
+        WHERE user_id = $1
+        AND name = $2
+        AND email = $3
+        AND mobile = $4
+        AND role = $5;`,
+       [userId, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  updateUserSpoc: async (name, email, mobile, role, userId, spocId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `UPDATE tbl_users_spoc
+         SET name = $1, email = $2, mobile = $3, role = $4, updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = $5 AND id = $6
+         RETURNING *;`,
+        [name, email, mobile, role, userId, spocId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  }
+
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];
 
@@ -3286,6 +3349,9 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   } */
-};
+
+
+
+  };
 
 export default userModel;
