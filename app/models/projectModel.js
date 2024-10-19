@@ -87,7 +87,7 @@ const projectModel = {
                     FROM tbl_rfq r
                     WHERE r.project_id = p.id
                     ORDER BY r.id DESC
-                    LIMIT ${limit} OFFSET ${offset}
+                    LIMIT $3 OFFSET $4
                 ) AS rfqs
 
             FROM 
@@ -100,7 +100,7 @@ const projectModel = {
             GROUP BY 
                 p.id;
               `,
-              [project_id, user_id]
+              [project_id, user_id, limit, offset]
 
             )
                 .then(function (data) {

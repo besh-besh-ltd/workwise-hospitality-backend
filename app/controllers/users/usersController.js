@@ -2926,9 +2926,6 @@ const UsersController = {
         .end();
         return;
       }
-
-
-      const sameSpocExist = await userModel.check_exactly_same_spoc({});
         
 
       const response = await userModel.updateUserSpoc(name, email, mobile, role, userId, spocId);
