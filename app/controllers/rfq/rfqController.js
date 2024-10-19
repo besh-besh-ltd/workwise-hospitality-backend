@@ -4109,19 +4109,34 @@ const rfqController = {
       .end();
     }
 
+    if (!req.user.subscription_plan_id) {
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: 'You need to purchase subscription to create RFQ'
+        })
+        .end();
+      return;
+    }
+
     try {
 
       const {search_key} = req.body
       const user_id = req.user.id;
 
       // find product price stats like, min, avg, max
-      const priceHistory = await rfqModel.productPriceStats(search_key, user_id)
+      const priceHistoryMarket = await rfqModel.productPriceStatsMarket(search_key);
+      const priceHistoryPersonal = await rfqModel.productPriceStatsLastQuoteAndFinilizeForUser(search_key, user_id);
 
       res
       .status(200)
       .json({
         status: 2,
-        data: priceHistory
+        data : {
+          market: priceHistoryMarket,
+          personal:priceHistoryPersonal
+        }
       })
       .end();
       
