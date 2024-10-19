@@ -1989,16 +1989,16 @@ rfq_project_exist: async (project_id,user_id) => {
           'products', (
             SELECT json_agg(json_build_object('product_id', RFQ_P.product_id, 'variant', RFQ_P.variant, 'product_name', P.name, 'product_description', P.description, 
               'quotation_details', (
-                SELECT json_agg(json_build_object('quote_id', Q.id, 'timestamp', Q.timestamp, 'status', Q.status, 'total_price', QI.total_price, 'unit_price', QI.unit_price, 'package_price', QI.package_price, 'freight_price', QI.freight_price, 'tax', QI.tax, 'delivery_period', QI.delivery_period,
-                  'finalization', (
-                    SELECT json_build_object('id', TQF.id, 'rfq_no', TQF.rfq_no, 'vendor_id', TQF.vendor_id, 'timestamp', TQF.timestamp)
-                    FROM tbl_quote_finalization TQF
-                    WHERE TQF.quote_id = Q.id AND TQF.product_id = RFQ_P.product_id AND TQF.variant = RFQ_P.variant
-                  ))
+                SELECT json_agg(json_build_object('quote_id', Q.id, 'timestamp', Q.timestamp, 'status', Q.status, 'total_price', QI.total_price, 'unit_price', QI.unit_price, 'package_price', QI.package_price, 'freight_price', QI.freight_price, 'tax', QI.tax, 'delivery_period', QI.delivery_period)
                 )
                 FROM tbl_quotes Q
                 JOIN tbl_quote_items QI ON Q.id = QI.quote_id
                 WHERE Q.rfq_id = RFQ.id AND Q.created_by = V.id AND QI.product_id = RFQ_P.product_id AND QI.variant = RFQ_P.variant
+              ),
+              'finalization', (
+                SELECT json_build_object('id', TQF.id, 'rfq_no', TQF.rfq_no, 'vendor_id', TQF.vendor_id, 'timestamp', TQF.timestamp)
+                FROM tbl_quote_finalization TQF
+                WHERE TQF.rfq_id = RFQ_P.rfq_id AND TQF.product_id = RFQ_P.product_id AND TQF.variant = RFQ_P.variant
               ),
               'product_specs', (
                 SELECT json_agg(json_build_object('title', SPEC.title, 'value', SPEC.value))
