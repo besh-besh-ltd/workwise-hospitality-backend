@@ -930,6 +930,20 @@ const productController = {
             vendor_id
           );
 
+          // checking whehter the product exist with the same vendor
+          console.log("............................",prodNameExists);
+          if(prodNameExists.length>0){
+            const errObj = {
+              vendorName: value['Vendor Name'] || null,
+              vendorEmail: value['Vendor Email'] || null,
+              productName: productName,
+              Row: index + 1,
+              errors: "product already present with the vendor"
+            }
+            errorsObj.push(errObj);
+            continue;
+          }
+
           let productObj = '';
 
           let check_master_exist = await productModel.checkMasterNameExist(
@@ -966,7 +980,8 @@ const productController = {
               sku: productDetails[0].name,
               created_by: vendor_id,
               added_by: req.user.id,
-              is_approve: 1
+              is_approve: 1,
+              vendor:vendor_id
             };
 
             product = await productModel.createProduct(productObj);
