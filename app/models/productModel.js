@@ -803,11 +803,10 @@ const productModel = {
     productId = null,
     added_by = null
   ) => {
-
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (vendorId) {
-        dynamicQuery += `AND (vendor = ${vendorId} OR created_by = ${vendorId})`;
+        dynamicQuery += `AND vendor = ${vendorId}`;
       }
       if (productId) {
         dynamicQuery += `AND id != ${productId}`;
