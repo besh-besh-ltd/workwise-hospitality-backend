@@ -1968,9 +1968,10 @@ const rfqController = {
   closeRFQ: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { id } = req.user;
-
+    
     try {
       const rfQItem = await rfqModel.changeRFQStatus(rfq_id, id);
+      console.log(rfQItem.length);
       res
         .status(200)
         .json({
