@@ -4,22 +4,16 @@ import Config from '../config/app.config.js';
 const rfqModel = {
   insert: async (table_name, data) => {
     const keys = Object.keys(data);
-    const values = keys.map((key) => {
-      if (typeof data[key] === 'string') {
-        return `'${data[key]}'`;
-      } else {
-        return data[key];
-      }
-    });
+    const values = Object.values(data);
     const d_keys = keys.join(', ');
-    const query = `INSERT INTO ${table_name} (${d_keys}) VALUES (${values.join(
-      ', '
-    )}) RETURNING *`;
-    console.log('query', query);
+    const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
+    const query = `INSERT INTO ${table_name} (${d_keys})
+      VALUES (${placeholders})
+      RETURNING *;`;
     return new Promise(function (resolve, reject) {
-      db.query(query)
-        .then(function (data) {
-          resolve(data);
+      db.query(query, values)
+        .then(function (result) {
+          resolve(result);
         })
         .catch(function (err) {
           let error = new Error(err);
@@ -161,9 +155,9 @@ const rfqModel = {
       SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = '${user_id}'
     ) AS "finilize"
     FROM tbl_rfq RFQ 
-    WHERE created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '${month}' AND EXTRACT(YEAR FROM timestamp) = '${year}' ORDER BY id DESC LIMIT ${limit} OFFSET ${offset} `;
+    WHERE created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC LIMIT $3 OFFSET $4 `;
     return new Promise(function (resolve, reject) {
-      db.query(query)
+      db.query(query,[month,year,limit,offset])
         .then(function (data) {
           resolve(data);
         })
@@ -183,9 +177,9 @@ const rfqModel = {
       SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = '${user_id}'
     ) AS "finilize"
     FROM tbl_rfq RFQ 
-    WHERE created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '${month}' AND EXTRACT(YEAR FROM timestamp) = '${year}' ORDER BY id DESC  `;
+    WHERE created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC  `;
     return new Promise(function (resolve, reject) {
-      db.query(query)
+      db.query(query,[month,year])
         .then(function (data) {
           resolve(data);
         })
@@ -258,8 +252,8 @@ const rfqModel = {
             AND RFQ_P_V.user_id = ${user_id} 
         )
         ORDER BY RFQ.id DESC
-        LIMIT ${limit} OFFSET $1;`,
-        [offset]
+        LIMIT $2 OFFSET $1;`,
+        [offset,limit]
       )
         .then(function (data) {
           resolve(data);
@@ -418,7 +412,7 @@ const rfqModel = {
        
     ) AS "products"
     
-FROM tbl_rfq RFQ WHERE id=${id}
+FROM tbl_rfq RFQ WHERE id=$1
 ORDER BY RFQ.id DESC
 LIMIT 1;`;
 
@@ -440,7 +434,7 @@ LIMIT 1;`;
     // }
 
     return new Promise(function (resolve, reject) {
-      db.query(q)
+      db.query(q,[id])
         .then(function (data) {
           resolve(data);
         })
@@ -542,7 +536,8 @@ LIMIT 1;`;
   getUserProducts: async (rfq_id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `select DISTINCT product_id, variant from tbl_rfq_product_vendors where rfq_id = ${rfq_id} AND user_id=${user_id}`
+        `select DISTINCT product_id, variant from tbl_rfq_product_vendors where rfq_id = $1 AND user_id=$2`,
+        [rfq_id,user_id]
       )
         .then(function (data) {
           resolve(data);
@@ -630,8 +625,8 @@ AND (RFQ.project_id = $1 OR $1 IS NULL)
 AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
 AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
 ORDER BY RFQ.timestamp ${sort}
-LIMIT ${limit} OFFSET $4;`,
-        [project_id,rfq_type,reverse_auction,offset]
+LIMIT $5 OFFSET $4;`,
+        [project_id,rfq_type,reverse_auction,offset,limit]
       )
         .then(function (data) {
           resolve(data);
@@ -656,19 +651,24 @@ LIMIT ${limit} OFFSET $4;`,
     });
   },
   getVendors: async (vendors) => {
-    const query = `SELECT 
-    TU.id,
-    TU.name,
-    TU.email,
-    TU.mobile,
-    TU.address,
-    TU.organization_name,
-    ARRAY(
-      SELECT json_build_object('id',TP.id, 'name',TP.name) FROM tbl_product TP WHERE TU.id = TP.created_by
-    ) AS "products" FROM tbl_users TU WHERE id IN (${vendors.join(',')})`;
+    const placeholders = vendors.map((_, index) => `$${index + 1}`).join(', ');
+    const query = `SELECT
+      TU.id,
+      TU.name,
+      TU.email,
+      TU.mobile,
+      TU.address,
+      TU.organization_name,
+      ARRAY(
+        SELECT json_build_object('id', TP.id, 'name', TP.name)
+        FROM tbl_product TP
+        WHERE TU.id = TP.created_by
+      ) AS "products"
+      FROM tbl_users TU
+      WHERE id IN (${placeholders})`;
     console.log(query);
     return new Promise(function (resolve, reject) {
-      db.any(query)
+      db.any(query, vendors)
         .then(function (data) {
           resolve(data);
         })
@@ -679,9 +679,9 @@ LIMIT ${limit} OFFSET $4;`,
     });
   },
   checkIfExists: async (table_name, parameter) => {
-    const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
+    const query = `SELECT * FROM $1 WHERE $2`;
     return new Promise(function (resolve, reject) {
-      db.any(query)
+      db.any(query,[table_name,parameter])
         .then(function (data) {
           resolve(data);
         })
@@ -959,7 +959,8 @@ LIMIT ${limit} OFFSET $4;`,
       db.query(
         `UPDATE tbl_rfq
         SET status = ${parseInt(2)}, updated_by = ${user_id}
-        WHERE id=${id} RETURNING *`
+        WHERE id=$1 RETURNING *`,
+        [id]
       )
         .then(function (data) {
           resolve(data);
@@ -973,7 +974,8 @@ LIMIT ${limit} OFFSET $4;`,
   gerRFQVendors: async (id) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT DISTINCT  user_id FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = ${id} `
+        `SELECT DISTINCT  user_id FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = $1;`,
+        [id]
       )
         .then(function (data) {
           resolve(data);
@@ -986,7 +988,7 @@ LIMIT ${limit} OFFSET $4;`,
   },
   quoteVendor: async (id) => {
     return new Promise(function (resolve, reject) {
-      db.query(`SELECT created_by  FROM "tbl_quotes" WHERE "rfq_id" = ${id}`)
+      db.query(`SELECT created_by  FROM "tbl_quotes" WHERE "rfq_id" = $1`,[id])
         .then(function (data) {
           resolve(data);
         })
@@ -1002,7 +1004,8 @@ LIMIT ${limit} OFFSET $4;`,
         `SELECT tbl_users.name,tbl_users.email,tbl_users.organization_name
         FROM tbl_rfq
         LEFT JOIN tbl_users ON tbl_rfq.created_by = tbl_users.id
-        WHERE tbl_rfq.id = ${id}`
+        WHERE tbl_rfq.id = $1;`,
+        [id]
       )
         .then(function (data) {
           resolve(data);
@@ -1019,8 +1022,9 @@ LIMIT ${limit} OFFSET $4;`,
       const result = await db.query(
         `SELECT *
          FROM tbl_rfq_activity
-         WHERE rfq_id = ${rfq_id} AND user_id = ${user_id}`
-      );
+         WHERE rfq_id = $1 AND user_id = ${user_id};`,
+          [rfq_id]
+        );
       return result;
 
     } catch (error) {
@@ -1091,8 +1095,6 @@ LIMIT ${limit} OFFSET $4;`,
         ${category_id ? `AND c.id = $2` : ``}
         ${approved_by_id ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)` : ``}
       ORDER BY rank DESC, similarity_score DESC, p.name ASC;`;
-
-    console.log('QUERY======', q);
 
     // Assuming db.query can handle parameterized queries:
     return new Promise(function (resolve, reject) {
@@ -1348,7 +1350,8 @@ ORDER BY is_linked_with_buyer DESC, RANDOM();
         FROM tbl_rfq
         LEFT JOIN tbl_quote_finalization ON tbl_rfq.id = tbl_quote_finalization.rfq_id
         LEFT JOIN tbl_product ON tbl_quote_finalization.product_id = tbl_product.id
-        WHERE tbl_rfq.created_by = ${user_id} AND tbl_quote_finalization.vendor_id = ${vendor_id};`
+        WHERE tbl_rfq.created_by = ${user_id} AND tbl_quote_finalization.vendor_id = $1;`,
+        [vendor_id]
       )
         .then(function (data) {
           resolve(data);
@@ -1393,7 +1396,8 @@ ORDER BY is_linked_with_buyer DESC, RANDOM();
   checkVendorRFQResponsibility: async (rfq_id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT * FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = ${rfq_id} AND "user_id" = ${user_id}`
+        `SELECT * FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = $1 AND "user_id" = $2`,
+        [rfq_id,user_id]
       )
         .then(function (data) {
           resolve(data);
@@ -1837,8 +1841,9 @@ WHERE created_by = $1 AND status = $2`,
       db.any(
         `SELECT 1 
         FROM tbl_projects
-        WHERE id = ${project_id} 
-        AND user_id = ${user_id};`
+        WHERE id = $1 
+        AND user_id = $2;`,
+        [project_id,user_id]
       )
         .then(function (data) {
           resolve(data);
