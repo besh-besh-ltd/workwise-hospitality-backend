@@ -299,6 +299,11 @@ const rfqModel = {
         )
       ) FROM tbl_rfq_terms_map RFQ_TM WHERE RFQ_TM.rfq_id = RFQ.id
     ) AS "terms",
+    (
+      SELECT json_agg(RF.file_url)
+      FROM tbl_rfq_files RF
+      WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
+    ) AS "TERM_files",
     ARRAY(
       SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
         'products', (
@@ -315,21 +320,21 @@ const rfqModel = {
     ARRAY(
         SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_id, 'variant', RFQ_P.variant, 'comment', RFQ_P.comment, 'spec_file', RFQ_P.spec_file, 'qap', RFQ_P.qap, 'qap_file', RFQ_P.qap_file, 'datasheet_file', RFQ_P.datasheet_file,
        
-         'TDS_flies', (
-      SELECT json_agg(json_build_object('file_url', RPF.file_url))
-      FROM tbl_rfq_product_files RPF
-      WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
-    ),
-    'QAP_file', (
-      SELECT json_agg(json_build_object('file_url', RPF.file_url))
-      FROM tbl_rfq_product_files RPF
-      WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
-    ),
-    'SPEC_files', (
-      SELECT json_agg(json_build_object('file_url', RPF.file_url))
-      FROM tbl_rfq_product_files RPF
-      WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
-    ),
+          'TDS_flies', (
+            SELECT json_agg(RPF.file_url)
+            FROM tbl_rfq_product_files RPF
+            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
+          ),
+          'QAP_files', (
+            SELECT json_agg(RPF.file_url)
+            FROM tbl_rfq_product_files RPF
+            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
+          ),
+          'SPEC_files', (
+            SELECT json_agg(RPF.file_url)
+            FROM tbl_rfq_product_files RPF
+            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
+          ),
         
           'datasheet', (
             SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
