@@ -815,7 +815,14 @@ LIMIT $5 OFFSET $4;`,
               ),
               'quote_details', (
                 SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name, 'unit_price', TQI.unit_price,'total_price', TQI.total_price, 'comment', TQI.comment, 'delivery_period', TQI.delivery_period,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'quantity',TQI.quantity,
-                  'rfq_details', (
+
+                'document_files', ( 
+                SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
+                FROM tbl_quotes_files TF
+                WHERE TF.quote_id = TQ.id
+              ),
+
+                'rfq_details', (
                     SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) 
                     FROM tbl_rfq_products_specs TPS 
                     WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = TRP.rfq_id
@@ -831,7 +838,13 @@ LIMIT $5 OFFSET $4;`,
                   TQI.product_id = TRP.product_id AND 
                   TQI.variant = TRP.variant 
             ORDER BY TQ.created_by ASC
-          ) AS "quotations"
+          ) AS "quotations",
+
+            ARRAY(
+        SELECT json_build_object('title', TPS.title, 'value', TPS.value)
+        FROM tbl_rfq_products_specs TPS
+        WHERE TPS.product_id = TRP.product_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
+      ) AS "product_specs"
           
         FROM tbl_rfq_products TRP WHERE TRP.rfq_id=${id}`
       )
