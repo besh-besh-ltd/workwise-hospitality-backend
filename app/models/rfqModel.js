@@ -302,7 +302,11 @@ const rfqModel = {
     ARRAY(
       SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
         'products', (
-          SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name,'unit_price', TQI.unit_price,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'total_price', TQI.total_price,'comment', TQI.comment,'delivery_period', TQI.delivery_period))
+          SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name,'unit_price', TQI.unit_price,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'total_price', TQI.total_price,'comment', TQI.comment,'delivery_period', TQI.delivery_period, 'document_files', (
+                SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
+                FROM tbl_quote_item_files QIF
+                WHERE QIF.quote_item_id = TQI.id
+            )))
           FROM tbl_quote_items TQI
           WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id
         )
@@ -310,6 +314,23 @@ const rfqModel = {
     ) AS "quotations",
     ARRAY(
         SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_id, 'variant', RFQ_P.variant, 'comment', RFQ_P.comment, 'spec_file', RFQ_P.spec_file, 'qap', RFQ_P.qap, 'qap_file', RFQ_P.qap_file, 'datasheet_file', RFQ_P.datasheet_file,
+       
+         'TDS_flies', (
+      SELECT json_agg(json_build_object('file_url', RPF.file_url))
+      FROM tbl_rfq_product_files RPF
+      WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
+    ),
+    'QAP_file', (
+      SELECT json_agg(json_build_object('file_url', RPF.file_url))
+      FROM tbl_rfq_product_files RPF
+      WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
+    ),
+    'SPEC_files', (
+      SELECT json_agg(json_build_object('file_url', RPF.file_url))
+      FROM tbl_rfq_product_files RPF
+      WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
+    ),
+        
           'datasheet', (
             SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
                 CASE
@@ -911,6 +932,11 @@ LIMIT $5 OFFSET $4;`,
                 FROM tbl_quotes TQ
                 WHERE TQ.id = TQI.quote_id
                   AND TQ.rfq_id = ${id}
+              ),
+                'document_files', (
+                SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
+                FROM tbl_quote_item_files QIF
+                WHERE QIF.quote_item_id = TQI.id
               ),
               'previous_quotes', (
                 SELECT json_agg(

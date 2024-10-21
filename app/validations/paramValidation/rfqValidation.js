@@ -18,9 +18,9 @@ const productItems = Joi.object({
   product_id: Joi.number().required(),
   comment: Joi.string().optional().allow(null).allow(''),
   datasheet: Joi.string().optional().allow(null).allow(''),
-  datasheet_file: Joi.string().optional().allow(null).allow(''),
-  spec_file: Joi.string().optional().allow(null).allow(''),
-  qap_file: Joi.string().optional().allow(null).allow(''),
+  datasheet_file: Joi.array().items(Joi.string()).optional(),
+  spec_file: Joi.array().items(Joi.string()).optional(),
+  qap_file: Joi.array().items(Joi.string()).optional(),
   qap: Joi.string().optional().allow(null).allow(''),
   vendors: Joi.array().items(vendorItems).allow(null).allow(''),
   spec: Joi.array().items(specItems).required().min(4).max(4)
@@ -62,6 +62,7 @@ export const rfqSchemas = {
     vendors: Joi.array().items(vendorItems).allow(null).allow(''),
     terms: Joi.array().items(termsItems).allow(null).allow(''),
     project_id: Joi.number().integer().required(),
+    term_and_condition_files: Joi.array().items(Joi.string()).optional(),
   }),
   update: Joi.object().keys({
     rfq_id: Joi.number().required(),
