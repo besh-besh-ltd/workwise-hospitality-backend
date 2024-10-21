@@ -104,6 +104,7 @@ RfqRoutes.get(
   '/close-rfq/:id',
   passportSignIn,
   validateDbBody.user_id_profileexists,
+  validateDbBody.rfq_access_check,
   rfqController.closeRFQ
 );
 RfqRoutes.get(

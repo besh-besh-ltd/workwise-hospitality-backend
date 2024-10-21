@@ -904,7 +904,43 @@ const validateDbBody = {
         })
         .end();
     }
+  },
+
+  rfq_access_check: async (req, res, next) => {
+    try {
+      const rfq_id  = req.params.id;
+      console.log(req.params); // Assuming rfq_id is part of the request body
+      const user_id = req.user.id;  // Assuming user_id is part of the request object
+      const user_type = req.user.user_type; // Assuming user_type is part of the request object
+      // Validate if rfq_id exists in the body
+      if (!rfq_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'RFQ ID is required'
+        });
+      }
+      // Call the user_rfq_access_review function and check the result
+      const hasAccess = await userModel.user_rfq_access_review(rfq_id, user_id, user_type);
+      if (hasAccess) {
+        // If access is granted, proceed to the next middleware
+        next();
+      } else {
+        // If access is denied, return a 403 error response
+        res.status(403).json({
+          status: 2,
+          message: 'RFQ does not found'
+        });
+      }
+    } catch (err) {
+      // Handle errors gracefully and log them if necessary
+      logError(err); // Optional: Implement your own error logging
+      res.status(500).json({
+        status: 3,
+        message: 'An internal server error occurred'
+      });
+    }
   }
+  
 };
 
 export { validateDbBody };

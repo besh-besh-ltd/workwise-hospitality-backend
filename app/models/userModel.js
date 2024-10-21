@@ -304,7 +304,7 @@ const userModel = {
         WHEN tbl_users.new_profile_image IS NULL THEN
         NULL
         ELSE tbl_users.new_profile_image
-        END AS image_url  from tbl_vendor_reviews LEFT JOIN tbl_users ON tbl_vendor_reviews.reviewed_by = tbl_users.id  where reviewed_to = ${user_id} ORDER BY id DESC LIMIT $2 OFFSET $3`,
+        END AS image_url  from tbl_vendor_reviews LEFT JOIN tbl_users ON tbl_vendor_reviews.reviewed_by = tbl_users.id  where reviewed_to = $1 ORDER BY id DESC LIMIT $2 OFFSET $3`,
         [user_id, limit, offset]
       )
         .then(function (data) {
@@ -3305,6 +3305,44 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         })
         .catch(function (err) {
           let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  user_rfq_access_review: async (rfq_id, user_id, user_type) => {
+    let query = null;
+    let values = [];
+    // Sanitize input values
+    rfq_id = parseInt(rfq_id, 10); // Ensure rfq_id is an integer
+    user_id = parseInt(user_id, 10); // Ensure user_id is an integer
+    user_type = parseInt(user_type, 10); // Ensure user_type is an integer
+    // Construct the parameterized query based on user type
+    if (user_type === 2) {
+      query = `SELECT 1
+               FROM tbl_rfq
+               WHERE id = $1
+               AND created_by = $2;`;
+      values = [rfq_id, user_id]; // Use parameterized values
+    } else if (user_type === 3) {
+      query = `SELECT 1
+               FROM tbl_rfq_product_vendors
+               WHERE rfq_id = $1
+               AND user_id = $2;`;
+      values = [rfq_id, user_id]; // Use parameterized values
+    }
+    return new Promise((resolve, reject) => {
+      if (!query) {
+        return reject(new Error('Invalid user type'));
+      }
+      db.any(query, values)
+        .then((data) => {
+          // If data is not empty, return true, otherwise false
+          resolve(data.length > 0);
+        })
+        .catch((err) => {
+          let error = new Error('Database query failed');
+          error.details = err; // Add detailed error for potential logging
           reject(error);
         });
     });
