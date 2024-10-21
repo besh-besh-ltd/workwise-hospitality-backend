@@ -806,15 +806,15 @@ const productModel = {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (vendorId) {
-        dynamicQuery += `AND vendor = ${vendorId}`;
+        dynamicQuery += ` AND vendor = ${vendorId}`;
       }
       if (productId) {
-        dynamicQuery += `AND id != ${productId}`;
+        dynamicQuery += ` AND id != ${productId}`;
       }
       if (added_by) {
-        dynamicQuery += `AND added_by = ${added_by} AND created_by = ${added_by}`;
+        dynamicQuery += ` AND added_by = ${added_by} AND created_by = ${added_by}`;
       }
-      db.any(`SELECT * FROM tbl_product WHERE name = $1 ${dynamicQuery}`, [
+      db.any(`SELECT * FROM tbl_product WHERE name = $1${dynamicQuery}`, [
         name
       ])
         .then(function (data) {
