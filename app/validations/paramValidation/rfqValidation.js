@@ -5,8 +5,8 @@ const vendorItems = Joi.object({
   name: Joi.string().optional()
 });
 const specItems = Joi.object({
-  title: Joi.string().required(),
-  value: Joi.string().required()
+  title: Joi.string().valid('Size', 'Spec', 'Quantity', 'Unit').required(),
+  value: Joi.string().allow('').optional()
 });
 const termsItems = Joi.object({
   id: Joi.number().required()
@@ -23,7 +23,15 @@ const productItems = Joi.object({
   qap_file: Joi.string().optional().allow(null).allow(''),
   qap: Joi.string().optional().allow(null).allow(''),
   vendors: Joi.array().items(vendorItems).allow(null).allow(''),
-  spec: Joi.array().items(specItems).required().min(3),
+  spec: Joi.array().items(specItems).required().min(4).max(4)
+  .custom((value, helpers) => {
+    const quantityItem = value.find(item => item.title === 'Quantity');
+    const unitItem = value.find(item => item.title === 'Unit');
+    if (!quantityItem || !unitItem || !quantityItem.value || !unitItem.value) {
+      return helpers.error('any.required');
+    }
+    return value;
+  }),
   defaultSelectedVAB: Joi.string().optional().allow('').allow(null),
   predefined_tds_file: Joi.string().optional().allow('').allow(null),
   predefined_qap_file: Joi.string().optional().allow('').allow(null),
