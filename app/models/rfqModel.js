@@ -972,6 +972,11 @@ LIMIT $5 OFFSET $4;`,
                 FROM tbl_quote_item_files QIF
                 WHERE QIF.quote_item_id = TQI.id
               ),
+              'global_document_files', (
+                SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
+                FROM tbl_quotes_files TF
+                WHERE TF.quote_id = TQI.quote_id
+              ),
               'previous_quotes', (
                 SELECT json_agg(
                   json_build_object(
