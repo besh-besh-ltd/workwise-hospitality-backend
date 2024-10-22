@@ -95,7 +95,7 @@ export const rfqSchemas = {
     page: Joi.number().integer().optional(), 
     limit: Joi.number().integer().optional(),
     offset: Joi.number().integer().optional(), 
-    rfq_status: Joi.string().valid('1', '0').allow(null).optional(), 
+    rfq_status: Joi.string().valid('1', '2').allow(null).optional(), 
     admin_service_status: Joi.string().valid('Pending', 'Working', 'Complete').allow(null).optional(), 
     sort: Joi.string().valid('ASC', 'DESC').optional() 
   }),
