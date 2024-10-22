@@ -280,21 +280,25 @@ const rfqModel = {
       LIMIT 1
     ) AS "quote_details",
     
-(
-  SELECT json_agg(json_build_object(
-    'file_url', TQF.file_url
-  ))
-  FROM tbl_quotes_files TQF
-  WHERE TQF.quote_id = (
-    SELECT TQ.id
-    FROM tbl_quotes TQ
-    WHERE TQ.rfq_id = RFQ.id
-      AND TQ.created_by = ${user_id}
-    LIMIT 1
-  )
-    AND TQF.file_type = 'term_and_condition'
-) AS "terms_and_conditions_files",
-
+    (
+      SELECT json_agg(json_build_object(
+        'file_url', TQF.file_url
+      ))
+      FROM tbl_quotes_files TQF
+      WHERE TQF.quote_id = (
+        SELECT TQ.id
+        FROM tbl_quotes TQ
+        WHERE TQ.rfq_id = RFQ.id
+          AND TQ.created_by = ${user_id}
+        LIMIT 1
+      )
+        AND TQF.file_type = 'term_and_condition'
+    ) AS "terms_and_conditions_files",
+    (
+      SELECT COUNT(*)::INT
+      FROM tbl_quotes TQ1
+      WHERE TQ1.rfq_id = RFQ.id
+      ) AS "total_quotes_received",
     ARRAY(
       SELECT json_build_object('id', TQF.id,'product_id',TQF.product_id, 'timestamp', TQF.timestamp,'variant', TQF.variant,
         'winning_vendor', 
