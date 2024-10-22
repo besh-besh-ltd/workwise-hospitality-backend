@@ -1275,7 +1275,6 @@ const rfqController = {
 
       if (req.user.user_type != 2) {
         const userProducts = await rfqModel.getUserProducts(id, req.user.id);
-        console.log('=======================', userProducts);
         if (
           userProducts.length > 0 &&
           rfQItem.length > 0 &&
