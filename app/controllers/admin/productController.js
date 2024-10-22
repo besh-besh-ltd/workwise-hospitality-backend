@@ -810,15 +810,35 @@ const productController = {
                 await productModel.addFile(filesObj);
               }
 
+              const spocList = await vendorModel.getSpocDetails(vendor[0].id)
+
+              console.log(" products contoller 815 spoc console ", vendor[0].id,  spocList)
+
+              
+      let mailRecipients = {
+        from: Config.webmasterMail,
+        subject: `Work wise | Registration`,
+        html: `Dear ${value['Vendor Name']}, Your login credential Userid: ${value['Vendor Email']} and password ${password}`
+            };
+
+      if (spocList.length > 0) {
+        mailRecipients.to = spocList.map(spoc => spoc.email);
+        mailRecipients.cc = vendor_email;
+      } else {
+        mailRecipients.to = vendor_email;
+      }
+
+      sendMail(mailRecipients);
+
               // console.log('vendor-->', vendor);
               vendor_id = vendor[0].id;
-              sendMail({
-                from: Config.webmasterMail, // sender address
-                to: vendor_email, // list of receivers
-                subject: `Work wise | Registration`, // Subject line
-                // html: dynamic_html // plain text body
-                html: `Dear ${value['Vendor Name']}, Your login credential Userid: ${value['Vendor Email']} and password ${password}`
-              });
+              // sendMail({
+              //   from: Config.webmasterMail, // sender address
+              //   to: vendor_email, // list of receivers
+              //   subject: `Work wise | Registration`, // Subject line
+              //   // html: dynamic_html // plain text body
+              //   html: `Dear ${value['Vendor Name']}, Your login credential Userid: ${value['Vendor Email']} and password ${password}`
+              // });
 
               let checkFreeSubscription =
                 await subscriptionModel.checkFreeSubscription();
@@ -2442,12 +2462,34 @@ const productController = {
 
         dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
       }
-      sendMail({
-        from: Config.webmasterMail, // sender address
-        to: userDetail[0].email, // list of receivers
-        subject: `Work wise | Product`, // Subject line
-        html: dynamic_html // plain text body
-      });
+
+      //  spoc email
+      const spocList = await vendorModel.getSpocDetails(userDetail[0].id)
+
+      console.log(" product contoller 249 spoc console ", userDetail[0].id, spocList)
+
+      
+      let mailRecipients = {
+        from: Config.webmasterMail,
+        subject: `Work Wise | New RFQ Alert`,
+        html: dynamic_html
+      };
+
+      if (spocList.length > 0) {
+        mailRecipients.to = spocList.map(spoc => spoc.email);
+        mailRecipients.cc = userDetail[0].email;
+      } else {
+        mailRecipients.to = userDetail[0].email;
+      }
+
+      sendMail(mailRecipients);
+
+      // sendMail({
+      //   from: Config.webmasterMail, // sender address
+      //   to: userDetail[0].email, // list of receivers
+      //   subject: `Work wise | Product`, // Subject line
+      //   html: dynamic_html // plain text body
+      // });
 
       res
         .status(200)

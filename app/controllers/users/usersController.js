@@ -144,12 +144,34 @@ const UsersController = {
             html: findDynamicNotification[0].content // plain text body
           });
         } else {
-          sendMail({
-            from: Config.webmasterMail, // sender address
-            to: email, // list of receivers
-            subject: `Work wise | Registration`, // Subject line
-            html: dynamic_html // plain text body
-          });
+
+          
+        const spocList = await vendorModel.getSpocDetails(user_id[0].id)
+
+        console.log(" user contoller 151 spoc console ", user_id[0]?.id, spocList)
+              
+        let mailRecipients = {
+          from: Config.webmasterMail,
+          subject: `Work Wise | Registration`,
+          html: dynamic_html
+        };
+  
+        if (spocList.length > 0) {
+          mailRecipients.to = spocList.map(spoc => spoc.email);
+          mailRecipients.cc = email;
+        } else {
+          mailRecipients.to = email;
+        }
+  
+        sendMail(mailRecipients);
+
+
+          // sendMail({
+          //   from: Config.webmasterMail, // sender address
+          //   to: email, // list of receivers
+          //   subject: `Work wise | Registration`, // Subject line
+          //   html: dynamic_html // plain text body
+          // });
         }
 
         addDefaultNotifications(user_id[0].id);
@@ -601,12 +623,33 @@ const UsersController = {
           dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
         }
 
-        sendMail({
-          from: Config.webmasterMail, // sender address
-          to: email, // list of receivers
-          subject: `Work wise | Forgot Password OTP `, // Subject line
-          html: dynamic_html // plain text body
-        });
+        
+          
+        const spocList = await vendorModel.getSpocDetails(user_detail[0]?.id)
+
+        console.log(" user contoller 630 spoc console ", user_detail[0]?.id, spocList)
+              
+        let mailRecipients = {
+          from: Config.webmasterMail,
+          subject: `Work wise | Forgot Password OTP`,
+          html: dynamic_html
+        };
+  
+        if (spocList.length > 0) {
+          mailRecipients.to = spocList.map(spoc => spoc.email);
+          mailRecipients.cc = user_detail[0].email;
+        } else {
+          mailRecipients.to = user_detail[0].email;
+        }
+  
+        sendMail(mailRecipients);
+
+        // sendMail({
+        //   from: Config.webmasterMail, // sender address
+        //   to: email, // list of receivers
+        //   subject: `Work wise | Forgot Password OTP `, // Subject line
+        //   html: dynamic_html // plain text body
+        // });
 
         let updateOtp = {
           otp: otpseq,
@@ -1976,12 +2019,32 @@ const UsersController = {
             dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
           }
 
-          sendMail({
-            from: Config.webmasterMail, // sender address
-            to: userDetails.email, // list of receivers
-            subject: `Work wise | Subscription Plan`, // Subject line
-            html: dynamic_html // plain text body
-          });
+          
+        const spocList = await vendorModel.getSpocDetails(paymentUpdate[0].user_id)
+
+        console.log(" user contoller spoc 2025 console ", paymentUpdate[0]?.id, spocList)
+              
+        let mailRecipients = {
+          from: Config.webmasterMail,
+          subject: `Work Wise | Subscription Plan`,
+          html: dynamic_html
+        };
+  
+        if (spocList.length > 0) {
+          mailRecipients.to = spocList.map(spoc => spoc.email);
+          mailRecipients.cc = userDetails[0].email;
+        } else {
+          mailRecipients.to = userDetails[0].email;
+        }
+  
+        sendMail(mailRecipients);
+
+          // sendMail({
+          //   from: Config.webmasterMail, // sender address
+          //   to: userDetails.email, // list of receivers
+          //   subject: `Work wise | Subscription Plan`, // Subject line
+          //   html: dynamic_html // plain text body
+          // });
 
           let findDynamicNotification =
             await notificationModel.findDynamicNotification(

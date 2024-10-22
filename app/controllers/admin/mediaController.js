@@ -8,6 +8,7 @@ import mediaModel from '../../models/mediaModel.js';
 import Config from '../../config/app.config.js';
 import { logError, sendMail, generatePassword } from '../../helper/common.js';
 import jwtHelper from '../../helper/jwtHelper.js';
+import vendorModel from '../../models/vendorModel.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -134,13 +135,31 @@ const mediaController = {
       if (vendorId) {
         let html_variables = [{ name: name }];
 
-        sendMail({
-          from: Config.webmasterMail, // sender address
-          to: email, // list of receivers
-          subject: `Des Technico | Registration`, // Subject line
-          // html: dynamic_html // plain text body
-          html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
-        });
+        const spocList = await vendorModel.getSpocDetails(vendorId)
+        console.log('media controller 138 spoc vendorId ', vendorId, spocList)
+
+      let mailRecipients = {
+        from: Config.webmasterMail,
+        subject: `Des Technico | Registration`,
+        html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
+      };
+
+      if (spocList.length > 0) {
+        mailRecipients.to = spocList.map(spoc => spoc.email);
+        mailRecipients.cc = email;
+      } else {
+        mailRecipients.to = email;
+      }
+
+      sendMail(mailRecipients);
+
+        // sendMail({
+        //   from: Config.webmasterMail, // sender address
+        //   to: email, // list of receivers
+        //   subject: `Des Technico | Registration`, // Subject line
+        //   // html: dynamic_html // plain text body
+        //   html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
+        // });
 
         res
           .status(200)

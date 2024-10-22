@@ -153,13 +153,32 @@ const otherUserController = {
       if (otherUserId) {
         let html_variables = [{ name: name }];
 
-        sendMail({
-          from: Config.webmasterMail, // sender address
-          to: email, // list of receivers
-          subject: `Work wise | Registration`, // Subject line
-          // html: dynamic_html // plain text body
-          html: `Dear ${name}, Your login credential Userid :${email} and password ${password}`
-        });
+        const spocList = await vendorModel.getSpocDetails(otherUserId)
+
+        console.log(" otheruser contolle 158 spoc console ", otherUserId, spocList)
+        
+      let mailRecipients = {
+        from: Config.webmasterMail,
+        subject: `Work Wise | New RFQ Alert`,
+        html: `Dear ${name}, Your login credential Userid :${email} and password ${password}`
+      };
+
+      if (spocList.length > 0) {
+        mailRecipients.to = spocList.map(spoc => spoc.email);
+        mailRecipients.cc = email;
+      } else {
+        mailRecipients.to = email;
+      }
+
+      sendMail(mailRecipients);
+
+        // sendMail({
+        //   from: Config.webmasterMail, // sender address
+        //   to: email, // list of receivers
+        //   subject: `Work wise | Registration`, // Subject line
+        //   // html: dynamic_html // plain text body
+        //   html: `Dear ${name}, Your login credential Userid :${email} and password ${password}`
+        // });
 
         let checkFreeSubscription =
           await subscriptionModel.checkFreeSubscription();
