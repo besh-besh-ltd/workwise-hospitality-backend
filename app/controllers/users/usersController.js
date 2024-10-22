@@ -60,6 +60,7 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 import { v4 as uuidv4 } from 'uuid';
 import { log } from 'console';
 import rfqModel from '../../models/rfqModel.js';
+import vendorModel from '../../models/vendorModel.js';
 var global_subscription = '';
 const UsersController = {
   user_registration: async (req, res, next) => {
@@ -920,6 +921,8 @@ const UsersController = {
       }
       let user_id = req.user.id;
       const user = await userModel.userinfo(user_id);
+      // now getting spoc details of the user
+      const spoc = await vendorModel.getSpocDetails(user_id);
       if (user) {
         user.password = null;
         if (user.new_profile_image == '') {
@@ -936,6 +939,7 @@ const UsersController = {
 
         // return false;
         user.vendor_approve = vendor_arr;
+        user.spoc = spoc;
         // console.log('user-->', user);
         // return false;
         res
@@ -2605,7 +2609,7 @@ const UsersController = {
         email,
         phone,
         productList,
-        is_private:!(req.body.is_private) ? 0 : is_private,
+        is_private: !(req.body.is_private) ? 0 : is_private,
       }
 
       // If user does not exist, proceed with inserting data into the tbl_temp_user table
@@ -2668,9 +2672,9 @@ const UsersController = {
 
       // checing the is_private field
       let is_private = parseInt(req.body.is_private);
-      console.log(typeof is_private);
+
       // when is_private does not send with request
-      if(!req.body.is_private){
+      if (!req.body.is_private) {
         is_private = 0;
       }
 
@@ -2695,7 +2699,6 @@ const UsersController = {
         const mobile = (value["Vendor company owner/hr/official contact number"] || "").toString();
         const productList = (value["Product List (ex-pipe,valve)"] || "").trim();
 
-
         // now check validation for vendor name number and email
 
         const errors = validateBulkVendorInputs(vendorName, email, mobile, productList);
@@ -2712,44 +2715,45 @@ const UsersController = {
 
         // now these are those vendors which do not have errors 
         // so we are moving forward for the insertion and other validation check
-
         if (email && mobile) {
-          const userEmailExists = await userModel.company_exist(email, mobile);
+          const userEmailExists = await userModel.user_exist(email, mobile);
           if (userEmailExists.length > 0) {
-            // case 1 -> whethtr the vendor is public
-            if (userEmailExists.is_private == 0) {
-              await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].user_id);
-              const addVendor = {
-                "index": index + 1,
-                "email": userEmailExists.email,
-                "message": "This vendor is already registered as a PUBLIC vendor in our system. They have now been added to your preferred vendor list."
+            //  check whether the user is vendor or not by checking thier user_type==3
+            if (userEmailExists[0].user_type == 3) {
+              // case 1 -> whethtr the vendor is public
+              if (userEmailExists.is_private == 0) {
+                await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].id);
+                const addVendor = {
+                  "index": index + 1,
+                  "email": userEmailExists[0].email,
+                  "phone": userEmailExists[0].mobile,
+                  "message": "This vendor is already registered as a PUBLIC vendor in our system. They have now been added to your preferred vendor list."
+                }
+                vendorsMapped.push(addVendor);
+                continue;
+              } else {
+                // case 2 -> whether the vendor is private
+                await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].id);
+                const addVendor = {
+                  "index": index + 1,
+                  "email": userEmailExists[0].email,
+                  "phone": userEmailExists[0].mobile,
+                  "message": "This vendor is already registered as a PRIVATE vendor in our system. They have now been added to your preferred vendor list."
+                }
+                vendorsMapped.push(addVendor);
+                continue;
               }
-              vendorsMapped.push(addVendor);
-              continue;
             } else {
-              // case 2 -> whether the vendor is private
-              await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].user_id);
               const addVendor = {
                 "index": index + 1,
-                "email": userEmailExists.email,
-                "message": "This vendor is already registered as a PRIVATE vendor in our system. They have now been added to your preferred vendor list."
-              }
-              vendorsMapped.push(addVendor);
-              continue;
-            }
-          } else {
-            // this is for when the buyer trying to add other buyer credentials as a vendor
-
-            const buyerCredentials = await userModel.user_exist(email, mobile);
-            if (buyerCredentials.length > 0) {
-              const addVendor = {
-                "index": index + 1,
-                "email": buyerCredentials.email,
+                "email": userEmailExists[0].email,
+                "phone": userEmailExists[0].mobile,
                 "message": "Unable to add this vendor. Please ensure the credentials belong to a valid vendor account."
               }
               vendorsMapped.push(addVendor);
               continue;
             }
+
           }
         }
 
@@ -2758,12 +2762,12 @@ const UsersController = {
 
           const buyerId = req.user.id; // Getting buyerId from the authenticated user
 
-           const obj = {
-            buyerId, 
-            vendorName, 
-            email, 
-            phone: mobile, 
-            productList, 
+          const obj = {
+            buyerId,
+            vendorName,
+            email,
+            phone: mobile,
+            productList,
             is_private
           }
 
@@ -2773,19 +2777,21 @@ const UsersController = {
           // Sending the response back to the client
           if (result) {
             const addVendor = {
-              "index": index+1,
+              "index": index + 1,
               "email": email,
+              "phone": mobile,
               "message": 'Vendor successfully added. Please wait for vendor review.',
             }
             vendorsMapped.push(addVendor);
           }
-          
+
         } catch (error) {
           logError(error);
           let message = error == "Error: Vendor_In_Review" ? "This vendor has already been added by you. Please wait while we review the vendor details" : Config.errorText.value;
           const addVendor = {
-            "index": index+1,
+            "index": index + 1,
             "email": email,
+            "phone": mobile,
             "message": message,
           }
           vendorsMapped.push(addVendor);
@@ -2808,15 +2814,134 @@ const UsersController = {
       res
         .status(200)
         .json({
-          status:1,
-          addVendor:vendorsMapped,
-          errorsObj:validationErrors,
+          status: 1,
+          addVendor: vendorsMapped,
+          errorsObj: validationErrors,
         })
-
 
 
     } catch (err) {
       logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
+  addSpoc: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+  
+      const user_id = req.user.id;
+
+      let {spoc_name, spoc_email, spoc_mobile, spoc_role} = req.body;
+      
+       spoc_name = spoc_name ?? null;
+       spoc_email = spoc_email ?? null;
+       spoc_mobile = spoc_mobile ?? null;
+       spoc_role = spoc_role ?? null;
+
+      if(!spoc_name && !spoc_email && !spoc_mobile && !spoc_role){
+        err++;
+        errors.empty_fields = 'All fields are empty or missing.';
+      }
+
+      if(err>0){
+        res
+        .status(400)
+        .json({
+          status: 2,
+          errors
+        })
+        .end();
+        return;
+      }
+      
+      const spocExist = await userModel.check_exactly_same_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
+
+      if(spocExist<1){
+        const response = await userModel.add_user_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
+        res
+        .status(200)
+        .json({
+          status: 1,
+          message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to your spoc`
+        })
+        .end();
+      }else{
+        res
+        .status(200)
+        .json({
+          status: 1,
+          message: `spoc already exist`
+        })
+        .end();
+      }
+
+      
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
+  updateSpoc:  async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+  
+      const userId = req.user.id;
+      const spocId = req.params.spoc_id;
+
+      const {spoc_name, spoc_email, spoc_mobile, spoc_role} = req.body;
+      
+      const name = spoc_name ?? null;
+      const email = spoc_email ?? null;
+      const mobile = spoc_mobile ?? null;
+      const role = spoc_role ?? null;
+
+      if(!name && !email && !mobile && !role){
+        err++;
+        errors.empty_fields = 'All fields are empty or missing.';
+      }
+
+      if(err>0){
+        res
+        .status(400)
+        .json({
+          status: 2,
+          errors
+        })
+        .end();
+        return;
+      }
+        
+
+      const response = await userModel.updateUserSpoc(name, email, mobile, role, userId, spocId);
+      
+      if(response){
+        res
+        .status(200)
+        .json({
+          status: 1,
+           message: `spoc of ${response[0].role.toUpperCase()} ${response[0].name} updated`
+        })
+        .end();
+      }
+      
+    } catch (error) {
+      logError(error);
       res
         .status(400)
         .json({
@@ -2836,8 +2961,6 @@ const validateBulkVendorInputs = (vendorName, email, mobile, productList) => {
   let errors = [];
 
   // Function to validate product list format allowing a trailing comma
- 
-
 
   const isValidEmail = (email) => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -2875,9 +2998,9 @@ const validateBulkVendorInputs = (vendorName, email, mobile, productList) => {
   // Checking product list
   if (!productList) {
     errors.push('Missing Product List');
-  // } else if (!isValidProductList(productList)) { // Added validation for product list
-  //   errors.push('Invalid Product List (should be a string of items separated by commas, e.g., "p1,p2,p3" or "p1,p2,p3,")');
-  // }
+    // } else if (!isValidProductList(productList)) { // Added validation for product list
+    //   errors.push('Invalid Product List (should be a string of items separated by commas, e.g., "p1,p2,p3" or "p1,p2,p3,")');
+    // }
   }
 
   return errors;

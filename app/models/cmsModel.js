@@ -458,8 +458,8 @@ const cmsModel = {
         WHEN tbl_cms_banner.image IS NULL THEN
         NULL
         ELSE tbl_cms_banner.image
-        END AS image_url from tbl_cms_banner LEFT JOIN tbl_cms_pages ON tbl_cms_banner.page_id = tbl_cms_pages.id limit ${limit} offset $1`,
-        [offset]
+        END AS image_url from tbl_cms_banner LEFT JOIN tbl_cms_pages ON tbl_cms_banner.page_id = tbl_cms_pages.id limit $2 offset $1`,
+        [offset,limit]
       )
         .then(function (data) {
           resolve(data);
@@ -478,8 +478,8 @@ const cmsModel = {
         WHEN tbl_company_logo.image IS NULL THEN
         NULL
         ELSE tbl_company_logo.image
-        END AS image_url from tbl_company_logo  limit ${limit} offset $1`,
-        [offset]
+        END AS image_url from tbl_company_logo  limit $2 offset $1`,
+        [offset,limit]
       )
         .then(function (data) {
           resolve(data);
@@ -542,7 +542,8 @@ const cmsModel = {
       WHEN tbl_cms_banner.image IS NULL THEN
       NULL
       ELSE tbl_cms_banner.image
-      END AS image_url from tbl_cms_banner WHERE id = ${banner_id} `
+      END AS image_url from tbl_cms_banner WHERE id = $1`,
+      [banner_id]
       )
         .then(function (data) {
           resolve(data);
@@ -561,7 +562,8 @@ const cmsModel = {
       WHEN tbl_company_logo.image IS NULL THEN
       NULL
       ELSE tbl_company_logo.image
-      END AS image_url from tbl_company_logo WHERE id = ${logo_id} `
+      END AS image_url from tbl_company_logo WHERE id = $1`,
+      [logo_id]
       )
         .then(function (data) {
           resolve(data);
@@ -574,7 +576,7 @@ const cmsModel = {
   },
   getFaqDetail: async (faq_id) => {
     return new Promise(function (resolve, reject) {
-      db.one(`select * from tbl_faq WHERE id = ${faq_id} `)
+      db.one(`select * from tbl_faq WHERE id = $1`,[faq_id])
         .then(function (data) {
           resolve(data);
         })
@@ -592,7 +594,7 @@ const cmsModel = {
       WHEN tbl_blog.image IS NULL THEN
       NULL
       ELSE tbl_blog.image
-      END AS image_url from tbl_blog WHERE id = ${blog_id} `
+      END AS image_url from tbl_blog WHERE id = $1`,[blog_id]
       )
         .then(function (data) {
           resolve(data);
@@ -616,7 +618,8 @@ const cmsModel = {
       WHEN tbl_testimonials.created_image IS NULL THEN
       NULL
       ELSE tbl_testimonials.created_image
-      END AS created_image_url from tbl_testimonials WHERE id = ${testimonial_id} `
+      END AS created_image_url from tbl_testimonials WHERE id = $1`,
+      [testimonial_id]
       )
         .then(function (data) {
           resolve(data);

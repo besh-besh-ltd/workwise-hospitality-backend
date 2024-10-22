@@ -304,7 +304,7 @@ const userModel = {
         WHEN tbl_users.new_profile_image IS NULL THEN
         NULL
         ELSE tbl_users.new_profile_image
-        END AS image_url  from tbl_vendor_reviews LEFT JOIN tbl_users ON tbl_vendor_reviews.reviewed_by = tbl_users.id  where reviewed_to = ${user_id} ORDER BY id DESC LIMIT $2 OFFSET $3`,
+        END AS image_url  from tbl_vendor_reviews LEFT JOIN tbl_users ON tbl_vendor_reviews.reviewed_by = tbl_users.id  where reviewed_to = $1 ORDER BY id DESC LIMIT $2 OFFSET $3`,
         [user_id, limit, offset]
       )
         .then(function (data) {
@@ -3066,9 +3066,11 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
       try {
         // Check if a vendor with the same email already exists for the given buyerId
         const existingVendor = await db.any(
-          `SELECT * FROM tbl_temp_user 
-           WHERE buyer_id = $1 AND email = $2`,
-          [buyerId, email]
+              `SELECT * 
+                FROM tbl_temp_user
+                WHERE buyer_id = $1 
+                AND (email = $2 OR mobile = $3)`,
+          [buyerId, email, phone]
         );
 
         if (existingVendor.length > 0) {
@@ -3228,11 +3230,12 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
   },
   user_exist: async (email,mobile) => {
     return new Promise(function (resolve, reject) {
+      console.log(email);
       db.any(
         `SELECT *
         FROM tbl_users
         WHERE email = $1
-        AND mobile = $2;`,
+        OR mobile = $2;`,
         [email,mobile]
       )
         .then(function (data) {
@@ -3244,6 +3247,107 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   },
+
+  // Inserting the new spoc with user_id
+  add_user_spoc: async (spocObj) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `INSERT INTO tbl_users_spoc (user_id, name, email, mobile, role, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         RETURNING *;`,
+         [spocObj.user_id, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  check_exactly_same_spoc: async (spocObj) => {
+    return new Promise(function (resolve, reject) {
+      // Convert user_id to an integer if it's supposed to be a bigint
+    const userId = parseInt(spocObj.user_id, 10);
+
+    db.any(
+      `SELECT * FROM tbl_users_spoc
+        WHERE user_id = $1
+        AND name = $2
+        AND email = $3
+        AND mobile = $4
+        AND role = $5;`,
+       [userId, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  updateUserSpoc: async (name, email, mobile, role, userId, spocId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `UPDATE tbl_users_spoc
+         SET name = $1, email = $2, mobile = $3, role = $4, updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = $5 AND id = $6
+         RETURNING *;`,
+        [name, email, mobile, role, userId, spocId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  user_rfq_access_review: async (rfq_id, user_id, user_type) => {
+    let query = null;
+    let values = [];
+    // Sanitize input values
+    rfq_id = parseInt(rfq_id, 10); // Ensure rfq_id is an integer
+    user_id = parseInt(user_id, 10); // Ensure user_id is an integer
+    user_type = parseInt(user_type, 10); // Ensure user_type is an integer
+    // Construct the parameterized query based on user type
+    if (user_type === 2) {
+      query = `SELECT 1
+               FROM tbl_rfq
+               WHERE id = $1
+               AND created_by = $2;`;
+      values = [rfq_id, user_id]; // Use parameterized values
+    } else if (user_type === 3) {
+      query = `SELECT 1
+               FROM tbl_rfq_product_vendors
+               WHERE rfq_id = $1
+               AND user_id = $2;`;
+      values = [rfq_id, user_id]; // Use parameterized values
+    }
+    return new Promise((resolve, reject) => {
+      if (!query) {
+        return reject(new Error('Invalid user type'));
+      }
+      db.any(query, values)
+        .then((data) => {
+          // If data is not empty, return true, otherwise false
+          resolve(data.length > 0);
+        })
+        .catch((err) => {
+          let error = new Error('Database query failed');
+          error.details = err; // Add detailed error for potential logging
+          reject(error);
+        });
+    });
+  }
+
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];
 
@@ -3283,6 +3387,9 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   } */
-};
+
+
+
+  };
 
 export default userModel;

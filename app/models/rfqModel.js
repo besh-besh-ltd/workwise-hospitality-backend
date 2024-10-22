@@ -4,22 +4,16 @@ import Config from '../config/app.config.js';
 const rfqModel = {
   insert: async (table_name, data) => {
     const keys = Object.keys(data);
-    const values = keys.map((key) => {
-      if (typeof data[key] === 'string') {
-        return `'${data[key]}'`;
-      } else {
-        return data[key];
-      }
-    });
+    const values = Object.values(data);
     const d_keys = keys.join(', ');
-    const query = `INSERT INTO ${table_name} (${d_keys}) VALUES (${values.join(
-      ', '
-    )}) RETURNING *`;
-    console.log('query', query);
+    const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
+    const query = `INSERT INTO ${table_name} (${d_keys})
+      VALUES (${placeholders})
+      RETURNING *;`;
     return new Promise(function (resolve, reject) {
-      db.query(query)
-        .then(function (data) {
-          resolve(data);
+      db.query(query, values)
+        .then(function (result) {
+          resolve(result);
         })
         .catch(function (err) {
           let error = new Error(err);
@@ -161,9 +155,9 @@ const rfqModel = {
       SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = '${user_id}'
     ) AS "finilize"
     FROM tbl_rfq RFQ 
-    WHERE created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '${month}' AND EXTRACT(YEAR FROM timestamp) = '${year}' ORDER BY id DESC LIMIT ${limit} OFFSET ${offset} `;
+    WHERE created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC LIMIT $3 OFFSET $4 `;
     return new Promise(function (resolve, reject) {
-      db.query(query)
+      db.query(query,[month,year,limit,offset])
         .then(function (data) {
           resolve(data);
         })
@@ -183,9 +177,9 @@ const rfqModel = {
       SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = '${user_id}'
     ) AS "finilize"
     FROM tbl_rfq RFQ 
-    WHERE created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '${month}' AND EXTRACT(YEAR FROM timestamp) = '${year}' ORDER BY id DESC  `;
+    WHERE created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC  `;
     return new Promise(function (resolve, reject) {
-      db.query(query)
+      db.query(query,[month,year])
         .then(function (data) {
           resolve(data);
         })
@@ -258,8 +252,8 @@ const rfqModel = {
             AND RFQ_P_V.user_id = ${user_id} 
         )
         ORDER BY RFQ.id DESC
-        LIMIT ${limit} OFFSET $1;`,
-        [offset]
+        LIMIT $2 OFFSET $1;`,
+        [offset,limit]
       )
         .then(function (data) {
           resolve(data);
@@ -274,6 +268,37 @@ const rfqModel = {
 
     //  query changed by mukul,
     let q = `SELECT RFQ.*,
+    -- Fetching global_payment_term and global_comment from tbl_quotes
+    (
+      SELECT json_build_object(
+        'global_payment_term', TQ.global_payment_term,
+        'global_comment', TQ.global_comment
+      )
+      FROM tbl_quotes TQ
+      WHERE TQ.rfq_id = RFQ.id
+        AND TQ.created_by = ${user_id}
+      LIMIT 1
+    ) AS "quote_details",
+    
+    (
+      SELECT json_agg(json_build_object(
+        'file_url', TQF.file_url
+      ))
+      FROM tbl_quotes_files TQF
+      WHERE TQF.quote_id = (
+        SELECT TQ.id
+        FROM tbl_quotes TQ
+        WHERE TQ.rfq_id = RFQ.id
+          AND TQ.created_by = ${user_id}
+        LIMIT 1
+      )
+        AND TQF.file_type = 'term_and_condition'
+    ) AS "terms_and_conditions_files",
+    (
+      SELECT COUNT(*)::INT
+      FROM tbl_quotes TQ1
+      WHERE TQ1.rfq_id = RFQ.id
+      ) AS "total_quotes_received",
     ARRAY(
       SELECT json_build_object('id', TQF.id,'product_id',TQF.product_id, 'timestamp', TQF.timestamp,'variant', TQF.variant,
         'winning_vendor', 
@@ -294,10 +319,19 @@ const rfqModel = {
         )
       ) FROM tbl_rfq_terms_map RFQ_TM WHERE RFQ_TM.rfq_id = RFQ.id
     ) AS "terms",
+    (
+      SELECT json_agg(RF.file_url)
+      FROM tbl_rfq_files RF
+      WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
+    ) AS "TERM_files",
     ARRAY(
       SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
         'products', (
-          SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name,'unit_price', TQI.unit_price,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'total_price', TQI.total_price,'comment', TQI.comment,'delivery_period', TQI.delivery_period))
+          SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name,'unit_price', TQI.unit_price,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'total_price', TQI.total_price,'comment', TQI.comment,'delivery_period', TQI.delivery_period, 'document_files', (
+                SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
+                FROM tbl_quote_item_files QIF
+                WHERE QIF.quote_item_id = TQI.id
+            )))
           FROM tbl_quote_items TQI
           WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id
         )
@@ -305,6 +339,23 @@ const rfqModel = {
     ) AS "quotations",
     ARRAY(
         SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_id, 'variant', RFQ_P.variant, 'comment', RFQ_P.comment, 'spec_file', RFQ_P.spec_file, 'qap', RFQ_P.qap, 'qap_file', RFQ_P.qap_file, 'datasheet_file', RFQ_P.datasheet_file,
+       
+          'TDS_flies', (
+            SELECT json_agg(RPF.file_url)
+            FROM tbl_rfq_product_files RPF
+            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
+          ),
+          'QAP_files', (
+            SELECT json_agg(RPF.file_url)
+            FROM tbl_rfq_product_files RPF
+            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
+          ),
+          'SPEC_files', (
+            SELECT json_agg(RPF.file_url)
+            FROM tbl_rfq_product_files RPF
+            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
+          ),
+        
           'datasheet', (
             SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
                 CASE
@@ -342,6 +393,22 @@ const rfqModel = {
                   ELSE T_P.qap_new_file_name END))
             FROM tbl_product T_P
             WHERE RFQ_P.product_id = T_P.id
+          ),
+          -- New finalization_status field for each product (gyan - 16/10/2024)
+          'finalization_status', COALESCE(
+            (
+              SELECT 
+                CASE
+                  WHEN TQF.vendor_id = ${user_id} THEN 'You are finalized'
+                  ELSE 'Another vendor is finalized'
+                END
+              FROM tbl_quote_finalization TQF
+              WHERE TQF.rfq_id = RFQ_P.rfq_id 
+                AND TQF.product_id = RFQ_P.product_id 
+                AND TQF.variant = RFQ_P.variant
+              LIMIT 1
+            ), 
+            'No vendor finalized yet'
           ),
             ${
               user_type == 3
@@ -391,7 +458,7 @@ const rfqModel = {
        
     ) AS "products"
     
-FROM tbl_rfq RFQ WHERE id=${id}
+FROM tbl_rfq RFQ WHERE id=$1
 ORDER BY RFQ.id DESC
 LIMIT 1;`;
 
@@ -413,7 +480,7 @@ LIMIT 1;`;
     // }
 
     return new Promise(function (resolve, reject) {
-      db.query(q)
+      db.query(q,[id])
         .then(function (data) {
           resolve(data);
         })
@@ -515,7 +582,8 @@ LIMIT 1;`;
   getUserProducts: async (rfq_id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `select DISTINCT product_id, variant from tbl_rfq_product_vendors where rfq_id = ${rfq_id} AND user_id=${user_id}`
+        `select DISTINCT product_id, variant from tbl_rfq_product_vendors where rfq_id = $1 AND user_id=$2`,
+        [rfq_id,user_id]
       )
         .then(function (data) {
           resolve(data);
@@ -603,8 +671,8 @@ AND (RFQ.project_id = $1 OR $1 IS NULL)
 AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
 AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
 ORDER BY RFQ.timestamp ${sort}
-LIMIT ${limit} OFFSET $4;`,
-        [project_id,rfq_type,reverse_auction,offset]
+LIMIT $5 OFFSET $4;`,
+        [project_id,rfq_type,reverse_auction,offset,limit]
       )
         .then(function (data) {
           resolve(data);
@@ -629,19 +697,24 @@ LIMIT ${limit} OFFSET $4;`,
     });
   },
   getVendors: async (vendors) => {
-    const query = `SELECT 
-    TU.id,
-    TU.name,
-    TU.email,
-    TU.mobile,
-    TU.address,
-    TU.organization_name,
-    ARRAY(
-      SELECT json_build_object('id',TP.id, 'name',TP.name) FROM tbl_product TP WHERE TU.id = TP.created_by
-    ) AS "products" FROM tbl_users TU WHERE id IN (${vendors.join(',')})`;
+    const placeholders = vendors.map((_, index) => `$${index + 1}`).join(', ');
+    const query = `SELECT
+      TU.id,
+      TU.name,
+      TU.email,
+      TU.mobile,
+      TU.address,
+      TU.organization_name,
+      ARRAY(
+        SELECT json_build_object('id', TP.id, 'name', TP.name)
+        FROM tbl_product TP
+        WHERE TU.id = TP.created_by
+      ) AS "products"
+      FROM tbl_users TU
+      WHERE id IN (${placeholders})`;
     console.log(query);
     return new Promise(function (resolve, reject) {
-      db.any(query)
+      db.any(query, vendors)
         .then(function (data) {
           resolve(data);
         })
@@ -654,7 +727,7 @@ LIMIT ${limit} OFFSET $4;`,
   checkIfExists: async (table_name, parameter) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
     return new Promise(function (resolve, reject) {
-      db.any(query)
+      db.any(query,[table_name,parameter])
         .then(function (data) {
           resolve(data);
         })
@@ -746,7 +819,14 @@ LIMIT ${limit} OFFSET $4;`,
               ),
               'quote_details', (
                 SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name, 'unit_price', TQI.unit_price,'total_price', TQI.total_price, 'comment', TQI.comment, 'delivery_period', TQI.delivery_period,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'quantity',TQI.quantity,
-                  'rfq_details', (
+
+                'document_files', ( 
+                SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
+                FROM tbl_quotes_files TF
+                WHERE TF.quote_id = TQ.id
+              ),
+
+                'rfq_details', (
                     SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) 
                     FROM tbl_rfq_products_specs TPS 
                     WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = TRP.rfq_id
@@ -762,7 +842,13 @@ LIMIT ${limit} OFFSET $4;`,
                   TQI.product_id = TRP.product_id AND 
                   TQI.variant = TRP.variant 
             ORDER BY TQ.created_by ASC
-          ) AS "quotations"
+          ) AS "quotations",
+
+            ARRAY(
+        SELECT json_build_object('title', TPS.title, 'value', TPS.value)
+        FROM tbl_rfq_products_specs TPS
+        WHERE TPS.product_id = TRP.product_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
+      ) AS "product_specs"
           
         FROM tbl_rfq_products TRP WHERE TRP.rfq_id=${id}`
       )
@@ -885,6 +971,16 @@ LIMIT ${limit} OFFSET $4;`,
                 WHERE TQ.id = TQI.quote_id
                   AND TQ.rfq_id = ${id}
               ),
+                'document_files', (
+                SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
+                FROM tbl_quote_item_files QIF
+                WHERE QIF.quote_item_id = TQI.id
+              ),
+              'global_document_files', (
+                SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
+                FROM tbl_quotes_files TF
+                WHERE TF.quote_id = TQI.quote_id
+              ),
               'previous_quotes', (
                 SELECT json_agg(
                   json_build_object(
@@ -932,7 +1028,8 @@ LIMIT ${limit} OFFSET $4;`,
       db.query(
         `UPDATE tbl_rfq
         SET status = ${parseInt(2)}, updated_by = ${user_id}
-        WHERE id=${id} RETURNING *`
+        WHERE id=$1 RETURNING *`,
+        [id]
       )
         .then(function (data) {
           resolve(data);
@@ -946,7 +1043,8 @@ LIMIT ${limit} OFFSET $4;`,
   gerRFQVendors: async (id) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT DISTINCT  user_id FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = ${id} `
+        `SELECT DISTINCT  user_id FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = $1;`,
+        [id]
       )
         .then(function (data) {
           resolve(data);
@@ -959,7 +1057,7 @@ LIMIT ${limit} OFFSET $4;`,
   },
   quoteVendor: async (id) => {
     return new Promise(function (resolve, reject) {
-      db.query(`SELECT created_by  FROM "tbl_quotes" WHERE "rfq_id" = ${id}`)
+      db.query(`SELECT created_by  FROM "tbl_quotes" WHERE "rfq_id" = $1`,[id])
         .then(function (data) {
           resolve(data);
         })
@@ -975,7 +1073,8 @@ LIMIT ${limit} OFFSET $4;`,
         `SELECT tbl_users.name,tbl_users.email,tbl_users.organization_name
         FROM tbl_rfq
         LEFT JOIN tbl_users ON tbl_rfq.created_by = tbl_users.id
-        WHERE tbl_rfq.id = ${id}`
+        WHERE tbl_rfq.id = $1;`,
+        [id]
       )
         .then(function (data) {
           resolve(data);
@@ -992,8 +1091,9 @@ LIMIT ${limit} OFFSET $4;`,
       const result = await db.query(
         `SELECT *
          FROM tbl_rfq_activity
-         WHERE rfq_id = ${rfq_id} AND user_id = ${user_id}`
-      );
+         WHERE rfq_id = $1 AND user_id = ${user_id};`,
+          [rfq_id]
+        );
       return result;
 
     } catch (error) {
@@ -1064,8 +1164,6 @@ LIMIT ${limit} OFFSET $4;`,
         ${category_id ? `AND c.id = $2` : ``}
         ${approved_by_id ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)` : ``}
       ORDER BY rank DESC, similarity_score DESC, p.name ASC;`;
-
-    console.log('QUERY======', q);
 
     // Assuming db.query can handle parameterized queries:
     return new Promise(function (resolve, reject) {
@@ -1321,7 +1419,8 @@ ORDER BY is_linked_with_buyer DESC, RANDOM();
         FROM tbl_rfq
         LEFT JOIN tbl_quote_finalization ON tbl_rfq.id = tbl_quote_finalization.rfq_id
         LEFT JOIN tbl_product ON tbl_quote_finalization.product_id = tbl_product.id
-        WHERE tbl_rfq.created_by = ${user_id} AND tbl_quote_finalization.vendor_id = ${vendor_id};`
+        WHERE tbl_rfq.created_by = ${user_id} AND tbl_quote_finalization.vendor_id = $1;`,
+        [vendor_id]
       )
         .then(function (data) {
           resolve(data);
@@ -1366,7 +1465,8 @@ ORDER BY is_linked_with_buyer DESC, RANDOM();
   checkVendorRFQResponsibility: async (rfq_id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT * FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = ${rfq_id} AND "user_id" = ${user_id}`
+        `SELECT * FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = $1 AND "user_id" = $2`,
+        [rfq_id,user_id]
       )
         .then(function (data) {
           resolve(data);
@@ -1695,123 +1795,135 @@ WHERE created_by = $1 AND status = $2`,
       }
     });
   },
-  productPriceStats: async (product_name, user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.query(`
-        WITH ProductPriceStats AS (
-           SELECT 
-             MIN(qi.unit_price) AS min_price,
-             MAX(qi.unit_price) AS max_price,
-             AVG(qi.unit_price) AS avg_price
-           FROM tbl_product AS p
-           JOIN tbl_quote_items AS qi ON p.id = qi.product_id
-   JOIN tbl_quotes AS q ON q.rfq_id = qi.rfq_id
-           WHERE p.name = $1
-   AND CAST(q.timestamp AS BIGINT) >= EXTRACT(EPOCH FROM NOW() - INTERVAL '12 months') * 1000
- ) 
-        , RFQDetails AS (
-           SELECT
-             r.id AS rfq_id
-           FROM tbl_rfq AS r
-           WHERE r.created_by = $2
-         ), QuoteDetails AS (
-           SELECT
-             qi.product_id,
-             qi.unit_price,
-             qi.quantity,
-             q.timestamp AS last_quote_timestamp
-           FROM tbl_quote_items AS qi
-           JOIN RFQDetails ON qi.rfq_id = RFQDetails.rfq_id
-           JOIN tbl_product AS p ON p.id = qi.product_id
-           JOIN tbl_quotes AS q ON q.rfq_id = qi.rfq_id
-           WHERE p.name = $1
-           ORDER BY q.timestamp DESC
-           LIMIT 1
-         ), PriceHistory AS (
-           SELECT
-             qi.unit_price,
-             CAST(q.timestamp AS BIGINT) AS numeric_timestamp,
-             EXTRACT(YEAR FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)) AS year,
-             EXTRACT(MONTH FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)) AS month
-           FROM tbl_quote_items AS qi
-           JOIN tbl_product AS p ON p.id = qi.product_id
-           JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
-           WHERE p.name = $1 AND CAST(q.timestamp AS BIGINT) >= EXTRACT(EPOCH FROM NOW() - INTERVAL '12 months') * 1000
-         ), MonthlyPriceStats AS (
-           SELECT
-             MIN(unit_price) AS min_price,
-             AVG(unit_price) AS avg_price,
-             MAX(unit_price) AS max_price,
-             year,
-             month
-           FROM PriceHistory
-           GROUP BY year, month
-           ORDER BY year, month
-         ), FinalizedQuote AS (
-           SELECT
-             fq.product_id,
-             fq.vendor_id,
-             fq.variant,
-             fq.rfq_no,
-             fq.quote_id,
-             fq.timestamp
-           FROM tbl_quote_finalization AS fq
-           WHERE fq.product_id IN (SELECT product_id FROM QuoteDetails)
-           ORDER BY fq.timestamp DESC
-           LIMIT 1
-         ), FinalizedQuoteDetails AS (
-           SELECT 
-             qi.unit_price::NUMERIC AS finalized_unit_price,
-             qi.quantity::NUMERIC AS finalized_quantity,
-             (qi.unit_price::NUMERIC * qi.quantity::NUMERIC) AS total_price,
-             qi.quote_id  -- Include quote_id here
-           FROM tbl_quote_items AS qi
-           WHERE qi.quote_id IN (SELECT fq.quote_id FROM FinalizedQuote fq)
-         )
-         SELECT 
-           pps.min_price,
-           pps.max_price,
-           pps.avg_price,
-           qd.product_id,
-           qd.unit_price AS last_purchase_price,
-           qd.quantity AS last_purchase_quantity,
-           qd.last_quote_timestamp AS last_purchase_date,
-           JSON_AGG(JSON_BUILD_OBJECT('min', mp.min_price, 'avg', mp.avg_price, 'max', mp.max_price, 'month', mp.month, 'year', mp.year)) AS monthly_price_stats,
-           JSON_BUILD_OBJECT(
-             'vendor_id', fq.vendor_id,
-             'variant', fq.variant,
-             'rfq_no', fq.rfq_no,
-             'quote_id', fq.quote_id,
-             'timestamp', fq.timestamp,
-             'unit_price', fqd.finalized_unit_price,
-             'quantity', fqd.finalized_quantity,
-             'total_price', fqd.total_price
-           ) AS last_finalized_quote
-         FROM ProductPriceStats AS pps
-         CROSS JOIN QuoteDetails AS qd
-         CROSS JOIN MonthlyPriceStats AS mp
-         LEFT JOIN FinalizedQuote AS fq ON fq.product_id = qd.product_id
-         LEFT JOIN FinalizedQuoteDetails AS fqd ON fq.quote_id = fqd.quote_id
-         GROUP BY pps.min_price, pps.max_price, pps.avg_price, qd.product_id, qd.unit_price, qd.quantity, qd.last_quote_timestamp, fq.vendor_id, fq.variant, fq.rfq_no, fq.quote_id, fq.timestamp, fqd.finalized_unit_price, fqd.finalized_quantity, fqd.total_price
-      `,
-      [product_name, user_id]
+
+productPriceStatsMarket: async (product_name) => {
+  return new Promise(function (resolve, reject) {
+    db.query(`
+      WITH GeneralStats AS (
+        SELECT
+            MIN(qi.unit_price) AS min_price,
+            MAX(qi.unit_price) AS max_price,
+            AVG(qi.unit_price) AS avg_price
+        FROM tbl_product AS p
+        JOIN tbl_quote_items AS qi ON p.id = qi.product_id
+        JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
+        WHERE p.name = $1
+            AND to_timestamp(CAST(q.timestamp AS BIGINT) / 1000) >= NOW() - INTERVAL '1 year'
+      ), MonthlyStats AS (
+        SELECT
+            EXTRACT(YEAR FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)) AS year,
+            EXTRACT(MONTH FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)) AS month,
+            MIN(qi.unit_price) AS min_price,
+            AVG(qi.unit_price) AS avg_price,
+            MAX(qi.unit_price) AS max_price
+        FROM tbl_product AS p
+        JOIN tbl_quote_items AS qi ON p.id = qi.product_id
+        JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
+        WHERE p.name = $1
+            AND to_timestamp(CAST(q.timestamp AS BIGINT) / 1000) >= NOW() - INTERVAL '1 year'
+        GROUP BY EXTRACT(YEAR FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)), EXTRACT(MONTH FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000))
+        ORDER BY year, month
+      )
+      SELECT
+        JSON_BUILD_OBJECT(
+            'min', (SELECT min_price FROM GeneralStats),
+            'max', (SELECT max_price FROM GeneralStats),
+            'avg', (SELECT avg_price FROM GeneralStats)
+        ) AS general,
+        JSON_OBJECT_AGG(
+            CAST(year AS TEXT) || '-' || LPAD(CAST(month AS TEXT), 2, '0'),
+            JSON_BUILD_OBJECT('min', min_price, 'avg', avg_price, 'max', max_price)
+        ) AS monthly
+      FROM MonthlyStats;
+  `,
+    [ product_name]
     )
-      .then(function (data) {
-        resolve(data);
-      })
-      .catch(function (err) {
-        let error = new Error(err);
-        reject(error);
-      });
+    .then(function (data) {
+      resolve(data);
+    })
+    .catch(function (err) {
+      let error = new Error(err);
+      reject(error);
     });
-  },
-  rfq_project_exist: async (project_id,user_id) => {
+  });
+},
+
+productPriceStatsLastQuoteAndFinilizeForUser: async (product_name, user_id) => {
+  return new Promise(function (resolve, reject) {
+    db.query(`
+      WITH BuyerRFQs AS (
+        SELECT
+            rfq.id AS rfq_id
+        FROM tbl_rfq AS rfq
+        WHERE rfq.created_by = $1  -- $1 is the buyer_id
+      ), ProductDetails AS (
+        SELECT
+            p.id AS product_id
+        FROM tbl_product AS p
+        WHERE p.name = $2  -- $2 is the product_name
+      ), LatestQuote AS (
+        SELECT
+            qi.quote_id,
+            qi.product_id,
+            qi.unit_price,
+            q.timestamp
+        FROM tbl_quote_items AS qi
+        JOIN tbl_quotes AS q ON qi.quote_id = q.id
+        JOIN BuyerRFQs br ON q.rfq_id = br.rfq_id
+        JOIN ProductDetails pd ON qi.product_id = pd.product_id
+        ORDER BY q.timestamp DESC
+        LIMIT 1
+      ), LatestFinalizedQuote AS (
+        SELECT
+            qi.quote_id,
+            qi.product_id,
+            qi.unit_price,
+            q.timestamp
+        FROM tbl_quote_finalization AS fq
+        JOIN tbl_quotes AS q ON fq.quote_id = q.id
+        JOIN tbl_quote_items AS qi ON qi.quote_id = fq.quote_id
+        JOIN BuyerRFQs br ON q.rfq_id = br.rfq_id
+        JOIN ProductDetails pd ON qi.product_id = pd.product_id
+        WHERE fq.product_id = pd.product_id
+        ORDER BY q.timestamp DESC
+        LIMIT 1
+      )
+      SELECT
+        'Latest Quote' AS quote_type,
+        lq.quote_id,
+        lq.product_id,
+        lq.unit_price,
+        lq.timestamp AS quote_timestamp
+      FROM LatestQuote lq
+      UNION ALL
+      SELECT
+        'Latest Finalized Quote' AS quote_type,
+        lfq.quote_id,
+        lfq.product_id,
+        lfq.unit_price,
+        lfq.timestamp AS quote_timestamp
+      FROM LatestFinalizedQuote lfq;
+  `,
+    [ user_id, product_name]
+    )
+    .then(function (data) {
+      resolve(data);
+    })
+    .catch(function (err) {
+      let error = new Error(err);
+      reject(error);
+    });
+  });
+},
+
+rfq_project_exist: async (project_id,user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT 1 
         FROM tbl_projects
-        WHERE id = ${project_id} 
-        AND user_id = ${user_id};`
+        WHERE id = $1 
+        AND user_id = $2;`,
+        [project_id,user_id]
       )
         .then(function (data) {
           resolve(data);
@@ -1838,7 +1950,176 @@ WHERE created_by = $1 AND status = $2`,
         reject(error);
       });
     })
-  }
+  },
+
+  getAllRfqsForAdmin: async (limit, offset, rfqStatus, adminServiceStatus, sort) => {
+    return new Promise((resolve, reject) => {
+      db.any(`
+        SELECT 
+          RFQ.id,
+          RFQ.rfq_no,
+          RFQ.comment,
+          RFQ.company_name,
+          RFQ.response_email,
+          RFQ.contact_name,
+          RFQ.contact_number,
+          RFQ.bid_end_date,
+          RFQ.location,
+          RFQ.is_published,
+          RFQ.created_by,
+          RFQ.updated_by,
+          RFQ.timestamp,
+          RFQ.status AS rfq_status,
+          RFQ.rfq_type,
+          RFQ.reverse_auction,
+          P.id AS project_id,
+          P.name AS project_name,
+          (
+            SELECT COUNT(*)
+            FROM tbl_rfq_products RFQ_P
+            WHERE RFQ_P.rfq_id = RFQ.id
+          ) AS total_products,
+          (
+            SELECT json_build_object(
+              'quotes_received', COUNT(DISTINCT TQ.created_by),
+              'total_vendors', COUNT(DISTINCT TRPV.user_id)
+            )
+            FROM tbl_quotes TQ
+            LEFT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = RFQ.id
+            WHERE TQ.rfq_id = RFQ.id
+          ) AS stats,
+          json_build_object(
+            'id', ARS.id,
+            'subadmin_id', ARS.subadmin_id,
+            'status', ARS.status,
+            'comment', ARS.comment
+          ) AS admin_service
+        FROM tbl_rfq RFQ
+        LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
+        LEFT JOIN tbl_admin_rfq_service ARS ON RFQ.id = ARS.rfq_id
+        WHERE 
+          (${rfqStatus} IS NULL OR RFQ.status = ${rfqStatus})
+          AND (${adminServiceStatus} IS NULL OR ARS.status = ${adminServiceStatus})
+        ORDER BY RFQ.timestamp ${sort}
+        LIMIT ${limit} OFFSET ${offset}
+      `)
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
+  getTotalRfqCountForAdmin: async (rfqStatus, adminServiceStatus) => {
+    return new Promise((resolve, reject) => {
+      db.one(`
+        SELECT COUNT(*) AS total
+        FROM tbl_rfq RFQ
+        LEFT JOIN tbl_admin_rfq_service ARS ON RFQ.id = ARS.rfq_id
+        WHERE 
+          (${rfqStatus} IS NULL OR RFQ.status = ${rfqStatus})
+          AND (${adminServiceStatus} IS NULL OR ARS.status = ${adminServiceStatus})
+      `)
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
+  createOrUpdateAdminRfqService: async (rfq_id, subadmin_id, status, comment) => {
+    return new Promise((resolve, reject) => {
+      db.one(`
+        INSERT INTO tbl_admin_rfq_service (rfq_id, subadmin_id, status, comment)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (rfq_id) DO UPDATE SET
+          subadmin_id = $2,
+          status = $3,
+          comment = $4,
+          updated_at = CURRENT_TIMESTAMP
+        RETURNING *;
+      `, [rfq_id, subadmin_id, status, comment || null])
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });  
+  },
+
+  getRfqByIdForAdmin: async (id) => {
+    let q = `SELECT RFQ.*,
+      P.name AS project_name,
+      ARRAY(
+        SELECT json_build_object('vendor_id', V.id, 'vendor_name', V.name, 'vendor_email', V.email, 'vendor_mobile', V.mobile, 'vendor_organization', V.organization_name,
+          'products', (
+            SELECT json_agg(json_build_object('product_id', RFQ_P.product_id, 'variant', RFQ_P.variant, 'product_name', P.name, 'product_description', P.description, 
+              'quotation_details', (
+                SELECT json_agg(json_build_object('quote_id', Q.id, 'timestamp', Q.timestamp, 'status', Q.status, 'total_price', QI.total_price, 'unit_price', QI.unit_price, 'package_price', QI.package_price, 'freight_price', QI.freight_price, 'tax', QI.tax, 'delivery_period', QI.delivery_period)
+                )
+                FROM tbl_quotes Q
+                JOIN tbl_quote_items QI ON Q.id = QI.quote_id
+                WHERE Q.rfq_id = RFQ.id AND Q.created_by = V.id AND QI.product_id = RFQ_P.product_id AND QI.variant = RFQ_P.variant
+              ),
+              'finalization', (
+                SELECT json_build_object('id', TQF.id, 'rfq_no', TQF.rfq_no, 'vendor_id', TQF.vendor_id, 'timestamp', TQF.timestamp)
+                FROM tbl_quote_finalization TQF
+                WHERE TQF.rfq_id = RFQ_P.rfq_id AND TQF.product_id = RFQ_P.product_id AND TQF.variant = RFQ_P.variant
+              ),
+              'product_specs', (
+                SELECT json_agg(json_build_object('title', SPEC.title, 'value', SPEC.value))
+                FROM tbl_rfq_products_specs SPEC
+                WHERE SPEC.rfq_id = RFQ_P.rfq_id
+                AND SPEC.product_id = RFQ_P.product_id
+                AND SPEC.variant = RFQ_P.variant
+              )
+            ))
+            FROM tbl_rfq_products RFQ_P
+            JOIN tbl_product P ON RFQ_P.product_id = P.id
+            WHERE RFQ_P.rfq_id = RFQ.id
+            AND EXISTS (SELECT 1 FROM tbl_rfq_product_vendors RFQ_P_V WHERE RFQ_P_V.rfq_id = RFQ_P.rfq_id AND RFQ_P_V.user_id = V.id AND RFQ_P_V.product_id = RFQ_P.product_id AND RFQ_P_V.variant = RFQ_P.variant)
+          )
+        ) 
+        FROM tbl_users V
+        WHERE EXISTS (
+          SELECT 1 FROM tbl_rfq_product_vendors RFQ_P_V
+          WHERE RFQ_P_V.rfq_id = RFQ.id AND RFQ_P_V.user_id = V.id
+        )
+      ) AS "vendor_details",
+      
+      -- Fetch admin service details for this RFQ
+      (
+        SELECT json_agg(json_build_object('id', A.id, 'subadmin_id', A.subadmin_id, 'status', A.status, 'comment', A.comment, 'created_at', A.created_at, 'updated_at', A.updated_at))
+        FROM tbl_admin_rfq_service A
+        WHERE A.rfq_id = RFQ.id
+      ) AS "admin_service_details"
+      
+    FROM tbl_rfq RFQ
+    LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
+    WHERE RFQ.id = ${id}
+    ORDER BY RFQ.id DESC
+    LIMIT 1;`;
+  
+    return new Promise(function (resolve, reject) {
+      db.query(q)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
 };
 
 export default rfqModel;

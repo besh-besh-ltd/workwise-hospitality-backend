@@ -6,6 +6,7 @@ import couponModel from '../../models/couponModel.js';
 import { encode } from 'html-entities';
 import dateFormat from 'dateformat';
 import rfqModel from '../../models/rfqModel.js';
+import vendorModel from '../../models/vendorModel.js';
 
 
 const validateDbBody = {
@@ -769,8 +770,8 @@ const validateDbBody = {
       let { project_id } = req.body;
       const user_id = req.user.id;
 
-      if (project_id && project_id!=-1) {
-        const rfqProjectExists = await rfqModel.rfq_project_exist(project_id,user_id);
+      if (project_id && project_id != -1) {
+        const rfqProjectExists = await rfqModel.rfq_project_exist(project_id, user_id);
         if (rfqProjectExists.length < 1) {
           err++;
           errors.unauthorized_project = 'Project does not exist';
@@ -803,43 +804,44 @@ const validateDbBody = {
     try {
       let errors = {};
       let err = 0;
-      let { email, phone} = req.body;
+      let { email, phone } = req.body;
 
       if (email && phone) {
-        const userEmailExists = await userModel.company_exist(email,phone);
+        const userEmailExists = await userModel.user_exist(email, phone);
         if (userEmailExists.length > 0) {
-          // case 1 -> whethtr the vendor is public
-          console.log(userEmailExists);
-          if(userEmailExists.is_private==0){
-                 await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].user_id);
-                res
+
+          //  check whether the user is vendor or not by checking thier user_type==3
+          if (userEmailExists[0].user_type == 3) {
+            // case 1 -> whether the vendor is public
+            if (userEmailExists.is_private == 0) {
+              await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].id);
+              res
                 .status(200)
                 .json({
                   status: 1,
-                  message:"This vendor is already registered as a PUBLIC vendor in our system. They have now been added to your preferred vendor list."
+                  message: "This vendor is already registered as a PUBLIC vendor in our system. They have now been added to your preferred vendor list."
                 })
                 .end();
-                return;
-              }else{
-                // case 2 -> whether the vendor is private
-                await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].user_id);
-                res
+              return;
+            } else {
+              // case 2 -> whether the vendor is private
+              await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].id);
+              res
                 .status(200)
                 .json({
                   status: 1,
-                  message:"This vendor is already registered as a PRIVATE vendor in our system. They have now been added to your preferred vendor list."
+                  message: "This vendor is already registered as a PRIVATE vendor in our system. They have now been added to your preferred vendor list."
                 })
                 .end();
-                return;
-              }  
-        }else{
-          // this is for when the buyer trying to add other buyer credentials as a vendor
-          
-          const buyerCredentials = await userModel.user_exist(email,phone);
-          if(buyerCredentials.length > 0){
+              return;
+            }
+
+          } else {
             err++;
             errors.user_exist = 'Unable to add this vendor. Please ensure the credentials belong to a valid vendor account.';
           }
+
+
         }
       }
 
@@ -864,7 +866,81 @@ const validateDbBody = {
         })
         .end();
     }
+  },
+
+  spoc_id_exists: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+      let userId = req.user.id;
+      let spocId = req.params.spoc_id;
+
+      if (userId && spocId) {
+        const userIDExists = await vendorModel.SpocExist(userId,spocId);
+        if (userIDExists.length == 0) {
+          err++;
+          errors.invalid_spoc = 'User spoc not found';
+        }
+      }
+
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+      } else {
+        next();
+      }
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
+  rfq_access_check: async (req, res, next) => {
+    try {
+      const rfq_id  = req.params.id;
+      console.log(req.params); // Assuming rfq_id is part of the request body
+      const user_id = req.user.id;  // Assuming user_id is part of the request object
+      const user_type = req.user.user_type; // Assuming user_type is part of the request object
+      // Validate if rfq_id exists in the body
+      if (!rfq_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'RFQ ID is required'
+        });
+      }
+      // Call the user_rfq_access_review function and check the result
+      const hasAccess = await userModel.user_rfq_access_review(rfq_id, user_id, user_type);
+      if (hasAccess) {
+        // If access is granted, proceed to the next middleware
+        next();
+      } else {
+        // If access is denied, return a 403 error response
+        res.status(403).json({
+          status: 2,
+          message: 'RFQ does not found'
+        });
+      }
+    } catch (err) {
+      // Handle errors gracefully and log them if necessary
+      logError(err); // Optional: Implement your own error logging
+      res.status(500).json({
+        status: 3,
+        message: 'An internal server error occurred'
+      });
+    }
   }
+  
 };
 
 export { validateDbBody };
