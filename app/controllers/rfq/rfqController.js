@@ -206,10 +206,10 @@ const insertProduct = async (
       variant,
       comment,
       datasheet,
-      spec_file,
-      qap_file,
+      spec_file:'',// this field we have to remove from database
+      qap_file:'',// this field we have to remove from database
       rfq_id: created_rfq_id,
-      datasheet_file,
+      datasheet_file:"",// this field we have to remove from database
       qap
     };
     let spec_array = spec.map((item) => {
@@ -248,6 +248,41 @@ const insertProduct = async (
         'tbl_rfq_product_vendors'
       );
     }
+
+// Handle multiple datasheet files
+if (datasheet_file && datasheet_file.length > 0) {
+  const fileDataArray = datasheet_file.map(url => ({
+    rfq_product_id:productResult[0].id,
+    file_type: 'TDS',
+    file_url: url
+  }));
+  for (const fileData of fileDataArray) {
+    await rfqModel.insert('tbl_rfq_product_files', fileData);
+  }
+}
+
+if (qap_file && qap_file.length > 0) {
+  const qapFiles = qap_file.map(url => ({
+    rfq_product_id:productResult[0].id,
+    file_type: 'QAP',
+    file_url: url
+  }));
+  for (const fileData of qapFiles) {
+    await rfqModel.insert('tbl_rfq_product_files', fileData);
+  }
+}
+
+if (spec_file && spec_file.length > 0) {
+  const specFiles = spec_file.map(url => ({
+    rfq_product_id:productResult[0].id,
+    file_type: 'SPEC',
+    file_url: url
+  }));
+  for (const fileData of specFiles) {
+    await rfqModel.insert('tbl_rfq_product_files', fileData);
+  }
+}
+
 
     return { product_info: productResult[0], spec_info, vendor_info };
   } catch (error) {
@@ -863,6 +898,7 @@ const rfqController = {
         rfq_type,
         reverse_auction,
         project_id,
+        term_and_condition_files
       } = req.body;
 
       if (rfq_id && rfq_id != '' && rfq_id != null) {
@@ -944,6 +980,17 @@ const rfqController = {
             );
           }
 
+          if (term_and_condition_files && term_and_condition_files.length > 0) {
+            const rfq_files = term_and_condition_files.map(url => ({
+              rfq_id:created_rfq_id,
+              file_type: 'term_and_condition',
+              file_url: url
+            }));
+            for (const fileData of rfq_files) {
+              await rfqModel.insert('tbl_rfq_files', fileData);
+            }
+          }
+
           Promise.all(
             products.map((item) => insertProduct(item, created_rfq_id))
           )
@@ -952,7 +999,7 @@ const rfqController = {
               response[0].terms = rfqtermsRsp;
               // sendMailtoVendors => in this function we are also generating token for vendor so he will quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
               await sendMailtoVendors(req, response[0].id);
-
+              
               await sendQuotationMailToBuyer(req, response[0].id);
 
               res
@@ -1228,7 +1275,6 @@ const rfqController = {
 
       if (req.user.user_type != 2) {
         const userProducts = await rfqModel.getUserProducts(id, req.user.id);
-        console.log('=======================', userProducts);
         if (
           userProducts.length > 0 &&
           rfQItem.length > 0 &&
@@ -1619,7 +1665,8 @@ const rfqController = {
       status,
       products,
       globalPaymentTerms,
-      globalComment
+      globalComment,
+      term_and_condition_files
     } = req.body;
 
     const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
@@ -1731,7 +1778,20 @@ const rfqController = {
 
           let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
           if (quote_rsp.length > 0) {
+
             const created_quote_id = quote_rsp[0].id;
+
+            if (term_and_condition_files && term_and_condition_files.length > 0) {
+              const quote_files = term_and_condition_files.map(url => ({
+                quote_id:created_quote_id,
+                file_type: 'term_and_condition',
+                file_url: url
+              }));
+              for (const fileData of quote_files) {
+                await rfqModel.insert('tbl_quotes_files', fileData);
+              }
+            }
+
             var quote_items_data = [];
             products.map(
               ({
@@ -1787,6 +1847,23 @@ const rfqController = {
               quote_items_keys,
               'tbl_quote_items'
             );
+
+         // New code to insert file links into tbl_quote_item_files
+        if (quotes_items.length > 0) {
+          quotes_items.forEach(async (item, index) => {
+          const file_links = products[index].document_files;
+            if (file_links && file_links.length > 0) {
+                const file_records = file_links.map(link => ({
+                quote_item_id: item.id,
+                file_type: "DOC",
+                file_url: link,
+                created_at: new Date()
+              }));
+              await rfqModel.insertArray( file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files'
+              );
+            }
+            }); 
+          }
 
             await sendQuoteNotificationEmail(req, rfq_id);
             await sendQuoteNotificationToVendor(req);
