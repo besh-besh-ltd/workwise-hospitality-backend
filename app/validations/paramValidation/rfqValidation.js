@@ -102,6 +102,6 @@ export const rfqSchemas = {
   updateRfqStatusValidation: Joi.object().keys({
     rfq_id: Joi.number().integer().required(), 
     status: Joi.string().valid('Pending', 'Working', 'Complete').required(),
-    comment: Joi.string().optional()
+    comment: Joi.string().allow('').allow(null).optional()
   }),
 };
