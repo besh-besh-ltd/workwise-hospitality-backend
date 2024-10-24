@@ -1994,8 +1994,8 @@ rfq_project_exist: async (project_id,user_id) => {
               'total_vendors', COUNT(DISTINCT TRPV.user_id)
             )
             FROM tbl_quotes TQ
-            LEFT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = RFQ.id
-            WHERE TQ.rfq_id = RFQ.id
+            RIGHT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = TQ.rfq_id
+            WHERE TRPV.rfq_id = RFQ.id
           ) AS stats,
           json_build_object(
             'id', ARS.id,
