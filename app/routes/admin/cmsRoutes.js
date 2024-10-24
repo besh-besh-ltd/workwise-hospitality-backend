@@ -172,12 +172,16 @@ cmsRoutes.post(
   schema_posts.create_testimonial,
   cmsController.createTestimonial
 );
-
 cmsRoutes.get(
-  '/testimonial-list/:id',
+  '/testimonial-list',
   passportSignIn,
   cmsController.testimonialList
 );
+// cmsRoutes.get(
+//   '/testimonial-list/:id',
+//   passportSignIn,
+//   cmsController.testimonialList
+// );
 cmsRoutes.get(
   '/testimonial-detail/:id',
   passportSignIn,

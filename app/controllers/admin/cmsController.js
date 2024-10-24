@@ -970,10 +970,10 @@ const cmsController = {
         url: url,
         page_id: pageId,
         status: status,
-        thumbnail_image:
-          req?.files?.image?.length > 0
-            ? `${Config.download_url}/testimonial_image/${req.files.image[0].filename}`
-            : null,
+        // thumbnail_image:
+        //   req?.files?.image?.length > 0
+        //     ? `${Config.download_url}/testimonial_image/${req.files.image[0].filename}`
+        //     : null,
         created_name,
         created_image:
           req?.files?.created_image?.length > 0
@@ -1003,17 +1003,17 @@ const cmsController = {
   },
   testimonialList: async (req, res, next) => {
     try {
-      let id=req.params.id
-      if(!id){
-        logError("no page id is provided");
-        res
-          .status(400)
-          .json({
-            status: 3,
-            message: "no page id is provided "
-          })
-          .end();
-      }
+      // let id=req.params.id
+      // if(!id){
+      //   logError("no page id is provided");
+      //   res
+      //     .status(400)
+      //     .json({
+      //       status: 3,
+      //       message: "no page id is provided "
+      //     })
+      //     .end();
+      // }
       let page, limit, offset;
       if (req.query.page && req.query.page > 0) {
         page = req.query.page;
@@ -1029,8 +1029,7 @@ const cmsController = {
       let testimonialList = await cmsModel.getAllTestimonial(
         limit,
         offset,
-        search,
-        id
+        search
       );
       let testimonialCount = await cmsModel.getAllTestimonialCount(search);
       res
