@@ -327,11 +327,18 @@ const rfqModel = {
     ARRAY(
       SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
         'products', (
-          SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name,'unit_price', TQI.unit_price,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'total_price', TQI.total_price,'comment', TQI.comment,'delivery_period', TQI.delivery_period, 'document_files', (
+          SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name,'unit_price', TQI.unit_price,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'total_price', TQI.total_price,'comment', TQI.comment,'delivery_period', TQI.delivery_period,
+          'previous_document_files', (
                 SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
                 FROM tbl_quote_item_files QIF
                 WHERE QIF.quote_item_id = TQI.id
-            )))
+            ),
+          'document_files', (
+                SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
+                FROM tbl_quote_item_files QIF
+                WHERE QIF.quote_item_id = TQI.id
+            )
+          ))
           FROM tbl_quote_items TQI
           WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id
         )
@@ -1794,6 +1801,27 @@ WHERE created_by = $1 AND status = $2`,
         reject(error);
       }
     });
+  },
+
+  getQuoteItem: async (quoteId, product) => {
+    try { 
+      const existingItemQuery = `
+        SELECT * FROM tbl_quote_items
+        WHERE quote_id = $1 AND product_id = $2 AND variant = $3`;
+  
+      const result = await db.query(existingItemQuery, [
+        quoteId,
+        product.product_id,
+        product.variant
+      ]);
+      
+      const item = result[0] || null;      
+      return item;
+    } 
+    catch (error) {
+      console.error('Get QuoteItem: ', error);
+      throw error;  
+    }
   },
 
 productPriceStatsMarket: async (product_name) => {
