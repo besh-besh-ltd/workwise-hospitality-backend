@@ -1954,7 +1954,16 @@ rfq_project_exist: async (project_id,user_id) => {
 
   getAllRfqsForAdmin: async (limit, offset, rfqStatus, adminServiceStatus, sort) => {
     return new Promise((resolve, reject) => {
-      db.any(`
+
+      let dynamicQuery = "";
+
+      if(adminServiceStatus=="Pending"){
+        dynamicQuery += ` AND (ARS.status IS NULL OR ARS.status = '${adminServiceStatus}')`;
+      } else if(adminServiceStatus){
+        dynamicQuery += ` AND ARS.status = '${adminServiceStatus}'`;
+      }
+
+      const query = `
         SELECT 
           RFQ.id,
           RFQ.rfq_no,
@@ -1985,8 +1994,8 @@ rfq_project_exist: async (project_id,user_id) => {
               'total_vendors', COUNT(DISTINCT TRPV.user_id)
             )
             FROM tbl_quotes TQ
-            LEFT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = RFQ.id
-            WHERE TQ.rfq_id = RFQ.id
+            RIGHT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = TQ.rfq_id
+            WHERE TRPV.rfq_id = RFQ.id
           ) AS stats,
           json_build_object(
             'id', ARS.id,
@@ -1998,11 +2007,17 @@ rfq_project_exist: async (project_id,user_id) => {
         LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
         LEFT JOIN tbl_admin_rfq_service ARS ON RFQ.id = ARS.rfq_id
         WHERE 
-          (${rfqStatus} IS NULL OR RFQ.status = ${rfqStatus})
-          AND (${adminServiceStatus} IS NULL OR ARS.status = ${adminServiceStatus})
+          (($1 IS NULL) OR RFQ.status = $1)
+          ${dynamicQuery}
         ORDER BY RFQ.timestamp ${sort}
-        LIMIT ${limit} OFFSET ${offset}
-      `)
+        LIMIT $4 OFFSET $5
+    `;
+
+      console.log(query);
+
+    const values = [rfqStatus, adminServiceStatus, sort, limit, offset];
+
+    db.any(query, values)
       .then(function (data) {
         resolve(data);
       })
@@ -2015,14 +2030,26 @@ rfq_project_exist: async (project_id,user_id) => {
 
   getTotalRfqCountForAdmin: async (rfqStatus, adminServiceStatus) => {
     return new Promise((resolve, reject) => {
-      db.one(`
+      let dynamicQuery = "";
+
+      if(adminServiceStatus=="Pending"){
+        dynamicQuery += ` AND (ARS.status IS NULL OR ARS.status = '${adminServiceStatus}')`;
+      } else if(adminServiceStatus){
+        dynamicQuery += ` AND ARS.status = '${adminServiceStatus}'`;
+      }
+
+      const query = `
         SELECT COUNT(*) AS total
         FROM tbl_rfq RFQ
         LEFT JOIN tbl_admin_rfq_service ARS ON RFQ.id = ARS.rfq_id
         WHERE 
-          (${rfqStatus} IS NULL OR RFQ.status = ${rfqStatus})
-          AND (${adminServiceStatus} IS NULL OR ARS.status = ${adminServiceStatus})
-      `)
+          ($1 IS NULL OR RFQ.status = $1)
+          ${dynamicQuery}
+      `;
+
+      const values = [rfqStatus];
+
+      db.one(query, values)
       .then(function (data) {
         resolve(data);
       })

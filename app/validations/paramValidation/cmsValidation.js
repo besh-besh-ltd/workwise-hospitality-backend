@@ -264,7 +264,7 @@ const schemas = {
     status: Joi.string()
       .required()
       .regex(/^[0|1]$/, 'numeric values only'),
-    image: Joi.string().optional().allow(null).allow(''),
+    // image: Joi.string().optional().allow(null).allow(''),
     created_image: Joi.string().optional().allow(null).allow('')
   }),
   create_blog: Joi.object().keys({
@@ -1525,7 +1525,7 @@ const schema_posts = {
           }
         }
       }).fields([
-        { name: 'image', maxCount: 1 },
+        // { name: 'image', maxCount: 1 },
         { name: 'created_image', maxCount: 1 }
       ]);
       upload(req, res, async (err) => {

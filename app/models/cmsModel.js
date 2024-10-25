@@ -1989,7 +1989,7 @@ const cmsModel = {
         });
     });
   },
-  getAllTestimonial: async (limit, offset, search, id) => {
+  getAllTestimonial: async (limit, offset, search) => {
     return new Promise(function (resolve, reject) {
       let query = ``;
       if (search) {
@@ -2003,7 +2003,7 @@ const cmsModel = {
               ELSE tbl_testimonials.thumbnail_image
               END AS image_url
           FROM tbl_testimonials
-          WHERE status != 2 ${query} AND id=${id}
+          WHERE status != 2 ${query}
           ORDER BY  "createdAt" DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
       )
@@ -2054,7 +2054,7 @@ const cmsModel = {
   },
   deleteTestimonial: async (testimonialObj, testimonialId) => {
     return new Promise(function (resolve, reject) {
-      const condition = `WHERE id = $1 RETURNING id`;
+      const condition = ` WHERE id = $1 RETURNING id`;
       const values = [testimonialId];
       let query =
         pgp().helpers.update(testimonialObj, null, 'tbl_testimonials') +
