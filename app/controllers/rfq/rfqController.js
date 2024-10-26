@@ -250,39 +250,39 @@ const insertProduct = async (
       );
     }
 
-// Handle multiple datasheet files
-if (datasheet_file && datasheet_file.length > 0) {
-  const fileDataArray = datasheet_file.map(url => ({
-    rfq_product_id:productResult[0].id,
-    file_type: 'TDS',
-    file_url: url
-  }));
-  for (const fileData of fileDataArray) {
-    await rfqModel.insert('tbl_rfq_product_files', fileData);
-  }
-}
+    // Handle multiple datasheet files
+    if (datasheet_file && datasheet_file.length > 0) {
+      const fileDataArray = datasheet_file.map(url => ({
+        rfq_product_id:productResult[0].id,
+        file_type: 'TDS',
+        file_url: url
+      }));
+      for (const fileData of fileDataArray) {
+        await rfqModel.insert('tbl_rfq_product_files', fileData);
+      }
+    }
 
-if (qap_file && qap_file.length > 0) {
-  const qapFiles = qap_file.map(url => ({
-    rfq_product_id:productResult[0].id,
-    file_type: 'QAP',
-    file_url: url
-  }));
-  for (const fileData of qapFiles) {
-    await rfqModel.insert('tbl_rfq_product_files', fileData);
-  }
-}
+    if (qap_file && qap_file.length > 0) {
+      const qapFiles = qap_file.map(url => ({
+        rfq_product_id:productResult[0].id,
+        file_type: 'QAP',
+        file_url: url
+      }));
+      for (const fileData of qapFiles) {
+        await rfqModel.insert('tbl_rfq_product_files', fileData);
+      }
+    }
 
-if (spec_file && spec_file.length > 0) {
-  const specFiles = spec_file.map(url => ({
-    rfq_product_id:productResult[0].id,
-    file_type: 'SPEC',
-    file_url: url
-  }));
-  for (const fileData of specFiles) {
-    await rfqModel.insert('tbl_rfq_product_files', fileData);
-  }
-}
+    if (spec_file && spec_file.length > 0) {
+      const specFiles = spec_file.map(url => ({
+        rfq_product_id:productResult[0].id,
+        file_type: 'SPEC',
+        file_url: url
+      }));
+      for (const fileData of specFiles) {
+        await rfqModel.insert('tbl_rfq_product_files', fileData);
+      }
+    }
 
 
     return { product_info: productResult[0], spec_info, vendor_info };
@@ -325,18 +325,18 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
 
       // Construct dynamic HTML for products list
       let productHTML = products.slice(0, 3).map((product) => {
-          const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
-          return `
+        const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
+        return `
             <tr>
               <td style="font-size: 15px; padding-bottom: 3px;">${product.name}</td>
               <td style="font-size: 15px; text-align: right; padding-bottom: 3px;">${quantitySpec.value || '--'}</td>
             </tr>
           `;
-        })
+      })
         .join('');
 
-        if (products.length > 3) {
-          productHTML += `
+      if (products.length > 3) {
+        productHTML += `
             <tr>
               <td colspan="2" style="text-align: right; padding-bottom: 3px;">
                 <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}
@@ -346,7 +346,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
               </td>
             </tr>
           `;
-        }
+      }
 
 
       // Construct the email content with the list of products
@@ -1085,7 +1085,7 @@ const rfqController = {
           tbl_rfq_data.project_id=project_id;
         }
 
-       
+
         const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
         var rfqtermsRsp = null;
 
@@ -1128,7 +1128,7 @@ const rfqController = {
               response[0].terms = rfqtermsRsp;
               // sendMailtoVendors => in this function we are also generating token for vendor so he will quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
               await sendMailtoVendors(req, response[0].id);
-              
+
               await sendQuotationMailToBuyer(req, response[0].id);
 
               res
@@ -1411,9 +1411,7 @@ const rfqController = {
         ) {
           let fproducts = [];
           userProducts.map((prod_item) => {
-            prod_item.product_id;
             rfQItem[0].products.map((pintem) => {
-              console.log("pintem", pintem)
               if (prod_item.product_id == pintem.product_id && prod_item.variant == pintem.variant) {
                 pintem.vendor_details = pintem.vendor_details.filter(vendor => vendor.user_id === req.user.id);
                 fproducts.push(pintem);
@@ -1740,7 +1738,7 @@ const rfqController = {
       if(reverse_auction=='-1'){
         reverse_auction=null;
       }
-      
+
 
       const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort,reverse_auction,rfq_type);
 
@@ -1873,12 +1871,12 @@ console.log("mukul 1870")
           );
           if (alreadyExists.length > 0) {
             res
-            .status(400)
-            .json({
-              status: 3,
-              message: 'Quote is alredy present for this RFQ!'
-            })
-            .end();
+              .status(400)
+              .json({
+                status: 3,
+                message: 'Quote is alredy present for this RFQ!'
+              })
+              .end();
             // let quote_rsp = await rfqModel.update(
             //   'tbl_quotes',
             //   tbl_quotes_data,
@@ -1979,22 +1977,22 @@ console.log("mukul 1870")
               'tbl_quote_items'
             );
 
-         // New code to insert file links into tbl_quote_item_files
-        if (quotes_items.length > 0) {
-          quotes_items.forEach(async (item, index) => {
-          const file_links = products[index].document_files;
-            if (file_links && file_links.length > 0) {
-                const file_records = file_links.map(link => ({
-                quote_item_id: item.id,
-                file_type: "DOC",
-                file_url: link,
-                created_at: new Date()
-              }));
-              await rfqModel.insertArray( file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files'
-              );
+            // New code to insert file links into tbl_quote_item_files
+            if (quotes_items.length > 0) {
+              quotes_items.forEach(async (item, index) => {
+                const file_links = products[index].document_files;
+                if (file_links && file_links.length > 0) {
+                  const file_records = file_links.map(link => ({
+                    quote_item_id: item.id,
+                    file_type: "DOC",
+                    file_url: link,
+                    created_at: new Date()
+                  }));
+                  await rfqModel.insertArray( file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files'
+                  );
+                }
+              });
             }
-            }); 
-          }
 
             await sendQuoteNotificationEmail(req, rfq_id);
             await sendQuoteNotificationToVendor(req);
@@ -2176,7 +2174,7 @@ console.log("mukul 1870")
   closeRFQ: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { id } = req.user;
-    
+
     try {
       const rfQItem = await rfqModel.changeRFQStatus(rfq_id, id);
       console.log(rfQItem.length);
@@ -4104,7 +4102,7 @@ console.log("mukul 1870")
         contact_name: contact_name,
         contact_number: contact_number,
         location: location,
-        rfq_type:rfq_type, 
+        rfq_type: rfq_type,
         reverse_auction: reverse_auction,
         bid_end_date: bid_end_date,
         company_name: company_name,
@@ -4124,13 +4122,13 @@ console.log("mukul 1870")
         contact_number: finalObject.contact_number,
         bid_end_date: finalObject.bid_end_date,
         location: finalObject.location,
-        rfq_type:finalObject.rfq_type, 
+        rfq_type: finalObject.rfq_type,
         reverse_auction: finalObject.reverse_auction,
         is_published: finalObject.is_published,
         rfq_no: nextRFQNumber,
         created_by: user.id,
         updated_by: user.id,
-        project_id:project_id
+        project_id: project_id
       };
 
       // check if all row are failed in our validation
@@ -4232,7 +4230,8 @@ console.log("mukul 1870")
       // status,
       products,
       globalPaymentTerms,
-      globalComment
+      globalComment,
+      term_and_condition_files
     } = req.body;
 
     // Check if all required fields are present in each product
@@ -4278,6 +4277,18 @@ console.log("mukul 1870")
         paymentTermAndCommentChanges = true;
       }
 
+      // Check if global terms & conditions file are uploaded
+      if (term_and_condition_files && term_and_condition_files.length > 0) {
+        const global_files = term_and_condition_files.map(url => ({
+          quote_id: quoteId,
+          file_type: 'term_and_condition',
+          file_url: url
+        }));
+        for (const fileData of global_files) {
+          await rfqModel.insert('tbl_quotes_files', fileData);
+        }
+      }
+
       // Process each product in the request
       const quoteItemChanges = await Promise.all(
         products.map((product) => {
@@ -4285,18 +4296,40 @@ console.log("mukul 1870")
         })
       );
 
-      const anyQuoteChanged = quoteItemChanges.some((result) => result.changed);
+      // Insert new document_files for each product if exists
+      const fileUpdates = await Promise.all(
+        products.map(async (prodItem) => {
+          const  quote_item = await rfqModel.getQuoteItem(quoteId, prodItem);
+          const file_links = prodItem.document_files;
+
+          if (file_links && file_links.length > 0) {
+            const file_records = file_links.map(link => ({
+              quote_item_id: quote_item.id,
+              file_type: "DOC",
+              file_url: link,
+              created_at: new Date()
+            }));
+
+            if (file_records.length > 0) {
+              return rfqModel.insertArray(file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files');
+            }
+          }
+        })
+      );
+
+      const anyQuoteChanged = fileUpdates || quoteItemChanges.some((result) => result.changed);
 
       let status = true;
       if (!anyQuoteChanged && !paymentTermAndCommentChanges) {
         status = false;
       }
       return res.status(200).json({
-        status:status,
-        message: status? 'Quote items updated successfully':"No updates made as the quotes and global terms remain unchanged",
+        status: status,
+        message: status ? 'Quote items updated successfully' : "No updates made as the quotes and global terms remain unchanged",
         data: {
           quoteItems: quoteItemChanges,
-          globalTermComment: paymentTermAndCommentChanges?"global comment and payment term is updated": "global comment and payment term is remain unchanged"
+          globalFilesAdded: fileUpdates,
+          globalTermComment: paymentTermAndCommentChanges ? "global comment and payment term is updated" : "global comment and payment term is remain unchanged"
         }
       });
     } catch (error) {
@@ -4310,12 +4343,12 @@ console.log("mukul 1870")
 
     if (!req.is_verified) {
       res
-      .status(400)
-      .json({
-        success: false,
-        message: 'you are not login',
-      })
-      .end();
+        .status(400)
+        .json({
+          success: false,
+          message: 'you are not login',
+        })
+        .end();
     }
 
     if (!req.user.subscription_plan_id) {
@@ -4331,7 +4364,7 @@ console.log("mukul 1870")
 
     try {
 
-      const {search_key} = req.body
+      const { search_key } = req.body
       const user_id = req.user.id;
 
       // find product price stats like, min, avg, max
@@ -4339,16 +4372,16 @@ console.log("mukul 1870")
       const priceHistoryPersonal = await rfqModel.productPriceStatsLastQuoteAndFinilizeForUser(search_key, user_id);
 
       res
-      .status(200)
-      .json({
-        status: 2,
-        data : {
-          market: priceHistoryMarket,
-          personal:priceHistoryPersonal
-        }
-      })
-      .end();
-      
+        .status(200)
+        .json({
+          status: 2,
+          data: {
+            market: priceHistoryMarket,
+            personal: priceHistoryPersonal
+          }
+        })
+        .end();
+
     } catch (error) {
       logError(error);
       res
