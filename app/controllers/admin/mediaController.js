@@ -130,13 +130,13 @@ const mediaController = {
         fileName,
         originalFilename
       };
-      let vendorId = await vendorModel.addVendor(vendorObj);
+      let vendorId = await vendorModel.addVendor(vendorObj)[0]?.id;
 
       if (vendorId) {
         let html_variables = [{ name: name }];
 
         const spocList = await vendorModel.getSpocDetails(vendorId)
-        console.log('media controller 138 spoc vendorId ', vendorId, spocList)
+        // console.log('media controller 138 spoc vendorId ', vendorId, spocList)
 
       let mailRecipients = {
         from: Config.webmasterMail,
@@ -144,7 +144,7 @@ const mediaController = {
         html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
       };
 
-      if (spocList.length > 0) {
+      if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
         mailRecipients.cc = email;
       } else {

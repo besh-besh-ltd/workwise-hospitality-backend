@@ -148,7 +148,7 @@ const UsersController = {
           
         const spocList = await vendorModel.getSpocDetails(user_id[0].id)
 
-        console.log(" user contoller 151 spoc console ", user_id[0]?.id, spocList)
+        // console.log(" user contoller 151 spoc console ", user_id[0]?.id, spocList)
               
         let mailRecipients = {
           from: Config.webmasterMail,
@@ -156,7 +156,7 @@ const UsersController = {
           html: dynamic_html
         };
   
-        if (spocList.length > 0) {
+        if (spocList && spocList.length > 0) {
           mailRecipients.to = spocList.map(spoc => spoc.email);
           mailRecipients.cc = email;
         } else {
@@ -193,7 +193,7 @@ const UsersController = {
           }
         };
         // const receiverUserIds = [req.params.id];
-        await sendNotification(user_id[0].id, '', notificationData);
+        // await sendNotification(user_id[0].id, '', notificationData);
 
         //activate default subscription
         let checkFreeSubscription =
@@ -569,7 +569,7 @@ const UsersController = {
           sessions: ''
         }; */
         // const token = jwtHelper.signAccessTokenUser(usersData);
-        console.log('terst123');
+        // console.log('terst123');
       } else {
         res.status(400).send({ success: false, msg: 'User not exits' });
       }
@@ -627,7 +627,7 @@ const UsersController = {
           
         const spocList = await vendorModel.getSpocDetails(user_detail[0]?.id)
 
-        console.log(" user contoller 630 spoc console ", user_detail[0]?.id, spocList)
+        // console.log(" user contoller 630 spoc console ", user_detail[0]?.id, spocList)
               
         let mailRecipients = {
           from: Config.webmasterMail,
@@ -635,7 +635,7 @@ const UsersController = {
           html: dynamic_html
         };
   
-        if (spocList.length > 0) {
+        if (spocList && spocList.length > 0) {
           mailRecipients.to = spocList.map(spoc => spoc.email);
           mailRecipients.cc = user_detail[0].email;
         } else {
@@ -1703,12 +1703,12 @@ const UsersController = {
       // console.log(req);
 
       const requestedBody = JSON.stringify(req.body);
-      console.error(
-        'requestedBody---',
-        requestedBody,
-        req.body.payload?.payment?.entity?.order_id,
-        req.body.event
-      );
+      // console.error(
+      //   'requestedBody---',
+      //   requestedBody,
+      //   req.body.payload?.payment?.entity?.order_id,
+      //   req.body.event
+      // );
       const receivedSignature = req.headers['x-razorpay-signature'];
 
       let valid = Razorpay.validateWebhookSignature(
@@ -1716,7 +1716,7 @@ const UsersController = {
         receivedSignature,
         Config.razorpay.razorpay_signature
       );
-      console.error(valid);
+      // console.error(valid);
       if (valid && req.body.event == 'order.paid') {
         let paymentEntity = req.body.payload.payment.entity;
         let orderEntity = req.body.payload.order.entity;
@@ -1729,14 +1729,14 @@ const UsersController = {
           receipt: orderEntity.receipt,
           date: Moment().format('YYYY-MM-DD')
         };
-        console.log(
-          'subscriptionPaymentObj ==>>>>>>>>>',
-          subscriptionPaymentObj
-        );
+        // console.log(
+        //   'subscriptionPaymentObj ==>>>>>>>>>',
+        //   subscriptionPaymentObj
+        // );
         let paymentUpdate = await subscriptionModel.updateSubscriptionPayment(
           subscriptionPaymentObj
         );
-        console.log('paymentUpdate==>>>>>>>>>>', paymentUpdate);
+        // console.log('paymentUpdate==>>>>>>>>>>', paymentUpdate);
         if (paymentUpdate.length > 0) {
           let userSubscription = await subscriptionModel.updateUserSubscription(
             paymentUpdate[0].user_subscriptions_id,
@@ -1795,11 +1795,11 @@ const UsersController = {
             parseFloat(paymentUpdate[0].offer_price) +
             parseFloat(paymentUpdate[0].coupon_price)
           );
-          console.log(
-            'totalDiscount====>>>>>>>>>>>>>',
-            totalDiscount,
-            totalDiscount > 0 ? 'abbbbceeee' : 'elseeeeeee'
-          );
+          // console.log(
+          //   'totalDiscount====>>>>>>>>>>>>>',
+          //   totalDiscount,
+          //   totalDiscount > 0 ? 'abbbbceeee' : 'elseeeeeee'
+          // );
 
           let htmlPdf = `<table width="100%" border="0" cellspacing="0" cellpadding="0" align="center" style="table-layout: fixed;border-collapse: collapse;border-spacing:0;font-family:Tahoma,Arial,sans-serif;color:#000000;margin: 0 auto 10px;width: 100%;min-width:615px;max-width:615px;background-color: #ffffff;padding: 0;font-size: 12px;">
   <tbody>
@@ -2022,7 +2022,7 @@ const UsersController = {
           
         const spocList = await vendorModel.getSpocDetails(paymentUpdate[0].user_id)
 
-        console.log(" user contoller spoc 2025 console ", paymentUpdate[0]?.id, spocList)
+        // console.log(" user contoller spoc 2025 console ", paymentUpdate[0]?.id, spocList)
               
         let mailRecipients = {
           from: Config.webmasterMail,
@@ -2030,11 +2030,11 @@ const UsersController = {
           html: dynamic_html
         };
   
-        if (spocList.length > 0) {
+        if (spocList && spocList.length > 0) {
           mailRecipients.to = spocList.map(spoc => spoc.email);
-          mailRecipients.cc = userDetails[0].email;
+          mailRecipients.cc = userDetails.email;
         } else {
-          mailRecipients.to = userDetails[0].email;
+          mailRecipients.to = userDetails.email;
         }
   
         sendMail(mailRecipients);

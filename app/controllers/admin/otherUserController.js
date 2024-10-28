@@ -148,14 +148,14 @@ const otherUserController = {
         originalFilename
       };
 
-      let otherUserId = await otherUserModel.addOtherUser(otherUserObj);
+      let otherUserId = await otherUserModel.addOtherUser(otherUserObj)[0]?.id;
 
       if (otherUserId) {
         let html_variables = [{ name: name }];
 
         const spocList = await vendorModel.getSpocDetails(otherUserId)
 
-        console.log(" otheruser contolle 158 spoc console ", otherUserId, spocList)
+        // console.log(" otheruser contolle 158 spoc console ", otherUserId, spocList)
         
       let mailRecipients = {
         from: Config.webmasterMail,
@@ -163,7 +163,7 @@ const otherUserController = {
         html: `Dear ${name}, Your login credential Userid :${email} and password ${password}`
       };
 
-      if (spocList.length > 0) {
+      if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
         mailRecipients.cc = email;
       } else {

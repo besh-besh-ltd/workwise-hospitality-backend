@@ -3,7 +3,7 @@ import Config from './app/config/app.config.js';
 import { logError, sendMail, notificationMail } from './app/helper/common.js';
 import { sendNotification } from './app/services/notificationService.js';
 import notificationModel from './app/models/notificationModel.js';
-
+import vendorModel from './app/models/vendorModel.js';
 import Moment from 'moment';
 import dateFormat from 'dateformat';
 import fs from 'fs';
@@ -49,6 +49,7 @@ async function expireDayNotification(date, days) {
       );
 
     if (
+      expSubscriptions.user_type !=3 && // Exclude vendors
       findDynamicNotification.length > 0 &&
       findDynamicNotification[0].notification_type == 1
     ) {
@@ -60,9 +61,12 @@ async function expireDayNotification(date, days) {
       });
     }
 
-    sendMail({
+    const spocList = await vendorModel.getSpocDetails(expSubscriptions.user_id);
+
+    (expSubscriptions.user_type !=3) && sendMail({
       from: Config.webmasterMail, // sender address
-      to: expSubscriptions.email, // list of receivers
+      to: spocList?.length ? spocList.map(spoc => spoc.email) :  expSubscriptions.email, // list of receivers
+      cc: spocList?.length ? expSubscriptions.email : '',
       subject: `Work Wise | Subscription Expire`, // Subject line
       // html: dynamicHTML // plain text body
       html: dynamic_html
@@ -133,9 +137,12 @@ try {
       dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
     }
 
-    sendMail({
+    const spocList = await vendorModel.getSpocDetails(expSubscriptions.user_id);
+
+    (expSubscriptions.user_type !=3) && sendMail({
       from: Config.webmasterMail, // sender address
-      to: expSubscriptions.email, // list of receivers
+      to: spocList?.length ? spocList.map(spoc => spoc.email) : expSubscriptions.email, // list of receivers
+      cc: spocList?.length ? expSubscriptions.email : '',
       subject: `Work Wise | Subscription Expire`, // Subject line
       // html: dynamicHTML // plain text body
       html: dynamic_html
@@ -147,6 +154,7 @@ try {
       );
 
     if (
+      expSubscriptions.user_type !=3 && 
       findDynamicNotification.length > 0 &&
       findDynamicNotification[0].notification_type == 1
     ) {

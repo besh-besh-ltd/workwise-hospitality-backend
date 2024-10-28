@@ -316,7 +316,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
     
     const spocList = await vendorModel.getSpocDetails(vendor.user_id)
 
-    console.log(" rfq contoller spoc console ", vendor.user_id, spocList)
+    // console.log(" rfq contoller spoc console ", vendor.user_id, spocList)
 
 
     if (user_details.length > 0) {
@@ -402,14 +402,14 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
         html: dynamicHTML
       };
 
-      if (spocList.length > 0) {
+      if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
         mailRecipients.cc = user_details[0].email;
       } else {
         mailRecipients.to = user_details[0].email;
       }
 
-      console.log(" rfq contoller 377 spoc console ", user_details[0]?.id, spocList)
+      // console.log(" rfq contoller 377 spoc console ", user_details[0]?.id, spocList)
 
       sendMail(mailRecipients);
 
@@ -520,7 +520,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
 
     const spocList = await vendorModel.getSpocDetails(id)
 
-    console.log(" rfq contoller 488 spoc console ", id, spocList)
+    // console.log(" rfq contoller 488 spoc console ", id, spocList)
 
     let mailRecipients = {
       from: Config.webmasterMail,
@@ -528,7 +528,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
       html: dynamicHTML
     };
 
-    if (spocList.length > 0) {
+    if (spocList && spocList.length > 0) {
       mailRecipients.to = spocList.map(spoc => spoc.email);
       mailRecipients.cc = email;
     } else {
@@ -601,7 +601,7 @@ const sendQuoteNotificationToVendor = async (req) => {
   
   const spocList = await vendorModel.getSpocDetails(id)
 
-  console.log(" rfq contoller 569 spoc console  ", id, spocList)
+  // console.log(" rfq contoller 569 spoc console  ", id, spocList)
               
   let mailRecipients = {
     from: Config.webmasterMail,
@@ -612,7 +612,7 @@ const sendQuoteNotificationToVendor = async (req) => {
     html: dynamicHTML
   };
 
-  if (spocList.length > 0) {
+  if (spocList && spocList.length > 0) {
     mailRecipients.to = spocList.map(spoc => spoc.email);
     mailRecipients.cc = email;
   } else {
@@ -664,7 +664,7 @@ const sendReminderRFQMAIL = async (vendoritem, org_name) => {
                     
         const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
 
-        console.log(" rfq contoller  632 spoc console ", user_details[0]?.id, spocList)
+        // console.log(" rfq contoller  632 spoc console ", user_details[0]?.id, spocList)
 
               
         let mailRecipients = {
@@ -673,7 +673,7 @@ const sendReminderRFQMAIL = async (vendoritem, org_name) => {
           html: dynamicHTML
         };
   
-        if (spocList.length > 0) {
+        if (spocList && spocList.length > 0) {
           mailRecipients.to = spocList.map(spoc => spoc.email);
           mailRecipients.cc = user_details[0].email;
         } else {
@@ -724,6 +724,7 @@ const sendQuoteNotificationEmail = async (req) => {
   return new Promise(async (resolve, reject) => {
     let u = await rfqModel.getRFQCreatedBy(rfq_id);
     if (u.length > 0) {
+      //This is the buyer
       let vendor = u[0];
       dynamicHTML = `
       <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
@@ -737,12 +738,12 @@ const sendQuoteNotificationEmail = async (req) => {
         </tr>
         <tr>
         <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:15px 30px; background:#fff; line-height:1.5;'>
-          <strong>Dear ${organization_name},</strong><br>
+          <strong>Dear ${vendor.name},</strong><br>
           
           </td>
         </tr>
         <tr>
-          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${vendor.name
+          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${organization_name
         }</u> on <a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</u> </a>for bellow products:
           ${getProducts()}
           
@@ -777,14 +778,14 @@ const sendQuoteNotificationEmail = async (req) => {
           </tr>
           <tr>
           <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:15px 30px; background:#fff; line-height:1.5;'>
-            <strong>Dear ${organization_name},</strong><br>
+            <strong>Dear ${vendor.name},</strong><br>
             
             </td>
           </tr>
           <tr>
             <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>
-            <u>${vendor.name
-          }</u> is declined the RFQ request (<a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
+            <u>${organization_name
+          }</u> has declined the RFQ request (<a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
              ${getProducts()}            
             
             </td>
@@ -813,7 +814,7 @@ const sendQuoteNotificationEmail = async (req) => {
       
       const spocList = await vendorModel.getSpocDetails(vendor?.id)
 
-      console.log(" rfq contoller 781 spoc console ", vendor?.id, spocList)
+      // console.log(" rfq contoller 781 spoc console ", vendor?.id, spocList)
               
       let mailRecipients = {
         from: Config.webmasterMail,
@@ -821,7 +822,7 @@ const sendQuoteNotificationEmail = async (req) => {
         html: dynamicHTML
       };
 
-      if (spocList.length > 0) {
+      if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
         mailRecipients.cc =  vendor.email
       } else {
@@ -933,7 +934,7 @@ const sendWinningNotificaion = async (
 
         const spocList = await vendorModel.getSpocDetails(vendor_id)
 
-        console.log(" rfq contoller 901 spoc console ", vendor_id, spocList)
+        // console.log(" rfq contoller 901 spoc console ", vendor_id, spocList)
                 
         let mailRecipients = {
           from: Config.webmasterMail,
@@ -941,21 +942,21 @@ const sendWinningNotificaion = async (
           html: dynamicHTML
         };
   
-        if (spocList.length > 0) {
+        if (spocList && spocList.length > 0) {
           mailRecipients.to = spocList.map(spoc => spoc.email);
-          mailRecipients.cc =  vendor.email
+          mailRecipients.cc =  winning_vendor_email;
         } else {
-          mailRecipients.to =  vendor.email;
+          mailRecipients.to =  winning_vendor_email;
         }
   
         sendMail(mailRecipients);
 
-    sendMail({
-      from: Config.webmasterMail, // sender address
-      to: winning_vendor_email, // list of receivers
-      subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
-      html: dynamicHTML // plain text body
-    });
+    // sendMail({
+    //   from: Config.webmasterMail, // sender address
+    //   to: winning_vendor_email, // list of receivers
+    //   subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
+    //   html: dynamicHTML // plain text body
+    // });
     resolve(true);
   });
 };
@@ -1864,7 +1865,7 @@ const rfqController = {
           };
 
           // check quote is already exists or not
-console.log("mukul 1870")
+// console.log("mukul 1870")
           let alreadyExists = await rfqModel.checkIfExists(
             'tbl_quotes',
             `rfq_id=${rfq_id} AND created_by=${user.id} LIMIT 1`
@@ -1902,7 +1903,7 @@ console.log("mukul 1870")
 
             return;
           }
-          console.log("mukul 1908")
+          // console.log("mukul 1908")
 
           let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
           if (quote_rsp.length > 0) {
@@ -1953,7 +1954,7 @@ console.log("mukul 1870")
                 });
               }
             );
-            console.log("mukul 1959")
+            // console.log("mukul 1959")
 
             const quote_items_keys = [
               'rfq_id',
@@ -2480,7 +2481,7 @@ console.log("mukul 1870")
 
         // Call the searchVendor method
         const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
-        console.log(vendorResult);
+        // console.log(vendorResult);
 
         // Check if vendorResult is not empty and has the expected structure
         if (vendorResult && vendorResult.total && vendorResult.vendor) {

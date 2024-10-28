@@ -2,7 +2,7 @@ import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
 import fs from 'fs';
 
-// import vendorModel from '../../models/vendorModel.js';
+import vendorModel from '../../models/vendorModel.js';
 import vendorapproveModel from '../../models/vendorapproveModel.js';
 
 import Config from '../../config/app.config.js';
@@ -10,7 +10,7 @@ import { logError, sendMail, generatePassword } from '../../helper/common.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
-
+// NOT USED
 const vendorController = {
   vendorApproveList: async (req, res, next) => {
     try {
@@ -146,7 +146,7 @@ const vendorController = {
 
           const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
 
-          console.log(" vendor contoller 149 spoc console ", user_details[0]?.id, spocList)
+          // console.log(" vendor contoller 149 spoc console ", user_details[0]?.id, spocList)
               
           let mailRecipients = {
             from: Config.webmasterMail,
@@ -154,7 +154,7 @@ const vendorController = {
             html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
           };
     
-          if (spocList.length > 0) {
+          if (spocList && spocList.length > 0) {
             mailRecipients.to = spocList.map(spoc => spoc.email);
             mailRecipients.cc = email;
           } else {
