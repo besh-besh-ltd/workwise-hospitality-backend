@@ -1229,7 +1229,6 @@ const productController = {
           }
 
 
-
           if (value['Vendor Approved By']) {
             let vendorApproveArray = [value['Vendor Approved By']];
             // let vendorApproveArray = value['Vendor Approved By'].split(',');
