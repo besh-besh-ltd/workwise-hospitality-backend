@@ -9,8 +9,8 @@ import Moment from 'moment';
 try {
   const startDate = Moment();
   const notifyDate = startDate.clone().add(30, 'day');
-  console.log('sevenEndDate ==>>>>>>', notifyDate);
-  console.log('notifyDate ==>>>>>>', notifyDate.format('YYYY-MM-DD'));
+  // console.log('sevenEndDate ==>>>>>>', notifyDate);
+  // console.log('notifyDate ==>>>>>>', notifyDate.format('YYYY-MM-DD'));
 
   let query = `SELECT tll.user_id, MAX(tll.date) AS last_login,MAX(users.email) AS email
    FROM tbl_login_log tll
@@ -51,7 +51,7 @@ try {
       html: dynamic_html
     }); */
 
-    console.log(' users.email ==>>>>>', users.email);
+    // console.log(' users.email ==>>>>>', users.email);
 
     if (
       findDynamicNotification.length > 0 &&

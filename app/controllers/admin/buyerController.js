@@ -545,13 +545,16 @@ const buyerController = {
       if (vendor[0].id) {
         let html_variables = [{ name: userDetails[0].vendor_name }];
 
+        const spocList = await vendorModel.getSpocDetails(vendor[0].id);
+        // console.log("user_id: ", vendor[0].id);
         sendMail({
           from: Config.webmasterMail, // sender address
-          to: userDetails[0].email, // list of receivers
+          to: spocList?.length ? spocList.map(spoc => spoc.email) : userDetails[0].email, // list of receivers
+          cc: spocList?.length ? userDetails[0].email : '',
           subject: `${buyerName} Added You on Workwise`, // Subject line
-          html: `To  ${userDetails[0].vendor_name},<br><br>
+          html: `Hello  ${userDetails[0].vendor_name},<br><br>
 
-          We are pleased to inform you that <Buyer Firm Name> has added you as a preferred vendor on the Workwise platform. Going forward, ${buyerName} will manage their procurement activities through Workwise. <br><br>
+          We are pleased to inform you that ${buyerName} has added you as a preferred vendor on the Workwise platform. Going forward, ${buyerName} will manage their procurement activities through Workwise. <br><br>
           To ensure you receive all enquiries promptly, please complete your registration with us. Your login credentials are provided below:<br><br>
                  <strong>Email:</strong> ${userDetails[0].email}<br>
                  <strong>Password:</strong> ${password}<br>

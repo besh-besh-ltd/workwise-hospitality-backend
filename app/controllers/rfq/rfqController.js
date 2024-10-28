@@ -13,6 +13,7 @@ import userModel from '../../models/userModel.js';
 import { sendNotification } from '../../services/notificationService.js';
 import excelJS from 'exceljs';
 import xlsx from 'xlsx';
+import vendorModel from '../../models/vendorModel.js';
 
 
 const getNextRfQNumber = async () => {
@@ -310,8 +311,13 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
   try {
     let organization_name = user.organization_name || user.name;
 
-    // Fetch user details of the vendor
+   // Fetch user details of the vendor
     const user_details = await userModel.user_profile_detail(vendor.user_id);
+    
+    const spocList = await vendorModel.getSpocDetails(vendor.user_id)
+
+    // console.log(" rfq contoller spoc console ", vendor.user_id, spocList)
+
 
     if (user_details.length > 0) {
       // Insert token into the table and get the token value
@@ -382,12 +388,30 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
       </div>`;
 
       // Send the email
-      sendMail({
+      //  sendMail({
+      //   from: Config.webmasterMail,
+      //   to: user_details[0].email,
+      //   subject: `Work Wise | New RFQ Alert`,
+      //   html: dynamicHTML,
+      // });
+
+
+      let mailRecipients = {
         from: Config.webmasterMail,
-        to: user_details[0].email,
         subject: `Work Wise | New RFQ Alert`,
-        html: dynamicHTML,
-      });
+        html: dynamicHTML
+      };
+
+      if (spocList && spocList.length > 0) {
+        mailRecipients.to = spocList.map(spoc => spoc.email);
+        mailRecipients.cc = user_details[0].email;
+      } else {
+        mailRecipients.to = user_details[0].email;
+      }
+
+      // console.log(" rfq contoller 377 spoc console ", user_details[0]?.id, spocList)
+
+      sendMail(mailRecipients);
 
       // Send notification if applicable
       if (user_details[0].endpoint) {
@@ -458,7 +482,7 @@ const sendMailtoVendors = async (req, rfqNumber) => {
 
 const sendQuotationMailToBuyer = async (req, rfqNumber) => {
   // send mail to vendors
-  const { name, email } = req.user;
+  const { name, email, id } = req.user;
   let dynamicHTML = `
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
@@ -494,16 +518,35 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
     </tr>
     </table>`;
 
-  sendMail({
-    from: Config.webmasterMail, // sender address
-    to: email, // list of receivers
-    subject: `Work Wise | RFQ Creation Confirmation`, // Subject line
-    html: dynamicHTML // plain text body
-  });
+    const spocList = await vendorModel.getSpocDetails(id)
+
+    // console.log(" rfq contoller 488 spoc console ", id, spocList)
+
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      subject: `Work Wise | RFQ Creation Confirmation`,
+      html: dynamicHTML
+    };
+
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map(spoc => spoc.email);
+      mailRecipients.cc = email;
+    } else {
+      mailRecipients.to = email;
+    }
+
+    sendMail(mailRecipients);
+
+  // sendMail({
+  //   from: Config.webmasterMail, // sender address
+  //   to: email, // list of receivers
+  //   subject: `Work Wise | RFQ Creation Confirmation`, // Subject line
+  //   html: dynamicHTML // plain text body
+  // });
 };
 const sendQuoteNotificationToVendor = async (req) => {
   // send mail to vendors
-  const { name, email } = req.user;
+  const { name, email, id } = req.user;
   let dynamicHTML = `
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
@@ -545,15 +588,39 @@ const sendQuoteNotificationToVendor = async (req) => {
     </tr>
     </table>`;
 
-  sendMail({
-    from: Config.webmasterMail, // sender address
-    to: email, // list of receivers
-    subject:
-      req.body.is_regret && req.body.is_regret == 1
-        ? `Work Wise | Quotation Regreted`
-        : `Work Wise | Quotation Submitted`, // Subject line
-    html: dynamicHTML // plain text body
-  });
+  // sendMail({
+  //   from: Config.webmasterMail, // sender address
+  //   to: email, // list of receivers
+  //   subject:
+  //     req.body.is_regret && req.body.is_regret == 1
+  //       ? `Work Wise | Quotation Regreted`
+  //       : `Work Wise | Quotation Submitted`, // Subject line
+  //   html: dynamicHTML // plain text body
+  // });
+
+  
+  const spocList = await vendorModel.getSpocDetails(id)
+
+  // console.log(" rfq contoller 569 spoc console  ", id, spocList)
+              
+  let mailRecipients = {
+    from: Config.webmasterMail,
+     subject:
+       req.body.is_regret && req.body.is_regret == 1
+         ? `Work Wise | Quotation Regreted`
+         : `Work Wise | Quotation Submitted`, // Subject line
+    html: dynamicHTML
+  };
+
+  if (spocList && spocList.length > 0) {
+    mailRecipients.to = spocList.map(spoc => spoc.email);
+    mailRecipients.cc = email;
+  } else {
+    mailRecipients.to = email;
+  }
+
+  sendMail(mailRecipients);
+
 };
 
 const sendReminderRFQMAIL = async (vendoritem, org_name) => {
@@ -593,12 +660,34 @@ const sendReminderRFQMAIL = async (vendoritem, org_name) => {
                     </tr>
                     </table>`;
 
-    sendMail({
-      from: Config.webmasterMail, // sender address
-      to: user_details[0].email, // list of receivers
-      subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
-      html: dynamicHTML // plain text body
-    });
+
+                    
+        const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
+
+        // console.log(" rfq contoller  632 spoc console ", user_details[0]?.id, spocList)
+
+              
+        let mailRecipients = {
+          from: Config.webmasterMail,
+          subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
+          html: dynamicHTML
+        };
+  
+        if (spocList && spocList.length > 0) {
+          mailRecipients.to = spocList.map(spoc => spoc.email);
+          mailRecipients.cc = user_details[0].email;
+        } else {
+          mailRecipients.to = user_details[0].email;
+        }
+  
+        sendMail(mailRecipients);
+
+    // sendMail({
+    //   from: Config.webmasterMail, // sender address
+    //   to: user_details[0].email, // list of receivers
+    //   subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
+    //   html: dynamicHTML // plain text body
+    // });
     const notificationData = {
       type: 'RFQ Pending',
       title: `RFQ Pending`,
@@ -635,6 +724,7 @@ const sendQuoteNotificationEmail = async (req) => {
   return new Promise(async (resolve, reject) => {
     let u = await rfqModel.getRFQCreatedBy(rfq_id);
     if (u.length > 0) {
+      //This is the buyer
       let vendor = u[0];
       dynamicHTML = `
       <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
@@ -648,12 +738,12 @@ const sendQuoteNotificationEmail = async (req) => {
         </tr>
         <tr>
         <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:15px 30px; background:#fff; line-height:1.5;'>
-          <strong>Dear ${organization_name},</strong><br>
+          <strong>Dear ${vendor.name},</strong><br>
           
           </td>
         </tr>
         <tr>
-          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${vendor.name
+          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${organization_name
         }</u> on <a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</u> </a>for bellow products:
           ${getProducts()}
           
@@ -688,14 +778,14 @@ const sendQuoteNotificationEmail = async (req) => {
           </tr>
           <tr>
           <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:15px 30px; background:#fff; line-height:1.5;'>
-            <strong>Dear ${organization_name},</strong><br>
+            <strong>Dear ${vendor.name},</strong><br>
             
             </td>
           </tr>
           <tr>
             <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>
-            <u>${vendor.name
-          }</u> is declined the RFQ request (<a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
+            <u>${organization_name
+          }</u> has declined the RFQ request (<a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
              ${getProducts()}            
             
             </td>
@@ -721,21 +811,42 @@ const sendQuoteNotificationEmail = async (req) => {
           </table>`;
       }
 
-      sendMail({
-        from: Config.webmasterMail, // sender address
-        to: vendor.email, // list of receivers
-        subject:
-          req.body.is_regret && req.body.is_regret == 1
-            ? `Work Wise | RFQ#${rfq_no} | RFQ Request Declined`
-            : `Work Wise | RFQ#${rfq_no} | New Quotation Received`, // Subject line
-        html: dynamicHTML // plain text body
-      });
+      
+      const spocList = await vendorModel.getSpocDetails(vendor?.id)
+
+      // console.log(" rfq contoller 781 spoc console ", vendor?.id, spocList)
+              
+      let mailRecipients = {
+        from: Config.webmasterMail,
+        subject: `Work Wise | New RFQ Alert`,
+        html: dynamicHTML
+      };
+
+      if (spocList && spocList.length > 0) {
+        mailRecipients.to = spocList.map(spoc => spoc.email);
+        mailRecipients.cc =  vendor.email
+      } else {
+        mailRecipients.to =  vendor.email;
+      }
+
+      sendMail(mailRecipients);
+
+      // sendMail({
+      //   from: Config.webmasterMail, // sender address
+      //   to: vendor.email, // list of receivers
+      //   subject:
+      //     req.body.is_regret && req.body.is_regret == 1
+      //       ? `Work Wise | RFQ#${rfq_no} | RFQ Request Declined`
+      //       : `Work Wise | RFQ#${rfq_no} | New Quotation Received`, // Subject line
+      //   html: dynamicHTML // plain text body
+      // });
       resolve(u);
     }
   });
 };
 
 const sendWinningNotificaion = async (
+  vendor_id,
   rfQItem,
   winning_product,
   winning_vendor_organization,
@@ -821,12 +932,31 @@ const sendWinningNotificaion = async (
         </tr>
         </table>`;
 
-    sendMail({
-      from: Config.webmasterMail, // sender address
-      to: winning_vendor_email, // list of receivers
-      subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
-      html: dynamicHTML // plain text body
-    });
+        const spocList = await vendorModel.getSpocDetails(vendor_id)
+
+        // console.log(" rfq contoller 901 spoc console ", vendor_id, spocList)
+                
+        let mailRecipients = {
+          from: Config.webmasterMail,
+          subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
+          html: dynamicHTML
+        };
+  
+        if (spocList && spocList.length > 0) {
+          mailRecipients.to = spocList.map(spoc => spoc.email);
+          mailRecipients.cc =  winning_vendor_email;
+        } else {
+          mailRecipients.to =  winning_vendor_email;
+        }
+  
+        sendMail(mailRecipients);
+
+    // sendMail({
+    //   from: Config.webmasterMail, // sender address
+    //   to: winning_vendor_email, // list of receivers
+    //   subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
+    //   html: dynamicHTML // plain text body
+    // });
     resolve(true);
   });
 };
@@ -1735,7 +1865,7 @@ const rfqController = {
           };
 
           // check quote is already exists or not
-
+// console.log("mukul 1870")
           let alreadyExists = await rfqModel.checkIfExists(
             'tbl_quotes',
             `rfq_id=${rfq_id} AND created_by=${user.id} LIMIT 1`
@@ -1773,6 +1903,7 @@ const rfqController = {
 
             return;
           }
+          // console.log("mukul 1908")
 
           let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
           if (quote_rsp.length > 0) {
@@ -1823,6 +1954,7 @@ const rfqController = {
                 });
               }
             );
+            // console.log("mukul 1959")
 
             const quote_items_keys = [
               'rfq_id',
@@ -2199,6 +2331,7 @@ const rfqController = {
             tbl_quote_finalization_data
           );
           await sendWinningNotificaion(
+            vendor_id,
             rfQItem,
             winning_product,
             winning_vendor_organization,
@@ -2348,7 +2481,7 @@ const rfqController = {
 
         // Call the searchVendor method
         const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
-        console.log(vendorResult);
+        // console.log(vendorResult);
 
         // Check if vendorResult is not empty and has the expected structure
         if (vendorResult && vendorResult.total && vendorResult.vendor) {

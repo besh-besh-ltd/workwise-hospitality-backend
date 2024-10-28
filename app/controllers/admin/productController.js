@@ -827,15 +827,50 @@ const productController = {
                 await productModel.addFile(filesObj);
               }
 
+              const spocList = await vendorModel.getSpocDetails(vendor[0]?.id)
+
+              // console.log(" products contoller 815 spoc console ", vendor[0].id,  spocList)
+
+              
+      // let mailRecipients = {
+      //   from: Config.webmasterMail,
+      //   subject: `Work wise | Registration`,
+      //   html: `Dear ${value['Vendor Name']}, Your login credential Userid: ${value['Vendor Email']} and password ${password}`
+      //       };
+        let mailRecipients = {
+          from: Config.webmasterMail,
+          subject: `Work wise | Registration`,
+          html: `
+              <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #333;">
+                  <p>Dear <strong>${value['Vendor Name']}</strong>,</p>
+                  <p>Your login credentials are as follows:</p>
+                  <div style="background-color: #f9f9f9; border: 1px solid #ddd; padding: 10px; margin-top: 10px;">
+                      <p><strong>User ID:</strong> ${value['Vendor Email']}</p>
+                      <p><strong>Password:</strong> ${password}</p>
+                  </div>
+                  <p>Thank you for registering with us!</p>
+              </div>
+          `
+      };
+
+      if (spocList && spocList.length > 0) {
+        mailRecipients.to = spocList.map(spoc => spoc.email);
+        mailRecipients.cc = vendor_email;
+      } else {
+        mailRecipients.to = vendor_email;
+      }
+
+      sendMail(mailRecipients);
+
               // console.log('vendor-->', vendor);
               vendor_id = vendor[0].id;
-              sendMail({
-                from: Config.webmasterMail, // sender address
-                to: vendor_email, // list of receivers
-                subject: `Work wise | Registration`, // Subject line
-                // html: dynamic_html // plain text body
-                html: `Dear ${value['Vendor Name']}, Your login credential Userid: ${value['Vendor Email']} and password ${password}`
-              });
+              // sendMail({
+              //   from: Config.webmasterMail, // sender address
+              //   to: vendor_email, // list of receivers
+              //   subject: `Work wise | Registration`, // Subject line
+              //   // html: dynamic_html // plain text body
+              //   html: `Dear ${value['Vendor Name']}, Your login credential Userid: ${value['Vendor Email']} and password ${password}`
+              // });
 
               let checkFreeSubscription =
                 await subscriptionModel.checkFreeSubscription();
@@ -948,8 +983,8 @@ const productController = {
           );
 
           // checking whehter the product exist with the same vendor
-          console.log("............................", prodNameExists);
-          if (prodNameExists.length > 0) {
+          // console.log("............................",prodNameExists);
+          if(prodNameExists.length>0){
             const errObj = {
               vendorName: value['Vendor Name'] || null,
               vendorEmail: value['Vendor Email'] || null,
@@ -980,7 +1015,7 @@ const productController = {
           } else {
             isMaster = 1;
           }
-          console.log('check_master_exist--->', isMaster);
+          // console.log('check_master_exist--->', isMaster);
           if (isMaster == 1) {
             let productDetails = await productModel.vendorProductDetails(
               check_master_exist[0].id
@@ -1561,58 +1596,38 @@ const productController = {
           }
 
           //return false;
-          if (productCategory) {
-
-            // now just check whether the product with this category exist or not
-            // if now exist then give error on that index.
-
-            let catNameExists = await productModel.productCategoryExist(productId, productCategory);
-
-            if (catNameExists.length < 1) {
-              const errObj = {
-                Row: index + 1,
-                error: `Category ${productCategory} does not exist`
-              }
-              errors.push(errObj);
-              continue;
+          if (value['Category']) {
+            let catNameExists = await productModel.topParentparentNameExists(
+              value['Category']
+            );
+            // console.log(catNameExists);
+            let category_id = '';
+            if (catNameExists.length > 0) {
+              category_id = { id: catNameExists[0].id };
             } else {
-              const errObj = {
-                Row: index + 1,
-                error: `Category ${productCategory} Already exist`
-              }
-              errors.push(errObj);
-              continue;
+              // console.log('test--->', value['Category']);
+              //  return false;
+              let catObj = {
+                title: value['Category'],
+                parent_id: '0',
+                slug:
+                  value['Category'] == undefined
+                    ? ''
+                    : titleToSlug(value['Category']),
+                status: '1',
+                adm_id: req.user.id
+              };
+              category_id = await productModel.addCategory(catObj);
+              // console.log('category_id--', category_id);
+              // return false;
             }
-
-            // let catNameExists = await productModel.topParentparentNameExists(
-            //   productCategory
-            // );
-            // let category_id = '';
-            // if (catNameExists.length > 0) {
-            //   category_id = { id: catNameExists[0].id };
-            // } else {
-            //   //  return false;
-            //   // let catObj = {
-            //   //   title: productCategory,
-            //   //   parent_id: '0',
-            //   //   slug:
-            //   //     productCategory == undefined
-            //   //       ? ''
-            //   //       : titleToSlug(productCategory),
-            //   //   status: '1',
-            //   //   adm_id: req.user.id
-            //   // };
-            //   category_id = await productModel.addCategory(catObj);
-            //   // console.log('category_id--', category_id);
-            //   // return false;
-            // }
-            // // Delete product category
-            // let categoryObj = {
-            //   product_id: productId,
-            //   category_name: productCategory,
-            //   category_id: category_id.id
-            // };
-            // await productModel.createProductCategory(categoryObj);
+            // Delete product category
+            let categoryObj = {
+              product_id: productId,
+              category_name: value['Category'],
+              category_id: category_id.id
+            };
+            await productModel.createProductCategory(categoryObj);
           }
 
           if (value['Product Featured Image\r\n(file)']) {
@@ -2397,7 +2412,7 @@ const productController = {
             });
           });
       } catch (err) {
-        console.log('err ==>>>>>>>>>>>>>>>>>>', err);
+        console.log('err: ', err);
         res.send({
           status: 'error',
           message: 'Something went wrong'
@@ -2738,12 +2753,34 @@ const productController = {
 
         dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
       }
-      sendMail({
-        from: Config.webmasterMail, // sender address
-        to: userDetail[0].email, // list of receivers
-        subject: `Work wise | Product`, // Subject line
-        html: dynamic_html // plain text body
-      });
+
+      //  spoc email
+      const spocList = await vendorModel.getSpocDetails(userDetail[0]?.id)
+
+      // console.log(" product contoller 249 spoc console ", userDetail[0].id, spocList)
+
+      
+      let mailRecipients = {
+        from: Config.webmasterMail,
+        subject: `Work Wise | New RFQ Alert`,
+        html: dynamic_html
+      };
+
+      if (spocList && spocList.length > 0) {
+        mailRecipients.to = spocList.map(spoc => spoc.email);
+        mailRecipients.cc = userDetail[0].email;
+      } else {
+        mailRecipients.to = userDetail[0].email;
+      }
+
+      sendMail(mailRecipients);
+
+      // sendMail({
+      //   from: Config.webmasterMail, // sender address
+      //   to: userDetail[0].email, // list of receivers
+      //   subject: `Work wise | Product`, // Subject line
+      //   html: dynamic_html // plain text body
+      // });
 
       res
         .status(200)
