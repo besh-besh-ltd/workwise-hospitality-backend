@@ -223,13 +223,49 @@ const vendorController = {
       if (vendor[0].id) {
         let html_variables = [{ name: name }];
 
-        sendMail({
-          from: Config.webmasterMail, // sender address
-          to: email, // list of receivers
-          subject: `Work wise | Registration`, // Subject line
-          // html: dynamic_html // plain text body
-          html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
-        });
+        
+        const spocList = await vendorModel.getSpocDetails(vendor[0]?.id)
+
+        // console.log(" vendor contoller 229 spoc console ", vendor[0].id, spocList)
+
+              
+      //   let mailRecipients = {
+      //     from: Config.webmasterMail,
+      //     subject: `Work Wise | Registration`,
+      //    html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
+      // };
+          let mailRecipients = {
+            from: Config.webmasterMail,
+            subject: `Work Wise | Registration`,
+            html: `
+                <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #333;">
+                    <p>Dear <strong>${name}</strong>,</p>
+                    <p>Your login credentials are as follows:</p>
+                    <div style="background-color: #f9f9f9; border: 1px solid #ddd; padding: 10px; margin-top: 10px;">
+                        <p><strong>User ID:</strong> ${email}</p>
+                        <p><strong>Password:</strong> ${password}</p>
+                    </div>
+                    <p>Thank you for registering with us!</p>
+                </div>
+            `
+        };
+  
+        if (spocList && spocList.length > 0) {
+          mailRecipients.to = spocList.map(spoc => spoc.email);
+          mailRecipients.cc = email;
+        } else {
+          mailRecipients.to = email;
+        }
+
+        sendMail(mailRecipients);
+
+        // sendMail({
+        //   from: Config.webmasterMail, // sender address
+        //   to: email, // list of receivers
+        //   subject: `Work wise | Registration`, // Subject line
+        //   // html: dynamic_html // plain text body
+        //   html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
+        // });
 
         let checkFreeSubscription =
           await subscriptionModel.checkFreeSubscription();
@@ -662,12 +698,32 @@ const vendorController = {
           html: findDynamicNotification[0].content // plain text body
         });
       } else {
-        sendMail({
-          from: Config.webmasterMail, // sender address
-          to: userDetail[0].email, // list of receivers
-          subject: `Work wise | Registration`, // Subject line
-          html: dynamic_html // plain text body
-        });
+
+        
+        const spocList = await vendorModel.getSpocDetails(vendorId)
+
+        // console.log(" vendor contoller 690 spoc console ", vendorId, spocList)
+
+              
+        let mailRecipients = {
+          from: Config.webmasterMail,
+          subject: `Work Wise | Registration`,
+          html: dynamic_html
+        };
+  
+        if (spocList && spocList.length > 0) {
+          mailRecipients.to = spocList.map(spoc => spoc.email);
+          mailRecipients.cc = userDetail[0].email;
+        } else {
+          mailRecipients.to = userDetail[0].email;
+        }
+
+        // sendMail({
+        //   from: Config.webmasterMail, // sender address
+        //   to: userDetail[0].email, // list of receivers
+        //   subject: `Work wise | Registration`, // Subject line
+        //   html: dynamic_html // plain text body
+        // });
       }
 
       res

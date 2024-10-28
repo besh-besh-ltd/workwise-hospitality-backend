@@ -2,7 +2,7 @@ import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
 import fs from 'fs';
 
-// import vendorModel from '../../models/vendorModel.js';
+import vendorModel from '../../models/vendorModel.js';
 import vendorapproveModel from '../../models/vendorapproveModel.js';
 
 import Config from '../../config/app.config.js';
@@ -10,7 +10,7 @@ import { logError, sendMail, generatePassword } from '../../helper/common.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
-
+// NOT USED
 const vendorController = {
   vendorApproveList: async (req, res, next) => {
     try {
@@ -142,13 +142,34 @@ const vendorController = {
           dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
         } */
 
-        sendMail({
-          from: Config.webmasterMail, // sender address
-          to: email, // list of receivers
-          subject: `Work wise | Registration`, // Subject line
-          // html: dynamic_html // plain text body
-          html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
-        });
+          
+
+          const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
+
+          // console.log(" vendor contoller 149 spoc console ", user_details[0]?.id, spocList)
+              
+          let mailRecipients = {
+            from: Config.webmasterMail,
+            subject:`Work wise | Registration`,
+            html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
+          };
+    
+          if (spocList && spocList.length > 0) {
+            mailRecipients.to = spocList.map(spoc => spoc.email);
+            mailRecipients.cc = email;
+          } else {
+            mailRecipients.to = email;
+          }
+    
+          sendMail(mailRecipients);
+
+        // sendMail({
+        //   from: Config.webmasterMail, // sender address
+        //   to: email, // list of receivers
+        //   subject: `Work wise | Registration`, // Subject line
+        //   // html: dynamic_html // plain text body
+        //   html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
+        // });
 
         res
           .status(200)
