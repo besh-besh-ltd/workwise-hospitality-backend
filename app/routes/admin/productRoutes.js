@@ -110,8 +110,8 @@ productRoutes.post(
   schema_posts.productBulkUpload,
   // validateBody(schemas.create_product)
   // validateDbBody.attributeIdExists,
-  productController.onlyProductBulkUpload
-);
+  productController.onlyProductBulkUploadTest
+); 
 productRoutes.get(
   '/product-list',
   passportSignIn,
