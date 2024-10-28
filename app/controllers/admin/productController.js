@@ -3,6 +3,7 @@ import vendorModel from '../../models/vendorModel.js';
 import vendorapproveModel from '../../models/vendorapproveModel.js';
 import Config from '../../config/app.config.js';
 import fs from 'fs';
+
 import {
   logError,
   currentDateTime,
@@ -1693,27 +1694,215 @@ const productController = {
 
       let productWithCategoryArray = [];
       let productError = false;
-      let productName = "";
+      let prodObj = {
+        category: [],
+        name: "",
+        productId: null,
+      };
 
-      console.log(jsonData);
-      let previousProduct = null;
-      const result = jsonData.reduce((acc, item) => {
-        // Use the current Product Name if present, otherwise carry forward the previous product name
-        if (item['Product Name']) previousProduct = item['Product Name'];
 
-        // If Category exists, add it to the result with the carried product name
-        if (item.Category && previousProduct) {
-          acc.push({ product: previousProduct, category: item.Category });
+      for (const [index, value] of jsonData.entries()) {
+        const productName = (value['Product Name'] || "").trim();
+        const productCategory = (value['Category'] || "").trim();
+
+        if (productName && productCategory) {
+          // when Product Name founds in a row
+          console.log(productName);
+          if (prodObj.name != "" && !productError) {
+              // means we have to add previous prodObj which do not have error 
+              if(prodObj.productId == null ){
+                // means new product
+                const product = await productModel.createProduct(prodObj.newProduct);
+                prodObj.productId = product.id;
+              }
+
+              // now map the product with all categories
+              for await (const value of prodObj.category){
+                let categoryObj = {
+                    product_id: prodObj.productId,
+                    category_name: value.title,
+                    category_id: value.id
+                  };
+                  console.log(`Mapping the ${value.title} with ${prodObj.name}`)
+                  await productModel.createProductCategory(categoryObj);
+              }
+        
+          }
+          // Also check for product name exist or not afterwards 
+          let prodNameExists = await productModel.checkMasterNameExist(productName);
+          if (prodNameExists && prodNameExists.length == 0) {
+            const productObj = {
+              name: productName,
+              description: value['Product\r\nDescription'] || null,
+              manufacturer: value['Manufacturer'] || null,
+              availability:
+                value['Product Availability'] == 'Available' ? 1 : 0,
+              slug: titleToSlug(productName),
+              sku: productName,
+              // vendor_approved_by: vendorApproveId == 0 ? null : vendorApproveId,
+              status: 1,
+              created_by: req.user.id,
+              vendor: null,
+              is_review: 1,
+              is_approve: 0,
+              added_by: req.user.id,
+              brochure_file: value['Product Brochure\r\n(file)'] || null,
+              qap_new_file_name: value['Product QAP\r\n(file)'] || null,
+              qap_original_file_name: value['Product QAP\r\n(file)']
+                ? await getFileNameFromUrl(value['Product QAP\r\n(file)'])
+                : null,
+              tds_new_file_name: value['Product TDS\r\n(file)'] || null,
+              tds_original_file_name: value['Product TDS\r\n(file)']
+                ? await getFileNameFromUrl(value['Product TDS\r\n(file)'])
+                : null
+            };
+            prodObj.newProduct = productObj;
+          } else {
+            prodObj.productId = prodNameExists[0].id;
+            prodObj.newProduct = prodNameExists[0];
+          }
+
+          prodObj.category = [],
+          prodObj.name = productName;
+          productError = false;
+          
+          
+          // first validation for the category
+          const catNameExists = await productModel.topParentparentNameExists(productCategory);
+          if (catNameExists < 1) {
+            // category does not exist
+            productError = true;
+            const err = {
+              Row: index + 2,
+              error: `Category ${productCategory} does not exist`
+            }
+            errors.push(err);
+            console.log(`Category ${productCategory} does not exist`, index+2);
+            prodObj = {
+              category: [],
+              name: "",
+              productId: null,
+            };
+            continue;
+
+          } else {
+            // category exist and checking its mapping
+            if (prodObj.productId != null) {
+              const catProductMapExist = await productModel.productCategoryExist(prodObj.productId, productCategory);
+
+              // if found then say already exist otherwise push the category in the object
+              if (catProductMapExist.length > 0) {
+                productError = true;
+                const err = {
+                  Row: index + 2,
+                  error: `Product ${prodObj.name} with category ${productCategory} already exist`
+                }
+                errors.push(err);
+                console.log("Product with category already exist", index+2);
+                prodObj = {
+                  category: [],
+                  name: "",
+                  productId: null,
+                };
+                continue;
+              }
+            } 
+              prodObj.category.push(catNameExists[0]);
+          }
+        } else if (productCategory && prodObj.name && !productError) {
+          // when there is no Product Name 
+          // now check whether there is category exist and 
+          // there should no product error i.e. productError = false
+          const catNameExists = await productModel.topParentparentNameExists(productCategory);
+          if (catNameExists < 1) {
+            // category does not exist
+            productError = true;
+            const err = {
+              Row: index + 2,
+              error: `Category ${productCategory} does not exist`
+            }
+            errors.push(err);
+            console.log(`Category ${productCategory} does not exist`, index+2);
+            prodObj = {
+              category: [],
+              name: "",
+              productId: null,
+            };
+            continue;
+          } else {
+            // category exist and checking its mapping
+            if (prodObj.productId != null) {
+              const catProductMapExist = await productModel.productCategoryExist(prodObj.productId, productCategory);
+
+              // if found then say already exist otherwise push the category in the object
+              if (catProductMapExist.length > 0) {
+                productError = true;
+                const err = {
+                  Row: index + 2,
+                  error: `Product ${prodObj.name} with category ${productCategory} already exist`
+                }
+                errors.push(err);
+                console.log("Product with category already exist",index+2);
+                prodObj = {
+                  category: [],
+                  name: "",
+                  productId: null,
+                };
+                continue;
+              }
+            }
+              prodObj.category.push(catNameExists[0]);
+          }
+
+        } else if (productCategory && productError) {
+          console.log("We are continuing because We found error in the product",index+2);
+          continue;
+        } else {
+          // case where productCategory having black space 
+          productError = true;
+          const err = {
+            Row: index + 2,
+            error: "Category is Missing"
+          }
+          errors.push(err);
+          console.log("We found the missed category", index+2);
+          prodObj = {
+            category: [],
+            name: "",
+            productId: null,
+          };
         }
-        return acc;
-      }, []);
+      }
 
-      console.log(result);
+      // final product object to be executed here
 
-      // we converted into 
+      if(!productError){
+        //means last product name does not have any error, now to be inserted
+        if(prodObj.productId == null ){
+          // means new product
+          const product = await productModel.createProduct(prodObj.newProduct);
+          prodObj.productId = product.id;
+        }
 
+        // now map the product with all categories
+        for await (const value of prodObj.category){
+          let categoryObj = {
+              product_id: prodObj.productId,
+              category_name: value.title,
+              category_id: value.id
+            };
+            console.log(`Mapping the ${value.title} with ${prodObj.name}`)
+            await productModel.createProductCategory(categoryObj);
+        }
+      }
 
-
+      res
+        .status(200)
+        .json({
+          status:1,
+          message: errors.length>0 ? "Partially Added" : "Product Added Successfully",
+          errors:errors
+        })
 
     } catch (err) {
       logError(err);
