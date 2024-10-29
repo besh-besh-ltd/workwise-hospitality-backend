@@ -110,7 +110,7 @@ productRoutes.post(
   schema_posts.productBulkUpload,
   // validateBody(schemas.create_product)
   // validateDbBody.attributeIdExists,
-  productController.onlyProductBulkUploadTest
+  productController.onlyProductBulkUpload
 ); 
 productRoutes.get(
   '/product-list',
