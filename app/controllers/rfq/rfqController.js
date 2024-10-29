@@ -13,6 +13,7 @@ import userModel from '../../models/userModel.js';
 import { sendNotification } from '../../services/notificationService.js';
 import excelJS from 'exceljs';
 import xlsx from 'xlsx';
+import vendorModel from '../../models/vendorModel.js';
 
 
 const getNextRfQNumber = async () => {
@@ -249,39 +250,39 @@ const insertProduct = async (
       );
     }
 
-// Handle multiple datasheet files
-if (datasheet_file && datasheet_file.length > 0) {
-  const fileDataArray = datasheet_file.map(url => ({
-    rfq_product_id:productResult[0].id,
-    file_type: 'TDS',
-    file_url: url
-  }));
-  for (const fileData of fileDataArray) {
-    await rfqModel.insert('tbl_rfq_product_files', fileData);
-  }
-}
+    // Handle multiple datasheet files
+    if (datasheet_file && datasheet_file.length > 0) {
+      const fileDataArray = datasheet_file.map(url => ({
+        rfq_product_id:productResult[0].id,
+        file_type: 'TDS',
+        file_url: url
+      }));
+      for (const fileData of fileDataArray) {
+        await rfqModel.insert('tbl_rfq_product_files', fileData);
+      }
+    }
 
-if (qap_file && qap_file.length > 0) {
-  const qapFiles = qap_file.map(url => ({
-    rfq_product_id:productResult[0].id,
-    file_type: 'QAP',
-    file_url: url
-  }));
-  for (const fileData of qapFiles) {
-    await rfqModel.insert('tbl_rfq_product_files', fileData);
-  }
-}
+    if (qap_file && qap_file.length > 0) {
+      const qapFiles = qap_file.map(url => ({
+        rfq_product_id:productResult[0].id,
+        file_type: 'QAP',
+        file_url: url
+      }));
+      for (const fileData of qapFiles) {
+        await rfqModel.insert('tbl_rfq_product_files', fileData);
+      }
+    }
 
-if (spec_file && spec_file.length > 0) {
-  const specFiles = spec_file.map(url => ({
-    rfq_product_id:productResult[0].id,
-    file_type: 'SPEC',
-    file_url: url
-  }));
-  for (const fileData of specFiles) {
-    await rfqModel.insert('tbl_rfq_product_files', fileData);
-  }
-}
+    if (spec_file && spec_file.length > 0) {
+      const specFiles = spec_file.map(url => ({
+        rfq_product_id:productResult[0].id,
+        file_type: 'SPEC',
+        file_url: url
+      }));
+      for (const fileData of specFiles) {
+        await rfqModel.insert('tbl_rfq_product_files', fileData);
+      }
+    }
 
 
     return { product_info: productResult[0], spec_info, vendor_info };
@@ -310,8 +311,13 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
   try {
     let organization_name = user.organization_name || user.name;
 
-    // Fetch user details of the vendor
+   // Fetch user details of the vendor
     const user_details = await userModel.user_profile_detail(vendor.user_id);
+    
+    const spocList = await vendorModel.getSpocDetails(vendor.user_id)
+
+    // console.log(" rfq contoller spoc console ", vendor.user_id, spocList)
+
 
     if (user_details.length > 0) {
       // Insert token into the table and get the token value
@@ -319,18 +325,18 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
 
       // Construct dynamic HTML for products list
       let productHTML = products.slice(0, 3).map((product) => {
-          const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
-          return `
+        const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
+        return `
             <tr>
               <td style="font-size: 15px; padding-bottom: 3px;">${product.name}</td>
               <td style="font-size: 15px; text-align: right; padding-bottom: 3px;">${quantitySpec.value || '--'}</td>
             </tr>
           `;
-        })
+      })
         .join('');
 
-        if (products.length > 3) {
-          productHTML += `
+      if (products.length > 3) {
+        productHTML += `
             <tr>
               <td colspan="2" style="text-align: right; padding-bottom: 3px;">
                 <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}
@@ -340,7 +346,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
               </td>
             </tr>
           `;
-        }
+      }
 
 
       // Construct the email content with the list of products
@@ -382,12 +388,30 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
       </div>`;
 
       // Send the email
-       sendMail({
+      //  sendMail({
+      //   from: Config.webmasterMail,
+      //   to: user_details[0].email,
+      //   subject: `Work Wise | New RFQ Alert`,
+      //   html: dynamicHTML,
+      // });
+
+
+      let mailRecipients = {
         from: Config.webmasterMail,
-        to: user_details[0].email,
         subject: `Work Wise | New RFQ Alert`,
-        html: dynamicHTML,
-      });
+        html: dynamicHTML
+      };
+
+      if (spocList && spocList.length > 0) {
+        mailRecipients.to = spocList.map(spoc => spoc.email);
+        mailRecipients.cc = user_details[0].email;
+      } else {
+        mailRecipients.to = user_details[0].email;
+      }
+
+      // console.log(" rfq contoller 377 spoc console ", user_details[0]?.id, spocList)
+
+      sendMail(mailRecipients);
 
       // Send notification if applicable
       if (user_details[0].endpoint) {
@@ -458,7 +482,7 @@ const sendMailtoVendors = async (req, rfqNumber) => {
 
 const sendQuotationMailToBuyer = async (req, rfqNumber) => {
   // send mail to vendors
-  const { name, email } = req.user;
+  const { name, email, id } = req.user;
   let dynamicHTML = `
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
@@ -494,16 +518,35 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
     </tr>
     </table>`;
 
-  sendMail({
-    from: Config.webmasterMail, // sender address
-    to: email, // list of receivers
-    subject: `Work Wise | RFQ Creation Confirmation`, // Subject line
-    html: dynamicHTML // plain text body
-  });
+    const spocList = await vendorModel.getSpocDetails(id)
+
+    // console.log(" rfq contoller 488 spoc console ", id, spocList)
+
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      subject: `Work Wise | RFQ Creation Confirmation`,
+      html: dynamicHTML
+    };
+
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map(spoc => spoc.email);
+      mailRecipients.cc = email;
+    } else {
+      mailRecipients.to = email;
+    }
+
+    sendMail(mailRecipients);
+
+  // sendMail({
+  //   from: Config.webmasterMail, // sender address
+  //   to: email, // list of receivers
+  //   subject: `Work Wise | RFQ Creation Confirmation`, // Subject line
+  //   html: dynamicHTML // plain text body
+  // });
 };
 const sendQuoteNotificationToVendor = async (req) => {
   // send mail to vendors
-  const { name, email } = req.user;
+  const { name, email, id } = req.user;
   let dynamicHTML = `
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
@@ -545,15 +588,39 @@ const sendQuoteNotificationToVendor = async (req) => {
     </tr>
     </table>`;
 
-  sendMail({
-    from: Config.webmasterMail, // sender address
-    to: email, // list of receivers
-    subject:
-      req.body.is_regret && req.body.is_regret == 1
-        ? `Work Wise | Quotation Regreted`
-        : `Work Wise | Quotation Submitted`, // Subject line
-    html: dynamicHTML // plain text body
-  });
+  // sendMail({
+  //   from: Config.webmasterMail, // sender address
+  //   to: email, // list of receivers
+  //   subject:
+  //     req.body.is_regret && req.body.is_regret == 1
+  //       ? `Work Wise | Quotation Regreted`
+  //       : `Work Wise | Quotation Submitted`, // Subject line
+  //   html: dynamicHTML // plain text body
+  // });
+
+  
+  const spocList = await vendorModel.getSpocDetails(id)
+
+  // console.log(" rfq contoller 569 spoc console  ", id, spocList)
+              
+  let mailRecipients = {
+    from: Config.webmasterMail,
+     subject:
+       req.body.is_regret && req.body.is_regret == 1
+         ? `Work Wise | Quotation Regreted`
+         : `Work Wise | Quotation Submitted`, // Subject line
+    html: dynamicHTML
+  };
+
+  if (spocList && spocList.length > 0) {
+    mailRecipients.to = spocList.map(spoc => spoc.email);
+    mailRecipients.cc = email;
+  } else {
+    mailRecipients.to = email;
+  }
+
+  sendMail(mailRecipients);
+
 };
 
 const sendReminderRFQMAIL = async (vendoritem, org_name) => {
@@ -593,12 +660,34 @@ const sendReminderRFQMAIL = async (vendoritem, org_name) => {
                     </tr>
                     </table>`;
 
-    sendMail({
-      from: Config.webmasterMail, // sender address
-      to: user_details[0].email, // list of receivers
-      subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
-      html: dynamicHTML // plain text body
-    });
+
+                    
+        const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
+
+        // console.log(" rfq contoller  632 spoc console ", user_details[0]?.id, spocList)
+
+              
+        let mailRecipients = {
+          from: Config.webmasterMail,
+          subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
+          html: dynamicHTML
+        };
+  
+        if (spocList && spocList.length > 0) {
+          mailRecipients.to = spocList.map(spoc => spoc.email);
+          mailRecipients.cc = user_details[0].email;
+        } else {
+          mailRecipients.to = user_details[0].email;
+        }
+  
+        sendMail(mailRecipients);
+
+    // sendMail({
+    //   from: Config.webmasterMail, // sender address
+    //   to: user_details[0].email, // list of receivers
+    //   subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
+    //   html: dynamicHTML // plain text body
+    // });
     const notificationData = {
       type: 'RFQ Pending',
       title: `RFQ Pending`,
@@ -635,6 +724,7 @@ const sendQuoteNotificationEmail = async (req) => {
   return new Promise(async (resolve, reject) => {
     let u = await rfqModel.getRFQCreatedBy(rfq_id);
     if (u.length > 0) {
+      //This is the buyer
       let vendor = u[0];
       dynamicHTML = `
       <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
@@ -648,12 +738,12 @@ const sendQuoteNotificationEmail = async (req) => {
         </tr>
         <tr>
         <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:15px 30px; background:#fff; line-height:1.5;'>
-          <strong>Dear ${organization_name},</strong><br>
+          <strong>Dear ${vendor.name},</strong><br>
           
           </td>
         </tr>
         <tr>
-          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${vendor.name
+          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${organization_name
         }</u> on <a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</u> </a>for bellow products:
           ${getProducts()}
           
@@ -688,14 +778,14 @@ const sendQuoteNotificationEmail = async (req) => {
           </tr>
           <tr>
           <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:15px 30px; background:#fff; line-height:1.5;'>
-            <strong>Dear ${organization_name},</strong><br>
+            <strong>Dear ${vendor.name},</strong><br>
             
             </td>
           </tr>
           <tr>
             <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>
-            <u>${vendor.name
-          }</u> is declined the RFQ request (<a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
+            <u>${organization_name
+          }</u> has declined the RFQ request (<a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
              ${getProducts()}            
             
             </td>
@@ -721,21 +811,42 @@ const sendQuoteNotificationEmail = async (req) => {
           </table>`;
       }
 
-      sendMail({
-        from: Config.webmasterMail, // sender address
-        to: vendor.email, // list of receivers
-        subject:
-          req.body.is_regret && req.body.is_regret == 1
-            ? `Work Wise | RFQ#${rfq_no} | RFQ Request Declined`
-            : `Work Wise | RFQ#${rfq_no} | New Quotation Received`, // Subject line
-        html: dynamicHTML // plain text body
-      });
+      
+      const spocList = await vendorModel.getSpocDetails(vendor?.id)
+
+      // console.log(" rfq contoller 781 spoc console ", vendor?.id, spocList)
+              
+      let mailRecipients = {
+        from: Config.webmasterMail,
+        subject: `Work Wise | New RFQ Alert`,
+        html: dynamicHTML
+      };
+
+      if (spocList && spocList.length > 0) {
+        mailRecipients.to = spocList.map(spoc => spoc.email);
+        mailRecipients.cc =  vendor.email
+      } else {
+        mailRecipients.to =  vendor.email;
+      }
+
+      sendMail(mailRecipients);
+
+      // sendMail({
+      //   from: Config.webmasterMail, // sender address
+      //   to: vendor.email, // list of receivers
+      //   subject:
+      //     req.body.is_regret && req.body.is_regret == 1
+      //       ? `Work Wise | RFQ#${rfq_no} | RFQ Request Declined`
+      //       : `Work Wise | RFQ#${rfq_no} | New Quotation Received`, // Subject line
+      //   html: dynamicHTML // plain text body
+      // });
       resolve(u);
     }
   });
 };
 
 const sendWinningNotificaion = async (
+  vendor_id,
   rfQItem,
   winning_product,
   winning_vendor_organization,
@@ -821,12 +932,31 @@ const sendWinningNotificaion = async (
         </tr>
         </table>`;
 
-    sendMail({
-      from: Config.webmasterMail, // sender address
-      to: winning_vendor_email, // list of receivers
-      subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
-      html: dynamicHTML // plain text body
-    });
+        const spocList = await vendorModel.getSpocDetails(vendor_id)
+
+        // console.log(" rfq contoller 901 spoc console ", vendor_id, spocList)
+                
+        let mailRecipients = {
+          from: Config.webmasterMail,
+          subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
+          html: dynamicHTML
+        };
+  
+        if (spocList && spocList.length > 0) {
+          mailRecipients.to = spocList.map(spoc => spoc.email);
+          mailRecipients.cc =  winning_vendor_email;
+        } else {
+          mailRecipients.to =  winning_vendor_email;
+        }
+  
+        sendMail(mailRecipients);
+
+    // sendMail({
+    //   from: Config.webmasterMail, // sender address
+    //   to: winning_vendor_email, // list of receivers
+    //   subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
+    //   html: dynamicHTML // plain text body
+    // });
     resolve(true);
   });
 };
@@ -956,7 +1086,7 @@ const rfqController = {
           tbl_rfq_data.project_id=project_id;
         }
 
-       
+
         const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
         var rfqtermsRsp = null;
 
@@ -999,7 +1129,7 @@ const rfqController = {
               response[0].terms = rfqtermsRsp;
               // sendMailtoVendors => in this function we are also generating token for vendor so he will quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
               await sendMailtoVendors(req, response[0].id);
-              
+
               await sendQuotationMailToBuyer(req, response[0].id);
 
               res
@@ -1282,9 +1412,7 @@ const rfqController = {
         ) {
           let fproducts = [];
           userProducts.map((prod_item) => {
-            prod_item.product_id;
             rfQItem[0].products.map((pintem) => {
-              console.log("pintem", pintem)
               if (prod_item.product_id == pintem.product_id && prod_item.variant == pintem.variant) {
                 pintem.vendor_details = pintem.vendor_details.filter(vendor => vendor.user_id === req.user.id);
                 fproducts.push(pintem);
@@ -1611,7 +1739,7 @@ const rfqController = {
       if(reverse_auction=='-1'){
         reverse_auction=null;
       }
-      
+
 
       const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort,reverse_auction,rfq_type);
 
@@ -1737,19 +1865,19 @@ const rfqController = {
           };
 
           // check quote is already exists or not
-
+// console.log("mukul 1870")
           let alreadyExists = await rfqModel.checkIfExists(
             'tbl_quotes',
             `rfq_id=${rfq_id} AND created_by=${user.id} LIMIT 1`
           );
           if (alreadyExists.length > 0) {
             res
-            .status(400)
-            .json({
-              status: 3,
-              message: 'Quote is alredy present for this RFQ!'
-            })
-            .end();
+              .status(400)
+              .json({
+                status: 3,
+                message: 'Quote is alredy present for this RFQ!'
+              })
+              .end();
             // let quote_rsp = await rfqModel.update(
             //   'tbl_quotes',
             //   tbl_quotes_data,
@@ -1775,6 +1903,7 @@ const rfqController = {
 
             return;
           }
+          // console.log("mukul 1908")
 
           let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
           if (quote_rsp.length > 0) {
@@ -1825,6 +1954,7 @@ const rfqController = {
                 });
               }
             );
+            // console.log("mukul 1959")
 
             const quote_items_keys = [
               'rfq_id',
@@ -1848,22 +1978,22 @@ const rfqController = {
               'tbl_quote_items'
             );
 
-         // New code to insert file links into tbl_quote_item_files
-        if (quotes_items.length > 0) {
-          quotes_items.forEach(async (item, index) => {
-          const file_links = products[index].document_files;
-            if (file_links && file_links.length > 0) {
-                const file_records = file_links.map(link => ({
-                quote_item_id: item.id,
-                file_type: "DOC",
-                file_url: link,
-                created_at: new Date()
-              }));
-              await rfqModel.insertArray( file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files'
-              );
+            // New code to insert file links into tbl_quote_item_files
+            if (quotes_items.length > 0) {
+              quotes_items.forEach(async (item, index) => {
+                const file_links = products[index].document_files;
+                if (file_links && file_links.length > 0) {
+                  const file_records = file_links.map(link => ({
+                    quote_item_id: item.id,
+                    file_type: "DOC",
+                    file_url: link,
+                    created_at: new Date()
+                  }));
+                  await rfqModel.insertArray( file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files'
+                  );
+                }
+              });
             }
-            }); 
-          }
 
             await sendQuoteNotificationEmail(req, rfq_id);
             await sendQuoteNotificationToVendor(req);
@@ -2045,7 +2175,7 @@ const rfqController = {
   closeRFQ: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { id } = req.user;
-    
+
     try {
       const rfQItem = await rfqModel.changeRFQStatus(rfq_id, id);
       console.log(rfQItem.length);
@@ -2201,6 +2331,7 @@ const rfqController = {
             tbl_quote_finalization_data
           );
           await sendWinningNotificaion(
+            vendor_id,
             rfQItem,
             winning_product,
             winning_vendor_organization,
@@ -2350,7 +2481,7 @@ const rfqController = {
 
         // Call the searchVendor method
         const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
-        console.log(vendorResult);
+        // console.log(vendorResult);
 
         // Check if vendorResult is not empty and has the expected structure
         if (vendorResult && vendorResult.total && vendorResult.vendor) {
@@ -3972,7 +4103,7 @@ const rfqController = {
         contact_name: contact_name,
         contact_number: contact_number,
         location: location,
-        rfq_type:rfq_type, 
+        rfq_type: rfq_type,
         reverse_auction: reverse_auction,
         bid_end_date: bid_end_date,
         company_name: company_name,
@@ -3992,13 +4123,13 @@ const rfqController = {
         contact_number: finalObject.contact_number,
         bid_end_date: finalObject.bid_end_date,
         location: finalObject.location,
-        rfq_type:finalObject.rfq_type, 
+        rfq_type: finalObject.rfq_type,
         reverse_auction: finalObject.reverse_auction,
         is_published: finalObject.is_published,
         rfq_no: nextRFQNumber,
         created_by: user.id,
         updated_by: user.id,
-        project_id:project_id
+        project_id: project_id
       };
 
       // check if all row are failed in our validation
@@ -4100,7 +4231,8 @@ const rfqController = {
       // status,
       products,
       globalPaymentTerms,
-      globalComment
+      globalComment,
+      term_and_condition_files
     } = req.body;
 
     // Check if all required fields are present in each product
@@ -4146,6 +4278,18 @@ const rfqController = {
         paymentTermAndCommentChanges = true;
       }
 
+      // Check if global terms & conditions file are uploaded
+      if (term_and_condition_files && term_and_condition_files.length > 0) {
+        const global_files = term_and_condition_files.map(url => ({
+          quote_id: quoteId,
+          file_type: 'term_and_condition',
+          file_url: url
+        }));
+        for (const fileData of global_files) {
+          await rfqModel.insert('tbl_quotes_files', fileData);
+        }
+      }
+
       // Process each product in the request
       const quoteItemChanges = await Promise.all(
         products.map((product) => {
@@ -4153,18 +4297,40 @@ const rfqController = {
         })
       );
 
-      const anyQuoteChanged = quoteItemChanges.some((result) => result.changed);
+      // Insert new document_files for each product if exists
+      const fileUpdates = await Promise.all(
+        products.map(async (prodItem) => {
+          const  quote_item = await rfqModel.getQuoteItem(quoteId, prodItem);
+          const file_links = prodItem.document_files;
+
+          if (file_links && file_links.length > 0) {
+            const file_records = file_links.map(link => ({
+              quote_item_id: quote_item.id,
+              file_type: "DOC",
+              file_url: link,
+              created_at: new Date()
+            }));
+
+            if (file_records.length > 0) {
+              return rfqModel.insertArray(file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files');
+            }
+          }
+        })
+      );
+
+      const anyQuoteChanged = fileUpdates || quoteItemChanges.some((result) => result.changed);
 
       let status = true;
       if (!anyQuoteChanged && !paymentTermAndCommentChanges) {
         status = false;
       }
       return res.status(200).json({
-        status:status,
-        message: status? 'Quote items updated successfully':"No updates made as the quotes and global terms remain unchanged",
+        status: status,
+        message: status ? 'Quote items updated successfully' : "No updates made as the quotes and global terms remain unchanged",
         data: {
           quoteItems: quoteItemChanges,
-          globalTermComment: paymentTermAndCommentChanges?"global comment and payment term is updated": "global comment and payment term is remain unchanged"
+          globalFilesAdded: fileUpdates,
+          globalTermComment: paymentTermAndCommentChanges ? "global comment and payment term is updated" : "global comment and payment term is remain unchanged"
         }
       });
     } catch (error) {
@@ -4178,12 +4344,12 @@ const rfqController = {
 
     if (!req.is_verified) {
       res
-      .status(400)
-      .json({
-        success: false,
-        message: 'you are not login',
-      })
-      .end();
+        .status(400)
+        .json({
+          success: false,
+          message: 'you are not login',
+        })
+        .end();
     }
 
     if (!req.user.subscription_plan_id) {
@@ -4199,7 +4365,7 @@ const rfqController = {
 
     try {
 
-      const {search_key} = req.body
+      const { search_key } = req.body
       const user_id = req.user.id;
 
       // find product price stats like, min, avg, max
@@ -4207,16 +4373,16 @@ const rfqController = {
       const priceHistoryPersonal = await rfqModel.productPriceStatsLastQuoteAndFinilizeForUser(search_key, user_id);
 
       res
-      .status(200)
-      .json({
-        status: 2,
-        data : {
-          market: priceHistoryMarket,
-          personal:priceHistoryPersonal
-        }
-      })
-      .end();
-      
+        .status(200)
+        .json({
+          status: 2,
+          data: {
+            market: priceHistoryMarket,
+            personal: priceHistoryPersonal
+          }
+        })
+        .end();
+
     } catch (error) {
       logError(error);
       res
