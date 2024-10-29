@@ -67,9 +67,7 @@ const validateBulkProductVendorInputs = (value) => {
   const spoc_email = value['Sales SPOC Business Email'] || "";
   const spoc_mobile = value['Sales SPOC Mobile'] || "";
 
-  const isAnySPOCFieldNonEmpty = spoc_name || spoc_role || spoc_email || spoc_mobile;
-
-  if (isAnySPOCFieldNonEmpty) {
+  
     // Validate spoc_name if provided
     if (!spoc_name.trim()) {
       errors.push('SPOC name is missing');
@@ -81,10 +79,9 @@ const validateBulkProductVendorInputs = (value) => {
     }
 
     // Validate spoc_mobile if provided and not empty
-    if (isValidPhoneNumber(vendorContactNumber)) {
+    if (isValidPhoneNumber(spoc_mobile)) {
       errors.push('Invalid/Missing SPOC Mobile');
     }
-  }
 
   return errors;
 };
@@ -687,6 +684,7 @@ const productController = {
 
           vendorName = value['Vendor Name'];
           vendorEmail = value['Vendor Email'];
+          
 
           // check vendor exist or not
           previousCategory = '';
@@ -705,10 +703,14 @@ const productController = {
                   .substring(6, 10)
               : 1234
           }`; */
-          password = `${capitalizeFourOrganizationLetter}@${value['Vendor company owner/hr/official contact number'].length < 8
-            ? 1234
-            : value['Vendor company owner/hr/official contact number'] % 10000
-            }`;
+          password = `${capitalizeFourOrganizationLetter}@${
+            value['Vendor company owner/hr/official contact number'].length < 8
+              ? 1234
+              : value['Vendor company owner/hr/official contact number']
+                  .toString()
+                  .slice(-4) // Get the last 4 digits as a string
+          }`;
+
 
           let vendor_email = (value['Vendor Email'] || "").trim();
 
@@ -759,11 +761,9 @@ const productController = {
             };
 
 
-
-            userExist = await productModel.checkVendorExist(vendor_email);
-            // console.log('userExist-->', userExist);
-            // console.log('webmail-->', Config.webmasterMail);
-            // return false;
+            // checking vendor email and mobile both to be exist
+            userExist = await userModel.user_exist(vendor_email,value['Vendor company owner/hr/official contact number'].toString());
+            
             if (userExist.length < 1) {
               vendorObj.password = generatePassword(password);
               vendor = await productModel.vendor_register(vendorObj);
@@ -820,7 +820,8 @@ const productController = {
       //   subject: `Work wise | Registration`,
       //   html: `Dear ${value['Vendor Name']}, Your login credential Userid: ${value['Vendor Email']} and password ${password}`
       //       };
-        let mailRecipients = {
+      console.log(".......................................",password);  
+      let mailRecipients = {
           from: Config.webmasterMail,
           subject: `Work wise | Registration`,
           html: `
