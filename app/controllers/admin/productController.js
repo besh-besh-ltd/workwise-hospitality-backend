@@ -820,7 +820,6 @@ const productController = {
       //   subject: `Work wise | Registration`,
       //   html: `Dear ${value['Vendor Name']}, Your login credential Userid: ${value['Vendor Email']} and password ${password}`
       //       };
-      console.log(".......................................",password);  
       let mailRecipients = {
           from: Config.webmasterMail,
           subject: `Work wise | Registration`,
