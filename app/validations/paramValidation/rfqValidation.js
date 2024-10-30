@@ -9,7 +9,8 @@ const specItems = Joi.object({
   value: Joi.string().allow('').optional()
 });
 const termsItems = Joi.object({
-  id: Joi.number().required()
+  id: Joi.number().required(),
+  name: Joi.string().optional()
 });
 
 const productItems = Joi.object({
