@@ -47,6 +47,10 @@ const validateBulkProductVendorInputs = (value) => {
     return phone.toString().length > 15 ? true : false;
   };
 
+  if(!(value['Category'] || "").trim()) {
+    errors.push("Product Category is missing");
+  }
+
   if (!(value['Vendor Name'] || "").trim()) {
     errors.push('vendor name is missing');
   }
@@ -653,7 +657,7 @@ const productController = {
       // let NewProduct = false;
       let productId = 0;
       let product = 0;
-      let isMaster = 0;
+      
       let previousCategory = '';
 
       let errorsObj = []
@@ -665,8 +669,9 @@ const productController = {
       for await (const [index, value] of jsonData.entries()) {
 
         const productName = (value['Product Name'] || "").trim()
-
-
+        const productCategory = (value['Category'] || "").trim()
+        let categoryId = 0;
+        let isMaster = 0;
 
         if (productName) {
 
@@ -684,6 +689,24 @@ const productController = {
             errorsObj.push(errObj)
             continue
           }
+
+
+           // check category exist in the system or not
+           const catNameExists = await productModel.topParentparentNameExists(productCategory);
+           if(catNameExists.length < 1){
+             const errObj = {
+               vendorName: value['Vendor Name'] || null,
+               vendorEmail: value['Vendor Email'] || null,
+               productName: productName,
+               Row: index + 1,
+               errors:  `${productCategory} Category does not exist`
+             }
+             errorsObj.push(errObj);
+             continue;
+           }else{
+             categoryId = catNameExists[0].id;
+           }
+
 
           vendorName = value['Vendor Name'];
           vendorEmail = value['Vendor Email'];
@@ -987,6 +1010,7 @@ const productController = {
           let check_master_exist = await productModel.checkMasterNameExist(
             productName
           );
+
           if (check_master_exist.length == 0) {
             const errObj = {
               vendorName: value['Vendor Name'] || null,
@@ -999,7 +1023,29 @@ const productController = {
             continue
             // isMaster = 0;
           } else {
-            isMaster = 1;
+
+            for(let i=0;i<check_master_exist.length;i++){
+              const catProductMapExist = await productModel.productCategoryIdExist(check_master_exist[i].id, categoryId);
+              if(catProductMapExist.length > 0){
+                isMaster = 1;
+                break;
+              }
+              console.log(check_master_exist[i].id,categoryId,isMaster);
+            }
+            console.log("for loop over --->>> ",categoryId,isMaster);
+            
+            if(isMaster !== 1){
+              errorsObj.push(
+                {
+                  vendorName: value['Vendor Name'] || null,
+                  vendorEmail: value['Vendor Email'] || null,
+                  productName: productName,
+                  Row: index + 1,
+                  errors: `${productName} with ${productCategory} does not exist`
+                }
+              )
+            }
+
           }
           // console.log('check_master_exist--->', isMaster);
           if (isMaster == 1) {
