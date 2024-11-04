@@ -15,7 +15,7 @@ import { acl } from '../../helper/common.js';
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
 const passportLogIn = passport.authenticate('localUsr', { session: false });
-const passportSignIn = passport.authenticate('jwtUsr', { session: false });
+const passportSignIn = passport.authenticate(['jwtUsr', 'jwtAdm'], { session: false });
 
 const ProductsRoutes = Router();
 ProductsRoutes.post(
@@ -84,7 +84,7 @@ ProductsRoutes.post(
 ProductsRoutes.get(
   '/vendor-product-details/:id',
   passportSignIn,
-  acl([3, 4]),
+  acl([1, 3, 4]),
   validateParam(schemas.id),
   validateDbBody.check_product,
   ProductsController.vendorProductDetails
