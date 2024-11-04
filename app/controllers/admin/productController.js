@@ -1758,6 +1758,7 @@ const productController = {
               // means we have to add previous prodObj which do not have error 
               if(prodObj.productId == null ){
                 // means new product
+                console.log("---------------->>>>>. ",prodObj)
                 const product = await productModel.createProduct(prodObj.newProduct);
                 prodObj.productId = product.id;
               }
@@ -1776,6 +1777,7 @@ const productController = {
           }
           // Also check for product name exist or not afterwards 
           let prodNameExists = await productModel.checkMasterNameExist(productName);
+
           if (prodNameExists && prodNameExists.length == 0) {
             const productObj = {
               name: productName,
@@ -1804,8 +1806,22 @@ const productController = {
             };
             prodObj.newProduct = productObj;
           } else {
-            prodObj.productId = prodNameExists[0].id;
-            prodObj.newProduct = prodNameExists[0];
+             // category does not exist
+             productError = true;
+             const err = {
+               Row: index + 2,
+               error: `Product ${productName} already exist`
+             }
+             errors.push(err);
+             console.log(`Product ${productName} already exist`, index+2);
+             prodObj = {
+               category: [],
+               name: "",
+               productId: null,
+             };
+             continue;
+            // prodObj.productId = prodNameExists[0].id;
+            // prodObj.newProduct = prodNameExists[0];
           }
 
           prodObj.category = [],
@@ -1926,6 +1942,7 @@ const productController = {
         //means last product name does not have any error, now to be inserted
         if(prodObj.productId == null ){
           // means new product
+          console.log("---------------- ",prodObj);
           const product = await productModel.createProduct(prodObj.newProduct);
           prodObj.productId = product.id;
         }
