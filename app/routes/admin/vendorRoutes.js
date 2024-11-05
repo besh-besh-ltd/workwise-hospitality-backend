@@ -68,6 +68,17 @@ vendorRoutes.put(
   validateDbBody.vendor_email_mobile_exists,
   vendorController.updateVendor
 );
+
+// to add new spoc for the vendor
+vendorRoutes.post(
+  '/update-vendor/:id/add-spoc',
+  passportSignIn,
+  validateParam(schemas.new_spoc_params),
+  validateBody(schemas.user_spoc),
+  validateDbBody.vendor_id_exists,
+  vendorController.addSpoc
+)
+
 vendorRoutes.put(
   '/update-vendor/:id/update-spoc/:spoc_id',
   passportSignIn,

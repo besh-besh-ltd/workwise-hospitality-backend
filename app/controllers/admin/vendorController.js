@@ -884,6 +884,68 @@ const vendorController = {
         })
         .end();
     }
-  }
+  },
+  addSpoc: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+
+      const user_id = req.params.id;
+
+      const { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
+ 
+      const name = spoc_name ?? null;
+      const email = spoc_email ?? null;
+      const mobile = spoc_mobile ?? null;
+      const role = spoc_role ?? null;
+
+      if (!name && !email && !mobile && !role) {
+        err++;
+        errors.empty_fields = 'All fields are empty or missing.';
+      }
+
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+        return;
+      }
+
+      const spocExist = await userModel.check_exactly_same_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
+
+      if(spocExist<1){
+        const response = await userModel.add_user_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
+        res
+        .status(200)
+        .json({
+          status: 1,
+          message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to your spoc`
+        })
+        .end();
+      }else{
+        res
+        .status(200)
+        .json({
+          status: 1,
+          message: `spoc already exist`
+        })
+        .end();
+      }
+
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
 };
 export default vendorController;
