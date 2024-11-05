@@ -54,6 +54,18 @@ const productModel = {
         });
     });
   },
+  productCategoryIdExist:async (id,categoryId) => {
+    return new Promise(function (resolve, reject) {
+      db.any('select * from tbl_product_categories where product_id = $1 AND category_id = $2', [id,categoryId])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   topParentparentCatExists: async (name, parentId) => {
     return new Promise(function (resolve, reject) {
       db.any('select * from tbl_category where title = $1 AND parent_id = $2', [
