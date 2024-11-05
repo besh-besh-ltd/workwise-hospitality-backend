@@ -72,6 +72,7 @@ const validateBulkProductVendorInputs = (value) => {
   const spoc_email = value['Sales SPOC Business Email'] || "";
   const spoc_mobile = value['Sales SPOC Mobile'] || "";
 
+  if (spoc_email || spoc_mobile || spoc_name || spoc_role) {
   
     // Validate spoc_name if provided
     if (!spoc_name.trim()) {
@@ -87,7 +88,7 @@ const validateBulkProductVendorInputs = (value) => {
     if (isValidPhoneNumber(spoc_mobile)) {
       errors.push('Invalid/Missing SPOC Mobile');
     }
-
+  }
   return errors;
 };
 
