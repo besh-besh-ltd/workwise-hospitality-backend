@@ -10,6 +10,9 @@ const rfqModel = {
     const query = `INSERT INTO ${table_name} (${d_keys})
       VALUES (${placeholders})
       RETURNING *;`;
+
+      console.log("query, values: ", query, values)
+
     return new Promise(function (resolve, reject) {
       db.query(query, values)
         .then(function (result) {
@@ -49,6 +52,84 @@ const rfqModel = {
         });
     });
   },
+  delete: async (table, conditions) => {
+    const conditionKeys = Object.keys(conditions);
+    const conditionString = conditionKeys.map((key, index) => `${key} = $${index+1}`).join(' AND ');
+    const conditionValues = conditionKeys.map(key => conditions[key]);
+
+    const query = `DELETE FROM ${table} WHERE ${conditionString} RETURING *`;
+    
+    try {
+        const result = await db.query(query, conditionValues);
+        console.log("result: ", result);
+        return result; // Number of rows deleted
+    } catch (error) {
+        console.error(`Error deleting from ${table}:`, error);
+        throw error;
+    }
+  },
+
+  deleteWithReturnIds: async (table, conditions) => {
+    const conditionKeys = Object.keys(conditions);
+    const conditionString = conditionKeys.map((key, index) => `${key} = $${index + 1}`).join(' AND ');
+    const conditionValues = conditionKeys.map(key => conditions[key]);
+
+    // Query to fetch IDs before deletion
+    const idQuery = `SELECT id FROM ${table} WHERE ${conditionString}`;
+    const deleteQuery = `DELETE FROM ${table} WHERE ${conditionString}`;
+
+    return new Promise((resolve, reject) => {
+        db.query(idQuery, conditionValues)
+            .then(async (idResult) => {
+                const ids = idResult.rows.map(row => row.id);
+                return db.query(deleteQuery, conditionValues).then(() => resolve(ids));
+            })
+            .catch((error) => {
+                console.error(`Error deleting from ${table}:`, error);
+                reject(error);
+            });
+    });
+},
+
+// Separate function to delete from tbl_rfq_product_files based on rfq_product_id list
+deleteProductFilesByIds: (rfqProductIds) => {
+    if (rfqProductIds.length === 0) return Promise.resolve(0); // If no IDs, return immediately
+
+    const query = `
+        DELETE FROM tbl_rfq_product_files 
+        WHERE rfq_product_id = ANY($1::int[])
+    `;
+
+    return new Promise((resolve, reject) => {
+        db.query(query, [rfqProductIds])
+            .then((result) => {
+                console.log("Deleted rows from tbl_rfq_product_files with rfq_product_ids:", rfqProductIds);
+                console.log(result);
+                resolve(result.rowCount); // Return count of deleted rows
+            })
+            .catch((error) => {
+                console.error("Error deleting from tbl_rfq_product_files:", error);
+                reject(error);
+            });
+    });
+  },
+  
+  findAll: async (table, conditions) => {
+    const conditionKeys = Object.keys(conditions);
+    const conditionString = conditionKeys.map((key, index) => `${key} = $${index+1}`).join(' AND ');
+    const conditionValues = conditionKeys.map(key => conditions[key]);
+
+    const query = `SELECT * FROM ${table} WHERE ${conditionString}`;
+  
+    try {
+        const results  = await db.query(query, conditionValues);
+        return results;
+    } catch (error) {
+        console.error(`Error finding all from ${table}:`, error);
+        throw error;
+    }
+  },
+
   getAll: async (limit, offset) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -133,6 +214,32 @@ const rfqModel = {
         });
     });
   },
+  // updateWithCondition: async (table_name, data, condition) => {
+  //   const setClause = Object.keys(data)
+  //     .map((key, index) => `${key} = $${index + 1}`)
+  //     .join(', ');
+  //   const setValues = Object.values(data);
+  //   const whereClause = Object.keys(condition)
+  //   .map((key, index) => `${key} = $${index + 1}`)
+  //   .join(' AND ');
+  // const whereValues = Object.values(condition);
+  //   const updateQuery = `
+  //     UPDATE ${table_name}
+  //     SET ${setClause}
+  //     WHERE ${whereClause}
+  //     RETURNING *`;
+  //   console.log("query:  ", updateQuery, setValues, whereValues);
+  //   return new Promise(function (resolve, reject) {
+  //     db.query(updateQuery, setValues, whereValues)
+  //       .then(function (data) {
+  //         resolve(data);
+  //       })
+  //       .catch(function (err) {
+  //         let error = new Error(err);
+  //         reject(error);
+  //       });
+  //   });
+  // },
   getAllTerms: async () => {
     return new Promise(function (resolve, reject) {
       db.query(`SELECT * FROM tbl_rfq_terms`)
@@ -264,6 +371,227 @@ const rfqModel = {
         });
     });
   },
+
+  getRfqDraftId: async (id) => {
+
+    // const q = `SELECT 
+    //   RFQ.is_published,
+    //   RFQ.comment,
+    //   RFQ.response_email,
+    //   RFQ.contact_name,
+    //   RFQ.contact_number,
+    //   RFQ.company_name,
+    //   RFQ.bid_end_date,
+    //   RFQ.rfq_type,
+    //   RFQ.reverse_auction,
+    //   RFQ.project_id,
+    //   RFQ.location,
+      
+    //   -- Term and condition files
+    //   (
+    //     SELECT json_agg(RF.file_url)
+    //     FROM tbl_rfq_files RF
+    //     WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
+    //   ) AS "term_and_condition_files",
+      
+    //   -- Products
+    //   ARRAY(
+    //       SELECT json_build_object(
+    //           'product_id', RFQ_P.product_id,
+    //           'predefined_tds_file', RFQ_P.datasheet_file,
+    //           'predefined_qap_file', RFQ_P.qap_file,
+    //           'name', T_P.name,
+    //           'variant', RFQ_P.variant,
+    //           'spec', (
+    //               SELECT json_agg(json_build_object(
+    //                   'title', RFQ_P_SPEC.title,
+    //                   'value', RFQ_P_SPEC.value
+    //               ))
+    //               FROM tbl_rfq_products_specs RFQ_P_SPEC
+    //               WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id AND RFQ_P.variant = RFQ_P_SPEC.variant
+    //           ),
+    //           'vendors', (
+    //               SELECT json_agg(json_build_object(
+    //                   'user_id', RFQ_P_V.user_id,
+    //                   'name', U.name
+    //               ))
+    //               FROM tbl_rfq_product_vendors RFQ_P_V
+    //               LEFT JOIN tbl_users U ON RFQ_P_V.user_id = U.id
+    //               WHERE RFQ_P.product_id = RFQ_P_V.product_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id AND RFQ_P.variant = RFQ_P_V.variant
+    //           ),
+    //           'comment', RFQ_P.comment,
+    //           --'defaultSelectedVAB', RFQ_P.defaultSelectedVAB,
+    //           'datasheet', RFQ_P.datasheet,
+    //           'datasheet_file', (
+    //               SELECT json_agg(RPF.file_url)
+    //               FROM tbl_rfq_product_files RPF
+    //               WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'datasheet'
+    //           ),
+    //           'spec_file', (
+    //               SELECT json_agg(RPF.file_url)
+    //               FROM tbl_rfq_product_files RPF
+    //               WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'spec'
+    //           ),
+    //           'qap', RFQ_P.qap,
+    //           'qap_file', (
+    //               SELECT json_agg(RPF.file_url)
+    //               FROM tbl_rfq_product_files RPF
+    //               WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'qap'
+    //           ),
+    //           'user_selected_predefined_tds', (RFQ_P.datasheet = '1') ,
+    //           'user_selected_predefined_qap', (RFQ_P.qap = '1')
+    //       )
+    //       FROM tbl_rfq_products RFQ_P
+    //       LEFT JOIN tbl_product T_P ON RFQ_P.product_id = T_P.id
+    //       WHERE RFQ.id = RFQ_P.rfq_id
+    //   ) AS "products",
+      
+    //   -- Terms
+    //   ARRAY(
+    //       SELECT json_build_object('id', RFQ_TM.terms_id)
+    //       FROM tbl_rfq_terms_map RFQ_TM
+    //       WHERE RFQ_TM.rfq_id = RFQ.id
+    //   ) AS "terms"
+
+    //   FROM 
+    //       tbl_rfq RFQ
+    //   WHERE 
+    //       RFQ.id = $1
+    //   ORDER BY 
+    //       RFQ.id DESC
+    //   LIMIT 1;
+    // `;
+
+    const q = `SELECT 
+    -- Encapsulate RFQ fields in rfqFormData
+    json_build_object(
+        'is_published', RFQ.is_published,
+        'comment', RFQ.comment,
+        'response_email', RFQ.response_email,
+        'contact_name', RFQ.contact_name,
+        'contact_number', RFQ.contact_number,
+        'company_name', RFQ.company_name,
+        'bid_end_date', RFQ.bid_end_date,
+        'rfq_type', RFQ.rfq_type,
+        'reverse_auction', RFQ.reverse_auction,
+        'project_id', RFQ.project_id,
+        'location', RFQ.location,
+        
+        -- Term and condition files
+        'term_and_condition_files', (
+            SELECT COALESCE(json_agg(RF.file_url), '[]'::json)
+            FROM tbl_rfq_files RF
+            WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
+        )
+    ) AS rfq_form_data,
+
+    -- Products
+    ARRAY(
+        SELECT json_build_object(
+            'product_id', RFQ_P.product_id,
+            'predefined_tds_file', RFQ_P.datasheet_file,
+            'predefined_qap_file', RFQ_P.qap_file,
+            'name', T_P.name,
+            'variant', RFQ_P.variant,
+            'spec', (
+                SELECT json_agg(json_build_object(
+                    'title', RFQ_P_SPEC.title,
+                    'value', RFQ_P_SPEC.value
+                ))
+                FROM tbl_rfq_products_specs RFQ_P_SPEC
+                WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id 
+                  AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
+                  AND RFQ_P.variant = RFQ_P_SPEC.variant
+            ),
+            'vendors', (
+                SELECT json_agg(json_build_object(
+                    'user_id', RFQ_P_V.user_id,
+                    'name', U.name
+                ))
+                FROM tbl_rfq_product_vendors RFQ_P_V
+                LEFT JOIN tbl_users U ON RFQ_P_V.user_id = U.id
+                WHERE RFQ_P.product_id = RFQ_P_V.product_id 
+                  AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
+                  AND RFQ_P.variant = RFQ_P_V.variant
+            ),
+            'comment', RFQ_P.comment,
+            'datasheet', (RFQ_P.datasheet::TEXT),
+            'datasheet_file', (
+                SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
+            ),
+            'spec_file', (
+                SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
+            ),
+            'qap', (RFQ_P.qap::TEXT),
+            'qap_file', (
+                SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
+            ),
+            'user_selected_predefined_tds', (RFQ_P.datasheet = '1'),
+            'user_selected_predefined_qap', (RFQ_P.qap = '1')
+        )
+        FROM tbl_rfq_products RFQ_P
+        LEFT JOIN tbl_product T_P ON RFQ_P.product_id = T_P.id
+        WHERE RFQ.id = RFQ_P.rfq_id
+    ) AS rfq_products,
+
+    -- Terms and ownTerm in rfqObjData
+    json_build_object(
+        'terms', (
+            SELECT COALESCE(json_agg(json_build_object('id', RFQ_TM.terms_id)), '[]'::json)
+            FROM tbl_rfq_terms_map RFQ_TM
+            WHERE RFQ_TM.rfq_id = RFQ.id
+        ),
+        'ownTerm', RFQ.comment
+    ) AS rfq_obj_data
+
+    FROM 
+        tbl_rfq RFQ
+    WHERE 
+        RFQ.id = $1
+    ORDER BY 
+        RFQ.id DESC
+    LIMIT 1;`;
+
+    return new Promise(function (resolve, reject) {
+      db.query(q,[id])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  getNextVariant: async (rfq_id, product_id, user_id) => {
+      const query = `
+          SELECT COUNT(*) AS count
+          FROM tbl_rfq_product_vendors
+          WHERE rfq_id = $1 AND product_id = $2 AND user_id = $3
+      `;
+      const values = [rfq_id, product_id, user_id];
+
+      return new Promise(function(resolve, reject) {
+          db.query(query, values)
+              .then(function(result) {
+                  const count = parseInt(result[0].count, 10);
+                  resolve(count);
+              })
+              .catch(function(err) {
+                  const error = new Error(err);
+                  reject(error);
+              });
+      });
+  },
+
+
   getRfqById: async (id, user_id, user_type) => {
 
     //  query changed by mukul,
