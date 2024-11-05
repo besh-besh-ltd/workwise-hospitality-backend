@@ -570,18 +570,19 @@ deleteProductFilesByIds: (rfqProductIds) => {
     });
   },
 
-  getNextVariant: async (rfq_id, product_id, user_id) => {
+  getNextVariant: async (rfq_id, product_id) => {
       const query = `
           SELECT COUNT(*) AS count
-          FROM tbl_rfq_product_vendors
-          WHERE rfq_id = $1 AND product_id = $2 AND user_id = $3
+          FROM tbl_rfq_products
+          WHERE rfq_id = $1 AND product_id = $2
       `;
-      const values = [rfq_id, product_id, user_id];
+      const values = [rfq_id, product_id];
 
       return new Promise(function(resolve, reject) {
           db.query(query, values)
               .then(function(result) {
                   const count = parseInt(result[0].count, 10);
+                  console.log("variant count: ", count);
                   resolve(count);
               })
               .catch(function(err) {

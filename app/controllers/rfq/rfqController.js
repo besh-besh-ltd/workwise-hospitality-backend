@@ -1075,7 +1075,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       //     rfqModel.delete('tbl_rfq_products_specs', { rfq_id }),
       //     rfqModel.delete('tbl_rfq_terms_map', { rfq_id })
       // ]);
-      deleteRelatedRecords(rfq_id);
+      await deleteRelatedRecords(rfq_id);
   } else {
       // Create new draft RFQ
       rfqData.created_by = user_id;
@@ -1517,11 +1517,11 @@ const rfqController = {
         if (!product || !product.product_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
           return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
         }
-
+        const variant = await rfqModel.getNextVariant(rfq_id, product.product_id);
         const productData = {
             rfq_id,
             product_id: product.product_id, // Product ID from the payload
-            variant: 0,
+            variant: variant,
             comment: "",
             datasheet: "",
             spec_file: "",
@@ -1533,8 +1533,6 @@ const rfqController = {
         await rfqModel.insert('tbl_rfq_products', productData); // Insert product data
 
         const vendorPromises = product.vendors.map(async (vendor) => {
-          const variant = await rfqModel.getNextVariant(rfq_id, product.product_id, vendor.vendor_id);
-
             const vendorData = {
                 rfq_id,
                 product_id: product.product_id, // Same product ID for each vendor
