@@ -213,7 +213,8 @@ const insertProduct = async (
       datasheet_file:"",// this field we have to remove from database
       qap
     };
-    let spec_array = spec.map((item) => {
+    console.log("here 1", tbl_rfq_products_data)
+    let spec_array = spec?.map((item) => {
       item.rfq_id = created_rfq_id;
       item.product_id = product_id;
       item.variant = variant;
@@ -231,16 +232,18 @@ const insertProduct = async (
         return item;
       });
     }
-
+    console.log("here 2", vendor_array)
     const productResult = await rfqModel.insert(
       'tbl_rfq_products',
       tbl_rfq_products_data
     );
-    const spec_info = await rfqModel.insertArray(
+    console.log("here 3", productResult)
+    const spec_info = spec_array && await rfqModel.insertArray(
       spec_array,
       spec_keys,
       'tbl_rfq_products_specs'
     );
+    console.log("here 4", spec_info)
     var vendor_info = [];
     if (vendors.length > 0) {
       vendor_info = await rfqModel.insertArray(
@@ -249,7 +252,7 @@ const insertProduct = async (
         'tbl_rfq_product_vendors'
       );
     }
-
+    console.log("here 5", vendor_info)
     // Handle multiple datasheet files
     if (datasheet_file && datasheet_file.length > 0) {
       const fileDataArray = datasheet_file.map(url => ({
@@ -284,7 +287,7 @@ const insertProduct = async (
       }
     }
 
-
+console.log({ product_info: productResult[0], spec_info, vendor_info })
     return { product_info: productResult[0], spec_info, vendor_info };
   } catch (error) {
     console.error('Error inserting data:', error);
@@ -1002,6 +1005,7 @@ const shuffleArray = (array) => {
 const deleteRelatedRecords = async (rfq_id) => {
   try {
       // Delete other records except for tbl_rfq_product_files
+      console.log("delete is called...")
       await Promise.all([
           rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }),
           rfqModel.deleteWithReturnIds('tbl_rfq_product_vendors', { rfq_id }),
@@ -1038,7 +1042,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       project_id,
       term_and_condition_files
   } = reqBody;
-
+  console.log("products: ", products);
   // Check for an existing draft RFQ
   let rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: user_id });
   let rfq_id;
@@ -1075,7 +1079,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       //     rfqModel.delete('tbl_rfq_products_specs', { rfq_id }),
       //     rfqModel.delete('tbl_rfq_terms_map', { rfq_id })
       // ]);
-      deleteRelatedRecords(rfq_id);
+      await deleteRelatedRecords(rfq_id);
   } else {
       // Create new draft RFQ
       rfqData.created_by = user_id;
@@ -1406,7 +1410,7 @@ const rfqController = {
 
         const rfqItem = await rfqModel.getRfqDraftId(id);
 
-        console.log(rfqItem);
+        console.log("rfqItem: ", rfqItem);
 
         // Fetch terms, products, and vendors related to this RFQ
         // const allTerms = await rfqModel.findAll('tbl_terms', {}); // Assuming fetching all terms
@@ -1518,10 +1522,12 @@ const rfqController = {
           return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
         }
 
+        const variant = await rfqModel.getNextVariant(rfq_id, product.product_id);
+
         const productData = {
             rfq_id,
             product_id: product.product_id, // Product ID from the payload
-            variant: 0,
+            variant: variant,
             comment: "",
             datasheet: "",
             spec_file: "",
@@ -1533,7 +1539,7 @@ const rfqController = {
         await rfqModel.insert('tbl_rfq_products', productData); // Insert product data
 
         const vendorPromises = product.vendors.map(async (vendor) => {
-          const variant = await rfqModel.getNextVariant(rfq_id, product.product_id, vendor.vendor_id);
+          
 
             const vendorData = {
                 rfq_id,

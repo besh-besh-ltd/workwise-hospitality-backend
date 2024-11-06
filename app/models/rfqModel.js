@@ -38,6 +38,7 @@ const rfqModel = {
     });
   },
   insertArray: async (dataArray, keys, table_name) => {
+    console.log("here", dataArray, keys, table_name)
     const insertQuery =
       pgp.helpers.insert(dataArray, keys, table_name) + ' RETURNING *';
 
@@ -81,7 +82,7 @@ const rfqModel = {
     return new Promise((resolve, reject) => {
         db.query(idQuery, conditionValues)
             .then(async (idResult) => {
-                const ids = idResult.rows.map(row => row.id);
+                const ids = idResult.map(row => row.id);
                 return db.query(deleteQuery, conditionValues).then(() => resolve(ids));
             })
             .catch((error) => {
@@ -92,7 +93,7 @@ const rfqModel = {
 },
 
 // Separate function to delete from tbl_rfq_product_files based on rfq_product_id list
-deleteProductFilesByIds: (rfqProductIds) => {
+deleteProductFilesByIds: async (rfqProductIds) => {
     if (rfqProductIds.length === 0) return Promise.resolve(0); // If no IDs, return immediately
 
     const query = `
@@ -559,24 +560,27 @@ deleteProductFilesByIds: (rfqProductIds) => {
     LIMIT 1;`;
 
     return new Promise(function (resolve, reject) {
+      console.log("query: ", q, [id])
       db.query(q,[id])
         .then(function (data) {
+          console.log("query data: ", data);
           resolve(data);
         })
         .catch(function (err) {
           let error = new Error(err);
+          console.log("error query: ", err);
           reject(error);
         });
     });
   },
 
-  getNextVariant: async (rfq_id, product_id, user_id) => {
+  getNextVariant: async (rfq_id, product_id) => {
       const query = `
           SELECT COUNT(*) AS count
-          FROM tbl_rfq_product_vendors
-          WHERE rfq_id = $1 AND product_id = $2 AND user_id = $3
+          FROM tbl_rfq_products
+          WHERE rfq_id = $1 AND product_id = $2
       `;
-      const values = [rfq_id, product_id, user_id];
+      const values = [rfq_id, product_id];
 
       return new Promise(function(resolve, reject) {
           db.query(query, values)
@@ -1001,7 +1005,7 @@ LIMIT 1;`;
     ) AS "products"
 FROM tbl_rfq RFQ
 LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
-WHERE RFQ.created_by = ${user_id}
+WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 1
 AND (RFQ.project_id = $1 OR $1 IS NULL) 
 AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
 AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -1021,7 +1025,7 @@ LIMIT $5 OFFSET $4;`,
   },
   getBuyerRfqCount: async (user_id) => {
     return new Promise(function (resolve, reject) {
-      db.any(`select * from tbl_rfq where created_by = ${user_id}`)
+      db.any(`select * from tbl_rfq where created_by = ${user_id} AND is_published = 1`)
         .then(function (data) {
           resolve(data);
         })
