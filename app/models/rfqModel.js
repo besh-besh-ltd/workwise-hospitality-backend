@@ -586,6 +586,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           db.query(query, values)
               .then(function(result) {
                   const count = parseInt(result[0].count, 10);
+                  console.log("variant count: ", count);
                   resolve(count);
               })
               .catch(function(err) {
