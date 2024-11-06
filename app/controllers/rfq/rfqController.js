@@ -1004,8 +1004,6 @@ const shuffleArray = (array) => {
 
 const deleteRelatedRecords = async (rfq_id) => {
   try {
-      // Delete other records except for tbl_rfq_product_files
-      console.log("delete is called...")
       await Promise.all([
           rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }),
           rfqModel.deleteWithReturnIds('tbl_rfq_product_vendors', { rfq_id }),
@@ -1013,7 +1011,6 @@ const deleteRelatedRecords = async (rfq_id) => {
           rfqModel.deleteWithReturnIds('tbl_rfq_products_specs', { rfq_id })
       ]);
 
-      // Delete from tbl_rfq_products and retrieve rfq_product_ids
       const rfqProductIds = await rfqModel.deleteWithReturnIds('tbl_rfq_products', { rfq_id });
 
       // Delete from tbl_rfq_product_files based on retrieved rfq_product_ids
@@ -1021,7 +1018,7 @@ const deleteRelatedRecords = async (rfq_id) => {
           await rfqModel.deleteProductFilesByIds(rfqProductIds);
       }
   } catch (error) {
-      console.error("Error deleting related records:", error);
+      logError("Error deleting related records:", error);
       throw error;
   }
 };
@@ -1042,7 +1039,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       project_id,
       term_and_condition_files
   } = reqBody;
-  console.log("products: ", products);
+
   // Check for an existing draft RFQ
   let rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: user_id });
   let rfq_id;
@@ -1069,17 +1066,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
       // Update existing RFQ
       rfq_id = rfqList[0].id;
       await rfqModel.update('tbl_rfq', rfqData, rfq_id);
-      
-      // Delete related data (terms, files, products)
-      // await Promise.all([
-      //     rfqModel.delete('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }),
-      //     rfqModel.delete('tbl_rfq_product_files', { rfq_id }),
-      //     rfqModel.delete('tbl_rfq_product_vendors', { rfq_id }),
-      //     rfqModel.delete('tbl_rfq_products', { rfq_id }),
-      //     rfqModel.delete('tbl_rfq_products_specs', { rfq_id }),
-      //     rfqModel.delete('tbl_rfq_terms_map', { rfq_id })
-      // ]);
-      await deleteRelatedRecords(rfq_id);
       await deleteRelatedRecords(rfq_id);
   } else {
       // Create new draft RFQ
@@ -1091,13 +1077,11 @@ const saveRfqDraft = async (user_id, reqBody) => {
       rfq_id = response[0].id;
   }
 
-  // Insert terms if provided
   if (terms && terms.length > 0) {
       const rfqTerms = terms.map(term => ({ rfq_id, terms_id: term.id }));
       await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
   }
 
-  // Insert files if provided
   if (term_and_condition_files && term_and_condition_files.length > 0) {
       const rfqFiles = term_and_condition_files.map(url => ({
           rfq_id,
@@ -1107,7 +1091,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
       await rfqModel.insertArray(rfqFiles, ['rfq_id', 'file_type', 'file_url'], 'tbl_rfq_files');
   }
 
-  // Insert products if provided
   if (products && products.length > 0) {
       await Promise.all(products.map(product => insertProduct(product, rfq_id)));
   }
@@ -1151,7 +1134,7 @@ const rfqController = {
         // Updating existing Draft
 
         await saveRfqDraft(req.user.id, req.body);
-        console.log("body: ", req.body);
+
         const response = await rfqModel.update(
           'tbl_rfq',
           {is_published: 1},
@@ -1165,34 +1148,6 @@ const rfqController = {
             data: response[0]
           })
           .end();
-
-        // const tbl_rfq_update_data = {
-        //   comment,
-        //   company_name,
-        //   response_email,
-        //   contact_name,
-        //   contact_number,
-        //   bid_end_date,
-        //   location,
-        //   is_published: 1,
-        //   rfq_type,
-        //   updated_by: user_id,
-        //   project_id,
-        //   reverse_auction
-        // };
-        // const response = await rfqModel.update(
-        //   'tbl_rfq',
-        //   tbl_rfq_update_data,
-        //   rfq_id
-        // );
-
-        // res
-        //   .status(400)
-        //   .json({
-        //     status: 2,
-        //     data: response[0]
-        //   })
-        //   .end();
       } else {
         // Creating fresh RFQ
 
@@ -1299,86 +1254,6 @@ const rfqController = {
 
   saveDraft: async (req, res) => {
     try {
-      // const user_id = req.user.id;
-      // const {
-      //   comment,
-      //   company_name,
-      //   response_email,
-      //   contact_name,
-      //   contact_number,
-      //   bid_end_date,
-      //   location,
-      //   products,
-      //   terms,
-      //   rfq_type,
-      //   reverse_auction,
-      //   project_id,
-      //   term_and_condition_files
-      // } = req.body;
-  
-      // // Check for an existing draft RFQ
-      // let rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: req.user.id });
-      // let rfq_id;
-  
-      // const rfqData = {
-      //   comment,
-      //   company_name,
-      //   response_email,
-      //   contact_name,
-      //   contact_number,
-      //   bid_end_date,
-      //   location,
-      //   rfq_type,
-      //   reverse_auction,
-      //   is_published: 0, // Set as draft
-      //   updated_by: user_id,
-      // };
-  
-
-      // rfqData.project_id = project_id || -1;
-
-  
-      // if (rfqList.length > 0) {
-      //   // Update existing RFQ if found
-      //   rfq_id = rfqList[0].id;
-      //   await rfqModel.update('tbl_rfq', rfqData, rfq_id );
-  
-      //   // Delete related data (terms, files, products) to prepare for re-insertion
-      //   await rfqModel.delete('tbl_rfq_terms_map', { rfq_id });
-      //   await rfqModel.delete('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' });
-      //   await rfqModel.delete('tbl_rfq_products', { rfq_id });
-  
-      // } else {
-      //   // Create new draft RFQ
-      //   rfqData.created_by = user_id;
-      //   const nextRFQNumber = await getNextRfQNumber();
-      //   rfqData.rfq_no = nextRFQNumber;
-      //   const response = await rfqModel.insert('tbl_rfq', rfqData);
-      //   rfq_id = response[0].id;
-      //   console.log("response: ", response);
-      // }
-  
-      // // Insert terms if provided
-      // if (terms && terms.length > 0) {
-      //   const rfqTerms = terms.map(term => ({ rfq_id, terms_id: term.id }));
-      //   await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
-      // }
-  
-      // // Insert files if provided
-      // if (term_and_condition_files && term_and_condition_files.length > 0) {
-      //   const rfqFiles = term_and_condition_files.map(url => ({
-      //     rfq_id,
-      //     file_type: 'term_and_condition',
-      //     file_url: url
-      //   }));
-      //   await rfqModel.insertArray(rfqFiles, ['rfq_id', 'file_type', 'file_url'], 'tbl_rfq_files');
-      // }
-  
-      // // Insert products if provided
-      // if (products && products.length > 0) {
-      //   const productPromises = products.map(product => insertProduct(product, rfq_id));
-      //   await Promise.all(productPromises);
-      // }
   
       const response = await saveRfqDraft(req.user.id, req.body);
 
@@ -1397,10 +1272,7 @@ const rfqController = {
 
   getRFQDraftData: async (req, res) => {
     try {
-        // Fetch RFQ main data
         const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: req.user.id });
-
-      console.log("rfqList: ", rfqList)
 
         if (!rfqList.length) {
             return res.status(404).json({ status: 2, message: 'RFQ not found' });
@@ -1411,56 +1283,12 @@ const rfqController = {
 
         const rfqItem = await rfqModel.getRfqDraftId(id);
 
-        console.log("rfqItem: ", rfqItem);
-
-        // Fetch terms, products, and vendors related to this RFQ
-        // const allTerms = await rfqModel.findAll('tbl_terms', {}); // Assuming fetching all terms
-        // const rfqProducts = await rfqModel.findAll('tbl_rfq_products', { rfq_id });
-        // const rfqVendors = await rfqModel.findAll('tbl_rfq_vendors', { rfq_id });
-        // const termAndConditionFiles = await rfqModel.findAll('tbl_rfq_files', {
-        //     rfq_id,
-        //     file_type: 'term_and_condition'
-        // });
-        
-        // // Fetch terms associated with the RFQ
-        // const rfqTerms = await rfqModel.findAll('tbl_rfq_terms_map', { rfq_id });
-        
-        // // Optional: Fetch subscription data if applicable
-        // const swSubscription = req.user.subscription_plan_id || null;
-
-        // Construct initial state based on the data fetched for the specific RFQ
-        // const initialState = {
-        //     swSubscription,
-        //     allTerms,
-        //     rfqProducts,
-        //     rfqVendors,
-        //     rfqFormData: {
-        //         is_published: rfqData.is_published,
-        //         comment: rfqData.comment,
-        //         response_email: rfqData.response_email,
-        //         contact_name: rfqData.contact_name,
-        //         contact_number: rfqData.contact_number,
-        //         company_name: rfqData.company_name,
-        //         term_and_condition_files: termAndConditionFiles.map(file => file.file_url),
-        //         bid_end_date: rfqData.bid_end_date,
-        //         rfq_type: rfqData.rfq_type,
-        //         reverse_auction: rfqData.reverse_auction,
-        //         project_id: rfqData.project_id,
-        //         location: rfqData.location,
-        //     },
-        //     rfqObjData: {
-        //         terms: rfqTerms.map(term => term.terms_id),
-        //         ownTerm: "" // Assuming no custom terms initially; adjust if needed
-        //     }
-        // };
-
         res.status(200).json({
             status: 1,
             data: rfqItem.length > 0 ? rfqItem[0] : rfqItem
         });
     } catch (error) {
-        // logError("Error fetching RFQ creation data:", error);
-        console.error("Error fetching RFQ creation data:", error);
+        logError("Error fetching RFQ creation data:", error);
         res.status(500).json({
             status: 3,
             message: "An error occurred while fetching RFQ draft data"
@@ -1483,42 +1311,33 @@ const rfqController = {
         let rfq_id;
         let rfqData;
 
-        console.log("rfqList: ", rfqList)
-
         if (rfqList.length > 0) {
-            // If RFQ exists, use the first one
+
             rfqData = rfqList[0];
             rfq_id = rfqData.id;
         } else {
             // Create a new RFQ
             rfqData = {
-                // comment: req.body.comment,
-                company_name: user.organization_name || '', // Assuming these fields come from user info
+                company_name: user.organization_name || '',
                 response_email: user.email,
                 contact_name: user.name,
                 contact_number: user.number,
-                // bid_end_date: req.body.bid_end_date,
-                // location: req.body.location,
-                // rfq_type: req.body.rfq_type,
-                // reverse_auction: req.body.reverse_auction,
-                is_published: 0, // Set as draft
+                is_published: 0,
                 created_by: user_id,
                 updated_by: user_id,
-                status: 1, // Assuming a default status
-                timestamp: new Date(), // Current timestamp
+                status: 1,
+                timestamp: new Date(),
             };
 
             const nextRFQNumber = await getNextRfQNumber();
             rfqData.rfq_no = nextRFQNumber;
 
             const response = await rfqModel.insert('tbl_rfq', rfqData);
-            rfq_id = response[0].id; // Get the newly created RFQ ID
+            rfq_id = response[0].id;
         }
 
-        console.log("req.body: ", req.body);
-
-        // Step 4: Add products to the RFQ
-        const product = req.body; // Assuming products is an array in the request body
+        // Add products to the RFQ
+        const product = req.body;
         if (!product || !product.product_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
           return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
         }
@@ -1527,7 +1346,7 @@ const rfqController = {
 
         const productData = {
             rfq_id,
-            product_id: product.product_id, // Product ID from the payload
+            product_id: product.product_id,
             variant: variant,
             variant: variant,
             comment: "",
@@ -1538,17 +1357,16 @@ const rfqController = {
             datasheet_file: ""
         };
 
-        await rfqModel.insert('tbl_rfq_products', productData); // Insert product data
+        await rfqModel.insert('tbl_rfq_products', productData);
 
         const vendorPromises = product.vendors.map(async (vendor) => {
           const variant = await rfqModel.getNextVariant(rfq_id, product.product_id, vendor.vendor_id);
 
             const vendorData = {
                 rfq_id,
-                product_id: product.product_id, // Same product ID for each vendor
-                user_id: vendor.vendor_id, // Assuming each vendor has a user_id field
-                // id: null, // Assuming this is auto-generated by your database
-                variant: variant // Optional variant field for vendors
+                product_id: product.product_id,
+                user_id: vendor.vendor_id,
+                variant: variant
             };
             return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
         });
@@ -1562,8 +1380,7 @@ const rfqController = {
         });
 
     } catch (error) {
-        console.log("Error while creating or updating RFQ with products:", error);
-        // logError("Error while creating or updating RFQ with products:", error);
+        logError("Error while creating or updating RFQ with products:", error);
         res.status(500).json({
             status: 3,
             message: "An error occurred while processing your request"
