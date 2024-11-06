@@ -1291,16 +1291,49 @@ const ProductsController = {
   },
   approvedProductList: async (req, res, next) => {
     try {
-      let productList = await productModel.approvedProductList();
+      let page, limit, offset;
+      if (req.query.page && req.query.page > 0) {
+        page = req.query.page;
+        limit = req.query.limit || Config.globalAdminLimit;
+        offset = (page - 1) * limit;
+      } else {
+        limit = Config.globalAdminLimit;
+        offset = 0;
+      }
+
+      let productName = req.query?.productName;
+      let vendorApprove = req.query?.vendorApprove;
+      let vendorId = req.query?.vendorId;
+      let isFeatured = req.query?.isFeatured;
+      let filterProduct = {};
+      if (vendorApprove) {
+        filterProduct = await productModel.getApprovedByProduct(vendorApprove);
+      }
+
+      let productList = await productModel.getProductList(
+        limit,
+        offset,
+        vendorId,
+        productName,
+        filterProduct,
+        isFeatured
+      );
+      let productCount = await productModel.getProductCount(
+        vendorId,
+        productName,
+        filterProduct,
+        isFeatured
+      );
       res
         .status(200)
         .json({
           status: 1,
-          data: productList
+          data: productList,
+          total_count: productCount.length
         })
         .end();
-    } catch (err) {
-      logError(err);
+    } catch (error) {
+      logError(error);
       res
         .status(400)
         .json({
