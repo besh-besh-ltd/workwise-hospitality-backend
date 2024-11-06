@@ -122,6 +122,11 @@ const schemas = {
       .required()
       .regex(/^[0-9]*$/, 'Please send proper id')
   }),
+  new_spoc_params: Joi.object().keys({
+    id: Joi.string()
+      .required()
+      .regex(/^[0-9]*$/, 'Please send proper id')
+  }),
   approval: Joi.object().keys({
     status: Joi.string()
       .required()
@@ -158,10 +163,11 @@ const schemas = {
       .email({ tlds: { allow: false } }),  // Email validation only if non-empty
     spoc_mobile: Joi.string()
       .optional()
-      .allow(null, '')
+      .allow(null, '') // Allow null or empty strings
       .trim()
-      .regex(/^[0-9]*$/, 'numbers')  // Only validate if non-empty and only digits
-      .length(10)  // Ensure it's exactly 10 digits if non-empty
+      .regex(/^[0-9]*$/, 'numbers')  // Only digits if non-empty
+      .min(10)  // Minimum 10 digits if non-empty
+      .max(15)  // Maximum 15 digits if non-empty
   }),
 };
 

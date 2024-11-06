@@ -223,13 +223,49 @@ const vendorController = {
       if (vendor[0].id) {
         let html_variables = [{ name: name }];
 
-        sendMail({
-          from: Config.webmasterMail, // sender address
-          to: email, // list of receivers
-          subject: `Work wise | Registration`, // Subject line
-          // html: dynamic_html // plain text body
-          html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
-        });
+        
+        const spocList = await vendorModel.getSpocDetails(vendor[0]?.id)
+
+        // console.log(" vendor contoller 229 spoc console ", vendor[0].id, spocList)
+
+              
+      //   let mailRecipients = {
+      //     from: Config.webmasterMail,
+      //     subject: `Work Wise | Registration`,
+      //    html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
+      // };
+          let mailRecipients = {
+            from: Config.webmasterMail,
+            subject: `Work Wise | Registration`,
+            html: `
+                <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #333;">
+                    <p>Dear <strong>${name}</strong>,</p>
+                    <p>Your login credentials are as follows:</p>
+                    <div style="background-color: #f9f9f9; border: 1px solid #ddd; padding: 10px; margin-top: 10px;">
+                        <p><strong>User ID:</strong> ${email}</p>
+                        <p><strong>Password:</strong> ${password}</p>
+                    </div>
+                    <p>Thank you for registering with us!</p>
+                </div>
+            `
+        };
+  
+        if (spocList && spocList.length > 0) {
+          mailRecipients.to = spocList.map(spoc => spoc.email);
+          mailRecipients.cc = email;
+        } else {
+          mailRecipients.to = email;
+        }
+
+        sendMail(mailRecipients);
+
+        // sendMail({
+        //   from: Config.webmasterMail, // sender address
+        //   to: email, // list of receivers
+        //   subject: `Work wise | Registration`, // Subject line
+        //   // html: dynamic_html // plain text body
+        //   html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
+        // });
 
         let checkFreeSubscription =
           await subscriptionModel.checkFreeSubscription();
@@ -662,12 +698,32 @@ const vendorController = {
           html: findDynamicNotification[0].content // plain text body
         });
       } else {
-        sendMail({
-          from: Config.webmasterMail, // sender address
-          to: userDetail[0].email, // list of receivers
-          subject: `Work wise | Registration`, // Subject line
-          html: dynamic_html // plain text body
-        });
+
+        
+        const spocList = await vendorModel.getSpocDetails(vendorId)
+
+        // console.log(" vendor contoller 690 spoc console ", vendorId, spocList)
+
+              
+        let mailRecipients = {
+          from: Config.webmasterMail,
+          subject: `Work Wise | Registration`,
+          html: dynamic_html
+        };
+  
+        if (spocList && spocList.length > 0) {
+          mailRecipients.to = spocList.map(spoc => spoc.email);
+          mailRecipients.cc = userDetail[0].email;
+        } else {
+          mailRecipients.to = userDetail[0].email;
+        }
+
+        // sendMail({
+        //   from: Config.webmasterMail, // sender address
+        //   to: userDetail[0].email, // list of receivers
+        //   subject: `Work wise | Registration`, // Subject line
+        //   html: dynamic_html // plain text body
+        // });
       }
 
       res
@@ -828,6 +884,68 @@ const vendorController = {
         })
         .end();
     }
-  }
+  },
+  addSpoc: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+
+      const user_id = req.params.id;
+
+      const { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
+ 
+      const name = spoc_name ?? null;
+      const email = spoc_email ?? null;
+      const mobile = spoc_mobile ?? null;
+      const role = spoc_role ?? null;
+
+      if (!name && !email && !mobile && !role) {
+        err++;
+        errors.empty_fields = 'All fields are empty or missing.';
+      }
+
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+        return;
+      }
+
+      const spocExist = await userModel.check_exactly_same_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
+
+      if(spocExist<1){
+        const response = await userModel.add_user_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
+        res
+        .status(200)
+        .json({
+          status: 1,
+          message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to your spoc`
+        })
+        .end();
+      }else{
+        res
+        .status(200)
+        .json({
+          status: 1,
+          message: `spoc already exist`
+        })
+        .end();
+      }
+
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
 };
 export default vendorController;
