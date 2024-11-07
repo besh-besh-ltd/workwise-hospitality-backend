@@ -504,11 +504,19 @@ const ProductsController = {
         approved_name,
         master_id
       } = req.body;
-      categories = JSON.parse(categories);
-      variations = JSON.parse(variations);
-      if (approved_id) {
-        approved_id = JSON.parse(approved_id);
-      }
+      // categories = JSON.parse(categories);
+      // variations = JSON.parse(variations);
+        // ---------------- approved by ---------------
+        if (approved_id) {
+          // Check if it's a string, and parse only if necessary
+          if (typeof approved_id === 'string') {
+            approved_id = JSON.parse(approved_id); // Ensure it's parsed from a JSON string
+          }
+          // Ensure it's an array of numbers
+          else if (!Array.isArray(approved_id)) {
+            approved_id = [approved_id]; // If it's a single number, convert it to an array
+          }
+        }
       let vendorApproveId = 0;
       if (!approved_id && approved_name) {
         let findVendorApprove =
@@ -579,28 +587,35 @@ const ProductsController = {
       }
 
       // ---------------- categories ---------------
-      // console.log(categories);
-      for await (const categoryId of categories) {
-        let categoryObj = {
-          category_id: categoryId,
-          product_id: productId
-        };
-        // console.log(categoryObj);
+      if (categories) {
+        // Check if it's a string, and parse only if necessary
+        if (typeof categories === 'string') {
+          categories = JSON.parse(categories); // Ensure it's parsed from a JSON string
+        }
+        // Ensure it's an array of numbers
+        else if (!Array.isArray(categories)) {
+          categories = [categories]; // If it's a single number, convert it to an array
+        }
 
-        await productModel.createProductCategories(categoryObj);
-      }
+        for await (const categoryId of categories) {
+          let categoryObj = {
+            category_id: categoryId,
+            product_id: productId
+          };
+          await productModel.createProductCategories(categoryObj);
+        }
+      }  
 
-      // ---------------- variations ----------------
-      for await (const { attribute, attributeValue } of variations) {
-        // console.log(attribute, attributeValue);
-        let varientObj = {
-          product_id: productId,
-          variant_name: attribute,
-          variant_value: attributeValue
-        };
-        // console.log(categoryObj);
-
-        await productModel.createProductveriants(varientObj);
+       // ---------------- variations ----------------
+       if (variations && Array.isArray(variations)) {
+        for (const { attribute = "", attributeValue = "" } of variations) {
+          let variantObj = {
+            product_id: productId,
+            variant_name: attribute,
+            variant_value: attributeValue,
+          };
+          await productModel.createProductVariants(variantObj);
+        }
       }
 
       // ---------------- featured image ----------------
