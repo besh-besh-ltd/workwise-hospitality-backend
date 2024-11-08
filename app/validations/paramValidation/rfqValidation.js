@@ -104,4 +104,18 @@ export const rfqSchemas = {
     status: Joi.string().valid('Pending', 'Working', 'Complete').required(),
     comment: Joi.string().allow('').allow(null).optional()
   }),
+  sendMessage: Joi.object().keys({
+    rfq_id: Joi.number().required(), 
+    receiver_id: Joi.number().required(),
+    message_text: Joi.string().trim().required(),
+    files: Joi.array()
+      .items(
+        Joi.object({
+          name: Joi.string().optional().allow(null, ''),
+          url: Joi.string().uri().required()
+        })
+      )
+      .optional()
+      .allow(null)
+  })
 };

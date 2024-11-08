@@ -21,6 +21,67 @@ const rfqModel = {
         });
     });
   },
+
+  insertReturnId: async (table_name, data) => {
+    const keys = Object.keys(data);
+    const values = Object.values(data);
+    const d_keys = keys.join(', ');
+    const placeholders = values.map((_, index) => `$${index + 1}`).join(', ');
+    const query = `INSERT INTO ${table_name} (${d_keys})
+      VALUES (${placeholders})
+      RETURNING id;`;
+    return new Promise(function (resolve, reject) {
+      db.query(query, values)
+        .then(function (result) {
+          resolve(result);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  getVendorsForRfq: async (rfq_id) => {
+      const query = `
+          SELECT DISTINCT user_id 
+          FROM tbl_rfq_product_vendors 
+          WHERE rfq_id = $1
+      `;
+      return new Promise((resolve, reject) => {
+          db.query(query, [rfq_id])
+              .then(data => resolve(data))
+              .catch(err => reject(new Error(err)));
+      });
+  },
+  
+  getBuyerForRfq: async (rfq_id) => {
+      const query = `
+          SELECT created_by AS user_id 
+          FROM tbl_rfq 
+          WHERE id = $1
+      `;
+      return new Promise((resolve, reject) => {
+          db.query(query, [rfq_id])
+              .then(data => resolve(data))
+              .catch(err => reject(new Error(err)));
+      });
+  },
+
+  getRfqDetailsById: async (rfq_id) => {
+    const query = `
+      SELECT *
+      FROM tbl_rfq
+      WHERE id = $1
+    `;
+    return new Promise((resolve, reject) => {
+      db.query(query, [rfq_id])
+        .then(data => resolve(data[0]))
+        .catch(err => reject(new Error(`Error fetching RFQ details: ${err.message}`)));
+    });
+  },
+  
+
   getLastRfQNumber: async () => {
     const query = `SELECT rfq_no FROM tbl_rfq ORDER BY id DESC LIMIT 1`;
     return new Promise(function (resolve, reject) {
@@ -2187,6 +2248,69 @@ rfq_project_exist: async (project_id,user_id) => {
           let error = new Error(err);
           reject(error);
         });
+    });
+  },
+  
+  getQueryMessages: async (rfq_id, sender_id, receiver_id) => {
+    const query = `
+      SELECT m.id AS message_id, 
+            m.message_text, 
+            m.created_at, 
+            m.sender_id, 
+            m.sender_type,
+            m.receiver_id,
+            COALESCE(JSON_AGG(JSON_BUILD_OBJECT('file_name', f.file_name, 'file_url', f.file_url)) FILTER (WHERE f.file_url IS NOT NULL), '[]') AS files
+      FROM tbl_query_messages m
+      LEFT JOIN tbl_query_message_files f ON m.id = f.message_id
+      WHERE m.rfq_id = $1 AND
+            ((m.sender_id = $2 AND m.receiver_id = $3) OR (m.sender_id = $3 AND m.receiver_id = $2))
+      GROUP BY m.id, m.message_text, m.created_at, m.sender_id, m.sender_type
+      ORDER BY m.created_at;
+    `;
+  
+    const updateQuery = `
+        UPDATE tbl_query_messages
+        SET is_seen = TRUE
+        WHERE rfq_id = $1 AND receiver_id = $2 AND sender_id = $3 AND is_seen = FALSE;
+    `;
+
+    return new Promise((resolve, reject) => {
+        db.query(query, [rfq_id, sender_id, receiver_id])
+            .then(data => {
+                // Mark the received messages as seen
+                db.query(updateQuery, [rfq_id, sender_id, receiver_id])
+                    .then(() => resolve(data))
+                    .catch(err => reject(new Error(err)));
+            })
+            .catch(err => reject(new Error(err)));
+    });
+  },
+
+  getQueryMessageSummary: async (rfq_id, user_id, other_user_id) => {
+    const query = `
+        SELECT 
+            u.id AS user_id,
+            u.name AS user_name,
+            COUNT(CASE WHEN m.is_seen = FALSE THEN 1 END) AS unseen_count,
+            last_message.message_text AS last_message,
+            last_message.created_at AS last_message_timestamp
+        FROM tbl_users u
+        LEFT JOIN tbl_query_messages m ON u.id = m.sender_id
+        LEFT JOIN LATERAL (
+            SELECT message_text, created_at 
+            FROM tbl_query_messages 
+            WHERE rfq_id = $1 
+              AND ((sender_id = $2 AND receiver_id = $3) OR (sender_id = $3 AND receiver_id = $2))
+            ORDER BY created_at DESC
+            LIMIT 1
+        ) AS last_message ON TRUE
+        WHERE u.id = $3
+        GROUP BY u.id, u.name, last_message.message_text, last_message.created_at
+    `;
+    return new Promise((resolve, reject) => {
+        db.query(query, [rfq_id, user_id, other_user_id])
+            .then(data => resolve(data))
+            .catch(err => reject(new Error(err)));
     });
   },
   

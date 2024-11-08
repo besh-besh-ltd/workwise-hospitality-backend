@@ -164,5 +164,26 @@ RfqRoutes.post('/magic-search-rfq-create',
   rfqController.magicSearchRfqCreate
 );
 
+RfqRoutes.post(
+  '/send-query-message',
+  passportSignIn,
+  validateBody(rfqSchemas.sendMessage),
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.sendQueryMessage
+);
+
+RfqRoutes.post(
+  '/list-query-messages',
+  passportSignIn,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.listQueryMessages
+);
+
+RfqRoutes.post(
+  '/list-queries',
+  passportSignIn,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.listQueries
+);
 
 export default RfqRoutes;
