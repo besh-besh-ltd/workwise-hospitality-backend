@@ -98,6 +98,15 @@ async function expireDayNotification(date, days) {
 }
 
 try {
+
+  sendMail({
+    from: Config.webmasterMail, // sender address
+    to: "mukul@letsworkwise.com",
+    subject: `Work Wise | Subscription Expire`, // Subject line
+    // html: dynamicHTML // plain text body
+    html: " Hlo mukul corntab is working take rest but dont in peace :) try block is executed "
+  });
+
   let today = dateFormat(new Date(), 'yyyy-mm-dd');
   let query = `SELECT tus.* ,users.user_type,users.name,users.email,users.endpoint
     FROM tbl_user_subscriptions tus
@@ -208,5 +217,12 @@ try {
   const todayDate = startDate;
   expireDayNotification(todayDate.format('YYYY-MM-DD'), 'today');
 } catch (err) {
+  sendMail({
+    from: Config.webmasterMail, // sender address
+    to: "mukul@letsworkwise.com",
+    subject: `Work Wise | Subscription Expire`, // Subject line
+    // html: dynamicHTML // plain text body
+    html: " Hlo mukul corntab is working take rest but dont in peace :) catch block is executed "
+  });
   logError(err);
 }
