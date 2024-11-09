@@ -1350,10 +1350,9 @@ WHERE row_num_by_name_category = 1
     category_id,
     approved_by_id,
     state,
-    city
+    city,
+    vendor_name // Added vendor_name parameter
   ) => {
-    // query changes by mukul jatav30-08-2024,
-    // include city and state name in response, left join of tbl_location_states and tbl_location_cities
     let q = `
 SELECT * FROM (
     SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
@@ -1377,18 +1376,17 @@ SELECT * FROM (
     ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
     WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
       AND p.name = '${search_key}' AND tu.email IS NOT NULL
+      ${vendor_name != '' ? `AND (to_tsvector('english', tu.name) @@ plainto_tsquery('english', '${vendor_name}') OR similarity(tu.name, '${vendor_name}') > 0.1)` : ''}
       ${state != '' ? `AND tu.state = ${state}` : ``}
       ${city != '' ? `AND tu.city = ${city}` : ``}
       ${category_id != '' ? `AND c.id = ${category_id}` : ``}
       ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``}
-          AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))  
+      AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))  
 ) AS distinct_vendors
 ORDER BY is_linked_with_buyer DESC, RANDOM();
-    `;
+`;
 
-
-    console.log('QUERY======', q);
-
+  
     return new Promise(function (resolve, reject) {
       db.query(q)
         .then(function (data) {
