@@ -292,7 +292,7 @@ const schemas = {
         attributeValue: Joi.string().required()
       })
     ), */
-    variations: Joi.string().required(),
+    variations: Joi.string().required().allow('',null),
     approved_id: Joi.string().optional().allow('', null),
     approved_name: Joi.string().optional().allow('', null)
     /* approved_name: Joi.when('approved_id', {

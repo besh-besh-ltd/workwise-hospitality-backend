@@ -504,11 +504,19 @@ const ProductsController = {
         approved_name,
         master_id
       } = req.body;
-      categories = JSON.parse(categories);
-      variations = JSON.parse(variations);
-      if (approved_id) {
-        approved_id = JSON.parse(approved_id);
-      }
+      // categories = JSON.parse(categories);
+      // variations = JSON.parse(variations);
+        // ---------------- approved by ---------------
+        if (approved_id) {
+          // Check if it's a string, and parse only if necessary
+          if (typeof approved_id === 'string') {
+            approved_id = JSON.parse(approved_id); // Ensure it's parsed from a JSON string
+          }
+          // Ensure it's an array of numbers
+          else if (!Array.isArray(approved_id)) {
+            approved_id = [approved_id]; // If it's a single number, convert it to an array
+          }
+        }
       let vendorApproveId = 0;
       if (!approved_id && approved_name) {
         let findVendorApprove =
@@ -579,28 +587,35 @@ const ProductsController = {
       }
 
       // ---------------- categories ---------------
-      // console.log(categories);
-      for await (const categoryId of categories) {
-        let categoryObj = {
-          category_id: categoryId,
-          product_id: productId
-        };
-        // console.log(categoryObj);
+      if (categories) {
+        // Check if it's a string, and parse only if necessary
+        if (typeof categories === 'string') {
+          categories = JSON.parse(categories); // Ensure it's parsed from a JSON string
+        }
+        // Ensure it's an array of numbers
+        else if (!Array.isArray(categories)) {
+          categories = [categories]; // If it's a single number, convert it to an array
+        }
 
-        await productModel.createProductCategories(categoryObj);
-      }
+        for await (const categoryId of categories) {
+          let categoryObj = {
+            category_id: categoryId,
+            product_id: productId
+          };
+          await productModel.createProductCategories(categoryObj);
+        }
+      }  
 
-      // ---------------- variations ----------------
-      for await (const { attribute, attributeValue } of variations) {
-        // console.log(attribute, attributeValue);
-        let varientObj = {
-          product_id: productId,
-          variant_name: attribute,
-          variant_value: attributeValue
-        };
-        // console.log(categoryObj);
-
-        await productModel.createProductveriants(varientObj);
+       // ---------------- variations ----------------
+       if (variations && Array.isArray(variations)) {
+        for (const { attribute = "", attributeValue = "" } of variations) {
+          let variantObj = {
+            product_id: productId,
+            variant_name: attribute,
+            variant_value: attributeValue,
+          };
+          await productModel.createProductVariants(variantObj);
+        }
       }
 
       // ---------------- featured image ----------------
@@ -1291,16 +1306,49 @@ const ProductsController = {
   },
   approvedProductList: async (req, res, next) => {
     try {
-      let productList = await productModel.approvedProductList();
+      let page, limit, offset;
+      if (req.query.page && req.query.page > 0) {
+        page = req.query.page;
+        limit = req.query.limit || Config.globalAdminLimit;
+        offset = (page - 1) * limit;
+      } else {
+        limit = Config.globalAdminLimit;
+        offset = 0;
+      }
+
+      let productName = req.query?.productName;
+      let vendorApprove = req.query?.vendorApprove;
+      let vendorId = req.query?.vendorId;
+      let isFeatured = req.query?.isFeatured;
+      let filterProduct = {};
+      if (vendorApprove) {
+        filterProduct = await productModel.getApprovedByProduct(vendorApprove);
+      }
+
+      let productList = await productModel.getProductList(
+        limit,
+        offset,
+        vendorId,
+        productName,
+        filterProduct,
+        isFeatured
+      );
+      let productCount = await productModel.getProductCount(
+        vendorId,
+        productName,
+        filterProduct,
+        isFeatured
+      );
       res
         .status(200)
         .json({
           status: 1,
-          data: productList
+          data: productList,
+          total_count: productCount.length
         })
         .end();
-    } catch (err) {
-      logError(err);
+    } catch (error) {
+      logError(error);
       res
         .status(400)
         .json({

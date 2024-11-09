@@ -311,9 +311,9 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
   try {
     let organization_name = user.organization_name || user.name;
 
-   // Fetch user details of the vendor
+    // Fetch user details of the vendor
     const user_details = await userModel.user_profile_detail(vendor.user_id);
-    
+
     const spocList = await vendorModel.getSpocDetails(vendor.user_id)
 
     // console.log(" rfq contoller spoc console ", vendor.user_id, spocList)
@@ -518,24 +518,24 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
     </tr>
     </table>`;
 
-    const spocList = await vendorModel.getSpocDetails(id)
+  const spocList = await vendorModel.getSpocDetails(id)
 
-    // console.log(" rfq contoller 488 spoc console ", id, spocList)
+  // console.log(" rfq contoller 488 spoc console ", id, spocList)
 
-    let mailRecipients = {
-      from: Config.webmasterMail,
-      subject: `Work Wise | RFQ Creation Confirmation`,
-      html: dynamicHTML
-    };
+  let mailRecipients = {
+    from: Config.webmasterMail,
+    subject: `Work Wise | RFQ Creation Confirmation`,
+    html: dynamicHTML
+  };
 
-    if (spocList && spocList.length > 0) {
-      mailRecipients.to = spocList.map(spoc => spoc.email);
-      mailRecipients.cc = email;
-    } else {
-      mailRecipients.to = email;
-    }
+  if (spocList && spocList.length > 0) {
+    mailRecipients.to = spocList.map(spoc => spoc.email);
+    mailRecipients.cc = email;
+  } else {
+    mailRecipients.to = email;
+  }
 
-    sendMail(mailRecipients);
+  sendMail(mailRecipients);
 
   // sendMail({
   //   from: Config.webmasterMail, // sender address
@@ -598,17 +598,17 @@ const sendQuoteNotificationToVendor = async (req) => {
   //   html: dynamicHTML // plain text body
   // });
 
-  
+
   const spocList = await vendorModel.getSpocDetails(id)
 
   // console.log(" rfq contoller 569 spoc console  ", id, spocList)
-              
+
   let mailRecipients = {
     from: Config.webmasterMail,
-     subject:
-       req.body.is_regret && req.body.is_regret == 1
-         ? `Work Wise | Quotation Regreted`
-         : `Work Wise | Quotation Submitted`, // Subject line
+    subject:
+      req.body.is_regret && req.body.is_regret == 1
+        ? `Work Wise | Quotation Regreted`
+        : `Work Wise | Quotation Submitted`, // Subject line
     html: dynamicHTML
   };
 
@@ -623,8 +623,9 @@ const sendQuoteNotificationToVendor = async (req) => {
 
 };
 
-const sendReminderRFQMAIL = async (vendoritem, org_name) => {
+const sendReminderRFQMAIL = async (vendoritem, org_name,rfq_id) => {
   let user_details = await userModel.user_profile_detail(vendoritem.user_id);
+  const token = await rfqModel.getVendorRfqToken(vendoritem.user_id, rfq_id);
   if (user_details.length > 0) {
     let dynamicHTML = `
                   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
@@ -645,6 +646,14 @@ const sendReminderRFQMAIL = async (vendoritem, org_name) => {
                     <tr>
                       <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>You have received a reminder from ${org_name} to provide a quote for the RFQ.</td>                      
                     </tr>
+                     <tr>
+                      <td colspan="2" style="text-align: center; padding-bottom: 3px;">
+                        <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}
+                        style="font-size: 15px; color: blue; text-decoration: none;">
+                          click here
+                        </a>
+                      </td>
+                    </tr>
                       
 
                     <tr>
@@ -661,26 +670,26 @@ const sendReminderRFQMAIL = async (vendoritem, org_name) => {
                     </table>`;
 
 
-                    
-        const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
 
-        // console.log(" rfq contoller  632 spoc console ", user_details[0]?.id, spocList)
+    const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
 
-              
-        let mailRecipients = {
-          from: Config.webmasterMail,
-          subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
-          html: dynamicHTML
-        };
-  
-        if (spocList && spocList.length > 0) {
-          mailRecipients.to = spocList.map(spoc => spoc.email);
-          mailRecipients.cc = user_details[0].email;
-        } else {
-          mailRecipients.to = user_details[0].email;
-        }
-  
-        sendMail(mailRecipients);
+    // console.log(" rfq contoller  632 spoc console ", user_details[0]?.id, spocList)
+
+    
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
+      html: dynamicHTML
+    };
+
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map(spoc => spoc.email);
+      mailRecipients.cc = user_details[0].email;
+    } else {
+      mailRecipients.to = user_details[0].email;
+    }
+
+    sendMail(mailRecipients);
 
     // sendMail({
     //   from: Config.webmasterMail, // sender address
@@ -811,11 +820,11 @@ const sendQuoteNotificationEmail = async (req) => {
           </table>`;
       }
 
-      
+
       const spocList = await vendorModel.getSpocDetails(vendor?.id)
 
       // console.log(" rfq contoller 781 spoc console ", vendor?.id, spocList)
-              
+
       let mailRecipients = {
         from: Config.webmasterMail,
         subject: `Work Wise | New RFQ Alert`,
@@ -932,24 +941,24 @@ const sendWinningNotificaion = async (
         </tr>
         </table>`;
 
-        const spocList = await vendorModel.getSpocDetails(vendor_id)
+    const spocList = await vendorModel.getSpocDetails(vendor_id)
 
-        // console.log(" rfq contoller 901 spoc console ", vendor_id, spocList)
-                
-        let mailRecipients = {
-          from: Config.webmasterMail,
-          subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
-          html: dynamicHTML
-        };
-  
-        if (spocList && spocList.length > 0) {
-          mailRecipients.to = spocList.map(spoc => spoc.email);
+    // console.log(" rfq contoller 901 spoc console ", vendor_id, spocList)
+
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
+      html: dynamicHTML
+    };
+
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map(spoc => spoc.email);
           mailRecipients.cc =  winning_vendor_email;
-        } else {
+    } else {
           mailRecipients.to =  winning_vendor_email;
-        }
-  
-        sendMail(mailRecipients);
+    }
+
+    sendMail(mailRecipients);
 
     // sendMail({
     //   from: Config.webmasterMail, // sender address
@@ -1865,7 +1874,7 @@ const rfqController = {
           };
 
           // check quote is already exists or not
-// console.log("mukul 1870")
+          // console.log("mukul 1870")
           let alreadyExists = await rfqModel.checkIfExists(
             'tbl_quotes',
             `rfq_id=${rfq_id} AND created_by=${user.id} LIMIT 1`
@@ -2230,9 +2239,9 @@ const rfqController = {
         (vendor) => !createdByIds.has(vendor.user_id)
       );
       vendors = unmatchedVendors;
-
       let org_name = organization_name ? organization_name : name;
-      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item, org_name)))
+
+      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item, org_name, rfq_id)))
         .then(async () => {
           try {
             await rfqModel.updateRFQActivity(rfq_id, id, rfq_activity_id);
@@ -4314,7 +4323,7 @@ const rfqController = {
       // Insert new document_files for each product if exists
       const fileUpdates = await Promise.all(
         products.map(async (prodItem) => {
-          const  quote_item = await rfqModel.getQuoteItem(quoteId, prodItem);
+          const quote_item = await rfqModel.getQuoteItem(quoteId, prodItem);
           const file_links = prodItem.document_files;
 
           if (file_links && file_links.length > 0) {

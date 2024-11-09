@@ -1722,6 +1722,21 @@ WHERE created_by = $1 AND status = $2`,
 
     return token; // Return the successfully inserted token
   },
+  getVendorRfqToken: async (vendorId, rfqNumber) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT token FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id = $1 AND rfq_no = $2;`,
+        [vendorId, rfqNumber]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    })
+  },
   updateQuoteItemWithHistory: async (quoteId, product) => {
     return new Promise(async (resolve, reject) => {
       try {

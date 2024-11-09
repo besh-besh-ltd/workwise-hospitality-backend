@@ -882,63 +882,63 @@ const productController = {
               //   html: `Dear ${value['Vendor Name']}, Your login credential Userid: ${value['Vendor Email']} and password ${password}`
               // });
 
-              let checkFreeSubscription =
-                await subscriptionModel.checkFreeSubscription();
-              if (checkFreeSubscription.length > 0) {
-                const startDate = moment(); // Replace with the actual start date
+              // let checkFreeSubscription =
+              //   await subscriptionModel.checkFreeSubscription();
+              // if (checkFreeSubscription.length > 0) {
+              //   const startDate = moment(); // Replace with the actual start date
 
-                const billingCycleMonths = checkFreeSubscription[0].duration;
+              //   const billingCycleMonths = checkFreeSubscription[0].duration;
 
-                // Calculate the end date by adding the billing cycle and subtracting one day
-                const endDate = startDate
-                  .clone()
-                  .add(billingCycleMonths, 'months')
-                  .subtract(1, 'day');
-                const renewDate = startDate
-                  .clone()
-                  .add(billingCycleMonths, 'months');
+              //   // Calculate the end date by adding the billing cycle and subtracting one day
+              //   const endDate = startDate
+              //     .clone()
+              //     .add(billingCycleMonths, 'months')
+              //     .subtract(1, 'day');
+              //   const renewDate = startDate
+              //     .clone()
+              //     .add(billingCycleMonths, 'months');
 
 
-                let UserSubscriptionObj = {
-                  user_id: vendor[0].id,
-                  plan_id: checkFreeSubscription[0].id,
-                  status: 1, //By default payment done
-                  start_date: startDate.format('YYYY-MM-DD'),
-                  end_date: endDate.format('YYYY-MM-DD'),
-                  renew_date: renewDate.format('YYYY-MM-DD')
-                };
+              //   let UserSubscriptionObj = {
+              //     user_id: vendor[0].id,
+              //     plan_id: checkFreeSubscription[0].id,
+              //     status: 1, //By default payment done
+              //     start_date: startDate.format('YYYY-MM-DD'),
+              //     end_date: endDate.format('YYYY-MM-DD'),
+              //     renew_date: renewDate.format('YYYY-MM-DD')
+              //   };
 
-                let createUserSubscription =
-                  await subscriptionModel.createUserSubscription(
-                    UserSubscriptionObj
-                  );
+              //   let createUserSubscription =
+              //     await subscriptionModel.createUserSubscription(
+              //       UserSubscriptionObj
+              //     );
 
-                await subscriptionModel.updateUserSubscriptionId(
-                  checkFreeSubscription[0].id,
-                  vendor[0].id
-                );
-                let subscriptionMappingDetails =
-                  await subscriptionModel.getSubscriptionMappingDetails(
-                    checkFreeSubscription[0].id
-                  );
+              //   await subscriptionModel.updateUserSubscriptionId(
+              //     checkFreeSubscription[0].id,
+              //     vendor[0].id
+              //   );
+              //   let subscriptionMappingDetails =
+              //     await subscriptionModel.getSubscriptionMappingDetails(
+              //       checkFreeSubscription[0].id
+              //     );
 
-                for await (const {
-                  allocated_feature,
-                  feature_id
-                } of subscriptionMappingDetails) {
-                  let userSubscriptionFeatureObj = {
-                    user_subscriptions_id: createUserSubscription.id,
-                    feature_id: feature_id,
-                    plan_id: checkFreeSubscription[0].id,
-                    used_feature_count: 0,
-                    allocated_feature: allocated_feature,
-                    user_id: vendor[0].id
-                  };
-                  await subscriptionModel.createUserSubscriptionFeature(
-                    userSubscriptionFeatureObj
-                  );
-                }
-              }
+              //   for await (const {
+              //     allocated_feature,
+              //     feature_id
+              //   } of subscriptionMappingDetails) {
+              //     let userSubscriptionFeatureObj = {
+              //       user_subscriptions_id: createUserSubscription.id,
+              //       feature_id: feature_id,
+              //       plan_id: checkFreeSubscription[0].id,
+              //       used_feature_count: 0,
+              //       allocated_feature: allocated_feature,
+              //       user_id: vendor[0].id
+              //     };
+              //     await subscriptionModel.createUserSubscriptionFeature(
+              //       userSubscriptionFeatureObj
+              //     );
+              //   }
+              // }
             } else {
               vendor = await productModel.updateVendorDetail(vendorObj);
               companyObj.user_id = vendor[0].id;
