@@ -11,7 +11,6 @@ const rfqModel = {
       VALUES (${placeholders})
       RETURNING *;`;
 
-      console.log("query, values: ", query, values)
 
     return new Promise(function (resolve, reject) {
       db.query(query, values)
@@ -20,6 +19,7 @@ const rfqModel = {
         })
         .catch(function (err) {
           let error = new Error(err);
+          console.log(err)
           reject(error);
         });
     });
@@ -38,7 +38,6 @@ const rfqModel = {
     });
   },
   insertArray: async (dataArray, keys, table_name) => {
-    console.log("here", dataArray, keys, table_name)
     const insertQuery =
       pgp.helpers.insert(dataArray, keys, table_name) + ' RETURNING *';
 
@@ -464,99 +463,95 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     // `;
 
     const q = `SELECT 
-    -- Encapsulate RFQ fields in rfqFormData
-    json_build_object(
-        'is_published', RFQ.is_published,
-        'comment', RFQ.comment,
-        'response_email', RFQ.response_email,
-        'contact_name', RFQ.contact_name,
-        'contact_number', RFQ.contact_number,
-        'company_name', RFQ.company_name,
-        'bid_end_date', RFQ.bid_end_date,
-        'rfq_type', RFQ.rfq_type,
-        'reverse_auction', RFQ.reverse_auction,
-        'project_id', RFQ.project_id,
-        'location', RFQ.location,
-        
-        -- Term and condition files
-        'term_and_condition_files', (
-            SELECT COALESCE(json_agg(RF.file_url), '[]'::json)
-            FROM tbl_rfq_files RF
-            WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
-        )
-    ) AS rfq_form_data,
+      RFQ.id AS rfq_id,
+      RFQ.rfq_no,   
 
-    -- Products
-    ARRAY(
-        SELECT json_build_object(
-            'product_id', RFQ_P.product_id,
-            'predefined_tds_file', RFQ_P.datasheet_file,
-            'predefined_qap_file', RFQ_P.qap_file,
-            'name', T_P.name,
-            'variant', RFQ_P.variant,
-            'spec', (
-                SELECT json_agg(json_build_object(
-                    'title', RFQ_P_SPEC.title,
-                    'value', RFQ_P_SPEC.value
-                ))
-                FROM tbl_rfq_products_specs RFQ_P_SPEC
-                WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id 
-                  AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
-                  AND RFQ_P.variant = RFQ_P_SPEC.variant
-            ),
-            'vendors', (
-                SELECT json_agg(json_build_object(
-                    'user_id', RFQ_P_V.user_id,
-                    'name', U.name
-                ))
-                FROM tbl_rfq_product_vendors RFQ_P_V
-                LEFT JOIN tbl_users U ON RFQ_P_V.user_id = U.id
-                WHERE RFQ_P.product_id = RFQ_P_V.product_id 
-                  AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
-                  AND RFQ_P.variant = RFQ_P_V.variant
-            ),
-            'comment', RFQ_P.comment,
-            'datasheet', (RFQ_P.datasheet::TEXT),
-            'datasheet_file', (
-                SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
-            ),
-            'spec_file', (
-                SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
-            ),
-            'qap', (RFQ_P.qap::TEXT),
-            'qap_file', (
-                SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
-            ),
-            'user_selected_predefined_tds', (RFQ_P.datasheet = '1'),
-            'user_selected_predefined_qap', (RFQ_P.qap = '1')
-        )
-        FROM tbl_rfq_products RFQ_P
-        LEFT JOIN tbl_product T_P ON RFQ_P.product_id = T_P.id
-        WHERE RFQ.id = RFQ_P.rfq_id
-    ) AS rfq_products,
+      -- Encapsulate RFQ fields in rfqFormData
+      json_build_object(
+          'is_published', RFQ.is_published,
+          'comment', RFQ.comment,
+          'response_email', RFQ.response_email,
+          'contact_name', RFQ.contact_name,
+          'contact_number', RFQ.contact_number,
+          'company_name', RFQ.company_name,
+          'bid_end_date', RFQ.bid_end_date,
+          'rfq_type', RFQ.rfq_type,
+          'reverse_auction', RFQ.reverse_auction,
+          'project_id', RFQ.project_id,
+          'location', RFQ.location,
 
-    -- Terms and ownTerm in rfqObjData
-    json_build_object(
-        'terms', (
-            SELECT COALESCE(json_agg(json_build_object('id', RFQ_TM.terms_id)), '[]'::json)
-            FROM tbl_rfq_terms_map RFQ_TM
-            WHERE RFQ_TM.rfq_id = RFQ.id
-        ),
-        'ownTerm', RFQ.comment
-    ) AS rfq_obj_data
+          -- Selected Terms
+          'terms', (
+              SELECT COALESCE(json_agg(json_build_object('id', RFQ_TM.terms_id)), '[]'::json)
+              FROM tbl_rfq_terms_map RFQ_TM
+              WHERE RFQ_TM.rfq_id = RFQ.id
+          ),
+          
+          -- Term and condition files
+          'term_and_condition_files', (
+              SELECT COALESCE(json_agg(RF.file_url), '[]'::json)
+              FROM tbl_rfq_files RF
+              WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
+          )
+      ) AS rfq_form_data,
 
-    FROM 
-        tbl_rfq RFQ
-    WHERE 
-        RFQ.id = $1
-    ORDER BY 
-        RFQ.id DESC
+      -- Products
+      ARRAY(
+          SELECT json_build_object(
+              'product_id', RFQ_P.product_id,
+              'predefined_tds_file', RFQ_P.datasheet_file,
+              'predefined_qap_file', RFQ_P.qap_file,
+              'name', T_P.name,
+              'variant', RFQ_P.variant,
+              'spec', (
+                  SELECT json_agg(json_build_object(
+                      'title', RFQ_P_SPEC.title,
+                      'value', RFQ_P_SPEC.value
+                  ))
+                  FROM tbl_rfq_products_specs RFQ_P_SPEC
+                  WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id 
+                    AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
+                    AND RFQ_P.variant = RFQ_P_SPEC.variant
+              ),
+              'vendors', (
+                  SELECT json_agg(json_build_object(
+                      'user_id', RFQ_P_V.user_id,
+                      'name', U.name
+                  ))
+                  FROM tbl_rfq_product_vendors RFQ_P_V
+                  LEFT JOIN tbl_users U ON RFQ_P_V.user_id = U.id
+                  WHERE RFQ_P.product_id = RFQ_P_V.product_id 
+                    AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
+                    AND RFQ_P.variant = RFQ_P_V.variant
+              ),
+              'comment', RFQ_P.comment,
+              'datasheet', (RFQ_P.datasheet::TEXT),
+              'datasheet_file', (
+                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
+                  FROM tbl_rfq_product_files RPF
+                  WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
+              ),
+              'spec_file', (
+                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
+                  FROM tbl_rfq_product_files RPF
+                  WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
+              ),
+              'qap', (RFQ_P.qap::TEXT),
+              'qap_file', (
+                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
+                  FROM tbl_rfq_product_files RPF
+                  WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
+              ),
+              'user_selected_predefined_tds', (RFQ_P.datasheet = '1'),
+              'user_selected_predefined_qap', (RFQ_P.qap = '1')
+          )
+          FROM tbl_rfq_products RFQ_P
+          LEFT JOIN tbl_product T_P ON RFQ_P.product_id = T_P.id
+          WHERE RFQ.id = RFQ_P.rfq_id
+      ) AS rfq_products
+    FROM tbl_rfq RFQ
+    WHERE RFQ.id = $1
+    ORDER BY RFQ.id DESC
     LIMIT 1;`;
 
     return new Promise(function (resolve, reject) {
@@ -576,7 +571,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 
   getNextVariant: async (rfq_id, product_id) => {
       const query = `
-          SELECT COUNT(*) AS count
+          SELECT COALESCE(MAX(variant), -1) AS max_variant
           FROM tbl_rfq_products
           WHERE rfq_id = $1 AND product_id = $2
       `;
@@ -585,9 +580,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       return new Promise(function(resolve, reject) {
           db.query(query, values)
               .then(function(result) {
-                  const count = parseInt(result[0].count, 10);
-                  console.log("variant count: ", count);
-                  resolve(count);
+                  const max_variant = parseInt(result[0].max_variant);
+                  resolve(max_variant + 1);
               })
               .catch(function(err) {
                   const error = new Error(err);
@@ -1683,10 +1677,9 @@ WHERE row_num_by_name_category = 1
     category_id,
     approved_by_id,
     state,
-    city
+    city,
+    vendor_name // Added vendor_name parameter
   ) => {
-    // query changes by mukul jatav30-08-2024,
-    // include city and state name in response, left join of tbl_location_states and tbl_location_cities
     let q = `
 SELECT * FROM (
     SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
@@ -1710,18 +1703,17 @@ SELECT * FROM (
     ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
     WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
       AND p.name = '${search_key}' AND tu.email IS NOT NULL
+      ${vendor_name != '' ? `AND (to_tsvector('english', tu.name) @@ plainto_tsquery('english', '${vendor_name}') OR similarity(tu.name, '${vendor_name}') > 0.1)` : ''}
       ${state != '' ? `AND tu.state = ${state}` : ``}
       ${city != '' ? `AND tu.city = ${city}` : ``}
       ${category_id != '' ? `AND c.id = ${category_id}` : ``}
       ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``}
-          AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))  
+      AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))  
 ) AS distinct_vendors
 ORDER BY is_linked_with_buyer DESC, RANDOM();
-    `;
+`;
 
-
-    console.log('QUERY======', q);
-
+  
     return new Promise(function (resolve, reject) {
       db.query(q)
         .then(function (data) {
@@ -2054,6 +2046,21 @@ WHERE created_by = $1 AND status = $2`,
     }
 
     return token; // Return the successfully inserted token
+  },
+  getVendorRfqToken: async (vendorId, rfqNumber) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT token FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id = $1 AND rfq_no = $2;`,
+        [vendorId, rfqNumber]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    })
   },
   updateQuoteItemWithHistory: async (quoteId, product) => {
     return new Promise(async (resolve, reject) => {

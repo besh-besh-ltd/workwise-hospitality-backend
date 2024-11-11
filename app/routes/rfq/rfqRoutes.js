@@ -179,7 +179,9 @@ RfqRoutes.post('/rfq-list', passportSignIn, rfqController.rfqList);
 
 RfqRoutes.get('/save-state-cities', rfqController.saveStateCities);
 
-RfqRoutes.post('/magic-search-rfq-create',
+
+// to show the preview of the final data for the creation of the rfq
+RfqRoutes.post('/magic-search-rfq-preview',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
   acl([2]),
@@ -188,5 +190,14 @@ RfqRoutes.post('/magic-search-rfq-create',
   rfqController.magicSearchRfqCreate
 );
 
+// to create the rfq using magic search rfq feature
+RfqRoutes.post('/magic-search-rfq-create',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2]),
+  validateDbBody.rfq_project_exist,
+  validateBody(rfqSchemas.create),
+  rfqController.create  
+)
 
 export default RfqRoutes;

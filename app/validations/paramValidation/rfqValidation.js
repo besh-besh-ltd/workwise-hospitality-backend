@@ -9,7 +9,8 @@ const specItems = Joi.object({
   value: Joi.string().allow('').optional()
 });
 const termsItems = Joi.object({
-  id: Joi.number().required()
+  id: Joi.number().required(),
+  name: Joi.string().optional()
 });
 
 const productItems = Joi.object({
@@ -23,15 +24,27 @@ const productItems = Joi.object({
   qap_file: Joi.array().items(Joi.string()).optional(),
   qap: Joi.string().optional().allow(null).allow(''),
   vendors: Joi.array().items(vendorItems).allow(null).allow(''),
-  spec: Joi.array().items(specItems).required().min(4).max(4)
-  .custom((value, helpers) => {
-    const quantityItem = value.find(item => item.title === 'Quantity');
-    const unitItem = value.find(item => item.title === 'Unit');
-    if (!quantityItem || !unitItem || !quantityItem.value || !unitItem.value) {
-      return helpers.error('any.required');
-    }
-    return value;
-  }),
+  spec: Joi.array()
+    .items(specItems)
+    .required()
+    .min(4)
+    .max(4)
+    .custom((value, helpers) => {
+      const quantityItem = value.find(item => item.title === 'Quantity');
+      const unitItem = value.find(item => item.title === 'Unit');
+      if (!quantityItem || !unitItem || !quantityItem.value || !unitItem.value) {
+        // Pass product-specific information in the context
+        return helpers.error('spec.missingRequiredFields', {
+          productName: helpers.state.ancestors[0].name,
+          productId: helpers.state.ancestors[0].product_id,
+        });
+      }
+      return value;
+    })
+    .messages({
+      'spec.missingRequiredFields': 'Product "{#productName}" requires for "Quantity" and "Unit" in the spec.',
+      'any.required': 'The spec array is required and must include complete entries for "Size", "Spec", "Quantity", and "Unit".'
+    }),
   defaultSelectedVAB: Joi.string().optional().allow('').allow(null),
   predefined_tds_file: Joi.string().optional().allow('').allow(null),
   predefined_qap_file: Joi.string().optional().allow('').allow(null),

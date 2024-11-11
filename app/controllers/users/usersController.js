@@ -198,7 +198,9 @@ const UsersController = {
         //activate default subscription
         let checkFreeSubscription =
           await subscriptionModel.checkFreeSubscription();
-        if (checkFreeSubscription.length > 0) {
+          // added check for vendor
+          // if the user is vendor then it will not get into subscription check
+        if (checkFreeSubscription.length > 0 && register_as != '3') {
           const startDate = Moment(); // Replace with the actual start date
 
           const billingCycleMonths = checkFreeSubscription[0].duration;
@@ -2650,17 +2652,18 @@ const UsersController = {
   },
   addPrivateVendor: async (req, res, next) => {
 
-    // adding subscription check to add private vendor
-    if (!req.user.subscription_plan_id) {
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: 'You need to purchase subscription to add vendor'
-        })
-        .end();
-      return;
-    }
+    // No need to check subscription when buyer is adding its vendor or new vendor
+
+    // if (!req.user.subscription_plan_id) {
+    //   res
+    //     .status(400)
+    //     .json({
+    //       status: 3,
+    //       message: 'You need to purchase subscription to add vendor'
+    //     })
+    //     .end();
+    //   return;
+    // }
 
     try {
       const { vendorName, email, phone, productList, is_private } = req.body;
@@ -2718,17 +2721,18 @@ const UsersController = {
   buyerExcelUploadVendor: async (req, res, next) => {
     try {
 
-      // adding subscription check to add private vendor
-      if (!req.user.subscription_plan_id) {
-        res
-          .status(400)
-          .json({
-            status: 3,
-            message: 'You need to purchase subscription to add vendor'
-          })
-          .end();
-        return;
-      }
+      // No need to check subscription when buyer is adding its vendor or new vendor
+      
+      // if (!req.user.subscription_plan_id) {
+      //   res
+      //     .status(400)
+      //     .json({
+      //       status: 3,
+      //       message: 'You need to purchase subscription to add vendor'
+      //     })
+      //     .end();
+      //   return;
+      // }
 
 
       let file = req.file;
