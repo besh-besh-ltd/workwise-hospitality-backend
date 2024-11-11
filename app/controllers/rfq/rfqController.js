@@ -1206,6 +1206,29 @@ const rfqController = {
   //       .end();
   //   }
   // },
+  getRfqDetailsById: async (req, res) => {
+    try {
+      const { rfq_id } = req.body;
+      const result = await rfqModel.getRFQDetails(rfq_id);
+      res
+      .status(200)
+      .json({
+        status: 1,
+        data: result[0]
+      })
+      .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: error.message
+        })
+        .end();
+    }
+  },
+
   getTerms: async (req, res, next) => {
     try {
       const result = await rfqModel.getAllTerms();
@@ -2483,7 +2506,8 @@ const rfqController = {
     approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
     state = req.body?.state ? req.body?.state : '';
     city = req.body?.city ? req.body?.city : '';
-
+    let vendor_name = req.body.vendor_name;
+    
     // If user is not logged in
     if (!req.is_verified) {
       try {
@@ -2539,7 +2563,8 @@ const rfqController = {
             category_id,
             approved_by_id,
             state,
-            city
+            city,
+            vendor_name
           );
 
           let dummyOBJ = {
@@ -3962,7 +3987,7 @@ const rfqController = {
 
       // get all terms list
       const termList = await rfqModel.getAllTerms();
-      const transformedTermList = termList.map(term => ({ id: term.id }));
+      const transformedTermList = termList.map(term => ({ id: term.id, name: term.term_content }));
 
       // product error
       const products = [];
@@ -4056,6 +4081,7 @@ const rfqController = {
           ""
         );
 
+
         // if no vendor found for the product, push error in validation array
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
@@ -4066,7 +4092,7 @@ const rfqController = {
         }
 
         // transform vendor to required form
-        const transformedVendorResult = vendorResult.map(({ id }) => ({ user_id: id }));
+        const transformedVendorResult = vendorResult.map(({ id,name }) => ({ user_id: id,name:name}));
 
         // Initialize the variant to 0
         let variant = 0;
@@ -4090,10 +4116,10 @@ const rfqController = {
           comment: value["Comments"] || "",
           defaultSelectedVAB: "",
           datasheet: "0",
-          datasheet_file: "",
-          spec_file: "",
+          datasheet_file: [],
+          spec_file: [],
           qap: "0",
-          qap_file: "",
+          qap_file: [],
           user_selected_predefined_tds: false,
           user_selected_predefined_qap: false
         };
@@ -4117,30 +4143,12 @@ const rfqController = {
         bid_end_date: bid_end_date,
         company_name: company_name,
         products: products,
-        terms: transformedTermList
+        terms: transformedTermList,
+        project_id: project_id,
+        term_and_condition_files:[],
       };
 
-      // Step 2: Generate the next RFQ number
-      const nextRFQNumber = await getNextRfQNumber();
-
-      // Step 3: Insert the RFQ data into the database
-      const tbl_rfq_data = {
-        comment: finalObject.comment,
-        company_name: finalObject.company_name,
-        response_email: finalObject.response_email,
-        contact_name: finalObject.contact_name,
-        contact_number: finalObject.contact_number,
-        bid_end_date: finalObject.bid_end_date,
-        location: finalObject.location,
-        rfq_type: finalObject.rfq_type,
-        reverse_auction: finalObject.reverse_auction,
-        is_published: finalObject.is_published,
-        rfq_no: nextRFQNumber,
-        created_by: user.id,
-        updated_by: user.id,
-        project_id: project_id
-      };
-
+     
       // check if all row are failed in our validation
       if (validationErrors.length === jsonData.length) {
         return res
@@ -4154,73 +4162,104 @@ const rfqController = {
         // Exit early if every row has an error
       }
 
-      // insert basic rfq info in database
-      const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
-      var rfqtermsRsp = null;
+      res.status(200).json({
+        status:1,
+        data : finalObject,
+        validation_errors: validationErrors.length ? validationErrors : null
+      })
+      .end();
 
-      // if basic info successfully inserted in database
-      if (response.length > 0) {
-        const created_rfq_id = response[0].id;
+      // // here we are dividing the api into two different parts
+      
+      //  // Step 2: Generate the next RFQ number
+      //  const nextRFQNumber = await getNextRfQNumber();
 
-        // Step 4: Insert the terms into the RFQ terms mapping table
-        if (finalObject.terms.length > 0) {
-          var tbl_rfq_terms_map_array = [];
+      //  // Step 3: Insert the RFQ data into the database
+      //  const tbl_rfq_data = {
+      //    comment: finalObject.comment,
+      //    company_name: finalObject.company_name,
+      //    response_email: finalObject.response_email,
+      //    contact_name: finalObject.contact_name,
+      //    contact_number: finalObject.contact_number,
+      //    bid_end_date: finalObject.bid_end_date,
+      //    location: finalObject.location,
+      //    rfq_type: finalObject.rfq_type,
+      //    reverse_auction: finalObject.reverse_auction,
+      //    is_published: finalObject.is_published,
+      //    rfq_no: nextRFQNumber,
+      //    created_by: user.id,
+      //    updated_by: user.id,
+      //    project_id: project_id
+      //  };
 
-          finalObject.terms.map((item) => {
-            tbl_rfq_terms_map_array.push({
-              rfq_id: created_rfq_id,
-              terms_id: item.id
-            });
-          });
-          const tbl_rfq_terms_map_keys = ['rfq_id', 'terms_id'];
-          rfqtermsRsp = await rfqModel.insertArray(
-            tbl_rfq_terms_map_array,
-            tbl_rfq_terms_map_keys,
-            'tbl_rfq_terms_map'
-          );
-        }
 
-        // Step 5: Insert the products into the RFQ products table
-        Promise.all(finalObject.products.map((item) => insertProduct(item, created_rfq_id)))
-          .then(async (results) => {
-            response[0].otherDetails = results;
-            response[0].terms = rfqtermsRsp;
+      // // insert basic rfq info in database
+      // const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
+      // var rfqtermsRsp = null;
 
-            // Step 6: Send emails to vendors and buyer
-            req.body.products = products
-            await sendMailtoVendors(req, response[0].id);
-            await sendQuotationMailToBuyer(req, response[0].id);
+      // // if basic info successfully inserted in database
+      // if (response.length > 0) {
+      //   const created_rfq_id = response[0].id;
 
-            // Step 7: Send the final response back to the client
-            res
-              .status(200)
-              .json({
-                status: 1,
-                data: response[0],
-                validation_errors: validationErrors.length ? validationErrors : null
-              })
-              .end();
-          })
-          .catch((error) => {
-            console.error('Error inserting data:', error);
-            res
-              .status(500)
-              .json({
-                success: false,
-                message: 'Error inserting RFQ data',
-                error: error.message
-              })
-              .end();
-          });
-      } else {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            data: response
-          })
-          .end();
-      }
+      //   // Step 4: Insert the terms into the RFQ terms mapping table
+      //   if (finalObject.terms.length > 0) {
+      //     var tbl_rfq_terms_map_array = [];
+
+      //     finalObject.terms.map((item) => {
+      //       tbl_rfq_terms_map_array.push({
+      //         rfq_id: created_rfq_id,
+      //         terms_id: item.id
+      //       });
+      //     });
+      //     const tbl_rfq_terms_map_keys = ['rfq_id', 'terms_id'];
+      //     rfqtermsRsp = await rfqModel.insertArray(
+      //       tbl_rfq_terms_map_array,
+      //       tbl_rfq_terms_map_keys,
+      //       'tbl_rfq_terms_map'
+      //     );
+      //   }
+
+      //   // Step 5: Insert the products into the RFQ products table
+      //   Promise.all(finalObject.products.map((item) => insertProduct(item, created_rfq_id)))
+      //     .then(async (results) => {
+      //       response[0].otherDetails = results;
+      //       response[0].terms = rfqtermsRsp;
+
+      //       // Step 6: Send emails to vendors and buyer
+      //       req.body.products = products
+      //       await sendMailtoVendors(req, response[0].id);
+      //       await sendQuotationMailToBuyer(req, response[0].id);
+
+      //       // Step 7: Send the final response back to the client
+      //       res
+      //         .status(200)
+      //         .json({
+      //           status: 1,
+      //           data: response[0],
+      //           validation_errors: validationErrors.length ? validationErrors : null
+      //         })
+      //         .end();
+      //     })
+      //     .catch((error) => {
+      //       console.error('Error inserting data:', error);
+      //       res
+      //         .status(500)
+      //         .json({
+      //           success: false,
+      //           message: 'Error inserting RFQ data',
+      //           error: error.message
+      //         })
+      //         .end();
+      //     });
+      // } else {
+      //   res
+      //     .status(400)
+      //     .json({
+      //       status: 2,
+      //       data: response
+      //     })
+      //     .end();
+      // }
     } catch (error) {
       logError(error);
       res

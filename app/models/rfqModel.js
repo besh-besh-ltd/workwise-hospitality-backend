@@ -1153,6 +1153,23 @@ LIMIT $5 OFFSET $4;`,
         });
     });
   },
+  getRFQDetails: async (id) => {
+    return new Promise(function (resolve, reject) {
+      db.query(
+        `SELECT RFQ.*
+        FROM tbl_rfq RFQ
+        WHERE RFQ.id = $1;`,
+        [id]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   // function created by Imtiaj for getting RFQ activity 20/09/2024
   getRFQActivity: async (rfq_id, user_id) => {
     try {
@@ -1411,10 +1428,9 @@ WHERE row_num_by_name_category = 1
     category_id,
     approved_by_id,
     state,
-    city
+    city,
+    vendor_name // Added vendor_name parameter
   ) => {
-    // query changes by mukul jatav30-08-2024,
-    // include city and state name in response, left join of tbl_location_states and tbl_location_cities
     let q = `
 SELECT * FROM (
     SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
@@ -1438,18 +1454,17 @@ SELECT * FROM (
     ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
     WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
       AND p.name = '${search_key}' AND tu.email IS NOT NULL
+      ${vendor_name != '' ? `AND (to_tsvector('english', tu.name) @@ plainto_tsquery('english', '${vendor_name}') OR similarity(tu.name, '${vendor_name}') > 0.1)` : ''}
       ${state != '' ? `AND tu.state = ${state}` : ``}
       ${city != '' ? `AND tu.city = ${city}` : ``}
       ${category_id != '' ? `AND c.id = ${category_id}` : ``}
       ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``}
-          AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))  
+      AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))  
 ) AS distinct_vendors
 ORDER BY is_linked_with_buyer DESC, RANDOM();
-    `;
+`;
 
-
-    console.log('QUERY======', q);
-
+  
     return new Promise(function (resolve, reject) {
       db.query(q)
         .then(function (data) {
@@ -2306,6 +2321,7 @@ rfq_project_exist: async (project_id,user_id) => {
         ) AS last_message ON TRUE
         WHERE u.id = $3
         GROUP BY u.id, u.name, last_message.message_text, last_message.created_at
+        ORDER BY last_message.created_at DESC
     `;
     return new Promise((resolve, reject) => {
         db.query(query, [rfq_id, user_id, other_user_id])

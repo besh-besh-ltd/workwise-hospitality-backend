@@ -1,4 +1,11 @@
 import Joi from 'joi';
+import multer from 'multer';
+import path from 'path';
+import { v4 as uuidv4 } from 'uuid';
+import Config from '../../config/app.config.js';
+import userModel from '../../models/userModel.js';
+import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+
 
 const vendorItems = Joi.object({
   user_id: Joi.number().required(),
@@ -9,7 +16,8 @@ const specItems = Joi.object({
   value: Joi.string().allow('').optional()
 });
 const termsItems = Joi.object({
-  id: Joi.number().required()
+  id: Joi.number().required(),
+  name: Joi.string().optional()
 });
 
 const productItems = Joi.object({
@@ -50,6 +58,17 @@ const productItems = Joi.object({
   user_selected_predefined_tds: Joi.boolean().optional().allow('').allow(null),
   user_selected_predefined_qap: Joi.boolean().optional().allow('').allow(null)
 });
+
+let store_query_message_upload_file = multer.diskStorage({
+  destination: function (req, file, callback) {
+    callback(null, Config.upload.query_message_file)
+  },
+  filename: function (req, file, callback) {
+    var extention = path.extname(file.name);
+    var new_file_name = +new Date() + '-' + uuidv4() + extention;
+    callback(null, new_file_name);
+  }
+})
 
 export const rfqSchemas = {
   create: Joi.object().keys({
@@ -124,10 +143,40 @@ export const rfqSchemas = {
       .items(
         Joi.object({
           name: Joi.string().optional().allow(null, ''),
-          url: Joi.string().uri().required()
+          url: Joi.string().uri().required().optional().allow(null, ''),
         })
       )
       .optional()
       .allow(null)
-  })
+  }),
+  queryMessageFileUploadHandler: async (req, res, next) => {
+    try {
+      console.log(" mukul jatav ",req);
+      let upload = multer({
+        storage: store_query_message_upload_file,
+        limits: {
+          fileSize: 8000000, // 8MB
+        },
+      }).array("files", 10);
+      upload(req, res, async function (err) {
+        if (err) {
+          res.status(400).json({ status: 2, errors: { file: err } });
+          return;
+        }
+ 
+        // const uploadedFiles = req.files?.map((file) => ({
+        //   name: file.name,
+        //   url: `/uploads/query_message_files`, // Or wherever you store the files
+        // }));
+  
+        // Attach files to request for further processing
+        // req.files = uploadedFiles;
+  
+        next();
+      });
+    } catch (err) {
+      console.error("Server error:", err);
+      res.status(500).json({ status: 3, message: "server error" });
+    }
+  } 
 };
