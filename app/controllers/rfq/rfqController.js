@@ -2483,7 +2483,8 @@ const rfqController = {
     approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
     state = req.body?.state ? req.body?.state : '';
     city = req.body?.city ? req.body?.city : '';
-
+    let vendor_name = req.body.vendor_name;
+    
     // If user is not logged in
     if (!req.is_verified) {
       try {
@@ -2539,7 +2540,8 @@ const rfqController = {
             category_id,
             approved_by_id,
             state,
-            city
+            city,
+            vendor_name
           );
 
           let dummyOBJ = {
