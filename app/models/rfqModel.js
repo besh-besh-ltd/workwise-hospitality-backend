@@ -68,13 +68,10 @@ const rfqModel = {
     }
 
     const conditionString = conditionClauses.join(' AND ');
-    const query = `DELETE FROM ${table} WHERE ${conditionString} RETURING *`;
-
-    console.log(query, conditionValues);
+    const query = `DELETE FROM ${table} WHERE ${conditionString} RETURNING *`;
     
     try {
         const result = await db.query(query, conditionValues);
-        console.log("result: ", result);
         return result; // Number of rows deleted
     } catch (error) {
         console.error(`Error deleting from ${table}:`, error);

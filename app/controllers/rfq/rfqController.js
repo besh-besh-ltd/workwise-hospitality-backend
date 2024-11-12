@@ -1406,7 +1406,7 @@ const rfqController = {
         vendor_ids
     } = req.body;
 
-    if (!rfq_id || !product_id || !variant || !vendor_ids) {
+    if (!rfq_id || !product_id || !variant || !vendor_ids || vendor_ids.length == 0) {
         return res.status(400).json({ status : 3,  message: "Missing required fields." });
     }
 
@@ -1420,8 +1420,8 @@ const rfqController = {
 
         const result = await rfqModel.delete('tbl_rfq_product_vendors', conditions);
 
-        if (result.rowCount > 0) {
-            return res.status(200).json({ status : 1, message: "Vendor removed successfully.", deletedRows: result.rowCount });
+        if (result.length > 0) {
+            return res.status(200).json({ status : 1, message: "Vendor removed successfully.", deletedRows: result });
         } else {
             return res.status(404).json({ status : 3, message: "No matching record found to delete." });
         }
@@ -2344,16 +2344,7 @@ const rfqController = {
     try {
       let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id);
       rfQItem = processQuotCompare(rfQItem);
-      let rfqDATA = [];
-      if (rfQItem.length > 0) {
-        rfqDATA = rfQItem.map((item) => {
-          let base = item.all_vendors;
-          let data = item.quotations;
-          let quotes_unavailable_vendors = base.filter(
-            (baseitem) => !data.find((d) => d.created_by == baseitem.id)
-          );
-          item.quotes_unavailable_vendors = quotes_unavailable_vendors;
-      rfQItem = processQuotCompare(rfQItem);
+
       let rfqDATA = [];
       if (rfQItem.length > 0) {
         rfqDATA = rfQItem.map((item) => {

@@ -41,7 +41,7 @@ RfqRoutes.post(
   rfqController.createOrUpdateRfqDraftWithProductVendors
 );
 
-RfqRoutes.delete(
+RfqRoutes.post(
   '/remove-vendor-from-draft',
   passportSignIn,
   rfqController.removeVendorFromDraft
