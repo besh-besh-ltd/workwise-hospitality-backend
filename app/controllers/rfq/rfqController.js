@@ -4055,6 +4055,7 @@ const rfqController = {
           searchObj.category_id,
           searchObj.approved_by_id,
           "",
+          "",
           ""
         );
 
@@ -4069,7 +4070,7 @@ const rfqController = {
         }
 
         // transform vendor to required form
-        const transformedVendorResult = vendorResult.map(({ id,name }) => ({ user_id: id,name:name}));
+        const transformedVendorResult = vendorResult.map(({ id, vendor_name }) => ({ user_id: id, name: vendor_name}));
 
         // Initialize the variant to 0
         let variant = 0;
