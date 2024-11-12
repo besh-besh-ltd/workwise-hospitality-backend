@@ -1403,10 +1403,10 @@ const rfqController = {
         rfq_id,
         product_id,
         variant,
-        vendor_id
+        vendor_ids
     } = req.body;
 
-    if (!rfq_id || !product_id || !variant || !vendor_id) {
+    if (!rfq_id || !product_id || !variant || !vendor_ids) {
         return res.status(400).json({ status : 3,  message: "Missing required fields." });
     }
 
@@ -1414,7 +1414,7 @@ const rfqController = {
         const conditions = {
             rfq_id: rfq_id,
             product_id: product_id,
-            user_id: vendor_id,
+            user_ids: vendor_ids,
             variant: variant
         };
 
@@ -4279,6 +4279,7 @@ const rfqController = {
           search_key.product_name,
           searchObj.category_id,
           searchObj.approved_by_id,
+          "",
           "",
           ""
         );

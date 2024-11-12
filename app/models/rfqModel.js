@@ -53,11 +53,24 @@ const rfqModel = {
     });
   },
   delete: async (table, conditions) => {
-    const conditionKeys = Object.keys(conditions);
-    const conditionString = conditionKeys.map((key, index) => `${key} = $${index+1}`).join(' AND ');
-    const conditionValues = conditionKeys.map(key => conditions[key]);
+    const conditionClauses = [];
+    const conditionValues = [];
+    let index = 1;
 
+    for (const [key, value] of Object.entries(conditions)) {
+        if (key === 'user_ids') {
+            conditionClauses.push(`user_id IN (${value.map(() => `$${index++}`).join(', ')})`);
+            conditionValues.push(...value);
+        } else {
+            conditionClauses.push(`${key} = $${index++}`);
+            conditionValues.push(value);
+        }
+    }
+
+    const conditionString = conditionClauses.join(' AND ');
     const query = `DELETE FROM ${table} WHERE ${conditionString} RETURING *`;
+
+    console.log(query, conditionValues);
     
     try {
         const result = await db.query(query, conditionValues);
