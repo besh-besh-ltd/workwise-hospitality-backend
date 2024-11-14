@@ -1206,6 +1206,29 @@ const rfqController = {
   //       .end();
   //   }
   // },
+  getRfqDetailsById: async (req, res) => {
+    try {
+      const { rfq_id } = req.body;
+      const result = await rfqModel.getRFQDetails(rfq_id);
+      res
+      .status(200)
+      .json({
+        status: 1,
+        data: result[0]
+      })
+      .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: error.message
+        })
+        .end();
+    }
+  },
+
   getTerms: async (req, res, next) => {
     try {
       const result = await rfqModel.getAllTerms();
@@ -2118,35 +2141,35 @@ const rfqController = {
 
     try {
       let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id);
-      // rfQItem = processQuotCompare(rfQItem);
-      // let rfqDATA = [];
-      // if (rfQItem.length > 0) {
-      //   rfqDATA = rfQItem.map((item) => {
-      //     let base = item.all_vendors;
-      //     let data = item.quotations;
-      //     let quotes_unavailable_vendors = base.filter(
-      //       (baseitem) => !data.find((d) => d.created_by == baseitem.id)
-      //     );
-      //     item.quotes_unavailable_vendors = quotes_unavailable_vendors;
+      rfQItem = processQuotCompare(rfQItem);
+      let rfqDATA = [];
+      if (rfQItem.length > 0) {
+        rfqDATA = rfQItem.map((item) => {
+          let base = item.all_vendors;
+          let data = item.quotations;
+          let quotes_unavailable_vendors = base.filter(
+            (baseitem) => !data.find((d) => d.created_by == baseitem.id)
+          );
+          item.quotes_unavailable_vendors = quotes_unavailable_vendors;
 
-      //     if (quotes_unavailable_vendors.length > 0) {
-      //       quotes_unavailable_vendors.map((q_item) => {
-      //         item.quotations.push({
-      //           id: null,
-      //           timestamp: null,
-      //           status: 1,
-      //           created_by: q_item.id,
-      //           is_regret: null,
-      //           quote_details: [],
-      //           vendor_details: [q_item]
-      //         });
-      //       });
-      //     }
-      //     item.quotations.sort((a, b) => a.created_by - b.created_by);
+          if (quotes_unavailable_vendors.length > 0) {
+            quotes_unavailable_vendors.map((q_item) => {
+              item.quotations.push({
+                id: null,
+                timestamp: null,
+                status: 1,
+                created_by: q_item.id,
+                is_regret: null,
+                quote_details: [],
+                vendor_details: [q_item]
+              });
+            });
+          }
+          item.quotations.sort((a, b) => a.created_by - b.created_by);
 
-      //     return item;
-      //   });
-      // }
+          return item;
+        });
+      }
       res
         .status(200)
         .json({
@@ -2483,7 +2506,8 @@ const rfqController = {
     approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
     state = req.body?.state ? req.body?.state : '';
     city = req.body?.city ? req.body?.city : '';
-
+    let vendor_name = req.body.vendor_name;
+    
     // If user is not logged in
     if (!req.is_verified) {
       try {
@@ -2539,7 +2563,8 @@ const rfqController = {
             category_id,
             approved_by_id,
             state,
-            city
+            city,
+            vendor_name
           );
 
           let dummyOBJ = {
@@ -3962,7 +3987,7 @@ const rfqController = {
 
       // get all terms list
       const termList = await rfqModel.getAllTerms();
-      const transformedTermList = termList.map(term => ({ id: term.id }));
+      const transformedTermList = termList.map(term => ({ id: term.id, name: term.term_content }));
 
       // product error
       const products = [];
@@ -4053,8 +4078,10 @@ const rfqController = {
           searchObj.category_id,
           searchObj.approved_by_id,
           "",
+          "",
           ""
         );
+
 
         // if no vendor found for the product, push error in validation array
         if (!vendorResult || vendorResult.length === 0) {
@@ -4066,7 +4093,7 @@ const rfqController = {
         }
 
         // transform vendor to required form
-        const transformedVendorResult = vendorResult.map(({ id }) => ({ user_id: id }));
+        const transformedVendorResult = vendorResult.map(({ id, vendor_name }) => ({ user_id: id, name: vendor_name}));
 
         // Initialize the variant to 0
         let variant = 0;
@@ -4090,10 +4117,10 @@ const rfqController = {
           comment: value["Comments"] || "",
           defaultSelectedVAB: "",
           datasheet: "0",
-          datasheet_file: "",
-          spec_file: "",
+          datasheet_file: [],
+          spec_file: [],
           qap: "0",
-          qap_file: "",
+          qap_file: [],
           user_selected_predefined_tds: false,
           user_selected_predefined_qap: false
         };
@@ -4117,30 +4144,12 @@ const rfqController = {
         bid_end_date: bid_end_date,
         company_name: company_name,
         products: products,
-        terms: transformedTermList
+        terms: transformedTermList,
+        project_id: project_id,
+        term_and_condition_files:[],
       };
 
-      // Step 2: Generate the next RFQ number
-      const nextRFQNumber = await getNextRfQNumber();
-
-      // Step 3: Insert the RFQ data into the database
-      const tbl_rfq_data = {
-        comment: finalObject.comment,
-        company_name: finalObject.company_name,
-        response_email: finalObject.response_email,
-        contact_name: finalObject.contact_name,
-        contact_number: finalObject.contact_number,
-        bid_end_date: finalObject.bid_end_date,
-        location: finalObject.location,
-        rfq_type: finalObject.rfq_type,
-        reverse_auction: finalObject.reverse_auction,
-        is_published: finalObject.is_published,
-        rfq_no: nextRFQNumber,
-        created_by: user.id,
-        updated_by: user.id,
-        project_id: project_id
-      };
-
+     
       // check if all row are failed in our validation
       if (validationErrors.length === jsonData.length) {
         return res
@@ -4154,73 +4163,104 @@ const rfqController = {
         // Exit early if every row has an error
       }
 
-      // insert basic rfq info in database
-      const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
-      var rfqtermsRsp = null;
+      res.status(200).json({
+        status:1,
+        data : finalObject,
+        validation_errors: validationErrors.length ? validationErrors : null
+      })
+      .end();
 
-      // if basic info successfully inserted in database
-      if (response.length > 0) {
-        const created_rfq_id = response[0].id;
+      // // here we are dividing the api into two different parts
+      
+      //  // Step 2: Generate the next RFQ number
+      //  const nextRFQNumber = await getNextRfQNumber();
 
-        // Step 4: Insert the terms into the RFQ terms mapping table
-        if (finalObject.terms.length > 0) {
-          var tbl_rfq_terms_map_array = [];
+      //  // Step 3: Insert the RFQ data into the database
+      //  const tbl_rfq_data = {
+      //    comment: finalObject.comment,
+      //    company_name: finalObject.company_name,
+      //    response_email: finalObject.response_email,
+      //    contact_name: finalObject.contact_name,
+      //    contact_number: finalObject.contact_number,
+      //    bid_end_date: finalObject.bid_end_date,
+      //    location: finalObject.location,
+      //    rfq_type: finalObject.rfq_type,
+      //    reverse_auction: finalObject.reverse_auction,
+      //    is_published: finalObject.is_published,
+      //    rfq_no: nextRFQNumber,
+      //    created_by: user.id,
+      //    updated_by: user.id,
+      //    project_id: project_id
+      //  };
 
-          finalObject.terms.map((item) => {
-            tbl_rfq_terms_map_array.push({
-              rfq_id: created_rfq_id,
-              terms_id: item.id
-            });
-          });
-          const tbl_rfq_terms_map_keys = ['rfq_id', 'terms_id'];
-          rfqtermsRsp = await rfqModel.insertArray(
-            tbl_rfq_terms_map_array,
-            tbl_rfq_terms_map_keys,
-            'tbl_rfq_terms_map'
-          );
-        }
 
-        // Step 5: Insert the products into the RFQ products table
-        Promise.all(finalObject.products.map((item) => insertProduct(item, created_rfq_id)))
-          .then(async (results) => {
-            response[0].otherDetails = results;
-            response[0].terms = rfqtermsRsp;
+      // // insert basic rfq info in database
+      // const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
+      // var rfqtermsRsp = null;
 
-            // Step 6: Send emails to vendors and buyer
-            req.body.products = products
-            await sendMailtoVendors(req, response[0].id);
-            await sendQuotationMailToBuyer(req, response[0].id);
+      // // if basic info successfully inserted in database
+      // if (response.length > 0) {
+      //   const created_rfq_id = response[0].id;
 
-            // Step 7: Send the final response back to the client
-            res
-              .status(200)
-              .json({
-                status: 1,
-                data: response[0],
-                validation_errors: validationErrors.length ? validationErrors : null
-              })
-              .end();
-          })
-          .catch((error) => {
-            console.error('Error inserting data:', error);
-            res
-              .status(500)
-              .json({
-                success: false,
-                message: 'Error inserting RFQ data',
-                error: error.message
-              })
-              .end();
-          });
-      } else {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            data: response
-          })
-          .end();
-      }
+      //   // Step 4: Insert the terms into the RFQ terms mapping table
+      //   if (finalObject.terms.length > 0) {
+      //     var tbl_rfq_terms_map_array = [];
+
+      //     finalObject.terms.map((item) => {
+      //       tbl_rfq_terms_map_array.push({
+      //         rfq_id: created_rfq_id,
+      //         terms_id: item.id
+      //       });
+      //     });
+      //     const tbl_rfq_terms_map_keys = ['rfq_id', 'terms_id'];
+      //     rfqtermsRsp = await rfqModel.insertArray(
+      //       tbl_rfq_terms_map_array,
+      //       tbl_rfq_terms_map_keys,
+      //       'tbl_rfq_terms_map'
+      //     );
+      //   }
+
+      //   // Step 5: Insert the products into the RFQ products table
+      //   Promise.all(finalObject.products.map((item) => insertProduct(item, created_rfq_id)))
+      //     .then(async (results) => {
+      //       response[0].otherDetails = results;
+      //       response[0].terms = rfqtermsRsp;
+
+      //       // Step 6: Send emails to vendors and buyer
+      //       req.body.products = products
+      //       await sendMailtoVendors(req, response[0].id);
+      //       await sendQuotationMailToBuyer(req, response[0].id);
+
+      //       // Step 7: Send the final response back to the client
+      //       res
+      //         .status(200)
+      //         .json({
+      //           status: 1,
+      //           data: response[0],
+      //           validation_errors: validationErrors.length ? validationErrors : null
+      //         })
+      //         .end();
+      //     })
+      //     .catch((error) => {
+      //       console.error('Error inserting data:', error);
+      //       res
+      //         .status(500)
+      //         .json({
+      //           success: false,
+      //           message: 'Error inserting RFQ data',
+      //           error: error.message
+      //         })
+      //         .end();
+      //     });
+      // } else {
+      //   res
+      //     .status(400)
+      //     .json({
+      //       status: 2,
+      //       data: response
+      //     })
+      //     .end();
+      // }
     } catch (error) {
       logError(error);
       res
@@ -4402,6 +4442,197 @@ const rfqController = {
           error: error.message,
         });
     }
+},
+
+sendQueryMessage: async (req, res) => {
+  const { rfq_id, receiver_id, message_text } = req.body;
+  const files = req.files;
+  const sender_id = req.user.id;
+  const sender_type = req.user.user_type;
+
+  try {
+    const data = {
+      rfq_id,
+      sender_id,
+      receiver_id,
+      sender_type,
+      message_text
+    };
+
+    const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+    if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
+
+    const rfqNumber = rfqDetails.rfq_no;
+
+    const result = await rfqModel.insertReturnId('tbl_query_messages', data);
+    const message_id = result[0].id;
+
+    const filesData = files.map(file => ({
+      message_id: message_id,
+      file_name: file.name,
+      file_url: file.url
+    }));
+
+    if (filesData.length) await rfqModel.insertArray(filesData, ['message_id', 'file_name', 'file_url'], 'tbl_query_message_files');
+
+    const sender_details = await userModel.user_profile_detail(sender_id);
+    const senderDetails = sender_details[0];
+
+    const receiver_details = await userModel.user_profile_detail(receiver_id);
+    if (receiver_details.length > 0) {
+      const receiverDetails = receiver_details[0];
+      const spocList = await vendorModel.getSpocDetails(receiver_id);
+      const dynamicHTML = `
+      <table width='600' border='0' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #B6B6B6; background-color:#FFFFFF; margin-top:15px; margin-bottom:10px; font-family:Arial, sans-serif; color:#414141;'>
+        <tr>
+          <td colspan="2" align='center' style='background:#203367; padding:20px; color:#FFFFFF; font-size:18px; font-weight:bold;'>
+            You have a new message from ${senderDetails.name}
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2" align='left' style='padding:20px; font-size:14px; line-height:1.6;'>
+            <strong>Hello ${receiverDetails.name},</strong><br><br>
+            You have received a new message regarding the RFQ #${rfqNumber}:<br>
+            <blockquote style='border-left:3px solid #203367; margin:10px 0; padding-left:15px; color:#333333;'>${message_text}</blockquote>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2" align='center' style='background:#F8F8F8; padding:15px; font-size:12px; color:#333333;'>
+            <p>© WorkWise. All Rights Reserved.</p>
+          </td>
+        </tr>
+      </table>
+    `;
+    
+    const mailRecipients = {
+      from: Config.webmasterMail,
+      subject: `WorkWise | New Message Notification | RFQ #${rfqNumber}`,
+      html: dynamicHTML
+    };
+    
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map(spoc => spoc.email);
+      mailRecipients.cc = receiverDetails.email;
+    } else {
+      mailRecipients.to = receiverDetails.email;
+    }
+    mailRecipients.bcc = "gyan@letsworkwise.com";
+    
+    sendMail(mailRecipients);
+    
+    const notificationData = {
+      type: 'New Message',
+      title: 'New RFQ Message Received',
+      message: `You have received a new message from ${senderDetails.name}.`,
+      additional_data: { user_type: receiverDetails.user_type }
+    };
+    const payload = {
+      title: `Hello ${receiverDetails.name}`,
+      body: 'You have a new message regarding an RFQ.'
+    };
+    const ss = JSON.parse(receiverDetails.endpoint);
+    sendNotification(receiver_id, '', notificationData, payload, ss);
+    
+    }
+
+    res
+      .status(200)
+      .json({
+        status: 1,
+        data: {
+          message: 'Message sent successfully'
+        }
+      })
+      .end();
+  } catch (error) {
+    logError(error);
+    res
+      .status(500)
+      .json({
+        success: false,
+        message: 'Error in sending message',
+        error: error.message,
+      });
   }
+},
+
+listQueryMessages: async (req, res) => {
+  const { rfq_id, receiver_id } = req.body;
+  const sender_id = req.user.id;
+
+  try {
+      const messages = await rfqModel.getQueryMessages(rfq_id, sender_id, receiver_id);
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: messages
+        })
+        .end();
+  } catch (error) {
+      logError(error);
+      res
+        .status(500)
+        .json({
+          success: false,
+          message: 'Error in listing messages for vendor',
+          error: error.message,
+        });
+  }
+},
+
+listQueries: async (req, res) => {
+  const { rfq_id, user_name } = req.body;
+  const user_id = req.user.id;
+  const user_type = req.user.user_type;
+
+  try {
+      let users;
+      if (user_type === 2) {
+          const vendorResult = await rfqModel.getVendorsForRfq(rfq_id, user_name);
+          users = vendorResult.map(row => row.user_id);
+      } else if (user_type === 3) {
+          const buyerResult = await rfqModel.getBuyerForRfq(rfq_id);
+          users = buyerResult.length ? [buyerResult[0].user_id] : [];
+      } else {
+          return res.status(400).json({
+              success: false,
+              message: 'Invalid user type'
+          });
+      }
+
+      const summaries = await Promise.all(users.map(async (other_user_id) => {
+          const summaryResult = await rfqModel.getQueryMessageSummary(rfq_id, user_id, other_user_id);
+          return {
+              user_id: other_user_id,
+              user_name: summaryResult[0]?.user_name || '',
+              unseen_count: summaryResult[0]?.unseen_count || 0,
+              last_message: summaryResult[0]?.last_message || '',
+              last_message_timestamp: summaryResult[0]?.last_message_timestamp || null
+          };
+      }));
+
+    summaries.sort((a, b) => {
+        if (a.last_message_timestamp === null && b.last_message_timestamp === null) return 0;
+        if (a.last_message_timestamp === null) return 1;
+        if (b.last_message_timestamp === null) return -1;
+        return new Date(b.last_message_timestamp) - new Date(a.last_message_timestamp);
+    });
+
+      res.status(200).json({
+          status: 1,
+          data: summaries
+      }).end();
+
+  } catch (error) {
+      logError(error);
+      res.status(500).json({
+          success: false,
+          message: 'Error in listing queries for RFQ',
+          error: error.message
+      });
+  }
+},
+
 };
 export default rfqController;

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import rfqController from '../../controllers/rfq/rfqController.js';
 import noLogin from '../../middleware/noLogin.js';
-import { validateBody,validateParam } from '../../validations/paramValidation/userValidation.js';
+import { validateBody, validateParam } from '../../validations/paramValidation/userValidation.js';
 import { validateDbBody } from '../../validations/dbValidation/userDbValidation.js';
 import passport from '../../middleware/passport.js';
 import { rfqSchemas } from '../../validations/paramValidation/rfqValidation.js';
@@ -37,6 +37,13 @@ RfqRoutes.put(
 //   //validateDbBody.user_id_profileexists,
 //   rfqController.listAll
 // );
+
+RfqRoutes.post(
+  '/get-details',
+  passportSignIn,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.getRfqDetailsById
+);
 
 RfqRoutes.get(
   '/getRfqById/:id',
@@ -155,7 +162,9 @@ RfqRoutes.post('/rfq-list', passportSignIn, rfqController.rfqList);
 
 RfqRoutes.get('/save-state-cities', rfqController.saveStateCities);
 
-RfqRoutes.post('/magic-search-rfq-create',
+
+// to show the preview of the final data for the creation of the rfq
+RfqRoutes.post('/magic-search-rfq-preview',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
   acl([2]),
@@ -164,5 +173,37 @@ RfqRoutes.post('/magic-search-rfq-create',
   rfqController.magicSearchRfqCreate
 );
 
+RfqRoutes.post(
+  '/send-query-message',
+  passportSignIn,
+  rfqSchemas.queryMessageFileUploadHandler, 
+  validateDbBody.rfq_access_check_req_body,
+  validateBody(rfqSchemas.sendMessage),
+  rfqController.sendQueryMessage
+);
+
+RfqRoutes.post(
+  '/list-query-messages',
+  passportSignIn,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.listQueryMessages
+);
+
+RfqRoutes.post(
+  '/list-queries',
+  passportSignIn,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.listQueries
+);
+
+// to create the rfq using magic search rfq feature
+RfqRoutes.post('/magic-search-rfq-create',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2]),
+  validateDbBody.rfq_project_exist,
+  validateBody(rfqSchemas.create),
+  rfqController.create  
+)
 
 export default RfqRoutes;
