@@ -4445,7 +4445,8 @@ const rfqController = {
 },
 
 sendQueryMessage: async (req, res) => {
-  const { rfq_id, receiver_id, message_text, files = [] } = req.body;
+  const { rfq_id, receiver_id, message_text } = req.body;
+  const files = req.files;
   const sender_id = req.user.id;
   const sender_type = req.user.user_type;
 
@@ -4471,7 +4472,8 @@ sendQueryMessage: async (req, res) => {
       file_name: file.name,
       file_url: file.url
     }));
-    if (files.length) await rfqModel.insertArray(filesData, ['message_id', 'file_name', 'file_url'], 'tbl_query_message_files');
+
+    if (filesData.length) await rfqModel.insertArray(filesData, ['message_id', 'file_name', 'file_url'], 'tbl_query_message_files');
 
     const sender_details = await userModel.user_profile_detail(sender_id);
     const senderDetails = sender_details[0];
@@ -4536,7 +4538,7 @@ sendQueryMessage: async (req, res) => {
     res
       .status(200)
       .json({
-        status: 2,
+        status: 1,
         data: {
           message: 'Message sent successfully'
         }
@@ -4563,7 +4565,7 @@ listQueryMessages: async (req, res) => {
       res
         .status(200)
         .json({
-          status: 2,
+          status: 1,
           data: messages
         })
         .end();
@@ -4580,14 +4582,14 @@ listQueryMessages: async (req, res) => {
 },
 
 listQueries: async (req, res) => {
-  const { rfq_id } = req.body;
+  const { rfq_id, user_name } = req.body;
   const user_id = req.user.id;
   const user_type = req.user.user_type;
 
   try {
       let users;
       if (user_type === 2) {
-          const vendorResult = await rfqModel.getVendorsForRfq(rfq_id);
+          const vendorResult = await rfqModel.getVendorsForRfq(rfq_id, user_name);
           users = vendorResult.map(row => row.user_id);
       } else if (user_type === 3) {
           const buyerResult = await rfqModel.getBuyerForRfq(rfq_id);
@@ -4610,8 +4612,15 @@ listQueries: async (req, res) => {
           };
       }));
 
+    summaries.sort((a, b) => {
+        if (a.last_message_timestamp === null && b.last_message_timestamp === null) return 0;
+        if (a.last_message_timestamp === null) return 1;
+        if (b.last_message_timestamp === null) return -1;
+        return new Date(b.last_message_timestamp) - new Date(a.last_message_timestamp);
+    });
+
       res.status(200).json({
-          status: 2,
+          status: 1,
           data: summaries
       }).end();
 

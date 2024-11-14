@@ -176,9 +176,9 @@ RfqRoutes.post('/magic-search-rfq-preview',
 RfqRoutes.post(
   '/send-query-message',
   passportSignIn,
-  // validateBody(rfqSchemas.sendMessage),
-  // validateDbBody.rfq_access_check_req_body,
   rfqSchemas.queryMessageFileUploadHandler, 
+  validateDbBody.rfq_access_check_req_body,
+  validateBody(rfqSchemas.sendMessage),
   rfqController.sendQueryMessage
 );
 
@@ -195,6 +195,7 @@ RfqRoutes.post(
   validateDbBody.rfq_access_check_req_body,
   rfqController.listQueries
 );
+
 // to create the rfq using magic search rfq feature
 RfqRoutes.post('/magic-search-rfq-create',
   passportSignIn,

@@ -64,7 +64,7 @@ let store_query_message_upload_file = multer.diskStorage({
     callback(null, Config.upload.query_message_file)
   },
   filename: function (req, file, callback) {
-    var extention = path.extname(file.name);
+    var extention = path.extname(file.originalname);
     var new_file_name = +new Date() + '-' + uuidv4() + extention;
     callback(null, new_file_name);
   }
@@ -151,7 +151,6 @@ export const rfqSchemas = {
   }),
   queryMessageFileUploadHandler: async (req, res, next) => {
     try {
-      console.log(" mukul jatav ",req);
       let upload = multer({
         storage: store_query_message_upload_file,
         limits: {
@@ -163,14 +162,13 @@ export const rfqSchemas = {
           res.status(400).json({ status: 2, errors: { file: err } });
           return;
         }
- 
-        // const uploadedFiles = req.files?.map((file) => ({
-        //   name: file.name,
-        //   url: `/uploads/query_message_files`, // Or wherever you store the files
-        // }));
+
+        const uploadedFiles = req.files?.map((file) => ({
+          name: file.originalname,
+          url: `${Config.base_url}/query_message_files/${file.filename}`
+        }));
   
-        // Attach files to request for further processing
-        // req.files = uploadedFiles;
+        req.files = uploadedFiles;
   
         next();
       });
