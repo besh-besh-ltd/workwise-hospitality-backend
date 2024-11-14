@@ -2520,6 +2520,8 @@ const rfqController = {
     state = req.body?.state ? req.body?.state : '';
     city = req.body?.city ? req.body?.city : '';
     let vendor_name = req.body.vendor_name;
+    let is_private = req.body.is_private;
+    let preferred_vendor = req.body.preferred_vendor;
     
     // If user is not logged in
     if (!req.is_verified) {
@@ -2569,6 +2571,24 @@ const rfqController = {
       let user = req.user;
       if (user && user.user_type != 3) {
 
+        // Type validation for the is_private check
+        if (is_private && typeof is_private !== "boolean") {
+          return res.status(400).json({ 
+            status: 1,
+            message: "is_private must be a boolean"
+          });
+        }
+
+        // Type validation for the preferred_vendor check
+        if (preferred_vendor && typeof preferred_vendor !== "boolean") {
+          return res.status(400).json({ 
+            status: 1,
+            message: "preferred_vendor must be a boolean"
+          });
+        }
+
+
+
         try {
           const vendorResult = await rfqModel.searchVendor(
             req.user.id,
@@ -2577,7 +2597,9 @@ const rfqController = {
             approved_by_id,
             state,
             city,
-            vendor_name
+            vendor_name,
+            is_private = is_private ? true : false,
+            preferred_vendor = preferred_vendor ? true : false,
           );
 
           let dummyOBJ = {
@@ -4092,7 +4114,9 @@ const rfqController = {
           searchObj.approved_by_id,
           "",
           "",
-          ""
+          "",
+          false,
+          false
         );
 
 
