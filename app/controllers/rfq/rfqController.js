@@ -2162,6 +2162,72 @@ const rfqController = {
           }
           // console.log("mukul 1908")
 
+          var quote_items_data = [];
+            products.map(
+              ({
+                product_id,
+                product_name,
+                unit_price,
+                package_price,
+                tax,
+                freight_price,
+                total_price,
+                comment,
+                delivery_period,
+                quantity,
+                variant,
+                document_files
+              }) => {
+                if(unit_price!=""){
+                  quote_items_data.push({
+                    rfq_id,
+                    rfq_no,
+                    product_id,
+                    product_name,
+                    unit_price,
+                    package_price,
+                    tax,
+                    freight_price,
+                    total_price,
+                    comment,
+                    delivery_period,
+                    quantity,
+                    variant
+                  });
+                }else if(comment!="" || document_files?.length>0){
+                  quote_items_data.push({
+                    rfq_id,
+                    rfq_no,
+                    product_id,
+                    product_name,
+                    unit_price:0,
+                    package_price,
+                    tax,
+                    freight_price,
+                    total_price,
+                    comment,
+                    delivery_period,
+                    quantity,
+                    variant
+                  });
+                }
+              }
+            );
+
+
+            // if quote item data is empty because of errors
+            if(quote_items_data.length < 1){
+              res
+              .status(200)
+              .json({
+                status: 3,
+                message: 'Not able to send the Quote'
+              })
+              .end();
+              return;
+            }
+
+          // Insertion of the quote
           let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
           if (quote_rsp.length > 0) {
 
@@ -2178,39 +2244,9 @@ const rfqController = {
               }
             }
 
-            var quote_items_data = [];
-            products.map(
-              ({
-                product_id,
-                product_name,
-                unit_price,
-                package_price,
-                tax,
-                freight_price,
-                total_price,
-                comment,
-                delivery_period,
-                quantity,
-                variant
-              }) => {
-                quote_items_data.push({
-                  rfq_id,
-                  rfq_no,
-                  quote_id: created_quote_id,
-                  product_id,
-                  product_name,
-                  unit_price,
-                  package_price,
-                  tax,
-                  freight_price,
-                  total_price,
-                  comment,
-                  delivery_period,
-                  quantity,
-                  variant
-                });
-              }
-            );
+            // adding the quote_id
+            quote_items_data.map((item)=> item.quote_id=created_quote_id);
+
             // console.log("mukul 1959")
 
             const quote_items_keys = [
@@ -4526,7 +4562,7 @@ const rfqController = {
 
     // Check if all required fields are present in each product
     if (
-      !products.every((product) => product.product_id && product.unit_price)
+      !products.every((product) => product.product_id)
     ) {
       return res.status(400).json({
         message: 'Missing required fields in product items.',
@@ -4567,6 +4603,15 @@ const rfqController = {
         paymentTermAndCommentChanges = true;
       }
 
+            // Process each product in the request
+        const quoteItemChanges = await Promise.all(
+          products.map((product) => {
+            return rfqModel.updateQuoteItemWithHistory(quoteId, product,quoteExists[0]);
+          })
+        );
+
+        // console.log("mj ", quoteItemChanges)
+
       // Check if global terms & conditions file are uploaded
       if (term_and_condition_files && term_and_condition_files.length > 0) {
         const global_files = term_and_condition_files.map(url => ({
@@ -4579,12 +4624,6 @@ const rfqController = {
         }
       }
 
-      // Process each product in the request
-      const quoteItemChanges = await Promise.all(
-        products.map((product) => {
-          return rfqModel.updateQuoteItemWithHistory(quoteId, product);
-        })
-      );
 
       // Insert new document_files for each product if exists
       const fileUpdates = await Promise.all(
@@ -4756,7 +4795,6 @@ sendQueryMessage: async (req, res) => {
     } else {
       mailRecipients.to = receiverDetails.email;
     }
-    mailRecipients.bcc = "gyan@letsworkwise.com";
     
     sendMail(mailRecipients);
     
