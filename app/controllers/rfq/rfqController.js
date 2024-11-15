@@ -213,7 +213,7 @@ const insertProduct = async (
       datasheet_file:"",// this field we have to remove from database
       qap
     };
-    console.log("here 1", tbl_rfq_products_data)
+    
     let spec_array = spec?.map((item) => {
       item.rfq_id = created_rfq_id;
       item.product_id = product_id;
@@ -232,18 +232,18 @@ const insertProduct = async (
         return item;
       });
     }
-    console.log("here 2", vendor_array)
+
     const productResult = await rfqModel.insert(
       'tbl_rfq_products',
       tbl_rfq_products_data
     );
-    console.log("here 3", productResult)
+
     const spec_info = spec_array && await rfqModel.insertArray(
       spec_array,
       spec_keys,
       'tbl_rfq_products_specs'
     );
-    console.log("here 4", spec_info)
+
     var vendor_info = [];
     if (vendors.length > 0) {
       vendor_info = await rfqModel.insertArray(
@@ -252,7 +252,7 @@ const insertProduct = async (
         'tbl_rfq_product_vendors'
       );
     }
-    console.log("here 5", vendor_info)
+
     // Handle multiple datasheet files
     if (datasheet_file && datasheet_file.length > 0) {
       const fileDataArray = datasheet_file.map(url => ({
@@ -1330,7 +1330,10 @@ const rfqController = {
                 company_name: user.organization_name || '',
                 response_email: user.email,
                 contact_name: user.name,
-                contact_number: user.number,
+                contact_number: user.mobile || '',
+                comment: req.body.comment || '',
+                bid_end_date: req.body.bid_end_date || '',
+                location: req.body.location || '',
                 is_published: 0,
                 created_by: user_id,
                 updated_by: user_id,
@@ -1357,7 +1360,6 @@ const rfqController = {
             rfq_id,
             product_id: product.product_id,
             variant: variant,
-            variant: variant,
             comment: "",
             datasheet: "",
             spec_file: "",
@@ -1369,7 +1371,6 @@ const rfqController = {
         await rfqModel.insert('tbl_rfq_products', productData);
 
         const vendorPromises = product.vendors.map(async (vendor) => {
-          const variant = await rfqModel.getNextVariant(rfq_id, product.product_id, vendor.vendor_id);
 
             const vendorData = {
                 rfq_id,
@@ -1389,7 +1390,7 @@ const rfqController = {
         });
 
     } catch (error) {
-        logError("Error while creating or updating RFQ with products:", error);
+        logError("Error while creating or updating RFQ with products:", error);    
         res.status(500).json({
             status: 3,
             message: "An error occurred while processing your request"
@@ -1402,10 +1403,10 @@ const rfqController = {
         rfq_id,
         product_id,
         variant,
-        vendor_id
+        vendor_ids
     } = req.body;
 
-    if (!rfq_id || !product_id || !variant || !vendor_id) {
+    if (!rfq_id || !product_id || !variant || !vendor_ids || vendor_ids.length == 0) {
         return res.status(400).json({ status : 3,  message: "Missing required fields." });
     }
 
@@ -1413,14 +1414,14 @@ const rfqController = {
         const conditions = {
             rfq_id: rfq_id,
             product_id: product_id,
-            user_id: vendor_id,
+            user_ids: vendor_ids,
             variant: variant
         };
 
         const result = await rfqModel.delete('tbl_rfq_product_vendors', conditions);
 
-        if (result.rowCount > 0) {
-            return res.status(200).json({ status : 1, message: "Vendor removed successfully.", deletedRows: result.rowCount });
+        if (result.length > 0) {
+            return res.status(200).json({ status : 1, message: "Vendor removed successfully.", deletedRows: result });
         } else {
             return res.status(404).json({ status : 3, message: "No matching record found to delete." });
         }
@@ -2366,6 +2367,7 @@ const rfqController = {
     try {
       let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id);
       rfQItem = processQuotCompare(rfQItem);
+
       let rfqDATA = [];
       if (rfQItem.length > 0) {
         rfqDATA = rfQItem.map((item) => {
@@ -2376,6 +2378,20 @@ const rfqController = {
           );
           item.quotes_unavailable_vendors = quotes_unavailable_vendors;
 
+          if (quotes_unavailable_vendors.length > 0) {
+            quotes_unavailable_vendors.map((q_item) => {
+              item.quotations.push({
+                id: null,
+                timestamp: null,
+                status: 1,
+                created_by: q_item.id,
+                is_regret: null,
+                quote_details: [],
+                vendor_details: [q_item]
+              });
+            });
+          }
+          item.quotations.sort((a, b) => a.created_by - b.created_by);
           if (quotes_unavailable_vendors.length > 0) {
             quotes_unavailable_vendors.map((q_item) => {
               item.quotations.push({
