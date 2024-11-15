@@ -23,6 +23,30 @@ RfqRoutes.post(
   rfqController.create
 );
 
+RfqRoutes.post(
+  '/save-draft',
+  passportSignIn,
+  rfqController.saveDraft
+);
+
+RfqRoutes.get(
+  '/draft',
+  passportSignIn,
+  rfqController.getRFQDraftData
+);
+
+RfqRoutes.post(
+  '/add-product-to-draft',
+  passportSignIn,
+  rfqController.createOrUpdateRfqDraftWithProductVendors
+);
+
+RfqRoutes.post(
+  '/remove-vendor-from-draft',
+  passportSignIn,
+  rfqController.removeVendorFromDraft
+);
+
 RfqRoutes.put(
   '/update',
   passportSignIn,
