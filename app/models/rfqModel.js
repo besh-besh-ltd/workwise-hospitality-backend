@@ -1708,7 +1708,13 @@ WHERE row_num_by_name_category = 1
         ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
         WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
           AND p.name = '${search_key}' AND tu.email IS NOT NULL
-          ${vendor_name != '' ? `AND (to_tsvector('english', tu.name) @@ plainto_tsquery('english', '${vendor_name}') OR similarity(tu.name, '${vendor_name}') > 0.1)` : ''}
+          ${vendor_name != '' ? `
+            AND (
+                to_tsvector('english', tu.name) @@ plainto_tsquery('english', $1)
+                OR (char_length($1) = 1 AND similarity(tu.name, $1) > 0)
+                OR (char_length($1) > 1 AND similarity(tu.name, $1) > 0.1)
+            )
+        ` : ''}
           ${state != '' ? `AND tu.state = ${state}` : ``}
           ${city != '' ? `AND tu.city = ${city}` : ``}
           ${category_id != '' ? `AND c.id = ${category_id}` : ``}
@@ -1721,9 +1727,9 @@ WHERE row_num_by_name_category = 1
     `;
         
 
-
+    const values = vendor_name ? [vendor_name] : [];
     return new Promise(function (resolve, reject) {
-      db.query(q)
+      db.query(q,values)
         .then(function (data) {
           resolve(data);
         })

@@ -84,7 +84,7 @@ ProductsRoutes.post(
 ProductsRoutes.get(
   '/vendor-product-details/:id',
   passportSignIn,
-  acl([1, 3, 4]),
+  acl([1, 2, 3, 4]),
   validateParam(schemas.id),
   validateDbBody.check_product,
   ProductsController.vendorProductDetails
@@ -102,7 +102,7 @@ ProductsRoutes.delete(
 ProductsRoutes.get(
   '/approved-product-list',
   passportSignIn,
-  acl([3, 4]),
+  acl([2, 3, 4]),
   ProductsController.approvedProductList
 );
 
