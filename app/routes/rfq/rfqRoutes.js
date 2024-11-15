@@ -230,4 +230,10 @@ RfqRoutes.post('/magic-search-rfq-create',
   rfqController.create  
 )
 
+// technical eveluation modules
+RfqRoutes.post('/add-technical-eveluation',
+  passportSignIn,
+  rfqController.create  
+)
+
 export default RfqRoutes;

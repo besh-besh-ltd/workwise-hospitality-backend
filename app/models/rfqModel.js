@@ -2675,6 +2675,19 @@ rfq_project_exist: async (project_id,user_id) => {
           reject(new Error(error));
         });
     });
+  },
+
+  addTechnicalEveluation: async(RFQ_ID, Tbl_rfq_product_ID) =>{
+    const query ='INSERT INTO Tbl_rfq_product_tech_evaluation (RFQ_ID, Tbl_rfq_product_ID) VALUES ($1, $2) RETURNING *';;
+    return new Promise((resolve, reject) => {
+      db.query(query, [RFQ_ID, Tbl_rfq_product_ID])
+        .then(result => {
+          resolve(result);
+        })
+        .catch(error => {
+          reject(new Error(error));
+        });
+    });
   }
  };
 
