@@ -1206,6 +1206,29 @@ const rfqController = {
   //       .end();
   //   }
   // },
+  getRfqDetailsById: async (req, res) => {
+    try {
+      const { rfq_id } = req.body;
+      const result = await rfqModel.getRFQDetails(rfq_id);
+      res
+      .status(200)
+      .json({
+        status: 1,
+        data: result[0]
+      })
+      .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: error.message
+        })
+        .end();
+    }
+  },
+
   getTerms: async (req, res, next) => {
     try {
       const result = await rfqModel.getAllTerms();
@@ -4458,6 +4481,197 @@ const rfqController = {
           error: error.message,
         });
     }
+},
+
+sendQueryMessage: async (req, res) => {
+  const { rfq_id, receiver_id, message_text } = req.body;
+  const files = req.files;
+  const sender_id = req.user.id;
+  const sender_type = req.user.user_type;
+
+  try {
+    const data = {
+      rfq_id,
+      sender_id,
+      receiver_id,
+      sender_type,
+      message_text
+    };
+
+    const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+    if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
+
+    const rfqNumber = rfqDetails.rfq_no;
+
+    const result = await rfqModel.insertReturnId('tbl_query_messages', data);
+    const message_id = result[0].id;
+
+    const filesData = files.map(file => ({
+      message_id: message_id,
+      file_name: file.name,
+      file_url: file.url
+    }));
+
+    if (filesData.length) await rfqModel.insertArray(filesData, ['message_id', 'file_name', 'file_url'], 'tbl_query_message_files');
+
+    const sender_details = await userModel.user_profile_detail(sender_id);
+    const senderDetails = sender_details[0];
+
+    const receiver_details = await userModel.user_profile_detail(receiver_id);
+    if (receiver_details.length > 0) {
+      const receiverDetails = receiver_details[0];
+      const spocList = await vendorModel.getSpocDetails(receiver_id);
+      const dynamicHTML = `
+      <table width='600' border='0' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #B6B6B6; background-color:#FFFFFF; margin-top:15px; margin-bottom:10px; font-family:Arial, sans-serif; color:#414141;'>
+        <tr>
+          <td colspan="2" align='center' style='background:#203367; padding:20px; color:#FFFFFF; font-size:18px; font-weight:bold;'>
+            You have a new message from ${senderDetails.name}
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2" align='left' style='padding:20px; font-size:14px; line-height:1.6;'>
+            <strong>Hello ${receiverDetails.name},</strong><br><br>
+            You have received a new message regarding the RFQ #${rfqNumber}:<br>
+            <blockquote style='border-left:3px solid #203367; margin:10px 0; padding-left:15px; color:#333333;'>${message_text}</blockquote>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2" align='center' style='background:#F8F8F8; padding:15px; font-size:12px; color:#333333;'>
+            <p>© WorkWise. All Rights Reserved.</p>
+          </td>
+        </tr>
+      </table>
+    `;
+    
+    const mailRecipients = {
+      from: Config.webmasterMail,
+      subject: `WorkWise | New Message Notification | RFQ #${rfqNumber}`,
+      html: dynamicHTML
+    };
+    
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map(spoc => spoc.email);
+      mailRecipients.cc = receiverDetails.email;
+    } else {
+      mailRecipients.to = receiverDetails.email;
+    }
+    mailRecipients.bcc = "gyan@letsworkwise.com";
+    
+    sendMail(mailRecipients);
+    
+    const notificationData = {
+      type: 'New Message',
+      title: 'New RFQ Message Received',
+      message: `You have received a new message from ${senderDetails.name}.`,
+      additional_data: { user_type: receiverDetails.user_type }
+    };
+    const payload = {
+      title: `Hello ${receiverDetails.name}`,
+      body: 'You have a new message regarding an RFQ.'
+    };
+    const ss = JSON.parse(receiverDetails.endpoint);
+    sendNotification(receiver_id, '', notificationData, payload, ss);
+    
+    }
+
+    res
+      .status(200)
+      .json({
+        status: 1,
+        data: {
+          message: 'Message sent successfully'
+        }
+      })
+      .end();
+  } catch (error) {
+    logError(error);
+    res
+      .status(500)
+      .json({
+        success: false,
+        message: 'Error in sending message',
+        error: error.message,
+      });
   }
+},
+
+listQueryMessages: async (req, res) => {
+  const { rfq_id, receiver_id } = req.body;
+  const sender_id = req.user.id;
+
+  try {
+      const messages = await rfqModel.getQueryMessages(rfq_id, sender_id, receiver_id);
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: messages
+        })
+        .end();
+  } catch (error) {
+      logError(error);
+      res
+        .status(500)
+        .json({
+          success: false,
+          message: 'Error in listing messages for vendor',
+          error: error.message,
+        });
+  }
+},
+
+listQueries: async (req, res) => {
+  const { rfq_id, user_name } = req.body;
+  const user_id = req.user.id;
+  const user_type = req.user.user_type;
+
+  try {
+      let users;
+      if (user_type === 2) {
+          const vendorResult = await rfqModel.getVendorsForRfq(rfq_id, user_name);
+          users = vendorResult.map(row => row.user_id);
+      } else if (user_type === 3) {
+          const buyerResult = await rfqModel.getBuyerForRfq(rfq_id);
+          users = buyerResult.length ? [buyerResult[0].user_id] : [];
+      } else {
+          return res.status(400).json({
+              success: false,
+              message: 'Invalid user type'
+          });
+      }
+
+      const summaries = await Promise.all(users.map(async (other_user_id) => {
+          const summaryResult = await rfqModel.getQueryMessageSummary(rfq_id, user_id, other_user_id);
+          return {
+              user_id: other_user_id,
+              user_name: summaryResult[0]?.user_name || '',
+              unseen_count: summaryResult[0]?.unseen_count || 0,
+              last_message: summaryResult[0]?.last_message || '',
+              last_message_timestamp: summaryResult[0]?.last_message_timestamp || null
+          };
+      }));
+
+    summaries.sort((a, b) => {
+        if (a.last_message_timestamp === null && b.last_message_timestamp === null) return 0;
+        if (a.last_message_timestamp === null) return 1;
+        if (b.last_message_timestamp === null) return -1;
+        return new Date(b.last_message_timestamp) - new Date(a.last_message_timestamp);
+    });
+
+      res.status(200).json({
+          status: 1,
+          data: summaries
+      }).end();
+
+  } catch (error) {
+      logError(error);
+      res.status(500).json({
+          success: false,
+          message: 'Error in listing queries for RFQ',
+          error: error.message
+      });
+  }
+},
+
 };
 export default rfqController;
