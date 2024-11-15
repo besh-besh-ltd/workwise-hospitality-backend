@@ -4912,5 +4912,29 @@ listQueries: async (req, res) => {
   }
 },
 
+addTechnicalEveluation: async (req, res) => {
+  try {
+    const { rfq_ID, rfq_product_id } = rq.body;
+
+    const result = rfqModel.addTechnicalEveluation(rfq_ID, rfq_product_id);
+
+    res
+      .status(200)
+      .json({
+        status: 1,
+        data:result,
+        data: "product successfully added to technical eveluation"
+      })
+      .end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+        success: false,
+        message: 'Error in adding product in technical eveluation',
+        error: error.message
+    });
+  }
+}
+
 };
 export default rfqController;
