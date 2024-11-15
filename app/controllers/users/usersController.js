@@ -2701,6 +2701,51 @@ const UsersController = {
         .end();
     }
   },
+
+  addPrivateVendorWithApproval: async (req, res, next) => {
+
+    try {
+      // Here product list has product ID
+      const { vendorName, email, phone, productList, is_private } = req.body;
+      const buyerId = req.user.id; // Getting buyerId
+
+      let obj = {
+        buyerId,
+        vendorName,
+        email,
+        phone,
+        productList,
+        is_private: !(req.body.is_private) ? 0 : is_private,
+      }
+
+      // If user is private
+
+      
+
+      // If user does not exist, proceed with inserting data into the tbl_temp_user table
+      const result = await userModel.insertBuyerPrivateVendor(obj);
+
+      // Sending the response back to the client
+      res.status(201).json({
+        status: 1,
+        message: 'Vendor successfully added. Please wait for vendor review.',
+        data: result
+      });
+
+    } catch (error) {
+      logError(error);
+      let message = error == "Error: Vendor_In_Review" ? "This vendor has already been added by you. Please wait while we review the vendor details" : Config.errorText.value;
+
+      return res
+        .status(400)
+        .json({
+          status: 3,
+          message: message
+        })
+        .end();
+    }
+  },
+
   getBuyerPrivateVendors: async (req, res, next) => {
     try {
       const buyerId = req.user.id; // Getting buyerId from the authenticated user
