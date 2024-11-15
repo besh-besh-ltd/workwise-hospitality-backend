@@ -247,6 +247,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             ) AS "products"
             
             FROM tbl_rfq RFQ
+            WHERE RFQ.is_published = 1
             ORDER BY RFQ.id DESC
             LIMIT ${limit} OFFSET $1;`,
         [offset]
@@ -262,7 +263,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
   },
   getRfqCount: async () => {
     return new Promise(function (resolve, reject) {
-      db.any(`select * from tbl_rfq`)
+      db.any(`select * from tbl_rfq WHERE RFQ.is_published = 1`)
         .then(function (data) {
           resolve(data);
         })
@@ -294,32 +295,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         });
     });
   },
-  // updateWithCondition: async (table_name, data, condition) => {
-  //   const setClause = Object.keys(data)
-  //     .map((key, index) => `${key} = $${index + 1}`)
-  //     .join(', ');
-  //   const setValues = Object.values(data);
-  //   const whereClause = Object.keys(condition)
-  //   .map((key, index) => `${key} = $${index + 1}`)
-  //   .join(' AND ');
-  // const whereValues = Object.values(condition);
-  //   const updateQuery = `
-  //     UPDATE ${table_name}
-  //     SET ${setClause}
-  //     WHERE ${whereClause}
-  //     RETURNING *`;
-  //   console.log("query:  ", updateQuery, setValues, whereValues);
-  //   return new Promise(function (resolve, reject) {
-  //     db.query(updateQuery, setValues, whereValues)
-  //       .then(function (data) {
-  //         resolve(data);
-  //       })
-  //       .catch(function (err) {
-  //         let error = new Error(err);
-  //         reject(error);
-  //       });
-  //   });
-  // },
+
   getAllTerms: async () => {
     return new Promise(function (resolve, reject) {
       db.query(`SELECT * FROM tbl_rfq_terms`)
@@ -342,7 +318,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = '${user_id}'
     ) AS "finilize"
     FROM tbl_rfq RFQ 
-    WHERE created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC LIMIT $3 OFFSET $4 `;
+    WHERE RFQ.is_published = 1 AND created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC LIMIT $3 OFFSET $4 `;
     return new Promise(function (resolve, reject) {
       db.query(query,[month,year,limit,offset])
         .then(function (data) {
@@ -364,7 +340,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = '${user_id}'
     ) AS "finilize"
     FROM tbl_rfq RFQ 
-    WHERE created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC  `;
+    WHERE RFQ.is_published = 1 AND created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC  `;
     return new Promise(function (resolve, reject) {
       db.query(query,[month,year])
         .then(function (data) {
@@ -443,7 +419,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             FROM tbl_rfq_product_vendors RFQ_P_V
             WHERE RFQ.id = RFQ_P_V.rfq_id
             AND RFQ_P_V.user_id = ${user_id} 
-        )
+        ) AND RFQ.is_published = 1
         ORDER BY RFQ.id DESC
         LIMIT $2 OFFSET $1;`,
         [offset,limit]
@@ -459,94 +435,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
   },
 
   getRfqDraftId: async (id) => {
-
-    // const q = `SELECT 
-    //   RFQ.is_published,
-    //   RFQ.comment,
-    //   RFQ.response_email,
-    //   RFQ.contact_name,
-    //   RFQ.contact_number,
-    //   RFQ.company_name,
-    //   RFQ.bid_end_date,
-    //   RFQ.rfq_type,
-    //   RFQ.reverse_auction,
-    //   RFQ.project_id,
-    //   RFQ.location,
-      
-    //   -- Term and condition files
-    //   (
-    //     SELECT json_agg(RF.file_url)
-    //     FROM tbl_rfq_files RF
-    //     WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
-    //   ) AS "term_and_condition_files",
-      
-    //   -- Products
-    //   ARRAY(
-    //       SELECT json_build_object(
-    //           'product_id', RFQ_P.product_id,
-    //           'predefined_tds_file', RFQ_P.datasheet_file,
-    //           'predefined_qap_file', RFQ_P.qap_file,
-    //           'name', T_P.name,
-    //           'variant', RFQ_P.variant,
-    //           'spec', (
-    //               SELECT json_agg(json_build_object(
-    //                   'title', RFQ_P_SPEC.title,
-    //                   'value', RFQ_P_SPEC.value
-    //               ))
-    //               FROM tbl_rfq_products_specs RFQ_P_SPEC
-    //               WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id AND RFQ_P.variant = RFQ_P_SPEC.variant
-    //           ),
-    //           'vendors', (
-    //               SELECT json_agg(json_build_object(
-    //                   'user_id', RFQ_P_V.user_id,
-    //                   'name', U.name
-    //               ))
-    //               FROM tbl_rfq_product_vendors RFQ_P_V
-    //               LEFT JOIN tbl_users U ON RFQ_P_V.user_id = U.id
-    //               WHERE RFQ_P.product_id = RFQ_P_V.product_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id AND RFQ_P.variant = RFQ_P_V.variant
-    //           ),
-    //           'comment', RFQ_P.comment,
-    //           --'defaultSelectedVAB', RFQ_P.defaultSelectedVAB,
-    //           'datasheet', RFQ_P.datasheet,
-    //           'datasheet_file', (
-    //               SELECT json_agg(RPF.file_url)
-    //               FROM tbl_rfq_product_files RPF
-    //               WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'datasheet'
-    //           ),
-    //           'spec_file', (
-    //               SELECT json_agg(RPF.file_url)
-    //               FROM tbl_rfq_product_files RPF
-    //               WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'spec'
-    //           ),
-    //           'qap', RFQ_P.qap,
-    //           'qap_file', (
-    //               SELECT json_agg(RPF.file_url)
-    //               FROM tbl_rfq_product_files RPF
-    //               WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'qap'
-    //           ),
-    //           'user_selected_predefined_tds', (RFQ_P.datasheet = '1') ,
-    //           'user_selected_predefined_qap', (RFQ_P.qap = '1')
-    //       )
-    //       FROM tbl_rfq_products RFQ_P
-    //       LEFT JOIN tbl_product T_P ON RFQ_P.product_id = T_P.id
-    //       WHERE RFQ.id = RFQ_P.rfq_id
-    //   ) AS "products",
-      
-    //   -- Terms
-    //   ARRAY(
-    //       SELECT json_build_object('id', RFQ_TM.terms_id)
-    //       FROM tbl_rfq_terms_map RFQ_TM
-    //       WHERE RFQ_TM.rfq_id = RFQ.id
-    //   ) AS "terms"
-
-    //   FROM 
-    //       tbl_rfq RFQ
-    //   WHERE 
-    //       RFQ.id = $1
-    //   ORDER BY 
-    //       RFQ.id DESC
-    //   LIMIT 1;
-    // `;
 
     const q = `SELECT 
       RFQ.id AS rfq_id,
@@ -1927,9 +1815,9 @@ ORDER BY is_linked_with_buyer DESC, RANDOM();
   getAllRfq: async (active) => {
     let dynamicWhere = ``;
     if (active) {
-      dynamicWhere = `WHERE status = 1`;
+      dynamicWhere = `AND status = 1`;
     }
-    const query = `SELECT count(id) FROM tbl_rfq ${dynamicWhere}`;
+    const query = `SELECT count(id) FROM tbl_rfq WHERE RFQ.is_published = 1 ${dynamicWhere}`;
     return new Promise(function (resolve, reject) {
       db.one(query)
         .then(function (data) {
@@ -1944,7 +1832,9 @@ ORDER BY is_linked_with_buyer DESC, RANDOM();
   getAllVendorRfq: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT DISTINCT rfq_id FROM tbl_rfq_product_vendors WHERE user_id = $1`,
+        `SELECT DISTINCT RPV.rfq_id FROM tbl_rfq_product_vendors RPV
+        JOIN tbl_rfq RFQ ON RFQ.id = RPV.rfq_id
+        WHERE RFQ.is_published = 1 AND user_id = $1`,
         [vendorId]
       )
         .then(function (data) {
@@ -2005,7 +1895,7 @@ ORDER BY is_linked_with_buyer DESC, RANDOM();
     return new Promise(function (resolve, reject) {
       db.query(
         `SELECT DISTINCT (rfq_id) FROM tbl_rfq_product_vendors 
-        left join tbl_rfq on tbl_rfq.id = tbl_rfq_product_vendors.rfq_id WHERE user_id = $1 and tbl_rfq.status = 2`,
+        left join tbl_rfq on tbl_rfq.id = tbl_rfq_product_vendors.rfq_id WHERE user_id = $1 and tbl_rfq.status = 2 and tbl_rfq.is_published = 1`,
         [vendorId]
       )
         .then(function (data) {
@@ -2034,7 +1924,7 @@ ORDER BY is_linked_with_buyer DESC, RANDOM();
   getAllRfqByUser: async (user_id, status) => {
     return new Promise(function (resolve, reject) {
       db.one(
-        `SELECT count(id) FROM tbl_rfq WHERE created_by = $1 AND status = $2`,
+        `SELECT count(id) FROM tbl_rfq WHERE created_by = $1 AND status = $2 AND is_published = 1`,
         [user_id, status]
       )
         .then(function (data) {
@@ -2049,7 +1939,7 @@ ORDER BY is_linked_with_buyer DESC, RANDOM();
   getPendingResponseCount: async (user_id, status) => {
     return new Promise(function (resolve, reject) {
       db.one(
-        `SELECT count(*) FROM "tbl_rfq" tr JOIN "tbl_quotes" tq on tr.id = tq.rfq_id where tr.created_by = $1 and tr.status = $2 and tr.id = tq.rfq_id`,
+        `SELECT count(*) FROM "tbl_rfq" tr JOIN "tbl_quotes" tq on tr.id = tq.rfq_id where tr.created_by = $1 and tr.status = $2 and tr.is_published = 1 and tr.id = tq.rfq_id`,
         [user_id, status]
       )
         .then(function (data) {
@@ -2081,7 +1971,7 @@ ORDER BY is_linked_with_buyer DESC, RANDOM();
       db.one(
         `SELECT  SUM(tbl_quote_items.total_price) AS total_sales , SUM(tbl_quote_items.total_price) ::NUMERIC AS total_price_formatted FROM tbl_rfq 
 LEFT JOIN tbl_quote_items ON tbl_rfq.rfq_no = tbl_quote_items.rfq_no 
-WHERE created_by = $1 AND status = $2`,
+WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         [user_id, status]
       )
         .then(function (data) {
@@ -2113,7 +2003,7 @@ WHERE created_by = $1 AND status = $2`,
       db.query(
         `SELECT  tr.id, tr.rfq_no , tq.timestamp as timestamp, tq.created_by FROM "tbl_rfq" tr
       LEFT JOIN "tbl_quotes" tq ON tr.id = tq.rfq_id      
-      WHERE tr.created_by = $1 AND tr.status = '1' ORDER BY "id" DESC LIMIT 50`,
+      WHERE tr.created_by = $1 AND tr.status = '1' AND tr.is_published = 1 ORDER BY "id" DESC LIMIT 50`,
         [user_id]
       )
         .then(function (data) {
@@ -2420,9 +2310,10 @@ rfq_project_exist: async (project_id,user_id) => {
   getVendorRfqCount: async(user_id)=>{
     return new Promise((resolve, reject) => {
       db.one(
-        `SELECT COUNT(DISTINCT rfq_id)
-         FROM tbl_rfq_product_vendors
-         WHERE user_id = $1`, // Matching user_id in tbl_rfq_product_vendors
+        `SELECT COUNT(DISTINCT v.rfq_id)
+         FROM tbl_rfq_product_vendors v
+         JOIN tbl_rfq r ON v.rfq_id = r.id
+         WHERE v.user_id = $1 AND r.is_published = 1`, // Matching user_id in tbl_rfq_product_vendors
         [user_id]
       )
       .then(function (data) {
@@ -2490,13 +2381,12 @@ rfq_project_exist: async (project_id,user_id) => {
         LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
         LEFT JOIN tbl_admin_rfq_service ARS ON RFQ.id = ARS.rfq_id
         WHERE 
+          RFQ.is_published = 1 AND
           (($1 IS NULL) OR RFQ.status = $1)
           ${dynamicQuery}
         ORDER BY RFQ.timestamp ${sort}
         LIMIT $4 OFFSET $5
     `;
-
-      console.log(query);
 
     const values = [rfqStatus, adminServiceStatus, sort, limit, offset];
 
@@ -2526,6 +2416,7 @@ rfq_project_exist: async (project_id,user_id) => {
         FROM tbl_rfq RFQ
         LEFT JOIN tbl_admin_rfq_service ARS ON RFQ.id = ARS.rfq_id
         WHERE 
+          RFQ.is_published = 1 AND
           ($1 IS NULL OR RFQ.status = $1)
           ${dynamicQuery}
       `;
