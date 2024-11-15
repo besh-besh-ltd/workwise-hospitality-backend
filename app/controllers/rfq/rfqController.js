@@ -4555,7 +4555,6 @@ sendQueryMessage: async (req, res) => {
     } else {
       mailRecipients.to = receiverDetails.email;
     }
-    mailRecipients.bcc = "gyan@letsworkwise.com";
     
     sendMail(mailRecipients);
     
