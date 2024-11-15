@@ -38,7 +38,10 @@ const cn = {
   database: process.env.DATABASE_NAME || null,
   host: process.env.HOST || null,
   port: process.env.DATABASE_PORT || null,
-  dialect: process.env.DATABASE_DIALECT || null
+  dialect: process.env.DATABASE_DIALECT || null,
+  ssl: {
+    rejectUnauthorized: false, // Use true for stronger security
+  },
 };
 // const cn = 'postgres://process.env.DB_USER:process.env.DB_PASS@process.env.DB_HOST:process.env.DB_PORT/process.env.DB_NAME';
 
@@ -49,6 +52,9 @@ const db = pgp(cn); // database instance;
 db.connect()
   .then((obj) => {
     obj.done(); // success, release the connection;
+    console.log("###################################################################")
+    console.log("#######  Connected with database, Jai mata di - Let's ROCK  #######")
+    console.log("###################################################################")
   })
   .catch((error) => {
     console.log('ERROR:', error.message || error);
