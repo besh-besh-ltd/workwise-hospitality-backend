@@ -318,6 +318,22 @@ const buyerController = {
           .end();
       }
 
+      // For single public vendor upload
+      if (status == 3) {
+        const result = await userModel.updateStatusInTempUserTable(vendorTempId, status, reject_reason || "")
+        
+        await userModel.deleteVendorFromTempUserTable(vendorTempId);
+        
+        return res
+          .status(200)
+          .json({
+            status: 1,
+            data: result,
+            message: "Vendor is made public"
+          })
+          .end();
+      }
+
       if (status != 1) {
         return res
           .status(400)
@@ -366,7 +382,7 @@ const buyerController = {
       const vendorId = vendor[0].id;
       // add product in the tbl_product with the vendor 
       let errors = [];
-      for (let i = 0; i < productdetails.length; i++) {
+      for (let i = 0; i < productdetails?.length; i++) {
         console.log(productdetails[i]);
         const errors = add_vendor_product(productdetails[i], vendorId);
         if (errors.length > 0) {

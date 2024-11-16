@@ -3060,7 +3060,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   },
-  insertBuyerPrivateVendor: async ({buyerId, vendorName, email, phone, productList, is_private}) => {
+  insertBuyerPrivateVendor: async ({buyerId, vendorName, email, phone, productList, status = -1, is_private}) => {
     // this function insert user info in a temp user table for admin review, once admin review we will delete user from here 
     return new Promise(async (resolve, reject) => {
       try {
@@ -3084,7 +3084,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
           VALUES 
           ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $8) 
           RETURNING *`,
-          [buyerId, vendorName, email, phone, productList, -1, null, is_private]
+          [buyerId, vendorName, email, phone, productList, status || -1, null, is_private]
           // status -1 pending review, 0 disable user profile, 1 active user, 2 rejected
           //  added new field  is_private , whose default value is 0, until it is manually inserted 
         );
