@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import rfqController from '../../controllers/rfq/rfqController.js';
 import noLogin from '../../middleware/noLogin.js';
-import { validateBody,validateParam } from '../../validations/paramValidation/userValidation.js';
+import { validateBody, validateParam } from '../../validations/paramValidation/userValidation.js';
 import { validateDbBody } from '../../validations/dbValidation/userDbValidation.js';
 import passport from '../../middleware/passport.js';
 import { rfqSchemas } from '../../validations/paramValidation/rfqValidation.js';
@@ -23,6 +23,30 @@ RfqRoutes.post(
   rfqController.create
 );
 
+RfqRoutes.post(
+  '/save-draft',
+  passportSignIn,
+  rfqController.saveDraft
+);
+
+RfqRoutes.get(
+  '/draft',
+  passportSignIn,
+  rfqController.getRFQDraftData
+);
+
+RfqRoutes.post(
+  '/add-product-to-draft',
+  passportSignIn,
+  rfqController.createOrUpdateRfqDraftWithProductVendors
+);
+
+RfqRoutes.post(
+  '/remove-vendor-from-draft',
+  passportSignIn,
+  rfqController.removeVendorFromDraft
+);
+
 RfqRoutes.put(
   '/update',
   passportSignIn,
@@ -37,6 +61,13 @@ RfqRoutes.put(
 //   //validateDbBody.user_id_profileexists,
 //   rfqController.listAll
 // );
+
+RfqRoutes.post(
+  '/get-details',
+  passportSignIn,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.getRfqDetailsById
+);
 
 RfqRoutes.get(
   '/getRfqById/:id',
@@ -164,6 +195,29 @@ RfqRoutes.post('/magic-search-rfq-preview',
   validateDbBody.rfq_project_exist,
   schema_posts.magicSearchExcelUpload,
   rfqController.magicSearchRfqCreate
+);
+
+RfqRoutes.post(
+  '/send-query-message',
+  passportSignIn,
+  rfqSchemas.queryMessageFileUploadHandler, 
+  validateDbBody.rfq_access_check_req_body,
+  validateBody(rfqSchemas.sendMessage),
+  rfqController.sendQueryMessage
+);
+
+RfqRoutes.post(
+  '/list-query-messages',
+  passportSignIn,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.listQueryMessages
+);
+
+RfqRoutes.post(
+  '/list-queries',
+  passportSignIn,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.listQueries
 );
 
 // to create the rfq using magic search rfq feature
