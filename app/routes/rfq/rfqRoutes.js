@@ -233,7 +233,29 @@ RfqRoutes.post('/magic-search-rfq-create',
 // technical eveluation modules
 RfqRoutes.post('/add-technical-eveluation',
   passportSignIn,
-  rfqController.create  
+  rfqController.addTechnicalEveluation 
 )
+
+RfqRoutes.post('/add-clause',
+  passportSignIn,
+  rfqController.addClause
+)
+
+RfqRoutes.put('/update-clause',
+  passportSignIn,
+  rfqController.updateClause
+)
+
+RfqRoutes.delete('/remove-clause',
+  passportSignIn,
+  rfqController.removeClause
+)
+
+RfqRoutes.get('/get-clauses',
+  passportSignIn,
+  rfqController.getClauses
+)
+
+
 
 export default RfqRoutes;

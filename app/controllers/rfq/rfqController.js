@@ -4914,7 +4914,7 @@ listQueries: async (req, res) => {
 
 addTechnicalEveluation: async (req, res) => {
   try {
-    const { rfq_ID, rfq_product_id } = rq.body;
+    const { rfq_ID, rfq_product_id } = req.body;
 
     const result = rfqModel.addTechnicalEveluation(rfq_ID, rfq_product_id);
 
@@ -4922,7 +4922,7 @@ addTechnicalEveluation: async (req, res) => {
       .status(200)
       .json({
         status: 1,
-        data:result,
+        // data:result,
         data: "product successfully added to technical eveluation"
       })
       .end();
@@ -4934,7 +4934,98 @@ addTechnicalEveluation: async (req, res) => {
         error: error.message
     });
   }
-}
+},
 
+addClause: async (req, res) => {
+  try {
+    console.log("add clause controller");
+    const { rfq_id, rfq_product_tech_evaluation_id, clause_text,file_url } = req.body;
+    console.log("bodyy = ",req.body);
+
+    if (!rfq_id || !rfq_product_tech_evaluation_id || !clause_text || !Array.isArray(file_url)) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid input. Ensure RFQ_ID, rfq_product_techevaluation_id, and clauses are provided correctly.",
+      });
+    }
+    // Calling  the model function
+    console.log("add clause controller working");
+
+    const result = await rfqModel.addClause(rfq_id, rfq_product_tech_evaluation_id,  clause_text,file_url );
+
+    res.status(200).json(result).end();
+  } catch (error) {
+    console.log("controller error")
+    console.error("Error in addClause:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error in adding clauses to technical evaluation.",
+      error: error.message,
+    });
+  }
+},
+
+updateClause: async (req, res) => {
+  try {
+    const {clause_id, clause_text,file_url} = req.body;
+    console.log("data from update clause controller = ",clause_id,clause_text,file_url);
+
+    const result = await rfqModel.updateClause(clause_id, clause_text,file_url);
+
+    res
+      .status(200)
+      .json(result)
+      .end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+        success: false,
+        message: 'Error in updating technical evaluation clause.',
+        error: error.message
+    });
+  }
+},
+
+removeClause: async (req, res) => {
+  try {
+    const {clause_id} = req.body;
+
+    const result = await rfqModel.removeClause(clause_id);
+    console.log("result of remove clause = ",result);
+
+    res
+      .status(200)
+      .json(result)
+      .end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+        success: false,
+        message: 'Error in deleting clause.',
+        error: error.message
+    });
+  }
+},
+
+getClauses: async (req, res) => {
+  try {
+    const {tbl_rfq_product_tech_evaluation_id} = req.body;
+
+    const result = await rfqModel.getClauses(tbl_rfq_product_tech_evaluation_id);
+    console.log("Result main of get clauses = ",result);
+
+    res
+      .status(200)
+      .json(result)
+      .end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+        success: false,
+        message: 'Error in deleting clause.',
+        error: error.message
+    });
+  }
+},
 };
 export default rfqController;

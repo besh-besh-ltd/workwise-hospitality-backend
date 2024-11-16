@@ -2678,6 +2678,7 @@ rfq_project_exist: async (project_id,user_id) => {
   },
 
   addTechnicalEveluation: async(RFQ_ID, Tbl_rfq_product_ID) =>{
+    console.log("rfqid idd",RFQ_ID, Tbl_rfq_product_ID)
     const query ='INSERT INTO Tbl_rfq_product_tech_evaluation (RFQ_ID, Tbl_rfq_product_ID) VALUES ($1, $2) RETURNING *';;
     return new Promise((resolve, reject) => {
       db.query(query, [RFQ_ID, Tbl_rfq_product_ID])
@@ -2688,7 +2689,303 @@ rfq_project_exist: async (project_id,user_id) => {
           reject(new Error(error));
         });
     });
-  }
+  },
+
+  addClause: async (rfq_id, rfq_product_tech_evaluation_id, clause_text, file_url) => {
+    console.log("values in add clause model", rfq_product_tech_evaluation_id, clause_text, file_url);
+  
+    const insertClauseQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_clauses 
+      (tbl_rfq_product_tech_evaluation_id, clause_text, timestamp)
+      VALUES ($1, $2, NOW())
+      RETURNING id;
+    `;
+  
+    const insertFileQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_clauses_files 
+      (tbl_rfq_product_tech_evaluation_clauses_id, file_url, timestamp)
+      VALUES ($1, $2, NOW());
+    `;
+  
+    return new Promise((resolve, reject) => {
+      console.log("entered add-clause model");
+  
+      // Insert the clause
+      db.query(insertClauseQuery, [rfq_product_tech_evaluation_id, clause_text])
+        .then(async (clauseResult) => {
+          console.log("clause result = ", clauseResult);
+          const clauseId = clauseResult[0].id; // Extracting the returned clause ID
+          console.log("clause id = ", clauseId);
+  
+          // Inserting related files for the clause
+          if (file_url && file_url.length > 0) {
+            for (const url of file_url) {
+              await db.query(insertFileQuery, [clauseId, url]);
+            }
+          }
+  
+          // After all files are inserted, resolve the final response
+          resolve({
+            status: 1,
+            message: "Clause and files successfully added to technical evaluation.",
+          });
+        })
+        .catch((error) => {
+          console.error("Error adding clause:", error);
+          reject(new Error("Error in adding clauses or associated files."));
+        });
+    });
+  },
+
+   updateClause: async (tbl_rfq_product_tech_evaluation_clauses_id, clause_text,file_url) => {
+
+    console.log("entered update clause = ", tbl_rfq_product_tech_evaluation_clauses_id, clause_text,file_url);
+    const queryUpdateClause = `
+      UPDATE tbl_rfq_product_tech_evaluation_clauses 
+      SET clause_text = $1, timestamp = NOW() 
+      WHERE id = $2 
+      RETURNING id;
+    `;
+    
+    const queryGetExistingFiles = `
+      SELECT file_url 
+      FROM tbl_rfq_product_tech_evaluation_clauses_files 
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
+    `;
+    
+    const queryInsertFile = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_clauses_files 
+      (tbl_rfq_product_tech_evaluation_clauses_id, file_url, timestamp) 
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (tbl_rfq_product_tech_evaluation_clauses_id, file_url) 
+      DO UPDATE SET timestamp = NOW();
+    `;
+    
+    const queryDeleteFiles = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_clauses_files 
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 
+        AND file_url = ANY($2::text[]);
+    `;
+    
+    const queryDeleteAllFiles = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_clauses_files 
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
+    `;
+    
+    return new Promise((resolve, reject) => {
+      // Updating the clause text
+      db.query(queryUpdateClause, [
+        clause_text,
+        tbl_rfq_product_tech_evaluation_clauses_id,
+      ])
+      .then(async (updateResult) => {
+        if (updateResult.rowCount === 0) {
+          reject({
+            success: false,
+            message: `Clause ID ${tbl_rfq_product_tech_evaluation_clauses_id} not found.`,
+          });
+          return;
+        }
+  
+        console.log(`Clause updated: ${tbl_rfq_product_tech_evaluation_clauses_id}`);
+        
+        // Handling file URLs
+        if (file_url && file_url.length > 0) {
+          // Get existing file URLs from the database
+          db.query(queryGetExistingFiles, [tbl_rfq_product_tech_evaluation_clauses_id])
+          .then((existingFilesResult) => {
+            console.log("existing files result = ",existingFilesResult)
+            // const existingFiles = existingFilesResult.rows.map(row => row.file_url);
+            const existingFiles = [];
+            for(let i=0;i<existingFilesResult.length;i++){
+              existingFiles.push(existingFilesResult[i].file_url);
+            }
+            console.log("existing files = ",existingFiles);
+            
+            // Determining files to delete and to add
+            const filesToDelete = existingFiles.filter(file => !file_url.includes(file));
+            const filesToAdd = file_url.filter(file => !existingFiles.includes(file));
+            console.log("files to add = ",filesToAdd);
+            console.log("files to delete = ",filesToDelete);
+            // Deleting files no longer needed
+            if (filesToDelete.length > 0) {
+              db.query(queryDeleteFiles, [
+                tbl_rfq_product_tech_evaluation_clauses_id,
+                filesToDelete,
+              ])
+              .then(() => {
+                console.log(`Deleted files: ${filesToDelete}`);
+              })
+              .catch((error) => {
+                console.error(`Error deleting files: ${error.message}`);
+                reject({
+                  success: false,
+                  message: 'Error deleting files.',
+                  error: error.message,
+                });
+              });
+            }
+            
+            // Inserting new files
+            if (filesToAdd.length > 0) {
+              for (const fileUrl of filesToAdd) {
+                db.query(queryInsertFile, [
+                  tbl_rfq_product_tech_evaluation_clauses_id,
+                  fileUrl,
+                ])
+                .then(() => {
+                  console.log(`Inserted file: ${fileUrl}`);
+                })
+                .catch((error) => {
+                  console.error(`Error inserting file: ${fileUrl}. Error: ${error.message}`);
+                  reject({
+                    success: false,
+                    message: 'Error inserting files.',
+                    error: error.message,
+                  });
+                });
+              }
+            }
+            
+            resolve({
+              success: true,
+              message: 'Clause and associated files updated successfully.',
+            });
+          })
+          .catch((error) => {
+            console.error(`Error retrieving existing files: ${error.message}`);
+            reject({
+              success: false,
+              message: 'Error retrieving existing files.',
+              error: error.message,
+            });
+          });
+        } else {
+          // If no file URLs provided, deleting all files
+          db.query(queryDeleteAllFiles, [tbl_rfq_product_tech_evaluation_clauses_id])
+          .then(() => {
+            console.log(`All files deleted for clause ID: ${tbl_rfq_product_tech_evaluation_clauses_id}`);
+            resolve({
+              success: true,
+              message: 'Clause updated successfully, and all files deleted.',
+            });
+          })
+          .catch((error) => {
+            console.error(`Error deleting all files: ${error.message}`);
+            reject({
+              success: false,
+              message: 'Error deleting all files.',
+              error: error.message,
+            });
+          });
+        }
+      })
+      .catch((error) => {
+        console.error(`Error updating clause: ${error.message}`);
+        reject({
+          success: false,
+          message: 'Error updating clause.',
+          error: error.message,
+        });
+      });
+    });
+  },
+
+  removeClause: async (tbl_rfq_product_tech_evaluation_clauses_id) => {
+    const checkClauseExistsQuery = `
+      SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses 
+      WHERE id = $1;
+    `;
+    const deleteClauseQuery = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE id = $1;
+    `;
+
+    return new Promise((resolve, reject) => {
+      //Checking if the clause exists
+      db.query(checkClauseExistsQuery, [tbl_rfq_product_tech_evaluation_clauses_id])
+        .then(async (result) => {
+          if (result.rowCount === 0) {
+            return reject(new Error('Clause not found.'));
+          }
+
+          //Deleting the clause (files will be deleted automatically due to ON DELETE CASCADE)
+          db.query(deleteClauseQuery, [tbl_rfq_product_tech_evaluation_clauses_id])
+            .then(() => {
+              resolve({ success: true, message: 'Clause and associated files deleted successfully.' });
+            })
+            .catch((error) => {
+              reject(new Error(error));
+            });
+        })
+        .catch((error) => {
+          reject(new Error(error));
+        });
+    });
+  },
+
+  getClauses: async (tbl_rfq_product_tech_evaluation_id) => {
+    console.log("entered get clauses model = ",tbl_rfq_product_tech_evaluation_id);
+    const query = `
+      SELECT
+        c.id AS clause_id,
+        c.clause_text,
+        f.file_url
+      FROM
+        tbl_rfq_product_tech_evaluation_clauses AS c
+      JOIN
+        tbl_rfq_product_tech_evaluation_clauses_files AS f
+      ON
+        c.id = f.tbl_rfq_product_tech_evaluation_clauses_id
+      WHERE
+        c.tbl_rfq_product_tech_evaluation_id = $1;
+    `;
+  
+    return new Promise((resolve, reject) => {
+      db.query(query, [tbl_rfq_product_tech_evaluation_id])
+        .then((result) => {
+          console.log("result get clauses = ",result);
+          // const clauses = result.rows;
+          // Grouping the result by clause_id
+          const groupedClauses = result.reduce((acc, row) => {
+            const { clause_id, clause_text, file_url } = row;
+            if (!acc[clause_id]) {
+              acc[clause_id] = {
+                clause_text,
+                files: []
+              };
+            }
+            acc[clause_id].files.push(file_url);
+            return acc;
+          }, {});
+          console.log("grouped clauses = ",groupedClauses);
+  
+          // Format the response as an array
+          const response = Object.keys(groupedClauses).map(key => ({
+            clause_id: key,
+            clause_text: groupedClauses[key].clause_text,
+            files: groupedClauses[key].files
+          }));
+
+          console.log("response get clauses = ",response);
+          
+          resolve({
+            success: true,
+            data: response
+          });
+        })
+        .catch(error => {
+          console.error("Error fetching clauses and files:", error);
+          reject({
+            success: false,
+            message: "Error fetching clauses and files.",
+            error: error.message
+          });
+        });
+    });
+  },
+
+  
  };
 
 export default rfqModel;
