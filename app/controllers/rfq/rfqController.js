@@ -4939,19 +4939,19 @@ addTechnicalEveluation: async (req, res) => {
 addClause: async (req, res) => {
   try {
     console.log("add clause controller");
-    const { rfq_id, rfq_product_tech_evaluation_id, clause_text,file_url } = req.body;
+    const { rfq_id,rfq_product_id, rfq_product_tech_evaluation_id, clause_text,file_url } = req.body;
     console.log("bodyy = ",req.body);
 
-    if (!rfq_id || !rfq_product_tech_evaluation_id || !clause_text || !Array.isArray(file_url)) {
+    if (!rfq_id ||!rfq_product_id || !rfq_product_tech_evaluation_id || !clause_text || !Array.isArray(file_url)) {
       return res.status(400).json({
         status: 0,
-        message: "Invalid input. Ensure RFQ_ID, rfq_product_techevaluation_id, and clauses are provided correctly.",
+        message: "Invalid input. Ensure RFQ_ID, rfq_product_id, rfq_product_techevaluation_id, and clauses are provided correctly.",
       });
     }
     // Calling  the model function
     console.log("add clause controller working");
 
-    const result = await rfqModel.addClause(rfq_id, rfq_product_tech_evaluation_id,  clause_text,file_url );
+    const result = await rfqModel.addClause(rfq_id, rfq_product_id, rfq_product_tech_evaluation_id,  clause_text,file_url );
 
     res.status(200).json(result).end();
   } catch (error) {
@@ -5027,5 +5027,31 @@ getClauses: async (req, res) => {
     });
   }
 },
+
+addComment: async (req, res) => {
+  try{
+    const { clause_id, created_by, text, file_url } = req.body;
+    console.log("entered comment controller = ",clause_id,created_by,text, file_url);
+
+    // Validate input
+    if (!clause_id || !created_by || !text || !Array.isArray(file_url)) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid input. Please provide clause ID, creator ID, and comment text.",
+      });
+    }
+    const response = await rfqModel.addComment(clause_id, created_by, text, file_url);
+    res
+      .status(200)
+      .json(response)
+      .end();
+  } catch (error) {
+    res.status(500).json({
+      status: 0,
+      message: "Error storing comment.",
+      error: error.message,
+    });
+  }
+}
 };
 export default rfqController;

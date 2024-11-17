@@ -256,6 +256,11 @@ RfqRoutes.get('/get-clauses',
   rfqController.getClauses
 )
 
+RfqRoutes.post('/add-comment',
+  passportSignIn,
+  rfqController.addComment
+)
+
 
 
 export default RfqRoutes;

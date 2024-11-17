@@ -2691,8 +2691,21 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
 
-  addClause: async (rfq_id, rfq_product_tech_evaluation_id, clause_text, file_url) => {
-    console.log("values in add clause model", rfq_product_tech_evaluation_id, clause_text, file_url);
+  addClause: async (rfq_id, rfq_product_id, rfq_product_tech_evaluation_id, clause_text, file_url) => {
+    console.log("values in add clause model", rfq_id, rfq_product_id, rfq_product_tech_evaluation_id, clause_text, file_url);
+  
+    const validateRfqProductQuery = `
+      SELECT id 
+      FROM tbl_rfq_product_tech_evaluation 
+      WHERE rfq_id = $1 AND tbl_rfq_product_id = $2;
+    `;
+  
+    const insertRfqProductQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation 
+      (rfq_id, tbl_rfq_product_id, timestamp) 
+      VALUES ($1, $2,NOW()) 
+      RETURNING id;
+    `;
   
     const insertClauseQuery = `
       INSERT INTO tbl_rfq_product_tech_evaluation_clauses 
@@ -2710,21 +2723,38 @@ rfq_project_exist: async (project_id,user_id) => {
     return new Promise((resolve, reject) => {
       console.log("entered add-clause model");
   
-      // Insert the clause
-      db.query(insertClauseQuery, [rfq_product_tech_evaluation_id, clause_text])
+      // Validate or Insert RFQ Product
+      db.query(validateRfqProductQuery, [rfq_id, rfq_product_id])
+        .then(async (validationResult) => {
+          let evaluationId = rfq_product_tech_evaluation_id;
+          console.log("validatyion result = ",validationResult, evaluationId)
+  
+          // If not found, insert the RFQ Product and retrieve the new ID
+          if (validationResult.length === 0) {
+            console.log("RFQ Product not found, inserting new record...");
+            const insertResult = await db.query(insertRfqProductQuery, [rfq_id, rfq_product_id]);
+            evaluationId = insertResult[0].id;
+            console.log("New rfq_product_tech_evaluation_id:", evaluationId);
+          } else {
+            console.log("RFQ Product found, using provided evaluation ID:", evaluationId);
+          }
+  
+          // Insert the Clause
+          return db.query(insertClauseQuery, [evaluationId, clause_text]);
+        })
         .then(async (clauseResult) => {
           console.log("clause result = ", clauseResult);
-          const clauseId = clauseResult[0].id; // Extracting the returned clause ID
+          const clauseId = clauseResult[0].id; // Extract the returned clause ID
           console.log("clause id = ", clauseId);
   
-          // Inserting related files for the clause
+          // Insert associated files
           if (file_url && file_url.length > 0) {
             for (const url of file_url) {
               await db.query(insertFileQuery, [clauseId, url]);
             }
           }
   
-          // After all files are inserted, resolve the final response
+          // Respond after successful operations
           resolve({
             status: 1,
             message: "Clause and files successfully added to technical evaluation.",
@@ -2732,7 +2762,11 @@ rfq_project_exist: async (project_id,user_id) => {
         })
         .catch((error) => {
           console.error("Error adding clause:", error);
-          reject(new Error("Error in adding clauses or associated files."));
+          reject({
+            status: 0,
+            message: "Error in adding clauses or associated files.",
+            error: error.message,
+          });
         });
     });
   },
@@ -2985,7 +3019,81 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
 
+  addComment: async (tbl_rfq_product_tech_evaluation_clauses_id, created_by, text, file_urls) => {
+    const validateClauseQuery = `
+      SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE id = $1) AS clause_exists;
+    `;
   
- };
-
+    const insertCommentQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_comments
+      (tbl_rfq_product_tech_evaluation_clauses_id, created_by, text, timestamp)
+      VALUES ($1, $2, $3, NOW())
+      RETURNING id;
+    `;
+  
+    const insertFileQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_comments_files
+      (tbl_rfq_product_tech_evaluation_comments_id, file_url, timestamp)
+      VALUES ($1, $2, NOW());
+    `;
+  
+    return new Promise((resolve, reject) => {
+      // Validate clause existence
+      db.query(validateClauseQuery, [tbl_rfq_product_tech_evaluation_clauses_id])
+        .then((clauseResult) => {
+          console.log("clause result  ",clauseResult);
+          if (!clauseResult[0].clause_exists) {
+            return reject({
+              status: 0,
+              message: "Invalid clause ID. Clause does not exist.",
+            });
+          }
+  
+          // Proceed with adding the comment
+          db.query(insertCommentQuery, [tbl_rfq_product_tech_evaluation_clauses_id, created_by, text])
+            .then(async (commentResult) => {
+              const commentId = commentResult[0].id;
+              console.log(`Comment added with ID: ${commentId}`);
+  
+              // Insert associated files if provided
+              if (file_urls && file_urls.length > 0) {
+                for (const file_url of file_urls) {
+                  await db.query(insertFileQuery, [commentId, file_url]).catch((fileError) => {
+                    console.error(`Error adding file: ${file_url}`, fileError.message);
+                    reject({
+                      status: 0,
+                      message: "Failed to add files associated with the comment.",
+                      error: fileError.message,
+                    });
+                  });
+                }
+              }
+  
+              resolve({
+                status: 1,
+                message: "Comment and associated files added successfully.",
+                commentId: commentId,
+              });
+            })
+            .catch((commentError) => {
+              console.error("Error adding comment:", commentError.message);
+              reject({
+                status: 0,
+                message: "Failed to add comment.",
+                error: commentError.message,
+              });
+            });
+        })
+        .catch((validationError) => {
+          console.error("Error validating clause:", validationError.message);
+          reject({
+            status: 0,
+            message: "Failed to validate clause.",
+            error: validationError.message,
+          });
+        });
+    });
+  }
+ }
 export default rfqModel;
