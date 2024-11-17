@@ -261,6 +261,11 @@ RfqRoutes.post('/add-comment',
   rfqController.addComment
 )
 
+RfqRoutes.post('/add-vendor-response',
+  passportSignIn,
+  rfqController.addVendorResponse
+)
+
 
 
 export default RfqRoutes;

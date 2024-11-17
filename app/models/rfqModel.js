@@ -3094,6 +3094,116 @@ rfq_project_exist: async (project_id,user_id) => {
           });
         });
     });
+  },
+
+  addVendorResponse: (vendor_id, clause_id, vendor_response, file_url) => {
+    console.log("Entered addVendorResponse =", vendor_id, clause_id, vendor_response, file_url);
+  
+    const validateClauseQuery = `
+      SELECT id 
+      FROM tbl_rfq_product_tech_evaluation_clauses 
+      WHERE id = $1;
+    `;
+  
+    const validateVendorQuery = `
+      SELECT id 
+      FROM tbl_users 
+      WHERE id = $1;
+    `;
+  
+    const checkVendorResponseQuery = `
+      SELECT id 
+      FROM tbl_rfq_product_tech_evaluation_vendors_response 
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 AND vendor_id = $2;
+    `;
+  
+    const insertVendorResponseQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response 
+      (vendor_id, tbl_rfq_product_tech_evaluation_clauses_id, vendor_response, timestamp) 
+      VALUES ($1, $2, $3, NOW()) 
+      RETURNING id;
+    `;
+  
+    const insertFileQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response_files 
+      (tbl_rfq_product_tech_evaluation_vendors_response_id, file_url, timestamp) 
+      VALUES ($1, $2, NOW());
+    `;
+  
+    return new Promise((resolve, reject) => {
+      console.log("Entered vendor response model");
+  
+      // Validate Clause
+      db.query(validateClauseQuery, [clause_id])
+        .then((clauseResult) => {
+          console.log("Clause validation result =", clauseResult);
+  
+          if (clauseResult.length === 0) {
+            reject({
+              status: 0,
+              message: `Clause ID ${clause_id} not found.`,
+            });
+            return; // Stop further execution
+          }
+  
+          // Validate Vendor
+          return db.query(validateVendorQuery, [vendor_id]);
+        })
+        .then((vendorResult) => {
+          console.log("Vendor validation result =", vendorResult);
+  
+          if (vendorResult.length === 0) {
+            reject({
+              status: 0,
+              message: `Vendor ID ${vendor_id} not found.`,
+            });
+            return; // Stop further execution
+          }
+  
+          // Check if Vendor Response already exists
+          return db.query(checkVendorResponseQuery, [clause_id, vendor_id]);
+        })
+        .then((responseResult) => {
+          console.log("Vendor response validation result =", responseResult);
+  
+          if (responseResult.length > 0) {
+            reject({
+              status: 0,
+              message: `Vendor response already exists for Clause ID ${clause_id}.`,
+            });
+            return; // Stop further execution
+          }
+  
+          // Insert Vendor Response
+          return db.query(insertVendorResponseQuery, [vendor_id, clause_id, vendor_response]);
+        })
+        .then(async (insertResponseResult) => {
+          const responseId = insertResponseResult[0].id;
+          console.log("Inserted Vendor Response ID =", responseId);
+  
+          // Insert associated files one by one
+          if (file_url && file_url.length > 0) {
+            for (const url of file_url) {
+              await db.query(insertFileQuery, [responseId, url]);
+            }
+          }
+  
+          // Respond after successful operations
+          resolve({
+            status: 1,
+            message: "Vendor response and files successfully added.",
+            response_id: responseId,
+          });
+        })
+        .catch((error) => {
+          console.error("Error in addVendorResponse:", error);
+          reject({
+            status: 0,
+            message: "Error adding vendor response or associated files.",
+            error: error.message,
+          });
+        });
+    });
   }
  }
 export default rfqModel;

@@ -5052,6 +5052,35 @@ addComment: async (req, res) => {
       error: error.message,
     });
   }
+},
+
+addVendorResponse: async (req, res) => {
+  try {
+    const {vendor_id, clause_id, vendor_response, file_url} = req.body;
+    console.log("API Input: ", req.body);
+
+    // Validate input
+    if (!vendor_id || !Array.isArray(file_url) || !clause_id || !vendor_response) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid input. Please provide vendor ID and clause details.",
+      });
+    }
+
+    const response = await rfqModel.addVendorResponse(vendor_id, clause_id, vendor_response, file_url);
+
+    res
+      .status(200)
+      .json(response)
+      .end();
+  } catch (error) {
+    console.error("Error in addVendorResponse API: ", error.message);
+    res.status(500).json({
+      status: 0,
+      message: "Error processing vendor response.",
+      error: error.message,
+    });
+  }
 }
 };
 export default rfqController;
