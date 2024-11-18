@@ -188,9 +188,10 @@ UsersRoutes.post(
   '/buyer-private-vendor',
   passportSignIn,
   acl([2]),
-  validateBody(schemas.buyer_private_vendor),
+  validateBody(schemas.buyer_private_vendor_approved),
   validateDbBody.vendor_exist,
-  UsersController.addPrivateVendor
+  // UsersController.addPrivateVendor
+  UsersController.addApprovedPrivateVendor
 );
 
 UsersRoutes.get(
