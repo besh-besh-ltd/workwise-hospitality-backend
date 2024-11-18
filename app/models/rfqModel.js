@@ -1681,40 +1681,45 @@ WHERE row_num_by_name_category = 1
     approved_by_id,
     state,
     city,
-    vendor_name // Added vendor_name parameter
+    vendor_name, // Added vendor_name parameter
+    is_private, //for buyers private vendors
+    preferred_vendor
   ) => {
     let q = `
-SELECT * FROM (
-    SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
-           tu.address, tc.profile as about, tc.website, tc.company_name, lc.city_name, ls.state_name,
-           CASE
-               WHEN tu.new_profile_image IS NULL THEN NULL
-               ELSE tu.new_profile_image
-           END AS image_url,
-           CASE
-               WHEN bvm.vendor_id IS NOT NULL THEN 1
-               ELSE 0
-           END AS is_linked_with_buyer
-    FROM tbl_product p
-    JOIN tbl_product_categories pc ON p.id = pc.product_id
-    JOIN tbl_category c ON pc.category_id = c.id
-    JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
-    LEFT JOIN tbl_company tc ON tc.user_id = tu.id
-    LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
-    LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-    LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-    ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
-    WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
-      AND p.name = '${search_key}' AND tu.email IS NOT NULL
-      ${vendor_name != '' ? `AND (to_tsvector('english', tu.name) @@ plainto_tsquery('english', '${vendor_name}') OR similarity(tu.name, '${vendor_name}') > 0.1)` : ''}
-      ${state != '' ? `AND tu.state = ${state}` : ``}
-      ${city != '' ? `AND tu.city = ${city}` : ``}
-      ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-      ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``}
-      AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))  
-) AS distinct_vendors
-ORDER BY is_linked_with_buyer DESC, RANDOM();
-`;
+    SELECT * FROM (
+        SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
+               tu.address, tc.profile as about, tc.website, tc.company_name, lc.city_name, ls.state_name,
+               CASE
+                   WHEN tu.new_profile_image IS NULL THEN NULL
+                   ELSE tu.new_profile_image
+               END AS image_url,
+               CASE
+                   WHEN bvm.vendor_id IS NOT NULL THEN 1
+                   ELSE 0
+               END AS is_linked_with_buyer
+        FROM tbl_product p
+        JOIN tbl_product_categories pc ON p.id = pc.product_id
+        JOIN tbl_category c ON pc.category_id = c.id
+        JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
+        LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+        LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+        LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
+        LEFT JOIN tbl_location_states ls ON tu.state = ls.id
+        ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
+          AND p.name = '${search_key}' AND tu.email IS NOT NULL
+          ${vendor_name != '' ? `AND (to_tsvector('english', tu.name) @@ plainto_tsquery('english', '${vendor_name}') OR similarity(tu.name, '${vendor_name}') > 0.1)` : ''}
+          ${state != '' ? `AND tu.state = ${state}` : ``}
+          ${city != '' ? `AND tu.city = ${city}` : ``}
+          ${category_id != '' ? `AND c.id = ${category_id}` : ``}
+          ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``} 
+          AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
+          ${is_private ? `AND tc.is_private = 1` : ``}
+          ${preferred_vendor ? `AND bvm.vendor_id IS NOT NULL` : ``}
+    ) AS distinct_vendors
+    ORDER BY is_linked_with_buyer DESC, RANDOM();
+    `;
+        
 
 
     return new Promise(function (resolve, reject) {
