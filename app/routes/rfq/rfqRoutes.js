@@ -261,11 +261,24 @@ RfqRoutes.post('/add-comment',
   rfqController.addComment
 )
 
+RfqRoutes.get('/get-vendor-names',
+  passportSignIn,
+  rfqController.getVendorNames
+)
+
+RfqRoutes.get('/get-vendor-responses',
+  passportSignIn,
+  rfqController.getVendorResponses
+)
+
 RfqRoutes.post('/add-vendor-response',
   passportSignIn,
   rfqController.addVendorResponse
 )
 
-
+RfqRoutes.post('/tech-evaluation-cleared-vendors',
+  passportSignIn,
+  rfqController.addtechEvaluationClearedVendors
+)
 
 export default RfqRoutes;

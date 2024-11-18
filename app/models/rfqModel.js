@@ -2691,8 +2691,8 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
 
-  addClause: async (rfq_id, rfq_product_id, rfq_product_tech_evaluation_id, clause_text, file_url) => {
-    console.log("values in add clause model", rfq_id, rfq_product_id, rfq_product_tech_evaluation_id, clause_text, file_url);
+  addClause: async (rfq_id, rfq_product_id, clause_text, file_url) => {
+    console.log("values in add clause model", rfq_id, rfq_product_id,  clause_text, file_url);
   
     const validateRfqProductQuery = `
       SELECT id 
@@ -2726,19 +2726,21 @@ rfq_project_exist: async (project_id,user_id) => {
       // Validate or Insert RFQ Product
       db.query(validateRfqProductQuery, [rfq_id, rfq_product_id])
         .then(async (validationResult) => {
-          let evaluationId = rfq_product_tech_evaluation_id;
-          console.log("validatyion result = ",validationResult, evaluationId)
-  
+          // let evaluationId = rfq_product_tech_evaluation_id;
+          console.log("validatyion result = ",validationResult)
+          let evaluationId=0;
           // If not found, insert the RFQ Product and retrieve the new ID
           if (validationResult.length === 0) {
             console.log("RFQ Product not found, inserting new record...");
             const insertResult = await db.query(insertRfqProductQuery, [rfq_id, rfq_product_id]);
+            console.log("insert result = ",insertResult);
             evaluationId = insertResult[0].id;
             console.log("New rfq_product_tech_evaluation_id:", evaluationId);
-          } else {
-            console.log("RFQ Product found, using provided evaluation ID:", evaluationId);
-          }
-  
+          }else{
+            evaluationId = validationResult[0].id;
+            console.log("RFQ Product found, using provided evaluation ID:");
+
+          } 
           // Insert the Clause
           return db.query(insertClauseQuery, [evaluationId, clause_text]);
         })
@@ -3204,6 +3206,263 @@ rfq_project_exist: async (project_id,user_id) => {
           });
         });
     });
-  }
+  },
+  addtechEvaluationClearedVendors: (vendor_id, tbl_rfq_product_tech_evaluation_id) => {
+    console.log("Entered addClearedVendor =", vendor_id, tbl_rfq_product_tech_evaluation_id);
+  
+    const validateVendorQuery = `
+      SELECT id 
+      FROM tbl_users 
+      WHERE id = $1;
+    `;
+  
+    const validateRfqEvaluationQuery = `
+      SELECT id 
+      FROM tbl_rfq_product_tech_evaluation 
+      WHERE id = $1;
+    `;
+  
+    const insertClearedVendorQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors 
+      (tbl_rfq_product_tech_evaluation_id, vendor_id, timestamp) 
+      VALUES ($1, $2, NOW());
+    `;
+  
+    return new Promise((resolve, reject) => {
+      console.log("Entered cleared vendor model");
+  
+      // Validate Vendor
+      db.query(validateVendorQuery, [vendor_id])
+        .then((vendorResult) => {
+          console.log("Vendor validation result =", vendorResult);
+  
+          if (vendorResult.length === 0) {
+            reject({
+              status: 0,
+              message: `Vendor ID ${vendor_id} not found.`,
+            });
+            return; // Stop further execution
+          }
+  
+          // Validate RFQ Product Technical Evaluation ID
+          return db.query(validateRfqEvaluationQuery, [tbl_rfq_product_tech_evaluation_id]);
+        })
+        .then((evaluationResult) => {
+          console.log("RFQ Evaluation validation result =", evaluationResult);
+  
+          if (evaluationResult.length === 0) {
+            reject({
+              status: 0,
+              message: `Technical Evaluation ID ${tbl_rfq_product_tech_evaluation_id} not found.`,
+            });
+            return; // Stop further execution
+          }
+  
+          // Insert Cleared Vendor
+          return db.query(insertClearedVendorQuery, [tbl_rfq_product_tech_evaluation_id, vendor_id]);
+        })
+        .then(() => {
+          console.log("Vendor successfully added to cleared vendors.");
+  
+          // Respond after successful operation
+          resolve({
+            status: 1,
+            message: "Vendor successfully added to cleared vendors.",
+          });
+        })
+        .catch((error) => {
+          console.error("Error in addClearedVendor:", error);
+          reject({
+            status: 0,
+            message: "Error in adding cleared vendor.",
+            error: error.message,
+          });
+        });
+    });
+  },
+  getVendorNames: async (rfq_id, tbl_rfq_product_id) => {
+    console.log("Values in getVendorsDetails model:", rfq_id, tbl_rfq_product_id);
+  
+    // Updated query to fetch vendor IDs
+    const fetchVendorsQuery = `
+      SELECT DISTINCT vr.vendor_id
+      FROM tbl_rfq_product_tech_evaluation te
+      JOIN tbl_rfq_product_tech_evaluation_clauses c 
+          ON te.id = c.tbl_rfq_product_tech_evaluation_id
+      JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
+          ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+      WHERE te.rfq_id = $1
+        AND te.tbl_rfq_product_id = $2;
+    `;
+  
+    // Query to fetch vendor details (vendor_name, company_name, organization_name)
+    const fetchVendorDetailsQuery = `
+      SELECT 
+        u.id AS vendor_id,
+        u.name AS vendor_name,
+        COALESCE(c.company_name, '') AS company_name,
+        COALESCE(u.organization_name, '') AS organization_name
+      FROM tbl_users u
+      LEFT JOIN tbl_company c ON u.id = c.user_id
+      WHERE u.id = $1;
+    `;
+  
+    return new Promise((resolve, reject) => {
+      console.log("Entered getVendorsDetails model");
+  
+      // Fetch vendor IDs related to the given RFQ and product
+      db.query(fetchVendorsQuery, [rfq_id, tbl_rfq_product_id])
+        .then(async (vendorIdsResult) => {
+          if (vendorIdsResult.length === 0) {
+            // If no vendors found, return an empty array
+            resolve({
+              status: 1,
+              message: "No vendors found.",
+              data: [],
+            });
+            return;
+          }
+  
+          // Initialize an empty array to store the vendor details
+          const vendorDetails = [];
+  
+          // Fetch vendor details for each unique vendor_id
+          for (const vendor of vendorIdsResult) {
+            const vendorId = vendor.vendor_id;
+  
+            // Fetch vendor details (vendor_name, company_name, organization_name)
+            const vendorDetailsResult = await db.query(fetchVendorDetailsQuery, [vendorId]);
+  
+            if (vendorDetailsResult.length > 0) {
+              const vendorData = vendorDetailsResult[0];
+              vendorDetails.push({
+                vendor_id: vendorData.vendor_id,
+                vendor_name: vendorData.vendor_name,
+                company_name: vendorData.company_name,
+                organization_name: vendorData.organization_name,
+              });
+            }
+          }
+  
+          // Return the vendor details
+          resolve({
+            status: 1,
+            message: "Vendors fetched successfully.",
+            data: vendorDetails,
+          });
+        })
+        .catch((error) => {
+          console.error("Error fetching vendor details:", error);
+          reject({
+            status: 0,
+            message: "Error in fetching vendor details.",
+            error: error.message,
+          });
+        });
+    });
+  },
+
+  getVendorResponses: async (rfq_id, tbl_rfq_product_id, vendor_id) => {
+    console.log("Values in getVendorResponsesForClauses model:", rfq_id, tbl_rfq_product_id, vendor_id);
+
+    // Query to fetch the tbl_rfq_product_tech_evaluation_id
+    const getTechEvaluationIdQuery = `
+      SELECT id
+      FROM tbl_rfq_product_tech_evaluation
+      WHERE rfq_id = $1
+        AND tbl_rfq_product_id = $2;
+    `;
+
+    // Query to fetch clauses associated with the tbl_rfq_product_tech_evaluation_id
+    const getClausesQuery = `
+      SELECT id AS clause_id, clause_text
+      FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE tbl_rfq_product_tech_evaluation_id = $1;
+    `;
+
+    // Query to fetch clause files associated with each clause
+    const getClauseFilesQuery = `
+      SELECT tbl_rfq_product_tech_evaluation_clauses_id, file_url
+      FROM tbl_rfq_product_tech_evaluation_clauses_files
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = ANY($1::int[]);
+    `;
+
+    // Query to fetch vendor responses and vendor response files
+    const getVendorResponsesQuery = `
+      SELECT vr.tbl_rfq_product_tech_evaluation_clauses_id, vr.vendor_response, vrf.file_url AS vendor_response_files
+      FROM tbl_rfq_product_tech_evaluation_vendors_response vr
+      LEFT JOIN tbl_rfq_product_tech_evaluation_vendors_response_files vrf 
+        ON vr.id = vrf.tbl_rfq_product_tech_evaluation_vendors_response_id
+      WHERE vr.vendor_id = $1 AND vr.tbl_rfq_product_tech_evaluation_clauses_id = ANY($2::int[]);
+    `;
+
+    return new Promise((resolve, reject) => {
+        console.log("Entered getVendorResponsesForClauses model");
+
+        // Step 1: Fetch tbl_rfq_product_tech_evaluation_id
+        db.query(getTechEvaluationIdQuery, [rfq_id, tbl_rfq_product_id])
+            .then(async (techEvalResult) => {
+                if (techEvalResult.length === 0) {
+                    resolve({
+                        status: 0,
+                        message: "No tech evaluation found for the given rfq_id and tbl_rfq_product_id.",
+                        data: [],
+                    });
+                    return;
+                }
+
+                const techEvaluationId = techEvalResult[0].id;
+
+                // Step 2: Fetch clauses associated with the tbl_rfq_product_tech_evaluation_id
+                const clausesResult = await db.query(getClausesQuery, [techEvaluationId]);
+
+                if (clausesResult.length === 0) {
+                    resolve({
+                        status: 0,
+                        message: "No clauses found for the given tech evaluation.",
+                        data: [],
+                    });
+                    return;
+                }
+
+                // Step 3: Fetch clause files associated with each clause
+                const clauseIds = clausesResult.map(clause => clause.clause_id);
+                const clauseFilesResult = await db.query(getClauseFilesQuery, [clauseIds]);
+
+                // Step 4: Fetch vendor responses for each clause
+                const vendorResponsesResult = await db.query(getVendorResponsesQuery, [vendor_id, clauseIds]);
+                console.log("vendor response result = ",vendorResponsesResult);
+                // Step 5: Format the response
+                const data = clausesResult.map((clause) => {
+                    const clauseFiles = clauseFilesResult.filter(file => file.tbl_rfq_product_tech_evaluation_clauses_id === clause.clause_id)
+                        .map((file) => file.file_url);
+
+                    const vendorResponse = vendorResponsesResult.filter((vr) => vr.tbl_rfq_product_tech_evaluation_clauses_id === clause.clause_id);
+
+                    return {
+                        clause_id: clause.clause_id,
+                        clause_text: clause.clause_text,
+                        clause_files: clauseFiles,
+                        vendor_response: vendorResponse.length > 0 ? vendorResponse[0].vendor_response : '',
+                        vendor_response_files: vendorResponse.map((vr) => vr.vendor_response_files).flat(),
+                    };
+                });
+
+                resolve({
+                    status: 1,
+                    message: "Vendor responses fetched successfully.",
+                    data: data,
+                });
+            })
+            .catch((error) => {
+                console.error("Error fetching vendor responses:", error);
+                reject({
+                    status: 0,
+                    message: "Error in fetching vendor responses.",
+                    error: error.message,
+                });
+            });
+    });
+},
  }
 export default rfqModel;

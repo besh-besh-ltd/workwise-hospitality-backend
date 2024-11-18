@@ -4939,19 +4939,19 @@ addTechnicalEveluation: async (req, res) => {
 addClause: async (req, res) => {
   try {
     console.log("add clause controller");
-    const { rfq_id,rfq_product_id, rfq_product_tech_evaluation_id, clause_text,file_url } = req.body;
+    const { rfq_id,rfq_product_id, clause_text,file_url } = req.body;
     console.log("bodyy = ",req.body);
 
-    if (!rfq_id ||!rfq_product_id || !rfq_product_tech_evaluation_id || !clause_text || !Array.isArray(file_url)) {
+    if (!rfq_id ||!rfq_product_id || !clause_text || !Array.isArray(file_url)) {
       return res.status(400).json({
         status: 0,
-        message: "Invalid input. Ensure RFQ_ID, rfq_product_id, rfq_product_techevaluation_id, and clauses are provided correctly.",
+        message: "Invalid input. Ensure RFQ_ID, rfq_product_id and clauses are provided correctly.",
       });
     }
     // Calling  the model function
     console.log("add clause controller working");
 
-    const result = await rfqModel.addClause(rfq_id, rfq_product_id, rfq_product_tech_evaluation_id,  clause_text,file_url );
+    const result = await rfqModel.addClause(rfq_id, rfq_product_id, clause_text,file_url );
 
     res.status(200).json(result).end();
   } catch (error) {
@@ -5081,6 +5081,92 @@ addVendorResponse: async (req, res) => {
       error: error.message,
     });
   }
-}
+},
+
+addtechEvaluationClearedVendors: async (req, res) => {
+  try {
+    const {vendor_id, rfq_product_tech_evaluation_id} = req.body;
+    console.log("API Input: ", req.body);
+
+    // Validate input
+    if (!vendor_id || !rfq_product_tech_evaluation_id) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid input. Please provide vendor ID and rfq_product_tech_evaluation_id",
+      });
+    }
+
+    const response = await rfqModel.addtechEvaluationClearedVendors(vendor_id, rfq_product_tech_evaluation_id);
+
+    res
+      .status(200)
+      .json(response)
+      .end();
+  } catch (error) {
+    console.error("Error in addVendorResponse API: ", error.message);
+    res.status(500).json({
+      status: 0,
+      message: "Error processing vendor response.",
+      error: error.message,
+    });
+  }
+},
+
+getVendorNames: async (req, res) => {
+  try {
+    const {rfq_id, rfq_product_id} = req.body;
+    console.log("API Input: ", req.body);
+
+    // Validate input
+    if (!rfq_id || ! rfq_product_id) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid input. Please provide RFQ ID and rfq_product_id",
+      });
+    }
+
+    const response = await rfqModel.getVendorNames(rfq_id, rfq_product_id);
+
+    res
+      .status(200)
+      .json(response)
+      .end();
+  } catch (error) {
+    console.error("Error in addVendorResponse API: ", error.message);
+    res.status(500).json({
+      status: 0,
+      message: "Error processing vendor response.",
+      error: error.message,
+    });
+  }
+},
+getVendorResponses: async (req, res) => {
+  try {
+    const {rfq_id, rfq_product_id, vendor_id} = req.body;
+    console.log("API Input: ", req.body);
+
+    // Validate input
+    if (!rfq_id || ! rfq_product_id || !vendor_id) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid input. Please provide RFQ ID and rfq_product_id and Vendor ID",
+      });
+    }
+
+    const response = await rfqModel.getVendorResponses(rfq_id, rfq_product_id, vendor_id);
+
+    res
+      .status(200)
+      .json(response)
+      .end();
+  } catch (error) {
+    console.error("Error in addVendorResponse API: ", error.message);
+    res.status(500).json({
+      status: 0,
+      message: "Error processing vendor response.",
+      error: error.message,
+    });
+  }
+},
 };
 export default rfqController;
