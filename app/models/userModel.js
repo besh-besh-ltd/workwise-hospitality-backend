@@ -3157,6 +3157,23 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   },
+  updateIsPrivateOfVendorOnEmail: async (email) => {
+
+    return new Promise((resolve, reject) => {
+      db.none(
+        `UPDATE tbl_company 
+         SET is_private = 0
+         WHERE email = $1`,
+        [email]
+      )
+        .then(() => {
+          resolve({ message: 'Vendor successfully made public' });
+        })
+        .catch((err) => {
+          reject(err);
+        });
+    });
+  },
   mapBuyerToVendor: async (buyerId, vendorId) => {
     // Map buyers to vendors and prioritize these vendors in search results for the buyer
     return new Promise((resolve, reject) => {
