@@ -1727,6 +1727,7 @@ WHERE row_num_by_name_category = 1
     `;
         
 
+
     const values = vendor_name ? [vendor_name] : [];
     return new Promise(function (resolve, reject) {
       db.query(q,values)
