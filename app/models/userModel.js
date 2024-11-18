@@ -562,16 +562,28 @@ const userModel = {
   userinfo: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.one(
-        `select tbl_users.*,tbl_company.mobile as company_mobile,tbl_company.gstin,
-        tbl_company.cin,tbl_company.profile,tbl_company.company_name,tbl_company.location,
-        tbl_company.import_export_code,tbl_company.certifications,tbl_company.nature_of_business,
-        tbl_company.type_of_business,tbl_company.turnover,tbl_company.no_of_employess,
-        tbl_location_states.state_name , tbl_location_cities.city_name  
-        from tbl_users 
-        left join tbl_company on tbl_users.id = tbl_company.user_id  
-        LEFT JOIN tbl_location_states on tbl_users.state = tbl_location_states.id
-        LEFT JOIN tbl_location_cities on tbl_users.city = tbl_location_cities.id
-        where tbl_users.id = $1`,
+        `SELECT tbl_users.*,
+            tbl_company.company_name,
+            tbl_company.profile,
+            tbl_company.nature_of_business,
+            tbl_company.type_of_business,
+            tbl_company.turnover,
+            tbl_company.no_of_employess,
+            tbl_company.import_export_code,
+            tbl_company.certifications,
+            tbl_company.location,
+            tbl_company.mobile as company_mobile,
+            tbl_company.gstin,
+            tbl_company.cin,
+            tbl_company.website,
+            tbl_company.established_year,
+            tbl_location_states.state_name, 
+            tbl_location_cities.city_name  
+        FROM tbl_users 
+        LEFT JOIN tbl_company ON tbl_users.id = tbl_company.user_id  
+        LEFT JOIN tbl_location_states ON tbl_users.state = tbl_location_states.id
+        LEFT JOIN tbl_location_cities ON tbl_users.city = tbl_location_cities.id
+        WHERE tbl_users.id = $1`,
         [user_id]
       )
         .then(function (data) {
@@ -628,6 +640,10 @@ const userModel = {
              tbl_users.dob,
              tbl_users.nationality,
              tbl_users.status,
+             tbl_users.linkedin,
+             tbl_users.facebook,
+             tbl_users.whatsapp,
+             tbl_users.skype,
              tbl_company.id as company_id,
              tbl_company.gstin,
              tbl_company.cin,
@@ -646,20 +662,6 @@ const userModel = {
                
              ARRAY(
                  SELECT json_build_object(
-                     'vendor_approve', tbl_vendor_approve.vendor_approve,
-                     'id', tbl_vendor_approve.id,
-                     'vendor_approve_url', CASE
-                         WHEN tbl_vendor_approve.vendor_logo IS NULL THEN
-                             NULL
-                         ELSE tbl_vendor_approve.vendor_logo
-                     END
-                 )
-                 FROM tbl_vendorapprove_user_mapping VM
-                 LEFT JOIN tbl_vendor_approve ON tbl_vendor_approve.id = VM.vendor_approve_id
-                 WHERE tbl_users.id = VM.user_id
-             ) AS "vendor_approve",
-             ARRAY(
-                 SELECT json_build_object(
                      'brochure', tbl_files.file_name,
                      'brochure_url', tbl_files.file_path
                  )
@@ -671,6 +673,10 @@ const userModel = {
                'product_name', P.name, 
                'product_description', P.description, 
                'product_id', P.id,
+               'product_images', json_agg(json_build_object(
+                    'new_product_image', PI.new_image_name,
+                    'original_product_image', PI.original_image_name
+                )) FILTER (WHERE PI.product_id IS NOT NULL),
                'approved_by', ARRAY(
                    SELECT json_build_object(
                        'vendor_approve_id', VA.id,
@@ -683,7 +689,9 @@ const userModel = {
                )
            )
            FROM tbl_product P
+           LEFT JOIN tbl_product_images PI ON P.id = PI.product_id
            WHERE P.created_by = tbl_users.id
+           GROUP BY P.id
        ) AS "product_list",
              CASE
                  WHEN tbl_users.new_profile_image IS NULL THEN
@@ -703,12 +711,13 @@ const userModel = {
                      'rating', tbl_vendor_reviews.rating,
                      'description', tbl_vendor_reviews.description,
                      'buyer', BU.name,
-                     'buyer_email', BU.email
+                     'buyer_email', BU.email,
+                     'original_profile_image', BU.original_profile_image,
+                     'new_profile_image', BU.new_profile_image
                  )
                  FROM tbl_vendor_reviews
                  LEFT JOIN tbl_users BU ON BU.id = tbl_vendor_reviews.reviewed_by
                  WHERE tbl_vendor_reviews.reviewed_to = tbl_users.id
-                 AND tbl_vendor_reviews.reviewed_by = ${current_user}
              ) AS "reviews"`;
       }
 
