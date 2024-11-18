@@ -390,6 +390,21 @@ const schemas = {
     productList: Joi.string().required().trim().max(300),  // Required, trimmed, and max length of 300 characters,
     is_private: Joi.number().optional().valid(0, 1),
   }),
+  buyer_private_vendor_approved: Joi.object().keys({
+    vendorName: Joi.string().required().trim().max(60),
+    email: Joi.string().required().email().trim().max(50),
+    phone: Joi.string().required().trim().max(20),
+    productDetails: Joi.array().items(Joi.object().keys({
+      master_id: Joi.number().required(),
+      name: Joi.string().required(),
+      description: Joi.string().allow('', null),
+      status: Joi.number().optional(),
+      approved_id: Joi.array().items(Joi.number()).optional(),
+      approved_name: Joi.array().items(Joi.string()).optional(),
+      categories: Joi.array().items(Joi.number()).optional()
+    })).optional(),
+    is_private: Joi.number().optional().valid(0, 1),
+  }),
 
   user_spoc: Joi.object().keys({
     spoc_name: Joi.string()
