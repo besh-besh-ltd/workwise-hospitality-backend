@@ -293,7 +293,7 @@ const buyerController = {
 
       // status -1 pending review, 0 disable user profile, 1 active user, 2 rejected  
       const { vendorTempId, status, reject_reason, buyerName, productdetails } = req.body
-
+      
       const userDetails = await rfqModel.checkIfExists('tbl_temp_user', `id = ${vendorTempId}`);
       if (userDetails.length <= 0) {
         return res
@@ -320,7 +320,7 @@ const buyerController = {
 
       // For single public vendor upload
       if (status == 3) {
-        const result = await userModel.updateStatusInTempUserTable(vendorTempId, status, reject_reason || "")
+        const result = await userModel.updateIsPrivateOfVendorOnEmail(userDetails[0].email);
         
         await userModel.deleteVendorFromTempUserTable(vendorTempId);
         
