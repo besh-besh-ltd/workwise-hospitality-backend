@@ -294,6 +294,31 @@ console.log({ product_info: productResult[0], spec_info, vendor_info })
     throw error;
   }
 };
+
+const updateRfqProductIdInTechEvaluation = async (oldProductId, newProductId) => {
+  try {
+
+    const records = await rfqModel.getTechEvaluationRecordsByProductId(oldProductId);
+
+    if (records.length > 0) {
+      await Promise.all(
+        records.map((record) =>
+          rfqModel.update(
+            'tbl_rfq_product_tech_evaluation',
+            { tbl_rfq_product_id: newProductId },
+            record.id
+          )
+        )
+      );
+    }
+
+    console.log('RFQ Product IDs successfully updated in Tech Evaluation');
+  } catch (error) {
+    console.error('Error updating RFQ Product IDs:', error.message);
+    throw error;
+  }
+};
+
 const getQUOTES = async ({ id }, user_id) => {
   console.log('RFQ ID', id);
   try {
@@ -1101,7 +1126,16 @@ const saveRfqDraft = async (user_id, reqBody) => {
   }
 
   if (products && products.length > 0) {
-      await Promise.all(products.map(product => insertProduct(product, rfq_id)));
+      // await Promise.all(products.map(product => insertProduct(product, rfq_id)));
+      await Promise.all(
+        products.map(async (product) => {
+          const insertResult = await insertProduct(product, rfq_id);
+          const oldProductId = product.id;
+          const newProductId = insertResult.product_info.id;
+    
+          await updateRfqProductIdInTechEvaluation(oldProductId, newProductId);
+        })
+      );
   }
 
   return { status: 1, message: 'Draft saved successfully', rfq_id };
@@ -1290,7 +1324,7 @@ const rfqController = {
         const rfqData = rfqList[0];
         const id = rfqData.id;
 
-        const rfqItem = await rfqModel.getRfqDraftId(id);
+        const rfqItem = await rfqModel.getRfqDraftById(id);
 
         res.status(200).json({
             status: 1,
