@@ -261,12 +261,17 @@ RfqRoutes.post('/add-comment',
   rfqController.addComment
 )
 
-RfqRoutes.get('/get-vendor-names',
+RfqRoutes.get('/get-comments/:id',
+  passportSignIn,
+  rfqController.getComments
+)
+
+RfqRoutes.post('/get-vendor-names',
   passportSignIn,
   rfqController.getVendorNames
 )
 
-RfqRoutes.get('/get-vendor-responses',
+RfqRoutes.post('/get-vendor-responses',
   passportSignIn,
   rfqController.getVendorResponses
 )

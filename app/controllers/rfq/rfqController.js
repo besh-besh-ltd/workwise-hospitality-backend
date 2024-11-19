@@ -4966,7 +4966,7 @@ addClause: async (req, res) => {
     const { rfq_id,rfq_product_id, clause_text,file_url } = req.body;
     console.log("bodyy = ",req.body);
 
-    if (!rfq_id ||!rfq_product_id || !clause_text || !Array.isArray(file_url)) {
+    if (!rfq_id ||!rfq_product_id || !clause_text) {
       return res.status(400).json({
         status: 0,
         message: "Invalid input. Ensure RFQ_ID, rfq_product_id and clauses are provided correctly.",
@@ -5058,7 +5058,7 @@ addComment: async (req, res) => {
     console.log("entered comment controller = ",clause_id,created_by,text, file_url);
 
     // Validate input
-    if (!clause_id || !created_by || !text || !Array.isArray(file_url)) {
+    if (!clause_id || !created_by || !text) {
       return res.status(400).json({
         status: 0,
         message: "Invalid input. Please provide clause ID, creator ID, and comment text.",
@@ -5078,6 +5078,31 @@ addComment: async (req, res) => {
   }
 },
 
+getComments: async (req, res) => {
+  try{
+    const clause_id = req.params.id;
+    console.log("entered comment controller = ",clause_id);
+
+    // Validate input
+    if (!clause_id) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid input. Please provide clause ID",
+      });
+    }
+    const response = await rfqModel.getComments(clause_id);
+    res
+      .status(200)
+      .json(response)
+      .end();
+  } catch (error) {
+    res.status(500).json({
+      status: 0,
+      message: "Error storing comment.",
+      error: error.message,
+    });
+  }
+},
 addVendorResponse: async (req, res) => {
   try {
     const {vendor_id, clause_id, vendor_response, file_url} = req.body;
