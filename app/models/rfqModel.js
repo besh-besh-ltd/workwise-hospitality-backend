@@ -3129,6 +3129,88 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
 
+  getComments: async (clause_id) => {
+    const validateClauseQuery = `
+      SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE id = $1) AS clause_exists;
+    `;
+  
+    const fetchCommentsQuery = `
+      SELECT id AS comment_id, text AS comment_text, created_by
+      FROM tbl_rfq_product_tech_evaluation_comments
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
+    `;
+  
+    const fetchCommentFilesQuery = `
+      SELECT file_url
+      FROM tbl_rfq_product_tech_evaluation_comments_files
+      WHERE tbl_rfq_product_tech_evaluation_comments_id = $1;
+    `;
+  
+    return new Promise((resolve, reject) => {
+      // Validate clause existence
+      db.query(validateClauseQuery, [clause_id])
+        .then((clauseResult) => {
+          if (!clauseResult[0].clause_exists) {
+            return reject({
+              status: 0,
+              message: "Invalid clause ID. Clause does not exist.",
+            });
+          }
+  
+          // Fetch comments for the clause
+          db.query(fetchCommentsQuery, [clause_id])
+            .then(async (commentsResult) => {
+              const data = [];
+  
+              for (const comment of commentsResult) {
+                const { comment_id, comment_text, created_by } = comment;
+  
+                // Fetch files associated with the comment
+                const filesResult = await db.query(fetchCommentFilesQuery, [comment_id]).catch((fileError) => {
+                  console.error(`Error fetching files for comment ID: ${comment_id}`, fileError.message);
+                  reject({
+                    status: 0,
+                    message: "Failed to fetch files for comments.",
+                    error: fileError.message,
+                  });
+                });
+  
+                // Add comment and files to the response
+                data.push({
+                  comment_id,
+                  comment_text,
+                  created_by,
+                  comment_files: filesResult.map((file) => file.file_url) || [],
+                });
+              }
+  
+              resolve({
+                status: 1,
+                message: "Comments fetched successfully.",
+                data,
+              });
+            })
+            .catch((commentsError) => {
+              console.error("Error fetching comments:", commentsError.message);
+              reject({
+                status: 0,
+                message: "Failed to fetch comments.",
+                error: commentsError.message,
+              });
+            });
+        })
+        .catch((validationError) => {
+          console.error("Error validating clause:", validationError.message);
+          reject({
+            status: 0,
+            message: "Failed to validate clause.",
+            error: validationError.message,
+          });
+        });
+    });
+  },
+
   addVendorResponse: (vendor_id, clause_id, vendor_response, file_url) => {
     console.log("Entered addVendorResponse =", vendor_id, clause_id, vendor_response, file_url);
   
