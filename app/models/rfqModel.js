@@ -296,6 +296,24 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     });
   },
 
+  getTechEvaluationRecordsByProductId: async (productId) => {
+    const fetchQuery = `
+      SELECT id
+      FROM tbl_rfq_product_tech_evaluation
+      WHERE tbl_rfq_product_id = $1`;
+
+    return new Promise((resolve, reject) => {
+      db.query(fetchQuery, [productId])
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
   getAllTerms: async () => {
     return new Promise(function (resolve, reject) {
       db.query(`SELECT * FROM tbl_rfq_terms`)
@@ -434,7 +452,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     });
   },
 
-  getRfqDraftId: async (id) => {
+  getRfqDraftById: async (id) => {
 
     const q = `SELECT 
       RFQ.id AS rfq_id,
@@ -472,6 +490,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       -- Products
       ARRAY(
           SELECT json_build_object(
+              'id', RFQ_P.id,
               'product_id', RFQ_P.product_id,
               'predefined_tds_file', RFQ_P.datasheet_file,
               'predefined_qap_file', RFQ_P.qap_file,
