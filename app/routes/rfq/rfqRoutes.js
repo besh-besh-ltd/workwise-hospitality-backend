@@ -230,4 +230,55 @@ RfqRoutes.post('/magic-search-rfq-create',
   rfqController.create  
 )
 
+// technical eveluation modules
+RfqRoutes.post('/add-technical-eveluation',
+  passportSignIn,
+  rfqController.addTechnicalEveluation 
+)
+
+RfqRoutes.post('/add-clause',
+  passportSignIn,
+  rfqController.addClause
+)
+
+RfqRoutes.put('/update-clause',
+  passportSignIn,
+  rfqController.updateClause
+)
+
+RfqRoutes.delete('/remove-clause',
+  passportSignIn,
+  rfqController.removeClause
+)
+
+RfqRoutes.get('/get-clauses',
+  passportSignIn,
+  rfqController.getClauses
+)
+
+RfqRoutes.post('/add-comment',
+  passportSignIn,
+  rfqController.addComment
+)
+
+RfqRoutes.get('/get-vendor-names',
+  passportSignIn,
+  rfqController.getVendorNames
+)
+
+RfqRoutes.get('/get-vendor-responses',
+  passportSignIn,
+  rfqController.getVendorResponses
+)
+
+RfqRoutes.post('/add-vendor-response',
+  passportSignIn,
+  rfqController.addVendorResponse
+)
+
+RfqRoutes.post('/tech-evaluation-cleared-vendors',
+  passportSignIn,
+  rfqController.addtechEvaluationClearedVendors
+)
+
 export default RfqRoutes;
