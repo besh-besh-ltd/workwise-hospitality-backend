@@ -5139,18 +5139,18 @@ getComments: async (req, res) => {
 },
 addVendorResponse: async (req, res) => {
   try {
-    const {vendor_id, clause_id, vendor_response, file_url} = req.body;
+    const data = req.body;
     console.log("API Input: ", req.body);
 
     // Validate input
-    if (!vendor_id || !Array.isArray(file_url) || !clause_id || !vendor_response) {
+    if (!data) {
       return res.status(400).json({
         status: 0,
-        message: "Invalid input. Please provide vendor ID and clause details.",
+        message: "Invalid input. Please provide vendor responses",
       });
     }
 
-    const response = await rfqModel.addVendorResponse(vendor_id, clause_id, vendor_response, file_url);
+    const response = await rfqModel.addVendorResponse(data);
 
     res
       .status(200)
@@ -5261,7 +5261,7 @@ getTechEvaluationRFQDetails: async (req, res) => {
     if (!user_id) {
       return res.status(400).json({
         status: 0,
-        message: "Invalid input. Please provide RFQ ID and rfq_product_id and Vendor ID",
+        message: "Invalid input. Please provide user_ID",
       });
     }
 

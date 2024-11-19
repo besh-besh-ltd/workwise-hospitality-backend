@@ -3239,25 +3239,19 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
 
-  addVendorResponse: (vendor_id, clause_id, vendor_response, file_url) => {
-    console.log("Entered addVendorResponse =", vendor_id, clause_id, vendor_response, file_url);
-  
+  addVendorResponse: async (responses) => {
     const validateClauseQuery = `
-      SELECT id 
-      FROM tbl_rfq_product_tech_evaluation_clauses 
-      WHERE id = $1;
+      SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE id = $1) AS clause_exists;
     `;
   
     const validateVendorQuery = `
-      SELECT id 
-      FROM tbl_users 
-      WHERE id = $1;
+      SELECT EXISTS (SELECT 1 FROM tbl_users WHERE id = $1) AS vendor_exists;
     `;
   
     const checkVendorResponseQuery = `
-      SELECT id 
-      FROM tbl_rfq_product_tech_evaluation_vendors_response 
-      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 AND vendor_id = $2;
+      SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_vendors_response
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 AND vendor_id = $2) AS response_exists;
     `;
   
     const insertVendorResponseQuery = `
@@ -3274,75 +3268,79 @@ rfq_project_exist: async (project_id,user_id) => {
     `;
   
     return new Promise((resolve, reject) => {
-      console.log("Entered vendor response model");
-  
-      // Validate Clause
-      db.query(validateClauseQuery, [clause_id])
-        .then((clauseResult) => {
-          console.log("Clause validation result =", clauseResult);
-  
-          if (clauseResult.length === 0) {
-            reject({
-              status: 0,
-              message: `Clause ID ${clause_id} not found.`,
+      // Iterate over each vendor response
+      const promises = responses.map(async (response) => {
+        const { vendor_id, clause_id, vendor_response, file_url } = response;
+
+        // Validate clause existence
+        const clauseResult = await db.query(validateClauseQuery, [clause_id]);
+        console.log("Clause validation result =", clauseResult);
+        if (!clauseResult[0].clause_exists) {
+          throw {
+            status: 0,
+            message: `Clause ID ${clause_id} does not exist.`,
+          };
+        }
+
+        // Validate vendor existence
+        const vendorResult = await db.query(validateVendorQuery, [vendor_id]);
+        console.log("Vendor validation result =", vendorResult);
+        if (!vendorResult[0].vendor_exists) {
+          reject({
+            status: 0,
+            message: `Vendor ID ${vendor_id} does not exist.`,
+          });
+          return;
+        }
+
+        // Check if Vendor Response already exists
+        const responseResult = await db.query(checkVendorResponseQuery, [clause_id, vendor_id]);
+        console.log("Vendor response validation result =", responseResult);
+        if (responseResult[0].response_exists) {
+          reject( {
+            status: 0,
+            message: `Vendor response already exists for Clause ID ${clause_id}.`,
+          });
+          return;
+        }
+
+        // Insert vendor response
+        const insertResponseResult = await db.query(insertVendorResponseQuery, [vendor_id, clause_id, vendor_response]);
+        const responseId = insertResponseResult[0].id;
+        console.log("Inserted Vendor Response ID =", responseId);
+
+        // Insert associated files if provided
+        if (file_url && file_url.length > 0) {
+          for (const url of file_url) {
+            await db.query(insertFileQuery, [responseId, url]).catch((fileError) => {
+              console.error(`Error adding file: ${url}`, fileError.message);
+              reject({
+                status: 0,
+                message: "Failed to add files associated with the vendor response.",
+                error: fileError.message,
+              });
+              return;
             });
-            return; // Stop further execution
           }
-  
-          // Validate Vendor
-          return db.query(validateVendorQuery, [vendor_id]);
-        })
-        .then((vendorResult) => {
-          console.log("Vendor validation result =", vendorResult);
-  
-          if (vendorResult.length === 0) {
-            reject({
-              status: 0,
-              message: `Vendor ID ${vendor_id} not found.`,
-            });
-            return; // Stop further execution
-          }
-  
-          // Check if Vendor Response already exists
-          return db.query(checkVendorResponseQuery, [clause_id, vendor_id]);
-        })
-        .then((responseResult) => {
-          console.log("Vendor response validation result =", responseResult);
-  
-          if (responseResult.length > 0) {
-            reject({
-              status: 0,
-              message: `Vendor response already exists for Clause ID ${clause_id}.`,
-            });
-            return; // Stop further execution
-          }
-  
-          // Insert Vendor Response
-          return db.query(insertVendorResponseQuery, [vendor_id, clause_id, vendor_response]);
-        })
-        .then(async (insertResponseResult) => {
-          const responseId = insertResponseResult[0].id;
-          console.log("Inserted Vendor Response ID =", responseId);
-  
-          // Insert associated files one by one
-          if (file_url && file_url.length > 0) {
-            for (const url of file_url) {
-              await db.query(insertFileQuery, [responseId, url]);
-            }
-          }
-  
-          // Respond after successful operations
+        }
+
+        return { status: 1, message: "Vendor response and files successfully added.", response_id: responseId };
+      });
+
+      // Wait for all vendor responses to be processed
+      Promise.all(promises)
+        .then((results) => {
           resolve({
             status: 1,
-            message: "Vendor response and files successfully added.",
-            response_id: responseId,
+            message: "All vendor responses successfully added.",
+            results: results,
           });
         })
         .catch((error) => {
-          console.error("Error in addVendorResponse:", error);
+          console.error("Error in addVendorResponses:", error);
           reject({
             status: 0,
-            message: "Error adding vendor response or associated files.",
+            message: "Error adding vendor responses or associated files.",
             error: error.message,
           });
         });
@@ -3610,7 +3608,7 @@ rfq_project_exist: async (project_id,user_id) => {
 
 getTechEvaluationRFQDetails : (user_id) => {
     const fetchRFQDetailsQuery = `
-    SELECT 
+      SELECT 
       rfq.id AS rfq_id,
       rfq.rfq_no,
       rfq_product.id AS rfq_product_id,
@@ -3620,32 +3618,33 @@ getTechEvaluationRFQDetails : (user_id) => {
       spec.value
     FROM 
       tbl_rfq AS rfq
-    JOIN 
+    LEFT JOIN 
       tbl_rfq_products AS rfq_product
       ON rfq.id = rfq_product.rfq_id
-    JOIN 
+    LEFT JOIN 
       tbl_product AS product
       ON rfq_product.product_id = product.id
-    JOIN 
+    LEFT JOIN 
       tbl_rfq_products_specs AS spec
       ON rfq_product.rfq_id = spec.rfq_id AND rfq_product.product_id = spec.product_id
-    JOIN 
+    LEFT JOIN 
       tbl_rfq_product_tech_evaluation AS rfq_tech_eval
       ON rfq_tech_eval.rfq_id = rfq.id AND rfq_tech_eval.tbl_rfq_product_id = rfq_product.id
-    JOIN 
+    LEFT JOIN 
       tbl_rfq_product_tech_evaluation_clauses AS tech_clauses
       ON tech_clauses.tbl_rfq_product_tech_evaluation_id = rfq_tech_eval.id
-    JOIN 
+    LEFT JOIN 
       tbl_rfq_product_tech_evaluation_vendors_response AS vendor_response
       ON vendor_response.tbl_rfq_product_tech_evaluation_clauses_id = tech_clauses.id
     WHERE 
       rfq.created_by = $1;
-  `;
+    `;
     return new Promise((resolve, reject) => {
       console.log("Fetching RFQ details...");
 
       db.query(fetchRFQDetailsQuery, [user_id])
         .then((result) => {
+          console.log("result of fetch RFQ = ",result)
           if (result.length === 0) {
             // No RFQs found
             resolve({
