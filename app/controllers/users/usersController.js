@@ -2775,8 +2775,9 @@ const UsersController = {
 
     try {
       
-      const { vendorName, email, phone, productDetails, is_private } = req.body;
-      const buyerId = req.user.id;
+      const { vendorName, email, phone, is_private } = req.body;
+      let {productDetails} = req.body
+       const buyerId = req.user.id;
 
       let obj = {
         buyerId,
@@ -2890,9 +2891,9 @@ const UsersController = {
           }
   
           // ---------------- products ----------------
-          let productDetails = '';
+          let productdetails = '';
           if (master_id) {
-            productDetails = await productModel.check_product(master_id);
+            productdetails = await productModel.check_product(master_id);
           }
           let productObj = {
             name: name,
@@ -2910,19 +2911,19 @@ const UsersController = {
             qap_new_file_name:
               req.files?.qap?.length > 0
                 ? `${Config.download_url}/product_image/${req.files.qap[0].filename}`
-                : productDetails[0].qap_new_file_name,
+                : productdetails[0].qap_new_file_name,
             qap_original_file_name:
               req.files?.qap?.length > 0
                 ? req.files.qap[0].originalname
-                : productDetails[0].qap_original_file_name,
+                : productdetails[0].qap_original_file_name,
             tds_new_file_name:
               req.files?.tds?.length > 0
                 ? `${Config.download_url}/product_image/${req.files.tds[0].filename}`
-                : productDetails[0].tds_new_file_name,
+                : productdetails[0].tds_new_file_name,
             tds_original_file_name:
               req.files?.tds?.length > 0
                 ? req.files.tds[0].originalname
-                : productDetails[0].tds_original_file_name
+                : productdetails[0].tds_original_file_name
           };
   
           let product = await productModel.createProduct(productObj);
