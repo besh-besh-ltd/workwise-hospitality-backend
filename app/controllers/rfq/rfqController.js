@@ -5217,5 +5217,34 @@ getVendorResponses: async (req, res) => {
     });
   }
 },
+
+getTechEvaluationRFQDetails: async (req, res) => {
+  try {
+    const user_id = req.params.id;
+    console.log("API Input: ", user_id);
+
+    // Validate input
+    if (!user_id) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid input. Please provide RFQ ID and rfq_product_id and Vendor ID",
+      });
+    }
+
+    const response = await rfqModel.getTechEvaluationRFQDetails(user_id);
+
+    res
+      .status(200)
+      .json(response)
+      .end();
+  } catch (error) {
+    console.error("Error in addVendorResponse API: ", error.message);
+    res.status(500).json({
+      status: 0,
+      message: "Error processing vendor response.",
+      error: error.message,
+    });
+  }
+},
 };
 export default rfqController;

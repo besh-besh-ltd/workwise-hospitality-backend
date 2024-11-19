@@ -286,4 +286,8 @@ RfqRoutes.post('/tech-evaluation-cleared-vendors',
   rfqController.addtechEvaluationClearedVendors
 )
 
+RfqRoutes.get('/get-tech-evaluation-rfqs/:id',
+  passportSignIn,
+  rfqController.getTechEvaluationRFQDetails
+)
 export default RfqRoutes;

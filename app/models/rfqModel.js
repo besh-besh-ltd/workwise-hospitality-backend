@@ -2704,18 +2704,30 @@ rfq_project_exist: async (project_id,user_id) => {
   },
 
   addClause: async (rfq_id, rfq_product_id, clause_text, file_url) => {
-    console.log("values in add clause model", rfq_id, rfq_product_id,  clause_text, file_url);
+    console.log("values in add clause model", rfq_id, rfq_product_id, clause_text, file_url);
+  
+    const validateRfqQuery = `
+      SELECT id 
+      FROM tbl_rfq 
+      WHERE id = $1;
+    `;
   
     const validateRfqProductQuery = `
+      SELECT product_id 
+      FROM tbl_rfq_products 
+      WHERE product_id = $1;
+    `;
+  
+    const validateRfqProductTechEvaluationQuery = `
       SELECT id 
       FROM tbl_rfq_product_tech_evaluation 
       WHERE rfq_id = $1 AND tbl_rfq_product_id = $2;
     `;
   
-    const insertRfqProductQuery = `
+    const insertRfqProductTechEvaluationQuery = `
       INSERT INTO tbl_rfq_product_tech_evaluation 
       (rfq_id, tbl_rfq_product_id, timestamp) 
-      VALUES ($1, $2,NOW()) 
+      VALUES ($1, $2, NOW()) 
       RETURNING id;
     `;
   
@@ -2733,33 +2745,49 @@ rfq_project_exist: async (project_id,user_id) => {
     `;
   
     return new Promise((resolve, reject) => {
-      console.log("entered add-clause model");
+      console.log("Entered add-clause model");
   
-      // Validate or Insert RFQ Product
-      db.query(validateRfqProductQuery, [rfq_id, rfq_product_id])
-        .then(async (validationResult) => {
-          // let evaluationId = rfq_product_tech_evaluation_id;
-          console.log("validatyion result = ",validationResult)
-          let evaluationId=0;
-          // If not found, insert the RFQ Product and retrieve the new ID
-          if (validationResult.length === 0) {
-            console.log("RFQ Product not found, inserting new record...");
-            const insertResult = await db.query(insertRfqProductQuery, [rfq_id, rfq_product_id]);
-            console.log("insert result = ",insertResult);
+      // Validate the RFQ ID
+      db.query(validateRfqQuery, [rfq_id])
+        .then(async (rfqValidationResult) => {
+          if (rfqValidationResult.length === 0) {
+            resolve({
+              status: 0,
+              message: `RFQ with ID ${rfq_id} does not exist.`,
+            });
+            return;
+          }
+  
+          // Validate the RFQ Product ID
+          const rfqProductValidationResult = await db.query(validateRfqProductQuery, [rfq_product_id]);
+          if (rfqProductValidationResult.length === 0) {
+            resolve({
+              status: 0,
+              message: `RFQ Product with ID ${rfq_product_id} does not exist.`,
+            });
+            return;
+          }
+  
+          // Validate or Insert RFQ Product Tech Evaluation
+          const techEvaluationResult = await db.query(validateRfqProductTechEvaluationQuery, [rfq_id, rfq_product_id]);
+          let evaluationId;
+  
+          if (techEvaluationResult.length === 0) {
+            console.log("RFQ Product Tech Evaluation not found, inserting new record...");
+            const insertResult = await db.query(insertRfqProductTechEvaluationQuery, [rfq_id, rfq_product_id]);
             evaluationId = insertResult[0].id;
-            console.log("New rfq_product_tech_evaluation_id:", evaluationId);
-          }else{
-            evaluationId = validationResult[0].id;
-            console.log("RFQ Product found, using provided evaluation ID:");
-
-          } 
+            console.log("New RFQ Product Tech Evaluation ID:", evaluationId);
+          } else {
+            evaluationId = techEvaluationResult[0].id;
+            console.log("RFQ Product Tech Evaluation found, using existing ID:", evaluationId);
+          }
+  
           // Insert the Clause
           return db.query(insertClauseQuery, [evaluationId, clause_text]);
         })
         .then(async (clauseResult) => {
-          console.log("clause result = ", clauseResult);
           const clauseId = clauseResult[0].id; // Extract the returned clause ID
-          console.log("clause id = ", clauseId);
+          console.log("Clause ID:", clauseId);
   
           // Insert associated files
           if (file_url && file_url.length > 0) {
@@ -3558,5 +3586,83 @@ rfq_project_exist: async (project_id,user_id) => {
             });
     });
 },
+
+
+
+getTechEvaluationRFQDetails : (user_id) => {
+    const fetchRFQDetailsQuery = `
+    SELECT 
+      rfq.id AS rfq_id,
+      rfq.rfq_no,
+      rfq_product.id AS rfq_product_id,
+      rfq_tech_eval.id AS tbl_rfq_product_tech_evaluation_id,
+      product.name AS product_name,
+      spec.title,
+      spec.value
+    FROM 
+      tbl_rfq AS rfq
+    JOIN 
+      tbl_rfq_products AS rfq_product
+      ON rfq.id = rfq_product.rfq_id
+    JOIN 
+      tbl_product AS product
+      ON rfq_product.product_id = product.id
+    JOIN 
+      tbl_rfq_products_specs AS spec
+      ON rfq_product.rfq_id = spec.rfq_id AND rfq_product.product_id = spec.product_id
+    JOIN 
+      tbl_rfq_product_tech_evaluation AS rfq_tech_eval
+      ON rfq_tech_eval.rfq_id = rfq.id AND rfq_tech_eval.tbl_rfq_product_id = rfq_product.id
+    JOIN 
+      tbl_rfq_product_tech_evaluation_clauses AS tech_clauses
+      ON tech_clauses.tbl_rfq_product_tech_evaluation_id = rfq_tech_eval.id
+    JOIN 
+      tbl_rfq_product_tech_evaluation_vendors_response AS vendor_response
+      ON vendor_response.tbl_rfq_product_tech_evaluation_clauses_id = tech_clauses.id
+    WHERE 
+      rfq.created_by = $1;
+  `;
+    return new Promise((resolve, reject) => {
+      console.log("Fetching RFQ details...");
+
+      db.query(fetchRFQDetailsQuery, [user_id])
+        .then((result) => {
+          if (result.length === 0) {
+            // No RFQs found
+            resolve({
+              status: 1,
+              message: "No RFQs found for the given user.",
+              data: [],
+            });
+            return;
+          }
+
+          // Process and structure the result
+          const rfqDetails = result.map((row) => ({
+            rfq_id: row.rfq_id,
+            rfq_no: row.rfq_no,
+            rfq_product_id: row.rfq_product_id,
+            tbl_rfq_product_tech_evaluation_id: row.tbl_rfq_product_tech_evaluation_id,
+            product_name: row.product_name,
+            title: row.title,
+            value: row.value,
+          }));
+
+          resolve({
+            status: 1,
+            message: "RFQ details fetched successfully.",
+            data: rfqDetails,
+          });
+        })
+        .catch((error) => {
+          console.error("Error fetching RFQ details:", error);
+          reject({
+            status: 0,
+            message: "Error in fetching RFQ details.",
+            error: error.message,
+          });
+        });
+    });
+  }
  }
 export default rfqModel;
