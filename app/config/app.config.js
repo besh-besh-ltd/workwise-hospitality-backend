@@ -23,8 +23,11 @@ const documentPathUploadPath = process.env.DOCUMENT_PATH || null;
 const programBrochurePathUploadPath = process.env.PORGRAM_BROCHURE_PATH || null;
 
 // const productImageUploadPath = process.env.PRODUCT_IMAGE || null;
-const bulkProductUploadPath = process.env.BULK_PRODUCT_FILE || null;
+const bulkProductUploadPath = process.env.BULK_PRODUCT_FILE || "";
+const magicSearchFileUploadPath = process.env.BULK_PRODUCT_FILE || null;
 const invoiceFileUploadPath = process.env.INVOICE_FILE || null;
+const buyerUploadVendorFile = process.env.BUYER_UPLOAD_VENDOR_FILE || null;
+
 // const blogImageUploadPath = process.env.BLOG_IMAGE || null;
 
 const downloadURL = process.env.DOWNLOADD_URL || null;
@@ -36,7 +39,7 @@ const cgst = process.env.CGST || 0.0015;
 const app_version = process.env.APP_VERSION || 1.0;
 const base_url =
   // process.env.BASE_URL || 'https://panacheapi.indusnettechnologies.com';
-  process.env.BASE_URL || "http://localhost:3001";
+  process.env.BASE_URL || "http://localhost:8002";
 
 if (
   (jwtSecret == undefined || jwtSecret == null) &&
@@ -129,7 +132,7 @@ if (
   env == "development" &&
   (invoiceFileUploadPath == undefined || invoiceFileUploadPath == null)
 ) {
-  throw new Error("Please set invoice upload path in env file");
+  // throw new Error("Please set invoice upload path in env file");
 }
 
 if (
@@ -193,8 +196,8 @@ const config = {
         : "/application/de_technico/web-backend/des-technico/app/uploads/testimonial_image",
     product_image:
       env == "development"
-        ? productImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/product_image",
+        ? "app/uploads/product_image"
+        : "app/uploads/product_image",
     company_image:
       env == "development"
         ? companyImageUploadPath
@@ -218,7 +221,7 @@ const config = {
     user_document:
       env == "development"
         ? documentPathUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/user_document/",
+        : "app/uploads/user_document/",
     program_brochure:
       env == "development"
         ? documentPathUploadPath
@@ -230,18 +233,27 @@ const config = {
     bulk_product_file:
       env == "development"
         ? bulkProductUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/bulk_product_file",
+        : "app/uploads/bulk_product_file",
+    magic_search_file:
+      env == "development"
+        ? magicSearchFileUploadPath :
+        "app/uploads/magic_search_file",
     invoice_file:
       env == "development"
         ? invoiceFileUploadPath
-        : "/var/www/html/INT-Emerge2/des_technical/api/des-technico/app/uploads/invoice_file",
+        : "app/uploads/invoice_file",
+        buyer_upload_vendor_file:
+        env == "development"
+          ? buyerUploadVendorFile
+          : "app/uploads/buyer_upload_vendor_file"
   },
+  
   download_url:
     // env == 'development' ? downloadURL : 'http://143.110.242.57:8112',
-    env == "development" ? downloadURL : "https://api.letsworkwise.com",
+    env == "development" ? downloadURL : "http://localhost:8002",
   // base_url: env == 'development' ? base_url : 'http://localhost:3000',
   // base_url: 'http://143.110.242.57:8112',
-  base_url: "https://api.letsworkwise.com",
+  base_url: "http://localhost:8002",
   globalAdminLimit: globalAdminLimit,
   errorText: {
     value: "An internal error has occurred. Please try again later.",
@@ -255,7 +267,7 @@ const config = {
     host: "smtp-relay.brevo.com",
     port: 587,
     auth: {
-      user: "prasun@talash.net",
+     user: "prasun@talash.net mukul",
       pass: "O815pjTIbYX670zE",
     },
   },
@@ -269,10 +281,10 @@ const config = {
     "ranit.majumder@indusnet.co.in",
     "anumita.banerjee@indusnet.co.in",
   ],
-  webmasterMail: "Work Wise <support@workwise.com>",
+  webmasterMail: "Work Wise <hello@letsworkwise.com>",
   template_path:
     process.env.TEMPLATE_PATH ||
-    "/var/www/html/INT-Emerge2/des_technical/api/des-technico/app/helper/email_template",
+    "/application/de_technico/web-backend/des-technico/app/helper/email_template",
   razorpay: {
     razorpay_key: process.env.RAZORPAY_KEY,
     razorpay_secret: process.env.RAZORPAY_SECRET,
