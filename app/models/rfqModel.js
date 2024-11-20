@@ -3666,10 +3666,6 @@ getTechEvaluationRFQDetails: (user_id) => {
         });
         return;
       }
-
-      const validEvaluations = techEvalResult;
-      console.log("Valid evaluations = ", validEvaluations);
-
       // Step 3: Fetch RFQ products
       const fetchRFQProductsQuery = `
         SELECT id AS rfq_product_id, rfq_id, product_id
@@ -3677,7 +3673,6 @@ getTechEvaluationRFQDetails: (user_id) => {
         WHERE rfq_id = ANY($1);
       `;
       const rfqProductsResult = await db.query(fetchRFQProductsQuery, [rfqIds]);
-      console.log("rfq product result=  ", rfqProductsResult);
 
       if (rfqProductsResult.length === 0) {
         resolve({
@@ -3696,8 +3691,6 @@ getTechEvaluationRFQDetails: (user_id) => {
         WHERE id = ANY($1);
       `;
       const productNamesResult = await db.query(fetchProductNamesQuery, [productIds]);
-      // console.log("product names result = ",productNamesResult)
-
 
       const fetchProductSpecsQuery = `
         SELECT product_id, title, value
@@ -3705,37 +3698,54 @@ getTechEvaluationRFQDetails: (user_id) => {
         WHERE rfq_id = ANY($1) AND product_id = ANY($2);
       `;
       const productSpecsResult = await db.query(fetchProductSpecsQuery, [rfqIds, productIds]);
-      // console.log("product specs result = ",productSpecsResult)
 
-      // Step 5: Map product details with evaluations
-      const rfqDetails = validEvaluations.map(evaluation => {
+      // Step 5: Group products by RFQ ID and ensure unique entries per product
+      const rfqDetailsMap = {};
+
+      techEvalResult.forEach(evaluation => {
         const rfqProduct = rfqProductsResult.find(
-          product => 
-            product.rfq_id === evaluation.rfq_id 
+          product => product.rfq_id === evaluation.rfq_id 
         );
 
+        if (!rfqProduct) return;
+
         const productName = productNamesResult.find(
-          product => product.product_id === rfqProduct?.product_id
+          product => product.product_id === rfqProduct.product_id
         )?.product_name;
-        
+
         const productSpecs = productSpecsResult
-          .filter(spec => spec.product_id === rfqProduct?.product_id)
+          .filter(spec => spec.product_id === rfqProduct.product_id)
           .map(spec => ({ title: spec.title, value: spec.value }));
 
-        return {
-          rfq_id: evaluation.rfq_id,
-          rfq_no: rfqData.find(rfq => rfq.rfq_id === evaluation.rfq_id)?.rfq_no,
-          product: [
-            {
-              rfq_product_id: rfqProduct?.rfq_product_id || null, // id from tbl_rfq_products
-              product_id: rfqProduct?.product_id || null, // product_id from tbl_rfq_products
-              tbl_rfq_product_tech_evaluation_id: evaluation.tbl_rfq_product_tech_evaluation_id,
-              product_name: productName || null,
-              specs: productSpecs,
-            }
-          ]
+        const product = {
+          rfq_product_id: rfqProduct.rfq_product_id,
+          product_id: rfqProduct.product_id,
+          tbl_rfq_product_tech_evaluation_id: evaluation.tbl_rfq_product_tech_evaluation_id,
+          product_name: productName || null,
+          specs: productSpecs,
         };
+
+        if (!rfqDetailsMap[evaluation.rfq_id]) {
+          rfqDetailsMap[evaluation.rfq_id] = {
+            rfq_id: evaluation.rfq_id,
+            rfq_no: rfqData.find(rfq => rfq.rfq_id === evaluation.rfq_id)?.rfq_no,
+            products: [],
+          };
+        }
+
+        // Ensure product uniqueness under the same RFQ
+        const existingProduct = rfqDetailsMap[evaluation.rfq_id].products.find(
+          prod => prod.product_id === rfqProduct.product_id
+        );
+        
+        if (existingProduct) {
+          existingProduct.specs.push(...productSpecs);  // Add specs only if it's a new evaluation
+        } else {
+          rfqDetailsMap[evaluation.rfq_id].products.push(product);
+        }
       });
+
+      const rfqDetails = Object.values(rfqDetailsMap);
 
       resolve({
         status: 1,
