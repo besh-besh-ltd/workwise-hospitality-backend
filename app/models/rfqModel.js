@@ -3619,7 +3619,6 @@ rfq_project_exist: async (project_id,user_id) => {
             });
     });
 },
-
 getTechEvaluationRFQDetails: (user_id) => {
   return new Promise(async (resolve, reject) => {
     console.log("Fetching RFQ details...");
@@ -3723,11 +3722,15 @@ getTechEvaluationRFQDetails: (user_id) => {
         return {
           rfq_id: evaluation.rfq_id,
           rfq_no: rfqData.find(rfq => rfq.rfq_id === evaluation.rfq_id)?.rfq_no,
-          rfq_product_id: rfqProduct?.rfq_product_id || null, // id from tbl_rfq_products
-          product_id: rfqProduct?.product_id || null, // product_id from tbl_rfq_products
-          tbl_rfq_product_tech_evaluation_id: evaluation.tbl_rfq_product_tech_evaluation_id,
-          product_name: productName || null,
-          specs: productSpecs,
+          product: [
+            {
+              rfq_product_id: rfqProduct?.rfq_product_id || null, // id from tbl_rfq_products
+              product_id: rfqProduct?.product_id || null, // product_id from tbl_rfq_products
+              tbl_rfq_product_tech_evaluation_id: evaluation.tbl_rfq_product_tech_evaluation_id,
+              product_name: productName || null,
+              specs: productSpecs,
+            }
+          ]
         };
       });
 
