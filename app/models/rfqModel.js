@@ -1111,98 +1111,143 @@ LIMIT $5 OFFSET $4;`,
         });
     });
   },
-
-  getQuotesByRfqByIdByProduct: async (id, user_id) => {
+  getQuotesByRfqByIdByProduct: async (id, user_id, TA_Vendors) => {
     return new Promise(function (resolve, reject) {
-      db.query(
-        `SELECT TRP.product_id, TRP.variant, TRP.rfq_id,
-        (
-          SELECT json_build_object(
-           'unit_price', TQI1.unit_price,
-            'package_price', TQI1.package_price,
-            'tax', TQI1.tax,
-            'freight_price', TQI1.freight_price,
-            'total_price', TQI1.total_price,
-            'quantity', TQI1.quantity,
-            'timestamp', TQF1.timestamp
-          )
-          FROM tbl_quote_items TQI1
-          JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
-          WHERE TQF1.created_by = ${user_id} -- buyer's ID
-            AND TQI1.product_id = TRP.product_id
-            AND TQF1.rfq_id != ${id} -- different RFQ
-          ORDER BY TQF1.timestamp DESC
-          LIMIT 1
-        ) AS "last_purchase_rate",
-          ARRAY(
-            SELECT json_build_object('name', TP.name,'description', TP.description) 
-            FROM tbl_product TP 
-            WHERE TP.id = TRP.product_id 
-          ) AS "product_details",
-          ARRAY(
-            SELECT json_build_object('id', TU.id, 'name', TU.name, 'email', TU.email, 'mobile', TU.mobile, 'address', TU.address, 'organization_name', TU.organization_name,
-                'global_payment_term', (
-                    SELECT json_agg(json_build_object('details', TQ_inner.global_payment_term,'comment', TQ_inner.global_comment))
-                    FROM tbl_quotes TQ_inner
-                    WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
+        const vendorCondition = TA_Vendors === "TA" ? 
+        `AND EXISTS (
+            SELECT 1 
+            FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
+            JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
+            WHERE TEC.rfq_id = ${id} AND TECV.vendor_id = TQ.created_by
+        )` : "";
+
+        db.query(
+            `SELECT TRP.product_id, TRP.variant, TRP.rfq_id,
+            (
+                SELECT json_build_object(
+                'unit_price', TQI1.unit_price,
+                'package_price', TQI1.package_price,
+                'tax', TQI1.tax,
+                'freight_price', TQI1.freight_price,
+                'total_price', TQI1.total_price,
+                'quantity', TQI1.quantity,
+                'timestamp', TQF1.timestamp
                 )
-            )
-            FROM tbl_quotes TQ
-            LEFT JOIN tbl_users TU ON TU.id = TQ.created_by
-            WHERE TQ.rfq_id = TRP.rfq_id
-            ORDER BY TU.id ASC
-        ) AS "all_vendors",
-          ARRAY(
-            SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,'global_payment_term', TQ.global_payment_term,'global_comment', TQ.global_comment, 
-            'vendor_details', (              
-                SELECT json_agg(json_build_object('id', TU.id, 'name' , TU.name, 'email', TU.email,'mobile' , TU.mobile,'address' , TU.address,'organization_name' , TU.organization_name)) 
-                FROM tbl_users TU 
-                WHERE TU.id = TQ.created_by
-              ),
-              'quote_details', (
-                SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name, 'unit_price', TQI.unit_price,'total_price', TQI.total_price, 'comment', TQI.comment, 'delivery_period', TQI.delivery_period,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'quantity',TQI.quantity,
-
-                'document_files', ( 
-                SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
-                FROM tbl_quotes_files TF
-                WHERE TF.quote_id = TQ.id
-              ),
-
-                'rfq_details', (
-                    SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) 
-                    FROM tbl_rfq_products_specs TPS 
-                    WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = TRP.rfq_id
-                  )    
-                  )) 
-                FROM tbl_quote_items TQI 
-                WHERE TQI.quote_id = TQ.id AND TQI.product_id = TRP.product_id AND TQI.variant = TRP.variant
-              )
-            )  
-            FROM tbl_quotes TQ 
-            LEFT JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id 
-            WHERE TQ.rfq_id = TRP.rfq_id AND 
-                  TQI.product_id = TRP.product_id AND 
-                  TQI.variant = TRP.variant 
-            ORDER BY TQ.created_by ASC
-          ) AS "quotations",
-
+                FROM tbl_quote_items TQI1
+                JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
+                WHERE TQF1.created_by = ${user_id}
+                AND TQI1.product_id = TRP.product_id
+                AND TQF1.rfq_id != ${id}
+                ORDER BY TQF1.timestamp DESC
+                LIMIT 1
+            ) AS "last_purchase_rate",
             ARRAY(
-        SELECT json_build_object('title', TPS.title, 'value', TPS.value)
-        FROM tbl_rfq_products_specs TPS
-        WHERE TPS.product_id = TRP.product_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
-      ) AS "product_specs"
-          
-        FROM tbl_rfq_products TRP WHERE TRP.rfq_id=${id}`
-      )
+                SELECT json_build_object('name', TP.name,'description', TP.description) 
+                FROM tbl_product TP 
+                WHERE TP.id = TRP.product_id 
+            ) AS "product_details",
+            ARRAY(
+                SELECT json_build_object(
+                    'id', TU.id, 
+                    'name', TU.name, 
+                    'email', TU.email, 
+                    'mobile', TU.mobile, 
+                    'address', TU.address, 
+                    'organization_name', TU.organization_name,
+                    'global_payment_term', (
+                        SELECT json_agg(json_build_object('details', TQ_inner.global_payment_term,'comment', TQ_inner.global_comment))
+                        FROM tbl_quotes TQ_inner
+                        JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
+                        WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
+                        ${vendorCondition}
+                    )
+                )
+                FROM tbl_quotes TQ
+                JOIN tbl_users TU ON TU.id = TQ.created_by
+                WHERE TQ.rfq_id = TRP.rfq_id
+                ${vendorCondition}
+                ORDER BY TU.id ASC
+            ) AS "all_vendors",
+            ARRAY(
+                SELECT json_build_object(
+                    'id', TQ.id, 
+                    'timestamp', TQ.timestamp, 
+                    'status', TQ.status, 
+                    'created_by', TQ.created_by,
+                    'is_regret', TQ.is_regret,
+                    'global_payment_term', TQ.global_payment_term,
+                    'global_comment', TQ.global_comment, 
+                    'vendor_details', (
+                        SELECT json_agg(json_build_object(
+                            'id', TU.id, 
+                            'name', TU.name, 
+                            'email', TU.email,
+                            'mobile', TU.mobile,
+                            'address', TU.address,
+                            'organization_name', TU.organization_name
+                        ))
+                        FROM tbl_users TU 
+                        WHERE TU.id = TQ.created_by
+                        ${vendorCondition}
+                    ),
+                    'quote_details', (
+                        SELECT json_agg(json_build_object(
+                            'product_id', TQI.product_id,
+                            'variant', TQI.variant,
+                            'product_name', TQI.product_name, 
+                            'unit_price', TQI.unit_price,
+                            'total_price', TQI.total_price, 
+                            'comment', TQI.comment, 
+                            'delivery_period', TQI.delivery_period,
+                            'package_price', TQI.package_price,
+                            'tax', TQI.tax,
+                            'freight_price', TQI.freight_price,
+                            'quantity', TQI.quantity,
+                            'document_files', (
+                                SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
+                                FROM tbl_quotes_files TF
+                                WHERE TF.quote_id = TQ.id
+                            ),
+                            'rfq_details', (
+                                SELECT json_agg(json_build_object('title', TPS.title, 'value', TPS.value))
+                                FROM tbl_rfq_products_specs TPS 
+                                WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = TRP.rfq_id
+                            )
+                        ))
+                        FROM tbl_quote_items TQI 
+                        JOIN tbl_quotes TQ_inner ON TQI.quote_id = TQ_inner.id
+                        JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
+                        WHERE TQI.quote_id = TQ.id AND TQI.product_id = TRP.product_id AND TQI.variant = TRP.variant
+                        ${vendorCondition}
+                    )
+                )
+                FROM tbl_quotes TQ 
+                JOIN tbl_users TU ON TU.id = TQ.created_by
+                JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id 
+                WHERE TQ.rfq_id = TRP.rfq_id AND 
+                      TQI.product_id = TRP.product_id AND 
+                      TQI.variant = TRP.variant 
+                ${vendorCondition}
+                ORDER BY TQ.created_by ASC
+            ) AS "quotations",
+            ARRAY(
+                SELECT json_build_object('title', TPS.title, 'value', TPS.value)
+                FROM tbl_rfq_products_specs TPS
+                WHERE TPS.product_id = TRP.product_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
+            ) AS "product_specs"
+            FROM tbl_rfq_products TRP WHERE TRP.rfq_id=${id}`
+        )
         .then(function (data) {
-          resolve(data);
+            resolve(data);
         })
         .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
+            let error = new Error(err);
+            reject(error);
         });
     });
-  },
+},
+
+
 
   getQuotesByRfqById2: async (id, user_id, TA_Vendors) => {
     return new Promise(function (resolve, reject) {

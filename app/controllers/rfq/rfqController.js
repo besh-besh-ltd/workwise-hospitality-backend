@@ -2433,6 +2433,8 @@ const rfqController = {
   },
   downloadQuoteResultsProductWise: async (req, res, next) => {
     let rfq_id = req.params.id;
+    const {TA_Vendors} =req.query 
+
     const { id } = req.user;
 
     try {
