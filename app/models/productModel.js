@@ -988,7 +988,11 @@ const productModel = {
             LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
             LEFT JOIN tbl_reject_reason trr ON PD.reject_reason_id = trr.id
             LEFT JOIN tbl_product_images tpi ON PD.id = tpi.product_id AND tpi.is_featured = 1
-            WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 AND PD.is_review = 0 ${dynamicQuery}     
+            WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 AND PD.created_by=1 AND PD.is_review = 0
+            AND EXISTS (
+            SELECT 1 FROM tbl_product_categories pc WHERE pc.product_id = PD.id
+           )
+            ${dynamicQuery}     
         ORDER BY PD.created_at DESC LIMIT ${limit} OFFSET $1`,
         [offset]
       )
