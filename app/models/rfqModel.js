@@ -586,6 +586,9 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 
   getRfqById: async (id, user_id, user_type) => {
 
+    //query changes by mukul on 20-11-2024 
+    // type casting for TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
+
     //  query changed by mukul,
     let q = `SELECT RFQ.*,
     (SELECT COUNT(*)
@@ -698,7 +701,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                 END
               ))
             FROM tbl_vendor_approve TVA
-            WHERE CAST(RFQ_P.datasheet AS INTEGER) = TVA.id
+            WHERE TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
           ),
           'qap', (
             SELECT json_agg(json_build_object('name', TVA.vendor_approve,'qap_link', CASE
@@ -707,7 +710,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                   ELSE TVA.qap_file
                 END))
             FROM tbl_vendor_approve TVA
-            WHERE CAST(RFQ_P.qap AS INTEGER) = TVA.id
+            WHERE TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
           ),
           'product_specs', (
             SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title,'value', RFQ_P_SPEC.value,'id', RFQ_P_SPEC.id,'product_id', RFQ_P_SPEC.product_id,'rfq_id', RFQ_P_SPEC.rfq_id,'variant', RFQ_P_SPEC.variant))
