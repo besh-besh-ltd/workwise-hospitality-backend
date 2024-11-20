@@ -2374,10 +2374,11 @@ const rfqController = {
   },
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
+    const {TA_Vendors} =req.query 
     const { id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqById2(rfq_id, id);
+      let rfQItem = await rfqModel.getQuotesByRfqById2(rfq_id, id, TA_Vendors);
       // rfQItem = filterQuotations(rfQItem);
       // rfQItem = processQuotations(rfQItem);
       res
@@ -2435,7 +2436,7 @@ const rfqController = {
     const { id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id);
+      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, TA_Vendors);
       rfQItem = processQuotCompare(rfQItem);
 
       let rfqDATA = [];

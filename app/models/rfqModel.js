@@ -1204,8 +1204,19 @@ LIMIT $5 OFFSET $4;`,
     });
   },
 
-  getQuotesByRfqById2: async (id, user_id) => {
+  getQuotesByRfqById2: async (id, user_id, TA_Vendors) => {
     return new Promise(function (resolve, reject) {
+
+      const vendorCondition = TA_Vendors === "TA" ? 
+      `AND EXISTS (
+    SELECT 1 
+    FROM tbl_quotes TQ
+    INNER JOIN tbl_rfq_product_tech_evaluation_cleared_vendors TECV ON TQ.created_by = TECV.vendor_id
+    INNER JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
+    WHERE TEC.rfq_id = ${id}
+      AND TQ.id = TQI.quote_id
+      )` : "";
+
       db.query(
         `SELECT TRF.*,
           ARRAY(
@@ -1351,6 +1362,7 @@ LIMIT $5 OFFSET $4;`,
             WHERE TQI.rfq_id = ${id}
               AND TQI.product_id = TRF.product_id
               AND TQI.variant = TRF.variant
+              ${vendorCondition}
           ) AS "quotations"
         FROM tbl_rfq_products TRF
         WHERE TRF.rfq_id = ${id};`
