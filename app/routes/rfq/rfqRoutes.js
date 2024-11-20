@@ -256,6 +256,7 @@ RfqRoutes.get('/get-clauses',
   rfqController.getClauses
 )
 
+
 RfqRoutes.post('/add-comment',
   passportSignIn,
   rfqController.addComment
@@ -290,4 +291,10 @@ RfqRoutes.get('/get-tech-evaluation-rfqs/:id',
   passportSignIn,
   rfqController.getTechEvaluationRFQDetails
 )
+
+RfqRoutes.post('/get-clauses-of-product',
+  passportSignIn,
+  rfqController.getClausesOfProduct
+)
+
 export default RfqRoutes;

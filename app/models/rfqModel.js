@@ -2835,6 +2835,11 @@ rfq_project_exist: async (project_id,user_id) => {
    updateClause: async (tbl_rfq_product_tech_evaluation_clauses_id, clause_text,file_url) => {
 
     console.log("entered update clause = ", tbl_rfq_product_tech_evaluation_clauses_id, clause_text,file_url);
+    const queryCheckClauseId = `
+    SELECT id 
+      FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE id = $1;
+    `
     const queryUpdateClause = `
       UPDATE tbl_rfq_product_tech_evaluation_clauses 
       SET clause_text = $1, timestamp = NOW() 
@@ -2868,6 +2873,17 @@ rfq_project_exist: async (project_id,user_id) => {
     `;
     
     return new Promise((resolve, reject) => {
+       // Validate the clause ID
+       db.query(queryCheckClauseId, [tbl_rfq_product_tech_evaluation_clauses_id])
+      .then(async (clauseIdValidationResult) => {
+        if (clauseIdValidationResult.length === 0) {
+          resolve ({
+            status: 0,
+            message: `Clause with ID ${tbl_rfq_product_tech_evaluation_clauses_id} does not exist.`,
+          });
+        }
+      })
+     
       // Updating the clause text
       db.query(queryUpdateClause, [
         clause_text,
@@ -3729,6 +3745,84 @@ getTechEvaluationRFQDetails: (user_id) => {
       });
     }
   });
+},
+getClausesOfProduct: async (rfq_id, rfq_product_id) => {
+  console.log("Entered getClauses API with rfq_id =", rfq_id, "and rfq_product_id =", rfq_product_id);
+
+  return new Promise(async (resolve, reject) => {
+    try {
+      // Step 1: Validate if tbl_rfq_product_tech_evaluation_id exists
+      const validateQuery = `
+        SELECT id AS tbl_rfq_product_tech_evaluation_id
+        FROM tbl_rfq_product_tech_evaluation
+        WHERE rfq_id = $1 AND tbl_rfq_product_id = $2;
+      `;
+      const validationResult = await db.query(validateQuery, [rfq_id, rfq_product_id]);
+
+      if (validationResult.length === 0) {
+        return resolve({
+          success: false,
+          message: "No technical evaluation found for the given RFQ and product.",
+        });
+      }
+
+      const tbl_rfq_product_tech_evaluation_id = validationResult[0].tbl_rfq_product_tech_evaluation_id;
+      console.log("Validated tbl_rfq_product_tech_evaluation_id =", tbl_rfq_product_tech_evaluation_id);
+
+      // Step 2: Fetch clauses and associated files
+      const fetchClausesQuery = `
+        SELECT
+          c.id AS clause_id,
+          c.clause_text,
+          f.file_url
+        FROM
+          tbl_rfq_product_tech_evaluation_clauses AS c
+        LEFT JOIN
+          tbl_rfq_product_tech_evaluation_clauses_files AS f
+        ON
+          c.id = f.tbl_rfq_product_tech_evaluation_clauses_id
+        WHERE
+          c.tbl_rfq_product_tech_evaluation_id = $1;
+      `;
+      const clausesResult = await db.query(fetchClausesQuery, [tbl_rfq_product_tech_evaluation_id]);
+
+      // Step 3: Group clauses by clause_id
+      const groupedClauses = clausesResult.reduce((acc, row) => {
+        const { clause_id, clause_text, file_url } = row;
+        if (!acc[clause_id]) {
+          acc[clause_id] = {
+            clause_text,
+            files: [],
+          };
+        }
+        if (file_url) {
+          acc[clause_id].files.push(file_url);
+        }
+        return acc;
+      }, {});
+
+      // Step 4: Format the response as an array of objects
+      const response = Object.keys(groupedClauses).map((key) => ({
+        clause_id: parseInt(key, 10),
+        clause_text: groupedClauses[key].clause_text,
+        files: groupedClauses[key].files,
+      }));
+
+      console.log("Response data =", response);
+
+      resolve({
+        success: true,
+        data: response,
+      });
+    } catch (error) {
+      console.error("Error in getClauses API:", error);
+      reject({
+        success: false,
+        message: "Error fetching clauses and files.",
+        error: error.message,
+      });
+    }
+  });
 }
- }
+}
 export default rfqModel;

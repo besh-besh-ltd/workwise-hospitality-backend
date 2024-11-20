@@ -5280,5 +5280,33 @@ getTechEvaluationRFQDetails: async (req, res) => {
     });
   }
 },
+
+getClausesOfProduct: async (req, res) => {
+  try {
+    const {rfq_id, rfq_product_id} = req.body;
+    // Validate input
+    if (!rfq_id || !rfq_product_id) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid input. Please provide RFQ ID and RFQ product ID",
+      });
+    }
+
+    const result = await rfqModel.getClausesOfProduct(rfq_id, rfq_product_id);
+    console.log("Result main of get clauses = ",result);
+
+    res
+      .status(200)
+      .json(result)
+      .end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+        success: false,
+        message: 'Error in deleting clause.',
+        error: error.message
+    });
+  }
+},
 };
 export default rfqController;
