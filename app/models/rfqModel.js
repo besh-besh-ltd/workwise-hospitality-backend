@@ -2732,9 +2732,9 @@ rfq_project_exist: async (project_id,user_id) => {
     `;
   
     const validateRfqProductQuery = `
-      SELECT product_id 
+      SELECT id 
       FROM tbl_rfq_products 
-      WHERE product_id = $1;
+      WHERE id = $1;
     `;
   
     const validateRfqProductTechEvaluationQuery = `
@@ -3604,83 +3604,131 @@ rfq_project_exist: async (project_id,user_id) => {
     });
 },
 
+getTechEvaluationRFQDetails: (user_id) => {
+  return new Promise(async (resolve, reject) => {
+    console.log("Fetching RFQ details...");
 
+    try {
+      // Step 1: Fetch rfq_ids for the given user_id
+      const fetchRFQIdsQuery = `
+        SELECT id AS rfq_id, rfq_no
+        FROM tbl_rfq
+        WHERE created_by = $1;
+      `;
+      const rfqResult = await db.query(fetchRFQIdsQuery, [user_id]);
 
-getTechEvaluationRFQDetails : (user_id) => {
-    const fetchRFQDetailsQuery = `
-      SELECT 
-      rfq.id AS rfq_id,
-      rfq.rfq_no,
-      rfq_product.id AS rfq_product_id,
-      rfq_tech_eval.id AS tbl_rfq_product_tech_evaluation_id,
-      product.name AS product_name,
-      spec.title,
-      spec.value
-    FROM 
-      tbl_rfq AS rfq
-    LEFT JOIN 
-      tbl_rfq_products AS rfq_product
-      ON rfq.id = rfq_product.rfq_id
-    LEFT JOIN 
-      tbl_product AS product
-      ON rfq_product.product_id = product.id
-    LEFT JOIN 
-      tbl_rfq_products_specs AS spec
-      ON rfq_product.rfq_id = spec.rfq_id AND rfq_product.product_id = spec.product_id
-    LEFT JOIN 
-      tbl_rfq_product_tech_evaluation AS rfq_tech_eval
-      ON rfq_tech_eval.rfq_id = rfq.id AND rfq_tech_eval.tbl_rfq_product_id = rfq_product.id
-    LEFT JOIN 
-      tbl_rfq_product_tech_evaluation_clauses AS tech_clauses
-      ON tech_clauses.tbl_rfq_product_tech_evaluation_id = rfq_tech_eval.id
-    LEFT JOIN 
-      tbl_rfq_product_tech_evaluation_vendors_response AS vendor_response
-      ON vendor_response.tbl_rfq_product_tech_evaluation_clauses_id = tech_clauses.id
-    WHERE 
-      rfq.created_by = $1;
-    `;
-    return new Promise((resolve, reject) => {
-      console.log("Fetching RFQ details...");
-
-      db.query(fetchRFQDetailsQuery, [user_id])
-        .then((result) => {
-          console.log("result of fetch RFQ = ",result)
-          if (result.length === 0) {
-            // No RFQs found
-            resolve({
-              status: 1,
-              message: "No RFQs found for the given user.",
-              data: [],
-            });
-            return;
-          }
-
-          // Process and structure the result
-          const rfqDetails = result.map((row) => ({
-            rfq_id: row.rfq_id,
-            rfq_no: row.rfq_no,
-            rfq_product_id: row.rfq_product_id,
-            tbl_rfq_product_tech_evaluation_id: row.tbl_rfq_product_tech_evaluation_id,
-            product_name: row.product_name,
-            title: row.title,
-            value: row.value,
-          }));
-
-          resolve({
-            status: 1,
-            message: "RFQ details fetched successfully.",
-            data: rfqDetails,
-          });
-        })
-        .catch((error) => {
-          console.error("Error fetching RFQ details:", error);
-          reject({
-            status: 0,
-            message: "Error in fetching RFQ details.",
-            error: error.message,
-          });
+      if (rfqResult.length === 0) {
+        resolve({
+          status: 1,
+          message: "No RFQs found for the given user.",
+          data: [],
         });
-    });
-  }
+        return;
+      }
+
+      const rfqData = rfqResult.map(row => ({
+        rfq_id: row.rfq_id,
+        rfq_no: row.rfq_no,
+      }));
+      const rfqIds = rfqData.map(row => row.rfq_id);
+
+      // Step 2: Fetch valid technical evaluations for the fetched RFQs
+      const fetchTechEvaluationQuery = `
+        SELECT rfq_id, tbl_rfq_product_id, id AS tbl_rfq_product_tech_evaluation_id
+        FROM tbl_rfq_product_tech_evaluation
+        WHERE rfq_id = ANY($1);
+      `;
+      const techEvalResult = await db.query(fetchTechEvaluationQuery, [rfqIds]);
+
+      if (techEvalResult.length === 0) {
+        resolve({
+          status: 1,
+          message: "No technical evaluations found for the given RFQs.",
+          data: [],
+        });
+        return;
+      }
+
+      const validEvaluations = techEvalResult;
+      console.log("Valid evaluations = ", validEvaluations);
+
+      // Step 3: Fetch RFQ products
+      const fetchRFQProductsQuery = `
+        SELECT id AS rfq_product_id, rfq_id, product_id
+        FROM tbl_rfq_products
+        WHERE rfq_id = ANY($1);
+      `;
+      const rfqProductsResult = await db.query(fetchRFQProductsQuery, [rfqIds]);
+      console.log("rfq product result=  ", rfqProductsResult);
+
+      if (rfqProductsResult.length === 0) {
+        resolve({
+          status: 1,
+          message: "No RFQ products found for the given RFQs.",
+          data: [],
+        });
+        return;
+      }
+
+      // Step 4: Fetch product names and details
+      const productIds = rfqProductsResult.map(row => row.product_id);
+      const fetchProductNamesQuery = `
+        SELECT id AS product_id, name AS product_name
+        FROM tbl_product
+        WHERE id = ANY($1);
+      `;
+      const productNamesResult = await db.query(fetchProductNamesQuery, [productIds]);
+      // console.log("product names result = ",productNamesResult)
+
+
+      const fetchProductSpecsQuery = `
+        SELECT product_id, title, value
+        FROM tbl_rfq_products_specs
+        WHERE rfq_id = ANY($1) AND product_id = ANY($2);
+      `;
+      const productSpecsResult = await db.query(fetchProductSpecsQuery, [rfqIds, productIds]);
+      // console.log("product specs result = ",productSpecsResult)
+
+      // Step 5: Map product details with evaluations
+      const rfqDetails = validEvaluations.map(evaluation => {
+        const rfqProduct = rfqProductsResult.find(
+          product => 
+            product.rfq_id === evaluation.rfq_id 
+        );
+
+        const productName = productNamesResult.find(
+          product => product.product_id === rfqProduct?.product_id
+        )?.product_name;
+        
+        const productSpecs = productSpecsResult
+          .filter(spec => spec.product_id === rfqProduct?.product_id)
+          .map(spec => ({ title: spec.title, value: spec.value }));
+
+        return {
+          rfq_id: evaluation.rfq_id,
+          rfq_no: rfqData.find(rfq => rfq.rfq_id === evaluation.rfq_id)?.rfq_no,
+          rfq_product_id: rfqProduct?.rfq_product_id || null, // id from tbl_rfq_products
+          product_id: rfqProduct?.product_id || null, // product_id from tbl_rfq_products
+          tbl_rfq_product_tech_evaluation_id: evaluation.tbl_rfq_product_tech_evaluation_id,
+          product_name: productName || null,
+          specs: productSpecs,
+        };
+      });
+
+      resolve({
+        status: 1,
+        message: "RFQ details fetched successfully.",
+        data: rfqDetails,
+      });
+    } catch (error) {
+      console.error("Error fetching RFQ details:", error);
+      reject({
+        status: 0,
+        message: "Error in fetching RFQ details.",
+        error: error.message,
+      });
+    }
+  });
+}
  }
 export default rfqModel;
