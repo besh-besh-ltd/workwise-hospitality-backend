@@ -3650,7 +3650,7 @@ rfq_project_exist: async (project_id,user_id) => {
                 // Step 5: Format the response
                 const data = clausesResult.map((clause) => {
                     const clauseFiles = clauseFilesResult.filter(file => file.tbl_rfq_product_tech_evaluation_clauses_id === clause.clause_id)
-                        .map((file) => file.file_url);
+                        .map((file) => file.file_url ? file.file_url : []);
 
                     const vendorResponse = vendorResponsesResult.filter((vr) => vr.tbl_rfq_product_tech_evaluation_clauses_id === clause.clause_id);
 
@@ -3659,7 +3659,7 @@ rfq_project_exist: async (project_id,user_id) => {
                         clause_text: clause.clause_text,
                         clause_files: clauseFiles,
                         vendor_response: vendorResponse.length > 0 ? vendorResponse[0].vendor_response : '',
-                        vendor_response_files: vendorResponse.map((vr) => vr.vendor_response_files).flat(),
+                        vendor_response_files: vendorResponse.map((vr) => vr.vendor_response_files ? vr.vendor_response_files : []).flat(),
                     };
                 });
 
