@@ -53,7 +53,7 @@ projectRoutes.put(
 
 // route for getting all projects of the user with projectid and projectName
 projectRoutes.get(
-    '/name_list',
+    '/name/list',
     passportSignIn,
     projectController.getIdAndNameOfProjects
 )
