@@ -5171,18 +5171,18 @@ addVendorResponse: async (req, res) => {
 
 addtechEvaluationClearedVendors: async (req, res) => {
   try {
-    const {vendor_id, rfq_product_tech_evaluation_id} = req.body;
-    console.log("API Input: ", req.body);
+    const {vendor_id, rfq_product_tech_evaluation_id,status, reject_message} = req.body;
+    console.log("API Input: ", vendor_id,rfq_product_tech_evaluation_id,status,reject_message);
 
     // Validate input
-    if (!vendor_id || !rfq_product_tech_evaluation_id) {
+    if (!vendor_id || !rfq_product_tech_evaluation_id ) {
       return res.status(400).json({
         status: 0,
-        message: "Invalid input. Please provide vendor ID and rfq_product_tech_evaluation_id",
+        message: "Invalid input. Please provide vendor ID , rfq_product_tech_evaluation_id and status",
       });
     }
 
-    const response = await rfqModel.addtechEvaluationClearedVendors(vendor_id, rfq_product_tech_evaluation_id);
+    const response = await rfqModel.addtechEvaluationClearedVendors(vendor_id, rfq_product_tech_evaluation_id,status, reject_message);
 
     res
       .status(200)
@@ -5296,6 +5296,35 @@ getClausesOfProduct: async (req, res) => {
     }
 
     const result = await rfqModel.getClausesOfProduct(rfq_id, rfq_product_id);
+    console.log("Result main of get clauses = ",result);
+
+    res
+      .status(200)
+      .json(result)
+      .end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+        success: false,
+        message: 'Error in deleting clause.',
+        error: error.message
+    });
+  }
+},
+
+getTechEvaluationResult: async (req, res) => {
+  try {
+    const {rfq_id, rfq_product_id, vendor_id} = req.body;
+    console.log("api input = ",rfq_id,rfq_product_id,vendor_id);
+    // Validate input
+    if (!rfq_id || !rfq_product_id || !vendor_id) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid input. Please provide RFQ ID and RFQ product ID",
+      });
+    }
+
+    const result = await rfqModel.getTechEvaluationResult(rfq_id, rfq_product_id,vendor_id);
     console.log("Result main of get clauses = ",result);
 
     res

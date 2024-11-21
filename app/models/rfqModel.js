@@ -3422,8 +3422,8 @@ rfq_project_exist: async (project_id,user_id) => {
         });
     });
   },
-  addtechEvaluationClearedVendors: (vendor_id, tbl_rfq_product_tech_evaluation_id) => {
-    console.log("Entered addClearedVendor =", vendor_id, tbl_rfq_product_tech_evaluation_id);
+  addtechEvaluationClearedVendors: (vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message) => {
+    console.log("Entered addClearedVendor =", vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message);
   
     const validateVendorQuery = `
       SELECT id 
@@ -3439,8 +3439,8 @@ rfq_project_exist: async (project_id,user_id) => {
   
     const insertClearedVendorQuery = `
       INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors 
-      (tbl_rfq_product_tech_evaluation_id, vendor_id, timestamp) 
-      VALUES ($1, $2, NOW());
+      (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, timestamp) 
+      VALUES ($1, $2, $3, $4, NOW());
     `;
   
     return new Promise((resolve, reject) => {
@@ -3474,7 +3474,7 @@ rfq_project_exist: async (project_id,user_id) => {
           }
   
           // Insert Cleared Vendor
-          return db.query(insertClearedVendorQuery, [tbl_rfq_product_tech_evaluation_id, vendor_id]);
+          return db.query(insertClearedVendorQuery, [tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message]);
         })
         .then(() => {
           console.log("Vendor successfully added to cleared vendors.");
@@ -3896,6 +3896,89 @@ getClausesOfProduct: async (rfq_id, rfq_product_id) => {
       });
     }
   });
-}
+},
+
+getTechEvaluationResult: (rfq_id, tbl_rfq_product_id, vendor_id) =>  {
+  console.log("Entered fetchTechClearedVendors =", rfq_id, tbl_rfq_product_id, vendor_id);
+
+  const validateVendorIdQuery = `
+      SELECT id 
+      FROM tbl_users 
+      WHERE id = $1;
+  `;
+
+  const getTechEvaluationIdQuery = `
+      SELECT id 
+      FROM tbl_rfq_product_tech_evaluation 
+      WHERE rfq_id = $1 AND tbl_rfq_product_id = $2;
+  `;
+
+  const fetchClearedVendorDetailsQuery = `
+      SELECT id, status, reject_message 
+      FROM tbl_rfq_product_tech_evaluation_cleared_vendors 
+      WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2;
+  `;
+
+  return new Promise((resolve, reject) => {
+      console.log("Validating Vendor ID in tbl_users...");
+
+      // Step 1: Validate Vendor ID in tbl_users
+      db.query(validateVendorIdQuery, [vendor_id])
+          .then((vendorValidationResult) => {
+              if (!vendorValidationResult || vendorValidationResult.length === 0) {
+                  reject({
+                      status: 0,
+                      message: `Vendor ID ${vendor_id} does not exist in tbl_users.`,
+                  });
+                  return; // Stop further execution
+              }
+
+              console.log("Fetching Technical Evaluation ID...");
+
+              // Step 2: Fetch the Technical Evaluation ID
+              return db.query(getTechEvaluationIdQuery, [rfq_id, tbl_rfq_product_id]);
+          })
+          .then((techEvaluationResult) => {
+              if (!techEvaluationResult || techEvaluationResult.length === 0) {
+                  return resolve({
+                      status: 0,
+                      message: `No Technical Evaluation ID found for RFQ ID ${rfq_id} and Product ID ${tbl_rfq_product_id}.`,
+                  });
+                  return; // Stop further execution
+              }
+
+              const techEvaluationId = techEvaluationResult[0].id;
+
+              console.log("Fetching Cleared Vendor Details...");
+
+              // Step 3: Fetch Cleared Vendor Details
+              return db.query(fetchClearedVendorDetailsQuery, [techEvaluationId, vendor_id]);
+          })
+          .then((clearedVendorResult) => {
+              if (!clearedVendorResult || clearedVendorResult.length === 0) {
+                  return resolve({
+                      status: 0,
+                      message: `No cleared vendor details found for Vendor ID ${vendor_id} and provided Tech Evaluation ID.`,
+                  });
+                  return; // Stop further execution
+              }
+
+              // Respond with fetched data
+              resolve({
+                  status: 1,
+                  message: "Cleared vendor details fetched successfully.",
+                  data: clearedVendorResult[0],
+              });
+          })
+          .catch((error) => {
+              console.error("Error in fetchTechClearedVendors:", error);
+              reject({
+                  status: 0,
+                  message: "Error in fetching cleared vendor details.",
+                  error: error.message,
+              });
+          });
+  });
+},
 }
 export default rfqModel;

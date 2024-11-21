@@ -297,4 +297,9 @@ RfqRoutes.post('/get-clauses-of-product',
   rfqController.getClausesOfProduct
 )
 
+RfqRoutes.post('/get-tech-evaluation-result',
+  passportSignIn,
+  rfqController.getTechEvaluationResult
+)
+
 export default RfqRoutes;
