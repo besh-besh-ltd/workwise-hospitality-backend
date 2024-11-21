@@ -20,6 +20,8 @@ const projectController = {
                 description,
                 location,
                 ended_at,
+                rfq_type,
+                reverse_auction
             } = req.body;
 
             const user_id = req.user.id;
@@ -29,6 +31,8 @@ const projectController = {
               description,
               location,
               ended_at: ended_at === "" ? null : ended_at,
+              rfq_type,
+              reverse_auction,
               user_id:user_id
             }
             
@@ -84,6 +88,33 @@ const projectController = {
             .end();
           }
     },
+
+    getProjectTableDataById: async(req,res,next) => {
+      try {
+        const project_id = req.params.project_id;
+        const user_id = req.user.id;
+          
+        let projectDetails = await projectModel.getProjectTableDataById(project_id, user_id);
+        res
+        .status(200)
+        .json({
+          status: true,
+          data:projectDetails
+        })
+        .end();
+
+      } catch (error) {
+        logError(error);
+          res
+            .status(400)
+            .json({
+              status: false,
+              message: Config.errorText.value
+            })
+            .end();
+          }
+    },
+
     getAllProjects: async (req, res, next) => {
       try {
 
@@ -115,7 +146,9 @@ const projectController = {
           description,
           location,
           ended_at,
-          status
+          status,
+          rfq_type,
+          reverse_auction
       } = req.body;
 
       const user_id = req.user.id;
@@ -127,6 +160,8 @@ const projectController = {
         ended_at,
         status,
         user_id:user_id,
+        rfq_type,
+        reverse_auction,
         project_id:project_id
       }
           
