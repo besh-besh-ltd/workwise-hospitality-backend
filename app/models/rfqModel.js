@@ -522,6 +522,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           FROM tbl_rfq_products RFQ_P
           LEFT JOIN tbl_product T_P ON RFQ_P.product_id = T_P.id
           WHERE RFQ.id = RFQ_P.rfq_id
+          ORDER BY RFQ_P.id
       ) AS rfq_products
     FROM tbl_rfq RFQ
     WHERE RFQ.id = $1
@@ -581,6 +582,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     -- Fetching global_payment_term and global_comment from tbl_quotes
     (
       SELECT json_build_object(
+        'is_regret', TQ.is_regret,
+        'regret_reason', TQ.regret_reason,
         'global_payment_term', TQ.global_payment_term,
         'global_comment', TQ.global_comment
       )
@@ -831,7 +834,8 @@ LIMIT 1;`;
         ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
         : ``
       }
-        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name = '${search_key}'
+        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1
+         AND tu.is_deleted = 0 AND tu.status = 1 AND p.name = '${search_key}' AND tc.is_private = 0 
         ${state != '' ? `AND tu.state = ${state}` : ``}
         ${city != '' ? `AND tu.city = ${city}` : ``}
         ${category_id != '' ? `AND c.id = ${category_id}` : ``}
