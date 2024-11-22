@@ -3112,10 +3112,19 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
       const vendorIdList = vendorIds.map(v => v.vendor_id);
 
       // Step 3: Use the vendor IDs to get the corresponding vendors from tbl_users
-      const vendorDetails = await db.any(
-        `SELECT name, email, mobile, status FROM tbl_users WHERE id IN ($1:csv)`,
-        [vendorIdList]
-      );
+      let vendorDetails = [];
+      if (vendorIdList.length > 0) {
+          vendorDetails = await db.any(
+              `SELECT name, email, mobile, status FROM tbl_users WHERE id IN ($1:csv)`,
+              [vendorIdList]
+          );
+      }
+
+      // // Step 3: Use the vendor IDs to get the corresponding vendors from tbl_users
+      // const vendorDetails = await db.any(
+      //   `SELECT name, email, mobile, status FROM tbl_users WHERE id IN ($1:csv)`,
+      //   [vendorIdList]
+      // );
 
       return [...tempUserData, ...vendorDetails];
 
