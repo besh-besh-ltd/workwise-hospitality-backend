@@ -5,14 +5,16 @@ const projectModel = {
         console.log(projectObj);
         return new Promise(function (resolve, reject) {
             db.any(
-                `INSERT INTO tbl_projects(name, description, location, ended_at, user_id)
-                 VALUES($1, $2, $3, $4, $5)`,
+                `INSERT INTO tbl_projects(name, description, location, ended_at, user_id, rfq_type, reverse_auction)
+                 VALUES($1, $2, $3, $4, $5, $6, $7)`,
                  [
                     projectObj.name,
                     projectObj.description,
                     projectObj.location,
                     projectObj.ended_at,
-                    projectObj.user_id
+                    projectObj.user_id,
+                    projectObj.rfq_type,
+                    projectObj.reverse_auction
                  ]
             )
                 .then(function (data) {
@@ -45,6 +47,28 @@ const projectModel = {
               });
         })
     },
+
+    getProjectTableDataById: async (project_id, user_id) => {
+        return new Promise(function (resolve, reject) {
+                db.any(`
+                    SELECT t.* 
+                    FROM tbl_projects t
+                    WHERE t.id = $1 AND t.user_id = $2;
+                `,
+              [project_id, user_id]
+            )
+                .then(function (data) {
+                    console.log("data: ", data)
+                resolve(data);
+              })
+               .catch(function (err) {
+                let error = new Error(err);
+                console.log("error: ", error)
+                reject(error);
+              });
+        })
+    },
+
     getProjectById: async (project_id,user_id,limit,offset) => {
         return new Promise(function (resolve, reject) {
                 db.any(
@@ -153,6 +177,8 @@ const projectModel = {
                description = $2,
                location = $3,
                ended_at = $4,
+               rfq_type = $7,
+               reverse_auction = $8,
                updated_at = NOW()
             WHERE
                id = $5
@@ -164,7 +190,9 @@ const projectModel = {
                projectObj.location,      
                projectObj.ended_at,      
                projectObj.project_id,    
-               projectObj.user_id        
+               projectObj.user_id,
+               projectObj.rfq_type,
+               projectObj.reverse_auction        
            ]
           )
               .then(function (data) {
@@ -186,7 +214,7 @@ const projectModel = {
             FROM 
                 tbl_projects p 
             WHERE 
-                p.user_id = ${user_id}`,
+                p.user_id = ${user_id}`
         )
             .then(function (data) {
             resolve(data);

@@ -27,6 +27,14 @@ projectRoutes.post(
     projectController.getProjectById
 )
 
+// route for getting the project table data using project id
+projectRoutes.get(
+    '/:project_id',
+    passportSignIn,
+    validateParam(projectSchemas.project_id),
+    projectController.getProjectTableDataById
+)
+
 // route for getting all Projects
 projectRoutes.get(
     '/',
@@ -45,7 +53,7 @@ projectRoutes.put(
 
 // route for getting all projects of the user with projectid and projectName
 projectRoutes.get(
-    '/name_list',
+    '/name/list',
     passportSignIn,
     projectController.getIdAndNameOfProjects
 )

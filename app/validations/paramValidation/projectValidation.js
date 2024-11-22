@@ -6,6 +6,8 @@ export const projectSchemas = {
         description:Joi.string().optional().allow('').allow(null),
         location:Joi.string().optional().allow('').allow(null),
         ended_at:Joi.string().optional().allow('').allow(null),
+        rfq_type: Joi.string().valid('firm', 'budgetary').allow('', null),
+        reverse_auction: Joi.number().valid(0, 1, -1)
     }),
 
     project_id: Joi.object().keys({
@@ -26,7 +28,9 @@ export const projectSchemas = {
         status:Joi.number().valid(0, 1), // Status can only be 0 or 1
         description:Joi.string().optional().allow('').allow(null),
         location:Joi.string().optional().allow('').allow(null),
-        ended_at:Joi.string().optional().allow('').allow(null)
+        ended_at:Joi.string().optional().allow('').allow(null),
+        rfq_type: Joi.string().valid('firm', 'budgetary').allow('', null),
+        reverse_auction: Joi.number().valid(0, 1, -1)
     })
 }
 

@@ -213,7 +213,8 @@ const insertProduct = async (
       datasheet_file:"",// this field we have to remove from database
       qap
     };
-    let spec_array = spec.map((item) => {
+    
+    let spec_array = spec?.map((item) => {
       item.rfq_id = created_rfq_id;
       item.product_id = product_id;
       item.variant = variant;
@@ -236,11 +237,13 @@ const insertProduct = async (
       'tbl_rfq_products',
       tbl_rfq_products_data
     );
-    const spec_info = await rfqModel.insertArray(
+
+    const spec_info = spec_array && await rfqModel.insertArray(
       spec_array,
       spec_keys,
       'tbl_rfq_products_specs'
     );
+
     var vendor_info = [];
     if (vendors.length > 0) {
       vendor_info = await rfqModel.insertArray(
@@ -284,7 +287,7 @@ const insertProduct = async (
       }
     }
 
-
+console.log({ product_info: productResult[0], spec_info, vendor_info })
     return { product_info: productResult[0], spec_info, vendor_info };
   } catch (error) {
     console.error('Error inserting data:', error);
@@ -1008,6 +1011,108 @@ const shuffleArray = (array) => {
   }
 };
 
+const deleteRelatedRecords = async (rfq_id) => {
+  try {
+      await Promise.all([
+          rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }),
+          rfqModel.deleteWithReturnIds('tbl_rfq_product_vendors', { rfq_id }),
+          rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id }),
+          rfqModel.deleteWithReturnIds('tbl_rfq_products_specs', { rfq_id })
+      ]);
+
+      const rfqProductIds = await rfqModel.deleteWithReturnIds('tbl_rfq_products', { rfq_id });
+
+      // Delete from tbl_rfq_product_files based on retrieved rfq_product_ids
+      if (rfqProductIds.length > 0) {
+          await rfqModel.deleteProductFilesByIds(rfqProductIds);
+      }
+  } catch (error) {
+      logError("Error deleting related records:", error);
+      throw error;
+  }
+};
+
+const saveRfqDraft = async (user_id, reqBody) => {
+  const {
+      comment,
+      company_name,
+      response_email,
+      contact_name,
+      contact_number,
+      bid_end_date,
+      location,
+      products,
+      terms,
+      rfq_type,
+      reverse_auction,
+      project_id,
+      term_and_condition_files
+  } = reqBody;
+
+  // Check for an existing draft RFQ
+  let rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: user_id });
+  let rfq_id;
+  
+  const rfqData = {
+      comment,
+      company_name,
+      response_email,
+      contact_name,
+      contact_number,
+      bid_end_date,
+      location,
+      rfq_type,
+      reverse_auction,
+      is_published: 0, // Set as draft
+      updated_by: user_id
+  };
+
+  if (project_id && project_id !== -1) {
+      rfqData.project_id = project_id;
+  }
+
+  if (rfqList.length > 0) {
+      // Update existing RFQ
+      rfq_id = rfqList[0].id;
+      await rfqModel.update('tbl_rfq', rfqData, rfq_id);
+      await deleteRelatedRecords(rfq_id);
+  } else {
+      // Create new draft RFQ
+      rfqData.created_by = user_id;
+      const nextRFQNumber = await getNextRfQNumber();
+      rfqData.rfq_no = nextRFQNumber;
+      
+      const response = await rfqModel.insert('tbl_rfq', rfqData);
+      rfq_id = response[0].id;
+  }
+
+  if (terms && terms.length > 0) {
+      const rfqTerms = terms.map(term => ({ rfq_id, terms_id: term.id }));
+      await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
+  }
+
+  if (term_and_condition_files && term_and_condition_files.length > 0) {
+      const rfqFiles = term_and_condition_files.map(url => ({
+          rfq_id,
+          file_type: 'term_and_condition',
+          file_url: url
+      }));
+      await rfqModel.insertArray(rfqFiles, ['rfq_id', 'file_type', 'file_url'], 'tbl_rfq_files');
+  }
+
+  // if (products && products.length > 0) {
+  //     await Promise.all(products.map(product => insertProduct(product, rfq_id)));
+  // }
+
+  if (products && products.length > 0) {
+    for (const product of products) {
+        await insertProduct(product, rfq_id);
+    }
+  }
+
+  return { status: 1, message: 'Draft saved successfully', rfq_id };
+};
+
 const rfqController = {
   create: async (req, res, next) => {
     const user_id = req.user.id;
@@ -1041,30 +1146,18 @@ const rfqController = {
       } = req.body;
 
       if (rfq_id && rfq_id != '' && rfq_id != null) {
-        // Updating existing RFQ
+        // Updating existing Draft
 
-        const tbl_rfq_update_data = {
-          comment,
-          company_name,
-          response_email,
-          contact_name,
-          contact_number,
-          bid_end_date,
-          location,
-          is_published: 1,
-          rfq_type,
-          updated_by: user_id,
-          project_id,
-          reverse_auction
-        };
+        await saveRfqDraft(req.user.id, req.body);
+
         const response = await rfqModel.update(
           'tbl_rfq',
-          tbl_rfq_update_data,
+          {is_published: 1},
           rfq_id
         );
 
         res
-          .status(400)
+          .status(200)
           .json({
             status: 2,
             data: response[0]
@@ -1173,39 +1266,177 @@ const rfqController = {
         .end();
     }
   },
-  // listAll: async (req, res, next) => {
-  //   try {
-  //     let page, limit, offset;
-  //     if (req.query.page && req.query.page > 0) {
-  //       page = req.query.page;
-  //       limit = req.query.limit || Config.globalAdminLimit;
-  //       offset = (page - 1) * limit;
-  //     } else {
-  //       limit = Config.globalAdminLimit;
-  //       offset = 0;
-  //     }
 
-  //     const listRfq = await rfqModel.getAll(limit, offset);
-  //     let count = await rfqModel.getRfqCount();
-  //     res
-  //       .status(200)
-  //       .json({
-  //         status: 1,
-  //         data: listRfq,
-  //         total_items: count.length
-  //       })
-  //       .end();
-  //   } catch (error) {
-  //     logError(error);
-  //     res
-  //       .status(400)
-  //       .json({
-  //         status: 3,
-  //         message: Config.errorText.value
-  //       })
-  //       .end();
-  //   }
-  // },
+  saveDraft: async (req, res) => {
+    try {
+  
+      const response = await saveRfqDraft(req.user.id, req.body);
+
+      res.status(200).json({
+        status: 1,
+        message: response
+      });
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
+        status: 3,
+        message: 'An error occurred while saving the draft'
+      });
+    }
+  },  
+
+  getRFQDraftData: async (req, res) => {
+    try {
+        const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: req.user.id });
+
+        if (!rfqList.length) {
+            return res.status(404).json({ status: 2, message: 'RFQ not found' });
+        }
+
+        const rfqData = rfqList[0];
+        const id = rfqData.id;
+
+        const rfqItem = await rfqModel.getRfqDraftId(id);
+
+        res.status(200).json({
+            status: 1,
+            data: rfqItem.length > 0 ? rfqItem[0] : rfqItem
+        });
+    } catch (error) {
+        logError("Error fetching RFQ creation data:", error);
+        res.status(500).json({
+            status: 3,
+            message: "An error occurred while fetching RFQ draft data"
+        });
+    }
+  },
+
+  createOrUpdateRfqDraftWithProductVendors : async (req, res) => {
+    try {
+        const user_id = req.user.id;
+
+        const user = await userModel.userinfo(user_id);
+        if (!user) {
+            return res.status(404).json({ status: 2, message: 'User not found' });
+        }
+
+        //Check for existing RFQ drafts
+        const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: user_id });
+
+        let rfq_id;
+        let rfqData;
+
+        if (rfqList.length > 0) {
+
+            rfqData = rfqList[0];
+            rfq_id = rfqData.id;
+        } else {
+            // Create a new RFQ
+            rfqData = {
+                company_name: user.organization_name || '',
+                response_email: user.email,
+                contact_name: user.name,
+                contact_number: user.mobile || '',
+                comment: req.body.comment || '',
+                bid_end_date: req.body.bid_end_date || '',
+                location: req.body.location || '',
+                is_published: 0,
+                created_by: user_id,
+                updated_by: user_id,
+                status: 1,
+                timestamp: new Date(),
+            };
+
+            const nextRFQNumber = await getNextRfQNumber();
+            rfqData.rfq_no = nextRFQNumber;
+
+            const response = await rfqModel.insert('tbl_rfq', rfqData);
+            rfq_id = response[0].id;
+        }
+
+        // Add products to the RFQ
+        const product = req.body;
+        if (!product || !product.product_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
+          return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
+        }
+
+        const variant = await rfqModel.getNextVariant(rfq_id, product.product_id);
+
+        const productData = {
+            rfq_id,
+            product_id: product.product_id,
+            variant: variant,
+            comment: "",
+            datasheet: "",
+            spec_file: "",
+            qap_file: "",
+            qap: "",
+            datasheet_file: ""
+        };
+
+        await rfqModel.insert('tbl_rfq_products', productData);
+
+        const vendorPromises = product.vendors.map(async (vendor) => {
+
+            const vendorData = {
+                rfq_id,
+                product_id: product.product_id,
+                user_id: vendor.vendor_id,
+                variant: variant
+            };
+            return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
+        });
+
+        await Promise.all(vendorPromises);
+
+        res.status(200).json({
+            status: 1,
+            message: 'RFQ draft created/updated successfully',
+            rfq_id
+        });
+
+    } catch (error) {
+        logError("Error while creating or updating RFQ with products:", error);    
+        res.status(500).json({
+            status: 3,
+            message: "An error occurred while processing your request"
+        });
+    }
+  },
+
+  removeVendorFromDraft: async (req, res) => {
+    const {
+        rfq_id,
+        product_id,
+        variant,
+        vendor_ids
+    } = req.body;
+
+    if (!rfq_id || !product_id || !variant || !vendor_ids || vendor_ids.length == 0) {
+        return res.status(400).json({ status : 3,  message: "Missing required fields." });
+    }
+
+    try {
+        const conditions = {
+            rfq_id: rfq_id,
+            product_id: product_id,
+            user_ids: vendor_ids,
+            variant: variant
+        };
+
+        const result = await rfqModel.delete('tbl_rfq_product_vendors', conditions);
+
+        if (result.length > 0) {
+            return res.status(200).json({ status : 1, message: "Vendor removed successfully.", deletedRows: result });
+        } else {
+            return res.status(404).json({ status : 3, message: "No matching record found to delete." });
+        }
+    } catch (error) {
+        logError("Error removing vendor from draft:", error);
+        return res.status(500).json({ status: 3, message: "Internal server error." });
+    }
+  },
+ 
   getRfqDetailsById: async (req, res) => {
     try {
       const { rfq_id } = req.body;
@@ -1826,7 +2057,9 @@ const rfqController = {
       products,
       globalPaymentTerms,
       globalComment,
-      term_and_condition_files
+      term_and_condition_files,
+      is_regret,
+      regret_reason
     } = req.body;
 
     const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
@@ -1893,7 +2126,8 @@ const rfqController = {
             timestamp: Date.now(),
             is_regret: req.body.is_regret ? req.body.is_regret : 0,
             global_payment_term: globalPaymentTerms,
-            global_comment: globalComment
+            global_comment: globalComment,
+            regret_reason
           };
 
           // check quote is already exists or not
@@ -1937,6 +2171,86 @@ const rfqController = {
           }
           // console.log("mukul 1908")
 
+          var quote_items_data = [];
+            products.map(
+              ({
+                product_id,
+                product_name,
+                unit_price,
+                package_price,
+                tax,
+                freight_price,
+                total_price,
+                comment,
+                delivery_period,
+                quantity,
+                variant,
+                document_files
+              }) => {
+                if(unit_price!=""){
+                  quote_items_data.push({
+                    rfq_id,
+                    rfq_no,
+                    product_id,
+                    product_name,
+                    unit_price,
+                    package_price,
+                    tax,
+                    freight_price,
+                    total_price,
+                    comment,
+                    delivery_period,
+                    quantity,
+                    variant
+                  });
+                }else if(comment!="" || document_files?.length>0){
+                  quote_items_data.push({
+                    rfq_id,
+                    rfq_no,
+                    product_id,
+                    product_name,
+                    unit_price:0,
+                    package_price,
+                    tax,
+                    freight_price,
+                    total_price,
+                    comment,
+                    delivery_period,
+                    quantity,
+                    variant
+                  });
+                }
+              }
+            );
+
+            if(is_regret){
+              let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
+              res
+              .status(200)
+              .json({
+                status: 3,
+                message: 'Your quote is regretted.',
+                regret_reason: regret_reason,
+                data: quote_rsp
+              })
+              .end();
+              return;
+
+            }
+
+            // if quote item data is empty because of errors
+            if(quote_items_data.length < 1){
+              res
+              .status(200)
+              .json({
+                status: 3,
+                message: 'Not able to send the Quote'
+              })
+              .end();
+              return;
+            }
+
+          // Insertion of the quote
           let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
           if (quote_rsp.length > 0) {
 
@@ -1953,39 +2267,9 @@ const rfqController = {
               }
             }
 
-            var quote_items_data = [];
-            products.map(
-              ({
-                product_id,
-                product_name,
-                unit_price,
-                package_price,
-                tax,
-                freight_price,
-                total_price,
-                comment,
-                delivery_period,
-                quantity,
-                variant
-              }) => {
-                quote_items_data.push({
-                  rfq_id,
-                  rfq_no,
-                  quote_id: created_quote_id,
-                  product_id,
-                  product_name,
-                  unit_price,
-                  package_price,
-                  tax,
-                  freight_price,
-                  total_price,
-                  comment,
-                  delivery_period,
-                  quantity,
-                  variant
-                });
-              }
-            );
+            // adding the quote_id
+            quote_items_data.map((item)=> item.quote_id=created_quote_id);
+
             // console.log("mukul 1959")
 
             const quote_items_keys = [
@@ -2141,35 +2425,80 @@ const rfqController = {
 
     try {
       let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id);
-      rfQItem = processQuotCompare(rfQItem);
-      let rfqDATA = [];
-      if (rfQItem.length > 0) {
-        rfqDATA = rfQItem.map((item) => {
-          let base = item.all_vendors;
-          let data = item.quotations;
-          let quotes_unavailable_vendors = base.filter(
-            (baseitem) => !data.find((d) => d.created_by == baseitem.id)
-          );
-          item.quotes_unavailable_vendors = quotes_unavailable_vendors;
-
-          if (quotes_unavailable_vendors.length > 0) {
-            quotes_unavailable_vendors.map((q_item) => {
-              item.quotations.push({
-                id: null,
-                timestamp: null,
-                status: 1,
-                created_by: q_item.id,
-                is_regret: null,
-                quote_details: [],
-                vendor_details: [q_item]
-              });
-            });
-          }
-          item.quotations.sort((a, b) => a.created_by - b.created_by);
-
-          return item;
+      
+      rfQItem.forEach(product => {
+        const vendorMap = new Map();
+        product.all_vendors.forEach(vendor => vendorMap.set(vendor.id, vendor));
+    
+        const updatedQuotations = product.all_vendors.map(vendor => {
+            const existingQuote = product.quotations.find(q => q.created_by === vendor.id);
+            if (existingQuote) {
+                return existingQuote;
+            } else {
+                // Creating a placeholder for missing quotation
+                return {
+                    id: null,
+                    timestamp: null,
+                    status: null,
+                    created_by: vendor.id,
+                    is_regret: null,
+                    global_payment_term: null,
+                    global_comment: null,
+                    vendor_details: [vendor],
+                    quote_details: []
+                };
+            }
         });
-      }
+    
+        product.quotations = updatedQuotations;
+    });
+    
+      
+      
+      // rfQItem = processQuotCompare(rfQItem);
+
+      // let rfqDATA = [];
+      // if (rfQItem.length > 0) {
+      //   rfqDATA = rfQItem.map((item) => {
+      //     let base = item.all_vendors;
+      //     let data = item.quotations;
+      //     let quotes_unavailable_vendors = base.filter(
+      //       (baseitem) => !data.find((d) => d.created_by == baseitem.id)
+      //     );
+      //     item.quotes_unavailable_vendors = quotes_unavailable_vendors;
+
+      //     if (quotes_unavailable_vendors.length > 0) {
+      //       quotes_unavailable_vendors.map((q_item) => {
+      //         item.quotations.push({
+      //           id: null,
+      //           timestamp: null,
+      //           status: 1,
+      //           created_by: q_item.id,
+      //           is_regret: null,
+      //           quote_details: [],
+      //           vendor_details: [q_item]
+      //         });
+      //       });
+      //     }
+      //     item.quotations.sort((a, b) => a.created_by - b.created_by);
+      //     if (quotes_unavailable_vendors.length > 0) {
+      //       quotes_unavailable_vendors.map((q_item) => {
+      //         item.quotations.push({
+      //           id: null,
+      //           timestamp: null,
+      //           status: 1,
+      //           created_by: q_item.id,
+      //           is_regret: null,
+      //           quote_details: [],
+      //           vendor_details: [q_item]
+      //         });
+      //       });
+      //     }
+      //     item.quotations.sort((a, b) => a.created_by - b.created_by);
+
+      //     return item;
+      //   });
+      // }
       res
         .status(200)
         .json({
@@ -2507,6 +2836,8 @@ const rfqController = {
     state = req.body?.state ? req.body?.state : '';
     city = req.body?.city ? req.body?.city : '';
     let vendor_name = req.body.vendor_name;
+    let is_private = req.body.is_private;
+    let preferred_vendor = req.body.preferred_vendor;
     
     // If user is not logged in
     if (!req.is_verified) {
@@ -2556,6 +2887,24 @@ const rfqController = {
       let user = req.user;
       if (user && user.user_type != 3) {
 
+        // Type validation for the is_private check
+        if (is_private && typeof is_private !== "boolean") {
+          return res.status(400).json({ 
+            status: 1,
+            message: "is_private must be a boolean"
+          });
+        }
+
+        // Type validation for the preferred_vendor check
+        if (preferred_vendor && typeof preferred_vendor !== "boolean") {
+          return res.status(400).json({ 
+            status: 1,
+            message: "preferred_vendor must be a boolean"
+          });
+        }
+
+
+
         try {
           const vendorResult = await rfqModel.searchVendor(
             req.user.id,
@@ -2564,7 +2913,9 @@ const rfqController = {
             approved_by_id,
             state,
             city,
-            vendor_name
+            vendor_name,
+            is_private = is_private ? true : false,
+            preferred_vendor = preferred_vendor ? true : false,
           );
 
           let dummyOBJ = {
@@ -4079,7 +4430,9 @@ const rfqController = {
           searchObj.approved_by_id,
           "",
           "",
-          ""
+          "",
+          false,
+          false
         );
 
 
@@ -4286,7 +4639,7 @@ const rfqController = {
 
     // Check if all required fields are present in each product
     if (
-      !products.every((product) => product.product_id && product.unit_price)
+      !products.every((product) => product.product_id)
     ) {
       return res.status(400).json({
         message: 'Missing required fields in product items.',
@@ -4327,6 +4680,15 @@ const rfqController = {
         paymentTermAndCommentChanges = true;
       }
 
+            // Process each product in the request
+        const quoteItemChanges = await Promise.all(
+          products.map((product) => {
+            return rfqModel.updateQuoteItemWithHistory(quoteId, product,quoteExists[0]);
+          })
+        );
+
+        // console.log("mj ", quoteItemChanges)
+
       // Check if global terms & conditions file are uploaded
       if (term_and_condition_files && term_and_condition_files.length > 0) {
         const global_files = term_and_condition_files.map(url => ({
@@ -4339,12 +4701,6 @@ const rfqController = {
         }
       }
 
-      // Process each product in the request
-      const quoteItemChanges = await Promise.all(
-        products.map((product) => {
-          return rfqModel.updateQuoteItemWithHistory(quoteId, product);
-        })
-      );
 
       // Insert new document_files for each product if exists
       const fileUpdates = await Promise.all(
@@ -4516,7 +4872,6 @@ sendQueryMessage: async (req, res) => {
     } else {
       mailRecipients.to = receiverDetails.email;
     }
-    mailRecipients.bcc = "gyan@letsworkwise.com";
     
     sendMail(mailRecipients);
     
