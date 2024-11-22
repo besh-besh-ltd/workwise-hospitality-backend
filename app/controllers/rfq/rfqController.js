@@ -1142,7 +1142,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
 };
 
 const rfqController = {
-  create: async (req, res, next) => {
+   create: async (req, res, next) => {
     const user_id = req.user.id;
     if (!req.user.subscription_plan_id) {
       res
@@ -5287,15 +5287,45 @@ getTechEvaluationRFQDetails: async (req, res) => {
 getClausesOfProduct: async (req, res) => {
   try {
     const {rfq_id, rfq_product_id} = req.body;
+    console.log("api input = ",req.body);
     // Validate input
-    if (!rfq_id || !rfq_product_id) {
-      return res.status(400).json({
-        status: 0,
-        message: "Invalid input. Please provide RFQ ID and RFQ product ID",
-      });
-    }
+    // if (!rfq_id) {
+    //   return res.status(400).json({
+    //     status: 0,
+    //     message: "Invalid input. Please provide RFQ ID and RFQ product ID",
+    //   });
+    // }
 
-    const result = await rfqModel.getClausesOfProduct(rfq_id, rfq_product_id);
+    const result = await rfqModel.getClausesOfProduct(rfq_id,rfq_product_id );
+    console.log("Result main of get clauses = ",result);
+
+    res
+      .status(200)
+      .json(result)
+      .end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+        success: false,
+        message: 'Error in deleting clause.',
+        error: error.message
+    });
+  }
+},
+
+getClausesOfProductVendorSide : async (req, res) => {
+  try {
+    const {rfq_product_id} = req.body;
+    console.log("api input = ",req.body);
+    // Validate input
+    // if (!rfq_id) {
+    //   return res.status(400).json({
+    //     status: 0,
+    //     message: "Invalid input. Please provide RFQ ID and RFQ product ID",
+    //   });
+    // }
+
+    const result = await rfqModel.getClausesOfProductVendorSide(rfq_product_id );
     console.log("Result main of get clauses = ",result);
 
     res
@@ -5314,19 +5344,18 @@ getClausesOfProduct: async (req, res) => {
 
 getTechEvaluationResult: async (req, res) => {
   try {
-    const {rfq_id, rfq_product_id, vendor_id} = req.body;
-    console.log("api input = ",rfq_id,rfq_product_id,vendor_id);
+    const {rfq_product_id, vendor_id} = req.body;
+    console.log("api input = ",rfq_product_id,vendor_id);
     // Validate input
-    if (!rfq_id || !rfq_product_id || !vendor_id) {
+    if (!rfq_product_id || !vendor_id) {
       return res.status(400).json({
         status: 0,
         message: "Invalid input. Please provide RFQ ID and RFQ product ID",
       });
     }
 
-    const result = await rfqModel.getTechEvaluationResult(rfq_id, rfq_product_id,vendor_id);
+    const result = await rfqModel.getTechEvaluationResult(rfq_product_id,vendor_id);
     console.log("Result main of get clauses = ",result);
-
     res
       .status(200)
       .json(result)
