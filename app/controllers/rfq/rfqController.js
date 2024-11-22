@@ -1125,17 +1125,14 @@ const saveRfqDraft = async (user_id, reqBody) => {
       await rfqModel.insertArray(rfqFiles, ['rfq_id', 'file_type', 'file_url'], 'tbl_rfq_files');
   }
 
+  // if (products && products.length > 0) {
+  //     await Promise.all(products.map(product => insertProduct(product, rfq_id)));
+  // }
+
   if (products && products.length > 0) {
-      // await Promise.all(products.map(product => insertProduct(product, rfq_id)));
-      await Promise.all(
-        products.map(async (product) => {
-          const insertResult = await insertProduct(product, rfq_id);
-          const oldProductId = product.id;
-          const newProductId = insertResult.product_info.id;
-    
-          await updateRfqProductIdInTechEvaluation(oldProductId, newProductId);
-        })
-      );
+    for (const product of products) {
+        await insertProduct(product, rfq_id);
+    }
   }
 
   return { status: 1, message: 'Draft saved successfully', rfq_id };
@@ -2085,7 +2082,9 @@ const rfqController = {
       products,
       globalPaymentTerms,
       globalComment,
-      term_and_condition_files
+      term_and_condition_files,
+      is_regret,
+      regret_reason
     } = req.body;
 
     const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
@@ -2152,7 +2151,8 @@ const rfqController = {
             timestamp: Date.now(),
             is_regret: req.body.is_regret ? req.body.is_regret : 0,
             global_payment_term: globalPaymentTerms,
-            global_comment: globalComment
+            global_comment: globalComment,
+            regret_reason
           };
 
           // check quote is already exists or not
@@ -2248,6 +2248,20 @@ const rfqController = {
               }
             );
 
+            if(is_regret){
+              let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
+              res
+              .status(200)
+              .json({
+                status: 3,
+                message: 'Your quote is regretted.',
+                regret_reason: regret_reason,
+                data: quote_rsp
+              })
+              .end();
+              return;
+
+            }
 
             // if quote item data is empty because of errors
             if(quote_items_data.length < 1){
