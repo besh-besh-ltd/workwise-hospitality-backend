@@ -3820,7 +3820,7 @@ getTechEvaluationRFQDetails: (user_id) => {
     }
   });
 },
-getClausesOfProduct: async (rfq_id,rfq_product_id) => {
+getClausesOfProduct: async (rfq_product_id) => {
   // console.log("Entered getClauses API with rfq_id =", rfq_id, "and rfq_product_id =", rfq_product_id);
 
   return new Promise(async (resolve, reject) => {
@@ -3829,9 +3829,9 @@ getClausesOfProduct: async (rfq_id,rfq_product_id) => {
       const validateQuery = `
         SELECT id AS tbl_rfq_product_tech_evaluation_id
         FROM tbl_rfq_product_tech_evaluation
-        WHERE rfq_id = $1 AND tbl_rfq_product_id = $2;
+        WHERE tbl_rfq_product_id = $1;
       `;
-      const validationResult = await db.query(validateQuery, [rfq_id,rfq_product_id]);
+      const validationResult = await db.query(validateQuery, [rfq_product_id]);
 
       if (validationResult.length === 0) {
         return resolve({

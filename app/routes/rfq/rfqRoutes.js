@@ -246,7 +246,7 @@ RfqRoutes.put('/update-clause',
   rfqController.updateClause
 )
 
-RfqRoutes.delete('/remove-clause',
+RfqRoutes.delete('/remove-clause/:id',
   passportSignIn,
   rfqController.removeClause
 )

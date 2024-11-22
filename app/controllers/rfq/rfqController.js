@@ -5079,7 +5079,7 @@ updateClause: async (req, res) => {
 
 removeClause: async (req, res) => {
   try {
-    const {clause_id} = req.body;
+    const clause_id = parseInt(req.params.id);
 
     const result = await rfqModel.removeClause(clause_id);
     console.log("result of remove clause = ",result);
@@ -5316,7 +5316,7 @@ getTechEvaluationRFQDetails: async (req, res) => {
 
 getClausesOfProduct: async (req, res) => {
   try {
-    const {rfq_id, rfq_product_id} = req.body;
+    const {rfq_product_id} = req.body;
     console.log("api input = ",req.body);
     // Validate input
     // if (!rfq_id) {
@@ -5326,7 +5326,7 @@ getClausesOfProduct: async (req, res) => {
     //   });
     // }
 
-    const result = await rfqModel.getClausesOfProduct(rfq_id,rfq_product_id );
+    const result = await rfqModel.getClausesOfProduct(rfq_product_id );
     console.log("Result main of get clauses = ",result);
 
     res
