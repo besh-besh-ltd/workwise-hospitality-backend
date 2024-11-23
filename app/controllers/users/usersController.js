@@ -1448,7 +1448,16 @@ const UsersController = {
   upload_documents: async (req, res, next) => {
     console.log('FILES======', req.files.file);
     try {
-      var user_id = req.user.id;
+      let user_id;
+      
+    // if user try to uplaod file without login
+    // then we assign user_id = 1
+     if(req.is_verified){
+      user_id = req.user.id;
+     } else {
+      user_id = 1;
+     }
+
       let { doc_type } = req.body;
       if (!doc_type) {
         doc_type = 'general';
