@@ -522,6 +522,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           FROM tbl_rfq_products RFQ_P
           LEFT JOIN tbl_product T_P ON RFQ_P.product_id = T_P.id
           WHERE RFQ.id = RFQ_P.rfq_id
+          ORDER BY RFQ_P.id
       ) AS rfq_products
     FROM tbl_rfq RFQ
     WHERE RFQ.id = $1
@@ -567,6 +568,9 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 
   getRfqById: async (id, user_id, user_type) => {
 
+    //query changes by mukul on 20-11-2024 
+    // type casting for TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
+
     //  query changed by mukul,
     let q = `SELECT RFQ.*,
     (SELECT COUNT(*)
@@ -578,6 +582,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     -- Fetching global_payment_term and global_comment from tbl_quotes
     (
       SELECT json_build_object(
+        'is_regret', TQ.is_regret,
+        'regret_reason', TQ.regret_reason,
         'global_payment_term', TQ.global_payment_term,
         'global_comment', TQ.global_comment
       )
@@ -679,7 +685,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                 END
               ))
             FROM tbl_vendor_approve TVA
-            WHERE CAST(RFQ_P.datasheet AS INTEGER) = TVA.id
+            WHERE TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
           ),
           'qap', (
             SELECT json_agg(json_build_object('name', TVA.vendor_approve,'qap_link', CASE
@@ -688,7 +694,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                   ELSE TVA.qap_file
                 END))
             FROM tbl_vendor_approve TVA
-            WHERE CAST(RFQ_P.qap AS INTEGER) = TVA.id
+            WHERE TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
           ),
           'product_specs', (
             SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title,'value', RFQ_P_SPEC.value,'id', RFQ_P_SPEC.id,'product_id', RFQ_P_SPEC.product_id,'rfq_id', RFQ_P_SPEC.rfq_id,'variant', RFQ_P_SPEC.variant))
@@ -828,7 +834,8 @@ LIMIT 1;`;
         ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id `
         : ``
       }
-        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name = '${search_key}'
+        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1
+         AND tu.is_deleted = 0 AND tu.status = 1 AND p.name = '${search_key}' AND tc.is_private = 0 
         ${state != '' ? `AND tu.state = ${state}` : ``}
         ${city != '' ? `AND tu.city = ${city}` : ``}
         ${category_id != '' ? `AND c.id = ${category_id}` : ``}
@@ -1681,44 +1688,56 @@ WHERE row_num_by_name_category = 1
     approved_by_id,
     state,
     city,
-    vendor_name // Added vendor_name parameter
+    vendor_name, // Added vendor_name parameter
+    is_private, //for buyers private vendors
+    preferred_vendor
   ) => {
     let q = `
-SELECT * FROM (
-    SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
-           tu.address, tc.profile as about, tc.website, tc.company_name, lc.city_name, ls.state_name,
-           CASE
-               WHEN tu.new_profile_image IS NULL THEN NULL
-               ELSE tu.new_profile_image
-           END AS image_url,
-           CASE
-               WHEN bvm.vendor_id IS NOT NULL THEN 1
-               ELSE 0
-           END AS is_linked_with_buyer
-    FROM tbl_product p
-    JOIN tbl_product_categories pc ON p.id = pc.product_id
-    JOIN tbl_category c ON pc.category_id = c.id
-    JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
-    LEFT JOIN tbl_company tc ON tc.user_id = tu.id
-    LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
-    LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-    LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-    ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
-    WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
-      AND p.name = '${search_key}' AND tu.email IS NOT NULL
-      ${vendor_name != '' ? `AND (to_tsvector('english', tu.name) @@ plainto_tsquery('english', '${vendor_name}') OR similarity(tu.name, '${vendor_name}') > 0.1)` : ''}
-      ${state != '' ? `AND tu.state = ${state}` : ``}
-      ${city != '' ? `AND tu.city = ${city}` : ``}
-      ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-      ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``}
-      AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))  
-) AS distinct_vendors
-ORDER BY is_linked_with_buyer DESC, RANDOM();
-`;
+    SELECT * FROM (
+        SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
+               tu.address, tc.profile as about, tc.website, tc.company_name, lc.city_name, ls.state_name,
+               CASE
+                   WHEN tu.new_profile_image IS NULL THEN NULL
+                   ELSE tu.new_profile_image
+               END AS image_url,
+               CASE
+                   WHEN bvm.vendor_id IS NOT NULL THEN 1
+                   ELSE 0
+               END AS is_linked_with_buyer
+        FROM tbl_product p
+        JOIN tbl_product_categories pc ON p.id = pc.product_id
+        JOIN tbl_category c ON pc.category_id = c.id
+        JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
+        LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+        LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+        LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
+        LEFT JOIN tbl_location_states ls ON tu.state = ls.id
+        ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
+          AND p.name = '${search_key}' AND tu.email IS NOT NULL
+          ${vendor_name != '' ? `
+            AND (
+                to_tsvector('english', tu.name) @@ plainto_tsquery('english', $1)
+                OR (char_length($1) = 1 AND similarity(tu.name, $1) > 0)
+                OR (char_length($1) > 1 AND similarity(tu.name, $1) > 0.1)
+            )
+        ` : ''}
+          ${state != '' ? `AND tu.state = ${state}` : ``}
+          ${city != '' ? `AND tu.city = ${city}` : ``}
+          ${category_id != '' ? `AND c.id = ${category_id}` : ``}
+          ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``} 
+          AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
+          ${is_private ? `AND tc.is_private = 1` : ``}
+          ${preferred_vendor ? `AND bvm.vendor_id IS NOT NULL` : ``}
+    ) AS distinct_vendors
+    ORDER BY is_linked_with_buyer DESC, RANDOM();
+    `;
+        
 
 
+    const values = vendor_name ? [vendor_name] : [];
     return new Promise(function (resolve, reject) {
-      db.query(q)
+      db.query(q,values)
         .then(function (data) {
           resolve(data);
         })

@@ -293,7 +293,7 @@ const buyerController = {
 
       // status -1 pending review, 0 disable user profile, 1 active user, 2 rejected  
       const { vendorTempId, status, reject_reason, buyerName, productdetails } = req.body
-
+      
       const userDetails = await rfqModel.checkIfExists('tbl_temp_user', `id = ${vendorTempId}`);
       if (userDetails.length <= 0) {
         return res
@@ -314,6 +314,22 @@ const buyerController = {
             status: 1,
             data: rejectUser,
             message: "User Rejected"
+          })
+          .end();
+      }
+
+      // For single public vendor upload
+      if (status == 3) {
+        const result = await userModel.updateIsPrivateOfVendorOnEmail(userDetails[0].email);
+        
+        await userModel.deleteVendorFromTempUserTable(vendorTempId);
+        
+        return res
+          .status(200)
+          .json({
+            status: 1,
+            data: result,
+            message: "Vendor is made public"
           })
           .end();
       }
@@ -366,7 +382,7 @@ const buyerController = {
       const vendorId = vendor[0].id;
       // add product in the tbl_product with the vendor 
       let errors = [];
-      for (let i = 0; i < productdetails.length; i++) {
+      for (let i = 0; i < productdetails?.length; i++) {
         console.log(productdetails[i]);
         const errors = add_vendor_product(productdetails[i], vendorId);
         if (errors.length > 0) {

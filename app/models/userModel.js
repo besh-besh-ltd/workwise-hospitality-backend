@@ -3069,7 +3069,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   },
-  insertBuyerPrivateVendor: async ({buyerId, vendorName, email, phone, productList, is_private}) => {
+  insertBuyerPrivateVendor: async ({buyerId, vendorName, email, phone, productList, status = -1, is_private}) => {
     // this function insert user info in a temp user table for admin review, once admin review we will delete user from here 
     return new Promise(async (resolve, reject) => {
       try {
@@ -3093,7 +3093,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
           VALUES 
           ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $8) 
           RETURNING *`,
-          [buyerId, vendorName, email, phone, productList, -1, null, is_private]
+          [buyerId, vendorName, email, phone, productList, status || -1, null, is_private]
           // status -1 pending review, 0 disable user profile, 1 active user, 2 rejected
           //  added new field  is_private , whose default value is 0, until it is manually inserted 
         );
@@ -3121,10 +3121,19 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
       const vendorIdList = vendorIds.map(v => v.vendor_id);
 
       // Step 3: Use the vendor IDs to get the corresponding vendors from tbl_users
-      const vendorDetails = await db.any(
-        `SELECT name, email, mobile, status FROM tbl_users WHERE id IN ($1:csv)`,
-        [vendorIdList]
-      );
+      let vendorDetails = [];
+      if (vendorIdList.length > 0) {
+          vendorDetails = await db.any(
+              `SELECT name, email, mobile, status FROM tbl_users WHERE id IN ($1:csv)`,
+              [vendorIdList]
+          );
+      }
+
+      // // Step 3: Use the vendor IDs to get the corresponding vendors from tbl_users
+      // const vendorDetails = await db.any(
+      //   `SELECT name, email, mobile, status FROM tbl_users WHERE id IN ($1:csv)`,
+      //   [vendorIdList]
+      // );
 
       return [...tempUserData, ...vendorDetails];
 
@@ -3160,6 +3169,23 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
       )
         .then(() => {
           resolve({ message: 'Vendor successfully updated' });
+        })
+        .catch((err) => {
+          reject(err);
+        });
+    });
+  },
+  updateIsPrivateOfVendorOnEmail: async (email) => {
+
+    return new Promise((resolve, reject) => {
+      db.none(
+        `UPDATE tbl_company 
+         SET is_private = 0
+         WHERE email = $1`,
+        [email]
+      )
+        .then(() => {
+          resolve({ message: 'Vendor successfully made public' });
         })
         .catch((err) => {
           reject(err);
