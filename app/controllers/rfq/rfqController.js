@@ -358,8 +358,8 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
       <div>
         <img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />
         <p style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; font-size: 16px; font-weight: 600; color: #333333; margin-top: 10px;">
-          Suite 804, 8th Floor, Martin Burn Business Park,<br />
-          Block BP 3, Sector V, Salt Lake, Kolkata-700 091
+          Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
+          Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063
         </p>
       </div>
         <hr />
@@ -490,10 +490,10 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
       <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
+            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />  </td>
             <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-            <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
-              Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
+            <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
+            Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
         </table></td>
     </tr>
     <tr>
@@ -554,10 +554,10 @@ const sendQuoteNotificationToVendor = async (req) => {
   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
     <tr>
       <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
+            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />  </td>
             <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-            <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
-              Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
+            <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
+            Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
         </table></td>
     </tr>
     <tr>
@@ -634,10 +634,10 @@ const sendReminderRFQMAIL = async (vendoritem, org_name,rfq_id) => {
                   <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
                     <tr>
                       <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
+                            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />  </td>
                             <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-                            <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
-                              Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
+                            <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
+                            Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
                         </table></td>
                     </tr>
                     <tr>
@@ -742,10 +742,10 @@ const sendQuoteNotificationEmail = async (req) => {
       <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
         <tr>
           <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
+                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />  </td>
                 <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-                <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
-                  Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
+                <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
+                Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
             </table></td>
         </tr>
         <tr>
@@ -782,10 +782,10 @@ const sendQuoteNotificationEmail = async (req) => {
         <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
           <tr>
             <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                  <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
+                  <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" /> </td>
                   <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-                  <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
-                    Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
+                  <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
+                  Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
               </table></td>
           </tr>
           <tr>
@@ -870,10 +870,10 @@ const sendWinningNotificaion = async (
       <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
         <tr>
           <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img alt="Workwise"  width="160" height="41"  src=${process.env.FRONT_END_WEBSITE}/_next/image?url=%2Fassets%2Fimages%2Flogo.png&w=256&q=75>  </td>
+                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />  </td>
                 <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-                <p>Suite 804, 8th Floor , Martin Burn Business Park, <br />
-                  Block , BP 3 Sector V, Salt Lake , Kolkata- 700 091</p></td>
+                <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
+                Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
             </table></td>
         </tr>
         <tr>
