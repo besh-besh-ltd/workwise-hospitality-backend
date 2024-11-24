@@ -1498,21 +1498,25 @@ const UsersController = {
   },
   vendor_profile: async (req, res, next) => {
     let user_id = req.params.vendor_id;
-    let user = "";
+    let user = {};
 
     try {
       // let user_id = req.user.id;
       let subscription = false;
       if (!req.is_verified || !req.user.subscription_plan_id) {
-
         user = await userModel.vendorinfo(user_id);
       } else {
-
         subscription = true;
-
-
         user = await userModel.vendorinfo(user_id, req.user.id);
       }
+      
+      // Get Spoc Details of the vendor
+      const spoc_details = await vendorModel.getSpocDetails(user_id);
+      user = {
+        ...user,
+        spoc_details
+      };
+
       if (user) {
         res
           .status(200)
