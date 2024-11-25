@@ -277,6 +277,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
       .join(', ');
+    console.log("set clause = ",setClause);
     const values = Object.values(data);
     const updateQuery = `
       UPDATE ${table_name}
@@ -3823,8 +3824,8 @@ getTechEvaluationRFQDetails: (user_id) => {
     }
   });
 },
-getClausesOfProduct: async (rfq_id, rfq_product_id) => {
-  console.log("Entered getClauses API with rfq_id =", rfq_id, "and rfq_product_id =", rfq_product_id);
+getClausesOfProduct: async (rfq_product_id) => {
+  // console.log("Entered getClauses API with rfq_id =", rfq_id, "and rfq_product_id =", rfq_product_id);
 
   return new Promise(async (resolve, reject) => {
     try {
@@ -3832,9 +3833,9 @@ getClausesOfProduct: async (rfq_id, rfq_product_id) => {
       const validateQuery = `
         SELECT id AS tbl_rfq_product_tech_evaluation_id
         FROM tbl_rfq_product_tech_evaluation
-        WHERE rfq_id = $1 AND tbl_rfq_product_id = $2;
+        WHERE tbl_rfq_product_id = $1;
       `;
-      const validationResult = await db.query(validateQuery, [rfq_id, rfq_product_id]);
+      const validationResult = await db.query(validateQuery, [rfq_product_id]);
 
       if (validationResult.length === 0) {
         return resolve({
@@ -3846,7 +3847,21 @@ getClausesOfProduct: async (rfq_id, rfq_product_id) => {
       const tbl_rfq_product_tech_evaluation_id = validationResult[0].tbl_rfq_product_tech_evaluation_id;
       console.log("Validated tbl_rfq_product_tech_evaluation_id =", tbl_rfq_product_tech_evaluation_id);
 
-      // Step 2: Fetch clauses and associated files
+      // Step 2: Check if at least one vendor response exists
+      const vendorResponseQuery = `
+        SELECT 1 AS has_response
+        FROM tbl_rfq_product_tech_evaluation_clauses AS c
+        INNER JOIN tbl_rfq_product_tech_evaluation_vendors_response AS vr
+        ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+        WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+        LIMIT 1;
+      `;
+      const vendorResponseResult = await db.query(vendorResponseQuery, [tbl_rfq_product_tech_evaluation_id]);
+
+      const vendorResponse = vendorResponseResult.length > 0 ? 1 : 0;
+      console.log("Vendor response exists =", vendorResponse);
+
+      // Step 3: Fetch clauses and associated files
       const fetchClausesQuery = `
         SELECT
           c.id AS clause_id,
@@ -3863,11 +3878,12 @@ getClausesOfProduct: async (rfq_id, rfq_product_id) => {
       `;
       const clausesResult = await db.query(fetchClausesQuery, [tbl_rfq_product_tech_evaluation_id]);
 
-      // Step 3: Group clauses by clause_id
+      // Step 4: Group clauses by clause_id
       const groupedClauses = clausesResult.reduce((acc, row) => {
         const { clause_id, clause_text, file_url } = row;
         if (!acc[clause_id]) {
           acc[clause_id] = {
+            clause_id,
             clause_text,
             files: [],
           };
@@ -3878,7 +3894,7 @@ getClausesOfProduct: async (rfq_id, rfq_product_id) => {
         return acc;
       }, {});
 
-      // Step 4: Format the response as an array of objects
+      // Step 5: Format the response as an array of objects
       const response = Object.keys(groupedClauses).map((key) => ({
         clause_id: parseInt(key, 10),
         clause_text: groupedClauses[key].clause_text,
@@ -3887,8 +3903,10 @@ getClausesOfProduct: async (rfq_id, rfq_product_id) => {
 
       console.log("Response data =", response);
 
+      // Step 6: Add vendor_response to the final response
       resolve({
         success: true,
+        vendor_response: vendorResponse,
         data: response,
       });
     } catch (error) {
@@ -3902,8 +3920,8 @@ getClausesOfProduct: async (rfq_id, rfq_product_id) => {
   });
 },
 
-getTechEvaluationResult: (rfq_id, tbl_rfq_product_id, vendor_id) =>  {
-  console.log("Entered fetchTechClearedVendors =", rfq_id, tbl_rfq_product_id, vendor_id);
+getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
+  // console.log("Entered fetchTechClearedVendors =", rfq_id, tbl_rfq_product_id, vendor_id);
 
   const validateVendorIdQuery = `
       SELECT id 
@@ -3914,7 +3932,7 @@ getTechEvaluationResult: (rfq_id, tbl_rfq_product_id, vendor_id) =>  {
   const getTechEvaluationIdQuery = `
       SELECT id 
       FROM tbl_rfq_product_tech_evaluation 
-      WHERE rfq_id = $1 AND tbl_rfq_product_id = $2;
+      WHERE tbl_rfq_product_id = $1;
   `;
 
   const fetchClearedVendorDetailsQuery = `
@@ -3940,13 +3958,13 @@ getTechEvaluationResult: (rfq_id, tbl_rfq_product_id, vendor_id) =>  {
               console.log("Fetching Technical Evaluation ID...");
 
               // Step 2: Fetch the Technical Evaluation ID
-              return db.query(getTechEvaluationIdQuery, [rfq_id, tbl_rfq_product_id]);
+              return db.query(getTechEvaluationIdQuery, [tbl_rfq_product_id]);
           })
           .then((techEvaluationResult) => {
               if (!techEvaluationResult || techEvaluationResult.length === 0) {
                   return resolve({
                       status: 0,
-                      message: `No Technical Evaluation ID found for RFQ ID ${rfq_id} and Product ID ${tbl_rfq_product_id}.`,
+                      message: `No Technical Evaluation ID found for RFQ Product ID ${tbl_rfq_product_id}.`,
                   });
                   return; // Stop further execution
               }
