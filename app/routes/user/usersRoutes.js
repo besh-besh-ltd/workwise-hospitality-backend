@@ -113,7 +113,7 @@ UsersRoutes.get(
 );
 UsersRoutes.post(
   '/upload-file',
-  passportSignIn,
+  noLogin.customer_auth,
   schema_posts.upload_user_document,
   UsersController.upload_documents
 );

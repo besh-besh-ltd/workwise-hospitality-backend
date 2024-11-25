@@ -1181,6 +1181,9 @@ const rfqController = {
           rfq_id
         );
 
+        await sendMailtoVendors(req, rfq_id);
+        // await sendQuotationMailToBuyer(req, response[0].id);
+
         res
           .status(200)
           .json({
