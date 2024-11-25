@@ -2222,12 +2222,56 @@ const rfqController = {
                     quantity,
                     variant
                   });
+                } else if(is_regret){
+                  quote_items_data.push({
+                    rfq_id,
+                    rfq_no,
+                    product_id,
+                    product_name,
+                    unit_price:0,
+                    package_price,
+                    tax,
+                    freight_price,
+                    total_price,
+                    comment,
+                    delivery_period,
+                    quantity,
+                    variant
+                  })
                 }
               }
             );
 
             if(is_regret){
               let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
+              const created_quote_id = quote_rsp[0].id;
+
+              // adding the quote_id
+              quote_items_data.map((item)=> item.quote_id=created_quote_id);
+
+              // console.log("mukul 1959")
+
+              const quote_items_keys = [
+                'rfq_id',
+                'rfq_no',
+                'quote_id',
+                'product_id',
+                'product_name',
+                'unit_price',
+                'package_price',
+                'tax',
+                'freight_price',
+                'total_price',
+                'comment',
+                'delivery_period',
+                'quantity',
+                'variant'
+              ];
+              await rfqModel.insertArray(
+                quote_items_data,
+                quote_items_keys,
+                'tbl_quote_items'
+              );
               res
               .status(200)
               .json({
