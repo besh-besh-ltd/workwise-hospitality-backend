@@ -1130,9 +1130,15 @@ const saveRfqDraft = async (user_id, reqBody) => {
   // }
 
   if (products && products.length > 0) {
-    for (const product of products) {
-        await insertProduct(product, rfq_id);
-    }
+    await Promise.all(
+      products.map(async (product) => {
+        const insertResult = await insertProduct(product, rfq_id);
+        const oldProductId = product.id;
+        const newProductId = insertResult.product_info.id;
+  
+        await updateRfqProductIdInTechEvaluation(oldProductId, newProductId);
+      })
+    );
   }
 
   return { status: 1, message: 'Draft saved successfully', rfq_id };
