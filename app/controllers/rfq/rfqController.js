@@ -5357,35 +5357,6 @@ getClausesOfProduct: async (req, res) => {
   }
 },
 
-getClausesOfProductVendorSide : async (req, res) => {
-  try {
-    const {rfq_product_id} = req.body;
-    console.log("api input = ",req.body);
-    // Validate input
-    // if (!rfq_id) {
-    //   return res.status(400).json({
-    //     status: 0,
-    //     message: "Invalid input. Please provide RFQ ID and RFQ product ID",
-    //   });
-    // }
-
-    const result = await rfqModel.getClausesOfProductVendorSide(rfq_product_id );
-    console.log("Result main of get clauses = ",result);
-
-    res
-      .status(200)
-      .json(result)
-      .end();
-  } catch (error) {
-    logError(error);
-    res.status(500).json({
-        success: false,
-        message: 'Error in deleting clause.',
-        error: error.message
-    });
-  }
-},
-
 getTechEvaluationResult: async (req, res) => {
   try {
     const {rfq_product_id, vendor_id} = req.body;
