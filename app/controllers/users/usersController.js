@@ -1448,7 +1448,16 @@ const UsersController = {
   upload_documents: async (req, res, next) => {
     console.log('FILES======', req.files.file);
     try {
-      var user_id = req.user.id;
+      let user_id;
+      
+    // if user try to uplaod file without login
+    // then we assign user_id = 1
+     if(req.is_verified){
+      user_id = req.user.id;
+     } else {
+      user_id = 1;
+     }
+
       let { doc_type } = req.body;
       if (!doc_type) {
         doc_type = 'general';
@@ -1489,21 +1498,25 @@ const UsersController = {
   },
   vendor_profile: async (req, res, next) => {
     let user_id = req.params.vendor_id;
-    let user = "";
+    let user = {};
 
     try {
       // let user_id = req.user.id;
       let subscription = false;
       if (!req.is_verified || !req.user.subscription_plan_id) {
-
         user = await userModel.vendorinfo(user_id);
       } else {
-
         subscription = true;
-
-
         user = await userModel.vendorinfo(user_id, req.user.id);
       }
+      
+      // Get Spoc Details of the vendor
+      const spoc_details = await vendorModel.getSpocDetails(user_id);
+      user = {
+        ...user,
+        spoc_details
+      };
+
       if (user) {
         res
           .status(200)
@@ -1912,16 +1925,13 @@ const UsersController = {
       <td style="padding:10px 0 0;font-size: 14px;font-weight: bold; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;"> Work Wise <table width="100%" border="0" cellspacing="0" cellpadding="0" align="center">
           <tbody>
             <tr>
-              <td style="padding: 10px 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">548 Suite 804, 8th Floor,</td>
+              <td style="padding: 10px 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Suite no. 801, Synergy Business Park,</td>
             </tr>
             <tr>
-              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Martin Burn Business Park,</td>
+              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">ITT Bhatti, Hanuman Tekdi, </td>
             </tr>
             <tr>
-              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">San Block , BP 3 Sector V,</td>
-            </tr>
-            <tr>
-              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Salt Lake , Kolkata- 700091</td>
+              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Goregaon, Mumbai, Maharashtra 400063</td>
             </tr>
             <tr>
               <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">
