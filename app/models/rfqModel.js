@@ -3729,86 +3729,62 @@ getTechEvaluationRFQDetails: (user_id) => {
         });
         return;
       }
-      // Step 3: Fetch RFQ products
-      const fetchRFQProductsQuery = `
-        SELECT id AS rfq_product_id, rfq_id, product_id
-        FROM tbl_rfq_products
-        WHERE rfq_id = ANY($1);
+      // Step 3: Fetch RFQ products and RFQ Details
+      const fetchDetailsQuery = `
+        SELECT RFQ.*,
+              ARRAY(
+                  SELECT json_build_object(
+                      'id', RFQ_P.id,
+                      'product_id', RFQ_P.product_id,
+                      'tbl_rfq_product_tech_evaluation_id', (
+                          SELECT TE.id
+                          FROM tbl_rfq_product_tech_evaluation TE
+                          WHERE TE.rfq_id = RFQ.id 
+                            AND TE.tbl_rfq_product_id = RFQ_P.id
+                          LIMIT 1
+                      ),
+                      'product_specs', (
+                          SELECT json_agg(
+                              json_build_object(
+                                  'title', RFQ_P_SPEC.title,
+                                  'value', RFQ_P_SPEC.value
+                              )
+                          )
+                          FROM tbl_rfq_products_specs RFQ_P_SPEC
+                          WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id
+                            AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
+                            AND RFQ_P.variant = RFQ_P_SPEC.variant
+                      ),
+                      'product_details', (
+                          SELECT json_agg(
+                              json_build_object(
+                                  'id', T_P.id,
+                                  'name', T_P.name,
+                                  'description', T_P.description,
+                                  'manufacturer', T_P.manufacturer,
+                                  'availability', T_P.availability
+                              )
+                          )
+                          FROM tbl_product T_P
+                          WHERE RFQ_P.product_id = T_P.id
+                      )
+                  )
+                  FROM tbl_rfq_products RFQ_P
+                  WHERE RFQ.id = RFQ_P.rfq_id
+              ) AS "products"
+        FROM tbl_rfq RFQ
+        JOIN tbl_rfq_product_tech_evaluation RFQ_T_E
+          ON RFQ.id = RFQ_T_E.rfq_id
+        WHERE RFQ.created_by = $1 
+          AND RFQ.is_published = 1
+          AND RFQ.id = ANY($2)
+        GROUP BY RFQ.id
+        HAVING COUNT(RFQ_T_E.id) > 0
+        ORDER BY RFQ.id DESC;
       `;
-      const rfqProductsResult = await db.query(fetchRFQProductsQuery, [rfqIds]);
 
-      if (rfqProductsResult.length === 0) {
-        resolve({
-          status: 1,
-          message: "No RFQ products found for the given RFQs.",
-          data: [],
-        });
-        return;
-      }
 
-      // Step 4: Fetch product names and details
-      const productIds = rfqProductsResult.map(row => row.product_id);
-      const fetchProductNamesQuery = `
-        SELECT id AS product_id, name AS product_name
-        FROM tbl_product
-        WHERE id = ANY($1);
-      `;
-      const productNamesResult = await db.query(fetchProductNamesQuery, [productIds]);
-
-      const fetchProductSpecsQuery = `
-        SELECT product_id, title, value
-        FROM tbl_rfq_products_specs
-        WHERE rfq_id = ANY($1) AND product_id = ANY($2);
-      `;
-      const productSpecsResult = await db.query(fetchProductSpecsQuery, [rfqIds, productIds]);
-
-      // Step 5: Group products by RFQ ID and ensure unique entries per product
-      const rfqDetailsMap = {};
-
-      techEvalResult.forEach(evaluation => {
-        const rfqProduct = rfqProductsResult.find(
-          product => product.rfq_id === evaluation.rfq_id 
-        );
-
-        if (!rfqProduct) return;
-
-        const productName = productNamesResult.find(
-          product => product.product_id === rfqProduct.product_id
-        )?.product_name;
-
-        const productSpecs = productSpecsResult
-          .filter(spec => spec.product_id === rfqProduct.product_id)
-          .map(spec => ({ title: spec.title, value: spec.value }));
-
-        const product = {
-          rfq_product_id: rfqProduct.rfq_product_id,
-          product_id: rfqProduct.product_id,
-          tbl_rfq_product_tech_evaluation_id: evaluation.tbl_rfq_product_tech_evaluation_id,
-          product_name: productName || null,
-          specs: productSpecs,
-        };
-
-        if (!rfqDetailsMap[evaluation.rfq_id]) {
-          rfqDetailsMap[evaluation.rfq_id] = {
-            rfq_id: evaluation.rfq_id,
-            rfq_no: rfqData.find(rfq => rfq.rfq_id === evaluation.rfq_id)?.rfq_no,
-            products: [],
-          };
-        }
-
-        // Ensure product uniqueness under the same RFQ
-        const existingProduct = rfqDetailsMap[evaluation.rfq_id].products.find(
-          prod => prod.product_id === rfqProduct.product_id
-        );
-        
-        if (existingProduct) {
-          existingProduct.specs.push(...productSpecs);  // Add specs only if it's a new evaluation
-        } else {
-          rfqDetailsMap[evaluation.rfq_id].products.push(product);
-        }
-      });
-
-      const rfqDetails = Object.values(rfqDetailsMap);
+      const rfqDetails = await db.query(fetchDetailsQuery, [user_id, rfqIds]);
 
       resolve({
         status: 1,
