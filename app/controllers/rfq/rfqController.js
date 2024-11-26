@@ -1103,12 +1103,16 @@ const saveRfqDraft = async (user_id, reqBody) => {
       await deleteRelatedRecords(rfq_id);
   } else {
       // Create new draft RFQ
-      rfqData.created_by = user_id;
-      const nextRFQNumber = await getNextRfQNumber();
-      rfqData.rfq_no = nextRFQNumber;
+      // rfqData.created_by = user_id;
+      // const nextRFQNumber = await getNextRfQNumber();
+      // rfqData.rfq_no = nextRFQNumber;
       
-      const response = await rfqModel.insert('tbl_rfq', rfqData);
-      rfq_id = response[0].id;
+      // const response = await rfqModel.insert('tbl_rfq', rfqData);
+      // rfq_id = response[0].id;
+      return {
+        success: true,
+        message: 'No draft to save!'
+      };
   }
 
   if (terms && terms.length > 0) {
@@ -1145,8 +1149,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
 };
 
 const rfqController = {
-   create: async (req, res, next) => {
-    const user_id = req.user.id;
+  create: async (req, res, next) => {
+    // const user_id = req.user.id;
     if (!req.user.subscription_plan_id) {
       res
         .status(400)
@@ -1160,20 +1164,20 @@ const rfqController = {
     try {
       const {
         rfq_id,
-        comment,
-        company_name,
-        response_email,
-        contact_name,
-        contact_number,
-        bid_end_date,
-        location,
-        is_published,
-        products,
-        terms,
-        rfq_type,
-        reverse_auction,
-        project_id,
-        term_and_condition_files
+        // comment,
+        // company_name,
+        // response_email,
+        // contact_name,
+        // contact_number,
+        // bid_end_date,
+        // location,
+        // is_published,
+        // products,
+        // terms,
+        // rfq_type,
+        // reverse_auction,
+        // project_id,
+        // term_and_condition_files
       } = req.body;
 
       if (rfq_id && rfq_id != '' && rfq_id != null) {
@@ -1188,7 +1192,7 @@ const rfqController = {
         );
 
         await sendMailtoVendors(req, rfq_id);
-        // await sendQuotationMailToBuyer(req, response[0].id);
+        await sendQuotationMailToBuyer(req, rfq_id);
 
         res
           .status(200)
@@ -1198,97 +1202,105 @@ const rfqController = {
           })
           .end();
       } else {
-        // Creating fresh RFQ
-
-        const nextRFQNumber = await getNextRfQNumber();
-
-        const tbl_rfq_data = {
-          comment,
-          company_name,
-          response_email,
-          contact_name,
-          contact_number,
-          bid_end_date,
-          location,
-          is_published,
-          rfq_type,
-          rfq_no: nextRFQNumber,
-          created_by: user_id,
-          updated_by: user_id,
-          reverse_auction
-        };
-
-        if(project_id!=-1){
-          tbl_rfq_data.project_id=project_id;
-        }
-
-
-        const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
-        var rfqtermsRsp = null;
-
-        if (response.length > 0) {
-          const created_rfq_id = response[0].id;
-
-          if (terms.length > 0) {
-            var tbl_rfq_terms_map_array = [];
-
-            terms.map((item) => {
-              tbl_rfq_terms_map_array.push({
-                rfq_id: created_rfq_id,
-                terms_id: item.id
-              });
-            });
-            const tbl_rfq_terms_map_keys = ['rfq_id', 'terms_id'];
-            rfqtermsRsp = await rfqModel.insertArray(
-              tbl_rfq_terms_map_array,
-              tbl_rfq_terms_map_keys,
-              'tbl_rfq_terms_map'
-            );
-          }
-
-          if (term_and_condition_files && term_and_condition_files.length > 0) {
-            const rfq_files = term_and_condition_files.map(url => ({
-              rfq_id:created_rfq_id,
-              file_type: 'term_and_condition',
-              file_url: url
-            }));
-            for (const fileData of rfq_files) {
-              await rfqModel.insert('tbl_rfq_files', fileData);
-            }
-          }
-
-          Promise.all(
-            products.map((item) => insertProduct(item, created_rfq_id))
-          )
-            .then(async (results) => {
-              response[0].otherDetails = results;
-              response[0].terms = rfqtermsRsp;
-              // sendMailtoVendors => in this function we are also generating token for vendor so he will quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
-              await sendMailtoVendors(req, response[0].id);
-
-              await sendQuotationMailToBuyer(req, response[0].id);
-
-              res
-                .status(200)
-                .json({
-                  status: 1,
-                  data: response[0]
-                })
-                .end();
-            })
-            .catch((error) => {
-              console.error('Error inserting data:', error);
-            });
-        } else {
-          res
-            .status(400)
-            .json({
-              status: 2,
-              data: response
-            })
-            .end();
-        }
+        return res.status(500).json({
+          success: false,
+          message: "Draft RFQ doesn't exist"
+      });
       }
+    
+      // The RFQ is already created before this method is called hence never goes in the else block
+      // else {
+      //   // Creating fresh RFQ
+
+      //   const nextRFQNumber = await getNextRfQNumber();
+
+      //   const tbl_rfq_data = {
+      //     comment,
+      //     company_name,
+      //     response_email,
+      //     contact_name,
+      //     contact_number,
+      //     bid_end_date,
+      //     location,
+      //     is_published,
+      //     rfq_type,
+      //     rfq_no: nextRFQNumber,
+      //     created_by: user_id,
+      //     updated_by: user_id,
+      //     reverse_auction
+      //   };
+
+      //   if(project_id!=-1){
+      //     tbl_rfq_data.project_id=project_id;
+      //   }
+
+
+      //   const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
+      //   var rfqtermsRsp = null;
+
+      //   if (response.length > 0) {
+      //     const created_rfq_id = response[0].id;
+
+      //     if (terms.length > 0) {
+      //       var tbl_rfq_terms_map_array = [];
+
+      //       terms.map((item) => {
+      //         tbl_rfq_terms_map_array.push({
+      //           rfq_id: created_rfq_id,
+      //           terms_id: item.id
+      //         });
+      //       });
+      //       const tbl_rfq_terms_map_keys = ['rfq_id', 'terms_id'];
+      //       rfqtermsRsp = await rfqModel.insertArray(
+      //         tbl_rfq_terms_map_array,
+      //         tbl_rfq_terms_map_keys,
+      //         'tbl_rfq_terms_map'
+      //       );
+      //     }
+
+      //     if (term_and_condition_files && term_and_condition_files.length > 0) {
+      //       const rfq_files = term_and_condition_files.map(url => ({
+      //         rfq_id:created_rfq_id,
+      //         file_type: 'term_and_condition',
+      //         file_url: url
+      //       }));
+      //       for (const fileData of rfq_files) {
+      //         await rfqModel.insert('tbl_rfq_files', fileData);
+      //       }
+      //     }
+
+      //     Promise.all(
+      //       products.map((item) => insertProduct(item, created_rfq_id))
+      //     )
+      //       .then(async (results) => {
+      //         response[0].otherDetails = results;
+      //         response[0].terms = rfqtermsRsp;
+      //         // sendMailtoVendors => in this function we are also generating token for vendor so he will quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
+      //         await sendMailtoVendors(req, response[0].id);
+
+      //         await sendQuotationMailToBuyer(req, response[0].id);
+
+      //         res
+      //           .status(200)
+      //           .json({
+      //             status: 1,
+      //             data: response[0]
+      //           })
+      //           .end();
+      //       })
+      //       .catch((error) => {
+      //         console.error('Error inserting data:', error);
+      //       });
+      //   } else {
+      //     res
+      //       .status(400)
+      //       .json({
+      //         status: 2,
+      //         data: response
+      //       })
+      //       .end();
+      //   }
+      // }
     } catch (error) {
       logError(error);
       res
@@ -1324,7 +1336,7 @@ const rfqController = {
         const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: req.user.id });
 
         if (!rfqList.length) {
-            return res.status(404).json({ status: 2, message: 'RFQ not found' });
+            return res.status(204).json({ status: 2, message: 'Draft RFQ doesnot exist' });
         }
 
         const rfqData = rfqList[0];
@@ -1386,6 +1398,12 @@ const rfqController = {
 
             const response = await rfqModel.insert('tbl_rfq', rfqData);
             rfq_id = response[0].id;
+
+            const rfqTerms = [];
+            for(let i=1; i<9; i++){
+              rfqTerms.push({ rfq_id, terms_id: i });
+            }
+            await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
         }
 
         // Add products to the RFQ
@@ -2253,12 +2271,56 @@ const rfqController = {
                     quantity,
                     variant
                   });
+                } else if(is_regret){
+                  quote_items_data.push({
+                    rfq_id,
+                    rfq_no,
+                    product_id,
+                    product_name,
+                    unit_price:0,
+                    package_price,
+                    tax,
+                    freight_price,
+                    total_price,
+                    comment,
+                    delivery_period,
+                    quantity,
+                    variant
+                  })
                 }
               }
             );
 
             if(is_regret){
               let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
+              const created_quote_id = quote_rsp[0].id;
+
+              // adding the quote_id
+              quote_items_data.map((item)=> item.quote_id=created_quote_id);
+
+              // console.log("mukul 1959")
+
+              const quote_items_keys = [
+                'rfq_id',
+                'rfq_no',
+                'quote_id',
+                'product_id',
+                'product_name',
+                'unit_price',
+                'package_price',
+                'tax',
+                'freight_price',
+                'total_price',
+                'comment',
+                'delivery_period',
+                'quantity',
+                'variant'
+              ];
+              await rfqModel.insertArray(
+                quote_items_data,
+                quote_items_keys,
+                'tbl_quote_items'
+              );
               res
               .status(200)
               .json({

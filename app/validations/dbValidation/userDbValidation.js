@@ -800,73 +800,102 @@ const validateDbBody = {
         .end();
     }
   },
-  vendor_exist: async (req, res, next) => {
-    try {
-      let errors = {};
-      let err = 0;
-      let { email, phone } = req.body;
+  // not used
+  // vendor_exist: async (req, res, next) => {
+  //   try {
+  //     let errors = {};
+  //     let err = 0;
+  //     const { vendorName, email, phone, is_private } = req.body;
+  //     // let {productDetails} = req.body
+  //      const buyerId = req.user.id;
 
-      if (email && phone) {
-        const userEmailExists = await userModel.user_exist(email, phone);
-        if (userEmailExists.length > 0) {
+  //     let obj = {
+  //       buyerId,
+  //       vendorName,
+  //       email,
+  //       phone,
+  //       productList: "Products already added.",
+  //       is_private: !(req.body.is_private) || req.body.is_private == 0 ? 0 : 1,
+  //     }
+  //     // let { email, phone, is_private } = req.body;
 
-          //  check whether the user is vendor or not by checking thier user_type==3
-          if (userEmailExists[0].user_type == 3) {
-            // case 1 -> whether the vendor is public
-            if (userEmailExists.is_private == 0) {
-              await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].id);
-              res
-                .status(200)
-                .json({
-                  status: 1,
-                  message: "This vendor is already registered as a PUBLIC vendor in our system. They have now been added to your preferred vendor list."
-                })
-                .end();
-              return;
-            } else {
-              // case 2 -> whether the vendor is private
-              await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].id);
-              res
-                .status(200)
-                .json({
-                  status: 1,
-                  message: "This vendor is already registered as a PRIVATE vendor in our system. They have now been added to your preferred vendor list."
-                })
-                .end();
-              return;
-            }
+  //     if (email && phone) {
+  //       const userEmailExists = await userModel.user_exist(email, phone);
+  //       if (userEmailExists.length > 0) {
 
-          } else {
-            err++;
-            errors.user_exist = 'Unable to add this vendor. Please ensure the credentials belong to a valid vendor account.';
-          }
+  //         //  check whether the user is vendor or not by checking thier user_type==3
+  //         if (userEmailExists[0].user_type == 3) {
+  //           // case 1 -> whether the vendor is public
+  //           if (userEmailExists.is_private == 0) {
+  //             await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].id);
+  //             res
+  //               .status(200)
+  //               .json({
+  //                 status: 1,
+  //                 message: "This vendor is already registered as a PUBLIC vendor in our system. They have now been added to your preferred vendor list."
+  //               })
+  //               .end();
+  //             return;
+  //           } else {
+  //             // case 2 -> whether the vendor is private
+  //             await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].id);
+  //             // when buyer adds as private
+  //             if(is_private){
+  //               res
+  //                 .status(200)
+  //                 .json({
+  //                   status: 1,
+  //                   message: "This vendor is already registered as a PRIVATE vendor in our system. They have now been added to your preferred vendor list."
+  //                 })
+  //                 .end();
+  //               return;
+  //             }else{
+  //               obj.status = 3; // For public vendor pending review
+  //               const result = await userModel.insertBuyerPrivateVendor(obj);
+  //               res
+  //               .status(200)
+  //               .json({
+  //                 status: 1,
+  //                 data : result,
+  //                 message: "Vendor has been sent to the admin for review to make their profile PUBLIC. They have also been added to your preferred vendor list."
+  //               })
+  //               .end();
+  //             return;
+  //             }
+
+  //           }
+
+  //         } else {
+  //           err++;
+  //           errors.user_exist = 'Unable to add this vendor. Please ensure the credentials belong to a valid vendor account.';
+  //         }
 
 
-        }
-      }
+  //       }
+  //     }
 
-      if (err > 0) {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            errors
-          })
-          .end();
-      } else {
-        next();
-      }
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
+  //     if (err > 0) {
+  //       res
+  //         .status(400)
+  //         .json({
+  //           status: 2,
+  //           errors
+  //         })
+  //         .end();
+  //     } else {
+  //       next();
+  //     }
+  //   } catch (err) {
+  //     logError(err);
+  //     res
+  //       .status(400)
+  //       .json({
+  //         status: 3,
+  //         message: Config.errorText.value
+  //       })
+  //       .end();
+  //   }
+  // },
 
   spoc_id_exists: async (req, res, next) => {
     try {

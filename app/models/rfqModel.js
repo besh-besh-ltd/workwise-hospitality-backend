@@ -1357,6 +1357,7 @@ LIMIT $5 OFFSET $4;`,
                   'status', TQ.status,
                   'created_by', TQ.created_by,
                   'is_regret', TQ.is_regret,
+                  'regret_reason', TQ.regret_reason,
                   'vendor_details', (
                     SELECT json_build_object(
                       'id', TU.id,
