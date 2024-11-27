@@ -315,6 +315,51 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     });
   },
 
+  getTechEvaluationRecordsByProductId: async (productId) => {
+    const fetchQuery = `
+      SELECT id
+      FROM tbl_rfq_product_tech_evaluation
+      WHERE tbl_rfq_product_id = $1`;
+
+    return new Promise((resolve, reject) => {
+      db.query(fetchQuery, [productId])
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
+  updateWithTimestamp: async (table_name, data, primary_key) => {
+    const setClause = Object.keys(data)
+      .map((key, index) => `${key} = $${index + 1}`)
+      .join(', ');
+    const values = Object.values(data);
+    const updateQuery = `
+      UPDATE ${table_name}
+      SET ${setClause}
+      , timestamp = CURRENT_TIMESTAMP
+      WHERE id = ${primary_key}
+      RETURNING *`;
+
+    console.log("here 1: ", updateQuery, values)
+
+    return new Promise(function (resolve, reject) {
+      db.query(updateQuery, values)
+        .then(function (data) {
+          console.log("here 2: ", data)
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
   getAllTerms: async () => {
     return new Promise(function (resolve, reject) {
       db.query(`SELECT * FROM tbl_rfq_terms`)
@@ -439,7 +484,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             WHERE RFQ.id = RFQ_P_V.rfq_id
             AND RFQ_P_V.user_id = ${user_id} 
         ) AND RFQ.is_published = 1
-        ORDER BY RFQ.id DESC
+        ORDER BY RFQ.timestamp DESC
         LIMIT $2 OFFSET $1;`,
         [offset,limit]
       )
