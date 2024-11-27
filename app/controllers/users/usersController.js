@@ -145,7 +145,7 @@ const UsersController = {
 
       let userObj = {
         name,
-        email,
+        email:email.toLowerCase(),
         mobile,
         organization_name,
         register_as,
@@ -208,7 +208,7 @@ const UsersController = {
         ) {
           notificationMail({
             from: Config.webmasterMail, // sender address
-            to: email, // list of receivers
+            to: userObj.email, // list of receivers
             subject: findDynamicNotification[0].title, // Subject line
             html: findDynamicNotification[0].content // plain text body
           });
@@ -227,9 +227,9 @@ const UsersController = {
   
         if (spocList && spocList.length > 0) {
           mailRecipients.to = spocList.map(spoc => spoc.email);
-          mailRecipients.cc = email;
+          mailRecipients.cc = userObj.email;
         } else {
-          mailRecipients.to = email;
+          mailRecipients.to = userObj.email;
         }
   
         sendMail(mailRecipients);
@@ -447,7 +447,7 @@ const UsersController = {
     try {
       let resJson = {};
       let error = 0;
-      let err_msg = 'Invalid username or password or OTP not verified';
+      let err_msg = 'Invalid email or password or OTP not verified';
       if (req.user.err_msg && req.user.err_msg != '') {
         err_msg = req.user.err_msg;
       }
@@ -653,7 +653,7 @@ const UsersController = {
     try {
       const now = currentDateTime();
       const created_at = dateFormat(now, 'yyyy-mm-dd HH:MM:ss');
-      const { email } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
       if (email) {
         const user_detail = await userModel.getUserAuthEmail(email);
         // console.log('user_detail--', user_detail[0].name);
@@ -1187,7 +1187,7 @@ const UsersController = {
           console.log('response--->', response.data.email);
           // return false;
           id = response.data.id;
-          email = response.data.email;
+          email = response.data.email?.toLowerCase();
           // let user_details = await userModel.social_login_exist(id);
           let user_details = await userModel.user_email_exist(email);
           // console.log('user_details123--->', user_details);
@@ -2386,7 +2386,8 @@ const UsersController = {
   communicationSettings: async (req, res, next) => {
     try {
       var user_id = req.user.id;
-      const { email, sms, type_id } = req.body;
+      const { sms, type_id } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
 
       const rsp = await userModel.setCommunicationSettings(
         user_id,
@@ -2745,7 +2746,8 @@ const UsersController = {
     // }
 
     try {
-      const { vendorName, email, phone, productList, is_private } = req.body;
+      const { vendorName, phone, productList, is_private } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
       const buyerId = req.user.id; // Getting buyerId from the authenticated user
 
       let obj = {
@@ -2792,7 +2794,7 @@ const UsersController = {
       let obj = {
         buyerId,
         vendorName,
-        email,
+        email:email.toLowerCase(),
         phone,
         productList: "Products already added by buyer.",
         is_private: !(req.body.is_private) || req.body.is_private == 0 ? 0 : 1,
@@ -2803,7 +2805,7 @@ const UsersController = {
       let companyExists = null;
 
       if (email && phone) {
-        userEmailExists = await userModel.user_exist(email, phone);
+        userEmailExists = await userModel.user_exist(email.toLowerCase(), phone);
         if (userEmailExists.length > 0 && userEmailExists[0].user_type == 3) {
           vendorId = userEmailExists[0].id;
           companyExists = await vendorModel.getCompanyDetails(vendorId);
@@ -2818,7 +2820,7 @@ const UsersController = {
         let userDetails = [{
           buyer_id: buyerId,
           vendor_name: vendorName,
-          email,
+          email:email.toLowerCase(),
           mobile: phone,
           productDetails,
           is_private: 1
@@ -3228,7 +3230,7 @@ const UsersController = {
 
         // trim all inputs
         const vendorName = (value["Vendor Name"] || "").trim();
-        const email = (value["Vendor Email"] || "").trim();
+        const email = (value["Vendor Email"]?.toLowerCase() || "").trim();
         const mobile = (value["Vendor company owner/hr/official contact number"] || "").toString();
         const productList = (value["Product List (ex-pipe,valve)"] || "").trim();
 
@@ -3375,7 +3377,7 @@ const UsersController = {
       let {spoc_name, spoc_email, spoc_mobile, spoc_role} = req.body;
       
        spoc_name = spoc_name ?? null;
-       spoc_email = spoc_email ?? null;
+       spoc_email = spoc_email?.toLowerCase() ?? null;
        spoc_mobile = spoc_mobile ?? null;
        spoc_role = spoc_role ?? null;
 
@@ -3440,7 +3442,7 @@ const UsersController = {
       const {spoc_name, spoc_email, spoc_mobile, spoc_role} = req.body;
       
       const name = spoc_name ?? null;
-      const email = spoc_email ?? null;
+      const email = spoc_email?.toLowerCase() ?? null;
       const mobile = spoc_mobile ?? null;
       const role = spoc_role ?? null;
 
