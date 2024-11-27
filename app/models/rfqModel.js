@@ -1118,15 +1118,17 @@ LIMIT $5 OFFSET $4;`,
   },
   getQuotesByRfqByIdByProduct: async (id, user_id, TA_Vendors) => {
     return new Promise(function (resolve, reject) {
-        const vendorCondition = TA_Vendors === "TA" ? 
-        `AND EXISTS (
+        const vendorCondition = `
+        AND EXISTS (
             SELECT 1 
             FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
             JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
-            WHERE TEC.rfq_id = ${id} AND TECV.vendor_id = TQ.created_by
-        )` : "";
+            WHERE TEC.rfq_id = $1 
+                AND TECV.vendor_id = TQ.created_by
+                AND TECV.status = 1
+        )`;
 
-        db.query(
+        const mainQuery = 
             `SELECT TRP.product_id, TRP.variant, TRP.rfq_id,
             (
                 SELECT json_build_object(
@@ -1140,9 +1142,9 @@ LIMIT $5 OFFSET $4;`,
                 )
                 FROM tbl_quote_items TQI1
                 JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
-                WHERE TQF1.created_by = ${user_id}
+                WHERE TQF1.created_by = $2
                 AND TQI1.product_id = TRP.product_id
-                AND TQF1.rfq_id != ${id}
+                AND TQF1.rfq_id != $1
                 ORDER BY TQF1.timestamp DESC
                 LIMIT 1
             ) AS "last_purchase_rate",
@@ -1164,13 +1166,13 @@ LIMIT $5 OFFSET $4;`,
                         FROM tbl_quotes TQ_inner
                         JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
                         WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
-                        ${vendorCondition}
+                        ${TA_Vendors === "TA" ? vendorCondition : ''}
                     )
                 )
                 FROM tbl_quotes TQ
                 JOIN tbl_users TU ON TU.id = TQ.created_by
                 WHERE TQ.rfq_id = TRP.rfq_id
-                ${vendorCondition}
+                ${TA_Vendors === "TA" ? vendorCondition : ''}
                 ORDER BY TU.id ASC
             ) AS "all_vendors",
             ARRAY(
@@ -1193,7 +1195,7 @@ LIMIT $5 OFFSET $4;`,
                         ))
                         FROM tbl_users TU 
                         WHERE TU.id = TQ.created_by
-                        ${vendorCondition}
+                        ${TA_Vendors === "TA" ? vendorCondition : ''}
                     ),
                     'quote_details', (
                         SELECT json_agg(json_build_object(
@@ -1223,7 +1225,7 @@ LIMIT $5 OFFSET $4;`,
                         JOIN tbl_quotes TQ_inner ON TQI.quote_id = TQ_inner.id
                         JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
                         WHERE TQI.quote_id = TQ.id AND TQI.product_id = TRP.product_id AND TQI.variant = TRP.variant
-                        ${vendorCondition}
+                        ${TA_Vendors === "TA" ? vendorCondition : ''}
                     )
                 )
                 FROM tbl_quotes TQ 
@@ -1232,7 +1234,7 @@ LIMIT $5 OFFSET $4;`,
                 WHERE TQ.rfq_id = TRP.rfq_id AND 
                       TQI.product_id = TRP.product_id AND 
                       TQI.variant = TRP.variant 
-                ${vendorCondition}
+                      ${TA_Vendors === "TA" ? vendorCondition : ''}
                 ORDER BY TQ.created_by ASC
             ) AS "quotations",
             ARRAY(
@@ -1240,8 +1242,9 @@ LIMIT $5 OFFSET $4;`,
                 FROM tbl_rfq_products_specs TPS
                 WHERE TPS.product_id = TRP.product_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
             ) AS "product_specs"
-            FROM tbl_rfq_products TRP WHERE TRP.rfq_id=${id}`
-        )
+            FROM tbl_rfq_products TRP WHERE TRP.rfq_id=$1`;
+
+        db.query(mainQuery, [id, user_id])
         .then(function (data) {
             resolve(data);
         })
@@ -1257,17 +1260,18 @@ LIMIT $5 OFFSET $4;`,
   getQuotesByRfqById2: async (id, user_id, TA_Vendors) => {
     return new Promise(function (resolve, reject) {
 
-      const vendorCondition = TA_Vendors === "TA" ? 
-      `AND EXISTS (
-    SELECT 1 
-    FROM tbl_quotes TQ
-    INNER JOIN tbl_rfq_product_tech_evaluation_cleared_vendors TECV ON TQ.created_by = TECV.vendor_id
-    INNER JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
-    WHERE TEC.rfq_id = ${id}
-      AND TQ.id = TQI.quote_id
-      )` : "";
+      const vendorCondition = `
+      AND EXISTS (
+        SELECT 1 
+        FROM tbl_quotes TQ
+        JOIN tbl_rfq_product_tech_evaluation_cleared_vendors TECV ON TQ.created_by = TECV.vendor_id
+        JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
+        WHERE TEC.rfq_id = $1
+          AND TQ.id = TQI.quote_id
+          AND TECV.status = 1
+      )`;
 
-      db.query(
+      let mainQuery = 
         `SELECT TRF.*,
           ARRAY(
             SELECT json_build_object(
@@ -1278,7 +1282,7 @@ LIMIT $5 OFFSET $4;`,
               'status', TR.status
             )
             FROM tbl_rfq TR
-            WHERE TR.id = ${id}
+            WHERE TR.id = $1
           ) AS "rfq",
         (
           SELECT json_build_object(
@@ -1292,9 +1296,9 @@ LIMIT $5 OFFSET $4;`,
           )
           FROM tbl_quote_items TQI1
           JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
-          WHERE TQF1.created_by = ${user_id} -- buyer's ID
+          WHERE TQF1.created_by = $2 -- buyer's ID
             AND TQI1.product_id = TRF.product_id
-            AND TQF1.rfq_id != ${id} -- different RFQ
+            AND TQF1.rfq_id != $1 -- different RFQ
           ORDER BY TQF1.timestamp DESC
           LIMIT 1
         ) AS "last_purchase_rate"
@@ -1312,7 +1316,7 @@ LIMIT $5 OFFSET $4;`,
                 FROM tbl_rfq_products_specs TPS
                 WHERE TPS.product_id = TRF.product_id
                   AND TPS.variant = TRF.variant
-                  AND TPS.rfq_id = ${id}
+                  AND TPS.rfq_id = $1
               )
             )
             FROM tbl_product TP
@@ -1368,12 +1372,12 @@ LIMIT $5 OFFSET $4;`,
                       'organization_name', TU.organization_name
                     )
                     FROM tbl_users TU
-                    WHERE TU.id = TQ.created_by
+                    WHERE TU.id = TQ.created_by                    
                   )
                 )
                 FROM tbl_quotes TQ
                 WHERE TQ.id = TQI.quote_id
-                  AND TQ.rfq_id = ${id}
+                  AND TQ.rfq_id = $1                  
               ),
                 'document_files', (
                 SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
@@ -1410,18 +1414,20 @@ LIMIT $5 OFFSET $4;`,
               )
             )
             FROM tbl_quote_items TQI
-            WHERE TQI.rfq_id = ${id}
+            WHERE TQI.rfq_id = $1
               AND TQI.product_id = TRF.product_id
-              AND TQI.variant = TRF.variant
-              ${vendorCondition}
+              AND TQI.variant = TRF.variant              
+              ${TA_Vendors === "TA" ? vendorCondition : ''}
           ) AS "quotations"
         FROM tbl_rfq_products TRF
-        WHERE TRF.rfq_id = ${id};`
-      )
+        WHERE TRF.rfq_id = $1;`
+
+        db.query(mainQuery, [id, user_id])
         .then(function (data) {
           resolve(data);
         })
         .catch(function (err) {
+          console.log(err)
           let error = new Error(err);
           reject(error);
         });
@@ -3801,8 +3807,7 @@ getTechEvaluationRFQDetails: (user_id) => {
     }
   });
 },
-getClausesOfProduct: async (rfq_product_id) => {
-  // console.log("Entered getClauses API with rfq_id =", rfq_id, "and rfq_product_id =", rfq_product_id);
+getClausesOfProduct: async (rfq_product_id, vendor_id) => {
 
   return new Promise(async (resolve, reject) => {
     try {
@@ -3822,21 +3827,23 @@ getClausesOfProduct: async (rfq_product_id) => {
       }
 
       const tbl_rfq_product_tech_evaluation_id = validationResult[0].tbl_rfq_product_tech_evaluation_id;
-      console.log("Validated tbl_rfq_product_tech_evaluation_id =", tbl_rfq_product_tech_evaluation_id);
 
       // Step 2: Check if at least one vendor response exists
       const vendorResponseQuery = `
-        SELECT 1 AS has_response
-        FROM tbl_rfq_product_tech_evaluation_clauses AS c
-        INNER JOIN tbl_rfq_product_tech_evaluation_vendors_response AS vr
-        ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
-        WHERE c.tbl_rfq_product_tech_evaluation_id = $1
-        LIMIT 1;
+      SELECT 1 AS has_response
+      FROM tbl_rfq_product_tech_evaluation_clauses AS c
+      INNER JOIN tbl_rfq_product_tech_evaluation_vendors_response AS vr
+      ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+      WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+      ${vendor_id ? `AND vr.vendor_id = $2` : ''}
+      LIMIT 1;
       `;
-      const vendorResponseResult = await db.query(vendorResponseQuery, [tbl_rfq_product_tech_evaluation_id]);
+
+      const queryParams = [tbl_rfq_product_tech_evaluation_id];
+      if (vendor_id) queryParams.push(vendor_id);
+      const vendorResponseResult = await db.query(vendorResponseQuery, queryParams);
 
       const vendorResponse = vendorResponseResult.length > 0 ? 1 : 0;
-      console.log("Vendor response exists =", vendorResponse);
 
       // Step 3: Fetch clauses and associated files
       const fetchClausesQuery = `
@@ -3956,7 +3963,7 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
           .then((clearedVendorResult) => {
               if (!clearedVendorResult || clearedVendorResult.length === 0) {
                   return resolve({
-                      status: 0,
+                      status: 2,
                       message: `No cleared vendor details found for Vendor ID ${vendor_id} and provided Tech Evaluation ID.`,
                   });
                   return; // Stop further execution

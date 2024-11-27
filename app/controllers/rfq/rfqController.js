@@ -2434,12 +2434,12 @@ const rfqController = {
   },
   downloadQuoteResultsProductWise: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const {TA_Vendors} =req.query 
+    const {TA_Vendors} = req.query 
 
     const { id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id);
+      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, TA_Vendors);
       
       rfQItem.forEach(product => {
         const vendorMap = new Map();
@@ -5158,7 +5158,7 @@ getComments: async (req, res) => {
         message: "Invalid input. Please provide clause ID",
       });
     }
-    const response = await rfqModel.getComments(clause_id);
+        const response = await rfqModel.getComments(clause_id);
     res
       .status(200)
       .json(response)
@@ -5317,18 +5317,9 @@ getTechEvaluationRFQDetails: async (req, res) => {
 
 getClausesOfProduct: async (req, res) => {
   try {
-    const {rfq_product_id} = req.body;
-    console.log("api input = ",req.body);
-    // Validate input
-    // if (!rfq_id) {
-    //   return res.status(400).json({
-    //     status: 0,
-    //     message: "Invalid input. Please provide RFQ ID and RFQ product ID",
-    //   });
-    // }
+    const {rfq_product_id, vendor_id = null} = req.body;
 
-    const result = await rfqModel.getClausesOfProduct(rfq_product_id );
-    console.log("Result main of get clauses = ",result);
+    const result = await rfqModel.getClausesOfProduct(rfq_product_id, vendor_id);
 
     res
       .status(200)
@@ -5347,7 +5338,7 @@ getClausesOfProduct: async (req, res) => {
 getTechEvaluationResult: async (req, res) => {
   try {
     const {rfq_product_id, vendor_id} = req.body;
-    console.log("api input = ",rfq_product_id,vendor_id);
+
     // Validate input
     if (!rfq_product_id || !vendor_id) {
       return res.status(400).json({
@@ -5357,7 +5348,7 @@ getTechEvaluationResult: async (req, res) => {
     }
 
     const result = await rfqModel.getTechEvaluationResult(rfq_product_id,vendor_id);
-    console.log("Result main of get clauses = ",result);
+
     res
       .status(200)
       .json(result)
