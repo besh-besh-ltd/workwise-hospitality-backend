@@ -334,288 +334,296 @@ const buyerController = {
           .end();
       }
 
-      if (status != 1) {
-        return res
-          .status(400)
-          .json({
-            status: 3,
-            message: "Invalid status"
-          })
-          .end();
-      }
+      return res
+      .status(400)
+      .json({
+        status: 3,
+        message: "Invalid status"
+      })
+      .end();
 
-      let orgChar = userDetails[0].vendor_name.match(/[a-zA-Z]/g).join('').toLowerCase();
-      let capitalizeFourOrganizationLetter = `${orgChar.charAt(0).toUpperCase()}${orgChar.substring(1, 4)}`;
-      let password = `${capitalizeFourOrganizationLetter}@${userDetails[0].mobile.substring(
-        6,
-        10
-      )}`;
+      // if (status != 1) {
+      //   return res
+      //     .status(400)
+      //     .json({
+      //       status: 3,
+      //       message: "Invalid status"
+      //     })
+      //     .end();
+      // }
 
-      let vendorObj = {
-        name: userDetails[0].vendor_name || null,
-        email: userDetails[0].email || null,
-        mobile: userDetails[0].mobile || null,
-        user_type: '3',
-        password: generatePassword(password),
-        status: '1',
-        created_by: createdBy,
-        organization_name: userDetails[0].name || null
-      };
+      // let orgChar = userDetails[0].vendor_name.match(/[a-zA-Z]/g).join('').toLowerCase();
+      // let capitalizeFourOrganizationLetter = `${orgChar.charAt(0).toUpperCase()}${orgChar.substring(1, 4)}`;
+      // let password = `${capitalizeFourOrganizationLetter}@${userDetails[0].mobile.substring(
+      //   6,
+      //   10
+      // )}`;
 
-      let companyObj = {
-        email: userDetails[0].email || null,
-        mobile: userDetails[0].mobile || null,
-        company_name: userDetails[0].vendor_name || null,
-        is_private: !userDetails[0].is_private ? 0 : userDetails[0].is_private,
-      };
+      // let vendorObj = {
+      //   name: userDetails[0].vendor_name || null,
+      //   email: userDetails[0].email || null,
+      //   mobile: userDetails[0].mobile || null,
+      //   user_type: '3',
+      //   password: generatePassword(password),
+      //   status: '1',
+      //   created_by: createdBy,
+      //   organization_name: userDetails[0].name || null
+      // };
 
-      let vendor = await productModel.vendor_register(vendorObj);
+      // let companyObj = {
+      //   email: userDetails[0].email || null,
+      //   mobile: userDetails[0].mobile || null,
+      //   company_name: userDetails[0].vendor_name || null,
+      //   is_private: !userDetails[0].is_private ? 0 : userDetails[0].is_private,
+      // };
 
-      companyObj.user_id = vendor[0].id;
-      await productModel.addCompany(companyObj);
+      // let vendor = await productModel.vendor_register(vendorObj);
 
-      await userModel.deleteVendorFromTempUserTable(vendorTempId);
+      // companyObj.user_id = vendor[0].id;
+      // await productModel.addCompany(companyObj);
 
-      //  map vendor with the buyer
-      await userModel.mapBuyerToVendor(userDetails[0].buyer_id, vendor[0].id);
+      // await userModel.deleteVendorFromTempUserTable(vendorTempId);
 
-      const vendorId = vendor[0].id;
-      // add product in the tbl_product with the vendor 
-      let errors = [];
-      for (let i = 0; i < productdetails?.length; i++) {
-        console.log(productdetails[i]);
-        const errors = add_vendor_product(productdetails[i], vendorId);
-        if (errors.length > 0) {
-          errors.push({
-            productName: productdetails[i].name,
-            errors: errors,
-          });
-          continue;
-        }
+      // //  map vendor with the buyer
+      // await userModel.mapBuyerToVendor(userDetails[0].buyer_id, vendor[0].id);
 
-        // if no error then move further for adding to tbl_product  
-        let {
-          name,
-          description,
-          manufacturer,
-          availability,
-          status,
-          approved_id,
-          approved_name,
-          master_id,
-          categories,
-          variations,
-        } = productdetails[i];
+      // const vendorId = vendor[0].id;
+      // // add product in the tbl_product with the vendor 
+      // let errors = [];
+      // for (let i = 0; i < productdetails?.length; i++) {
+      //   console.log(productdetails[i]);
+      //   const errors = add_vendor_product(productdetails[i], vendorId);
+      //   if (errors.length > 0) {
+      //     errors.push({
+      //       productName: productdetails[i].name,
+      //       errors: errors,
+      //     });
+      //     continue;
+      //   }
 
-        // ---------------- approved by ---------------
-        if (approved_id) {
-          // Check if it's a string, and parse only if necessary
-          if (typeof approved_id === 'string') {
-            approved_id = JSON.parse(approved_id); // Ensure it's parsed from a JSON string
-          }
-          // Ensure it's an array of numbers
-          else if (!Array.isArray(approved_id)) {
-            approved_id = [approved_id]; // If it's a single number, convert it to an array
-          }
-        }
+      //   // if no error then move further for adding to tbl_product  
+      //   let {
+      //     name,
+      //     description,
+      //     manufacturer,
+      //     availability,
+      //     status,
+      //     approved_id,
+      //     approved_name,
+      //     master_id,
+      //     categories,
+      //     variations,
+      //   } = productdetails[i];
 
-        let vendorApproveId = 0;
-        if (!approved_id && approved_name) {
-          let findVendorApprove = await vendorapproveModel.findVendorApproveByName(approved_name);
-          if (findVendorApprove.length === 0) {
-            let vendorApproveObj = {
-              vendor_approve: approved_name,
-              status: 1
-            };
-            let createVendorApprove = await vendorapproveModel.createVendorApprove(vendorApproveObj);
-            vendorApproveId = [createVendorApprove.id];
-          } else {
-            vendorApproveId = [findVendorApprove[0].id];
-          }
-        } else {
-          vendorApproveId = approved_id;
-        }
+      //   // ---------------- approved by ---------------
+      //   if (approved_id) {
+      //     // Check if it's a string, and parse only if necessary
+      //     if (typeof approved_id === 'string') {
+      //       approved_id = JSON.parse(approved_id); // Ensure it's parsed from a JSON string
+      //     }
+      //     // Ensure it's an array of numbers
+      //     else if (!Array.isArray(approved_id)) {
+      //       approved_id = [approved_id]; // If it's a single number, convert it to an array
+      //     }
+      //   }
 
-        // ---------------- products ----------------
-        let productDetails = '';
-        if (master_id) {
-          productDetails = await productModel.check_product(master_id);
-        }
-        let productObj = {
-          name: name,
-          description: description || null,
-          manufacturer: manufacturer || null,
-          availability: availability || 1,
-          slug: titleToSlug(name),
-          sku: name,
-          created_by: vendorId,
-          vendor: vendorId,
-          status: status || 0,
-          // vendor_approved_by: vendorApproveId || null,
-          is_approve: master_id ? 1 : 0,
-          added_by: req.user.id,
-          qap_new_file_name:
-            req.files?.qap?.length > 0
-              ? `${Config.download_url}/product_image/${req.files.qap[0].filename}`
-              : productDetails[0].qap_new_file_name,
-          qap_original_file_name:
-            req.files?.qap?.length > 0
-              ? req.files.qap[0].originalname
-              : productDetails[0].qap_original_file_name,
-          tds_new_file_name:
-            req.files?.tds?.length > 0
-              ? `${Config.download_url}/product_image/${req.files.tds[0].filename}`
-              : productDetails[0].tds_new_file_name,
-          tds_original_file_name:
-            req.files?.tds?.length > 0
-              ? req.files.tds[0].originalname
-              : productDetails[0].tds_original_file_name
-        };
+      //   let vendorApproveId = 0;
+      //   if (!approved_id && approved_name) {
+      //     let findVendorApprove = await vendorapproveModel.findVendorApproveByName(approved_name);
+      //     if (findVendorApprove.length === 0) {
+      //       let vendorApproveObj = {
+      //         vendor_approve: approved_name,
+      //         status: 1
+      //       };
+      //       let createVendorApprove = await vendorapproveModel.createVendorApprove(vendorApproveObj);
+      //       vendorApproveId = [createVendorApprove.id];
+      //     } else {
+      //       vendorApproveId = [findVendorApprove[0].id];
+      //     }
+      //   } else {
+      //     vendorApproveId = approved_id;
+      //   }
 
-        let product = await productModel.createProduct(productObj);
-        let productId = product.id;
-        if (vendorApproveId.length > 0) {
-          let productApproveArray = [];
-          vendorApproveId.forEach((item) => {
-            productApproveArray.push({
-              product_id: productId,
-              vendor_approve_id: item
-            });
-          });
-          await productModel.addProductApproveBy(productApproveArray, productId);
-        }
+      //   // ---------------- products ----------------
+      //   let productDetails = '';
+      //   if (master_id) {
+      //     productDetails = await productModel.check_product(master_id);
+      //   }
+      //   let productObj = {
+      //     name: name,
+      //     description: description || null,
+      //     manufacturer: manufacturer || null,
+      //     availability: availability || 1,
+      //     slug: titleToSlug(name),
+      //     sku: name,
+      //     created_by: vendorId,
+      //     vendor: vendorId,
+      //     status: status || 0,
+      //     // vendor_approved_by: vendorApproveId || null,
+      //     is_approve: master_id ? 1 : 0,
+      //     added_by: req.user.id,
+      //     qap_new_file_name:
+      //       req.files?.qap?.length > 0
+      //         ? `${Config.download_url}/product_image/${req.files.qap[0].filename}`
+      //         : productDetails[0].qap_new_file_name,
+      //     qap_original_file_name:
+      //       req.files?.qap?.length > 0
+      //         ? req.files.qap[0].originalname
+      //         : productDetails[0].qap_original_file_name,
+      //     tds_new_file_name:
+      //       req.files?.tds?.length > 0
+      //         ? `${Config.download_url}/product_image/${req.files.tds[0].filename}`
+      //         : productDetails[0].tds_new_file_name,
+      //     tds_original_file_name:
+      //       req.files?.tds?.length > 0
+      //         ? req.files.tds[0].originalname
+      //         : productDetails[0].tds_original_file_name
+      //   };
+
+      //   let product = await productModel.createProduct(productObj);
+      //   let productId = product.id;
+      //   if (vendorApproveId.length > 0) {
+      //     let productApproveArray = [];
+      //     vendorApproveId.forEach((item) => {
+      //       productApproveArray.push({
+      //         product_id: productId,
+      //         vendor_approve_id: item
+      //       });
+      //     });
+      //     await productModel.addProductApproveBy(productApproveArray, productId);
+      //   }
 
         
-        // ---------------- categories ---------------
-        if (categories) {
-          // Check if it's a string, and parse only if necessary
-          if (typeof categories === 'string') {
-            categories = JSON.parse(categories); // Ensure it's parsed from a JSON string
-          }
-          // Ensure it's an array of numbers
-          else if (!Array.isArray(categories)) {
-            categories = [categories]; // If it's a single number, convert it to an array
-          }
+      //   // ---------------- categories ---------------
+      //   if (categories) {
+      //     // Check if it's a string, and parse only if necessary
+      //     if (typeof categories === 'string') {
+      //       categories = JSON.parse(categories); // Ensure it's parsed from a JSON string
+      //     }
+      //     // Ensure it's an array of numbers
+      //     else if (!Array.isArray(categories)) {
+      //       categories = [categories]; // If it's a single number, convert it to an array
+      //     }
 
-          for await (const categoryId of categories) {
-            let categoryObj = {
-              category_id: categoryId,
-              product_id: productId
-            };
-            await productModel.createProductCategories(categoryObj);
-          }
-        }            
+      //     for await (const categoryId of categories) {
+      //       let categoryObj = {
+      //         category_id: categoryId,
+      //         product_id: productId
+      //       };
+      //       await productModel.createProductCategories(categoryObj);
+      //     }
+      //   }            
 
-        // ---------------- variations ----------------
-        if (variations) {
-          // Check if it's a string, and parse only if necessary
-          if (typeof variations === 'string') {
-            variations = JSON.parse(variations); // Ensure it's parsed from a JSON string
-          }
-          // Ensure it's an array of numbers
-          else if (!Array.isArray(variations)) {
-            variations = [variations]; // If it's a single number, convert it to an array
-          }
+      //   // ---------------- variations ----------------
+      //   if (variations) {
+      //     // Check if it's a string, and parse only if necessary
+      //     if (typeof variations === 'string') {
+      //       variations = JSON.parse(variations); // Ensure it's parsed from a JSON string
+      //     }
+      //     // Ensure it's an array of numbers
+      //     else if (!Array.isArray(variations)) {
+      //       variations = [variations]; // If it's a single number, convert it to an array
+      //     }
 
-          for await (const { attribute = "", attributeValue = "" } of variations) {
-            let varientObj = {
-              product_id: productId,
-              variant_name: attribute,
-              variant_value: attributeValue
-            };
-            await productModel.createProductveriants(varientObj);
-          }
-        } 
+      //     for await (const { attribute = "", attributeValue = "" } of variations) {
+      //       let varientObj = {
+      //         product_id: productId,
+      //         variant_name: attribute,
+      //         variant_value: attributeValue
+      //       };
+      //       await productModel.createProductveriants(varientObj);
+      //     }
+      //   } 
         
 
-        // ---------------- featured image ----------------
-        if (req.files?.featured && req.files?.featured.length > 0) {
-          let featuredImageObj = {
-            product_id: productId,
-            is_featured: 1,
-            original_image_name: req.files.featured[0].originalname,
-            new_image_name: `${Config.download_url}/product_image/${req.files.featured[0].filename}`
-          };
-          await productModel.insertProductImages(featuredImageObj);
-        } else if (master_id && !req.files?.featured) {
-          let featuredImage = await productModel.getProductImages(master_id, 1);
-          if (featuredImage.length > 0) {
-            let featuredImageObj = {
-              product_id: productId,
-              is_featured: 1,
-              original_image_name: featuredImage[0].original_image_name || null,
-              new_image_name: featuredImage[0].new_image_name || null
-            };
-            await productModel.insertProductImages(featuredImageObj);
-          }
-        }
+      //   // ---------------- featured image ----------------
+      //   if (req.files?.featured && req.files?.featured.length > 0) {
+      //     let featuredImageObj = {
+      //       product_id: productId,
+      //       is_featured: 1,
+      //       original_image_name: req.files.featured[0].originalname,
+      //       new_image_name: `${Config.download_url}/product_image/${req.files.featured[0].filename}`
+      //     };
+      //     await productModel.insertProductImages(featuredImageObj);
+      //   } else if (master_id && !req.files?.featured) {
+      //     let featuredImage = await productModel.getProductImages(master_id, 1);
+      //     if (featuredImage.length > 0) {
+      //       let featuredImageObj = {
+      //         product_id: productId,
+      //         is_featured: 1,
+      //         original_image_name: featuredImage[0].original_image_name || null,
+      //         new_image_name: featuredImage[0].new_image_name || null
+      //       };
+      //       await productModel.insertProductImages(featuredImageObj);
+      //     }
+      //   }
 
-        // ---------------- gallery image ----------------
-        if (req.files?.gallery && req.files?.gallery.length > 0) {
-          for await (const { originalname, filename } of req.files?.gallery) {
-            let featuredImageObj = {
-              product_id: productId,
-              is_featured: 0,
-              original_image_name: originalname,
-              new_image_name: `${Config.download_url}/product_image/${filename}`
-            };
-            await productModel.insertProductImages(featuredImageObj);
-          }
-        } else if (master_id && !req.files?.gallery) {
-          let galleryImage = await productModel.getProductImages(master_id, 0);
+      //   // ---------------- gallery image ----------------
+      //   if (req.files?.gallery && req.files?.gallery.length > 0) {
+      //     for await (const { originalname, filename } of req.files?.gallery) {
+      //       let featuredImageObj = {
+      //         product_id: productId,
+      //         is_featured: 0,
+      //         original_image_name: originalname,
+      //         new_image_name: `${Config.download_url}/product_image/${filename}`
+      //       };
+      //       await productModel.insertProductImages(featuredImageObj);
+      //     }
+      //   } else if (master_id && !req.files?.gallery) {
+      //     let galleryImage = await productModel.getProductImages(master_id, 0);
 
-          for await (const {
-            original_image_name,
-            new_image_name
-          } of galleryImage) {
-            let featuredImageObj = {
-              product_id: productId,
-              is_featured: 0,
-              original_image_name: original_image_name || null,
-              new_image_name: new_image_name || null
-            };
-            await productModel.insertProductImages(featuredImageObj);
-          }
-        }
-      }
+      //     for await (const {
+      //       original_image_name,
+      //       new_image_name
+      //     } of galleryImage) {
+      //       let featuredImageObj = {
+      //         product_id: productId,
+      //         is_featured: 0,
+      //         original_image_name: original_image_name || null,
+      //         new_image_name: new_image_name || null
+      //       };
+      //       await productModel.insertProductImages(featuredImageObj);
+      //     }
+      //   }
+      // }
 
-      addDefaultNotifications(vendor[0].id);
+      // addDefaultNotifications(vendor[0].id);
 
-      if (vendor[0].id) {
-        let html_variables = [{ name: userDetails[0].vendor_name }];
+      // if (vendor[0].id) {
+      //   let html_variables = [{ name: userDetails[0].vendor_name }];
 
-        const spocList = await vendorModel.getSpocDetails(vendor[0].id);
-        // console.log("user_id: ", vendor[0].id);
-        sendMail({
-          from: Config.webmasterMail, // sender address
-          to: spocList?.length ? spocList.map(spoc => spoc.email) : userDetails[0].email, // list of receivers
-          cc: spocList?.length ? userDetails[0].email : '',
-          subject: `${buyerName} Added You on Workwise`, // Subject line
-          html: `Hello  ${userDetails[0].vendor_name},<br><br>
+      //   const spocList = await vendorModel.getSpocDetails(vendor[0].id);
+      //   // console.log("user_id: ", vendor[0].id);
+      //   sendMail({
+      //     from: Config.webmasterMail, // sender address
+      //     to: spocList?.length ? spocList.map(spoc => spoc.email) : userDetails[0].email, // list of receivers
+      //     cc: spocList?.length ? userDetails[0].email : '',
+      //     subject: `${buyerName} Added You on Workwise`, // Subject line
+      //     html: `Hello  ${userDetails[0].vendor_name},<br><br>
 
-          We are pleased to inform you that ${buyerName} has added you as a preferred vendor on the Workwise platform. Going forward, ${buyerName} will manage their procurement activities through Workwise. <br><br>
-          To ensure you receive all enquiries promptly, please complete your registration with us. Your login credentials are provided below:<br><br>
-                 <strong>Email:</strong> ${userDetails[0].email}<br>
-                 <strong>Password:</strong> ${password}<br>
-                 We recommend changing your password after your first login for security reasons.<br><br>
-          We look forward to supporting your business growth.<br><br>
-         Best regards, <br>
-        The Workwise Team<br>
-        <a href="https://letsworkwise.com"> https://letsworkwise.com </a>   <br>     
-                 Best regards,<br>
-                 The Workwise Team`
-        });
+      //     We are pleased to inform you that ${buyerName} has added you as a preferred vendor on the Workwise platform. Going forward, ${buyerName} will manage their procurement activities through Workwise. <br><br>
+      //     To ensure you receive all enquiries promptly, please complete your registration with us. Your login credentials are provided below:<br><br>
+      //            <strong>Email:</strong> ${userDetails[0].email}<br>
+      //            <strong>Password:</strong> ${password}<br>
+      //            We recommend changing your password after your first login for security reasons.<br><br>
+      //     We look forward to supporting your business growth.<br><br>
+      //    Best regards, <br>
+      //   The Workwise Team<br>
+      //   <a href="https://letsworkwise.com"> https://letsworkwise.com </a>   <br>     
+      //            Best regards,<br>
+      //            The Workwise Team`
+      //   });
 
 
-        res
-          .status(200)
-          .json({
-            status: 1,
-            message: 'Vendor successfully reviewed and added to user database',
-            errors:errors
-          })
-          .end();
-      }
+      //   res
+      //     .status(200)
+      //     .json({
+      //       status: 1,
+      //       message: 'Vendor successfully reviewed and added to user database',
+      //       errors:errors
+      //     })
+      //     .end();
+      // }
     } catch (err) {
       logError(err);
       res

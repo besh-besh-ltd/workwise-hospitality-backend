@@ -1081,6 +1081,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
 
   await rfqModel.update('tbl_rfq', rfqData, rfq_id);
+  await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id);
   await deleteRelatedRecords(rfq_id);
 
   if (terms && terms.length > 0) {
