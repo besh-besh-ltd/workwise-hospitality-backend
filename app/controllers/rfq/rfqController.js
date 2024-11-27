@@ -1036,7 +1036,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
   const {
       comment,
       company_name,
-      response_email,
       contact_name,
       contact_number,
       bid_end_date,
@@ -1048,6 +1047,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
       project_id,
       term_and_condition_files
   } = reqBody;
+  const response_email = reqBody.response_email?.toLowerCase() || '';
+  
   
   const rfqData = {
       comment,
@@ -1124,7 +1125,6 @@ const rfqController = {
         rfq_id,
         comment,
         company_name,
-        response_email,
         contact_name,
         contact_number,
         bid_end_date,
@@ -1133,6 +1133,7 @@ const rfqController = {
         reverse_auction,
         project_id
       } = req.body;
+      const response_email = req.body.response_email?.toLowerCase();
 
       const user_id = req.user.id;
 

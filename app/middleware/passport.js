@@ -54,7 +54,7 @@ passport.use(
     },
     async (username, password, done) => {
       try {
-        let user = await userModel.getUserAuthEmail(username);
+        let user = await userModel.getUserAuthEmail(username?.toLowerCase());
         // console.log('username--', username);
         // console.log('user_passport--', user);
         let user_dtls = Object.assign({}, ...user);

@@ -15,9 +15,9 @@ const validateDbBody = {
       let errors = {};
       let err = 0;
       let { email, mobile } = req.body;
-
+      
       if (email) {
-        const userEmailExists = await userModel.user_email_exist(email);
+        const userEmailExists = await userModel.user_email_exist(email?.toLowerCase());
         if (userEmailExists.length > 0) {
           err++;
           errors.user_name = 'User email already exists';
@@ -97,7 +97,7 @@ const validateDbBody = {
       let { email, mobile } = req.body;
 
       if (email) {
-        let userEmailExists = await userModel.agent_user_email_exist(email);
+        let userEmailExists = await userModel.agent_user_email_exist(email?.toLowerCase());
         userEmailExists = Object.assign({}, ...userEmailExists);
         // console.log('userEmailExists--', userEmailExists);
         // return false;
@@ -152,7 +152,7 @@ const validateDbBody = {
 
       if (email) {
         // const userEmailExists = await userModel.user_email_exist(email);
-        const userEmailExists = await userModel.getUserAuthEmail(email);
+        const userEmailExists = await userModel.getUserAuthEmail(email?.toLowerCase());
         if (userEmailExists.length < 1) {
           err++;
           errors.user_name = 'User email not exists';
@@ -262,7 +262,7 @@ const validateDbBody = {
 
       if (email) {
         // const userEmailExists = await userModel.user_email_exist(email);
-        const userEmailExists = await userModel.user_email_temp_exist(email);
+        const userEmailExists = await userModel.user_email_temp_exist(email?.toLowerCase());
         if (userEmailExists.length > 0) {
           err++;
           errors.user_name = 'User email already exists';
