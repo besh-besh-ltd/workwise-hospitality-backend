@@ -5122,19 +5122,12 @@ getClauses: async (req, res) => {
   }
 },
 
-addComment: async (req, res) => {
+addTechComment: async (req, res) => {
   try{
-    const { clause_id, created_by, text, file_url } = req.body;
-    console.log("entered comment controller = ",clause_id,created_by,text, file_url);
+    const { clause_id, sender_id, receiver_id, text, file_url } = req.body;
 
-    // Validate input
-    if (!clause_id || !created_by || !text) {
-      return res.status(400).json({
-        status: 0,
-        message: "Invalid input. Please provide clause ID, creator ID, and comment text.",
-      });
-    }
-    const response = await rfqModel.addComment(clause_id, created_by, text, file_url);
+    // Save tech comment 
+    const response = await rfqModel.addTechComment(clause_id, sender_id, receiver_id, text, file_url);
     res
       .status(200)
       .json(response)
@@ -5148,19 +5141,11 @@ addComment: async (req, res) => {
   }
 },
 
-getComments: async (req, res) => {
+getTechComments: async (req, res) => {
   try{
-    const clause_id = req.params.id;
-    console.log("entered comment controller = ",clause_id);
+    const { clause_id, sender_id, receiver_id } = req.body;
 
-    // Validate input
-    if (!clause_id) {
-      return res.status(400).json({
-        status: 0,
-        message: "Invalid input. Please provide clause ID",
-      });
-    }
-        const response = await rfqModel.getComments(clause_id);
+    const response = await rfqModel.getTechComments(clause_id, sender_id, receiver_id);
     res
       .status(200)
       .json(response)

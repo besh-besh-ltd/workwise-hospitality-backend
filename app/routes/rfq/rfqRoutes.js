@@ -257,14 +257,14 @@ RfqRoutes.get('/get-clauses',
 )
 
 
-RfqRoutes.post('/add-comment',
+RfqRoutes.post('/add-tech-comment',
   passportSignIn,
-  rfqController.addComment
+  rfqController.addTechComment
 )
 
-RfqRoutes.get('/get-comments/:id',
+RfqRoutes.post('/get-tech-comments',
   passportSignIn,
-  rfqController.getComments
+  rfqController.getTechComments
 )
 
 RfqRoutes.post('/get-vendor-names',

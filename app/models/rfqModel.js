@@ -3213,7 +3213,7 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
 
-  addComment: async (tbl_rfq_product_tech_evaluation_clauses_id, created_by, text, file_urls) => {
+  addTechComment: async (tbl_rfq_product_tech_evaluation_clauses_id, sender_id, receiver_id, text, file_urls) => {
     const validateClauseQuery = `
       SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
       WHERE id = $1) AS clause_exists;
@@ -3221,155 +3221,136 @@ rfq_project_exist: async (project_id,user_id) => {
   
     const insertCommentQuery = `
       INSERT INTO tbl_rfq_product_tech_evaluation_comments
-      (tbl_rfq_product_tech_evaluation_clauses_id, created_by, text, timestamp)
-      VALUES ($1, $2, $3, NOW())
+      (tbl_rfq_product_tech_evaluation_clauses_id, sender_id, receiver_id, text, timestamp)
+      VALUES ($1, $2, $3, $4, NOW())
       RETURNING id;
     `;
   
     const insertFileQuery = `
       INSERT INTO tbl_rfq_product_tech_evaluation_comments_files
-      (tbl_rfq_product_tech_evaluation_comments_id, file_url, timestamp)
-      VALUES ($1, $2, NOW());
+      (tbl_rfq_product_tech_evaluation_comments_id, user_id, file_url, timestamp)
+      VALUES ($1, $2, $3, NOW());
     `;
   
-    return new Promise((resolve, reject) => {
-      // Validate clause existence
-      db.query(validateClauseQuery, [tbl_rfq_product_tech_evaluation_clauses_id])
-        .then((clauseResult) => {
-          console.log("clause result  ",clauseResult);
-          if (!clauseResult[0].clause_exists) {
-            return reject({
+    try {
+      // Validate clause
+      const clauseResult = await db.query(validateClauseQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
+      
+      if (!clauseResult[0].clause_exists) {
+        throw {
+          status: 0,
+          message: "Invalid clause ID. Clause does not exist.",
+        };
+      }
+  
+      // Insert comment
+      const commentResult = await db.query(insertCommentQuery, [tbl_rfq_product_tech_evaluation_clauses_id, sender_id, receiver_id, text]);
+      const commentId = commentResult[0].id;
+  
+      // Insert associated files if provided
+      if (file_urls && file_urls.length > 0) {
+        for (const file_url of file_urls) {
+          try {
+            await db.query(insertFileQuery, [commentId, sender_id, file_url]);
+          } catch (fileError) {
+            console.error(`Error adding file: ${file_url}`, fileError.message);
+            throw {
               status: 0,
-              message: "Invalid clause ID. Clause does not exist.",
-            });
+              message: "Failed to add files associated with the comment.",
+              error: fileError.message,
+            };
           }
+        }
+      }
   
-          // Proceed with adding the comment
-          db.query(insertCommentQuery, [tbl_rfq_product_tech_evaluation_clauses_id, created_by, text])
-            .then(async (commentResult) => {
-              const commentId = commentResult[0].id;
-              console.log(`Comment added with ID: ${commentId}`);
-  
-              // Insert associated files if provided
-              if (file_urls && file_urls.length > 0) {
-                for (const file_url of file_urls) {
-                  await db.query(insertFileQuery, [commentId, file_url]).catch((fileError) => {
-                    console.error(`Error adding file: ${file_url}`, fileError.message);
-                    reject({
-                      status: 0,
-                      message: "Failed to add files associated with the comment.",
-                      error: fileError.message,
-                    });
-                  });
-                }
-              }
-  
-              resolve({
-                status: 1,
-                message: "Comment and associated files added successfully.",
-                commentId: commentId,
-              });
-            })
-            .catch((commentError) => {
-              console.error("Error adding comment:", commentError.message);
-              reject({
-                status: 0,
-                message: "Failed to add comment.",
-                error: commentError.message,
-              });
-            });
-        })
-        .catch((validationError) => {
-          console.error("Error validating clause:", validationError.message);
-          reject({
-            status: 0,
-            message: "Failed to validate clause.",
-            error: validationError.message,
-          });
-        });
-    });
+      // Resolve if everything is successful
+      return {
+        status: 1,
+        message: "Comment and associated files added successfully.",
+        commentId: commentId,
+      };
+    } catch (error) {
+      // Handle errors
+      console.error("Error:", error.message);
+      throw error;
+    }
   },
 
-  getComments: async (clause_id) => {
+  getTechComments: async (clause_id, sender_id, receiver_id) => {
     const validateClauseQuery = `
       SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
       WHERE id = $1) AS clause_exists;
     `;
-  
+
     const fetchCommentsQuery = `
-      SELECT id AS comment_id, text AS comment_text, created_by
+      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by
       FROM tbl_rfq_product_tech_evaluation_comments
-      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
+        AND (
+          (sender_id = $2 AND receiver_id = $3) OR  -- Buyer to Vendor
+          (sender_id = $3 AND receiver_id = $2)    -- Vendor to Buyer
+      )
+      ORDER BY timestamp ASC;
     `;
-  
+
     const fetchCommentFilesQuery = `
       SELECT file_url
       FROM tbl_rfq_product_tech_evaluation_comments_files
-      WHERE tbl_rfq_product_tech_evaluation_comments_id = $1;
+      WHERE tbl_rfq_product_tech_evaluation_comments_id = $1
+        AND user_id = $2;
     `;
-  
-    return new Promise((resolve, reject) => {
+
+    try {
       // Validate clause existence
-      db.query(validateClauseQuery, [clause_id])
-        .then((clauseResult) => {
-          if (!clauseResult[0].clause_exists) {
-            return reject({
-              status: 0,
-              message: "Invalid clause ID. Clause does not exist.",
-            });
-          }
-  
-          // Fetch comments for the clause
-          db.query(fetchCommentsQuery, [clause_id])
-            .then(async (commentsResult) => {
-              const data = [];
-  
-              for (const comment of commentsResult) {
-                const { comment_id, comment_text, created_by } = comment;
-  
-                // Fetch files associated with the comment
-                const filesResult = await db.query(fetchCommentFilesQuery, [comment_id]).catch((fileError) => {
-                  console.error(`Error fetching files for comment ID: ${comment_id}`, fileError.message);
-                  reject({
-                    status: 0,
-                    message: "Failed to fetch files for comments.",
-                    error: fileError.message,
-                  });
-                });
-  
-                // Add comment and files to the response
-                data.push({
-                  comment_id,
-                  comment_text,
-                  created_by,
-                  comment_files: filesResult.map((file) => file.file_url) || [],
-                });
-              }
-  
-              resolve({
-                status: 1,
-                message: "Comments fetched successfully.",
-                data,
-              });
-            })
-            .catch((commentsError) => {
-              console.error("Error fetching comments:", commentsError.message);
-              reject({
-                status: 0,
-                message: "Failed to fetch comments.",
-                error: commentsError.message,
-              });
-            });
-        })
-        .catch((validationError) => {
-          console.error("Error validating clause:", validationError.message);
-          reject({
+      const clauseResult = await db.query(validateClauseQuery, [clause_id]);
+
+      if (!clauseResult[0].clause_exists) {
+        throw {
+          status: 0,
+          message: "Invalid clause ID. Clause does not exist.",
+        };
+      }
+
+      // Fetch comments for the clause
+      const commentsResult = await db.query(fetchCommentsQuery, [clause_id, sender_id, receiver_id]);
+      const data = [];
+
+      for (const comment of commentsResult) {
+        const { comment_id, comment_text, created_by } = comment;
+
+        // Fetch files associated with the comment
+        let filesResult = [];
+        try {
+          filesResult = await db.query(fetchCommentFilesQuery, [comment_id, created_by]);
+        } catch (fileError) {
+          console.error(`Error fetching files for comment ID: ${comment_id}`, fileError.message);
+          throw {
             status: 0,
-            message: "Failed to validate clause.",
-            error: validationError.message,
-          });
+            message: "Failed to fetch files for comments.",
+            error: fileError.message,
+          };
+        }
+
+        // Add comment and files to the response
+        data.push({
+          comment_id,
+          comment_text,
+          created_by,
+          comment_files: filesResult.map((file) => file.file_url) || [],
         });
-    });
+      }
+
+      // Return success response
+      return {
+        status: 1,
+        message: "Comments fetched successfully.",
+        data,
+      };
+
+    } catch (error) {
+      console.error("Error:", error.message);
+      throw error; // Rethrow the error for the caller to handle
+    }
   },
 
   addVendorResponse: async (responses) => {
