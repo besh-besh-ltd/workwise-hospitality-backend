@@ -741,7 +741,8 @@ const schema_posts = {
       var upload = multer({
         storage: store_document,
         limits: {
-          fileSize: 2000000 // Compliant: 8MB
+          // fileSize: 2000000 // Compliant: 8MB
+          fileSize: 26214400 // Compliant: 25MB, changes by mukul, 27-11-2024
         },
         fileFilter: (req, file, cb) => {
           var ext = path.extname(file.originalname).toLowerCase();
