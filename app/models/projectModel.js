@@ -110,7 +110,7 @@ const projectModel = {
                     )
                     FROM tbl_rfq r
                     WHERE r.project_id = p.id
-                    ORDER BY r.id DESC
+                    ORDER BY r.timestamp DESC
                     LIMIT $3 OFFSET $4
                 ) AS rfqs
 
