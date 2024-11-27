@@ -1073,10 +1073,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
       project_id,
       term_and_condition_files
   } = reqBody;
-
-  // Check for an existing draft RFQ
-  let rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: user_id });
-  let rfq_id;
   
   const rfqData = {
       comment,
@@ -1088,32 +1084,28 @@ const saveRfqDraft = async (user_id, reqBody) => {
       location,
       rfq_type,
       reverse_auction,
-      is_published: 0, // Set as draft
+      is_published: 0,
       updated_by: user_id
   };
+
+  let rfq_id;
+  const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: user_id });
+  if (rfqList.length > 0) {
+    rfq_id = rfqList[0].id;
+  } else {
+      return {
+        success: true,
+        message: 'No RFQ draft found!'
+      };
+  }
 
   if (project_id && project_id !== -1) {
       rfqData.project_id = project_id;
   }
 
-  if (rfqList.length > 0) {
-      // Update existing RFQ
-      rfq_id = rfqList[0].id;
-      await rfqModel.update('tbl_rfq', rfqData, rfq_id);
-      await deleteRelatedRecords(rfq_id);
-  } else {
-      // Create new draft RFQ
-      // rfqData.created_by = user_id;
-      // const nextRFQNumber = await getNextRfQNumber();
-      // rfqData.rfq_no = nextRFQNumber;
-      
-      // const response = await rfqModel.insert('tbl_rfq', rfqData);
-      // rfq_id = response[0].id;
-      return {
-        success: true,
-        message: 'No draft to save!'
-      };
-  }
+
+  await rfqModel.update('tbl_rfq', rfqData, rfq_id);
+  await deleteRelatedRecords(rfq_id);
 
   if (terms && terms.length > 0) {
       const rfqTerms = terms.map(term => ({ rfq_id, terms_id: term.id }));
@@ -1128,10 +1120,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
       }));
       await rfqModel.insertArray(rfqFiles, ['rfq_id', 'file_type', 'file_url'], 'tbl_rfq_files');
   }
-
-  // if (products && products.length > 0) {
-  //     await Promise.all(products.map(product => insertProduct(product, rfq_id)));
-  // }
 
   if (products && products.length > 0) {
     await Promise.all(
@@ -1150,7 +1138,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
 const rfqController = {
   create: async (req, res, next) => {
-    // const user_id = req.user.id;
+
     if (!req.user.subscription_plan_id) {
       res
         .status(400)
@@ -1161,146 +1149,74 @@ const rfqController = {
         .end();
       return;
     }
+
     try {
-      const {
+      let {
         rfq_id,
-        // comment,
-        // company_name,
-        // response_email,
-        // contact_name,
-        // contact_number,
-        // bid_end_date,
-        // location,
-        // is_published,
-        // products,
-        // terms,
-        // rfq_type,
-        // reverse_auction,
-        // project_id,
-        // term_and_condition_files
+        comment,
+        company_name,
+        response_email,
+        contact_name,
+        contact_number,
+        bid_end_date,
+        location,
+        rfq_type,
+        reverse_auction,
+        project_id
       } = req.body;
 
-      if (rfq_id && rfq_id != '' && rfq_id != null) {
-        // Updating existing Draft
+      const user_id = req.user.id;
 
-        await saveRfqDraft(req.user.id, req.body);
+      if(!rfq_id){
+        const nextRFQNumber = await getNextRfQNumber();
 
-        const response = await rfqModel.update(
-          'tbl_rfq',
-          {is_published: 1},
-          rfq_id
-        );
+        const tbl_rfq_data = {
+          comment,
+          company_name,
+          response_email,
+          contact_name,
+          contact_number,
+          bid_end_date,
+          location,
+          is_published: 0,
+          rfq_type,
+          rfq_no: nextRFQNumber,
+          created_by: user_id,
+          updated_by: user_id,
+          reverse_auction
+        };
 
-        await sendMailtoVendors(req, rfq_id);
-        await sendQuotationMailToBuyer(req, rfq_id);
+        if(project_id!=-1){
+          tbl_rfq_data.project_id=project_id;
+        }
 
-        res
-          .status(200)
-          .json({
-            status: 2,
-            data: response[0]
-          })
-          .end();
-      } else {
-        return res.status(500).json({
-          success: false,
-          message: "Draft RFQ doesn't exist"
-      });
+        const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
+
+        if (response.length > 0) {
+          req.body.rfq_id = response[0].id;
+          rfq_id = response[0].id;
+        }  
       }
-    
-      // The RFQ is already created before this method is called hence never goes in the else block
-      // else {
-      //   // Creating fresh RFQ
 
-      //   const nextRFQNumber = await getNextRfQNumber();
+      await saveRfqDraft(req.user.id, req.body);
 
-      //   const tbl_rfq_data = {
-      //     comment,
-      //     company_name,
-      //     response_email,
-      //     contact_name,
-      //     contact_number,
-      //     bid_end_date,
-      //     location,
-      //     is_published,
-      //     rfq_type,
-      //     rfq_no: nextRFQNumber,
-      //     created_by: user_id,
-      //     updated_by: user_id,
-      //     reverse_auction
-      //   };
+      const response = await rfqModel.update(
+        'tbl_rfq',
+        {is_published: 1},
+        rfq_id
+      );
 
-      //   if(project_id!=-1){
-      //     tbl_rfq_data.project_id=project_id;
-      //   }
+      await sendMailtoVendors(req, rfq_id);
+      await sendQuotationMailToBuyer(req, rfq_id);
 
+      res
+        .status(200)
+        .json({
+          status: 2,
+          data: response[0]
+        })
+        .end();
 
-      //   const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
-      //   var rfqtermsRsp = null;
-
-      //   if (response.length > 0) {
-      //     const created_rfq_id = response[0].id;
-
-      //     if (terms.length > 0) {
-      //       var tbl_rfq_terms_map_array = [];
-
-      //       terms.map((item) => {
-      //         tbl_rfq_terms_map_array.push({
-      //           rfq_id: created_rfq_id,
-      //           terms_id: item.id
-      //         });
-      //       });
-      //       const tbl_rfq_terms_map_keys = ['rfq_id', 'terms_id'];
-      //       rfqtermsRsp = await rfqModel.insertArray(
-      //         tbl_rfq_terms_map_array,
-      //         tbl_rfq_terms_map_keys,
-      //         'tbl_rfq_terms_map'
-      //       );
-      //     }
-
-      //     if (term_and_condition_files && term_and_condition_files.length > 0) {
-      //       const rfq_files = term_and_condition_files.map(url => ({
-      //         rfq_id:created_rfq_id,
-      //         file_type: 'term_and_condition',
-      //         file_url: url
-      //       }));
-      //       for (const fileData of rfq_files) {
-      //         await rfqModel.insert('tbl_rfq_files', fileData);
-      //       }
-      //     }
-
-      //     Promise.all(
-      //       products.map((item) => insertProduct(item, created_rfq_id))
-      //     )
-      //       .then(async (results) => {
-      //         response[0].otherDetails = results;
-      //         response[0].terms = rfqtermsRsp;
-      //         // sendMailtoVendors => in this function we are also generating token for vendor so he will quote for the RFQ when he is not login,  And will also map buyer to vendor in this function
-      //         await sendMailtoVendors(req, response[0].id);
-
-      //         await sendQuotationMailToBuyer(req, response[0].id);
-
-      //         res
-      //           .status(200)
-      //           .json({
-      //             status: 1,
-      //             data: response[0]
-      //           })
-      //           .end();
-      //       })
-      //       .catch((error) => {
-      //         console.error('Error inserting data:', error);
-      //       });
-      //   } else {
-      //     res
-      //       .status(400)
-      //       .json({
-      //         status: 2,
-      //         data: response
-      //       })
-      //       .end();
-      //   }
-      // }
     } catch (error) {
       logError(error);
       res
