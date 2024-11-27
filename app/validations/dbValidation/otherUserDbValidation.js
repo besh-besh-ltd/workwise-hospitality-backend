@@ -90,7 +90,8 @@ const validateDbBody = {
     try {
       let errors = {};
       let err = 0;
-      let { email, mobile } = req.body;
+      let { mobile } = req.body;
+      let email = req.body.email?.toLowerCase() || '';
 
       if (email) {
         const vendorEmailExists = await otherUserModel.userEmailExist(email);
