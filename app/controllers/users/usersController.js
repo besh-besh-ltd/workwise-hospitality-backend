@@ -2840,7 +2840,7 @@ const UsersController = {
           password: generatePassword(password),
           status: '1',
           created_by: createdBy,
-          organization_name: userDetails[0].name || null // name doesn't exist
+          organization_name: userDetails[0].vendor_name || null
         };
 
         let companyObj = {
