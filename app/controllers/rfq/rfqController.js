@@ -2547,15 +2547,8 @@ const rfqController = {
 
     try {
       const lastActivity = await rfqModel.getRFQActivity(rfq_id, id);
-      const rfq_activity_id = lastActivity[0]?.id || null;
-
-      if (rfq_activity_id) {
+      if ( lastActivity?.length > 2) {
         // check when the last reminder was sent
-        const lastSentAt = lastActivity[0].last_reminder_sent;
-        const today = new Date().toISOString().slice(0, 10);
-        const lastSentDate = new Date(lastSentAt).toISOString().slice(0, 10);
-
-        if (today === lastSentDate)
           return res
             .status(403)
             .json({
@@ -2579,7 +2572,7 @@ const rfqController = {
       Promise.all(vendors.map((item) => sendReminderRFQMAIL(item, org_name, rfq_id)))
         .then(async () => {
           try {
-            await rfqModel.updateRFQActivity(rfq_id, id, rfq_activity_id);
+            await rfqModel.insertRFQActivity(rfq_id, id);
           }
           catch (error) {
             throw new Error(error)
