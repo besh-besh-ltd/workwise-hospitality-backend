@@ -10,7 +10,8 @@ const validateDbBody = {
     try {
       let errors = {};
       let err = 0;
-      let { email, mobile } = req.body;
+      let { mobile } = req.body;
+      let email = req.body.email?.toLowerCase() || '';
 
       if (email) {
         const vendorEmailExists = await vendorModel.vendorEmailExist(email);
@@ -177,7 +178,8 @@ const validateDbBody = {
     try {
       let errors = {};
       let err = 0;
-      let { email, mobile } = req.body;
+      let { mobile } = req.body;
+      let email = req.body.email?.toLowerCase() || '';
       let vendorId = req.params.id;
 
       if (email) {
