@@ -1463,7 +1463,7 @@ LIMIT $5 OFFSET $4;`,
       const today = new Date(date).toISOString().slice(0, 10);
       const result = await db.query(
         `SELECT *
-         FROM tbl_rfq_activity
+                      FROM tbl_rfq_activity
          WHERE rfq_id = $1 AND user_id = ${user_id} AND DATE(created_at) = ${date ? today : `CURRENT_DATE`};`,
         [rfq_id]
       );
@@ -1479,8 +1479,8 @@ LIMIT $5 OFFSET $4;`,
     try {
       //insert new rfq actiivity
       const insertQuery = `
-        INSERT INTO tbl_rfq_activity (rfq_id, user_id, last_reminder_sent)
-        VALUES ($1, $2, CURRENT_TIMESTAMP)
+        INSERT INTO tbl_rfq_activity (rfq_id, user_id)
+        VALUES ($1, $2)
         RETURNING *;
       `;
       await db.query(insertQuery, [rfq_id, user_id]);
