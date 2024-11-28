@@ -1449,10 +1449,8 @@ const productModel = {
       const values = [companyObj.user_id];
       let query =
         pgp().helpers.update(companyObj, null, 'tbl_company') + condition;
-      console.log("updateCompany: ", query)
       db.any(query, values)
         .then(function (data) {
-          console.log("data updateCompany: ", data)
           resolve(data);
         })
         .catch(function (err) {
