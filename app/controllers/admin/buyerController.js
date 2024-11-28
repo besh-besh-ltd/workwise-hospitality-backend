@@ -178,7 +178,6 @@ const buyerController = {
       let updatedBy = req.user.id;
       const {
         name,
-        email,
         mobile,
         organization_name,
         address,
@@ -189,6 +188,7 @@ const buyerController = {
         whatsapp,
         skype
       } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
       let fileName = req?.file?.filename;
       let originalFilename = req?.file?.originalname;
       let buyerDetails = await buyerModel.getBuyerDetails(buyerId);

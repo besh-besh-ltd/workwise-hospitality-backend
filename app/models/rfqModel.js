@@ -1559,12 +1559,13 @@ LIMIT $5 OFFSET $4;`,
     });
   },
   // function created by Imtiaj for getting RFQ activity 20/09/2024
-  getRFQActivity: async (rfq_id, user_id) => {
+  getRFQActivity: async (rfq_id, user_id, date=null) => {
     try {
+      const today = new Date(date).toISOString().slice(0, 10);
       const result = await db.query(
         `SELECT *
-         FROM tbl_rfq_activity
-         WHERE rfq_id = $1 AND user_id = ${user_id};`,
+                      FROM tbl_rfq_activity
+         WHERE rfq_id = $1 AND user_id = ${user_id} AND DATE(created_at) = ${date ? today : `CURRENT_DATE`};`,
         [rfq_id]
       );
       return result;
@@ -1575,27 +1576,16 @@ LIMIT $5 OFFSET $4;`,
   },
 
   // function created by Imtiaj for updating RFQ activity 20/09/2024
-  updateRFQActivity: async (rfq_id, user_id, rfq_activity_id) => {
+  insertRFQActivity: async (rfq_id, user_id) => {
     try {
-      if (!rfq_activity_id) {
-        //insert new data
-        const insertQuery = `
-          INSERT INTO tbl_rfq_activity (rfq_id, user_id, last_reminder_sent)
-          VALUES ($1, $2, CURRENT_TIMESTAMP)
-          RETURNING *;
-        `;
-        await db.query(insertQuery, [rfq_id, user_id]);
-      }
-      else {
-        // update existing row
-        const updateQuery = `
-        UPDATE tbl_rfq_activity
-        SET last_reminder_sent = CURRENT_TIMESTAMP
-        WHERE id = $1
+      //insert new rfq actiivity
+      const insertQuery = `
+        INSERT INTO tbl_rfq_activity (rfq_id, user_id)
+        VALUES ($1, $2)
         RETURNING *;
       `;
-        await db.query(updateQuery, [rfq_activity_id]);
-      }
+      await db.query(insertQuery, [rfq_id, user_id]);
+
     } catch (error) {
       throw new Error(error);
     }
