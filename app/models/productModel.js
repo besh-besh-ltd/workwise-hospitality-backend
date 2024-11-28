@@ -1412,14 +1412,13 @@ const productModel = {
         });
     });
   },
-  updateVendorDetail: async (userObj) => {
+  updateVendorDetail: async (userObj, user_id) => {
     return new Promise(function (resolve, reject) {
-      const condition = ` WHERE email = '${userObj.email}' RETURNING id`;
-      // const values = [userObj.email];
-      let query = pgp().helpers.update(userObj, null, 'tbl_users') + condition;
-      console.log('query--', query);
+      const condition = ` WHERE id = $1 RETURNING id`;
 
-      db.any(query)
+      let query = pgp().helpers.update(userObj, null, 'tbl_users') + condition;
+
+      db.any(query, [user_id])
         .then(function (data) {
           resolve(data);
         })
@@ -1450,9 +1449,10 @@ const productModel = {
       const values = [companyObj.user_id];
       let query =
         pgp().helpers.update(companyObj, null, 'tbl_company') + condition;
-
+      console.log("updateCompany: ", query)
       db.any(query, values)
         .then(function (data) {
+          console.log("data updateCompany: ", data)
           resolve(data);
         })
         .catch(function (err) {

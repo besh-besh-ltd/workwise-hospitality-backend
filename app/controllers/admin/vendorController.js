@@ -488,6 +488,7 @@ const vendorController = {
         address: address || vendorDetails[0].address,
         city: city || vendorDetails[0].city,
         state: state || vendorDetails[0].state,
+        country: country || vendorDetails[0].country,
         mobile: mobile || vendorDetails[0].mobile,
         website: website || vendorDetails[0].website,
         postal_code: postal_code || vendorDetails[0].postal_code,
@@ -503,7 +504,7 @@ const vendorController = {
         organization_name:
           organization_name || vendorDetails[0].organization_name
       };
-      await productModel.updateVendorDetail(vendorObj);
+      await productModel.updateVendorDetail(vendorObj, vendorId);
 
       let companyDetails = await vendorModel.getCompanyDetails(vendorId);
 
