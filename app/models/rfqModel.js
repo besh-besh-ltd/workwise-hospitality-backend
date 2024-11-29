@@ -1458,18 +1458,27 @@ LIMIT $5 OFFSET $4;`,
     });
   },
   // function created by Imtiaj for getting RFQ activity 20/09/2024
-  getRFQActivity: async (rfq_id, user_id, date=null) => {
+  // 1. change by mukul 29-11-2024, 
+  // 2. valid date tghis model accept = new Date('2024-11-28').toISOString().slice(0, 10);  // Format, YYYY-MM-DD
+  // This model filters reminders for a specific date if provided, or returns the full list if no date is specified.
+getRFQActivity: async (rfq_id, user_id, date = null) => {
     try {
-      const today = new Date(date).toISOString().slice(0, 10);
-      const result = await db.query(
-        `SELECT *
-                      FROM tbl_rfq_activity
-         WHERE rfq_id = $1 AND user_id = ${user_id} AND DATE(created_at) = ${date ? today : `CURRENT_DATE`};`,
-        [rfq_id]
-      );
-      return result;
-
+      const query = `
+        SELECT *
+        FROM tbl_rfq_activity
+        WHERE rfq_id = $1 AND user_id = $2
+      ${date ? "AND DATE(created_at) = $3" : ""};
+      `;
+      const params = [rfq_id, user_id, date]; 
+      const result = await db.query(query, params);
+  
+      if (!result) {
+        throw new Error("Query did not return rows. Check your database or query logic.");
+      }
+  
+      return result; // Return the rows from the query
     } catch (error) {
+      console.error("Error in getRFQActivity:", error);
       throw new Error(error);
     }
   },
