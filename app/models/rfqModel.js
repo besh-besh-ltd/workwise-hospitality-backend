@@ -1559,43 +1559,42 @@ LIMIT $5 OFFSET $4;`,
     });
   },
   // function created by Imtiaj for getting RFQ activity 20/09/2024
-  getRFQActivity: async (rfq_id, user_id) => {
+  // 1. change by mukul 29-11-2024, 
+  // 2. valid date tghis model accept = new Date('2024-11-28').toISOString().slice(0, 10);  // Format, YYYY-MM-DD
+  // This model filters reminders for a specific date if provided, or returns the full list if no date is specified.
+getRFQActivity: async (rfq_id, user_id, date = null) => {
     try {
-      const result = await db.query(
-        `SELECT *
-         FROM tbl_rfq_activity
-         WHERE rfq_id = $1 AND user_id = ${user_id};`,
-        [rfq_id]
-      );
-      return result;
-
+      const query = `
+        SELECT *
+        FROM tbl_rfq_activity
+        WHERE rfq_id = $1 AND user_id = $2
+      ${date ? "AND DATE(created_at) = $3" : ""};
+      `;
+      const params = [rfq_id, user_id, date]; 
+      const result = await db.query(query, params);
+  
+      if (!result) {
+        throw new Error("Query did not return rows. Check your database or query logic.");
+      }
+  
+      return result; // Return the rows from the query
     } catch (error) {
+      console.error("Error in getRFQActivity:", error);
       throw new Error(error);
     }
   },
 
   // function created by Imtiaj for updating RFQ activity 20/09/2024
-  updateRFQActivity: async (rfq_id, user_id, rfq_activity_id) => {
+  insertRFQActivity: async (rfq_id, user_id) => {
     try {
-      if (!rfq_activity_id) {
-        //insert new data
-        const insertQuery = `
-          INSERT INTO tbl_rfq_activity (rfq_id, user_id, last_reminder_sent)
-          VALUES ($1, $2, CURRENT_TIMESTAMP)
-          RETURNING *;
-        `;
-        await db.query(insertQuery, [rfq_id, user_id]);
-      }
-      else {
-        // update existing row
-        const updateQuery = `
-        UPDATE tbl_rfq_activity
-        SET last_reminder_sent = CURRENT_TIMESTAMP
-        WHERE id = $1
+      //insert new rfq actiivity
+      const insertQuery = `
+        INSERT INTO tbl_rfq_activity (rfq_id, user_id)
+        VALUES ($1, $2)
         RETURNING *;
       `;
-        await db.query(updateQuery, [rfq_activity_id]);
-      }
+      await db.query(insertQuery, [rfq_id, user_id]);
+
     } catch (error) {
       throw new Error(error);
     }
