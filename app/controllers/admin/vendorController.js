@@ -81,7 +81,6 @@ const vendorController = {
       console.log(req.files);
       const {
         name,
-        email,
         mobile,
         organization_name,
         address,
@@ -107,6 +106,7 @@ const vendorController = {
         ptr_project_end_date,
         about_vendor_company
       } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
       let orgChar = organization_name
         .match(/[a-zA-Z]/g)
         .join('')
@@ -169,7 +169,7 @@ const vendorController = {
       let spocObj = {
         spoc_name: sales_spoc_name || null,
         spoc_role: sales_spoc_position || null,
-        spoc_email: sales_spoc_business_email || null,
+        spoc_email: sales_spoc_business_email?.toLowerCase() || null,
         spoc_mobile: sales_spoc_mobile || null,
       }
 
@@ -453,7 +453,6 @@ const vendorController = {
       let updatedBy = req.user.id;
       const {
         name,
-        email,
         mobile,
         organization_name,
         address,
@@ -479,6 +478,7 @@ const vendorController = {
         ptr_project_end_date,
         about_vendor_company
       } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
       let fileName = req?.file?.filename;
       let originalFilename = req?.file?.originalname;
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
@@ -488,6 +488,7 @@ const vendorController = {
         address: address || vendorDetails[0].address,
         city: city || vendorDetails[0].city,
         state: state || vendorDetails[0].state,
+        country: country || vendorDetails[0].country,
         mobile: mobile || vendorDetails[0].mobile,
         website: website || vendorDetails[0].website,
         postal_code: postal_code || vendorDetails[0].postal_code,
@@ -503,7 +504,7 @@ const vendorController = {
         organization_name:
           organization_name || vendorDetails[0].organization_name
       };
-      await productModel.updateVendorDetail(vendorObj);
+      await productModel.updateVendorDetail(vendorObj, vendorId);
 
       let companyDetails = await vendorModel.getCompanyDetails(vendorId);
 
@@ -833,7 +834,7 @@ const vendorController = {
       const { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
  
       const name = spoc_name ?? null;
-      const email = spoc_email ?? null;
+      const email = spoc_email?.toLowerCase() ?? null;
       const mobile = spoc_mobile ?? null;
       const role = spoc_role ?? null;
 
@@ -895,7 +896,7 @@ const vendorController = {
       const { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
  
       const name = spoc_name ?? null;
-      const email = spoc_email ?? null;
+      const email = spoc_email?.toLowerCase() ?? null;
       const mobile = spoc_mobile ?? null;
       const role = spoc_role ?? null;
 
@@ -915,10 +916,10 @@ const vendorController = {
         return;
       }
 
-      const spocExist = await userModel.check_exactly_same_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
+      const spocExist = await userModel.check_exactly_same_spoc({spoc_name, spoc_email:spoc_email.toLowerCase(), spoc_mobile, spoc_role, user_id});
 
       if(spocExist<1){
-        const response = await userModel.add_user_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
+        const response = await userModel.add_user_spoc({spoc_name, spoc_email:spoc_email.toLowerCase(), spoc_mobile, spoc_role, user_id});
         res
         .status(200)
         .json({

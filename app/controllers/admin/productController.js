@@ -749,7 +749,7 @@ const productController = {
             // console.log('checkState checkCity', checkState, checkCity);
             let vendorObj = {
               name: value['Vendor Name'],
-              email: value['Vendor Email'],
+              email: vendor_email.toLowerCase(),
               organization_name: value['Vendor Name'],
               address: value['Address'] || null,
               city: checkCity.length > 0 ? checkCity[0].id : null,
@@ -768,7 +768,7 @@ const productController = {
             let companyObj = {
               profile: value['About Vendor Company'] || null,
               logo: value['Logo\r\n(file)'] || null,
-              email: value['Vendor Email'] || null,
+              email: vendor_email.toLowerCase() || null,
               mobile:
                 value['Vendor company owner/hr/official contact number'] ||
                 null,
@@ -789,7 +789,7 @@ const productController = {
 
 
             // checking vendor email and mobile both to be exist
-            userExist = await userModel.user_exist(vendor_email,value['Vendor company owner/hr/official contact number'].toString());
+            userExist = await userModel.user_exist(vendor_email.toLowerCase(),value['Vendor company owner/hr/official contact number'].toString());
             
             if (userExist.length < 1) {
               vendorObj.password = generatePassword(password);
@@ -865,9 +865,9 @@ const productController = {
 
       if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
-        mailRecipients.cc = vendor_email;
+        mailRecipients.cc = vendor_email.toLowerCase();
       } else {
-        mailRecipients.to = vendor_email;
+        mailRecipients.to = vendor_email.toLowerCase();
       }
 
       sendMail(mailRecipients);
@@ -982,7 +982,7 @@ const productController = {
                 };
                 await productModel.addFile(filesObj);
               }
-              userExist = await productModel.checkVendorExist(vendor_email);
+              userExist = await productModel.checkVendorExist(vendor_email.toLowerCase());
               vendor_id = userExist[0].id;
             }
           }
@@ -1225,7 +1225,7 @@ const productController = {
           let spocObj = {
             spoc_name: value['Sales SPOC Name'] || null,
             spoc_role: value['Sales SPOC Position/Role'] || null,
-            spoc_email: value['Sales SPOC Business Email'] || null,
+            spoc_email: value['Sales SPOC Business Email']?.toLowerCase() || null,
             spoc_mobile: value['Sales SPOC Mobile'] || null,
           }
 

@@ -1036,7 +1036,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
   const {
       comment,
       company_name,
-      response_email,
       contact_name,
       contact_number,
       bid_end_date,
@@ -1048,6 +1047,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
       project_id,
       term_and_condition_files
   } = reqBody;
+  const response_email = reqBody.response_email?.toLowerCase() || '';
+  
   
   const rfqData = {
       comment,
@@ -1080,6 +1081,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
 
   await rfqModel.update('tbl_rfq', rfqData, rfq_id);
+  await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id);
   await deleteRelatedRecords(rfq_id);
 
   if (terms && terms.length > 0) {
@@ -1124,7 +1126,6 @@ const rfqController = {
         rfq_id,
         comment,
         company_name,
-        response_email,
         contact_name,
         contact_number,
         bid_end_date,
@@ -1133,6 +1134,7 @@ const rfqController = {
         reverse_auction,
         project_id
       } = req.body;
+      const response_email = req.body.response_email?.toLowerCase();
 
       const user_id = req.user.id;
 
@@ -2544,16 +2546,13 @@ const rfqController = {
     const { organization_name, name, id } = req.user;
 
     try {
-      const lastActivity = await rfqModel.getRFQActivity(rfq_id, id);
-      const rfq_activity_id = lastActivity[0]?.id || null;
 
-      if (rfq_activity_id) {
-        // check when the last reminder was sent
-        const lastSentAt = lastActivity[0].last_reminder_sent;
-        const today = new Date().toISOString().slice(0, 10);
-        const lastSentDate = new Date(lastSentAt).toISOString().slice(0, 10);
+      // const date = new Date('2024-11-28').toISOString().slice(0, 10);  // Format, YYYY-MM-DD
+      const date = new Date().toISOString().slice(0, 10); 
+  
+      const lastActivity = await rfqModel.getRFQActivity(rfq_id, id, date);
 
-        if (today === lastSentDate)
+      if ( lastActivity?.length > 2) {
           return res
             .status(403)
             .json({
@@ -2577,7 +2576,7 @@ const rfqController = {
       Promise.all(vendors.map((item) => sendReminderRFQMAIL(item, org_name, rfq_id)))
         .then(async () => {
           try {
-            await rfqModel.updateRFQActivity(rfq_id, id, rfq_activity_id);
+            await rfqModel.insertRFQActivity(rfq_id, id);
           }
           catch (error) {
             throw new Error(error)
@@ -2612,7 +2611,8 @@ const rfqController = {
         })
         .end();
     }
-  },
+  },  
+  
   finalize: async (req, res, next) => {
     const { organization_name, name } = req.user;
     const { product_id, vendor_id, rfq_id, rfq_no, quote_id, variant } = req.body;

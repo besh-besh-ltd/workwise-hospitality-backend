@@ -17,11 +17,15 @@ const generalModel = {
   },
   getCities: async (state_id) => {
     let q = `SELECT * FROM tbl_location_cities ORDER BY city_name ASC`;
-    if(state_id)
-        q = `SELECT * FROM tbl_location_cities where state_id=${state_id} ORDER BY city_name ASC`;
+    let value = [];
+    if(state_id){
+      q = `SELECT * FROM tbl_location_cities where state_id = $1 ORDER BY city_name ASC`;
+      value = [state_id]
+    }
+
 
     return new Promise(function (resolve, reject) {
-      db.any(q)
+      db.any(q, value)
         .then(function (data) {
           resolve(data);
         })

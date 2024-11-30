@@ -86,7 +86,8 @@ const validateDbBody = {
     try {
       let errors = {};
       let err = 0;
-      let { email, mobile } = req.body;
+      let { mobile } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
       let buyerId = req.params.id;
 
       if (email) {

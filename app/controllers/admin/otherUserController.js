@@ -120,7 +120,8 @@ const otherUserController = {
   addOtherUser: async (req, res, next) => {
     try {
       let createdBy = req.user.id;
-      const { name, email, mobile, organization_name } = req.body;
+      const { name, mobile, organization_name } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
       let fileName = req?.file?.filename;
       let originalFilename = req?.file?.originalname;
       let orgChar = organization_name

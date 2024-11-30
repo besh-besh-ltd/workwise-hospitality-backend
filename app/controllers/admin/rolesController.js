@@ -18,7 +18,8 @@ const rolesController = {
   createSubadmin: async (req, res, next) => {
     try {
       let createdBy = req.user.id;
-      const { name, email, mobile, password } = req.body;
+      const { name, mobile, password } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
       let fileName = req?.file?.filename;
       let originalFilename = req?.file?.originalname;
 

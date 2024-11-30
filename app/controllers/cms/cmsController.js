@@ -113,7 +113,8 @@ const CmsController = {
   },
   contact_us: async (req, res, next) => {
     try {
-      const { name, email, phone, subject, comment, submitted_from } = req.body;
+      const { name, phone, subject, comment, submitted_from } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
 
       let contactObj = {
         name,

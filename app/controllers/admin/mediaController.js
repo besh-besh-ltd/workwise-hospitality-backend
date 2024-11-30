@@ -114,7 +114,8 @@ const mediaController = {
   addVendor: async (req, res, next) => {
     try {
       let createdBy = req.user.id;
-      const { name, email, mobile, organization_name } = req.body;
+      const { name, mobile, organization_name } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
       let fileName = req?.file?.filename;
       let originalFilename = req?.file?.originalname;
       let password = `${name.trim().toLowerCase()}${mobile.substring(0, 4)}`;
@@ -235,7 +236,8 @@ const mediaController = {
     try {
       let vendorId = req.params.id;
       let updatedBy = req.user.id;
-      const { name, email, mobile, organization_name } = req.body;
+      const { name, mobile, organization_name } = req.body;
+      const email = req.body.email?.toLowerCase() || '';
       let fileName = req?.file?.filename;
       let originalFilename = req?.file?.originalname;
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);

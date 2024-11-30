@@ -80,7 +80,7 @@ export const rfqSchemas = {
     contact_number: Joi.string()
       .trim()
       .min(10)
-      .max(10)
+      .max(15)
       .required()
       .regex(/^[0-9]*$/),
     bid_end_date: Joi.string().optional().allow('').allow(null),
@@ -104,7 +104,7 @@ export const rfqSchemas = {
     contact_number: Joi.string()
       .trim()
       .min(10)
-      .max(10)
+      .max(15)
       .required()
       .regex(/^[0-9]*$/),
     bid_end_date: Joi.string().required(),
