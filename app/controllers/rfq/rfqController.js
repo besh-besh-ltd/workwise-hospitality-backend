@@ -5273,8 +5273,7 @@ getVendorResponses: async (req, res) => {
 
 getTechEvaluationRFQDetails: async (req, res) => {
   try {
-    const user_id = req.user.id;
-    // console.log("API Input: ", user_id);
+    const user_id = req.user.id;    
 
     // Validate input
     if (!user_id) {

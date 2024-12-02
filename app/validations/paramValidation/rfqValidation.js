@@ -182,13 +182,12 @@ export const rfqSchemas = {
   // technical_evaluation
   addClause: Joi.object().keys({
     rfq_id: Joi.number().integer().required(),
-    rfq_product_id: number().integer().required(),
+    rfq_product_id: Joi.number().integer().required(),
     clause_text: Joi.string().required(),
     file_url: Joi.array()
     .items(
       Joi.string()
         .uri()
-        .required()
     )
     .optional()
     .allow(null)
@@ -216,7 +215,6 @@ export const rfqSchemas = {
       .items(
         Joi.string()
           .uri()
-          .required()
       )
       .optional()
       .allow(null)
@@ -239,7 +237,6 @@ export const rfqSchemas = {
       .items(
         Joi.string()
           .uri()
-          .required()
       )
       .optional()
       .allow(null)
@@ -264,6 +261,8 @@ export const rfqSchemas = {
 
 addVendorResponse: Joi.array().items(
     Joi.object({
+      rfq_id: Joi.number().integer().required(),
+      rfq_product_id: Joi.number().integer().required(),
       vendor_id: Joi.number().integer().required(),
       clause_id: Joi.number().integer().required(),
       vendor_response: Joi.string().required(),
@@ -271,7 +270,6 @@ addVendorResponse: Joi.array().items(
         .items(
           Joi.string()
             .uri()
-            .required()
         )
         .optional()
         .allow(null)
@@ -292,6 +290,7 @@ addVendorResponse: Joi.array().items(
   }),
 
   getTechEvaluationResult: Joi.object({
+    rfq_id: Joi.number().integer().optional(),
     rfq_product_id: Joi.number().integer().required(),
     vendor_id: Joi.number().integer().required()
   })
