@@ -2598,7 +2598,7 @@ rfq_project_exist: async (project_id,user_id) => {
           'products', (
             SELECT json_agg(json_build_object('product_id', RFQ_P.product_id, 'variant', RFQ_P.variant, 'product_name', P.name, 'product_description', P.description, 
               'quotation_details', (
-                SELECT json_agg(json_build_object('quote_id', Q.id, 'timestamp', Q.timestamp, 'status', Q.status, 'total_price', QI.total_price, 'unit_price', QI.unit_price, 'package_price', QI.package_price, 'freight_price', QI.freight_price, 'tax', QI.tax, 'delivery_period', QI.delivery_period)
+                SELECT json_agg(json_build_object('quote_id', Q.id, 'timestamp', Q.timestamp, 'status', Q.status, 'is_regret', Q.is_regret, 'total_price', QI.total_price, 'unit_price', QI.unit_price, 'package_price', QI.package_price, 'freight_price', QI.freight_price, 'tax', QI.tax, 'delivery_period', QI.delivery_period)
                 )
                 FROM tbl_quotes Q
                 JOIN tbl_quote_items QI ON Q.id = QI.quote_id
