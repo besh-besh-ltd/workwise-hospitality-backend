@@ -5004,35 +5004,35 @@ listQueries: async (req, res) => {
   }
 },
 
-addTechnicalEveluation: async (req, res) => {
-  try {
-    const { rfq_ID, rfq_product_id } = req.body;
+// addTechnicalEveluation: async (req, res) => {
+//   try {
+//     const { rfq_ID, rfq_product_id } = req.body;
 
-    const result = rfqModel.addTechnicalEveluation(rfq_ID, rfq_product_id);
+//     const result = rfqModel.addTechnicalEveluation(rfq_ID, rfq_product_id);
 
-    res
-      .status(200)
-      .json({
-        status: 1,
-        // data:result,
-        data: "product successfully added to technical eveluation"
-      })
-      .end();
-  } catch (error) {
-    logError(error);
-    res.status(500).json({
-        success: false,
-        message: 'Error in adding product in technical eveluation',
-        error: error.message
-    });
-  }
-},
+//     res
+//       .status(200)
+//       .json({
+//         status: 1,
+//         // data:result,
+//         data: "product successfully added to technical eveluation"
+//       })
+//       .end();
+//   } catch (error) {
+//     logError(error);
+//     res.status(500).json({
+//         success: false,
+//         message: 'Error in adding product in technical eveluation',
+//         error: error.message
+//     });
+//   }
+// },
 
 addClause: async (req, res) => {
   try {
-    console.log("add clause controller");
+    // console.log("add clause controller");
     const { rfq_id,rfq_product_id, clause_text,file_url } = req.body;
-    console.log("bodyy = ",req.body);
+    // console.log("bodyy = ",req.body);
 
     if (!rfq_id ||!rfq_product_id || !clause_text) {
       return res.status(400).json({
@@ -5041,13 +5041,13 @@ addClause: async (req, res) => {
       });
     }
     // Calling  the model function
-    console.log("add clause controller working");
+    // console.log("add clause controller working");
 
     const result = await rfqModel.addClause(rfq_id, rfq_product_id, clause_text,file_url );
 
     res.status(200).json(result).end();
   } catch (error) {
-    console.log("controller error")
+    // console.log("controller error")
     console.error("Error in addClause:", error);
     res.status(500).json({
       success: false,
@@ -5060,7 +5060,7 @@ addClause: async (req, res) => {
 updateClause: async (req, res) => {
   try {
     const {clause_id, clause_text,file_url} = req.body;
-    console.log("data from update clause controller = ",clause_id,clause_text,file_url);
+    // console.log("data from update clause controller = ",clause_id,clause_text,file_url);
 
     const result = await rfqModel.updateClause(clause_id, clause_text,file_url);
 
@@ -5083,7 +5083,7 @@ removeClause: async (req, res) => {
     const clause_id = parseInt(req.params.id);
 
     const result = await rfqModel.removeClause(clause_id);
-    console.log("result of remove clause = ",result);
+    // console.log("result of remove clause = ",result);
 
     res
       .status(200)
@@ -5104,7 +5104,7 @@ getClauses: async (req, res) => {
     const {tbl_rfq_product_tech_evaluation_id} = req.body;
 
     const result = await rfqModel.getClauses(tbl_rfq_product_tech_evaluation_id);
-    console.log("Result main of get clauses = ",result);
+    // console.log("Result main of get clauses = ",result);
 
     res
       .status(200)
@@ -5159,7 +5159,7 @@ getTechComments: async (req, res) => {
 addVendorResponse: async (req, res) => {
   try {
     const data = req.body;
-    console.log("API Input: ", req.body);
+    // console.log("API Input: ", req.body);
 
     // Validate input
     if (!data) {
@@ -5188,7 +5188,7 @@ addVendorResponse: async (req, res) => {
 addtechEvaluationClearedVendors: async (req, res) => {
   try {
     const {vendor_id, rfq_product_tech_evaluation_id,status, reject_message} = req.body;
-    console.log("API Input: ", vendor_id,rfq_product_tech_evaluation_id,status,reject_message);
+    // console.log("API Input: ", vendor_id,rfq_product_tech_evaluation_id,status,reject_message);
 
     // Validate input
     if (!vendor_id || !rfq_product_tech_evaluation_id ) {
@@ -5217,7 +5217,7 @@ addtechEvaluationClearedVendors: async (req, res) => {
 getVendorNames: async (req, res) => {
   try {
     const {rfq_id, rfq_product_id} = req.body;
-    console.log("API Input: ", req.body);
+    // console.log("API Input: ", req.body);
 
     // Validate input
     if (!rfq_id || ! rfq_product_id) {
@@ -5245,7 +5245,7 @@ getVendorNames: async (req, res) => {
 getVendorResponses: async (req, res) => {
   try {
     const {rfq_id, rfq_product_id, vendor_id} = req.body;
-    console.log("API Input: ", req.body);
+    // console.log("API Input: ", req.body);
 
     // Validate input
     if (!rfq_id || ! rfq_product_id || !vendor_id) {
@@ -5273,14 +5273,14 @@ getVendorResponses: async (req, res) => {
 
 getTechEvaluationRFQDetails: async (req, res) => {
   try {
-    const user_id = req.params.id;
-    console.log("API Input: ", user_id);
+    const user_id = req.user.id;
+    // console.log("API Input: ", user_id);
 
     // Validate input
     if (!user_id) {
       return res.status(400).json({
         status: 0,
-        message: "Invalid input. Please provide user_ID",
+        message: "User not found!",
       });
     }
 

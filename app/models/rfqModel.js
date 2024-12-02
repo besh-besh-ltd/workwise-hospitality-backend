@@ -185,7 +185,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             .then((result) => {
                 console.log("Deleted rows from tbl_rfq_product_files with rfq_product_ids:", rfqProductIds);
                 console.log(result);
-                resolve(result.rowCount); // Return count of deleted rows
+                resolve(result.length); // Return count of deleted rows
             })
             .catch((error) => {
                 console.error("Error deleting from tbl_rfq_product_files:", error);
@@ -345,12 +345,12 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       WHERE id = ${primary_key}
       RETURNING *`;
 
-    console.log("here 1: ", updateQuery, values)
+    // console.log("here 1: ", updateQuery, values)
 
     return new Promise(function (resolve, reject) {
       db.query(updateQuery, values)
         .then(function (data) {
-          console.log("here 2: ", data)
+          // console.log("here 2: ", data)
           resolve(data);
         })
         .catch(function (err) {
@@ -779,7 +779,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             FROM tbl_product T_P
             WHERE RFQ_P.product_id = T_P.id
           ),
-          -- New finalization_status field for each product (gyan - 16/10/2024)
+          -- New finalization_status field for each product
           'finalization_status', COALESCE(
             (
               SELECT 
@@ -2824,22 +2824,22 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
 
-  addTechnicalEveluation: async(RFQ_ID, Tbl_rfq_product_ID) =>{
-    console.log("rfqid idd",RFQ_ID, Tbl_rfq_product_ID)
-    const query ='INSERT INTO Tbl_rfq_product_tech_evaluation (RFQ_ID, Tbl_rfq_product_ID) VALUES ($1, $2) RETURNING *';;
-    return new Promise((resolve, reject) => {
-      db.query(query, [RFQ_ID, Tbl_rfq_product_ID])
-        .then(result => {
-          resolve(result);
-        })
-        .catch(error => {
-          reject(new Error(error));
-        });
-    });
-  },
+  // addTechnicalEveluation: async(RFQ_ID, Tbl_rfq_product_ID) =>{
+  //   console.log("rfqid idd",RFQ_ID, Tbl_rfq_product_ID)
+  //   const query ='INSERT INTO Tbl_rfq_product_tech_evaluation (RFQ_ID, Tbl_rfq_product_ID) VALUES ($1, $2) RETURNING *';;
+  //   return new Promise((resolve, reject) => {
+  //     db.query(query, [RFQ_ID, Tbl_rfq_product_ID])
+  //       .then(result => {
+  //         resolve(result);
+  //       })
+  //       .catch(error => {
+  //         reject(new Error(error));
+  //       });
+  //   });
+  // },
 
   addClause: async (rfq_id, rfq_product_id, clause_text, file_url) => {
-    console.log("values in add clause model", rfq_id, rfq_product_id, clause_text, file_url);
+    // console.log("values in add clause model", rfq_id, rfq_product_id, clause_text, file_url);
   
     const validateRfqQuery = `
       SELECT id 
@@ -2880,7 +2880,7 @@ rfq_project_exist: async (project_id,user_id) => {
     `;
   
     return new Promise((resolve, reject) => {
-      console.log("Entered add-clause model");
+      // console.log("Entered add-clause model");
   
       // Validate the RFQ ID
       db.query(validateRfqQuery, [rfq_id])
@@ -2908,13 +2908,13 @@ rfq_project_exist: async (project_id,user_id) => {
           let evaluationId;
   
           if (techEvaluationResult.length === 0) {
-            console.log("RFQ Product Tech Evaluation not found, inserting new record...");
+            // console.log("RFQ Product Tech Evaluation not found, inserting new record...");
             const insertResult = await db.query(insertRfqProductTechEvaluationQuery, [rfq_id, rfq_product_id]);
             evaluationId = insertResult[0].id;
-            console.log("New RFQ Product Tech Evaluation ID:", evaluationId);
+            // console.log("New RFQ Product Tech Evaluation ID:", evaluationId);
           } else {
             evaluationId = techEvaluationResult[0].id;
-            console.log("RFQ Product Tech Evaluation found, using existing ID:", evaluationId);
+            // console.log("RFQ Product Tech Evaluation found, using existing ID:", evaluationId);
           }
   
           // Insert the Clause
@@ -2922,7 +2922,7 @@ rfq_project_exist: async (project_id,user_id) => {
         })
         .then(async (clauseResult) => {
           const clauseId = clauseResult[0].id; // Extract the returned clause ID
-          console.log("Clause ID:", clauseId);
+          // console.log("Clause ID:", clauseId);
   
           // Insert associated files
           if (file_url && file_url.length > 0) {
@@ -2950,7 +2950,7 @@ rfq_project_exist: async (project_id,user_id) => {
 
    updateClause: async (tbl_rfq_product_tech_evaluation_clauses_id, clause_text,file_url) => {
 
-    console.log("entered update clause = ", tbl_rfq_product_tech_evaluation_clauses_id, clause_text,file_url);
+    // console.log("entered update clause = ", tbl_rfq_product_tech_evaluation_clauses_id, clause_text,file_url);
     const queryCheckClauseId = `
     SELECT id 
       FROM tbl_rfq_product_tech_evaluation_clauses
@@ -3006,7 +3006,7 @@ rfq_project_exist: async (project_id,user_id) => {
         tbl_rfq_product_tech_evaluation_clauses_id,
       ])
       .then(async (updateResult) => {
-        if (updateResult.rowCount === 0) {
+        if (updateResult.length === 0) {
           reject({
             success: false,
             message: `Clause ID ${tbl_rfq_product_tech_evaluation_clauses_id} not found.`,
@@ -3014,7 +3014,7 @@ rfq_project_exist: async (project_id,user_id) => {
           return;
         }
   
-        console.log(`Clause updated: ${tbl_rfq_product_tech_evaluation_clauses_id}`);
+        // console.log(`Clause updated: ${tbl_rfq_product_tech_evaluation_clauses_id}`);
         
         // Handling file URLs
         if (file_url && file_url.length > 0) {
@@ -3027,13 +3027,13 @@ rfq_project_exist: async (project_id,user_id) => {
             for(let i=0;i<existingFilesResult.length;i++){
               existingFiles.push(existingFilesResult[i].file_url);
             }
-            console.log("existing files = ",existingFiles);
+            // console.log("existing files = ",existingFiles);
             
             // Determining files to delete and to add
             const filesToDelete = existingFiles.filter(file => !file_url.includes(file));
             const filesToAdd = file_url.filter(file => !existingFiles.includes(file));
-            console.log("files to add = ",filesToAdd);
-            console.log("files to delete = ",filesToDelete);
+            // console.log("files to add = ",filesToAdd);
+            // console.log("files to delete = ",filesToDelete);
             // Deleting files no longer needed
             if (filesToDelete.length > 0) {
               db.query(queryDeleteFiles, [
@@ -3061,7 +3061,7 @@ rfq_project_exist: async (project_id,user_id) => {
                   fileUrl,
                 ])
                 .then(() => {
-                  console.log(`Inserted file: ${fileUrl}`);
+                  // console.log(`Inserted file: ${fileUrl}`);
                 })
                 .catch((error) => {
                   console.error(`Error inserting file: ${fileUrl}. Error: ${error.message}`);
@@ -3132,7 +3132,7 @@ rfq_project_exist: async (project_id,user_id) => {
       //Checking if the clause exists
       db.query(checkClauseExistsQuery, [tbl_rfq_product_tech_evaluation_clauses_id])
         .then(async (result) => {
-          if (result.rowCount === 0) {
+          if (result.length === 0) {
             return reject(new Error('Clause not found.'));
           }
 
@@ -3152,7 +3152,7 @@ rfq_project_exist: async (project_id,user_id) => {
   },
 
   getClauses: async (tbl_rfq_product_tech_evaluation_id) => {
-    console.log("entered get clauses model = ",tbl_rfq_product_tech_evaluation_id);
+    // console.log("entered get clauses model = ",tbl_rfq_product_tech_evaluation_id);
     const query = `
       SELECT
         c.id AS clause_id,
@@ -3171,7 +3171,7 @@ rfq_project_exist: async (project_id,user_id) => {
     return new Promise((resolve, reject) => {
       db.query(query, [tbl_rfq_product_tech_evaluation_id])
         .then((result) => {
-          console.log("result get clauses = ",result);
+          // console.log("result get clauses = ",result);
           // const clauses = result.rows;
           // Grouping the result by clause_id
           const groupedClauses = result.reduce((acc, row) => {
@@ -3185,7 +3185,7 @@ rfq_project_exist: async (project_id,user_id) => {
             acc[clause_id].files.push(file_url);
             return acc;
           }, {});
-          console.log("grouped clauses = ",groupedClauses);
+          // console.log("grouped clauses = ",groupedClauses);
   
           // Format the response as an array
           const response = Object.keys(groupedClauses).map(key => ({
@@ -3194,7 +3194,7 @@ rfq_project_exist: async (project_id,user_id) => {
             files: groupedClauses[key].files
           }));
 
-          console.log("response get clauses = ",response);
+          // console.log("response get clauses = ",response);
           
           resolve({
             success: true,
@@ -3387,7 +3387,7 @@ rfq_project_exist: async (project_id,user_id) => {
 
         // Validate clause existence
         const clauseResult = await db.query(validateClauseQuery, [clause_id]);
-        console.log("Clause validation result =", clauseResult);
+        // console.log("Clause validation result =", clauseResult);
         if (!clauseResult[0].clause_exists) {
           throw {
             status: 0,
@@ -3397,7 +3397,7 @@ rfq_project_exist: async (project_id,user_id) => {
 
         // Validate vendor existence
         const vendorResult = await db.query(validateVendorQuery, [vendor_id]);
-        console.log("Vendor validation result =", vendorResult);
+        // console.log("Vendor validation result =", vendorResult);
         if (!vendorResult[0].vendor_exists) {
           reject({
             status: 0,
@@ -3408,7 +3408,7 @@ rfq_project_exist: async (project_id,user_id) => {
 
         // Check if Vendor Response already exists
         const responseResult = await db.query(checkVendorResponseQuery, [clause_id, vendor_id]);
-        console.log("Vendor response validation result =", responseResult);
+        // console.log("Vendor response validation result =", responseResult);
         if (responseResult[0].response_exists) {
           reject( {
             status: 0,
@@ -3420,7 +3420,7 @@ rfq_project_exist: async (project_id,user_id) => {
         // Insert vendor response
         const insertResponseResult = await db.query(insertVendorResponseQuery, [vendor_id, clause_id, vendor_response]);
         const responseId = insertResponseResult[0].id;
-        console.log("Inserted Vendor Response ID =", responseId);
+        // console.log("Inserted Vendor Response ID =", responseId);
 
         // Insert associated files if provided
         if (file_url && file_url.length > 0) {
@@ -3459,8 +3459,9 @@ rfq_project_exist: async (project_id,user_id) => {
         });
     });
   },
+
   addtechEvaluationClearedVendors: (vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message) => {
-    console.log("Entered addClearedVendor =", vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message);
+    // console.log("Entered addClearedVendor =", vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message);
   
     const validateVendorQuery = `
       SELECT id 
@@ -3481,12 +3482,12 @@ rfq_project_exist: async (project_id,user_id) => {
     `;
   
     return new Promise((resolve, reject) => {
-      console.log("Entered cleared vendor model");
+      // console.log("Entered cleared vendor model");
   
       // Validate Vendor
       db.query(validateVendorQuery, [vendor_id])
         .then((vendorResult) => {
-          console.log("Vendor validation result =", vendorResult);
+          // console.log("Vendor validation result =", vendorResult);
   
           if (vendorResult.length === 0) {
             reject({
@@ -3500,7 +3501,7 @@ rfq_project_exist: async (project_id,user_id) => {
           return db.query(validateRfqEvaluationQuery, [tbl_rfq_product_tech_evaluation_id]);
         })
         .then((evaluationResult) => {
-          console.log("RFQ Evaluation validation result =", evaluationResult);
+          // console.log("RFQ Evaluation validation result =", evaluationResult);
   
           if (evaluationResult.length === 0) {
             reject({
@@ -3514,7 +3515,7 @@ rfq_project_exist: async (project_id,user_id) => {
           return db.query(insertClearedVendorQuery, [tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message]);
         })
         .then(() => {
-          console.log("Vendor successfully added to cleared vendors.");
+          // console.log("Vendor successfully added to cleared vendors.");
   
           // Respond after successful operation
           resolve({
@@ -3523,7 +3524,7 @@ rfq_project_exist: async (project_id,user_id) => {
           });
         })
         .catch((error) => {
-          console.error("Error in addClearedVendor:", error);
+          // console.error("Error in addClearedVendor:", error);
           reject({
             status: 0,
             message: "Error in adding cleared vendor.",
@@ -3533,7 +3534,7 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
   getVendorNames: async (rfq_id, tbl_rfq_product_id) => {
-    console.log("Values in getVendorsDetails model:", rfq_id, tbl_rfq_product_id);
+    // console.log("Values in getVendorsDetails model:", rfq_id, tbl_rfq_product_id);
   
     // Updated query to fetch vendor IDs
     const fetchVendorsQuery = `
@@ -3560,7 +3561,7 @@ rfq_project_exist: async (project_id,user_id) => {
     `;
   
     return new Promise((resolve, reject) => {
-      console.log("Entered getVendorsDetails model");
+      // console.log("Entered getVendorsDetails model");
   
       // Fetch vendor IDs related to the given RFQ and product
       db.query(fetchVendorsQuery, [rfq_id, tbl_rfq_product_id])
@@ -3615,7 +3616,7 @@ rfq_project_exist: async (project_id,user_id) => {
   },
 
   getVendorResponses: async (rfq_id, tbl_rfq_product_id, vendor_id) => {
-    console.log("Values in getVendorResponsesForClauses model:", rfq_id, tbl_rfq_product_id, vendor_id);
+    // console.log("Values in getVendorResponsesForClauses model:", rfq_id, tbl_rfq_product_id, vendor_id);
 
     // Query to fetch the tbl_rfq_product_tech_evaluation_id
     const getTechEvaluationIdQuery = `
@@ -3649,7 +3650,7 @@ rfq_project_exist: async (project_id,user_id) => {
     `;
 
     return new Promise((resolve, reject) => {
-        console.log("Entered getVendorResponsesForClauses model");
+        // console.log("Entered getVendorResponsesForClauses model");
 
         // Step 1: Fetch tbl_rfq_product_tech_evaluation_id
         db.query(getTechEvaluationIdQuery, [rfq_id, tbl_rfq_product_id])
@@ -3683,7 +3684,7 @@ rfq_project_exist: async (project_id,user_id) => {
 
                 // Step 4: Fetch vendor responses for each clause
                 const vendorResponsesResult = await db.query(getVendorResponsesQuery, [vendor_id, clauseIds]);
-                console.log("vendor response result = ",vendorResponsesResult);
+                // console.log("vendor response result = ",vendorResponsesResult);
                 // Step 5: Format the response
                 const data = clausesResult.map((clause) => {
                     const clauseFiles = clauseFilesResult.filter(file => file.tbl_rfq_product_tech_evaluation_clauses_id === clause.clause_id)
@@ -3718,7 +3719,7 @@ rfq_project_exist: async (project_id,user_id) => {
 },
 getTechEvaluationRFQDetails: (user_id) => {
   return new Promise(async (resolve, reject) => {
-    console.log("Fetching RFQ details...");
+    // console.log("Fetching RFQ details...");
 
     try {
       // Step 1: Fetch rfq_ids for the given user_id
@@ -3910,7 +3911,7 @@ getClausesOfProduct: async (rfq_product_id, vendor_id) => {
         files: groupedClauses[key].files,
       }));
 
-      console.log("Response data =", response);
+      // console.log("Response data =", response);
 
       // Step 6: Add vendor_response to the final response
       resolve({
@@ -3951,7 +3952,7 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
   `;
 
   return new Promise((resolve, reject) => {
-      console.log("Validating Vendor ID in tbl_users...");
+      // console.log("Validating Vendor ID in tbl_users...");
 
       // Step 1: Validate Vendor ID in tbl_users
       db.query(validateVendorIdQuery, [vendor_id])
@@ -3964,7 +3965,7 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
                   return; // Stop further execution
               }
 
-              console.log("Fetching Technical Evaluation ID...");
+              // console.log("Fetching Technical Evaluation ID...");
 
               // Step 2: Fetch the Technical Evaluation ID
               return db.query(getTechEvaluationIdQuery, [tbl_rfq_product_id]);
@@ -3980,7 +3981,7 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
 
               const techEvaluationId = techEvaluationResult[0].id;
 
-              console.log("Fetching Cleared Vendor Details...");
+              // console.log("Fetching Cleared Vendor Details...");
 
               // Step 3: Fetch Cleared Vendor Details
               return db.query(fetchClearedVendorDetailsQuery, [techEvaluationId, vendor_id]);
