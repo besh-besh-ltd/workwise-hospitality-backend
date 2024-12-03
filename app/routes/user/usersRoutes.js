@@ -117,6 +117,14 @@ UsersRoutes.post(
   schema_posts.upload_user_document,
   UsersController.upload_documents
 );
+// Endpoint for uploading the file without authentication
+// This can be dangerous but let's see in future .
+UsersRoutes.post(
+  '/upload-file-without-auth',
+  noLogin.customer_auth,
+  schema_posts.upload_document_without_auth,
+  UsersController.upload_document_without_auth
+);
 UsersRoutes.get(
   '/vendor-profile/:vendor_id',
   noLogin.customer_auth,

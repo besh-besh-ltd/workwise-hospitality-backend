@@ -1496,6 +1496,52 @@ const UsersController = {
         .end();
     }
   },
+  // uploading the documents for the users without authenticatiion
+  upload_document_without_auth: async (req, res, next) => {
+    console.log('FILES======', req.files.file);
+    try {
+
+      // we havfe successfully saved to the server, 
+      // now we have to give the reponse to the frontend.
+
+      if (req.files) {
+        const dataArray = [];
+        req.files.file.map((item) => {
+          dataArray.push({
+            file_name: item.originalname,
+            new_file_name: item.filename,
+            file_path: `${Config.base_url}/user_document_without_auth/${item.filename}`,
+            file_type: item.mimetype,
+          });
+        });
+
+        res
+          .status(200)
+          .json({
+            status: 1,
+            data: dataArray
+          })
+          .end();
+      } else {
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: 'Please select a file!'
+          })
+          .end();
+      }
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   vendor_profile: async (req, res, next) => {
     let user_id = req.params.vendor_id;
     let user = {};
