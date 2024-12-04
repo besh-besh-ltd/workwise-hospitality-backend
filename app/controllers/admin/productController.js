@@ -75,7 +75,7 @@ const validateBulkProductVendorInputs = (value) => {
   if (spoc_email || spoc_mobile || spoc_name || spoc_role) {
   
     // Validate spoc_name if provided
-    if (!spoc_name.trim()) {
+    if (!spoc_name || spoc_name.trim() === '') {
       errors.push('SPOC name is missing');
     }
 
@@ -117,7 +117,7 @@ const spocInputsValidation = (value) => {
 
   if (isAnySPOCFieldNonEmpty) {
     // Validate spoc_name if provided
-    if (!spoc_name.trim()) {
+    if (!spoc_name || spoc_name.trim() === '') {
       errors.push('SPOC name is missing');
     }
 
@@ -715,7 +715,7 @@ const productController = {
 
           // check vendor exist or not
           previousCategory = '';
-          let userExist = '';
+          // let userExist = '';
           let vendor = '';
           let password = (value['Vendor Name'] || "").trim().replace(/\s+/g, '');
           let orgChar = password.match(/[a-zA-Z]/g).join('');
@@ -789,7 +789,7 @@ const productController = {
 
 
             // checking vendor email and mobile both to be exist
-            userExist = await userModel.user_exist(vendor_email.toLowerCase(),value['Vendor company owner/hr/official contact number'].toString());
+            const userExist = await userModel.user_exist(vendor_email.toLowerCase(),value['Vendor company owner/hr/official contact number'].toString());
             
             if (userExist.length < 1) {
               vendorObj.password = generatePassword(password);
@@ -940,6 +940,11 @@ const productController = {
               //   }
               // }
             } else {
+
+              vendorObj.email = userExist[0].email;
+              vendorObj.mobile = userExist[0].mobile;
+              companyObj.email = userExist[0].email;
+              companyObj.mobile = userExist[0].mobile;
               vendor = await productModel.updateVendorDetail(vendorObj, userExist[0].id);
               companyObj.user_id = vendor[0].id;
 
@@ -982,7 +987,7 @@ const productController = {
                 };
                 await productModel.addFile(filesObj);
               }
-              userExist = await productModel.checkVendorExist(vendor_email.toLowerCase());
+              // const userexist = await productModel.checkVendorExist(vendor_email.toLowerCase());
               vendor_id = userExist[0].id;
             }
           }
