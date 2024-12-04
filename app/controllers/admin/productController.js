@@ -940,7 +940,7 @@ const productController = {
               //   }
               // }
             } else {
-              vendor = await productModel.updateVendorDetail(vendorObj);
+              vendor = await productModel.updateVendorDetail(vendorObj, userExist[0].id);
               companyObj.user_id = vendor[0].id;
 
               await productModel.updateCompany(companyObj);
