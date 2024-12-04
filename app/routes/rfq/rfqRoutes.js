@@ -256,9 +256,8 @@ RfqRoutes.delete('/remove-clause/:id',
   rfqController.removeClause
 )
 
-RfqRoutes.get('/get-clauses',
+RfqRoutes.get('/get-clauses/:id',
   passportSignIn,
-  validateBody(rfqSchemas.getClauses),
   rfqController.getClauses
 )
 

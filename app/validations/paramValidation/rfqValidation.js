@@ -225,7 +225,8 @@ export const rfqSchemas = {
   }),
 
   getClauses: Joi.object().keys({
-    tbl_rfq_product_tech_evaluation_id: Joi.number().integer().required(),
+    rfq_id: Joi.number().integer().required(),
+    rfq_product_id: Joi.number().integer().optional()
   }),
 
   addTechComment: Joi.object().keys({
@@ -265,7 +266,7 @@ addVendorResponse: Joi.array().items(
       rfq_product_id: Joi.number().integer().required(),
       vendor_id: Joi.number().integer().required(),
       clause_id: Joi.number().integer().required(),
-      vendor_response: Joi.string().required(),
+      vendor_response: Joi.string().optional().allow("").allow(null),
       file_url: Joi.array()
         .items(
           Joi.string()
@@ -274,8 +275,7 @@ addVendorResponse: Joi.array().items(
         .optional()
         .allow(null)
     })
-  ).min(1)
-  .required(),
+  ).min(1),
 
   addtechEvaluationClearedVendors: Joi.object({
     vendor_id: Joi.number().integer().required(),

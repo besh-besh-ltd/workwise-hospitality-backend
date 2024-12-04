@@ -5101,9 +5101,9 @@ removeClause: async (req, res) => {
 
 getClauses: async (req, res) => {
   try {
-    const {tbl_rfq_product_tech_evaluation_id} = req.body;
+    const rfq_id = req.params.id;
 
-    const result = await rfqModel.getClauses(tbl_rfq_product_tech_evaluation_id);
+    const result = await rfqModel.getClauses(rfq_id);
     // console.log("Result main of get clauses = ",result);
 
     res

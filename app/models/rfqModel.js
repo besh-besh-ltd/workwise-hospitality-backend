@@ -3151,54 +3151,48 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
 
-  getClauses: async (tbl_rfq_product_tech_evaluation_id) => {
+  getClauses: async (rfq_id) => {
     // console.log("entered get clauses model = ",tbl_rfq_product_tech_evaluation_id);
     const query = `
+      WITH clause_files AS (
+        SELECT
+          TE_C.id AS clause_id,
+          TE_C.clause_text,
+          TE.rfq_id,
+          TE.tbl_rfq_product_id AS rfq_product_id,
+          COALESCE(
+            JSON_AGG(TE_F.file_url) FILTER (WHERE TE_F.file_url IS NOT NULL),
+            '[]'
+          ) AS files
+        FROM tbl_rfq_product_tech_evaluation TE
+        JOIN tbl_rfq_product_tech_evaluation_clauses AS TE_C
+          ON TE.id = TE_C.tbl_rfq_product_tech_evaluation_id
+        LEFT JOIN tbl_rfq_product_tech_evaluation_clauses_files AS TE_F
+          ON TE_C.id = TE_F.tbl_rfq_product_tech_evaluation_clauses_id
+        WHERE TE.rfq_id = $1
+        GROUP BY TE_C.id, TE_C.clause_text, TE.rfq_id, TE.tbl_rfq_product_id
+      )
       SELECT
-        c.id AS clause_id,
-        c.clause_text,
-        f.file_url
-      FROM
-        tbl_rfq_product_tech_evaluation_clauses AS c
-      JOIN
-        tbl_rfq_product_tech_evaluation_clauses_files AS f
-      ON
-        c.id = f.tbl_rfq_product_tech_evaluation_clauses_id
-      WHERE
-        c.tbl_rfq_product_tech_evaluation_id = $1;
+        rfq_id,
+        rfq_product_id,
+        JSON_AGG(
+          JSON_BUILD_OBJECT(
+            'clause_id', clause_id,
+            'clause_text', clause_text,
+            'files', files
+          )
+        ) AS clauses
+      FROM clause_files
+      GROUP BY rfq_id, rfq_product_id;
     `;
   
     return new Promise((resolve, reject) => {
-      db.query(query, [tbl_rfq_product_tech_evaluation_id])
+      db.query(query, [rfq_id])
         .then((result) => {
-          // console.log("result get clauses = ",result);
-          // const clauses = result.rows;
-          // Grouping the result by clause_id
-          const groupedClauses = result.reduce((acc, row) => {
-            const { clause_id, clause_text, file_url } = row;
-            if (!acc[clause_id]) {
-              acc[clause_id] = {
-                clause_text,
-                files: []
-              };
-            }
-            acc[clause_id].files.push(file_url);
-            return acc;
-          }, {});
-          // console.log("grouped clauses = ",groupedClauses);
-  
-          // Format the response as an array
-          const response = Object.keys(groupedClauses).map(key => ({
-            clause_id: key,
-            clause_text: groupedClauses[key].clause_text,
-            files: groupedClauses[key].files
-          }));
-
-          // console.log("response get clauses = ",response);
-          
+          console.log(result)
           resolve({
             success: true,
-            data: response
+            data: result
           });
         })
         .catch(error => {
@@ -3764,6 +3758,7 @@ getTechEvaluationRFQDetails: (user_id) => {
       // Step 3: Fetch RFQ products and RFQ Details
       const fetchDetailsQuery = `
         SELECT RFQ.*,
+              TP.name AS project_name,
               ARRAY(
                   SELECT json_build_object(
                       'id', RFQ_P.id,
@@ -3805,12 +3800,14 @@ getTechEvaluationRFQDetails: (user_id) => {
                   WHERE RFQ.id = RFQ_P.rfq_id
               ) AS "products"
         FROM tbl_rfq RFQ
+        LEFT JOIN tbl_projects TP
+          ON TP.id = RFQ.project_id
         JOIN tbl_rfq_product_tech_evaluation RFQ_T_E
           ON RFQ.id = RFQ_T_E.rfq_id
         WHERE RFQ.created_by = $1 
           AND RFQ.is_published = 1
           AND RFQ.id = ANY($2)
-        GROUP BY RFQ.id
+        GROUP BY RFQ.id, TP.name
         HAVING COUNT(RFQ_T_E.id) > 0
         ORDER BY RFQ.id DESC;
       `;
