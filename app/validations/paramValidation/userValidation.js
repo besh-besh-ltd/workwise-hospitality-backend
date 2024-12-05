@@ -39,6 +39,18 @@ var store_document = multer.diskStorage({
   }
 });
 
+// multer configuration for without authentiation files.
+var store_document_without_auth = multer.diskStorage({
+  destination: function (req, file, callback) {
+    callback(null, Config.upload.user_document_without_auth);
+  },
+  filename: function (req, file, callback) {
+    var extention = path.extname(file.originalname);
+    var new_file_name = +new Date() + '-' + uuidv4() + extention;
+    callback(null, new_file_name);
+  }
+});
+
 var validatingImage = (schema) => {
   return (req, res, next) => {
     const result = Joi.validate(req.body, schema, {
@@ -740,6 +752,59 @@ const schema_posts = {
 
       var upload = multer({
         storage: store_document,
+        limits: {
+          // fileSize: 2000000 // Compliant: 8MB
+          fileSize: 26214400 // Compliant: 25MB, changes by mukul, 27-11-2024
+        },
+        fileFilter: (req, file, cb) => {
+          var ext = path.extname(file.originalname).toLowerCase();
+
+          if (
+            ext == '.png' ||
+            ext == '.jpg' ||
+            ext == '.jpeg' ||
+            ext == '.pdf' ||
+            ext == '.doc' ||
+            ext == '.docx' ||
+            ext == '.xlsx'
+          ) {
+            var validateImage = validatingImage(schemas.user_document);
+            if (validateImage) {
+              cb(null, true);
+            }
+          } else {
+            cb(null, false);
+            return cb('File format not allowed!', null);
+          }
+        }
+      }).fields([{ name: 'file', maxCount: 8 }]);
+      upload(req, res, async function (err) {
+        if (err) {
+          let data = {};
+          data.file = err;
+          res
+            .status(400)
+            .json({
+              status: 2,
+              errors: data
+            })
+            .end();
+        } else {
+          next();
+        }
+      });
+    } catch (err) {
+      console.log('====>', err);
+      res.status(400).json({
+        status: 3,
+        message: 'server error'
+      });
+    }
+  },
+  upload_document_without_auth: async (req, res, next) => {
+    try {
+      var upload = multer({
+        storage: store_document_without_auth,
         limits: {
           // fileSize: 2000000 // Compliant: 8MB
           fileSize: 26214400 // Compliant: 25MB, changes by mukul, 27-11-2024
