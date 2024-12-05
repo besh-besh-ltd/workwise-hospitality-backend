@@ -19,6 +19,14 @@ projectRoutes.post(
     projectController.create
 )
 
+projectRoutes.post(
+    '/upload-file',
+    passportSignIn,
+    projectSchemas.projectFileUploadHandler, 
+    validateBody(projectSchemas.saveFiles),
+    projectController.saveProjectFiles
+)
+
 // route for getting the project details using project id
 projectRoutes.post(
     '/:project_id',
@@ -57,6 +65,8 @@ projectRoutes.get(
     passportSignIn,
     projectController.getIdAndNameOfProjects
 )
+
+
 
 
 
