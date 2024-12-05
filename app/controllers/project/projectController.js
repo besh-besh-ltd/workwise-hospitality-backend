@@ -1,6 +1,7 @@
 import projectModel from "../../models/projectModel.js";
 import Config from '../../config/app.config.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import rfqModel from "../../models/rfqModel.js";
 
 const projectController = {
     create: async (req, res, next) => {
@@ -209,7 +210,36 @@ const projectController = {
           })
           .end();
         }
-    }
+    },
+
+    saveProjectFiles: async (req, res) => {
+      const { project_id, file_type } = req.body;
+      const files = req.files;
+    
+      if (!files || !files.length) {
+        return res.status(400).json({ status: 2, message: 'No files uploaded' });
+      }
+    
+      try {
+        const filesData = files.map((file) => ({
+          project_id,
+          file_name: file.name,
+          file_url: file.url,
+          file_type
+        }));
+    
+        await rfqModel.insertArray(
+          filesData,
+          ['project_id', 'file_name', 'file_url', 'file_type'],
+          'tbl_project_files'
+        );
+    
+        res.status(200).json({ status: 1, message: 'Files uploaded successfully', files: files, file_type });
+      } catch (err) {
+        console.error('Error saving files:', err);
+        res.status(500).json({ status: 3, message: 'Server error' });
+      }
+    },
     
 }
 export default projectController;
