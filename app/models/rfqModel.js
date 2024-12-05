@@ -185,7 +185,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             .then((result) => {
                 console.log("Deleted rows from tbl_rfq_product_files with rfq_product_ids:", rfqProductIds);
                 console.log(result);
-                resolve(result.rowCount); // Return count of deleted rows
+                resolve(result.length); // Return count of deleted rows
             })
             .catch((error) => {
                 console.error("Error deleting from tbl_rfq_product_files:", error);
@@ -277,6 +277,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
       .join(', ');
+    console.log("set clause = ",setClause);
     const values = Object.values(data);
     const updateQuery = `
       UPDATE ${table_name}
@@ -296,6 +297,42 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     });
   },
 
+  getTechEvaluationRecordsByProductId: async (productId) => {
+    const fetchQuery = `
+      SELECT id
+      FROM tbl_rfq_product_tech_evaluation
+      WHERE tbl_rfq_product_id = $1`;
+
+    return new Promise((resolve, reject) => {
+      db.query(fetchQuery, [productId])
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
+  getTechEvaluationRecordsByProductId: async (productId) => {
+    const fetchQuery = `
+      SELECT id
+      FROM tbl_rfq_product_tech_evaluation
+      WHERE tbl_rfq_product_id = $1`;
+
+    return new Promise((resolve, reject) => {
+      db.query(fetchQuery, [productId])
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
   updateWithTimestamp: async (table_name, data, primary_key) => {
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
@@ -308,12 +345,12 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       WHERE id = ${primary_key}
       RETURNING *`;
 
-    console.log("here 1: ", updateQuery, values)
+    // console.log("here 1: ", updateQuery, values)
 
     return new Promise(function (resolve, reject) {
       db.query(updateQuery, values)
         .then(function (data) {
-          console.log("here 2: ", data)
+          // console.log("here 2: ", data)
           resolve(data);
         })
         .catch(function (err) {
@@ -461,7 +498,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     });
   },
 
-  getRfqDraftId: async (id) => {
+  getRfqDraftById: async (id) => {
 
     const q = `SELECT 
       RFQ.id AS rfq_id,
@@ -499,6 +536,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       -- Products
       ARRAY(
           SELECT json_build_object(
+              'id', RFQ_P.id,
               'product_id', RFQ_P.product_id,
               'predefined_tds_file', RFQ_P.datasheet_file,
               'predefined_qap_file', RFQ_P.qap_file,
@@ -741,7 +779,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             FROM tbl_product T_P
             WHERE RFQ_P.product_id = T_P.id
           ),
-          -- New finalization_status field for each product (gyan - 16/10/2024)
+          -- New finalization_status field for each product
           'finalization_status', COALESCE(
             (
               SELECT 
@@ -1123,102 +1161,162 @@ LIMIT $5 OFFSET $4;`,
         });
     });
   },
-
-  getQuotesByRfqByIdByProduct: async (id, user_id) => {
+  getQuotesByRfqByIdByProduct: async (id, user_id, TA_Vendors) => {
     return new Promise(function (resolve, reject) {
-      db.query(
-        `SELECT TRP.product_id, TRP.variant, TRP.rfq_id,
-        (
-          SELECT json_build_object(
-           'unit_price', TQI1.unit_price,
-            'package_price', TQI1.package_price,
-            'tax', TQI1.tax,
-            'freight_price', TQI1.freight_price,
-            'total_price', TQI1.total_price,
-            'quantity', TQI1.quantity,
-            'timestamp', TQF1.timestamp
-          )
-          FROM tbl_quote_items TQI1
-          JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
-          WHERE TQF1.created_by = ${user_id} -- buyer's ID
-            AND TQI1.product_id = TRP.product_id
-            AND TQF1.rfq_id != ${id} -- different RFQ
-          ORDER BY TQF1.timestamp DESC
-          LIMIT 1
-        ) AS "last_purchase_rate",
-          ARRAY(
-            SELECT json_build_object('name', TP.name,'description', TP.description) 
-            FROM tbl_product TP 
-            WHERE TP.id = TRP.product_id 
-          ) AS "product_details",
-          ARRAY(
-            SELECT json_build_object('id', TU.id, 'name', TU.name, 'email', TU.email, 'mobile', TU.mobile, 'address', TU.address, 'organization_name', TU.organization_name,
-                'global_payment_term', (
-                    SELECT json_agg(json_build_object('details', TQ_inner.global_payment_term,'comment', TQ_inner.global_comment))
-                    FROM tbl_quotes TQ_inner
-                    WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
+        const vendorCondition = `
+        AND EXISTS (
+            SELECT 1 
+            FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
+            JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
+            WHERE TEC.rfq_id = $1 
+                AND TECV.vendor_id = TQ.created_by
+                AND TECV.status = 1
+        )`;
+
+        const mainQuery = 
+            `SELECT TRP.product_id, TRP.variant, TRP.rfq_id,
+            (
+                SELECT json_build_object(
+                'unit_price', TQI1.unit_price,
+                'package_price', TQI1.package_price,
+                'tax', TQI1.tax,
+                'freight_price', TQI1.freight_price,
+                'total_price', TQI1.total_price,
+                'quantity', TQI1.quantity,
+                'timestamp', TQF1.timestamp
                 )
-            )
-            FROM tbl_quotes TQ
-            LEFT JOIN tbl_users TU ON TU.id = TQ.created_by
-            WHERE TQ.rfq_id = TRP.rfq_id
-            ORDER BY TU.id ASC
-        ) AS "all_vendors",
-          ARRAY(
-            SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,'global_payment_term', TQ.global_payment_term,'global_comment', TQ.global_comment, 
-            'vendor_details', (              
-                SELECT json_agg(json_build_object('id', TU.id, 'name' , TU.name, 'email', TU.email,'mobile' , TU.mobile,'address' , TU.address,'organization_name' , TU.organization_name)) 
-                FROM tbl_users TU 
-                WHERE TU.id = TQ.created_by
-              ),
-              'quote_details', (
-                SELECT json_agg(json_build_object('product_id', TQI.product_id,'variant', TQI.variant,'product_name', TQI.product_name, 'unit_price', TQI.unit_price,'total_price', TQI.total_price, 'comment', TQI.comment, 'delivery_period', TQI.delivery_period,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'quantity',TQI.quantity,
-
-                'document_files', ( 
-                SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
-                FROM tbl_quotes_files TF
-                WHERE TF.quote_id = TQ.id
-              ),
-
-                'rfq_details', (
-                    SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) 
-                    FROM tbl_rfq_products_specs TPS 
-                    WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = TRP.rfq_id
-                  )    
-                  )) 
-                FROM tbl_quote_items TQI 
-                WHERE TQI.quote_id = TQ.id AND TQI.product_id = TRP.product_id AND TQI.variant = TRP.variant
-              )
-            )  
-            FROM tbl_quotes TQ 
-            LEFT JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id 
-            WHERE TQ.rfq_id = TRP.rfq_id AND 
-                  TQI.product_id = TRP.product_id AND 
-                  TQI.variant = TRP.variant 
-            ORDER BY TQ.created_by ASC
-          ) AS "quotations",
-
+                FROM tbl_quote_items TQI1
+                JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
+                WHERE TQF1.created_by = $2
+                AND TQI1.product_id = TRP.product_id
+                AND TQF1.rfq_id != $1
+                ORDER BY TQF1.timestamp DESC
+                LIMIT 1
+            ) AS "last_purchase_rate",
             ARRAY(
-        SELECT json_build_object('title', TPS.title, 'value', TPS.value)
-        FROM tbl_rfq_products_specs TPS
-        WHERE TPS.product_id = TRP.product_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
-      ) AS "product_specs"
-          
-        FROM tbl_rfq_products TRP WHERE TRP.rfq_id=${id}`
-      )
+                SELECT json_build_object('name', TP.name,'description', TP.description) 
+                FROM tbl_product TP 
+                WHERE TP.id = TRP.product_id 
+            ) AS "product_details",
+            ARRAY(
+                SELECT json_build_object(
+                    'id', TU.id, 
+                    'name', TU.name, 
+                    'email', TU.email, 
+                    'mobile', TU.mobile, 
+                    'address', TU.address, 
+                    'organization_name', TU.organization_name,
+                    'global_payment_term', (
+                        SELECT json_agg(json_build_object('details', TQ_inner.global_payment_term,'comment', TQ_inner.global_comment))
+                        FROM tbl_quotes TQ_inner
+                        JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
+                        WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
+                        ${TA_Vendors === "TA" ? vendorCondition : ''}
+                    )
+                )
+                FROM tbl_quotes TQ
+                JOIN tbl_users TU ON TU.id = TQ.created_by
+                WHERE TQ.rfq_id = TRP.rfq_id
+                ${TA_Vendors === "TA" ? vendorCondition : ''}
+                ORDER BY TU.id ASC
+            ) AS "all_vendors",
+            ARRAY(
+                SELECT json_build_object(
+                    'id', TQ.id, 
+                    'timestamp', TQ.timestamp, 
+                    'status', TQ.status, 
+                    'created_by', TQ.created_by,
+                    'is_regret', TQ.is_regret,
+                    'global_payment_term', TQ.global_payment_term,
+                    'global_comment', TQ.global_comment, 
+                    'vendor_details', (
+                        SELECT json_agg(json_build_object(
+                            'id', TU.id, 
+                            'name', TU.name, 
+                            'email', TU.email,
+                            'mobile', TU.mobile,
+                            'address', TU.address,
+                            'organization_name', TU.organization_name
+                        ))
+                        FROM tbl_users TU 
+                        WHERE TU.id = TQ.created_by
+                        ${TA_Vendors === "TA" ? vendorCondition : ''}
+                    ),
+                    'quote_details', (
+                        SELECT json_agg(json_build_object(
+                            'product_id', TQI.product_id,
+                            'variant', TQI.variant,
+                            'product_name', TQI.product_name, 
+                            'unit_price', TQI.unit_price,
+                            'total_price', TQI.total_price, 
+                            'comment', TQI.comment, 
+                            'delivery_period', TQI.delivery_period,
+                            'package_price', TQI.package_price,
+                            'tax', TQI.tax,
+                            'freight_price', TQI.freight_price,
+                            'quantity', TQI.quantity,
+                            'document_files', (
+                                SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
+                                FROM tbl_quotes_files TF
+                                WHERE TF.quote_id = TQ.id
+                            ),
+                            'rfq_details', (
+                                SELECT json_agg(json_build_object('title', TPS.title, 'value', TPS.value))
+                                FROM tbl_rfq_products_specs TPS 
+                                WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = TRP.rfq_id
+                            )
+                        ))
+                        FROM tbl_quote_items TQI 
+                        JOIN tbl_quotes TQ_inner ON TQI.quote_id = TQ_inner.id
+                        JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
+                        WHERE TQI.quote_id = TQ.id AND TQI.product_id = TRP.product_id AND TQI.variant = TRP.variant
+                        ${TA_Vendors === "TA" ? vendorCondition : ''}
+                    )
+                )
+                FROM tbl_quotes TQ 
+                JOIN tbl_users TU ON TU.id = TQ.created_by
+                JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id 
+                WHERE TQ.rfq_id = TRP.rfq_id AND 
+                      TQI.product_id = TRP.product_id AND 
+                      TQI.variant = TRP.variant 
+                      ${TA_Vendors === "TA" ? vendorCondition : ''}
+                ORDER BY TQ.created_by ASC
+            ) AS "quotations",
+            ARRAY(
+                SELECT json_build_object('title', TPS.title, 'value', TPS.value)
+                FROM tbl_rfq_products_specs TPS
+                WHERE TPS.product_id = TRP.product_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
+            ) AS "product_specs"
+            FROM tbl_rfq_products TRP WHERE TRP.rfq_id=$1`;
+
+        db.query(mainQuery, [id, user_id])
         .then(function (data) {
-          resolve(data);
+            resolve(data);
         })
         .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
+            let error = new Error(err);
+            reject(error);
         });
     });
-  },
+},
 
-  getQuotesByRfqById2: async (id, user_id) => {
+
+
+  getQuotesByRfqById2: async (id, user_id, TA_Vendors) => {
     return new Promise(function (resolve, reject) {
-      db.query(
+
+      const vendorCondition = `
+      AND EXISTS (
+        SELECT 1 
+        FROM tbl_quotes TQ
+        JOIN tbl_rfq_product_tech_evaluation_cleared_vendors TECV ON TQ.created_by = TECV.vendor_id
+        JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
+        WHERE TEC.rfq_id = $1
+          AND TQ.id = TQI.quote_id
+          AND TECV.status = 1
+      )`;
+
+      let mainQuery = 
         `SELECT TRF.*,
           ARRAY(
             SELECT json_build_object(
@@ -1229,7 +1327,7 @@ LIMIT $5 OFFSET $4;`,
               'status', TR.status
             )
             FROM tbl_rfq TR
-            WHERE TR.id = ${id}
+            WHERE TR.id = $1
           ) AS "rfq",
         (
           SELECT json_build_object(
@@ -1243,9 +1341,9 @@ LIMIT $5 OFFSET $4;`,
           )
           FROM tbl_quote_items TQI1
           JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
-          WHERE TQF1.created_by = ${user_id} -- buyer's ID
+          WHERE TQF1.created_by = $2 -- buyer's ID
             AND TQI1.product_id = TRF.product_id
-            AND TQF1.rfq_id != ${id} -- different RFQ
+            AND TQF1.rfq_id != $1 -- different RFQ
           ORDER BY TQF1.timestamp DESC
           LIMIT 1
         ) AS "last_purchase_rate"
@@ -1263,7 +1361,7 @@ LIMIT $5 OFFSET $4;`,
                 FROM tbl_rfq_products_specs TPS
                 WHERE TPS.product_id = TRF.product_id
                   AND TPS.variant = TRF.variant
-                  AND TPS.rfq_id = ${id}
+                  AND TPS.rfq_id = $1
               )
             )
             FROM tbl_product TP
@@ -1319,12 +1417,12 @@ LIMIT $5 OFFSET $4;`,
                       'organization_name', TU.organization_name
                     )
                     FROM tbl_users TU
-                    WHERE TU.id = TQ.created_by
+                    WHERE TU.id = TQ.created_by                    
                   )
                 )
                 FROM tbl_quotes TQ
                 WHERE TQ.id = TQI.quote_id
-                  AND TQ.rfq_id = ${id}
+                  AND TQ.rfq_id = $1                  
               ),
                 'document_files', (
                 SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
@@ -1361,17 +1459,20 @@ LIMIT $5 OFFSET $4;`,
               )
             )
             FROM tbl_quote_items TQI
-            WHERE TQI.rfq_id = ${id}
+            WHERE TQI.rfq_id = $1
               AND TQI.product_id = TRF.product_id
-              AND TQI.variant = TRF.variant
+              AND TQI.variant = TRF.variant              
+              ${TA_Vendors === "TA" ? vendorCondition : ''}
           ) AS "quotations"
         FROM tbl_rfq_products TRF
-        WHERE TRF.rfq_id = ${id};`
-      )
+        WHERE TRF.rfq_id = $1;`
+
+        db.query(mainQuery, [id, user_id])
         .then(function (data) {
           resolve(data);
         })
         .catch(function (err) {
+          console.log(err)
           let error = new Error(err);
           reject(error);
         });
@@ -2721,7 +2822,1192 @@ rfq_project_exist: async (project_id,user_id) => {
           reject(new Error(error));
         });
     });
-  }
- };
+  },
 
+  // addTechnicalEveluation: async(RFQ_ID, Tbl_rfq_product_ID) =>{
+  //   console.log("rfqid idd",RFQ_ID, Tbl_rfq_product_ID)
+  //   const query ='INSERT INTO Tbl_rfq_product_tech_evaluation (RFQ_ID, Tbl_rfq_product_ID) VALUES ($1, $2) RETURNING *';;
+  //   return new Promise((resolve, reject) => {
+  //     db.query(query, [RFQ_ID, Tbl_rfq_product_ID])
+  //       .then(result => {
+  //         resolve(result);
+  //       })
+  //       .catch(error => {
+  //         reject(new Error(error));
+  //       });
+  //   });
+  // },
+
+  addClause: async (rfq_id, rfq_product_id, clause_text, file_url) => {
+    // console.log("values in add clause model", rfq_id, rfq_product_id, clause_text, file_url);
+  
+    const validateRfqQuery = `
+      SELECT id 
+      FROM tbl_rfq 
+      WHERE id = $1;
+    `;
+  
+    const validateRfqProductQuery = `
+      SELECT id 
+      FROM tbl_rfq_products 
+      WHERE id = $1;
+    `;
+  
+    const validateRfqProductTechEvaluationQuery = `
+      SELECT id 
+      FROM tbl_rfq_product_tech_evaluation 
+      WHERE rfq_id = $1 AND tbl_rfq_product_id = $2;
+    `;
+  
+    const insertRfqProductTechEvaluationQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation 
+      (rfq_id, tbl_rfq_product_id, timestamp) 
+      VALUES ($1, $2, NOW()) 
+      RETURNING id;
+    `;
+  
+    const insertClauseQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_clauses 
+      (tbl_rfq_product_tech_evaluation_id, clause_text, timestamp)
+      VALUES ($1, $2, NOW())
+      RETURNING id;
+    `;
+  
+    const insertFileQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_clauses_files 
+      (tbl_rfq_product_tech_evaluation_clauses_id, file_url, timestamp)
+      VALUES ($1, $2, NOW());
+    `;
+  
+    return new Promise((resolve, reject) => {
+      // console.log("Entered add-clause model");
+  
+      // Validate the RFQ ID
+      db.query(validateRfqQuery, [rfq_id])
+        .then(async (rfqValidationResult) => {
+          if (rfqValidationResult.length === 0) {
+            resolve({
+              status: 0,
+              message: `RFQ with ID ${rfq_id} does not exist.`,
+            });
+            return;
+          }
+  
+          // Validate the RFQ Product ID
+          const rfqProductValidationResult = await db.query(validateRfqProductQuery, [rfq_product_id]);
+          if (rfqProductValidationResult.length === 0) {
+            resolve({
+              status: 0,
+              message: `RFQ Product with ID ${rfq_product_id} does not exist.`,
+            });
+            return;
+          }
+  
+          // Validate or Insert RFQ Product Tech Evaluation
+          const techEvaluationResult = await db.query(validateRfqProductTechEvaluationQuery, [rfq_id, rfq_product_id]);
+          let evaluationId;
+  
+          if (techEvaluationResult.length === 0) {
+            // console.log("RFQ Product Tech Evaluation not found, inserting new record...");
+            const insertResult = await db.query(insertRfqProductTechEvaluationQuery, [rfq_id, rfq_product_id]);
+            evaluationId = insertResult[0].id;
+            // console.log("New RFQ Product Tech Evaluation ID:", evaluationId);
+          } else {
+            evaluationId = techEvaluationResult[0].id;
+            // console.log("RFQ Product Tech Evaluation found, using existing ID:", evaluationId);
+          }
+  
+          // Insert the Clause
+          return db.query(insertClauseQuery, [evaluationId, clause_text]);
+        })
+        .then(async (clauseResult) => {
+          const clauseId = clauseResult[0].id; // Extract the returned clause ID
+          // console.log("Clause ID:", clauseId);
+  
+          // Insert associated files
+          if (file_url && file_url.length > 0) {
+            for (const url of file_url) {
+              await db.query(insertFileQuery, [clauseId, url]);
+            }
+          }
+  
+          // Respond after successful operations
+          resolve({
+            status: 1,
+            message: "Clause and files successfully added to technical evaluation.",
+          });
+        })
+        .catch((error) => {
+          console.error("Error adding clause:", error);
+          reject({
+            status: 0,
+            message: "Error in adding clauses or associated files.",
+            error: error.message,
+          });
+        });
+    });
+  },
+
+   updateClause: async (tbl_rfq_product_tech_evaluation_clauses_id, clause_text,file_url) => {
+
+    // console.log("entered update clause = ", tbl_rfq_product_tech_evaluation_clauses_id, clause_text,file_url);
+    const queryCheckClauseId = `
+    SELECT id 
+      FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE id = $1;
+    `
+    const queryUpdateClause = `
+      UPDATE tbl_rfq_product_tech_evaluation_clauses 
+      SET clause_text = $1, timestamp = NOW() 
+      WHERE id = $2 
+      RETURNING id;
+    `;
+    
+    const queryGetExistingFiles = `
+      SELECT file_url 
+      FROM tbl_rfq_product_tech_evaluation_clauses_files 
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
+    `;
+    
+    const queryInsertFile = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_clauses_files 
+      (tbl_rfq_product_tech_evaluation_clauses_id, file_url, timestamp) 
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (tbl_rfq_product_tech_evaluation_clauses_id, file_url) 
+      DO UPDATE SET timestamp = NOW();
+    `;
+    
+    const queryDeleteFiles = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_clauses_files 
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 
+        AND file_url = ANY($2::text[]);
+    `;
+    
+    const queryDeleteAllFiles = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_clauses_files 
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
+    `;
+    
+    return new Promise((resolve, reject) => {
+       // Validate the clause ID
+       db.query(queryCheckClauseId, [tbl_rfq_product_tech_evaluation_clauses_id])
+      .then(async (clauseIdValidationResult) => {
+        if (clauseIdValidationResult.length === 0) {
+          resolve ({
+            status: 0,
+            message: `Clause with ID ${tbl_rfq_product_tech_evaluation_clauses_id} does not exist.`,
+          });
+        }
+      })
+     
+      // Updating the clause text
+      db.query(queryUpdateClause, [
+        clause_text,
+        tbl_rfq_product_tech_evaluation_clauses_id,
+      ])
+      .then(async (updateResult) => {
+        if (updateResult.length === 0) {
+          reject({
+            success: false,
+            message: `Clause ID ${tbl_rfq_product_tech_evaluation_clauses_id} not found.`,
+          });
+          return;
+        }
+  
+        // console.log(`Clause updated: ${tbl_rfq_product_tech_evaluation_clauses_id}`);
+        
+        // Handling file URLs
+        if (file_url && file_url.length > 0) {
+          // Get existing file URLs from the database
+          db.query(queryGetExistingFiles, [tbl_rfq_product_tech_evaluation_clauses_id])
+          .then((existingFilesResult) => {
+            console.log("existing files result = ",existingFilesResult)
+            // const existingFiles = existingFilesResult.rows.map(row => row.file_url);
+            const existingFiles = [];
+            for(let i=0;i<existingFilesResult.length;i++){
+              existingFiles.push(existingFilesResult[i].file_url);
+            }
+            // console.log("existing files = ",existingFiles);
+            
+            // Determining files to delete and to add
+            const filesToDelete = existingFiles.filter(file => !file_url.includes(file));
+            const filesToAdd = file_url.filter(file => !existingFiles.includes(file));
+            // console.log("files to add = ",filesToAdd);
+            // console.log("files to delete = ",filesToDelete);
+            // Deleting files no longer needed
+            if (filesToDelete.length > 0) {
+              db.query(queryDeleteFiles, [
+                tbl_rfq_product_tech_evaluation_clauses_id,
+                filesToDelete,
+              ])
+              .then(() => {
+                console.log(`Deleted files: ${filesToDelete}`);
+              })
+              .catch((error) => {
+                console.error(`Error deleting files: ${error.message}`);
+                reject({
+                  success: false,
+                  message: 'Error deleting files.',
+                  error: error.message,
+                });
+              });
+            }
+            
+            // Inserting new files
+            if (filesToAdd.length > 0) {
+              for (const fileUrl of filesToAdd) {
+                db.query(queryInsertFile, [
+                  tbl_rfq_product_tech_evaluation_clauses_id,
+                  fileUrl,
+                ])
+                .then(() => {
+                  // console.log(`Inserted file: ${fileUrl}`);
+                })
+                .catch((error) => {
+                  console.error(`Error inserting file: ${fileUrl}. Error: ${error.message}`);
+                  reject({
+                    success: false,
+                    message: 'Error inserting files.',
+                    error: error.message,
+                  });
+                });
+              }
+            }
+            
+            resolve({
+              success: true,
+              message: 'Clause and associated files updated successfully.',
+            });
+          })
+          .catch((error) => {
+            console.error(`Error retrieving existing files: ${error.message}`);
+            reject({
+              success: false,
+              message: 'Error retrieving existing files.',
+              error: error.message,
+            });
+          });
+        } else {
+          // If no file URLs provided, deleting all files
+          db.query(queryDeleteAllFiles, [tbl_rfq_product_tech_evaluation_clauses_id])
+          .then(() => {
+            console.log(`All files deleted for clause ID: ${tbl_rfq_product_tech_evaluation_clauses_id}`);
+            resolve({
+              success: true,
+              message: 'Clause updated successfully, and all files deleted.',
+            });
+          })
+          .catch((error) => {
+            console.error(`Error deleting all files: ${error.message}`);
+            reject({
+              success: false,
+              message: 'Error deleting all files.',
+              error: error.message,
+            });
+          });
+        }
+      })
+      .catch((error) => {
+        console.error(`Error updating clause: ${error.message}`);
+        reject({
+          success: false,
+          message: 'Error updating clause.',
+          error: error.message,
+        });
+      });
+    });
+  },
+
+  removeClause: async (tbl_rfq_product_tech_evaluation_clauses_id) => {
+    const checkClauseExistsQuery = `
+      SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses 
+      WHERE id = $1;
+    `;
+    const deleteClauseQuery = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE id = $1;
+    `;
+
+    return new Promise((resolve, reject) => {
+      //Checking if the clause exists
+      db.query(checkClauseExistsQuery, [tbl_rfq_product_tech_evaluation_clauses_id])
+        .then(async (result) => {
+          if (result.length === 0) {
+            return reject(new Error('Clause not found.'));
+          }
+
+          //Deleting the clause (files will be deleted automatically due to ON DELETE CASCADE)
+          db.query(deleteClauseQuery, [tbl_rfq_product_tech_evaluation_clauses_id])
+            .then(() => {
+              resolve({ success: true, message: 'Clause and associated files deleted successfully.' });
+            })
+            .catch((error) => {
+              reject(new Error(error));
+            });
+        })
+        .catch((error) => {
+          reject(new Error(error));
+        });
+    });
+  },
+
+  getClauses: async (rfq_id) => {
+    // console.log("entered get clauses model = ",tbl_rfq_product_tech_evaluation_id);
+    const query = `
+      WITH clause_files AS (
+        SELECT
+          TE_C.id AS clause_id,
+          TE_C.clause_text,
+          TE.rfq_id,
+          TE.tbl_rfq_product_id AS rfq_product_id,
+          COALESCE(
+            JSON_AGG(TE_F.file_url) FILTER (WHERE TE_F.file_url IS NOT NULL),
+            '[]'
+          ) AS files
+        FROM tbl_rfq_product_tech_evaluation TE
+        JOIN tbl_rfq_product_tech_evaluation_clauses AS TE_C
+          ON TE.id = TE_C.tbl_rfq_product_tech_evaluation_id
+        LEFT JOIN tbl_rfq_product_tech_evaluation_clauses_files AS TE_F
+          ON TE_C.id = TE_F.tbl_rfq_product_tech_evaluation_clauses_id
+        WHERE TE.rfq_id = $1
+        GROUP BY TE_C.id, TE_C.clause_text, TE.rfq_id, TE.tbl_rfq_product_id
+      )
+      SELECT
+        rfq_id,
+        rfq_product_id,
+        JSON_AGG(
+          JSON_BUILD_OBJECT(
+            'clause_id', clause_id,
+            'clause_text', clause_text,
+            'files', files
+          )
+        ) AS clauses
+      FROM clause_files
+      GROUP BY rfq_id, rfq_product_id;
+    `;
+  
+    return new Promise((resolve, reject) => {
+      db.query(query, [rfq_id])
+        .then((result) => {
+          console.log(result)
+          resolve({
+            success: true,
+            data: result
+          });
+        })
+        .catch(error => {
+          console.error("Error fetching clauses and files:", error);
+          reject({
+            success: false,
+            message: "Error fetching clauses and files.",
+            error: error.message
+          });
+        });
+    });
+  },
+
+  addTechComment: async (tbl_rfq_product_tech_evaluation_clauses_id, sender_id, receiver_id, text, file_urls) => {
+    const validateClauseQuery = `
+      SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE id = $1) AS clause_exists;
+    `;
+  
+    const insertCommentQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_comments
+      (tbl_rfq_product_tech_evaluation_clauses_id, sender_id, receiver_id, text, timestamp)
+      VALUES ($1, $2, $3, $4, NOW())
+      RETURNING id;
+    `;
+  
+    const insertFileQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_comments_files
+      (tbl_rfq_product_tech_evaluation_comments_id, user_id, file_url, timestamp)
+      VALUES ($1, $2, $3, NOW());
+    `;
+  
+    try {
+      // Validate clause
+      const clauseResult = await db.query(validateClauseQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
+      
+      if (!clauseResult[0].clause_exists) {
+        throw {
+          status: 0,
+          message: "Invalid clause ID. Clause does not exist.",
+        };
+      }
+  
+      // Insert comment
+      const commentResult = await db.query(insertCommentQuery, [tbl_rfq_product_tech_evaluation_clauses_id, sender_id, receiver_id, text]);
+      const commentId = commentResult[0].id;
+  
+      // Insert associated files if provided
+      if (file_urls && file_urls.length > 0) {
+        for (const file_url of file_urls) {
+          try {
+            await db.query(insertFileQuery, [commentId, sender_id, file_url]);
+          } catch (fileError) {
+            console.error(`Error adding file: ${file_url}`, fileError.message);
+            throw {
+              status: 0,
+              message: "Failed to add files associated with the comment.",
+              error: fileError.message,
+            };
+          }
+        }
+      }
+  
+      // Resolve if everything is successful
+      return {
+        status: 1,
+        message: "Comment and associated files added successfully.",
+        commentId: commentId,
+      };
+    } catch (error) {
+      // Handle errors
+      console.error("Error:", error.message);
+      throw error;
+    }
+  },
+
+  getTechComments: async (clause_id, sender_id, receiver_id) => {
+    const validateClauseQuery = `
+      SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE id = $1) AS clause_exists;
+    `;
+
+    const fetchCommentsQuery = `
+      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by
+      FROM tbl_rfq_product_tech_evaluation_comments
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
+        AND (
+          (sender_id = $2 AND receiver_id = $3) OR  -- Buyer to Vendor
+          (sender_id = $3 AND receiver_id = $2)    -- Vendor to Buyer
+      )
+      ORDER BY timestamp ASC;
+    `;
+
+    const fetchCommentFilesQuery = `
+      SELECT file_url
+      FROM tbl_rfq_product_tech_evaluation_comments_files
+      WHERE tbl_rfq_product_tech_evaluation_comments_id = $1
+        AND user_id = $2;
+    `;
+
+    try {
+      // Validate clause existence
+      const clauseResult = await db.query(validateClauseQuery, [clause_id]);
+
+      if (!clauseResult[0].clause_exists) {
+        throw {
+          status: 0,
+          message: "Invalid clause ID. Clause does not exist.",
+        };
+      }
+
+      // Fetch comments for the clause
+      const commentsResult = await db.query(fetchCommentsQuery, [clause_id, sender_id, receiver_id]);
+      const data = [];
+
+      for (const comment of commentsResult) {
+        const { comment_id, comment_text, created_by } = comment;
+
+        // Fetch files associated with the comment
+        let filesResult = [];
+        try {
+          filesResult = await db.query(fetchCommentFilesQuery, [comment_id, created_by]);
+        } catch (fileError) {
+          console.error(`Error fetching files for comment ID: ${comment_id}`, fileError.message);
+          throw {
+            status: 0,
+            message: "Failed to fetch files for comments.",
+            error: fileError.message,
+          };
+        }
+
+        // Add comment and files to the response
+        data.push({
+          comment_id,
+          comment_text,
+          created_by,
+          comment_files: filesResult.map((file) => file.file_url) || [],
+        });
+      }
+
+      // Return success response
+      return {
+        status: 1,
+        message: "Comments fetched successfully.",
+        data,
+      };
+
+    } catch (error) {
+      console.error("Error:", error.message);
+      throw error; // Rethrow the error for the caller to handle
+    }
+  },
+
+  addVendorResponse: async (responses) => {
+    const validateClauseQuery = `
+      SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE id = $1) AS clause_exists;
+    `;
+  
+    const validateVendorQuery = `
+      SELECT EXISTS (SELECT 1 FROM tbl_users WHERE id = $1) AS vendor_exists;
+    `;
+  
+    const checkVendorResponseQuery = `
+      SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_vendors_response
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 AND vendor_id = $2) AS response_exists;
+    `;
+  
+    const insertVendorResponseQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response 
+      (vendor_id, tbl_rfq_product_tech_evaluation_clauses_id, vendor_response, timestamp) 
+      VALUES ($1, $2, $3, NOW()) 
+      RETURNING id;
+    `;
+  
+    const insertFileQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response_files 
+      (tbl_rfq_product_tech_evaluation_vendors_response_id, file_url, timestamp) 
+      VALUES ($1, $2, NOW());
+    `;
+  
+    return new Promise((resolve, reject) => {
+      // Iterate over each vendor response
+      const promises = responses.map(async (response) => {
+        const { vendor_id, clause_id, vendor_response, file_url } = response;
+
+        // Validate clause existence
+        const clauseResult = await db.query(validateClauseQuery, [clause_id]);
+        // console.log("Clause validation result =", clauseResult);
+        if (!clauseResult[0].clause_exists) {
+          throw {
+            status: 0,
+            message: `Clause ID ${clause_id} does not exist.`,
+          };
+        }
+
+        // Validate vendor existence
+        const vendorResult = await db.query(validateVendorQuery, [vendor_id]);
+        // console.log("Vendor validation result =", vendorResult);
+        if (!vendorResult[0].vendor_exists) {
+          reject({
+            status: 0,
+            message: `Vendor ID ${vendor_id} does not exist.`,
+          });
+          return;
+        }
+
+        // Check if Vendor Response already exists
+        const responseResult = await db.query(checkVendorResponseQuery, [clause_id, vendor_id]);
+        // console.log("Vendor response validation result =", responseResult);
+        if (responseResult[0].response_exists) {
+          reject( {
+            status: 0,
+            message: `Vendor response already exists for Clause ID ${clause_id}.`,
+          });
+          return;
+        }
+
+        // Insert vendor response
+        const insertResponseResult = await db.query(insertVendorResponseQuery, [vendor_id, clause_id, vendor_response]);
+        const responseId = insertResponseResult[0].id;
+        // console.log("Inserted Vendor Response ID =", responseId);
+
+        // Insert associated files if provided
+        if (file_url && file_url.length > 0) {
+          for (const url of file_url) {
+            await db.query(insertFileQuery, [responseId, url]).catch((fileError) => {
+              console.error(`Error adding file: ${url}`, fileError.message);
+              reject({
+                status: 0,
+                message: "Failed to add files associated with the vendor response.",
+                error: fileError.message,
+              });
+              return;
+            });
+          }
+        }
+
+        return { status: 1, message: "Vendor response and files successfully added.", response_id: responseId };
+      });
+
+      // Wait for all vendor responses to be processed
+      Promise.all(promises)
+        .then((results) => {
+          resolve({
+            status: 1,
+            message: "All vendor responses successfully added.",
+            results: results,
+          });
+        })
+        .catch((error) => {
+          console.error("Error in addVendorResponses:", error);
+          reject({
+            status: 0,
+            message: "Error adding vendor responses or associated files.",
+            error: error.message,
+          });
+        });
+    });
+  },
+
+  addtechEvaluationClearedVendors: (vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message) => {
+    // console.log("Entered addClearedVendor =", vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message);
+  
+    const validateVendorQuery = `
+      SELECT id 
+      FROM tbl_users 
+      WHERE id = $1;
+    `;
+  
+    const validateRfqEvaluationQuery = `
+      SELECT id 
+      FROM tbl_rfq_product_tech_evaluation 
+      WHERE id = $1;
+    `;
+  
+    const insertClearedVendorQuery = `
+      INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors 
+      (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, timestamp) 
+      VALUES ($1, $2, $3, $4, NOW());
+    `;
+  
+    return new Promise((resolve, reject) => {
+      // console.log("Entered cleared vendor model");
+  
+      // Validate Vendor
+      db.query(validateVendorQuery, [vendor_id])
+        .then((vendorResult) => {
+          // console.log("Vendor validation result =", vendorResult);
+  
+          if (vendorResult.length === 0) {
+            reject({
+              status: 0,
+              message: `Vendor ID ${vendor_id} not found.`,
+            });
+            return; // Stop further execution
+          }
+  
+          // Validate RFQ Product Technical Evaluation ID
+          return db.query(validateRfqEvaluationQuery, [tbl_rfq_product_tech_evaluation_id]);
+        })
+        .then((evaluationResult) => {
+          // console.log("RFQ Evaluation validation result =", evaluationResult);
+  
+          if (evaluationResult.length === 0) {
+            reject({
+              status: 0,
+              message: `Technical Evaluation ID ${tbl_rfq_product_tech_evaluation_id} not found.`,
+            });
+            return; // Stop further execution
+          }
+  
+          // Insert Cleared Vendor
+          return db.query(insertClearedVendorQuery, [tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message]);
+        })
+        .then(() => {
+          // console.log("Vendor successfully added to cleared vendors.");
+  
+          // Respond after successful operation
+          resolve({
+            status: 1,
+            message: "Vendor successfully added to cleared vendors.",
+          });
+        })
+        .catch((error) => {
+          // console.error("Error in addClearedVendor:", error);
+          reject({
+            status: 0,
+            message: "Error in adding cleared vendor.",
+            error: error.message,
+          });
+        });
+    });
+  },
+  getVendorNames: async (rfq_id, tbl_rfq_product_id) => {
+    // console.log("Values in getVendorsDetails model:", rfq_id, tbl_rfq_product_id);
+  
+    // Updated query to fetch vendor IDs
+    const fetchVendorsQuery = `
+      SELECT DISTINCT vr.vendor_id
+      FROM tbl_rfq_product_tech_evaluation te
+      JOIN tbl_rfq_product_tech_evaluation_clauses c 
+          ON te.id = c.tbl_rfq_product_tech_evaluation_id
+      JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
+          ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+      WHERE te.rfq_id = $1
+        AND te.tbl_rfq_product_id = $2;
+    `;
+  
+    // Query to fetch vendor details (vendor_name, company_name, organization_name)
+    const fetchVendorDetailsQuery = `
+      SELECT 
+        u.id AS vendor_id,
+        u.name AS vendor_name,
+        COALESCE(c.company_name, '') AS company_name,
+        COALESCE(u.organization_name, '') AS organization_name
+      FROM tbl_users u
+      LEFT JOIN tbl_company c ON u.id = c.user_id
+      WHERE u.id = $1;
+    `;
+  
+    return new Promise((resolve, reject) => {
+      // console.log("Entered getVendorsDetails model");
+  
+      // Fetch vendor IDs related to the given RFQ and product
+      db.query(fetchVendorsQuery, [rfq_id, tbl_rfq_product_id])
+        .then(async (vendorIdsResult) => {
+          if (vendorIdsResult.length === 0) {
+            // If no vendors found, return an empty array
+            resolve({
+              status: 1,
+              message: "No vendors found.",
+              data: [],
+            });
+            return;
+          }
+  
+          // Initialize an empty array to store the vendor details
+          const vendorDetails = [];
+  
+          // Fetch vendor details for each unique vendor_id
+          for (const vendor of vendorIdsResult) {
+            const vendorId = vendor.vendor_id;
+  
+            // Fetch vendor details (vendor_name, company_name, organization_name)
+            const vendorDetailsResult = await db.query(fetchVendorDetailsQuery, [vendorId]);
+  
+            if (vendorDetailsResult.length > 0) {
+              const vendorData = vendorDetailsResult[0];
+              vendorDetails.push({
+                vendor_id: vendorData.vendor_id,
+                vendor_name: vendorData.vendor_name,
+                company_name: vendorData.company_name,
+                organization_name: vendorData.organization_name,
+              });
+            }
+          }
+  
+          // Return the vendor details
+          resolve({
+            status: 1,
+            message: "Vendors fetched successfully.",
+            data: vendorDetails,
+          });
+        })
+        .catch((error) => {
+          console.error("Error fetching vendor details:", error);
+          reject({
+            status: 0,
+            message: "Error in fetching vendor details.",
+            error: error.message,
+          });
+        });
+    });
+  },
+
+  getVendorResponses: async (rfq_id, tbl_rfq_product_id, vendor_id) => {
+    // console.log("Values in getVendorResponsesForClauses model:", rfq_id, tbl_rfq_product_id, vendor_id);
+
+    // Query to fetch the tbl_rfq_product_tech_evaluation_id
+    const getTechEvaluationIdQuery = `
+      SELECT id
+      FROM tbl_rfq_product_tech_evaluation
+      WHERE rfq_id = $1
+        AND tbl_rfq_product_id = $2;
+    `;
+
+    // Query to fetch clauses associated with the tbl_rfq_product_tech_evaluation_id
+    const getClausesQuery = `
+      SELECT id AS clause_id, clause_text
+      FROM tbl_rfq_product_tech_evaluation_clauses
+      WHERE tbl_rfq_product_tech_evaluation_id = $1;
+    `;
+
+    // Query to fetch clause files associated with each clause
+    const getClauseFilesQuery = `
+      SELECT tbl_rfq_product_tech_evaluation_clauses_id, file_url
+      FROM tbl_rfq_product_tech_evaluation_clauses_files
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = ANY($1::int[]);
+    `;
+
+    // Query to fetch vendor responses and vendor response files
+    const getVendorResponsesQuery = `
+      SELECT vr.tbl_rfq_product_tech_evaluation_clauses_id, vr.vendor_response, vrf.file_url AS vendor_response_files
+      FROM tbl_rfq_product_tech_evaluation_vendors_response vr
+      LEFT JOIN tbl_rfq_product_tech_evaluation_vendors_response_files vrf 
+        ON vr.id = vrf.tbl_rfq_product_tech_evaluation_vendors_response_id
+      WHERE vr.vendor_id = $1 AND vr.tbl_rfq_product_tech_evaluation_clauses_id = ANY($2::int[]);
+    `;
+
+    return new Promise((resolve, reject) => {
+        // console.log("Entered getVendorResponsesForClauses model");
+
+        // Step 1: Fetch tbl_rfq_product_tech_evaluation_id
+        db.query(getTechEvaluationIdQuery, [rfq_id, tbl_rfq_product_id])
+            .then(async (techEvalResult) => {
+                if (techEvalResult.length === 0) {
+                    resolve({
+                        status: 0,
+                        message: "No tech evaluation found for the given rfq_id and tbl_rfq_product_id.",
+                        data: [],
+                    });
+                    return;
+                }
+
+                const techEvaluationId = techEvalResult[0].id;
+
+                // Step 2: Fetch clauses associated with the tbl_rfq_product_tech_evaluation_id
+                const clausesResult = await db.query(getClausesQuery, [techEvaluationId]);
+
+                if (clausesResult.length === 0) {
+                    resolve({
+                        status: 0,
+                        message: "No clauses found for the given tech evaluation.",
+                        data: [],
+                    });
+                    return;
+                }
+
+                // Step 3: Fetch clause files associated with each clause
+                const clauseIds = clausesResult.map(clause => clause.clause_id);
+                const clauseFilesResult = await db.query(getClauseFilesQuery, [clauseIds]);
+
+                // Step 4: Fetch vendor responses for each clause
+                const vendorResponsesResult = await db.query(getVendorResponsesQuery, [vendor_id, clauseIds]);
+                // console.log("vendor response result = ",vendorResponsesResult);
+                // Step 5: Format the response
+                const data = clausesResult.map((clause) => {
+                    const clauseFiles = clauseFilesResult.filter(file => file.tbl_rfq_product_tech_evaluation_clauses_id === clause.clause_id)
+                        .map((file) => file.file_url ? file.file_url : []);
+
+                    const vendorResponse = vendorResponsesResult.filter((vr) => vr.tbl_rfq_product_tech_evaluation_clauses_id === clause.clause_id);
+
+                    return {
+                        clause_id: clause.clause_id,
+                        clause_text: clause.clause_text,
+                        clause_files: clauseFiles,
+                        vendor_response: vendorResponse.length > 0 ? vendorResponse[0].vendor_response : '',
+                        vendor_response_files: vendorResponse.map((vr) => vr.vendor_response_files ? vr.vendor_response_files : []).flat(),
+                    };
+                });
+
+                resolve({
+                    status: 1,
+                    message: "Vendor responses fetched successfully.",
+                    data: data,
+                });
+            })
+            .catch((error) => {
+                console.error("Error fetching vendor responses:", error);
+                reject({
+                    status: 0,
+                    message: "Error in fetching vendor responses.",
+                    error: error.message,
+                });
+            });
+    });
+},
+getTechEvaluationRFQDetails: (user_id) => {
+  return new Promise(async (resolve, reject) => {
+    // console.log("Fetching RFQ details...");
+
+    try {
+      // Step 1: Fetch rfq_ids for the given user_id
+      const fetchRFQIdsQuery = `
+        SELECT id AS rfq_id, rfq_no
+        FROM tbl_rfq
+        WHERE created_by = $1;
+      `;
+      const rfqResult = await db.query(fetchRFQIdsQuery, [user_id]);
+
+      if (rfqResult.length === 0) {
+        resolve({
+          status: 1,
+          message: "No RFQs found for the given user.",
+          data: [],
+        });
+        return;
+      }
+
+      const rfqData = rfqResult.map(row => ({
+        rfq_id: row.rfq_id,
+        rfq_no: row.rfq_no,
+      }));
+      const rfqIds = rfqData.map(row => row.rfq_id);
+
+      // Step 2: Fetch valid technical evaluations for the fetched RFQs
+      const fetchTechEvaluationQuery = `
+        SELECT rfq_id, tbl_rfq_product_id, id AS tbl_rfq_product_tech_evaluation_id
+        FROM tbl_rfq_product_tech_evaluation
+        WHERE rfq_id = ANY($1);
+      `;
+      const techEvalResult = await db.query(fetchTechEvaluationQuery, [rfqIds]);
+
+      if (techEvalResult.length === 0) {
+        resolve({
+          status: 1,
+          message: "No technical evaluations found for the given RFQs.",
+          data: [],
+        });
+        return;
+      }
+      // Step 3: Fetch RFQ products and RFQ Details
+      const fetchDetailsQuery = `
+        SELECT RFQ.*,
+              TP.name AS project_name,
+              ARRAY(
+                  SELECT json_build_object(
+                      'id', RFQ_P.id,
+                      'product_id', RFQ_P.product_id,
+                      'tbl_rfq_product_tech_evaluation_id', (
+                          SELECT TE.id
+                          FROM tbl_rfq_product_tech_evaluation TE
+                          WHERE TE.rfq_id = RFQ.id 
+                            AND TE.tbl_rfq_product_id = RFQ_P.id
+                          LIMIT 1
+                      ),
+                      'product_specs', (
+                          SELECT json_agg(
+                              json_build_object(
+                                  'title', RFQ_P_SPEC.title,
+                                  'value', RFQ_P_SPEC.value
+                              )
+                          )
+                          FROM tbl_rfq_products_specs RFQ_P_SPEC
+                          WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id
+                            AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
+                            AND RFQ_P.variant = RFQ_P_SPEC.variant
+                      ),
+                      'product_details', (
+                          SELECT json_agg(
+                              json_build_object(
+                                  'id', T_P.id,
+                                  'name', T_P.name,
+                                  'description', T_P.description,
+                                  'manufacturer', T_P.manufacturer,
+                                  'availability', T_P.availability
+                              )
+                          )
+                          FROM tbl_product T_P
+                          WHERE RFQ_P.product_id = T_P.id
+                      )
+                  )
+                  FROM tbl_rfq_products RFQ_P
+                  WHERE RFQ.id = RFQ_P.rfq_id
+              ) AS "products"
+        FROM tbl_rfq RFQ
+        LEFT JOIN tbl_projects TP
+          ON TP.id = RFQ.project_id
+        JOIN tbl_rfq_product_tech_evaluation RFQ_T_E
+          ON RFQ.id = RFQ_T_E.rfq_id
+        WHERE RFQ.created_by = $1 
+          AND RFQ.is_published = 1
+          AND RFQ.id = ANY($2)
+        GROUP BY RFQ.id, TP.name
+        HAVING COUNT(RFQ_T_E.id) > 0
+        ORDER BY RFQ.id DESC;
+      `;
+
+
+      const rfqDetails = await db.query(fetchDetailsQuery, [user_id, rfqIds]);
+
+      resolve({
+        status: 1,
+        message: "RFQ details fetched successfully.",
+        data: rfqDetails,
+      });
+    } catch (error) {
+      console.error("Error fetching RFQ details:", error);
+      reject({
+        status: 0,
+        message: "Error in fetching RFQ details.",
+        error: error.message,
+      });
+    }
+  });
+},
+getClausesOfProduct: async (rfq_product_id, vendor_id) => {
+
+  return new Promise(async (resolve, reject) => {
+    try {
+      // Step 1: Validate if tbl_rfq_product_tech_evaluation_id exists
+      const validateQuery = `
+        SELECT id AS tbl_rfq_product_tech_evaluation_id
+        FROM tbl_rfq_product_tech_evaluation
+        WHERE tbl_rfq_product_id = $1;
+      `;
+      const validationResult = await db.query(validateQuery, [rfq_product_id]);
+
+      if (validationResult.length === 0) {
+        return resolve({
+          success: false,
+          message: "No technical evaluation found for the given RFQ and product.",
+        });
+      }
+
+      const tbl_rfq_product_tech_evaluation_id = validationResult[0].tbl_rfq_product_tech_evaluation_id;
+
+      // Step 2: Check if at least one vendor response exists
+      const vendorResponseQuery = `
+      SELECT 1 AS has_response
+      FROM tbl_rfq_product_tech_evaluation_clauses AS c
+      INNER JOIN tbl_rfq_product_tech_evaluation_vendors_response AS vr
+      ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+      WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+      ${vendor_id ? `AND vr.vendor_id = $2` : ''}
+      LIMIT 1;
+      `;
+
+      const queryParams = [tbl_rfq_product_tech_evaluation_id];
+      if (vendor_id) queryParams.push(vendor_id);
+      const vendorResponseResult = await db.query(vendorResponseQuery, queryParams);
+
+      const vendorResponse = vendorResponseResult.length > 0 ? 1 : 0;
+
+      // Step 3: Fetch clauses and associated files
+      const fetchClausesQuery = `
+        SELECT
+          c.id AS clause_id,
+          c.clause_text,
+          f.file_url
+        FROM
+          tbl_rfq_product_tech_evaluation_clauses AS c
+        LEFT JOIN
+          tbl_rfq_product_tech_evaluation_clauses_files AS f
+        ON
+          c.id = f.tbl_rfq_product_tech_evaluation_clauses_id
+        WHERE
+          c.tbl_rfq_product_tech_evaluation_id = $1;
+      `;
+      const clausesResult = await db.query(fetchClausesQuery, [tbl_rfq_product_tech_evaluation_id]);
+
+      // Step 4: Group clauses by clause_id
+      const groupedClauses = clausesResult.reduce((acc, row) => {
+        const { clause_id, clause_text, file_url } = row;
+        if (!acc[clause_id]) {
+          acc[clause_id] = {
+            clause_id,
+            clause_text,
+            files: [],
+          };
+        }
+        if (file_url) {
+          acc[clause_id].files.push(file_url);
+        }
+        return acc;
+      }, {});
+
+      // Step 5: Format the response as an array of objects
+      const response = Object.keys(groupedClauses).map((key) => ({
+        clause_id: parseInt(key, 10),
+        clause_text: groupedClauses[key].clause_text,
+        files: groupedClauses[key].files,
+      }));
+
+      // console.log("Response data =", response);
+
+      // Step 6: Add vendor_response to the final response
+      resolve({
+        success: true,
+        vendor_response: vendorResponse,
+        data: response,
+      });
+    } catch (error) {
+      console.error("Error in getClauses API:", error);
+      reject({
+        success: false,
+        message: "Error fetching clauses and files.",
+        error: error.message,
+      });
+    }
+  });
+},
+
+getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
+  // console.log("Entered fetchTechClearedVendors =", rfq_id, tbl_rfq_product_id, vendor_id);
+
+  const validateVendorIdQuery = `
+      SELECT id 
+      FROM tbl_users 
+      WHERE id = $1;
+  `;
+
+  const getTechEvaluationIdQuery = `
+      SELECT id 
+      FROM tbl_rfq_product_tech_evaluation 
+      WHERE tbl_rfq_product_id = $1;
+  `;
+
+  const fetchClearedVendorDetailsQuery = `
+      SELECT id, status, reject_message 
+      FROM tbl_rfq_product_tech_evaluation_cleared_vendors 
+      WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2;
+  `;
+
+  return new Promise((resolve, reject) => {
+      // console.log("Validating Vendor ID in tbl_users...");
+
+      // Step 1: Validate Vendor ID in tbl_users
+      db.query(validateVendorIdQuery, [vendor_id])
+          .then((vendorValidationResult) => {
+              if (!vendorValidationResult || vendorValidationResult.length === 0) {
+                  reject({
+                      status: 0,
+                      message: `Vendor ID ${vendor_id} does not exist in tbl_users.`,
+                  });
+                  return; // Stop further execution
+              }
+
+              // console.log("Fetching Technical Evaluation ID...");
+
+              // Step 2: Fetch the Technical Evaluation ID
+              return db.query(getTechEvaluationIdQuery, [tbl_rfq_product_id]);
+          })
+          .then((techEvaluationResult) => {
+              if (!techEvaluationResult || techEvaluationResult.length === 0) {
+                  return resolve({
+                      status: 0,
+                      message: `No Technical Evaluation ID found for RFQ Product ID ${tbl_rfq_product_id}.`,
+                  });
+                  return; // Stop further execution
+              }
+
+              const techEvaluationId = techEvaluationResult[0].id;
+
+              // console.log("Fetching Cleared Vendor Details...");
+
+              // Step 3: Fetch Cleared Vendor Details
+              return db.query(fetchClearedVendorDetailsQuery, [techEvaluationId, vendor_id]);
+          })
+          .then((clearedVendorResult) => {
+              if (!clearedVendorResult || clearedVendorResult.length === 0) {
+                  return resolve({
+                      status: 2,
+                      message: `No cleared vendor details found for Vendor ID ${vendor_id} and provided Tech Evaluation ID.`,
+                  });
+                  return; // Stop further execution
+              }
+
+              // Respond with fetched data
+              resolve({
+                  status: 1,
+                  message: "Cleared vendor details fetched successfully.",
+                  data: clearedVendorResult[0],
+              });
+          })
+          .catch((error) => {
+              console.error("Error in fetchTechClearedVendors:", error);
+              reject({
+                  status: 0,
+                  message: "Error in fetching cleared vendor details.",
+                  error: error.message,
+              });
+          });
+  });
+},
+}
 export default rfqModel;
