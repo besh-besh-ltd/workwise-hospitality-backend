@@ -30,7 +30,22 @@ const productItems = Joi.object({
   spec_file: Joi.array().items(Joi.string()).optional(),
   qap_file: Joi.array().items(Joi.string()).optional(),
   qap: Joi.string().optional().allow(null).allow(''),
-  vendors: Joi.array().items(vendorItems).allow(null).allow(''),
+  vendors: Joi.array()
+    .items(vendorItems)
+    .min(1)
+    .required()
+    .custom((value, helpers) => {
+      const productName = helpers.state.ancestors[0].name; // Accessing product name from ancestors
+      if (value.length < 1) {
+        return helpers.error('array.min', { limit: 1, productName });
+      }
+      return value; // Return value if validation passes
+    })
+    .messages({
+      'array.base': 'Vendors must be an array',
+      'any.required': 'Vendors are required for product "{#productName}".',
+      'array.min': 'At least {#limit} vendor required for product - "{#productName}".'
+    }),
   spec: Joi.array()
     .items(specItems)
     .required()
@@ -89,8 +104,6 @@ export const rfqSchemas = {
     rfq_type: Joi.string().valid('firm', 'budgetary').allow('').allow(null),
     reverse_auction: Joi.valid(0, 1).allow(''),
     products: Joi.array().items(productItems).min(1).required(),
-    // products: Joi.array().optional().allow('').allow(null),
-    vendors: Joi.array().items(vendorItems).allow(null).allow(''),
     terms: Joi.array().items(termsItems).allow(null).allow(''),
     project_id: Joi.number().integer().required(),
     term_and_condition_files: Joi.array().items(Joi.string()).optional(),
