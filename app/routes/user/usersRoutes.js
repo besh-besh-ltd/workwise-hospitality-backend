@@ -111,12 +111,25 @@ UsersRoutes.get(
   // passportSignIn,
   UsersController.vendorapprove_list
 );
+
+// this needs to be change in future.....
+// in no authorization token we are takng the token from the query
+// for getting the user_id of the user when it is valid then only 
+// we upload the file.
 UsersRoutes.post(
   '/upload-file',
   noLogin.customer_auth,
   schema_posts.upload_user_document,
   UsersController.upload_documents
 );
+// Endpoint for uploading the file without authentication
+// This can be dangerous but let's see in future .
+// UsersRoutes.post(
+//   '/upload-file-without-auth',
+//   noLogin.customer_auth,
+//   schema_posts.upload_document_without_auth,
+//   UsersController.upload_document_without_auth
+// );
 UsersRoutes.get(
   '/vendor-profile/:vendor_id',
   noLogin.customer_auth,
