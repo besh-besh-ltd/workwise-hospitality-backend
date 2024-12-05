@@ -1059,6 +1059,7 @@ const deleteRelatedRecords = async (rfq_id) => {
 
 const saveRfqDraft = async (user_id, reqBody) => {
   const {
+      rfq_id,
       comment,
       company_name,
       contact_name,
@@ -1089,16 +1090,19 @@ const saveRfqDraft = async (user_id, reqBody) => {
       updated_by: user_id
   };
 
-  let rfq_id;
-  const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: user_id });
-  if (rfqList.length > 0) {
-    rfq_id = rfqList[0].id;
-  } else {
-      return {
-        success: true,
-        message: 'No RFQ draft found!'
-      };
-  }
+  // let { rfq_id } = reqBody;
+  // if(!rfq_id){
+  //   const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: user_id });
+  //   if (rfqList.length > 0) {
+  //     rfq_id = rfqList[0].id;
+  //   } else {
+  //       return {
+  //         success: true,
+  //         message: 'No RFQ draft found!'
+  //       };
+  //   }
+  // }
+
 
   if (project_id && project_id !== -1) {
       rfqData.project_id = project_id;

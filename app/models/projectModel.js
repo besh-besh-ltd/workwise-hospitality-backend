@@ -79,6 +79,21 @@ const projectModel = {
                 COUNT(CASE WHEN r.status = 0 THEN 1 END) AS closed_rfqs,
                 COUNT(CASE WHEN r.status = 1 THEN 1 END) AS open_rfqs,
 
+                COALESCE(
+                    jsonb_object_agg(
+                        f.file_type,
+                        ARRAY(
+                            SELECT json_build_object(
+                                'name', file.file_name,
+                                'url', file.file_url
+                            )
+                            FROM tbl_project_files file
+                            WHERE file.project_id = p.id AND file.file_type = f.file_type
+                        )
+                    ) FILTER (WHERE f.file_type IS NOT NULL),
+                    '{}'::jsonb
+                ) AS files,
+
                 -- Fetch RFQ details with vendors, number of products and quotes, including all RFQ columns
                 ARRAY(
                     SELECT json_build_object(
@@ -118,6 +133,8 @@ const projectModel = {
                 tbl_projects p
             LEFT JOIN 
                 tbl_rfq r ON r.project_id = p.id
+            LEFT JOIN 
+                tbl_project_files f ON f.project_id = p.id    
             WHERE 
                 p.id = $1
                 AND p.user_id = $2
