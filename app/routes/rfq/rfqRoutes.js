@@ -230,4 +230,89 @@ RfqRoutes.post('/magic-search-rfq-create',
   rfqController.create  
 )
 
+// technical eveluation modules
+
+// route not used
+// RfqRoutes.post('/add-technical-eveluation',
+//   passportSignIn,
+//   rfqController.addTechnicalEveluation 
+// )
+
+RfqRoutes.post('/add-clause',
+  passportSignIn,
+  validateBody(rfqSchemas.addClause),
+  rfqController.addClause
+)
+
+RfqRoutes.put('/update-clause',
+  passportSignIn,
+  validateBody(rfqSchemas.updateClause),
+  rfqController.updateClause
+)
+
+RfqRoutes.delete('/remove-clause/:id',
+  passportSignIn,
+  validateParam(rfqSchemas.id),
+  rfqController.removeClause
+)
+
+RfqRoutes.get('/get-clauses/:id',
+  passportSignIn,
+  rfqController.getClauses
+)
+
+
+RfqRoutes.post('/add-tech-comment',
+  passportSignIn,
+  validateBody(rfqSchemas.addTechComment),
+  rfqController.addTechComment
+)
+
+RfqRoutes.post('/get-tech-comments',
+  passportSignIn,
+  validateBody(rfqSchemas.getTechComments),
+  rfqController.getTechComments
+)
+
+RfqRoutes.post('/get-vendor-names',
+  passportSignIn,
+  validateBody(rfqSchemas.getVendorNames),
+  rfqController.getVendorNames
+)
+
+RfqRoutes.post('/get-vendor-responses',
+  passportSignIn,
+  validateBody(rfqSchemas.getVendorResponses),
+  rfqController.getVendorResponses
+)
+
+RfqRoutes.post('/add-vendor-response',
+  passportSignIn,
+  validateBody(rfqSchemas.addVendorResponse),
+  rfqController.addVendorResponse
+)
+
+RfqRoutes.post('/tech-evaluation-cleared-vendors',
+  passportSignIn,
+  validateBody(rfqSchemas.addtechEvaluationClearedVendors),
+  rfqController.addtechEvaluationClearedVendors
+)
+
+RfqRoutes.get('/get-tech-evaluation-rfqs',
+  passportSignIn,
+  rfqController.getTechEvaluationRFQDetails
+)
+
+RfqRoutes.post('/get-clauses-of-product',
+  passportSignIn,
+  validateBody(rfqSchemas.getClausesOfProduct),
+  rfqController.getClausesOfProduct
+)
+
+RfqRoutes.post('/get-tech-evaluation-result',
+  passportSignIn,
+  validateBody(rfqSchemas.getTechEvaluationResult),
+  rfqController.getTechEvaluationResult
+)
+
 export default RfqRoutes;

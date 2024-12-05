@@ -21,6 +21,7 @@ const termsItems = Joi.object({
 });
 
 const productItems = Joi.object({
+  id : Joi.number().optional().allow(null),
   name: Joi.string().optional().allow(null).allow(''),
   variant: Joi.number().optional().allow('').allow(null),
   product_id: Joi.number().required(),
@@ -176,5 +177,122 @@ export const rfqSchemas = {
       console.error("Server error:", err);
       res.status(500).json({ status: 3, message: "server error" });
     }
-  } 
+  },
+
+  // technical_evaluation
+  addClause: Joi.object().keys({
+    rfq_id: Joi.number().integer().required(),
+    rfq_product_id: Joi.number().integer().required(),
+    clause_text: Joi.string().required(),
+    file_url: Joi.array()
+    .items(
+      Joi.string()
+        .uri()
+    )
+    .optional()
+    .allow(null)
+    // file_url: Joi.alternatives().try(
+    //   Joi.array()
+    //     .items(
+    //       Joi.string()
+    //         .uri()
+    //         .trim()
+    //         .allow('')
+    //     )
+    //     .optional()
+    //     .custom((value, helpers) => {
+    //       const filtered = value.filter((url) => url !== '');
+    //       return filtered;
+    //     }),
+    //   Joi.allow(null)
+    // ).default([]),
+  }),
+
+  updateClause: Joi.object().keys({
+    clause_id: Joi.number().integer().required(),
+    clause_text: Joi.string().required(),
+    file_url: Joi.array()
+      .items(
+        Joi.string()
+          .uri()
+      )
+      .optional()
+      .allow(null)
+  }),
+
+  id: Joi.object().keys({
+    id: Joi.number().integer().required(),
+  }),
+
+  getClauses: Joi.object().keys({
+    rfq_id: Joi.number().integer().required(),
+    rfq_product_id: Joi.number().integer().optional()
+  }),
+
+  addTechComment: Joi.object().keys({
+    clause_id: Joi.number().integer().required(),
+    sender_id: Joi.number().integer().required(),
+    receiver_id: Joi.number().integer().required(),
+    text: Joi.string().required(),
+    file_url: Joi.array()
+      .items(
+        Joi.string()
+          .uri()
+      )
+      .optional()
+      .allow(null)
+  }),
+
+  getTechComments: Joi.object().keys({
+    clause_id: Joi.number().integer().required(),
+    sender_id:Joi.number().integer().required(),
+    receiver_id: Joi.number().integer().required()
+  }),
+  
+  getVendorNames: Joi.object().keys({
+    rfq_id: Joi.number().integer().required(),
+    rfq_product_id: Joi.number().integer().required()
+  }),
+
+  getVendorResponses: Joi.object().keys({
+    rfq_id: Joi.number().integer().required(),
+    rfq_product_id: Joi.number().integer().required(),
+    vendor_id: Joi.number().integer().required()
+  }),
+
+addVendorResponse: Joi.array().items(
+    Joi.object({
+      rfq_id: Joi.number().integer().required(),
+      rfq_product_id: Joi.number().integer().required(),
+      vendor_id: Joi.number().integer().required(),
+      clause_id: Joi.number().integer().required(),
+      vendor_response: Joi.string().optional().allow("").allow(null),
+      file_url: Joi.array()
+        .items(
+          Joi.string()
+            .uri()
+        )
+        .optional()
+        .allow(null)
+    })
+  ).min(1),
+
+  addtechEvaluationClearedVendors: Joi.object({
+    vendor_id: Joi.number().integer().required(),
+    rfq_product_tech_evaluation_id: Joi.number().integer().required(),
+    status: Joi.valid(null, 0, 1).required(),
+    reject_message: Joi.string().allow(null, '').optional()
+  }),
+
+  getClausesOfProduct: Joi.object({
+    rfq_product_id: Joi.number().integer().required(),
+    vendor_id: Joi.number().integer().allow(null).optional()
+  }),
+
+  getTechEvaluationResult: Joi.object({
+    rfq_id: Joi.number().integer().optional(),
+    rfq_product_id: Joi.number().integer().required(),
+    vendor_id: Joi.number().integer().required()
+  })
+
 };
