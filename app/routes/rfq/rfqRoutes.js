@@ -239,78 +239,79 @@ RfqRoutes.post('/magic-search-rfq-create',
 // )
 
 RfqRoutes.post('/add-clause',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.addClause),
   rfqController.addClause
 )
 
 RfqRoutes.put('/update-clause',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.updateClause),
   rfqController.updateClause
 )
 
 RfqRoutes.delete('/remove-clause/:id',
-  passportSignIn,
+  noLogin.customer_auth,
   validateParam(rfqSchemas.id),
   rfqController.removeClause
 )
 
 RfqRoutes.get('/get-clauses/:id',
-  passportSignIn,
+  noLogin.customer_auth,
   rfqController.getClauses
 )
 
 
 RfqRoutes.post('/add-tech-comment',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.addTechComment),
   rfqController.addTechComment
 )
 
 RfqRoutes.post('/get-tech-comments',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.getTechComments),
   rfqController.getTechComments
 )
 
 RfqRoutes.post('/get-vendor-names',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.getVendorNames),
   rfqController.getVendorNames
 )
 
 RfqRoutes.post('/get-vendor-responses',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.getVendorResponses),
   rfqController.getVendorResponses
 )
 
 RfqRoutes.post('/add-vendor-response',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.addVendorResponse),
   rfqController.addVendorResponse
 )
 
 RfqRoutes.post('/tech-evaluation-cleared-vendors',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.addtechEvaluationClearedVendors),
   rfqController.addtechEvaluationClearedVendors
 )
 
+// this endpoint needs query( ?token=123123123 ) in the endpoint from the frontend side.
 RfqRoutes.get('/get-tech-evaluation-rfqs',
-  passportSignIn,
+  noLogin.customer_auth,
   rfqController.getTechEvaluationRFQDetails
 )
 
 RfqRoutes.post('/get-clauses-of-product',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.getClausesOfProduct),
   rfqController.getClausesOfProduct
 )
 
 RfqRoutes.post('/get-tech-evaluation-result',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.getTechEvaluationResult),
   rfqController.getTechEvaluationResult
 )
