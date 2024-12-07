@@ -5278,6 +5278,7 @@ getVendorResponses: async (req, res) => {
 
 getTechEvaluationRFQDetails: async (req, res) => {
   try {
+
     const user_id = req.user.id;    
 
     // Validate input
