@@ -150,15 +150,13 @@ const schemas = {
   }),
   user_spoc: Joi.object().keys({
     spoc_name: Joi.string()
-      .optional()
-      .allow(null, '')  // Allow null and empty string
+      .required()
       .trim(),
     spoc_role: Joi.string()
       .optional()
       .allow(null, ''),  // Allow null and empty string
     spoc_email: Joi.string()
-      .optional()
-      .allow(null, '')
+      .required()
       .trim()
       .email({ tlds: { allow: false } }),  // Email validation only if non-empty
     spoc_mobile: Joi.string()
