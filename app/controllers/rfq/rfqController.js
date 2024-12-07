@@ -1414,6 +1414,7 @@ const rfqController = {
   getRfqDetailsById: async (req, res) => {
     try {
       const { rfq_id } = req.body;
+
       const result = await rfqModel.getRFQDetails(rfq_id);
       res
       .status(200)
