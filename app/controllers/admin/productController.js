@@ -85,7 +85,7 @@ const validateBulkProductVendorInputs = (value) => {
     }
 
     // Validate spoc_mobile if provided and not empty
-    if (isValidPhoneNumber(spoc_mobile)) {
+    if (spoc_mobile && isValidPhoneNumber(spoc_mobile)) {
       errors.push('Invalid/Missing SPOC Mobile');
     }
   }
@@ -121,9 +121,9 @@ const spocInputsValidation = (value) => {
       errors.push('SPOC name is missing');
     }
 
-    if (!spoc_role) {
-      errors.push("SPOC role is missing");
-    }
+    // if (!spoc_role) {
+    //   errors.push("SPOC role is missing");
+    // }
 
     // Validate spoc_email if provided and not empty
     if (!isValidEmail(spoc_email)) {
@@ -131,9 +131,7 @@ const spocInputsValidation = (value) => {
     }
 
     // Validate spoc_mobile if provided and not empty
-    if (!spoc_mobile) {
-      errors.push('Missing SPOC Mobile');
-    } else if (isValidPhoneNumber(spoc_mobile)) {
+    if (spoc_mobile && isValidPhoneNumber(spoc_mobile)) {
       errors.push('Invalid SPOC Mobile');
     }
   }
@@ -1253,7 +1251,7 @@ const productController = {
               spocObj.user_id = vendor_id;
 
               // adding the vendor id to the spocObj object
-              spocObj.spoc_mobile = spocObj.spoc_mobile.toString();
+              spocObj.spoc_mobile = spocObj.spoc_mobile?.toString();
 
               // check for exactly same input existence
               const response = await userModel.check_exactly_same_spoc(spocObj);
