@@ -64,7 +64,7 @@ RfqRoutes.put(
 
 RfqRoutes.post(
   '/get-details',
-  passportSignIn,
+  noLogin.customer_auth,
   validateDbBody.rfq_access_check_req_body,
   rfqController.getRfqDetailsById
 );
@@ -199,7 +199,7 @@ RfqRoutes.post('/magic-search-rfq-preview',
 
 RfqRoutes.post(
   '/send-query-message',
-  passportSignIn,
+  noLogin.customer_auth,
   rfqSchemas.queryMessageFileUploadHandler, 
   validateDbBody.rfq_access_check_req_body,
   validateBody(rfqSchemas.sendMessage),
@@ -208,14 +208,14 @@ RfqRoutes.post(
 
 RfqRoutes.post(
   '/list-query-messages',
-  passportSignIn,
+  noLogin.customer_auth,
   validateDbBody.rfq_access_check_req_body,
   rfqController.listQueryMessages
 );
 
 RfqRoutes.post(
   '/list-queries',
-  passportSignIn,
+  noLogin.customer_auth,
   validateDbBody.rfq_access_check_req_body,
   rfqController.listQueries
 );
