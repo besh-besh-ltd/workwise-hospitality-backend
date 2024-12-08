@@ -420,14 +420,14 @@ const schemas = {
 
   user_spoc: Joi.object().keys({
     spoc_name: Joi.string()
-      .optional()
+      .required()
       .allow(null, '')  // Allow null and empty string
       .trim(),
     spoc_role: Joi.string()
       .optional()
       .allow(null, ''),  // Allow null and empty string
     spoc_email: Joi.string()
-      .optional()
+      .required()
       .allow(null, '')
       .trim()
       .email({ tlds: { allow: false } }),  // Email validation only if non-empty
