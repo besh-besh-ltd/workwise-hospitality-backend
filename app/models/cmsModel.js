@@ -631,6 +631,22 @@ const cmsModel = {
     });
   },
 
+  getTeamMemberDetails: async (memberId) => {
+    return new Promise(function (resolve, reject) {
+      db.one(
+        `SELECT * from tbl_team_members WHERE id = $1`,
+        [memberId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
   getPageContentCount: async () => {
     return new Promise(function (resolve, reject) {
       db.any(`select * from tbl_cms_page_sections where is_deleted = 0`)
@@ -1975,6 +1991,22 @@ const cmsModel = {
         });
     });
   },
+  createTeamMember: async (teamMemberObj) => {
+    return new Promise(function (resolve, reject) {
+      const query =
+        pgp().helpers.insert(teamMemberObj, null, 'tbl_team_members') +
+        ' RETURNING id';
+
+      db.one(query)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   checkTestimonial: async (testimonialId) => {
     return new Promise(function (resolve, reject) {
       db.any(`SELECT * FROM tbl_testimonials WHERE id = $1 AND status!=2 `, [
@@ -2067,6 +2099,76 @@ const cmsModel = {
         .catch(function (err) {
           let error = new Error(err);
           reject(error);
+        });
+    });
+  },
+  checkTeamMember: async (memberId) => {
+    return new Promise(function (resolve, reject) {
+      db.one(`SELECT * FROM tbl_team_members WHERE id = $1 AND status!=2 `, [memberId])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  getAllTeamMembers: async (limit, offset, search) => {
+    return new Promise(function (resolve, reject) {
+      const searchQuery = `
+        AND (
+        LOWER(name) LIKE LOWER('%${search}%') OR 
+        LOWER(email) LIKE LOWER('%${search}%')
+      )`;
+      const query = `
+          SELECT *             
+          FROM tbl_team_members
+          WHERE status != 0 
+          ${search ? searchQuery : ""}
+          ORDER BY "createdAt" DESC LIMIT $1 OFFSET $2`;
+      
+      db.any(query, [limit, offset])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  teamMemberUpdateOne: async (memberObj, memberId) => {
+    return new Promise(function (resolve, reject) {
+      const condition = `WHERE id = $1 RETURNING id`;
+      const values = [memberId];
+      let query =
+        pgp().helpers.update(memberObj, null, 'tbl_team_members') +
+        condition;
+
+      db.one(query, values)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  deleteTeamMember: async (memberId) => {
+    return new Promise(function (resolve, reject) {
+      const query = `
+        DELETE FROM tbl_team_members 
+        WHERE id = $1 AND status != 2
+      `;
+
+      db.none(query, [memberId])
+        .then(function (data) {
+          resolve({ message: "Team member deleted successfully" });
+        })
+        .catch(function (err) {
+          reject(new Error(err.message || "Error deleting team member"));
         });
     });
   },
