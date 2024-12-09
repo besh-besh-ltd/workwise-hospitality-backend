@@ -64,7 +64,7 @@ RfqRoutes.put(
 
 RfqRoutes.post(
   '/get-details',
-  passportSignIn,
+  noLogin.customer_auth,
   validateDbBody.rfq_access_check_req_body,
   rfqController.getRfqDetailsById
 );
@@ -199,7 +199,7 @@ RfqRoutes.post('/magic-search-rfq-preview',
 
 RfqRoutes.post(
   '/send-query-message',
-  passportSignIn,
+  noLogin.customer_auth,
   rfqSchemas.queryMessageFileUploadHandler, 
   validateDbBody.rfq_access_check_req_body,
   validateBody(rfqSchemas.sendMessage),
@@ -208,14 +208,14 @@ RfqRoutes.post(
 
 RfqRoutes.post(
   '/list-query-messages',
-  passportSignIn,
+  noLogin.customer_auth,
   validateDbBody.rfq_access_check_req_body,
   rfqController.listQueryMessages
 );
 
 RfqRoutes.post(
   '/list-queries',
-  passportSignIn,
+  noLogin.customer_auth,
   validateDbBody.rfq_access_check_req_body,
   rfqController.listQueries
 );
@@ -257,19 +257,21 @@ RfqRoutes.delete('/remove-clause/:id',
 )
 
 RfqRoutes.get('/get-clauses/:id',
-  passportSignIn,
+  noLogin.customer_auth,
   rfqController.getClauses
 )
 
 
+// vendor side
 RfqRoutes.post('/add-tech-comment',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.addTechComment),
   rfqController.addTechComment
 )
 
+// vendor side
 RfqRoutes.post('/get-tech-comments',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.getTechComments),
   rfqController.getTechComments
 )
@@ -280,14 +282,16 @@ RfqRoutes.post('/get-vendor-names',
   rfqController.getVendorNames
 )
 
+// vendor side
 RfqRoutes.post('/get-vendor-responses',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.getVendorResponses),
   rfqController.getVendorResponses
 )
 
+// vendor side
 RfqRoutes.post('/add-vendor-response',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.addVendorResponse),
   rfqController.addVendorResponse
 )
@@ -298,19 +302,22 @@ RfqRoutes.post('/tech-evaluation-cleared-vendors',
   rfqController.addtechEvaluationClearedVendors
 )
 
+// this endpoint needs query( ?token=123123123 ) in the endpoint from the frontend side.
 RfqRoutes.get('/get-tech-evaluation-rfqs',
   passportSignIn,
   rfqController.getTechEvaluationRFQDetails
 )
 
+// vendor side
 RfqRoutes.post('/get-clauses-of-product',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.getClausesOfProduct),
   rfqController.getClausesOfProduct
 )
 
+// vendor side
 RfqRoutes.post('/get-tech-evaluation-result',
-  passportSignIn,
+  noLogin.customer_auth,
   validateBody(rfqSchemas.getTechEvaluationResult),
   rfqController.getTechEvaluationResult
 )
