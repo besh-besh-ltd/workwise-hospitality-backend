@@ -3103,45 +3103,35 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
       }
     });
   },
-  getBuyerPrivateVendors: async (buyerId) => {
+  
+  getBuyerPrivateVendors: async (buyerId, limit, page) => {
     try {
-      // Step 1: Get data from tbl_temp_user for the given buyerId
-      const tempUserData = await db.any(
-        `SELECT vendor_name AS name, email, status, mobile FROM tbl_temp_user WHERE buyer_id = $1`,
-        [buyerId]
-      );
 
-      // Step 2: Get vendor IDs from tbl_buyer_private_vendors_mapping
-      const vendorIds = await db.any(
-        `SELECT vendor_id FROM tbl_buyer_private_vendors_mapping WHERE buyer_id = $1`,
-        [buyerId]
-      );
-
-      // Extract vendor IDs into a list
-      const vendorIdList = vendorIds.map(v => v.vendor_id);
-
-      // Step 3: Use the vendor IDs to get the corresponding vendors from tbl_users
-      let vendorDetails = [];
-      if (vendorIdList.length > 0) {
-          vendorDetails = await db.any(
-              `SELECT name, email, mobile, status FROM tbl_users WHERE id IN ($1:csv)`,
-              [vendorIdList]
-          );
-      }
-
-      // // Step 3: Use the vendor IDs to get the corresponding vendors from tbl_users
-      // const vendorDetails = await db.any(
-      //   `SELECT name, email, mobile, status FROM tbl_users WHERE id IN ($1:csv)`,
-      //   [vendorIdList]
-      // );
-
-      return [...tempUserData, ...vendorDetails];
+    return await db.any(
+        `SELECT u.name, u.email, u.mobile, u.status FROM tbl_users u RIGHT JOIN tbl_buyer_private_vendors_mapping b ON u.id = b.vendor_id WHERE b.buyer_id = $1 ORDER BY b.id DESC LIMIT $2 OFFSET $3`,
+        [buyerId, limit, (page - 1) * limit]
+    );
 
     } catch (err) {
       throw new Error(err);
     }
-  }
-  ,
+  },
+
+  getBuyerPrivateVendorsCount: async (buyerId) => {
+    try {
+
+      const response = await db.any(
+        `SELECT COUNT(*) FROM tbl_users u RIGHT JOIN tbl_buyer_private_vendors_mapping b ON u.id = b.vendor_id WHERE b.buyer_id = $1`,
+        [buyerId]
+      );
+
+      return parseInt(response[0]?.count) || 0;
+
+    } catch (err) {
+      throw new Error(err);
+    }
+  },
+
   deleteVendorFromTempUserTable: async (vendorTempId) => {
     // delete user from temp_user table, by id
     return new Promise((resolve, reject) => {
