@@ -2243,12 +2243,20 @@ const productController = {
     try {
       let { products, all } = req.body;
       if (all == true) {
-        let acceptReviewObj = {
-          is_review: 0,
-          updated_by: req.user.id
-        };
-        await productModel.adminProductAcceptReview(acceptReviewObj);
-      } else {
+        // let acceptReviewObj = {
+        //   is_review: 0,
+        //   updated_by: req.user.id
+        // };
+        res
+        .status(500)
+        .json({
+          status: 1,
+          message: 'Select the list of products you want to approve'
+        })
+        .end();
+        // await productModel.adminProductAcceptReview(acceptReviewObj);
+      } 
+      else {
         for await (const productId of products) {
           let acceptReviewObj = {
             is_review: 0,
@@ -2261,77 +2269,77 @@ const productController = {
         }
       }
 
-      for await (const productId of products) {
-        let productDetails = await productModel.vendorProductDetails(productId);
+      // for await (const productId of products) {
+      //   let productDetails = await productModel.vendorProductDetails(productId);
 
-        let checkMasterNameExist = await productModel.checkMasterNameExist(
-          productDetails[0].name
-        );
-        if (checkMasterNameExist.length == 0 && status == 1) {
-          let productObj = {
-            name: productDetails[0].name,
-            description: productDetails[0].description,
-            qap_new_file_name: productDetails[0].qap_new_file_name,
-            qap_original_file_name: productDetails[0].qap_original_file_name,
-            tds_new_file_name: productDetails[0].tds_new_file_name,
-            tds_original_file_name: productDetails[0].tds_original_file_name,
-            slug: titleToSlug(productDetails[0].name),
-            availability: 0,
-            sku: productDetails[0].name,
-            created_by: 1,
-            updated_by: 1,
-            added_by: 1,
-            is_approve: 1
-          };
+      //   let checkMasterNameExist = await productModel.checkMasterNameExist(
+      //     productDetails[0].name
+      //   );
+      //   if (checkMasterNameExist.length == 0 && status == 1) {
+      //     let productObj = {
+      //       name: productDetails[0].name,
+      //       description: productDetails[0].description,
+      //       qap_new_file_name: productDetails[0].qap_new_file_name,
+      //       qap_original_file_name: productDetails[0].qap_original_file_name,
+      //       tds_new_file_name: productDetails[0].tds_new_file_name,
+      //       tds_original_file_name: productDetails[0].tds_original_file_name,
+      //       slug: titleToSlug(productDetails[0].name),
+      //       availability: 0,
+      //       sku: productDetails[0].name,
+      //       created_by: 1,
+      //       updated_by: 1,
+      //       added_by: 1,
+      //       is_approve: 1
+      //     };
 
-          let product = await productModel.createProduct(productObj);
+      //     let product = await productModel.createProduct(productObj);
 
-          if (productDetails[0].vendor_approved_by.length > 0) {
-            let productApproveArray = [];
-            productDetails[0].vendor_approved_by.forEach((item) => {
-              productApproveArray.push({
-                product_id: product.id,
-                vendor_approve_id: item
-              });
-            });
-            await productModel.addProductApproveBy(
-              productApproveArray,
-              product.id
-            );
-          }
+      //     if (productDetails[0].vendor_approved_by.length > 0) {
+      //       let productApproveArray = [];
+      //       productDetails[0].vendor_approved_by.forEach((item) => {
+      //         productApproveArray.push({
+      //           product_id: product.id,
+      //           vendor_approve_id: item
+      //         });
+      //       });
+      //       await productModel.addProductApproveBy(
+      //         productApproveArray,
+      //         product.id
+      //       );
+      //     }
 
-          // ---------------- categories ---------------
-          // console.log(categories);
-          for await (const { id } of productDetails[0].product_categories) {
-            let categoryObj = {
-              category_id: id,
-              product_id: product.id
-            };
-            // console.log(categoryObj);
+      //     // ---------------- categories ---------------
+      //     // console.log(categories);
+      //     for await (const { id } of productDetails[0].product_categories) {
+      //       let categoryObj = {
+      //         category_id: id,
+      //         product_id: product.id
+      //       };
+      //       // console.log(categoryObj);
 
-            await productModel.createProductCategories(categoryObj);
-          }
+      //       await productModel.createProductCategories(categoryObj);
+      //     }
 
-          for await (const {
-            product_image_url,
-            product_image,
-            is_featured
-          } of productDetails[0].product_images) {
-            let featuredImageObj = {
-              product_id: product.id,
-              is_featured: is_featured,
-              original_image_name: product_image,
-              new_image_name: product_image_url
-            };
-            await productModel.insertProductImages(featuredImageObj);
-          }
-        }
-      }
+      //     for await (const {
+      //       product_image_url,
+      //       product_image,
+      //       is_featured
+      //     } of productDetails[0].product_images) {
+      //       let featuredImageObj = {
+      //         product_id: product.id,
+      //         is_featured: is_featured,
+      //         original_image_name: product_image,
+      //         new_image_name: product_image_url
+      //       };
+      //       await productModel.insertProductImages(featuredImageObj);
+      //     }
+      //   }
+      // }
       res
         .status(200)
         .json({
           status: 1,
-          message: 'Review completed .Product added to product list'
+          message: 'Review completed. Product added to product list'
         })
         .end();
     } catch (error) {
