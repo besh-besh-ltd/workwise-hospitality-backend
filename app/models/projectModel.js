@@ -160,7 +160,7 @@ const projectModel = {
                     p.*, 
                     COUNT(r.id) AS total_rfqs,
 
-                    COUNT(CASE WHEN r.status = 0 THEN 1 END) AS closed_rfqs,
+                    COUNT(CASE WHEN r.status = 2 THEN 1 END) AS closed_rfqs,
 
                     COUNT(CASE WHEN r.status = 1 THEN 1 END) AS open_rfqs
                 FROM 
