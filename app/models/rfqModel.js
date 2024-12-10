@@ -980,7 +980,7 @@ LIMIT 1;`;
         });
     });
   },
-  getAllBuyerRfq: async (limit, offset, user_id, project_id,sort,reverse_auction,rfq_type) => {
+  getAllBuyerRfq: async (limit, offset, user_id, project_id,sort,reverse_auction,rfq_type,rfq_no) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT 
@@ -1062,9 +1062,10 @@ WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 1
 AND (RFQ.project_id = $1 OR $1 IS NULL) 
 AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
 AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
+AND (RFQ.rfq_no::text LIKE '%$6%' OR $6 IS NULL) -- Filter by rfq_no if provided
 ORDER BY RFQ.timestamp ${sort}
 LIMIT $5 OFFSET $4;`,
-        [project_id,rfq_type,reverse_auction,offset,limit]
+        [project_id,rfq_type,reverse_auction,offset,limit,rfq_no]
       )
         .then(function (data) {
           resolve(data);
@@ -1076,11 +1077,18 @@ LIMIT $5 OFFSET $4;`,
         });
     });
   },
-  getBuyerRfqCount: async (user_id) => {
+  getBuyerRfqCount: async (user_id,project_id,rfq_type,reverse_auction,rfq_no) => {
     return new Promise(function (resolve, reject) {
-      db.any(`select * from tbl_rfq where created_by = ${user_id} AND is_published = 1`)
+      db.any(`SELECT COUNT(*) from tbl_rfq RFQ 
+        LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name 
+        WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 1
+        AND (RFQ.project_id = $1 OR $1 IS NULL) 
+        AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
+        AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
+        AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL); -- Filter by rfq_no if provided 
+        `,[project_id,rfq_type,reverse_auction,rfq_no])
         .then(function (data) {
-          resolve(data);
+          resolve(data[0].count);
         })
         .catch(function (err) {
           let error = new Error(err);

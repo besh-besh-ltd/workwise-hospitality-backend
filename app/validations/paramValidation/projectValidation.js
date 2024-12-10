@@ -35,7 +35,8 @@ export const projectSchemas = {
         sort: Joi.string().valid('ASC', 'DESC').required(),  // Sorting order
         rfq_type: Joi.string().valid('firm', 'budgetary').allow(''),  // Type of RFQ
         reverse_auction: Joi.valid('0', '1', '-1'),  // Reverse auction flag,
-        limit: Joi.number().integer()  // add limit
+        limit: Joi.number().integer(),  // add limit,
+        rfq_no: Joi.number().integer().optional().allow(null),
     }),
 
 
