@@ -4031,13 +4031,17 @@ rfqProductReport: async (userId, productName, startDate, endDate) => {
         'variant', TRPS.variant
     )) AS product_specs,
     JSONB_AGG(DISTINCT JSONB_BUILD_OBJECT(
-        'vendor_id', TRPV.user_id,
+        'vendor_id', TU.id,
+        'vendor_name', TU.name,
+        'vendor_email', TU.email,
+        'vendor_mobile', TU.mobile,
+        'organization_name', TU.organization_name,
         'variant', TRPV.variant,
-        'quote_details', (
-            SELECT COALESCE(JSONB_AGG(
+        'quote_details', COALESCE(
+            (SELECT JSONB_AGG(
                 JSONB_BUILD_OBJECT(
-                    'quote_id', TQ.id,
                     'status', TQ.status,
+                    'quote_id', TQ.id,
                     'is_regret', TQ.is_regret,
                     'global_payment_term', TQ.global_payment_term,
                     'global_comment', TQ.global_comment,
@@ -4045,38 +4049,43 @@ rfqProductReport: async (userId, productName, startDate, endDate) => {
                     'quote_items', (
                         SELECT JSONB_AGG(
                             JSONB_BUILD_OBJECT(
-                                'unit_price', TQI.unit_price,
-                                'package_price', TQI.package_price,
                                 'tax', TQI.tax,
-                                'freight_price', TQI.freight_price,
-                                'total_price', TQI.total_price,
+                                'comment', TQI.comment,
                                 'quantity', TQI.quantity,
-                                'delivery_period', TQI.delivery_period,
+                                'unit_price', TQI.unit_price,
+                                'total_price', TQI.total_price,
                                 'product_name', TQI.product_name,
-                                'comment', TQI.comment
+                                'freight_price', TQI.freight_price,
+                                'package_price', TQI.package_price,
+                                'delivery_period', TQI.delivery_period
                             )
                         ) FROM tbl_quote_items TQI WHERE TQI.quote_id = TQ.id AND TQI.product_id = TRP.product_id
                     )
                 )
-            ), JSONB_BUILD_OBJECT(
-                'quote_id', 0,
-                'status', 0,
-                'is_regret', 0,
-                'global_payment_term', null,
-                'global_comment', null,
-                'regret_reason', null,
-                'quote_items', JSONB_BUILD_OBJECT(
-                    'unit_price', 0,
-                    'package_price', 0,
-                    'tax', 0,
-                    'freight_price', 0,
-                    'total_price', 0,
-                    'quantity', 0,
-                    'delivery_period', null,
-                    'product_name', '',
-                    'comment', ''
+            ) FROM tbl_quotes TQ WHERE TQ.rfq_id = T.id AND TQ.created_by = TU.id),
+            JSONB_BUILD_ARRAY(
+                JSONB_BUILD_OBJECT(
+                    'status', 0,
+                    'quote_id', 0,
+                    'is_regret', 0,
+                    'global_payment_term', '',
+                    'global_comment', '',
+                    'regret_reason', '',
+                    'quote_items', JSONB_BUILD_ARRAY(
+                        JSONB_BUILD_OBJECT(
+                            'tax', 0,
+                            'comment', 'quote not present',
+                            'quantity', '0',
+                            'unit_price', 0,
+                            'total_price', 0,
+                            'product_name', '',
+                            'freight_price', 0,
+                            'package_price', 0,
+                            'delivery_period', ''
+                        )
+                    )
                 )
-            )) FROM tbl_quotes TQ WHERE TQ.rfq_id = T.id AND TQ.created_by = TRPV.user_id
+            )
         )
     )) AS vendors
 FROM tbl_rfq_products TRP
@@ -4084,6 +4093,7 @@ JOIN tbl_product TP ON TP.id = TRP.product_id
 JOIN tbl_rfq T ON T.id = TRP.rfq_id
 LEFT JOIN tbl_rfq_products_specs TRPS ON TRPS.rfq_id = T.id AND TRPS.product_id = TRP.product_id
 LEFT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = T.id AND TRPV.product_id = TRP.product_id
+LEFT JOIN tbl_users TU ON TU.id = TRPV.user_id  -- Joining tbl_users for vendor details
 WHERE T.created_by = $1
     AND LOWER(TP.name) = LOWER($2)
     AND ($3::date IS NULL OR T.timestamp >= $3::date)
