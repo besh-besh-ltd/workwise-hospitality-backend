@@ -4009,5 +4009,84 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
           });
   });
 },
+
+rfqProductReport: async (userId, productName, startDate, endDate) => {
+  return new Promise(function (resolve, reject) {
+      const query = `
+        SELECT 
+            T.id AS rfq_id,
+            T.rfq_no,
+            TP.name AS product_name,
+            TP.description AS product_description,
+            T.comment AS rfq_comment,
+            T.company_name,
+            T.contact_name,
+            T.contact_number,
+            T.bid_end_date,
+            T.location,
+            T.status AS rfq_status,
+            T.timestamp AS rfq_timestamp,
+            ARRAY_AGG(
+                JSON_BUILD_OBJECT(
+                    'spec_title', TRPS.title,
+                    'spec_value', TRPS.value,
+                    'variant', TRPS.variant
+                )
+            ) FILTER (WHERE TRPS.rfq_id = T.id AND TRPS.product_id = TRP.product_id) AS product_specs,
+            ARRAY_AGG(
+                JSON_BUILD_OBJECT(
+                    'vendor_id', TRPV.user_id,
+                    'variant', TRPV.variant,
+                    'quote_details', (
+                        SELECT JSON_AGG(
+                            JSON_BUILD_OBJECT(
+                                'quote_id', TQ.id,
+                                'status', TQ.status,
+                                'is_regret', TQ.is_regret,
+                                'global_payment_term', TQ.global_payment_term,
+                                'global_comment', TQ.global_comment,
+                                'regret_reason', TQ.regret_reason,
+                                'quote_items', (
+                                    SELECT JSON_AGG(
+                                        JSON_BUILD_OBJECT(
+                                            'unit_price', TQI.unit_price,
+                                            'package_price', TQI.package_price,
+                                            'tax', TQI.tax,
+                                            'freight_price', TQI.freight_price,
+                                            'total_price', TQI.total_price,
+                                            'quantity', TQI.quantity,
+                                            'delivery_period', TQI.delivery_period,
+                                            'product_name', TQI.product_name,
+                                            'comment', TQI.comment
+                                        )
+                                    ) FROM tbl_quote_items TQI WHERE TQI.quote_id = TQ.id AND TQI.product_id = TRP.product_id
+                                )
+                            )
+                        ) FROM tbl_quotes TQ WHERE TQ.rfq_id = T.id AND TQ.created_by = TRPV.user_id
+                    )
+                )
+            ) FILTER (WHERE TRPV.rfq_id = T.id AND TRPV.product_id = TRP.product_id) AS vendors
+        FROM tbl_rfq_products TRP
+        JOIN tbl_product TP ON TP.id = TRP.product_id
+        JOIN tbl_rfq T ON T.id = TRP.rfq_id
+        LEFT JOIN tbl_rfq_products_specs TRPS ON TRPS.rfq_id = T.id AND TRPS.product_id = TRP.product_id
+        LEFT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = T.id AND TRPV.product_id = TRP.product_id
+        WHERE T.created_by = $1
+          AND LOWER(TP.name) = LOWER($2)
+          AND ($3::date IS NULL OR T.timestamp >= $3::date)
+          AND ($4::date IS NULL OR T.timestamp <= $4::date)
+        GROUP BY T.id, TP.name, TP.description
+        ORDER BY T.timestamp DESC  `;
+
+      db.query(query, [userId, productName, startDate, endDate])
+      .then(data => resolve(data))
+      .catch(err => {
+          let error = new Error(err);
+          reject(error);
+      });
+  });
+},
+
+
 }
 export default rfqModel;

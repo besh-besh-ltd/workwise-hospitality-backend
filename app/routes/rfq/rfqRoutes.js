@@ -322,4 +322,12 @@ RfqRoutes.post('/get-tech-evaluation-result',
   rfqController.getTechEvaluationResult
 )
 
+//  product wise audit report
+RfqRoutes.get('/report/rfq-product-wise',
+  passportSignIn,
+  rfqController.rfqProductWiseReport
+)
+
+
+
 export default RfqRoutes;

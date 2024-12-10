@@ -5357,5 +5357,27 @@ getTechEvaluationResult: async (req, res) => {
     });
   }
 },
+
+rfqProductWiseReport: async (req, res) => {
+  try {
+    const { startDate, endDate ,productName, productID} = req.query;
+    const userId = req.user.id;
+
+
+    const rfqData = await rfqModel.rfqProductReport(userId, productName, startDate, endDate);
+
+    res
+      .status(200)
+      .json(rfqData)
+      .end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+        success: false,
+        message: 'no data to return',
+        error: error
+    });
+  }
+},
 };
 export default rfqController;
