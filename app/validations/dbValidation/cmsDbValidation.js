@@ -425,6 +425,40 @@ const validateDbBody = {
         .end();
     }
   },
+  team_member_id_exists: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+      let memberId = req.params.id;
+
+      const memberIdIdExists = await cmsModel.checkTeamMember(memberId);
+      if (!memberIdIdExists) {
+        err++;
+        errors.id = 'Team Member not exists';
+      }
+
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+      } else {
+        next();
+      }
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   blog_category_id_exists: async (req, res, next) => {
     try {
       let errors = {};
