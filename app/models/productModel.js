@@ -1805,7 +1805,7 @@ WHERE tbl_product.name = $1`,
       if (productId) {
         dynamicCondition = `AND id = ${productId}`;
       }
-      const condition = `WHERE is_review = 1 ${dynamicCondition} RETURNING id`;
+      const condition = ` WHERE is_review = 1 ${dynamicCondition} RETURNING id`;
       let query =
         pgp().helpers.update(acceptReviewObj, null, 'tbl_product') + condition;
 

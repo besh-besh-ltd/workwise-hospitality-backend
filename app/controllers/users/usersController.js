@@ -1027,12 +1027,56 @@ const UsersController = {
   },
   get_profile: async (req, res, next) => {
     try {
-      if (!req.is_verified) {
-        return res.status(200).json({
-          status: 1,
-          message: 'User is not logged in.'
-        }).end();
+
+      // if req.is_verified is true then there must be token in the query
+    if (!req.is_verified && !req.query.token) {
+      return res
+      .status(401)
+      .json({ 
+        status: 0,
+        message: 'Access denied. Please provide a valid token.' 
+      });
+  }
+  
+      // if user try to uplaod file without login
+    // then we take token in the query and take the vendor
+  
+    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
+
+    if (withoutLoginUserToken) {
+      // Check if the token exists
+      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+
+      if (!tokenData || tokenData.length === 0) {
+        // Token is not valid
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'Invalid or expired token!'
+          })
+          .end();
       }
+
+      // Retrieve user data associated with the token
+      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+
+      if (!userData || userData.length === 0) {
+        // User data is not valid
+        return res
+          .status(404)
+          .json({
+            status: 0,
+            message: 'User not found!'
+          })
+          .end();
+      }
+      // Remove password from user data
+      const { password, ...userWithoutPassword } = userData[0];
+      // Assign the user data to req.user
+      req.user = userWithoutPassword;
+    }
+      
       let user_id = req.user.id;
       const user = await userModel.userinfo(user_id);
       // now getting spoc details of the user
@@ -3260,19 +3304,22 @@ const UsersController = {
 
   getBuyerPrivateVendors: async (req, res, next) => {
     try {
-      const buyerId = req.user.id; // Getting buyerId from the authenticated user
+      const buyerId = req.user.id;
 
-      // Fetch the vendor details from the model
-      const data = await userModel.getBuyerPrivateVendors(buyerId);
+      const page = parseInt(req.query.page, 10) || 1;
+      const limit = parseInt(req.query.limit, 10) || 10;
+      
+      const data = await userModel.getBuyerPrivateVendors(buyerId, limit, page);
+      const count = await userModel.getBuyerPrivateVendorsCount(buyerId);
 
-      // Sending the response back to the client
       res.status(200).json({
         status: 1,
         message: 'Vendor details retrieved successfully.',
-        data: data
+        data,
+        count
       });
     } catch (error) {
-      next(error); // Pass the error to the error-handling middleware
+      next(error);
     }
   },
   buyerExcelUploadVendor: async (req, res, next) => {

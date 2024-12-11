@@ -1300,19 +1300,24 @@ const rfqController = {
             rfq_id = rfqData.id;
         } else {
             // Create a new RFQ
+
+            const currentDate = new Date();
+            let bidEndDate = new Date();
+            bidEndDate.setDate(currentDate.getDate() + 30);
+
             rfqData = {
                 company_name: user.organization_name || '',
                 response_email: user.email,
                 contact_name: user.name,
                 contact_number: user.mobile || '',
                 comment: req.body.comment || '',
-                bid_end_date: req.body.bid_end_date || '',
+                bid_end_date: req.body.bid_end_date || bidEndDate.toISOString().split('T')[0],
                 location: req.body.location || '',
                 is_published: 0,
                 created_by: user_id,
                 updated_by: user_id,
                 status: 1,
-                timestamp: new Date(),
+                // timestamp: currentDate,
             };
 
             const nextRFQNumber = await getNextRfQNumber();
@@ -1414,6 +1419,7 @@ const rfqController = {
   getRfqDetailsById: async (req, res) => {
     try {
       const { rfq_id } = req.body;
+
       const result = await rfqModel.getRFQDetails(rfq_id);
       res
       .status(200)
@@ -5277,6 +5283,7 @@ getVendorResponses: async (req, res) => {
 
 getTechEvaluationRFQDetails: async (req, res) => {
   try {
+
     const user_id = req.user.id;    
 
     let {rfq_no, project_id} = req.body;

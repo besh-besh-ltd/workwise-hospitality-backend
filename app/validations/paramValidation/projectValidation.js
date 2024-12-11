@@ -15,12 +15,25 @@ let store_project_files = multer.diskStorage({
     }
 });
 
+// Calculate tomorrow's date
+const today = new Date();
+const tomorrow = new Date(today);
+const tomorrowString = tomorrow.toISOString().slice(0, 10); // Format as YYYY-MM-DD
+
 export const projectSchemas = {
     create: Joi.object().keys({
         name:Joi.string().required(),
         description:Joi.string().optional().allow('').allow(null),
         location:Joi.string().optional().allow('').allow(null),
-        ended_at:Joi.string().optional().allow('').allow(null),
+        ended_at: Joi.string()
+            .optional()
+            .allow(null)
+            .custom((value, helpers) => {
+                if (value && new Date(value) <= tomorrow) {
+                    return helpers.message(`ended_at must be greater than ${tomorrowString}`);
+                }
+                return value;
+            }),
         rfq_type: Joi.string().valid('firm', 'budgetary').allow('', null),
         reverse_auction: Joi.number().valid(0, 1, -1)
     }),
@@ -44,7 +57,15 @@ export const projectSchemas = {
         status:Joi.number().valid(0, 1), // Status can only be 0 or 1
         description:Joi.string().optional().allow('').allow(null),
         location:Joi.string().optional().allow('').allow(null),
-        ended_at:Joi.string().optional().allow('').allow(null),
+        ended_at: Joi.string()
+            .optional()
+            .allow(null)
+            .custom((value, helpers) => {
+                if (value && new Date(value) <= tomorrow) {
+                    return helpers.message(`ended_at must be greater than ${tomorrowString}`);
+                }
+                return value;
+            }),
         rfq_type: Joi.string().valid('firm', 'budgetary').allow('', null),
         reverse_auction: Joi.number().valid(0, 1, -1)
     }),

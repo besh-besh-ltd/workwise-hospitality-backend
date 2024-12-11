@@ -871,6 +871,28 @@ const cmsController = {
         .end();
     }
   },
+  teamMemberDetail: async (req, res, next) => {
+    try {
+      let memberId = req.params.id;
+      let memberDetails = await cmsModel.getTeamMemberDetails(memberId);
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: memberDetails
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   updateFaq: async (req, res, next) => {
     try {
       const { question, description, status } = req.body;
@@ -988,6 +1010,39 @@ const cmsController = {
         .json({
           status: 1,
           message: 'Testimonial added'
+        })
+        .end();
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  createTeamMember: async (req, res, next) => {
+    try {
+      const createdBy = req.user.id;
+      const { name, role, mobile, email, page_id, linkedin, twitter, facebook, whatsapp, status } = req.body;
+
+      let teamMemberObj = {
+        name, role, mobile, email, page_id, linkedin, twitter, facebook, whatsapp, status,
+        created_by: createdBy,
+        profile_image:
+          req.file?.filename
+            ? `${Config.download_url}/team_member_image/${req.file?.filename}`
+            : null,
+      };
+
+      await cmsModel.createTeamMember(teamMemberObj);
+      res
+        .status(200)
+        .json({
+          status: 1,
+          message: 'Team Member added Successfully...!'
         })
         .end();
     } catch (err) {
@@ -1132,6 +1187,122 @@ const cmsController = {
         status: 1,
         message: 'Testimonial Updated success'
       });
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  teamMemberList: async (req, res, next) => {
+    try {
+      let page, limit, offset;
+      if (req.query.page && req.query.page > 0) {
+        page = req.query.page;
+        limit = req.query.limit || Config.globalAdminLimit;
+        offset = (page - 1) * limit;
+      } else {
+        limit = Config.globalAdminLimit;
+        offset = 0;
+      }
+
+      const search = req.query?.search;
+      const teamMemberList = await cmsModel.getAllTeamMembers( limit, offset, search );
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: teamMemberList,
+          total_count: teamMemberList.length
+        })
+        .end();
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  updateTeamMember: async (req, res, next) => {
+    try {
+      const memberId = req.params.id;
+      if (!memberId) {
+        logError("Member_id is required");
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: "Member_id is required"
+          })
+          .end();
+      }
+
+      const { name, role, mobile, email, page_id, linkedin, twitter, facebook, whatsapp, status } = req.body;
+
+      const existingData = await cmsModel.checkTeamMember(memberId);
+
+      let teamMemberObj = {
+        name: name !== "" ? name : existingData.name,
+        role: role !== "" ? role : existingData.role,
+        mobile: mobile !== "" ? mobile : existingData.mobile,
+        email: email !== "" ? email : existingData.email,
+        page_id: page_id !== "" ? page_id : existingData.page_id,
+        linkedin: linkedin !== "" ? linkedin : existingData.linkedin,
+        twitter: twitter !== "" ? twitter : existingData.twitter,
+        facebook: facebook !== "" ? facebook : existingData.facebook,
+        whatsapp: whatsapp !== "" ? whatsapp : existingData.whatsapp,
+        status: status !== "" ? status : existingData.status,
+        updatedAt: new Date()
+      };
+
+      if (req.file) {
+        teamMemberObj = {
+          ...teamMemberObj,
+          old_image: existingData.profile_image,
+          profile_image: req.file?.filename
+            ? `${Config.download_url}/team_member_image/${req.file?.filename}`
+            : null,
+        };
+      }
+
+      await cmsModel.teamMemberUpdateOne(teamMemberObj, memberId);
+
+      res.status(200).json({
+        status: 1,
+        message: 'Member Updated successfully'
+      });
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  deleteTeamMember: async (req, res, next) => {
+    try {
+      let memberId = req.params.id;
+
+      await cmsModel.deleteTeamMember(memberId);
+      res
+        .status(200)
+        .json({
+          status: 1,
+          message: 'Team Member deleted'
+        })
+        .end();
     } catch (err) {
       logError(err);
       res
