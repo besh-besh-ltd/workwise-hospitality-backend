@@ -86,6 +86,10 @@ let store_query_message_upload_file = multer.diskStorage({
   }
 })
 
+const today = new Date();
+const tomorrow = new Date(today);
+const tomorrowString = tomorrow.toISOString().slice(0, 10); // Format as YYYY-MM-DD
+
 export const rfqSchemas = {
   create: Joi.object().keys({
     rfq_id: Joi.number().optional().allow('').allow(null),
@@ -99,7 +103,16 @@ export const rfqSchemas = {
       .max(15)
       .required()
       .regex(/^[0-9]*$/),
-    bid_end_date: Joi.string().optional().allow('').allow(null),
+    bid_end_date: Joi.string()
+    .optional()
+    .allow(null)
+    .allow('')
+    .custom((value, helpers) => {
+        if (value && new Date(value) <= tomorrow) {
+            return helpers.message(`bid_end_date must be greater than ${tomorrowString}`);
+        }
+        return value;
+    }),
     location: Joi.string().optional().allow('').allow(null),
     is_published: Joi.number().integer().min(0).max(1).required(),
     rfq_type: Joi.string().valid('firm', 'budgetary').allow('').allow(null),
@@ -121,7 +134,16 @@ export const rfqSchemas = {
       .max(15)
       .required()
       .regex(/^[0-9]*$/),
-    bid_end_date: Joi.string().required(),
+      bid_end_date: Joi.string()
+      .optional()
+      .allow(null)
+      .allow('')
+      .custom((value, helpers) => {
+          if (value && new Date(value) <= tomorrow) {
+              return helpers.message(`bid_end_date must be greater than ${tomorrowString}`);
+          }
+          return value;
+      }),
     location: Joi.string().required(),
     is_published: Joi.number().integer().min(0).max(1).required(),
     products: Joi.array().items(productItems).min(1).required(),

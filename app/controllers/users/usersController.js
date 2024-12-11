@@ -3304,19 +3304,22 @@ const UsersController = {
 
   getBuyerPrivateVendors: async (req, res, next) => {
     try {
-      const buyerId = req.user.id; // Getting buyerId from the authenticated user
+      const buyerId = req.user.id;
 
-      // Fetch the vendor details from the model
-      const data = await userModel.getBuyerPrivateVendors(buyerId);
+      const page = parseInt(req.query.page, 10) || 1;
+      const limit = parseInt(req.query.limit, 10) || 10;
+      
+      const data = await userModel.getBuyerPrivateVendors(buyerId, limit, page);
+      const count = await userModel.getBuyerPrivateVendorsCount(buyerId);
 
-      // Sending the response back to the client
       res.status(200).json({
         status: 1,
         message: 'Vendor details retrieved successfully.',
-        data: data
+        data,
+        count
       });
     } catch (error) {
-      next(error); // Pass the error to the error-handling middleware
+      next(error);
     }
   },
   buyerExcelUploadVendor: async (req, res, next) => {
