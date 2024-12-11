@@ -298,7 +298,7 @@ RfqRoutes.post('/tech-evaluation-cleared-vendors',
   rfqController.addtechEvaluationClearedVendors
 )
 
-RfqRoutes.get('/get-tech-evaluation-rfqs',
+RfqRoutes.post('/get-tech-evaluation-rfqs',
   passportSignIn,
   rfqController.getTechEvaluationRFQDetails
 )

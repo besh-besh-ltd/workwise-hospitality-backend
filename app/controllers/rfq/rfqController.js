@@ -5279,6 +5279,12 @@ getTechEvaluationRFQDetails: async (req, res) => {
   try {
     const user_id = req.user.id;    
 
+    let {rfq_no, project_id} = req.body;
+
+    if(!project_id || project_id==-1){
+      project_id=null;
+    }
+
     // Validate input
     if (!user_id) {
       return res.status(400).json({
@@ -5287,7 +5293,9 @@ getTechEvaluationRFQDetails: async (req, res) => {
       });
     }
 
-    const response = await rfqModel.getTechEvaluationRFQDetails(user_id);
+
+    const response = await rfqModel.getTechEvaluationRFQDetails(user_id, rfq_no, project_id);
+
 
     res
       .status(200)

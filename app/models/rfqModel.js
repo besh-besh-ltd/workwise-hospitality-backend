@@ -3719,7 +3719,7 @@ rfq_project_exist: async (project_id,user_id) => {
             });
     });
 },
-getTechEvaluationRFQDetails: (user_id) => {
+getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
   return new Promise(async (resolve, reject) => {
     // console.log("Fetching RFQ details...");
 
@@ -3763,6 +3763,19 @@ getTechEvaluationRFQDetails: (user_id) => {
         });
         return;
       }
+
+      // filters for the query as rfq_no and project_id3
+      console.log(typeof rfq_no, typeof project_id);
+      let filtersQuery='';
+      if (rfq_no) {
+        filtersQuery = `AND RFQ.rfq_no::text LIKE '%$3%'`;
+      }
+    
+      if (project_id) {
+          filtersQuery += ` AND RFQ.project_id = $4`;
+      }
+
+    console.log(rfq_no,project_id);
       // Step 3: Fetch RFQ products and RFQ Details
       const fetchDetailsQuery = `
         SELECT RFQ.*,
@@ -3815,13 +3828,14 @@ getTechEvaluationRFQDetails: (user_id) => {
         WHERE RFQ.created_by = $1 
           AND RFQ.is_published = 1
           AND RFQ.id = ANY($2)
+          ${filtersQuery==='' ? `` : filtersQuery }
         GROUP BY RFQ.id, TP.name
         HAVING COUNT(RFQ_T_E.id) > 0
         ORDER BY RFQ.id DESC;
       `;
 
 
-      const rfqDetails = await db.query(fetchDetailsQuery, [user_id, rfqIds]);
+      const rfqDetails = await db.query(fetchDetailsQuery, [user_id, rfqIds, rfq_no, project_id]);
 
       resolve({
         status: 1,
