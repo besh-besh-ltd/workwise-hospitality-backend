@@ -5038,6 +5038,51 @@ listQueries: async (req, res) => {
 //   }
 // },
 
+
+addClauseUsingFile : async (req, res) => {
+  try {
+
+    // converting the excel into json object
+    let file = req.file;
+    const workbook = xlsx.readFile(file.path);
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    let jsonData = xlsx.utils.sheet_to_json(sheet);
+ 
+    // if there is no Clauses in the excel file.
+    if(jsonData.length < 1){
+      return res.status(200).json({
+        status: 0,
+        message: "List of Clauses is empty",
+      });
+    }
+
+    const { rfq_id,rfq_product_id, } = req.body;
+    let errors=[];
+    for await(const[index,value] of jsonData.entries()){
+      const clause_text = (value['List of Clauses'] || "").trim();
+      const result = await rfqModel.addClause(rfq_id, rfq_product_id, clause_text,[]);
+      if(!result.status){
+        errors.push({
+          Row:index,
+          error:result.message
+        })
+      }
+    }
+
+    res.status(200).json({status:1, data:"Clause added Successfully", erros:errors}).end();
+
+  } catch (error) {
+    // console.log("controller error")
+    console.error("Error in addClause:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error in adding clauses to technical evaluation.",
+      error: error.message,
+    });
+  }
+},
+
 addClause: async (req, res) => {
   try {
     // console.log("add clause controller");
