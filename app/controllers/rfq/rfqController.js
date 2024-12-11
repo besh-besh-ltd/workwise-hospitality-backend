@@ -1972,7 +1972,7 @@ const rfqController = {
         offset = 0;
       }
 
-      let {project_id,sort,reverse_auction,rfq_type} = req.body;
+      let {project_id,sort,reverse_auction,rfq_type,rfq_no} = req.body;
       if(project_id==-1){
         project_id=null;
       }
@@ -1984,15 +1984,15 @@ const rfqController = {
       }
 
 
-      const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort,reverse_auction,rfq_type);
+      const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort,reverse_auction,rfq_type,rfq_no);
 
-      let count = await rfqModel.getBuyerRfqCount(user_id);
+      let count = await rfqModel.getBuyerRfqCount(user_id,project_id,rfq_type,reverse_auction,rfq_no);
       res
         .status(200)
         .json({
           status: 1,
           data: listRfq,
-          total_items: count.length
+          total_items: count
         })
         .end();
     } catch (error) {
@@ -5286,6 +5286,12 @@ getTechEvaluationRFQDetails: async (req, res) => {
 
     const user_id = req.user.id;    
 
+    let {rfq_no, project_id} = req.body;
+
+    if(!project_id || project_id==-1){
+      project_id=null;
+    }
+
     // Validate input
     if (!user_id) {
       return res.status(400).json({
@@ -5294,7 +5300,9 @@ getTechEvaluationRFQDetails: async (req, res) => {
       });
     }
 
-    const response = await rfqModel.getTechEvaluationRFQDetails(user_id);
+
+    const response = await rfqModel.getTechEvaluationRFQDetails(user_id, rfq_no, project_id);
+
 
     res
       .status(200)

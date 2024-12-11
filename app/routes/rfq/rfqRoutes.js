@@ -302,8 +302,7 @@ RfqRoutes.post('/tech-evaluation-cleared-vendors',
   rfqController.addtechEvaluationClearedVendors
 )
 
-// this endpoint needs query( ?token=123123123 ) in the endpoint from the frontend side.
-RfqRoutes.get('/get-tech-evaluation-rfqs',
+RfqRoutes.post('/get-tech-evaluation-rfqs',
   passportSignIn,
   rfqController.getTechEvaluationRFQDetails
 )
