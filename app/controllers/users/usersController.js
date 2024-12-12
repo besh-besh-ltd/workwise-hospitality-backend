@@ -2623,19 +2623,12 @@ const UsersController = {
     try {
       if (req.user.user_type == 2) {
         // Buyer
-        let active_rfqs = await rfqModel.getAllRfqByUser(req.user.id, 1);
-        data.active_rfqs = parseInt(active_rfqs.count);
-        let completed_rfqs = await rfqModel.getAllRfqByUser(req.user.id, 2);
-        data.completed_rfqs = parseInt(completed_rfqs.count);
-        let pending_responses = await rfqModel.getPendingResponseCount(
-          req.user.id,
-          1
-        );
-        data.pending_responses =
-          parseInt(active_rfqs.count) - parseInt(pending_responses.count);
-        data.pending_responses =
-          data.pending_responses < 0 ? 0 : data.pending_responses;
-        data.quote_received = parseInt(pending_responses.count);
+        const active_rfqs = await rfqModel.getAllRfqByUser( req.user.id, 1 );
+        const completed_rfqs = await rfqModel.getAllRfqByUser( req.user.id, 2 );
+        const closed_rfqs = await rfqModel.getAllRfqByUser( req.user.id, 0 );
+        const active_quotes = await rfqModel.getActiveQuotes( req.user.id, 1 );
+        const pending_responses = Math.max(parseInt(active_rfqs.count) - parseInt(active_quotes.count), 0);
+
          // getting the data of all rfqs of a buyer
          let page, limit, offset;
          if (req.body.page && req.body.page > 0) {
@@ -2658,10 +2651,7 @@ const UsersController = {
            reverse_auction=null;
          }
 
-
-
-
-     const rfq_data_for_notificaton = await rfqModel.getAllBuyerRfq(limit, offset, user_id, project_id, sort, reverse_auction, rfq_type);
+        const rfq_data_for_notificaton = await rfqModel.getAllBuyerRfq(limit, offset, user_id, project_id, sort, reverse_auction, rfq_type);
 
         let temp_rfqs = rfq_data_for_notificaton.map((item) => {
           delete item.products;
@@ -2682,9 +2672,7 @@ const UsersController = {
           return item;
         });
 
-        let recente_received_quotes = await rfqModel.getRecentQuotes(
-          req.user.id
-        );
+        let recente_received_quotes = await rfqModel.getRecentQuotes( req.user.id );
         recente_received_quotes = recente_received_quotes.filter(
           (item) => item.timestamp != null && item.created_by != null
         );
@@ -2734,12 +2722,19 @@ const UsersController = {
           };
         });
 
-        data.notificaiton_data = readable_notification_date_data;
         let rfq_data = await rfqModel.getAllBuyerRfq(limit, offset, user_id, project_id, sort, reverse_auction, rfq_type)
-        data.rfq_data = rfq_data;
-
         let cost = await rfqModel.getAllRfqCost(req.user.id, 2);
-        data.savings = parseInt(cost.total_price_formatted * 0.05);
+
+        data = {
+          active_rfqs: parseInt(active_rfqs.count),
+          completed_rfqs: parseInt(completed_rfqs.count),
+          closed_rfqs: parseInt(closed_rfqs.count),
+          pending_responses,
+          quotes_received: parseInt(active_quotes.count),
+          notificaiton_data: readable_notification_date_data,
+          rfq_data,
+          savings: parseInt(cost.total_price_formatted * 0.05)
+        }
       } else if (req.user.user_type == 3) {
         // Vendor
 

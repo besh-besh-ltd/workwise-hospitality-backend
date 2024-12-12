@@ -1491,7 +1491,7 @@ LIMIT $5 OFFSET $4;`,
     return new Promise(function (resolve, reject) {
       db.query(
         `UPDATE tbl_rfq
-        SET status = ${parseInt(2)}, updated_by = ${user_id}
+        SET status = ${parseInt(0)}, updated_by = ${user_id}
         WHERE id=$1 RETURNING *`,
         [id]
       )
@@ -2050,7 +2050,7 @@ WHERE row_num_by_name_category = 1
     return new Promise(function (resolve, reject) {
       db.query(
         `SELECT DISTINCT (rfq_id) FROM tbl_rfq_product_vendors 
-        left join tbl_rfq on tbl_rfq.id = tbl_rfq_product_vendors.rfq_id WHERE user_id = $1 and tbl_rfq.status = 2 and tbl_rfq.is_published = 1`,
+        left join tbl_rfq on tbl_rfq.id = tbl_rfq_product_vendors.rfq_id WHERE user_id = $1 and tbl_rfq.status = 0 and tbl_rfq.is_published = 1`,
         [vendorId]
       )
         .then(function (data) {
@@ -2091,10 +2091,14 @@ WHERE row_num_by_name_category = 1
         });
     });
   },
-  getPendingResponseCount: async (user_id, status) => {
+  getActiveQuotes: async (user_id, status) => {
     return new Promise(function (resolve, reject) {
       db.one(
-        `SELECT count(*) FROM "tbl_rfq" tr JOIN "tbl_quotes" tq on tr.id = tq.rfq_id where tr.created_by = $1 and tr.status = $2 and tr.is_published = 1 and tr.id = tq.rfq_id`,
+        `SELECT count(*) FROM "tbl_rfq" tr 
+         JOIN "tbl_quotes" tq on tr.id = tq.rfq_id 
+         WHERE tr.created_by = $1 
+          AND tr.status = $2 
+          AND tr.is_published = 1`,
         [user_id, status]
       )
         .then(function (data) {
