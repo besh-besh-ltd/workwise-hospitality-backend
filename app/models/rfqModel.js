@@ -1491,7 +1491,7 @@ LIMIT $5 OFFSET $4;`,
     return new Promise(function (resolve, reject) {
       db.query(
         `UPDATE tbl_rfq
-        SET status = ${parseInt(0)}, updated_by = ${user_id}
+        SET status = ${parseInt(2)}, updated_by = ${user_id}
         WHERE id=$1 RETURNING *`,
         [id]
       )
@@ -2050,7 +2050,7 @@ WHERE row_num_by_name_category = 1
     return new Promise(function (resolve, reject) {
       db.query(
         `SELECT DISTINCT (rfq_id) FROM tbl_rfq_product_vendors 
-        left join tbl_rfq on tbl_rfq.id = tbl_rfq_product_vendors.rfq_id WHERE user_id = $1 and tbl_rfq.status = 0 and tbl_rfq.is_published = 1`,
+        left join tbl_rfq on tbl_rfq.id = tbl_rfq_product_vendors.rfq_id WHERE user_id = $1 and tbl_rfq.status = 2 and tbl_rfq.is_published = 1`,
         [vendorId]
       )
         .then(function (data) {
@@ -2076,39 +2076,95 @@ WHERE row_num_by_name_category = 1
         });
     });
   },
+  getRfqChartData: async (user_id, chartFilter, start_date, end_date) => {
+    const dateQ = ['past7days', 'currentMonth'].includes(chartFilter)
+    const query = `
+        SELECT 
+            ${dateQ ? `DATE(tr.timestamp) AS date,`
+        : `TO_CHAR(timestamp, 'YYYY-MM') AS month,`}
+            count(*) FILTER (WHERE tr.status = 1) AS new_rfqs,
+            count(*) FILTER (
+                WHERE tr.status = 2
+                OR (
+                    (tr.bid_end_date IS NOT NULL AND tr.bid_end_date != '' 
+                    AND DATE(tr.bid_end_date) < now())
+                )
+            ) AS closed_rfqs,
+            count(*) FILTER (
+                WHERE tr.status = 1
+                AND tr.id IN (
+                    SELECT trp.rfq_id
+                    FROM tbl_rfq_products trp
+                    LEFT JOIN tbl_quote_finalization tqf 
+                        ON trp.product_id = tqf.product_id
+                        AND trp.variant = tqf.variant
+                    GROUP BY trp.rfq_id
+                    HAVING count(trp.product_id) = count(tqf.product_id)
+                )
+            ) AS completed_rfqs,
+            count(*) FILTER (
+                WHERE tr.status = 1
+                AND EXISTS (
+                    SELECT 1 
+                    FROM tbl_quotes tq 
+                    WHERE tq.rfq_id = tr.id
+                )
+            ) AS quotes_received
+        FROM tbl_rfq tr
+        WHERE tr.created_by = $1 
+          AND tr.is_published = 1
+          AND tr.timestamp BETWEEN $3::timestamp AND $4::timestamp
+        ${dateQ ? `GROUP BY DATE(tr.timestamp)
+                  ORDER BY date;`
+        : `GROUP BY TO_CHAR(timestamp, 'YYYY-MM')
+          ORDER BY month;`}`; 
+
+    try {
+      const formattedStartDate = new Date(start_date).toISOString();
+      const formattedEndDate = new Date(end_date).toISOString();
+      const values = [user_id, 1, formattedStartDate, formattedEndDate]; 
+
+      const result = await db.query(query, values);
+      return result;
+    } catch (error) {
+      throw new Error(error);
+    }
+  },
   getAllRfqByUser: async (user_id, status) => {
-    return new Promise(function (resolve, reject) {
-      db.one(
-        `SELECT count(id) FROM tbl_rfq WHERE created_by = $1 AND status = $2 AND is_published = 1`,
-        [user_id, status]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
+    const query = `
+      SELECT count(*) 
+      FROM tbl_rfq 
+      WHERE created_by = $1 
+        AND status = $2 
+        AND is_published = 1      
+    `;    
+
+    try {
+      let values = [user_id, status]; 
+
+      const result = await db.one(query, values);
+      return result;
+    } catch (error) {
+      throw new Error(error);
+    }
   },
   getActiveQuotes: async (user_id, status) => {
-    return new Promise(function (resolve, reject) {
-      db.one(
-        `SELECT count(*) FROM "tbl_rfq" tr 
+    const query = `
+      SELECT count(*) FROM "tbl_rfq" tr 
          JOIN "tbl_quotes" tq on tr.id = tq.rfq_id 
          WHERE tr.created_by = $1 
           AND tr.status = $2 
-          AND tr.is_published = 1`,
-        [user_id, status]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
+          AND tr.is_published = 1    
+    `; 
+
+    try {
+      let values = [user_id, status]; 
+
+      const result = await db.one(query, values);
+      return result;
+    } catch (error) {
+      throw new Error(error);
+    }    
   },
   getVendorReviews: async (vendorId) => {
     return new Promise(function (resolve, reject) {
