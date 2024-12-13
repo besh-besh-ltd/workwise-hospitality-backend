@@ -327,6 +327,13 @@ RfqRoutes.get('/report/rfq-product-wise',
   rfqController.rfqProductWiseReport
 )
 
+//  product wise audit report
+RfqRoutes.get('/report/rqf-project-wise',
+  passportSignIn,
+  rfqController.projectWiseReport
+)
+
+
 
 
 export default RfqRoutes;

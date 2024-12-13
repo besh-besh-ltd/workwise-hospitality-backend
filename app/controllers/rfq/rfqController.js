@@ -5387,5 +5387,32 @@ rfqProductWiseReport: async (req, res) => {
     });
   }
 },
+
+
+projectWiseReport: async (req, res) => {
+  try {
+    const { projectId, startDate, endDate } = req.query;
+    const userId = req.user.id;
+    console.log("Start Date, End Date, ProjectId:", startDate, endDate, projectId);
+
+    const rfqDetails = await rfqModel.projectReport(projectId, startDate, endDate);
+
+ 
+
+    res.status(200).json(rfqDetails);
+  } catch (error) {
+    console.error("Error fetching project report:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Error processing RFQ details',
+      error: error.toString()
+    });
+  }
+}
+
+
+
+
+
 };
 export default rfqController;

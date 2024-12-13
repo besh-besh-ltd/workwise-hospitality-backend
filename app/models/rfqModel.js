@@ -4135,6 +4135,23 @@ ORDER BY T.timestamp DESC;
   });
 },
 
+// project report including all rfq quote etc
+projectReport: async (projectId, startDate, endDate) => {
+  return new Promise(function (resolve, reject) {
+
+
+        // Then, retrieve RFQs for the project within the date range
+        const query = `
+`
+
+      db.query(query, [projectId, startDate, endDate])
+      .then(data => resolve(data))
+      .catch(err => {
+          let error = new Error(err);
+          reject(error);
+      });
+  });
+},
 
 }
 export default rfqModel;
