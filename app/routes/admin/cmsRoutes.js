@@ -1,7 +1,5 @@
 import { Router } from 'express';
-
 import cmsController from '../../controllers/admin/cmsController.js';
-
 import { validateDbBody } from '../../validations/dbValidation/cmsDbValidation.js';
 
 import {
@@ -12,6 +10,7 @@ import {
 } from '../../validations/paramValidation/cmsValidation.js';
 import passport from '../../middleware/passport.js';
 const passportSignIn = passport.authenticate('jwtAdm', { session: false });
+
 
 const cmsRoutes = Router();
 
@@ -241,6 +240,44 @@ cmsRoutes.get(
   '/analytics-dashboard',
   passportSignIn,
   cmsController.analytics_dashboard
+);
+
+// team-member routes
+
+cmsRoutes.get(
+  '/team-member-list',
+  cmsController.teamMemberList
+);
+
+cmsRoutes.get(
+  '/team-member-detail/:id',
+  passportSignIn,
+  validateDbBody.team_member_id_exists,
+  cmsController.teamMemberDetail
+);
+
+cmsRoutes.post(
+  '/create-team-member',
+  passportSignIn,
+  schema_posts.create_team_member,
+  cmsController.createTeamMember
+);
+
+cmsRoutes.put(
+  '/update-team-member/:id',
+  passportSignIn,
+  validateParam(schemas.id),
+  validateDbBody.team_member_id_exists,
+  schema_posts.create_team_member,
+  cmsController.updateTeamMember
+);
+
+cmsRoutes.delete(
+  '/delete-team-member/:id',
+  passportSignIn,
+  validateParam(schemas.id),
+  validateDbBody.team_member_id_exists,
+  cmsController.deleteTeamMember
 );
 
 export default cmsRoutes;
