@@ -2193,17 +2193,67 @@ WHERE row_num_by_name_category = 1
       FROM tbl_rfq 
       WHERE created_by = $1 
         AND status = $2 
-        AND is_published = 1      
-    `;    
+        AND is_published = 1     
+    `;
 
     try {
-      let values = [user_id, status]; 
+      let values = [user_id, status];
 
       const result = await db.one(query, values);
       return result;
     } catch (error) {
       throw new Error(error);
     }
+  },
+  getCompletedRfqs: async (user_id) => {
+    const query = `
+      SELECT count(*)
+      FROM tbl_rfq tr
+      WHERE tr.status = 1
+        AND tr.created_by = $1
+        AND tr.id IN (
+          SELECT trp.rfq_id
+          FROM tbl_rfq_products trp
+          LEFT JOIN tbl_quote_finalization tqf
+            ON trp.product_id = tqf.product_id
+          AND trp.variant = tqf.variant
+          GROUP BY trp.rfq_id
+          HAVING count(trp.product_id) = count(tqf.product_id)
+        );
+    `;
+
+    try {
+      let values = [user_id]; 
+
+      const result = await db.one(query, values);
+      return result;
+    } catch (error) {
+      throw new Error(error);
+    }    
+  },
+  getClosedRfqs: async (user_id) => {
+    const query = `
+      SELECT count(*)
+      FROM tbl_rfq tr        
+      WHERE tr.created_by = $1
+        AND (
+          tr.status = 2
+          OR (
+            tr.bid_end_date IS NOT NULL 
+            AND tr.bid_end_date != '' 
+            AND DATE(tr.bid_end_date) < now()
+          )
+        );
+    `;
+
+    try {
+      let values = [user_id]; 
+
+      const result = await db.one(query, values);
+      return result;
+    } catch (error) {
+      throw new Error(error);
+    }    
   },
   getActiveQuotes: async (user_id, status) => {
     const query = `
