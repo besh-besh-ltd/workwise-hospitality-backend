@@ -1883,13 +1883,70 @@ WHERE row_num_by_name_category = 1
         });
     });
   },
+
+  searchVendorsByName: async (buyerId, vendor_name) => {
+    let q = `
+    SELECT *
+    FROM (
+        SELECT 
+            tu.id AS vendor_id, 
+            tu.name AS vendor_name, 
+            tu.email, 
+            tu.mobile, 
+            tu.organization_name AS company_name,
+            tu.address,
+            CASE
+                WHEN bvm.vendor_id IS NOT NULL THEN 1
+                ELSE 0
+            END AS is_linked_with_buyer
+        FROM 
+            tbl_users tu
+        LEFT JOIN 
+            tbl_company tc ON tc.user_id = tu.id
+        LEFT JOIN 
+            tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = $1
+        LEFT JOIN 
+            tbl_location_cities lc ON tu.city = lc.id
+        LEFT JOIN 
+            tbl_location_states ls ON tu.state = ls.id
+        WHERE 
+            tu.user_type = 3 -- Vendor user types
+            AND tu.status = 1 -- Active vendors
+            AND tu.is_deleted = 0 -- Not deleted vendors
+            AND tu.email IS NOT NULL -- Vendors with email
+            AND (
+                tc.is_private = 0 -- Public vendors
+                OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL) -- Privately mapped vendors for this buyer
+            )
+            ${vendor_name ? `AND (
+                to_tsvector('english', tu.name) @@ plainto_tsquery('english', $2)
+                OR (char_length($2) = 1 AND similarity(tu.name, $2) > 0)
+                OR (char_length($2) > 1 AND similarity(tu.name, $2) > 0.1)
+            )` : ''}
+    ) AS distinct_vendors
+    ORDER BY 
+        is_linked_with_buyer DESC, RANDOM();
+    `;
+  
+    const values = vendor_name ? [buyerId, vendor_name] : [buyerId];
+
+    return new Promise(function (resolve, reject) {
+      db.query(q, values)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
   getVendorApprovedBy: async (user_id) => {
     let q = `SELECT tbl_vendor_approve.id, tbl_vendor_approve.vendor_approve as vendor_approve
     FROM tbl_vendorapprove_user_mapping
     LEFT JOIN tbl_vendor_approve on tbl_vendor_approve.id = tbl_vendorapprove_user_mapping.vendor_approve_id
     WHERE user_id = ${user_id}`;
-
-    console.log('QUERY======', q);
 
     return new Promise(function (resolve, reject) {
       db.query(q)
@@ -1930,7 +1987,7 @@ WHERE row_num_by_name_category = 1
         const statePromise = db
           .query(stateQuery, [stateName])
           .then(function (stateResult) {
-            console.log('stateResult:', stateResult); // Log stateResult to inspect its structure
+
             if (stateResult?.length > 0) {
               const stateId = stateResult[0].id;
 

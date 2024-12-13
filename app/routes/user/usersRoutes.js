@@ -247,7 +247,17 @@ UsersRoutes.put(
 )
 
 
+UsersRoutes.get(
+  '/dashboard-top-vendors-and-products',
+  passportSignIn,
+  UsersController.getTopVendorsandProducts
+)
 
+UsersRoutes.post(
+  '/dashboard-search-vendor',
+  passportSignIn,
+  UsersController.searchVendorsByName
+)
 
 
 export default UsersRoutes;

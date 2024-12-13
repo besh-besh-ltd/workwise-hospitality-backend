@@ -3658,7 +3658,72 @@ const UsersController = {
         })
         .end();
     }
-  }
+  },
+
+  getTopVendorsandProducts: async (req, res) => {
+    try {
+      
+      const user_id = req.user.id;
+
+      const vendorData = await vendorModel.topVendorsWithProducts(user_id);
+      const productData = await productModel.topProductsWithVendors(user_id);
+
+      res.status(200)
+      .json({
+        status: 1,
+        data:{
+          vendorData,
+          productData
+        }
+      })
+
+
+    } catch (error) {
+      logError("Error in getting top vendors and products for user dashboard: ", error);
+      res.status(400)
+      .json({
+        status: 3,
+        message: Config.errorText.value
+      })
+      .end();
+    }
+  },
+
+  searchVendorsByName: async (req, res) => {
+
+    try {  
+      const buyer_id = req.user.id;
+      const {vendor_name} = req.body;
+
+      if(vendor_name.length<3){
+        return res.status(200)
+        .json({
+          status: 1,
+          data: []
+        })
+        .end();
+      }
+
+      const data = await rfqModel.searchVendorsByName(buyer_id, vendor_name);
+
+      return res.status(200)
+      .json({
+        status: 1,
+        data
+      })
+      .end();
+     
+    } catch (error) {
+      logError("Error in searching vendors for user dashboard: ", error);
+      return res.status(400)
+      .json({
+        status: 3,
+        message: Config.errorText.value
+      })
+      .end();
+    }
+  },
+
 
 };
 
