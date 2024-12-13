@@ -12,6 +12,7 @@ const productExportImageUploadPath = process.env.PRODUCT_FILE || null;
 const vendorApproveImageUploadPath = process.env.VENDOR_APPROVE_IMAGE || null;
 const mediaImageUploadPath = process.env.MEDIA_IMAGE || null;
 const testimonialImageUploadPath = process.env.TESTIMONIAL_IMAGE || null;
+const teamMemberImageUploadPath = process.env.TEAM_MEMBER_IMAGE || null;
 const companyImageUploadPath = process.env.COMPANY_IMAGE || null;
 const managementImageUploadPath = process.env.MANAGEMENT_IMAGE || null;
 const bannerImageUploadPath = process.env.BANNER_IMAGE || null;
@@ -87,6 +88,13 @@ if (
     testimonialImageUploadPath == null)
 ) {
   throw new Error("Please set testimonial image upload path in env file");
+}
+if (
+  env == "development" &&
+  (teamMemberImageUploadPath == undefined ||
+    teamMemberImageUploadPath == null)
+) {
+  throw new Error("Please set team_memebrs image upload path in env file");
 }
 if (
   env == "development" &&
@@ -191,6 +199,10 @@ const config = {
       env == "development"
         ? testimonialImageUploadPath
         : "/application/de_technico/web-backend/des-technico/app/uploads/testimonial_image",
+    team_member_image:
+      env == "development"
+        ? teamMemberImageUploadPath
+        : "/application/de_technico/web-backend/des-technico/app/uploads/team_member_image",
     product_image:
       env == "development"
         ? productImageUploadPath
@@ -246,7 +258,7 @@ const config = {
   errorText: {
     value: "An internal error has occurred. Please try again later.",
   },
-  errorFileName: `./app/storage/internal/error_log_${dateFormat(
+  errorFileName: `./app/storage/logs/error_log_${dateFormat(
     new Date(),
     "mm_yyyy"
   )}.txt`,

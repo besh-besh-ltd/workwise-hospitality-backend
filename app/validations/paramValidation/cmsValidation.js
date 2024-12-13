@@ -79,6 +79,16 @@ let store_testimonial_images = multer.diskStorage({
     callback(null, new_file_name);
   }
 });
+let store_team_member_images = multer.diskStorage({
+  destination: function (req, file, callback) {
+    callback(null, Config.upload.team_member_image);
+  },
+  filename: function (req, file, callback) {
+    let extention = path.extname(file.originalname);
+    let new_file_name = +new Date() + '-' + uuidv4() + extention;
+    callback(null, new_file_name);
+  }
+});
 let store_blog_images = multer.diskStorage({
   destination: function (req, file, callback) {
     callback(null, Config.upload.blog_image);
@@ -266,6 +276,29 @@ const schemas = {
       .regex(/^[0|1]$/, 'numeric values only'),
     // image: Joi.string().optional().allow(null).allow(''),
     created_image: Joi.string().optional().allow(null).allow('')
+  }),
+  create_team_member: Joi.object().keys({
+    name: Joi.string().trim().required(),
+    role: Joi.string().trim().required(),
+    mobile: Joi.string()
+      .pattern(/^[0-9]+$/)  
+      .min(10)  
+      .max(15)  
+      .optional()
+      .allow(null, ''),
+    email: Joi.string().email().optional().allow(null, ''),
+    profile_image: Joi.string().optional().allow(null).allow(''),
+    page_id: Joi.number().required(),
+    linkedin: Joi.string().optional().allow(null).allow(''),
+    facebook: Joi.string().optional().allow(null).allow(''),
+    twitter: Joi.string().optional().allow(null).allow(''),
+    whatsapp: Joi.string()
+      .pattern(/^[0-9]+$/)  
+      .min(10)  
+      .max(15)  
+      .optional()
+      .allow(null, ''),    
+    status: Joi.number().valid(0, 1).optional().default(1)
   }),
   create_blog: Joi.object().keys({
     title: Joi.string().trim().required(),
@@ -1537,6 +1570,72 @@ const schema_posts = {
         }
 
         const result = schemas.create_testimonial.validate(req.body, {
+          abortEarly: false
+        });
+
+        if (result.error) {
+          const err_msg = {};
+          for (const detail of result.error.details) {
+            const key = detail.context.key;
+            const val = detail.message;
+            err_msg[key] = val;
+          }
+          const return_err = { status: 2, errors: err_msg };
+          return res.status(400).json(return_err);
+        } else {
+          const error = {};
+          const errCount = 0;
+          if (errCount > 0) {
+            return res.status(400).json({
+              status: 2,
+              errors: error
+            });
+          } else {
+            next();
+          }
+        }
+      });
+    } catch (err) {
+      logError(err);
+      res.status(400).json({
+        status: 3,
+        message: 'server error'
+      });
+    }
+  },
+  create_team_member: async (req, res, next) => {
+    try {
+      let upload = multer({
+        storage: store_team_member_images,
+        limits: {
+          fileSize: 2000000 // Compliant: 8MB
+        },
+        fileFilter: (req, file, cb) => {
+          let ext = path.extname(file.originalname).toLowerCase();
+
+          if (
+            ext == '.png' ||
+            ext == '.jpg' ||
+            ext == '.jpeg' ||
+            ext == '.webp'
+          ) {
+            cb(null, true);
+          } else {
+            cb(null, false);
+            return cb('Only .png, .jpg, .jpeg format allowed!', null);
+          }
+        }
+      }).single('profile_image')
+      upload(req, res, async (err) => {
+        console.log(err)
+        if (err) {
+          return res.status(400).json({
+            status: 2,
+            message: err.message
+          });
+        }
+
+        const result = schemas.create_team_member.validate(req.body, {
           abortEarly: false
         });
 
