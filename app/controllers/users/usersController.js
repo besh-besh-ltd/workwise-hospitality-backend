@@ -2623,10 +2623,10 @@ const UsersController = {
     try {
       if (req.user.user_type == 2) {
         // Buyer
-        const active_rfqs = await rfqModel.getAllRfqByUser( req.user.id, 1 );
-        const completed_rfqs = await rfqModel.getAllRfqByUser( req.user.id, 2 );
-        const closed_rfqs = await rfqModel.getAllRfqByUser( req.user.id, 0 );
-        const active_quotes = await rfqModel.getActiveQuotes( req.user.id, 1 );
+        const active_rfqs = await rfqModel.getAllRfqByUser( user_id, 1 );
+        const closed_rfqs = await rfqModel.getClosedRfqs( user_id );
+        const completed_rfqs = await rfqModel.getCompletedRfqs( user_id );
+        const active_quotes = await rfqModel.getActiveQuotes( user_id, 1 );
         const pending_responses = Math.max(parseInt(active_rfqs.count) - parseInt(active_quotes.count), 0);
 
          // getting the data of all rfqs of a buyer
