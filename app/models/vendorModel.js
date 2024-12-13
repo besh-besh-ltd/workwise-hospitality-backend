@@ -521,6 +521,49 @@ const vendorModel = {
           reject(error);
         });
     });
+  },
+
+  topVendorsWithProducts: async (userId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `
+          SELECT 
+              p.user_id, 
+              u.name AS name,
+              u.email AS email,
+              u.mobile AS mobile,
+              u.address AS address,
+              COUNT(DISTINCT (pr.name, c.id))::INT AS product_count
+          FROM tbl_rfq_product_vendors p
+          JOIN tbl_rfq r
+              ON r.id = p.rfq_id
+          JOIN tbl_product pr
+              ON pr.id = p.product_id
+          JOIN tbl_product_categories pc
+              ON pc.product_id = pr.id   
+          JOIN tbl_category c
+              ON c.id = pc.category_id
+          JOIN tbl_users u
+              ON u.id = p.user_id     
+          WHERE 
+              r.created_by = $1 
+              AND c.parent_id = 0
+          GROUP BY 
+              p.user_id, u.name, u.email, u.mobile, u.address
+          ORDER BY 
+              product_count DESC
+          LIMIT 10;
+        `
+        , [userId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
   }
 };
 
