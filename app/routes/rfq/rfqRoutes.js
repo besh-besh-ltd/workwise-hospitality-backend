@@ -238,6 +238,14 @@ RfqRoutes.post('/magic-search-rfq-create',
 //   rfqController.addTechnicalEveluation 
 // )
 
+// to add clause using file.
+RfqRoutes.post('/add-clause-using-file',
+  passportSignIn,
+  schema_posts.clauseFileUpload,
+  validateBody(rfqSchemas.addClauseUsingFile),
+  rfqController.addClauseUsingFile
+)
+
 RfqRoutes.post('/add-clause',
   passportSignIn,
   validateBody(rfqSchemas.addClause),

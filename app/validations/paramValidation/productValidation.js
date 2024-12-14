@@ -53,6 +53,17 @@ let store_magic_search_file = multer.diskStorage({
   }
 });
 
+let store_add_clause_file = multer.diskStorage({
+  destination: function (req, file, callback) {
+    callback(null, Config.upload.add_clause_file);
+  },
+  filename: function (req, file, callback) {
+    var extention = path.extname(file.originalname);
+    var new_file_name = +new Date() + '-' + uuidv4() + extention;
+    callback(null, new_file_name);
+  }
+});
+
 var validatingImage = (schema) => {
   return (req, res, next) => {
     const result = Joi.validate(req.body, schema, {
@@ -824,6 +835,48 @@ const schema_posts = {
     try {
       let upload = multer({
         storage: store_magic_search_file,
+        limits: {
+          fileSize: 2000000 // Compliant: 8MB
+        },
+        fileFilter: (req, file, cb) => {
+          let ext = path.extname(file.originalname).toLowerCase();
+
+          if ('.xlsx') {
+            cb(null, true);
+          } else {
+            cb(null, false);
+            return cb('Only .xlsx format allowed!', null);
+          }
+        }
+      }).single('file');
+      upload(req, res, async function (err) {
+        if (err) {
+          let data = {};
+          data.file = err;
+          res
+            .status(400)
+            .json({
+              status: 2,
+              errors: data
+            })
+            .end();
+        } else {
+          next();
+        }
+      });
+    } catch (err) {
+      logError(err);
+      res.status(400).json({
+        status: 3,
+        message: 'server error'
+      });
+    }
+  },
+
+  clauseFileUpload : async (req, res, next) => {
+    try {
+      let upload = multer({
+        storage: store_add_clause_file,
         limits: {
           fileSize: 2000000 // Compliant: 8MB
         },
