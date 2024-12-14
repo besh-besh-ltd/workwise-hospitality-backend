@@ -2624,6 +2624,7 @@ const UsersController = {
     try {
       if (req.user.user_type == 2) {
         // Buyer
+        const total_rfqs = await rfqModel.getAllRfqByUser( user_id );
         const active_rfqs = await rfqModel.getAllRfqByUser(user_id, 1);
         const closed_rfqs = await rfqModel.getClosedRfqs(user_id);
         const completed_rfqs = await rfqModel.getCompletedRfqs(user_id);
@@ -2727,6 +2728,7 @@ const UsersController = {
         let cost = await rfqModel.getAllRfqCost(req.user.id, 2);
 
         data = {
+          total_rfqs: parseInt(total_rfqs.count),
           active_rfqs: parseInt(active_rfqs.count),
           completed_rfqs: parseInt(completed_rfqs.count),
           closed_rfqs: parseInt(closed_rfqs.count),

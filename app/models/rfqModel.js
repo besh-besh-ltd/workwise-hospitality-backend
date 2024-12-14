@@ -2253,12 +2253,17 @@ WHERE row_num_by_name_category = 1
       throw new Error(error);
     }
   },
-  getAllRfqByUser: async (user_id, status) => {
+  getAllRfqByUser: async (user_id, status = null) => {
     const query = `
-      SELECT count(*) 
-      FROM tbl_rfq 
-      WHERE created_by = $1 
-        AND status = $2 
+      SELECT count(*)
+      FROM tbl_rfq
+      WHERE created_by = $1
+        ${ status ? `AND status = $2` : ``}
+        ${status == 1
+        ? `AND bid_end_date IS NOT NULL 
+            AND bid_end_date != '' 
+            AND DATE(bid_end_date) >= now()`
+        : ``}
         AND is_published = 1     
     `;
 
@@ -2323,11 +2328,14 @@ WHERE row_num_by_name_category = 1
   },
   getActiveQuotes: async (user_id, status) => {
     const query = `
-      SELECT count(*) FROM "tbl_rfq" tr 
-         JOIN "tbl_quotes" tq on tr.id = tq.rfq_id 
-         WHERE tr.created_by = $1 
-          AND tr.status = $2 
-          AND tr.is_published = 1    
+      SELECT count(*) FROM "tbl_rfq" tr
+         JOIN "tbl_quotes" tq on tr.id = tq.rfq_id
+         WHERE tr.created_by = $1
+          AND tr.status = $2
+          AND tr.is_published = 1
+          AND bid_end_date IS NOT NULL
+            AND bid_end_date != ''
+            AND DATE(bid_end_date) >= now()
     `; 
 
     try {
