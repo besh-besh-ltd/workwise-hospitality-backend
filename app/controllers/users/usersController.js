@@ -13,7 +13,8 @@ import {
   sendMail,
   notificationMail,
   convertSixDigit,
-  addDefaultNotifications
+  addDefaultNotifications,
+  getDateRange
 } from '../../helper/common.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 import dateFormat from 'dateformat';
@@ -66,7 +67,7 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 
 var global_subscription = '';
 
-const add_vendor_product= async (productDetails,vendorId) => {
+const add_vendor_product = async (productDetails, vendorId) => {
   try {
     let errors = {};
     let err = 0;
@@ -145,7 +146,7 @@ const UsersController = {
 
       let userObj = {
         name,
-        email:email.toLowerCase(),
+        email: email.toLowerCase(),
         mobile,
         organization_name,
         register_as,
@@ -214,25 +215,25 @@ const UsersController = {
           });
         } else {
 
-          
-        const spocList = await vendorModel.getSpocDetails(user_id[0].id)
 
-        // console.log(" user contoller 151 spoc console ", user_id[0]?.id, spocList)
-              
-        let mailRecipients = {
-          from: Config.webmasterMail,
-          subject: `Work Wise | Registration`,
-          html: dynamic_html
-        };
-  
-        if (spocList && spocList.length > 0) {
-          mailRecipients.to = spocList.map(spoc => spoc.email);
-          mailRecipients.cc = userObj.email;
-        } else {
-          mailRecipients.to = userObj.email;
-        }
-  
-        sendMail(mailRecipients);
+          const spocList = await vendorModel.getSpocDetails(user_id[0].id)
+
+          // console.log(" user contoller 151 spoc console ", user_id[0]?.id, spocList)
+
+          let mailRecipients = {
+            from: Config.webmasterMail,
+            subject: `Work Wise | Registration`,
+            html: dynamic_html
+          };
+
+          if (spocList && spocList.length > 0) {
+            mailRecipients.to = spocList.map(spoc => spoc.email);
+            mailRecipients.cc = userObj.email;
+          } else {
+            mailRecipients.to = userObj.email;
+          }
+
+          sendMail(mailRecipients);
 
 
           // sendMail({
@@ -267,8 +268,8 @@ const UsersController = {
         //activate default subscription
         let checkFreeSubscription =
           await subscriptionModel.checkFreeSubscription();
-          // added check for vendor
-          // if the user is vendor then it will not get into subscription check
+        // added check for vendor
+        // if the user is vendor then it will not get into subscription check
         if (checkFreeSubscription.length > 0 && register_as != '3') {
           const startDate = Moment(); // Replace with the actual start date
 
@@ -694,25 +695,25 @@ const UsersController = {
           dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
         }
 
-        
-          
+
+
         const spocList = await vendorModel.getSpocDetails(user_detail[0]?.id)
 
         // console.log(" user contoller 630 spoc console ", user_detail[0]?.id, spocList)
-              
+
         let mailRecipients = {
           from: Config.webmasterMail,
           subject: `Work wise | Forgot Password OTP`,
           html: dynamic_html
         };
-  
+
         if (spocList && spocList.length > 0) {
           mailRecipients.to = spocList.map(spoc => spoc.email);
           mailRecipients.cc = user_detail[0].email;
         } else {
           mailRecipients.to = user_detail[0].email;
         }
-  
+
         sendMail(mailRecipients);
 
         // sendMail({
@@ -1029,54 +1030,54 @@ const UsersController = {
     try {
 
       // if req.is_verified is true then there must be token in the query
-    if (!req.is_verified && !req.query.token) {
-      return res
-      .status(401)
-      .json({ 
-        status: 0,
-        message: 'Access denied. Please provide a valid token.' 
-      });
-  }
-  
+      if (!req.is_verified && !req.query.token) {
+        return res
+          .status(401)
+          .json({
+            status: 0,
+            message: 'Access denied. Please provide a valid token.'
+          });
+      }
+
       // if user try to uplaod file without login
-    // then we take token in the query and take the vendor
-  
-    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
+      // then we take token in the query and take the vendor
 
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
 
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
+      if (withoutLoginUserToken) {
+        // Check if the token exists
+        const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+
+        if (!tokenData || tokenData.length === 0) {
+          // Token is not valid
+          return res
+            .status(400)
+            .json({
+              status: 0,
+              message: 'Invalid or expired token!'
+            })
+            .end();
+        }
+
+        // Retrieve user data associated with the token
+        const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+
+        if (!userData || userData.length === 0) {
+          // User data is not valid
+          return res
+            .status(404)
+            .json({
+              status: 0,
+              message: 'User not found!'
+            })
+            .end();
+        }
+        // Remove password from user data
+        const { password, ...userWithoutPassword } = userData[0];
+        // Assign the user data to req.user
+        req.user = userWithoutPassword;
       }
 
-      // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
-
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-    }
-      
       let user_id = req.user.id;
       const user = await userModel.userinfo(user_id);
       // now getting spoc details of the user
@@ -1493,58 +1494,58 @@ const UsersController = {
     console.log('FILES======', req.files.file);
     try {
       let user_id;
-      
-    // if req.is_verified is true then there must be token in the query
-    if (!req.is_verified && !req.query.token) {
-      return res
-      .status(401)
-      .json({ 
-        status: 0,
-        message: 'Access denied. Please provide a valid token.' 
-      });
-  }
-  
+
+      // if req.is_verified is true then there must be token in the query
+      if (!req.is_verified && !req.query.token) {
+        return res
+          .status(401)
+          .json({
+            status: 0,
+            message: 'Access denied. Please provide a valid token.'
+          });
+      }
+
       // if user try to uplaod file without login
-    // then we take token in the query and take the vendor
-  
-    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
+      // then we take token in the query and take the vendor
 
-    if (withoutLoginUserToken) {
-      // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
 
-      if (!tokenData || tokenData.length === 0) {
-        // Token is not valid
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message: 'Invalid or expired token!'
-          })
-          .end();
+      if (withoutLoginUserToken) {
+        // Check if the token exists
+        const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+
+        if (!tokenData || tokenData.length === 0) {
+          // Token is not valid
+          return res
+            .status(400)
+            .json({
+              status: 0,
+              message: 'Invalid or expired token!'
+            })
+            .end();
+        }
+
+        // Retrieve user data associated with the token
+        const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+
+        if (!userData || userData.length === 0) {
+          // User data is not valid
+          return res
+            .status(404)
+            .json({
+              status: 0,
+              message: 'User not found!'
+            })
+            .end();
+        }
+        // Remove password from user data
+        const { password, ...userWithoutPassword } = userData[0];
+        // Assign the user data to req.user
+        req.user = userWithoutPassword;
       }
 
-      // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+      user_id = req.user.id;
 
-      if (!userData || userData.length === 0) {
-        // User data is not valid
-        return res
-          .status(404)
-          .json({
-            status: 0,
-            message: 'User not found!'
-          })
-          .end();
-      }
-      // Remove password from user data
-      const { password, ...userWithoutPassword } = userData[0];
-      // Assign the user data to req.user
-      req.user = userWithoutPassword;
-    }
-      
-    user_id = req.user.id;
-    
       let { doc_type } = req.body;
       if (!doc_type) {
         doc_type = 'general';
@@ -1642,7 +1643,7 @@ const UsersController = {
         subscription = true;
         user = await userModel.vendorinfo(user_id, req.user.id);
       }
-      
+
       // Get Spoc Details of the vendor
       const spoc_details = await vendorModel.getSpocDetails(user_id);
       user = {
@@ -2233,25 +2234,25 @@ const UsersController = {
             dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
           }
 
-          
-        const spocList = await vendorModel.getSpocDetails(paymentUpdate[0].user_id)
 
-        // console.log(" user contoller spoc 2025 console ", paymentUpdate[0]?.id, spocList)
-              
-        let mailRecipients = {
-          from: Config.webmasterMail,
-          subject: `Work Wise | Subscription Plan`,
-          html: dynamic_html
-        };
-  
-        if (spocList && spocList.length > 0) {
-          mailRecipients.to = spocList.map(spoc => spoc.email);
-          mailRecipients.cc = userDetails.email;
-        } else {
-          mailRecipients.to = userDetails.email;
-        }
-  
-        sendMail(mailRecipients);
+          const spocList = await vendorModel.getSpocDetails(paymentUpdate[0].user_id)
+
+          // console.log(" user contoller spoc 2025 console ", paymentUpdate[0]?.id, spocList)
+
+          let mailRecipients = {
+            from: Config.webmasterMail,
+            subject: `Work Wise | Subscription Plan`,
+            html: dynamic_html
+          };
+
+          if (spocList && spocList.length > 0) {
+            mailRecipients.to = spocList.map(spoc => spoc.email);
+            mailRecipients.cc = userDetails.email;
+          } else {
+            mailRecipients.to = userDetails.email;
+          }
+
+          sendMail(mailRecipients);
 
           // sendMail({
           //   from: Config.webmasterMail, // sender address
@@ -2623,33 +2624,34 @@ const UsersController = {
     try {
       if (req.user.user_type == 2) {
         // Buyer
-        const active_rfqs = await rfqModel.getAllRfqByUser( user_id, 1 );
-        const closed_rfqs = await rfqModel.getClosedRfqs( user_id );
-        const completed_rfqs = await rfqModel.getCompletedRfqs( user_id );
-        const active_quotes = await rfqModel.getActiveQuotes( user_id, 1 );
+        const total_rfqs = await rfqModel.getAllRfqByUser( user_id );
+        const active_rfqs = await rfqModel.getAllRfqByUser(user_id, 1);
+        const closed_rfqs = await rfqModel.getClosedRfqs(user_id);
+        const completed_rfqs = await rfqModel.getCompletedRfqs(user_id);
+        const active_quotes = await rfqModel.getActiveQuotes(user_id, 1);
         const pending_responses = Math.max(parseInt(active_rfqs.count) - parseInt(active_quotes.count), 0);
 
-         // getting the data of all rfqs of a buyer
-         let page, limit, offset;
-         if (req.body.page && req.body.page > 0) {
-           page = req.body.page;
-           limit = req.body.limit || Config.globalAdminLimit;
-           offset = (page - 1) * limit;
-         } else {
-           limit = Config.globalAdminLimit;
-           offset = 0;
-         }
+        // getting the data of all rfqs of a buyer
+        let page, limit, offset;
+        if (req.body.page && req.body.page > 0) {
+          page = req.body.page;
+          limit = req.body.limit || Config.globalAdminLimit;
+          offset = (page - 1) * limit;
+        } else {
+          limit = Config.globalAdminLimit;
+          offset = 0;
+        }
 
-         let {project_id,sort,reverse_auction,rfq_type} = req.body;
-         if(project_id==-1){
-           project_id=null;
-         }
-         if(rfq_type==''){
-           rfq_type=null;
-         }
-         if(reverse_auction=='-1'){
-           reverse_auction=null;
-         }
+        let { project_id, sort, reverse_auction, rfq_type } = req.body;
+        if (project_id == -1) {
+          project_id = null;
+        }
+        if (rfq_type == '') {
+          rfq_type = null;
+        }
+        if (reverse_auction == '-1') {
+          reverse_auction = null;
+        }
 
         const rfq_data_for_notificaton = await rfqModel.getAllBuyerRfq(limit, offset, user_id, project_id, sort, reverse_auction, rfq_type);
 
@@ -2672,7 +2674,7 @@ const UsersController = {
           return item;
         });
 
-        let recente_received_quotes = await rfqModel.getRecentQuotes( req.user.id );
+        let recente_received_quotes = await rfqModel.getRecentQuotes(req.user.id);
         recente_received_quotes = recente_received_quotes.filter(
           (item) => item.timestamp != null && item.created_by != null
         );
@@ -2726,6 +2728,7 @@ const UsersController = {
         let cost = await rfqModel.getAllRfqCost(req.user.id, 2);
 
         data = {
+          total_rfqs: parseInt(total_rfqs.count),
           active_rfqs: parseInt(active_rfqs.count),
           completed_rfqs: parseInt(completed_rfqs.count),
           closed_rfqs: parseInt(closed_rfqs.count),
@@ -2858,6 +2861,47 @@ const UsersController = {
         .end();
     }
   },
+  getDashboardAnalytics: async (req, res, next) => {
+    const user_id = req.user.id;
+    const chartFilter = req.query.chart_filter || null;
+    const dataType = req.query.data_type || null;
+    let data = {};
+
+    try {
+      const { startDate, endDate } = getDateRange(chartFilter);
+      switch (dataType) {
+        case 'quotes':
+            data = await rfqModel.getQuotesChartData(user_id, chartFilter, startDate, endDate);
+            break;
+        case 'quote_costing':
+            data = await rfqModel.getQuoteCostingData(user_id, chartFilter, startDate, endDate);
+            break;
+        case 'product_costing':
+            data = await rfqModel.getProductCostingData(user_id, chartFilter, startDate, endDate);
+            break;
+        default:
+            break;
+    }    
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data
+        })
+        .end();
+    } catch (error) {
+      console.log(error)
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   addPrivateVendor: async (req, res, next) => {
 
     // No need to check subscription when buyer is adding its vendor or new vendor
@@ -2922,7 +2966,7 @@ const UsersController = {
       let obj = {
         buyerId,
         vendorName,
-        email:email.toLowerCase(),
+        email: email.toLowerCase(),
         phone,
         productList: "Products already added by buyer.",
         is_private: !(req.body.is_private) || req.body.is_private == 0 ? 0 : 1,
@@ -2948,7 +2992,7 @@ const UsersController = {
         let userDetails = [{
           buyer_id: buyerId,
           vendor_name: vendorName,
-          email:email.toLowerCase(),
+          email: email.toLowerCase(),
           mobile: phone,
           productDetails,
           is_private: 1
@@ -3303,7 +3347,7 @@ const UsersController = {
 
       const page = parseInt(req.query.page, 10) || 1;
       const limit = parseInt(req.query.limit, 10) || 10;
-      
+
       const data = await userModel.getBuyerPrivateVendors(buyerId, limit, page);
       const count = await userModel.getBuyerPrivateVendorsCount(buyerId);
 
@@ -3321,7 +3365,7 @@ const UsersController = {
     try {
 
       // No need to check subscription when buyer is adding its vendor or new vendor
-      
+
       // if (!req.user.subscription_plan_id) {
       //   res
       //     .status(400)
@@ -3502,54 +3546,54 @@ const UsersController = {
     try {
       let errors = {};
       let err = 0;
-  
+
       const user_id = req.user.id;
 
-      let {spoc_name, spoc_email, spoc_mobile, spoc_role} = req.body;
-      
-       spoc_name = spoc_name ?? null;
-       spoc_email = spoc_email?.toLowerCase() ?? null;
-       spoc_mobile = spoc_mobile ?? null;
-       spoc_role = spoc_role ?? null;
+      let { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
 
-      if(!spoc_name && !spoc_email && !spoc_mobile && !spoc_role){
+      spoc_name = spoc_name ?? null;
+      spoc_email = spoc_email?.toLowerCase() ?? null;
+      spoc_mobile = spoc_mobile ?? null;
+      spoc_role = spoc_role ?? null;
+
+      if (!spoc_name && !spoc_email && !spoc_mobile && !spoc_role) {
         err++;
         errors.empty_fields = 'All fields are empty or missing.';
       }
 
-      if(err>0){
+      if (err > 0) {
         res
-        .status(400)
-        .json({
-          status: 2,
-          errors
-        })
-        .end();
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
         return;
       }
-      
-      const spocExist = await userModel.check_exactly_same_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
 
-      if(spocExist<1){
-        const response = await userModel.add_user_spoc({spoc_name, spoc_email, spoc_mobile, spoc_role, user_id});
+      const spocExist = await userModel.check_exactly_same_spoc({ spoc_name, spoc_email, spoc_mobile, spoc_role, user_id });
+
+      if (spocExist < 1) {
+        const response = await userModel.add_user_spoc({ spoc_name, spoc_email, spoc_mobile, spoc_role, user_id });
         res
-        .status(200)
-        .json({
-          status: 1,
-          message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to your spoc`
-        })
-        .end();
-      }else{
+          .status(200)
+          .json({
+            status: 1,
+            message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to your spoc`
+          })
+          .end();
+      } else {
         res
-        .status(200)
-        .json({
-          status: 1,
-          message: `spoc already exist`
-        })
-        .end();
+          .status(200)
+          .json({
+            status: 1,
+            message: `spoc already exist`
+          })
+          .end();
       }
 
-      
+
     } catch (error) {
       logError(error);
       res
@@ -3562,50 +3606,50 @@ const UsersController = {
     }
   },
 
-  updateSpoc:  async (req, res, next) => {
+  updateSpoc: async (req, res, next) => {
     try {
       let errors = {};
       let err = 0;
-  
+
       const userId = req.user.id;
       const spocId = req.params.spoc_id;
 
-      const {spoc_name, spoc_email, spoc_mobile, spoc_role} = req.body;
-      
+      const { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
+
       const name = spoc_name ?? null;
       const email = spoc_email?.toLowerCase() ?? null;
       const mobile = spoc_mobile ?? null;
       const role = spoc_role ?? null;
 
-      if(!name && !email && !mobile && !role){
+      if (!name && !email && !mobile && !role) {
         err++;
         errors.empty_fields = 'All fields are empty or missing.';
       }
 
-      if(err>0){
+      if (err > 0) {
         res
-        .status(400)
-        .json({
-          status: 2,
-          errors
-        })
-        .end();
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
         return;
       }
-        
+
 
       const response = await userModel.updateUserSpoc(name, email, mobile, role, userId, spocId);
-      
-      if(response){
+
+      if (response) {
         res
-        .status(200)
-        .json({
-          status: 1,
-           message: `spoc of ${response[0].role.toUpperCase()} ${response[0].name} updated`
-        })
-        .end();
+          .status(200)
+          .json({
+            status: 1,
+            message: `spoc of ${response[0].role.toUpperCase()} ${response[0].name} updated`
+          })
+          .end();
       }
-      
+
     } catch (error) {
       logError(error);
       res

@@ -2187,12 +2187,83 @@ WHERE row_num_by_name_category = 1
       throw new Error(error);
     }
   },
-  getAllRfqByUser: async (user_id, status) => {
+  getQuotesChartData: async (user_id, chartFilter, start_date, end_date) => {
+    const dateQ = ['past7days', 'currentMonth'].includes(chartFilter)
     const query = `
-      SELECT count(*) 
-      FROM tbl_rfq 
-      WHERE created_by = $1 
-        AND status = $2 
+      SELECT 
+          ${dateQ 
+              ? `DATE(tqf.timestamp) AS date,`
+              : `TO_CHAR(tqf.timestamp, 'YYYY-MM') AS month,`}
+          count(tqf.id) AS quotes_count 
+      FROM tbl_quote_finalization tqf
+      JOIN tbl_rfq tr
+          ON tr.id = tqf.rfq_id
+      WHERE tqf.timestamp BETWEEN $3::timestamp AND $4::timestamp
+        AND tr.created_by = $1 
+      ${dateQ 
+          ? `GROUP BY DATE(tqf.timestamp)
+            ORDER BY date;`
+          : `GROUP BY TO_CHAR(tqf.timestamp, 'YYYY-MM')
+            ORDER BY month;`}`;
+
+    console.log(query)
+    try {
+      const formattedStartDate = new Date(start_date).toISOString();
+      const formattedEndDate = new Date(end_date).toISOString();
+      const values = [user_id, 1, formattedStartDate, formattedEndDate];
+
+      const result = await db.query(query, values);
+      return result;
+    } catch (error) {
+      console.log(error)
+      throw new Error(error);
+    }
+  },
+  getQuoteCostingData: async (user_id, chartFilter, start_date, end_date) => {
+    const dateQ = ['past7days', 'currentMonth'].includes(chartFilter)
+    const query = `
+      SELECT
+          ${dateQ
+              ? `DATE(tqf.timestamp) AS date,`
+              : `TO_CHAR(tqf.timestamp, 'YYYY-MM') AS month,`}
+          SUM(tqi.total_price) AS total_quote_amount
+      FROM tbl_quote_finalization tqf
+      JOIN tbl_quote_items tqi
+          ON tqf.id = tqi.quote_id
+      JOIN tbl_rfq tr
+          ON tr.id = tqf.rfq_id
+      WHERE tqf.timestamp BETWEEN $3::timestamp AND $4::timestamp
+        AND tr.created_by = $1
+      ${dateQ
+          ? `GROUP BY DATE(tqf.timestamp)
+            ORDER BY date;`
+          : `GROUP BY TO_CHAR(tqf.timestamp, 'YYYY-MM')
+            ORDER BY month;`}
+      `;
+
+    try {
+      const formattedStartDate = new Date(start_date).toISOString();
+      const formattedEndDate = new Date(end_date).toISOString();
+      const values = [user_id, 1, formattedStartDate, formattedEndDate];
+
+      const result = await db.query(query, values);
+      return result;
+    } catch (error) {
+      console.log(error)
+      throw new Error(error);
+    }
+  },
+  getAllRfqByUser: async (user_id, status = null) => {
+    const query = `
+      SELECT count(*)
+      FROM tbl_rfq
+      WHERE created_by = $1
+        ${ status ? `AND status = $2` : ``}
+        ${status == 1
+        ? `AND bid_end_date IS NOT NULL 
+            AND bid_end_date != '' 
+            AND DATE(bid_end_date) >= now()`
+        : ``}
         AND is_published = 1     
     `;
 
@@ -2257,11 +2328,14 @@ WHERE row_num_by_name_category = 1
   },
   getActiveQuotes: async (user_id, status) => {
     const query = `
-      SELECT count(*) FROM "tbl_rfq" tr 
-         JOIN "tbl_quotes" tq on tr.id = tq.rfq_id 
-         WHERE tr.created_by = $1 
-          AND tr.status = $2 
-          AND tr.is_published = 1    
+      SELECT count(*) FROM "tbl_rfq" tr
+         JOIN "tbl_quotes" tq on tr.id = tq.rfq_id
+         WHERE tr.created_by = $1
+          AND tr.status = $2
+          AND tr.is_published = 1
+          AND bid_end_date IS NOT NULL
+            AND bid_end_date != ''
+            AND DATE(bid_end_date) >= now()
     `; 
 
     try {
@@ -2272,7 +2346,7 @@ WHERE row_num_by_name_category = 1
     } catch (error) {
       throw new Error(error);
     }    
-  },
+  },  
   getVendorReviews: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.query(

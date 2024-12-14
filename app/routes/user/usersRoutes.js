@@ -197,6 +197,13 @@ UsersRoutes.post(
   UsersController.getDashboardData
 );
 
+UsersRoutes.get(
+  '/get-dashboard-Analytics',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  UsersController.getDashboardAnalytics
+);
+
 UsersRoutes.post(
   '/buyer-private-vendor',
   passportSignIn,
