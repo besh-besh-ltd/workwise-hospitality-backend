@@ -5061,16 +5061,25 @@ addClauseUsingFile : async (req, res) => {
     let errors=[];
     for await(const[index,value] of jsonData.entries()){
       const clause_text = (value['List of Clauses'] || "").trim();
-      const result = await rfqModel.addClause(rfq_id, rfq_product_id, clause_text,[]);
-      if(!result.status){
+
+      if(clause_text==''){
         errors.push({
           Row:index,
-          error:result.message
+          error:"Either not find the column or Clause is empty"
         })
+      }else{
+        const result = await rfqModel.addClause(rfq_id, rfq_product_id, clause_text,[]);
+        if(!result.status){
+          errors.push({
+            Row:index,
+            error:result.message
+          })
+        }
       }
+
     }
 
-    res.status(200).json({status:1, data:"Clause added Successfully", erros:errors}).end();
+    res.status(200).json({status:errors?.length>0 ? 0 : 1, message : "Clause added Successfully", errors:errors}).end();
 
   } catch (error) {
     // console.log("controller error")
