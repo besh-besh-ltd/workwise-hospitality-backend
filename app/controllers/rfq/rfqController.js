@@ -1461,6 +1461,28 @@ const rfqController = {
         .end();
     }
   },
+
+  getUnits: async (req, res, next) => {
+    try {
+      const result = await rfqModel.getAvailableUnits();
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: result
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   getRfqReport: async (req, res, next) => {
     let user_id = req.user.id;
     /* if (req.body.user_id) {

@@ -372,6 +372,19 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         });
     });
   },
+  getAvailableUnits: async () => {
+    return new Promise(function (resolve, reject) {
+      db.query(`SELECT * FROM tbl_rfq_units`)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
   getAllRfqBuyer: async (limit, offset, user_id, month, year) => {
     const query = `SELECT RFQ.id,RFQ.rfq_no,RFQ.is_published,RFQ.created_by,RFQ.status,RFQ.timestamp,  
       ARRAY(
