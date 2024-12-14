@@ -2397,8 +2397,9 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
   getRecentQuotes: async (user_id, status) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT  tr.id, tr.rfq_no , tq.timestamp as timestamp, tq.created_by FROM "tbl_rfq" tr
-      LEFT JOIN "tbl_quotes" tq ON tr.id = tq.rfq_id      
+        `SELECT  tr.id, tr.rfq_no , tq.timestamp as timestamp, tq.created_by, tu.organization_name, tu.name as vendor_name FROM "tbl_rfq" tr
+      LEFT JOIN "tbl_quotes" tq ON tr.id = tq.rfq_id  
+      LEFT JOIN "tbl_users" tu ON tq.created_by = tu.id    
       WHERE tr.created_by = $1 AND tr.status = '1' AND tr.is_published = 1 ORDER BY "id" DESC LIMIT 50`,
         [user_id]
       )
