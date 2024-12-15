@@ -4136,22 +4136,127 @@ ORDER BY T.timestamp DESC;
 },
 
 // project report including all rfq quote etc
-projectReport: async (projectId, startDate, endDate) => {
+getProjectDetailsReport: async (projectId, startDate, endDate) => {
   return new Promise(function (resolve, reject) {
+     const query = `SELECT 
+      p.id AS project_id,
+      p.name AS project_name,
+      p.description AS project_description,
+      p.location AS project_location,
+      p.status AS project_status,
+      json_agg(
+          json_build_object(
+              'rfq_id', r.id,
+              'rfq_no', r.rfq_no,
+              'comment', r.comment,
+              'company_name', r.company_name,
+              'response_email', r.response_email,
+              'contact_name', r.contact_name,
+              'contact_number', r.contact_number,
+              'bid_end_date', r.bid_end_date,
+              'location', r.location,
+              'is_published', r.is_published,
+              'status', r.status,
+              'rfq_type', r.rfq_type,
+              'reverse_auction', r.reverse_auction,
+              'rfq_files', (
+                  SELECT json_agg(
+                      json_build_object(
+                          'file_id', f.id,
+                          'file_type', f.file_type,
+                          'file_url', f.file_url
+                      )
+                  )
+                  FROM tbl_rfq_files f
+                  WHERE f.rfq_id = r.id
+              ),
+              'terms', (
+                  SELECT json_agg(
+                      json_build_object(
+                          'term_content', t.term_content
+                      )
+                  )
+                  FROM tbl_rfq_terms t
+                  JOIN tbl_rfq_terms_map tm ON t.id = tm.terms_id
+                  WHERE tm.rfq_id = r.id
+              ),
+'products', (
+    SELECT json_agg(
+        json_build_object(
+            'product_id', prod.product_id,
+            'product_name', tp.name,
+            'comment', prod.comment,
+            'datasheet', prod.datasheet,
+            'spec_file', prod.spec_file,
+            'qap_file', prod.qap_file,
+            'datasheet_file', prod.datasheet_file,
+            'variant', prod.variant,
+            'product_files', (
+                SELECT json_agg(
+                    json_build_object(
+                        'file_id', pf.id,
+                        'file_type', pf.file_type,
+                        'file_url', pf.file_url
+                    )
+                )
+                FROM tbl_rfq_product_files pf
+                WHERE pf.rfq_product_id = prod.id
+            ),
+            'specs', (
+                SELECT json_agg(
+                    json_build_object(
+                        'title', specs.title,
+                        'value', specs.value
+                    )
+                )
+                FROM tbl_rfq_products_specs specs
+                WHERE specs.rfq_id = r.id AND specs.product_id = prod.product_id
+            ),
+            'vendors', (
+                SELECT json_agg(
+                    json_build_object(
+                        'vendor_id', v.id,
+                        'vendor_name', v.name,
+                        'vendor_email', v.email,
+                        'vendor_mobile', v.mobile,
+                        'vendor_address', v.address
+                    )
+                )
+                FROM tbl_rfq_product_vendors pv
+                JOIN tbl_users v ON pv.user_id = v.id
+                WHERE pv.product_id = prod.product_id AND pv.rfq_id = r.id  -- Assuming a filter condition here
+            )
+        )
+    )
+    FROM tbl_rfq_products prod
+    JOIN tbl_product tp ON prod.product_id = tp.id
+    WHERE prod.rfq_id = r.id
+)
 
-
-        // Then, retrieve RFQs for the project within the date range
-        const query = `
-`
+          )
+      ) AS rfq_details
+  FROM 
+      tbl_projects p
+  JOIN 
+      tbl_rfq r ON p.id = r.project_id
+  WHERE 
+      p.id = $1 AND 
+     r.timestamp >= $2::timestamp AND 
+    r.timestamp < ($3::timestamp + interval '1 day')
+  GROUP BY 
+      p.id;
+  `;
+  
+  // Assuming $2 and $3 are your start and end dates respectively passed as 'YYYY-MM-DD' strings
+  ;
 
       db.query(query, [projectId, startDate, endDate])
       .then(data => resolve(data))
-      .catch(err => {
-          let error = new Error(err);
-          reject(error);
-      });
+      .catch(err => reject(new Error(err)));
   });
-},
+}
+
+
 
 }
 export default rfqModel;

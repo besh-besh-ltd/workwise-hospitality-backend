@@ -5449,11 +5449,10 @@ projectWiseReport: async (req, res) => {
     const userId = req.user.id;
     console.log("Start Date, End Date, ProjectId:", startDate, endDate, projectId);
 
-    const rfqDetails = await rfqModel.projectReport(projectId, startDate, endDate);
 
- 
+    const rfqDetails = await rfqModel.getProjectDetailsReport(projectId, startDate, endDate);
 
-    res.status(200).json(rfqDetails);
+    res.status(200).json({projectDetail: rfqDetails });
   } catch (error) {
     console.error("Error fetching project report:", error);
     res.status(500).json({
