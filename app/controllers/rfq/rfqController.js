@@ -5442,7 +5442,6 @@ rfqProductWiseReport: async (req, res) => {
   }
 },
 
-
 projectWiseReport: async (req, res) => {
   try {
     const { projectId, startDate, endDate } = req.query;
@@ -5451,8 +5450,53 @@ projectWiseReport: async (req, res) => {
 
 
     const rfqDetails = await rfqModel.getProjectDetailsReport(projectId, startDate, endDate);
+    const  quoteList = []
 
-    res.status(200).json({projectDetail: rfqDetails });
+    //  fetch quotes for each rfq preent in the project
+    for (let i = 0; i < rfqDetails.length; i++) {
+      for (let j = 0; j < rfqDetails[i].rfq_details.length; j++) {
+        const rfqId = rfqDetails[i].rfq_details[j].rfq_id;
+        let quoteDetails = await rfqModel.getQuotesByRfqById2(rfqId, userId, false);
+        quoteList.push(quoteDetails)
+      }
+    }
+
+    res.status(200).json({quoteList: quoteList,  rfqDetails:rfqDetails});
+  } catch (error) {
+    console.error("Error fetching project report:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Error processing RFQ details',
+      error: error.toString()
+    });
+  }
+},
+
+sendReportOnEmail: async (req, res) => {
+  try {
+    // Extracting email addresses from the request
+    const emails = req.body.emails // Assuming 'emails' is a comma-separated list passed as a query parameter
+    const file = req.file;  // Assuming file data is sent via a multipart/form-data request
+
+    // Preparing email options with an attachment
+    const mailOptions = {
+      from: Config.webmasterMail, // Sender address
+      to: emails, // Sending email to all recipients directly from the query string
+      subject: `${file.originalname.split(".")[0] || "Project Report"} || Workwise ` , // Subject line
+      html: `<p>Sharing ${file.originalname.split(".")[0]} Project report. please find the attached zip file </p>`, // HTML body content
+     attachments: [
+        {
+          filename: file.originalname,  // Using original file name
+          content: file.buffer          // Assuming the file is available as a buffer
+        }
+      ]
+    };
+
+    // Sending the email with the attachment
+    sendMail(mailOptions);
+
+    res.status(200).json({ message: "Report sent successfully." });
+
   } catch (error) {
     console.error("Error fetching project report:", error);
     res.status(500).json({
@@ -5462,8 +5506,6 @@ projectWiseReport: async (req, res) => {
     });
   }
 }
-
-
 
 
 

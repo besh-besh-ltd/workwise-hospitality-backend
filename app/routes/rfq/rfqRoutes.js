@@ -336,12 +336,18 @@ RfqRoutes.get('/report/rfq-product-wise',
 )
 
 //  product wise audit report
-RfqRoutes.get('/report/rqf-project-wise',
+RfqRoutes.get('/report/rfq-project-wise',
   passportSignIn,
   rfqController.projectWiseReport
 )
 
 
+//  product wise audit report
+RfqRoutes.post('/report/send-on-email',
+  passportSignIn,
+  schema_posts.reportZipFileUpload,
+  rfqController.sendReportOnEmail
+)
 
 
 export default RfqRoutes;
