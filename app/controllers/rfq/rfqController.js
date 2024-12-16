@@ -2132,7 +2132,6 @@ const rfqController = {
             status,
             created_by: user.id,
             updated_by: user.id,
-            timestamp: Date.now(),
             is_regret: req.body.is_regret ? req.body.is_regret : 0,
             global_payment_term: globalPaymentTerms,
             global_comment: globalComment,
@@ -4724,7 +4723,7 @@ const rfqController = {
           status: quoteExists[0].status,
           created_by: quoteExists[0].created_by,
           updated_by: quoteExists[0].updated_by,
-          timestamp: Date.now(),
+          timestamp: new Date().toISOString(),
           is_regret: 0,
           global_payment_term: globalPaymentTerms,
           global_comment: globalComment

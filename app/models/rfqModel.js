@@ -2675,44 +2675,44 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
   productPriceStatsMarket: async (product_name) => {
     return new Promise(function (resolve, reject) {
       db.query(`
-      WITH GeneralStats AS (
+        WITH GeneralStats AS (
+          SELECT
+              MIN(qi.unit_price) AS min_price,
+              MAX(qi.unit_price) AS max_price,
+              AVG(qi.unit_price) AS avg_price
+          FROM tbl_product AS p
+          JOIN tbl_quote_items AS qi ON p.id = qi.product_id
+          JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
+          WHERE p.name = $1
+              AND q.timestamp >= NOW() - INTERVAL '1 year'
+        ), MonthlyStats AS (
+          SELECT
+              EXTRACT(YEAR FROM q.timestamp) AS year,
+              EXTRACT(MONTH FROM q.timestamp) AS month,
+              MIN(qi.unit_price) AS min_price,
+              AVG(qi.unit_price) AS avg_price,
+              MAX(qi.unit_price) AS max_price
+          FROM tbl_product AS p
+          JOIN tbl_quote_items AS qi ON p.id = qi.product_id
+          JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
+          WHERE p.name = $1
+              AND q.timestamp >= NOW() - INTERVAL '1 year'
+          GROUP BY EXTRACT(YEAR FROM q.timestamp), EXTRACT(MONTH FROM q.timestamp)
+          ORDER BY year, month
+        )
         SELECT
-            MIN(qi.unit_price) AS min_price,
-            MAX(qi.unit_price) AS max_price,
-            AVG(qi.unit_price) AS avg_price
-        FROM tbl_product AS p
-        JOIN tbl_quote_items AS qi ON p.id = qi.product_id
-        JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
-        WHERE p.name = $1
-            AND to_timestamp(CAST(q.timestamp AS BIGINT) / 1000) >= NOW() - INTERVAL '1 year'
-      ), MonthlyStats AS (
-        SELECT
-            EXTRACT(YEAR FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)) AS year,
-            EXTRACT(MONTH FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)) AS month,
-            MIN(qi.unit_price) AS min_price,
-            AVG(qi.unit_price) AS avg_price,
-            MAX(qi.unit_price) AS max_price
-        FROM tbl_product AS p
-        JOIN tbl_quote_items AS qi ON p.id = qi.product_id
-        JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
-        WHERE p.name = $1
-            AND to_timestamp(CAST(q.timestamp AS BIGINT) / 1000) >= NOW() - INTERVAL '1 year'
-        GROUP BY EXTRACT(YEAR FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)), EXTRACT(MONTH FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000))
-        ORDER BY year, month
-      )
-      SELECT
-        JSON_BUILD_OBJECT(
-            'min', (SELECT min_price FROM GeneralStats),
-            'max', (SELECT max_price FROM GeneralStats),
-            'avg', (SELECT avg_price FROM GeneralStats)
-        ) AS general,
-        JSON_OBJECT_AGG(
-            CAST(year AS TEXT) || '-' || LPAD(CAST(month AS TEXT), 2, '0'),
-            JSON_BUILD_OBJECT('min', min_price, 'avg', avg_price, 'max', max_price)
-        ) AS monthly
-      FROM MonthlyStats;
-  `,
-    [ product_name]
+          JSON_BUILD_OBJECT(
+              'min', (SELECT min_price FROM GeneralStats),
+              'max', (SELECT max_price FROM GeneralStats),
+              'avg', (SELECT avg_price FROM GeneralStats)
+          ) AS general,
+          JSON_OBJECT_AGG(
+              CAST(year AS TEXT) || '-' || LPAD(CAST(month AS TEXT), 2, '0'),
+              JSON_BUILD_OBJECT('min', min_price, 'avg', avg_price, 'max', max_price)
+          ) AS monthly
+        FROM MonthlyStats;
+    `,
+        [product_name]
       )
         .then(function (data) {
           resolve(data);
