@@ -2187,31 +2187,40 @@ WHERE row_num_by_name_category = 1
       throw new Error(error);
     }
   },
-  getQuotesChartData: async (user_id, chartFilter, start_date, end_date, product_id, vendor_id) => {
+  getQuotesChartData: async (user_id, chartFilter, start_date, end_date, product_id, vendor_ids) => {
     const dateQ = ['past7days', 'currentMonth'].includes(chartFilter)
     const query = `
-      SELECT 
-          ${dateQ 
-              ? `DATE(tqf.timestamp) AS date,`
-              : `TO_CHAR(tqf.timestamp, 'YYYY-MM') AS month,`}
-          count(tqf.id) AS quotes_count 
-      FROM tbl_quote_finalization tqf
-      JOIN tbl_rfq tr
-          ON tr.id = tqf.rfq_id
-      WHERE tqf.timestamp BETWEEN $3::timestamp AND $4::timestamp
-        AND tr.created_by = $1 
-        ${product_id ? `AND tqf.product_id = $5` : ``}
-        ${vendor_id ? `AND tqf.vendor_id = $6` : ``}
-      ${dateQ 
-          ? `GROUP BY DATE(tqf.timestamp)
-            ORDER BY date;`
-          : `GROUP BY TO_CHAR(tqf.timestamp, 'YYYY-MM')
-            ORDER BY month;`}`;
+        SELECT 
+            ${dateQ 
+                ? `DATE(tqf.timestamp) AS date,`
+                : `TO_CHAR(tqf.timestamp, 'YYYY-MM') AS date,`}
+            tc.company_name,
+            tu.organization_name,
+            tu.name,
+            COUNT(tqf.id) AS data_value
+        FROM tbl_quote_finalization tqf
+        JOIN tbl_rfq tr 
+            ON tr.id = tqf.rfq_id
+        JOIN tbl_company tc 
+            ON tqf.vendor_id = tc.user_id
+        JOIN tbl_users tu 
+            ON tqf.vendor_id = tu.id
+        WHERE tqf.timestamp BETWEEN $3::timestamp AND $4::timestamp
+          AND tr.created_by = $1
+          ${product_id ? `AND tqf.product_id = $5` : `` }
+          ${vendor_ids ? `AND tqf.vendor_id = ANY($6)` : ``} 
+        ${dateQ 
+            ? `GROUP BY DATE(tqf.timestamp), tc.company_name, tu.organization_name, tu.name
+              ORDER BY date;`
+            : `GROUP BY TO_CHAR(tqf.timestamp, 'YYYY-MM'), tc.company_name, tu.organization_name, tu.name
+              ORDER BY date;`}
+    `;
+
 
     try {
       const formattedStartDate = new Date(start_date).toISOString();
       const formattedEndDate = new Date(end_date).toISOString();
-      const values = [user_id, 1, formattedStartDate, formattedEndDate, product_id, vendor_id];
+      const values = [user_id, 1, formattedStartDate, formattedEndDate, product_id, vendor_ids];
 
       const result = await db.query(query, values);
       return result;
@@ -2220,34 +2229,41 @@ WHERE row_num_by_name_category = 1
       throw new Error(error);
     }
   },
-  getQuoteCostingData: async (user_id, chartFilter, start_date, end_date, product_id, vendor_id) => {
+  getQuoteCostingData: async (user_id, chartFilter, start_date, end_date, product_id, vendor_ids) => {
     const dateQ = ['past7days', 'currentMonth'].includes(chartFilter)
     const query = `
-      SELECT
-          ${dateQ
-              ? `DATE(tqf.timestamp) AS date,`
-              : `TO_CHAR(tqf.timestamp, 'YYYY-MM') AS month,`}
-          SUM(tqi.total_price) AS total_quote_amount
-      FROM tbl_quote_finalization tqf
-      JOIN tbl_quote_items tqi
+        SELECT 
+            ${dateQ 
+                ? `DATE(tqf.timestamp) AS date,`
+                : `TO_CHAR(tqf.timestamp, 'YYYY-MM') AS date,`}
+            tc.company_name,
+            tu.organization_name,
+            tu.name,
+            SUM(tqi.total_price) AS data_value
+        FROM tbl_quote_finalization tqf
+        JOIN tbl_quote_items tqi
           ON tqf.id = tqi.quote_id
-      JOIN tbl_rfq tr
-          ON tr.id = tqf.rfq_id
-      WHERE tqf.timestamp BETWEEN $3::timestamp AND $4::timestamp
-        AND tr.created_by = $1
-        ${product_id ? `AND tqf.product_id = $5` : ``}
-        ${vendor_id ? `AND tqf.vendor_id = $6` : ``}
-      ${dateQ
-          ? `GROUP BY DATE(tqf.timestamp)
-            ORDER BY date;`
-          : `GROUP BY TO_CHAR(tqf.timestamp, 'YYYY-MM')
-            ORDER BY month;`}
-      `;
+        JOIN tbl_rfq tr 
+            ON tr.id = tqf.rfq_id
+        JOIN tbl_company tc 
+            ON tqf.vendor_id = tc.user_id
+        JOIN tbl_users tu 
+            ON tqf.vendor_id = tu.id
+        WHERE tqf.timestamp BETWEEN $3::timestamp AND $4::timestamp
+          AND tr.created_by = $1
+          ${product_id ? `AND tqf.product_id = $5` : `` }
+          ${vendor_ids ? `AND tqf.vendor_id = ANY($6)` : ``} 
+        ${dateQ 
+            ? `GROUP BY DATE(tqf.timestamp), tc.company_name, tu.organization_name, tu.name
+              ORDER BY date;`
+            : `GROUP BY TO_CHAR(tqf.timestamp, 'YYYY-MM'), tc.company_name, tu.organization_name, tu.name
+              ORDER BY date;`}
+    `;
 
     try {
       const formattedStartDate = new Date(start_date).toISOString();
       const formattedEndDate = new Date(end_date).toISOString();
-      const values = [user_id, 1, formattedStartDate, formattedEndDate, product_id, vendor_id];
+      const values = [user_id, 1, formattedStartDate, formattedEndDate, product_id, vendor_ids];
 
       const result = await db.query(query, values);
       return result;

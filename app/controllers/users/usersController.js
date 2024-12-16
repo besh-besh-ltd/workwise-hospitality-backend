@@ -2866,17 +2866,17 @@ const UsersController = {
     const chartFilter = req.query.chart_filter || null;
     const dataType = req.query.data_type || null;
     const product_id = req.query.product || null;
-    const vendor_id = req.query.vendor || null;
+    const vendor_ids = req.query.vendor ? req.query.vendor.split(",").map(id => parseInt(id, 10)) : null;
     let data = {};
 
     try {
       const { startDate, endDate } = getDateRange(chartFilter);
       switch (dataType) {
         case 'quotes':
-            data = await rfqModel.getQuotesChartData(user_id, chartFilter, startDate, endDate, product_id, vendor_id);
+            data = await rfqModel.getQuotesChartData(user_id, chartFilter, startDate, endDate, product_id, vendor_ids);
             break;
         case 'quote_costing':
-            data = await rfqModel.getQuoteCostingData(user_id, chartFilter, startDate, endDate, product_id, vendor_id);
+            data = await rfqModel.getQuoteCostingData(user_id, chartFilter, startDate, endDate, product_id, vendor_ids);
             break;
         default:
             break;
