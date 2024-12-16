@@ -242,7 +242,10 @@ export const rfqSchemas = {
     //   Joi.allow(null)
     // ).default([]),
   }),
-
+  addClauseUsingFile:Joi.object({
+    rfq_id: Joi.number().integer().required(),
+    rfq_product_id: Joi.number().integer().required()
+  }),
   updateClause: Joi.object().keys({
     clause_id: Joi.number().integer().required(),
     clause_text: Joi.string().required(),
