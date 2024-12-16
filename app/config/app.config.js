@@ -5,14 +5,13 @@ import dateFormat from "dateformat";
 dotenv.config();
 
 // get env data
-const env = process.env.NODE_ENV || "development";
+const env = process.env.NODE_ENV || "uat";
 
 const userImageUploadPath = process.env.USER_IMAGE || null;
 const productExportImageUploadPath = process.env.PRODUCT_FILE || null;
 const vendorApproveImageUploadPath = process.env.VENDOR_APPROVE_IMAGE || null;
 const mediaImageUploadPath = process.env.MEDIA_IMAGE || null;
 const testimonialImageUploadPath = process.env.TESTIMONIAL_IMAGE || null;
-const teamMemberImageUploadPath = process.env.TEAM_MEMBER_IMAGE || null;
 const companyImageUploadPath = process.env.COMPANY_IMAGE || null;
 const managementImageUploadPath = process.env.MANAGEMENT_IMAGE || null;
 const bannerImageUploadPath = process.env.BANNER_IMAGE || null;
@@ -22,9 +21,17 @@ const agentImageUploadPath = process.env.AGENT_USER_IMAGE || null;
 const termConditionPath = process.env.TERM_CONDITION || null;
 const documentPathUploadPath = process.env.DOCUMENT_PATH || null;
 const programBrochurePathUploadPath = process.env.PORGRAM_BROCHURE_PATH || null;
+const buyerUploadVendorFile = process.env.BUYER_UPLOAD_VENDOR_FILE || null;
+const projectFileUploadPath = process.env.PROJECT_FILE_UPLOAD_PATH || null;
+const teamMemberImageUploadPath = process.env.TEAM_MEMBER_IMAGE || null;
+const addClauseUploadPath = process.env.ADD_CLAUSE_FILE || null;
+
+const queryMessageFilesUploadPath =
+  process.env.QUERY_MESSAGE_FILE_UPLOAD_PATH || null;
 
 // const productImageUploadPath = process.env.PRODUCT_IMAGE || null;
 const bulkProductUploadPath = process.env.BULK_PRODUCT_FILE || null;
+const magicSearchFileUploadPath = process.env.MAGIC_SEARCH_FILE || null;
 const invoiceFileUploadPath = process.env.INVOICE_FILE || null;
 // const blogImageUploadPath = process.env.BLOG_IMAGE || null;
 
@@ -37,7 +44,7 @@ const cgst = process.env.CGST || 0.0015;
 const app_version = process.env.APP_VERSION || 1.0;
 const base_url =
   // process.env.BASE_URL || 'https://panacheapi.indusnettechnologies.com';
-  process.env.BASE_URL || "http://localhost:3001";
+  process.env.BASE_URL || "https://letsworkwise.com";
 
 if (
   (jwtSecret == undefined || jwtSecret == null) &&
@@ -84,17 +91,17 @@ if (
 }
 if (
   env == "development" &&
+  (teamMemberImageUploadPath == undefined || teamMemberImageUploadPath == null)
+) {
+  throw new Error("Please set team_memebrs image upload path in env file");
+}
+
+if (
+  env == "development" &&
   (testimonialImageUploadPath == undefined ||
     testimonialImageUploadPath == null)
 ) {
   throw new Error("Please set testimonial image upload path in env file");
-}
-if (
-  env == "development" &&
-  (teamMemberImageUploadPath == undefined ||
-    teamMemberImageUploadPath == null)
-) {
-  throw new Error("Please set team_memebrs image upload path in env file");
 }
 if (
   env == "development" &&
@@ -166,6 +173,13 @@ if (env == "development" && (base_url == undefined || base_url == null)) {
   throw new Error("Please set user image upload path in env file");
 }
 
+if (
+  env == "development" &&
+  (addClauseUploadPath == undefined || addClauseUploadPath == null)
+) {
+  throw new Error("Please set add clause file path in env file");
+}
+
 const config = {
   app_version: app_version,
   jwt: {
@@ -195,14 +209,14 @@ const config = {
       env == "development"
         ? mediaImageUploadPath
         : "/application/de_technico/web-backend/des-technico/app/uploads/media_image",
-    testimonial_image:
-      env == "development"
-        ? testimonialImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/testimonial_image",
     team_member_image:
       env == "development"
         ? teamMemberImageUploadPath
         : "/application/de_technico/web-backend/des-technico/app/uploads/team_member_image",
+    testimonial_image:
+      env == "development"
+        ? testimonialImageUploadPath
+        : "/application/de_technico/web-backend/des-technico/app/uploads/testimonial_image",
     product_image:
       env == "development"
         ? productImageUploadPath
@@ -243,10 +257,30 @@ const config = {
       env == "development"
         ? bulkProductUploadPath
         : "/application/de_technico/web-backend/des-technico/app/uploads/bulk_product_file",
+    magic_search_file:
+      env == "development"
+        ? magicSearchFileUploadPath
+        : "/application/de_technico/web-backend/des-technico/app/uploads/magic_search_file",
+    query_message_file:
+      env == "development"
+        ? queryMessageFilesUploadPath
+        : "/application/de_technico/web-backend/des-technico/app/uploads/query_message_files",
     invoice_file:
       env == "development"
         ? invoiceFileUploadPath
-        : "/var/www/html/INT-Emerge2/des_technical/api/des-technico/app/uploads/invoice_file",
+        : "/application/de_technico/web-backend/des-technico/app/uploads/invoice_file",
+    project_file:
+      env == "development"
+        ? projectFileUploadPath
+        : "/application/de_technico/web-backend/des-technico/app/uploads/project_file",
+    buyer_upload_vendor_file:
+      env == "development"
+        ? buyerUploadVendorFile
+        : "/application/de_technico/web-backend/des-technico/app/uploads/buyer_upload_vendor_file",
+    add_clause_file:
+      env == "development"
+        ? addClauseUploadPath
+        : "/application/de_technico/web-backend/des-technico/app/uploads/add_clause_file",
   },
   download_url:
     // env == 'development' ? downloadURL : 'http://143.110.242.57:8112',
@@ -258,7 +292,7 @@ const config = {
   errorText: {
     value: "An internal error has occurred. Please try again later.",
   },
-  errorFileName: `./app/storage/logs/error_log_${dateFormat(
+  errorFileName: `./app/storage/internal/error_log_${dateFormat(
     new Date(),
     "mm_yyyy"
   )}.txt`,
@@ -267,8 +301,8 @@ const config = {
     host: "smtp-relay.brevo.com",
     port: 587,
     auth: {
-      user: "prasun@talash.net",
-      pass: "O815pjTIbYX670zE",
+      user: "b2bportal2023@gmail.com",
+      pass: "mjxsmtpsib-3b42f9886e4f809b920bfec2a77b5daa71c65fdcdf3e71d0c247d25261f4446e-J7znQEFTHW45M9Sw",
     },
   },
   developers: [
@@ -281,10 +315,10 @@ const config = {
     "ranit.majumder@indusnet.co.in",
     "anumita.banerjee@indusnet.co.in",
   ],
-  webmasterMail: "Work Wise <support@workwise.com>",
+  webmasterMail: "Work Wise <hello@letsworkwise.com>",
   template_path:
     process.env.TEMPLATE_PATH ||
-    "/var/www/html/INT-Emerge2/des_technical/api/des-technico/app/helper/email_template",
+    "/application/de_technico/web-backend/des-technico/app/helper/email_template",
   razorpay: {
     razorpay_key: process.env.RAZORPAY_KEY,
     razorpay_secret: process.env.RAZORPAY_SECRET,
