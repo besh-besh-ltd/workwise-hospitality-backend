@@ -5083,16 +5083,25 @@ addClauseUsingFile : async (req, res) => {
     let errors=[];
     for await(const[index,value] of jsonData.entries()){
       const clause_text = (value['List of Clauses'] || "").trim();
-      const result = await rfqModel.addClause(rfq_id, rfq_product_id, clause_text,[]);
-      if(!result.status){
+
+      if(clause_text==''){
         errors.push({
           Row:index,
-          error:result.message
+          error:"Either not find the column or Clause is empty"
         })
+      }else{
+        const result = await rfqModel.addClause(rfq_id, rfq_product_id, clause_text,[]);
+        if(!result.status){
+          errors.push({
+            Row:index,
+            error:result.message
+          })
+        }
       }
+
     }
 
-    res.status(200).json({status:1, data:"Clause added Successfully", erros:errors}).end();
+    res.status(200).json({status:errors?.length>0 ? 0 : 1, message : "Clause added Successfully", errors:errors}).end();
 
   } catch (error) {
     // console.log("controller error")
@@ -5432,5 +5441,95 @@ getTechEvaluationResult: async (req, res) => {
     });
   }
 },
+
+rfqProductWiseReport: async (req, res) => {
+  try {
+    const { startDate, endDate ,productName, productID} = req.query;
+    const userId = req.user.id;
+
+
+    const rfqData = await rfqModel.rfqProductReport(userId, productName, startDate, endDate);
+
+    res
+      .status(200)
+      .json(rfqData)
+      .end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+        success: false,
+        message: 'no data to return',
+        error: error
+    });
+  }
+},
+
+projectWiseReport: async (req, res) => {
+  try {
+    const { projectId, startDate, endDate } = req.query;
+    const userId = req.user.id;
+    console.log("Start Date, End Date, ProjectId:", startDate, endDate, projectId);
+
+
+    const rfqDetails = await rfqModel.getProjectDetailsReport(projectId, startDate, endDate);
+    const  quoteList = []
+
+    //  fetch quotes for each rfq preent in the project
+    for (let i = 0; i < rfqDetails.length; i++) {
+      for (let j = 0; j < rfqDetails[i].rfq_details.length; j++) {
+        const rfqId = rfqDetails[i].rfq_details[j].rfq_id;
+        let quoteDetails = await rfqModel.getQuotesByRfqById2(rfqId, userId, false);
+        quoteList.push(quoteDetails)
+      }
+    }
+
+    res.status(200).json({quoteList: quoteList,  rfqDetails:rfqDetails});
+  } catch (error) {
+    console.error("Error fetching project report:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Error processing RFQ details',
+      error: error.toString()
+    });
+  }
+},
+
+sendReportOnEmail: async (req, res) => {
+  try {
+    // Extracting email addresses from the request
+    const emails = req.body.emails // Assuming 'emails' is a comma-separated list passed as a query parameter
+    const file = req.file;  // Assuming file data is sent via a multipart/form-data request
+
+    // Preparing email options with an attachment
+    const mailOptions = {
+      from: Config.webmasterMail, // Sender address
+      to: emails, // Sending email to all recipients directly from the query string
+      subject: `${file.originalname.split(".")[0] || "Project Report"} || Workwise ` , // Subject line
+      html: `<p>Sharing ${file.originalname.split(".")[0]} Project report. please find the attached zip file </p>`, // HTML body content
+     attachments: [
+        {
+          filename: file.originalname,  // Using original file name
+          content: file.buffer          // Assuming the file is available as a buffer
+        }
+      ]
+    };
+
+    // Sending the email with the attachment
+    sendMail(mailOptions);
+
+    res.status(200).json({ message: "Report sent successfully." });
+
+  } catch (error) {
+    console.error("Error fetching project report:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Error processing RFQ details',
+      error: error.toString()
+    });
+  }
+}
+
+
+
 };
 export default rfqController;

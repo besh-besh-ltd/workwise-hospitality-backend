@@ -334,4 +334,25 @@ RfqRoutes.post('/get-tech-evaluation-result',
   rfqController.getTechEvaluationResult
 )
 
+//  product wise audit report
+RfqRoutes.get('/report/rfq-product-wise',
+  passportSignIn,
+  rfqController.rfqProductWiseReport
+)
+
+//  product wise audit report
+RfqRoutes.get('/report/rfq-project-wise',
+  passportSignIn,
+  rfqController.projectWiseReport
+)
+
+
+//  product wise audit report
+RfqRoutes.post('/report/send-on-email',
+  passportSignIn,
+  schema_posts.reportZipFileUpload,
+  rfqController.sendReportOnEmail
+)
+
+
 export default RfqRoutes;
