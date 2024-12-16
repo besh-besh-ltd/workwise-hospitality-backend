@@ -564,6 +564,58 @@ const vendorModel = {
           reject(error);
         });
     });
+  },
+
+  getFinalizedVendors: async (userId) => {
+    const query = `
+        SELECT DISTINCT
+            TC.user_id,
+            TC.company_name,
+            TC.email,
+            TC.mobile,
+            TU.organization_name,
+            TU.name
+        FROM tbl_company TC
+        LEFT JOIN tbl_users TU
+            ON TC.user_id = TU.id
+        INNER JOIN tbl_quote_finalization TQF
+            ON TC.user_id = TQF.vendor_id
+        INNER JOIN tbl_rfq TR
+            ON TR.id = TQF.rfq_id
+        WHERE TR.status = 1
+            AND TR.is_published = 1
+            AND TR.created_by = $1
+      `;
+
+    try {
+      const data = db.query(query, [userId]);
+      return data;
+    } catch (error) {
+      throw new Error(error);
+    }
+  },
+
+  getFinalizedProducts: async (userId) => {
+    const query = `
+        SELECT DISTINCT
+            TP.id AS value,
+            TP.name AS label
+        FROM tbl_product TP        
+        INNER JOIN tbl_quote_finalization TQF
+            ON TP.id = TQF.product_id
+        INNER JOIN tbl_rfq TR
+            ON TR.id = TQF.rfq_id
+        WHERE TR.status = 1
+            AND TR.is_published = 1
+            AND TR.created_by = $1
+      `;
+
+    try {
+      const data = db.query(query, [userId]);
+      return data;
+    } catch (error) {
+      throw new Error(error);
+    }
   }
 };
 

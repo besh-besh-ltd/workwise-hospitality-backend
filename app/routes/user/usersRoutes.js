@@ -182,28 +182,6 @@ UsersRoutes.get(
   UsersController.communicationSettingsList
 );
 
-UsersRoutes.get(
-  '/vendor-dashboard-data',
-  passportSignIn,
-  UsersController.vendorDashboardData
-);
-
-
-UsersRoutes.post(
-  '/get-dashboard-data',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
-  validateBody(projectSchemas.get_buyer_body_validation),
-  UsersController.getDashboardData
-);
-
-UsersRoutes.get(
-  '/get-dashboard-Analytics',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
-  UsersController.getDashboardAnalytics
-);
-
 UsersRoutes.post(
   '/buyer-private-vendor',
   passportSignIn,
@@ -246,11 +224,44 @@ UsersRoutes.put(
   UsersController.updateSpoc
 )
 
+UsersRoutes.get(
+  '/vendor-dashboard-data',
+  passportSignIn,
+  UsersController.vendorDashboardData
+);
+
+// Dashboard Routes
+UsersRoutes.post(
+  '/get-dashboard-data',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  validateBody(projectSchemas.get_buyer_body_validation),
+  UsersController.getDashboardData
+);
+
+UsersRoutes.get(
+  '/get-dashboard-Analytics',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  UsersController.getDashboardAnalytics
+);
 
 UsersRoutes.get(
   '/dashboard-top-vendors-and-products',
   passportSignIn,
   UsersController.getTopVendorsandProducts
+)
+
+UsersRoutes.get(
+  '/dashboard-finalized-vendors',
+  passportSignIn,
+  UsersController.getFinalizedVendors
+)
+
+UsersRoutes.get(
+  '/dashboard-finalized-products',
+  passportSignIn,
+  UsersController.getFinalizedProducts
 )
 
 UsersRoutes.post(

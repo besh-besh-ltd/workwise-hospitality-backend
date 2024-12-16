@@ -2187,7 +2187,7 @@ WHERE row_num_by_name_category = 1
       throw new Error(error);
     }
   },
-  getQuotesChartData: async (user_id, chartFilter, start_date, end_date) => {
+  getQuotesChartData: async (user_id, chartFilter, start_date, end_date, product_id, vendor_id) => {
     const dateQ = ['past7days', 'currentMonth'].includes(chartFilter)
     const query = `
       SELECT 
@@ -2200,17 +2200,18 @@ WHERE row_num_by_name_category = 1
           ON tr.id = tqf.rfq_id
       WHERE tqf.timestamp BETWEEN $3::timestamp AND $4::timestamp
         AND tr.created_by = $1 
+        ${product_id ? `AND tqf.product_id = $5` : ``}
+        ${vendor_id ? `AND tqf.vendor_id = $6` : ``}
       ${dateQ 
           ? `GROUP BY DATE(tqf.timestamp)
             ORDER BY date;`
           : `GROUP BY TO_CHAR(tqf.timestamp, 'YYYY-MM')
             ORDER BY month;`}`;
 
-    console.log(query)
     try {
       const formattedStartDate = new Date(start_date).toISOString();
       const formattedEndDate = new Date(end_date).toISOString();
-      const values = [user_id, 1, formattedStartDate, formattedEndDate];
+      const values = [user_id, 1, formattedStartDate, formattedEndDate, product_id, vendor_id];
 
       const result = await db.query(query, values);
       return result;
@@ -2219,7 +2220,7 @@ WHERE row_num_by_name_category = 1
       throw new Error(error);
     }
   },
-  getQuoteCostingData: async (user_id, chartFilter, start_date, end_date) => {
+  getQuoteCostingData: async (user_id, chartFilter, start_date, end_date, product_id, vendor_id) => {
     const dateQ = ['past7days', 'currentMonth'].includes(chartFilter)
     const query = `
       SELECT
@@ -2234,6 +2235,8 @@ WHERE row_num_by_name_category = 1
           ON tr.id = tqf.rfq_id
       WHERE tqf.timestamp BETWEEN $3::timestamp AND $4::timestamp
         AND tr.created_by = $1
+        ${product_id ? `AND tqf.product_id = $5` : ``}
+        ${vendor_id ? `AND tqf.vendor_id = $6` : ``}
       ${dateQ
           ? `GROUP BY DATE(tqf.timestamp)
             ORDER BY date;`
@@ -2244,7 +2247,7 @@ WHERE row_num_by_name_category = 1
     try {
       const formattedStartDate = new Date(start_date).toISOString();
       const formattedEndDate = new Date(end_date).toISOString();
-      const values = [user_id, 1, formattedStartDate, formattedEndDate];
+      const values = [user_id, 1, formattedStartDate, formattedEndDate, product_id, vendor_id];
 
       const result = await db.query(query, values);
       return result;

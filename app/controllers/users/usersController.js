@@ -2865,19 +2865,18 @@ const UsersController = {
     const user_id = req.user.id;
     const chartFilter = req.query.chart_filter || null;
     const dataType = req.query.data_type || null;
+    const product_id = req.query.product || null;
+    const vendor_id = req.query.vendor || null;
     let data = {};
 
     try {
       const { startDate, endDate } = getDateRange(chartFilter);
       switch (dataType) {
         case 'quotes':
-            data = await rfqModel.getQuotesChartData(user_id, chartFilter, startDate, endDate);
+            data = await rfqModel.getQuotesChartData(user_id, chartFilter, startDate, endDate, product_id, vendor_id);
             break;
         case 'quote_costing':
-            data = await rfqModel.getQuoteCostingData(user_id, chartFilter, startDate, endDate);
-            break;
-        case 'product_costing':
-            data = await rfqModel.getProductCostingData(user_id, chartFilter, startDate, endDate);
+            data = await rfqModel.getQuoteCostingData(user_id, chartFilter, startDate, endDate, product_id, vendor_id);
             break;
         default:
             break;
@@ -3682,6 +3681,50 @@ const UsersController = {
 
     } catch (error) {
       logError("Error in getting top vendors and products for user dashboard: ", error);
+      res.status(400)
+      .json({
+        status: 3,
+        message: Config.errorText.value
+      })
+      .end();
+    }
+  },
+
+  getFinalizedProducts: async (req, res) => {
+    try {      
+      const user_id = req.user.id;
+      const data = await vendorModel.getFinalizedProducts(user_id);
+
+      res.status(200)
+      .json({
+        status: 1,
+        data
+      })
+
+    } catch (error) {
+      logError("Error in getting finalized products for user dashboard: ", error);
+      res.status(400)
+      .json({
+        status: 3,
+        message: Config.errorText.value
+      })
+      .end();
+    }
+  },
+
+  getFinalizedVendors: async (req, res) => {
+    try {      
+      const user_id = req.user.id;
+      const data = await vendorModel.getFinalizedVendors(user_id);
+
+      res.status(200)
+      .json({
+        status: 1,
+        data
+      })
+
+    } catch (error) {
+      logError("Error in getting finalized vendors for user dashboard: ", error);
       res.status(400)
       .json({
         status: 3,
