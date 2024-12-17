@@ -2133,53 +2133,88 @@ WHERE row_num_by_name_category = 1
         });
     });
   },
-  getRfqChartData: async (user_id, chartFilter, start_date, end_date) => {
+  getRfqChartData: async (user_id, chartFilter, start_date, end_date, project_id) => {
     const dateQ = ['past7days', 'currentMonth'].includes(chartFilter)
     const query = `
+        WITH date_series AS (
+            SELECT 
+                CASE 
+                    WHEN $5 THEN to_char(d, 'YYYY-MM') 
+                    ELSE to_char(d, 'YYYY-MM-DD')     
+                END AS period
+            FROM generate_series(
+                CASE
+                    WHEN $5 THEN $3::timestamp + INTERVAL '1 day'  
+                    ELSE $3::timestamp
+                END,
+                $4::timestamp,   
+                CASE WHEN $5 THEN '1 month' ELSE '1 day' END::interval
+            ) AS d
+        ),
+        rfq_data AS (
+            SELECT 
+                CASE 
+                    WHEN $5 THEN to_char(tr.timestamp, 'YYYY-MM') 
+                    ELSE to_char(tr.timestamp, 'YYYY-MM-DD')     
+                END AS period,
+                count(*) FILTER (WHERE tr.status = 1) AS new_rfqs,
+                count(*) FILTER (
+                    WHERE tr.status = 2
+                    OR (
+                        (tr.bid_end_date IS NOT NULL AND tr.bid_end_date != '' 
+                        AND DATE(tr.bid_end_date) < now())
+                    )
+                ) AS closed_rfqs,
+                count(*) FILTER (
+                    WHERE tr.status = 1
+                    AND tr.id IN (
+                        SELECT trp.rfq_id
+                        FROM tbl_rfq_products trp
+                        LEFT JOIN tbl_quote_finalization tqf 
+                            ON trp.product_id = tqf.product_id
+                            AND trp.variant = tqf.variant
+                        GROUP BY trp.rfq_id
+                        HAVING count(trp.product_id) = count(tqf.product_id)
+                    )
+                ) AS completed_rfqs
+            FROM tbl_rfq tr            
+            WHERE tr.created_by = $1 
+              AND tr.is_published = 1
+              ${project_id ? `AND tr.project_id = $6` : `` }
+            GROUP BY period
+        ),
+        quotes_data AS (
+            SELECT 
+                CASE 
+                    WHEN $5 THEN to_char(tq.timestamp, 'YYYY-MM') 
+                    ELSE to_char(tq.timestamp, 'YYYY-MM-DD')    
+                END AS period,
+                count(*) AS quotes_received
+            FROM tbl_quotes tq
+            WHERE EXISTS (
+                SELECT 1 FROM tbl_rfq tr 
+                WHERE tq.rfq_id = tr.id 
+                AND tr.created_by = $1 
+                AND tr.is_published = 1
+            )
+            GROUP BY period
+        )
         SELECT 
-            ${dateQ ? `DATE(tr.timestamp) AS date,`
-        : `TO_CHAR(timestamp, 'YYYY-MM') AS month,`}
-            count(*) FILTER (WHERE tr.status = 1) AS new_rfqs,
-            count(*) FILTER (
-                WHERE tr.status = 2
-                OR (
-                    (tr.bid_end_date IS NOT NULL AND tr.bid_end_date != '' 
-                    AND DATE(tr.bid_end_date) < now())
-                )
-            ) AS closed_rfqs,
-            count(*) FILTER (
-                WHERE tr.status = 1
-                AND tr.id IN (
-                    SELECT trp.rfq_id
-                    FROM tbl_rfq_products trp
-                    LEFT JOIN tbl_quote_finalization tqf 
-                        ON trp.product_id = tqf.product_id
-                        AND trp.variant = tqf.variant
-                    GROUP BY trp.rfq_id
-                    HAVING count(trp.product_id) = count(tqf.product_id)
-                )
-            ) AS completed_rfqs,
-            count(*) FILTER (
-                WHERE tr.status = 1
-                AND EXISTS (
-                    SELECT 1 
-                    FROM tbl_quotes tq 
-                    WHERE tq.rfq_id = tr.id
-                )
-            ) AS quotes_received
-        FROM tbl_rfq tr
-        WHERE tr.created_by = $1 
-          AND tr.is_published = 1
-          AND tr.timestamp BETWEEN $3::timestamp AND $4::timestamp
-        ${dateQ ? `GROUP BY DATE(tr.timestamp)
-                  ORDER BY date;`
-        : `GROUP BY TO_CHAR(timestamp, 'YYYY-MM')
-          ORDER BY month;`}`; 
+            ds.period AS date,
+            COALESCE(rd.new_rfqs, 0) AS new_rfqs,
+            COALESCE(rd.closed_rfqs, 0) AS closed_rfqs,
+            COALESCE(rd.completed_rfqs, 0) AS completed_rfqs,
+            COALESCE(qd.quotes_received, 0) AS quotes_received
+        FROM date_series ds
+        LEFT JOIN rfq_data rd ON ds.period = rd.period
+        LEFT JOIN quotes_data qd ON ds.period = qd.period
+        ORDER BY ds.period; 
+    `; 
 
     try {
       const formattedStartDate = new Date(start_date).toISOString();
       const formattedEndDate = new Date(end_date).toISOString();
-      const values = [user_id, 1, formattedStartDate, formattedEndDate]; 
+      const values = [user_id, 1, formattedStartDate, formattedEndDate, !dateQ, project_id]; 
 
       const result = await db.query(query, values);
       return result;

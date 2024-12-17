@@ -1531,10 +1531,11 @@ const rfqController = {
   getRfqChartData: async (req, res, next) => {
     const user_id = req.user.id;
     const chartFilter = req.query.chart_filter || null;
+    const project_id = req.query.project || null;
 
     try {
       const { startDate, endDate } = getDateRange(chartFilter);
-      const rfq_data = await rfqModel.getRfqChartData(user_id, chartFilter, startDate, endDate);        
+      const rfq_data = await rfqModel.getRfqChartData(user_id, chartFilter, startDate, endDate, project_id);        
 
       res
         .status(200)
