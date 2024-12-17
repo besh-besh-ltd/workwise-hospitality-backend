@@ -1883,13 +1883,70 @@ WHERE row_num_by_name_category = 1
         });
     });
   },
+
+  searchVendorsByName: async (buyerId, vendor_name) => {
+    let q = `
+    SELECT *
+    FROM (
+        SELECT 
+            tu.id AS vendor_id, 
+            tu.name AS vendor_name, 
+            tu.email, 
+            tu.mobile, 
+            tu.organization_name AS company_name,
+            tu.address,
+            CASE
+                WHEN bvm.vendor_id IS NOT NULL THEN 1
+                ELSE 0
+            END AS is_linked_with_buyer
+        FROM 
+            tbl_users tu
+        LEFT JOIN 
+            tbl_company tc ON tc.user_id = tu.id
+        LEFT JOIN 
+            tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = $1
+        LEFT JOIN 
+            tbl_location_cities lc ON tu.city = lc.id
+        LEFT JOIN 
+            tbl_location_states ls ON tu.state = ls.id
+        WHERE 
+            tu.user_type = 3 -- Vendor user types
+            AND tu.status = 1 -- Active vendors
+            AND tu.is_deleted = 0 -- Not deleted vendors
+            AND tu.email IS NOT NULL -- Vendors with email
+            AND (
+                tc.is_private = 0 -- Public vendors
+                OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL) -- Privately mapped vendors for this buyer
+            )
+            ${vendor_name ? `AND (
+                to_tsvector('english', tu.name) @@ plainto_tsquery('english', $2)
+                OR (char_length($2) = 1 AND similarity(tu.name, $2) > 0)
+                OR (char_length($2) > 1 AND similarity(tu.name, $2) > 0.1)
+            )` : ''}
+    ) AS distinct_vendors
+    ORDER BY 
+        is_linked_with_buyer DESC, RANDOM();
+    `;
+  
+    const values = vendor_name ? [buyerId, vendor_name] : [buyerId];
+
+    return new Promise(function (resolve, reject) {
+      db.query(q, values)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
   getVendorApprovedBy: async (user_id) => {
     let q = `SELECT tbl_vendor_approve.id, tbl_vendor_approve.vendor_approve as vendor_approve
     FROM tbl_vendorapprove_user_mapping
     LEFT JOIN tbl_vendor_approve on tbl_vendor_approve.id = tbl_vendorapprove_user_mapping.vendor_approve_id
     WHERE user_id = ${user_id}`;
-
-    console.log('QUERY======', q);
 
     return new Promise(function (resolve, reject) {
       db.query(q)
@@ -1930,7 +1987,7 @@ WHERE row_num_by_name_category = 1
         const statePromise = db
           .query(stateQuery, [stateName])
           .then(function (stateResult) {
-            console.log('stateResult:', stateResult); // Log stateResult to inspect its structure
+
             if (stateResult?.length > 0) {
               const stateId = stateResult[0].id;
 
@@ -2076,36 +2133,275 @@ WHERE row_num_by_name_category = 1
         });
     });
   },
-  getAllRfqByUser: async (user_id, status) => {
-    return new Promise(function (resolve, reject) {
-      db.one(
-        `SELECT count(id) FROM tbl_rfq WHERE created_by = $1 AND status = $2 AND is_published = 1`,
-        [user_id, status]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
+  getRfqChartData: async (user_id, chartFilter, start_date, end_date, project_id) => {
+    const dateQ = ['past7days', 'currentMonth'].includes(chartFilter)
+    const query = `
+        WITH date_series AS (
+            SELECT 
+                CASE 
+                    WHEN $5 THEN to_char(d, 'YYYY-MM') 
+                    ELSE to_char(d, 'YYYY-MM-DD')     
+                END AS period
+            FROM generate_series(
+                CASE
+                    WHEN $5 THEN $3::timestamp + INTERVAL '1 day'  
+                    ELSE $3::timestamp
+                END,
+                $4::timestamp,   
+                CASE WHEN $5 THEN '1 month' ELSE '1 day' END::interval
+            ) AS d
+        ),
+        rfq_data AS (
+            SELECT 
+                CASE 
+                    WHEN $5 THEN to_char(tr.timestamp, 'YYYY-MM') 
+                    ELSE to_char(tr.timestamp, 'YYYY-MM-DD')     
+                END AS period,
+                count(*) FILTER (WHERE tr.status = 1) AS new_rfqs,
+                count(*) FILTER (
+                    WHERE tr.status = 2
+                    OR (
+                        (tr.bid_end_date IS NOT NULL AND tr.bid_end_date != '' 
+                        AND DATE(tr.bid_end_date) < now())
+                    )
+                ) AS closed_rfqs,
+                count(*) FILTER (
+                    WHERE tr.status = 1
+                    AND tr.id IN (
+                        SELECT trp.rfq_id
+                        FROM tbl_rfq_products trp
+                        LEFT JOIN tbl_quote_finalization tqf 
+                            ON trp.product_id = tqf.product_id
+                            AND trp.variant = tqf.variant
+                        GROUP BY trp.rfq_id
+                        HAVING count(trp.product_id) = count(tqf.product_id)
+                    )
+                ) AS completed_rfqs
+            FROM tbl_rfq tr            
+            WHERE tr.created_by = $1 
+                AND tr.is_published = 1
+                AND ($6 IS NULL OR tr.project_id = $6)
+            GROUP BY period
+        ),
+        quotes_data AS (
+            SELECT 
+                CASE 
+                    WHEN $5 THEN to_char(tq.timestamp, 'YYYY-MM') 
+                    ELSE to_char(tq.timestamp, 'YYYY-MM-DD')    
+                END AS period,
+                count(*) AS quotes_received
+            FROM tbl_quotes tq
+            WHERE EXISTS (
+                SELECT 1 FROM tbl_rfq tr 
+                WHERE tq.rfq_id = tr.id 
+                    AND tr.created_by = $1 
+                    AND tr.is_published = 1
+                    AND ($6 IS NULL OR tr.project_id = $6)
+            )
+            GROUP BY period
+        )
+        SELECT 
+            ds.period AS date,
+            COALESCE(rd.new_rfqs, 0) AS new_rfqs,
+            COALESCE(rd.closed_rfqs, 0) AS closed_rfqs,
+            COALESCE(rd.completed_rfqs, 0) AS completed_rfqs,
+            COALESCE(qd.quotes_received, 0) AS quotes_received
+        FROM date_series ds
+        LEFT JOIN rfq_data rd ON ds.period = rd.period
+        LEFT JOIN quotes_data qd ON ds.period = qd.period
+        ORDER BY ds.period; 
+    `; 
+
+    try {
+      const formattedStartDate = new Date(start_date).toISOString();
+      const formattedEndDate = new Date(end_date).toISOString();
+      const values = [user_id, 1, formattedStartDate, formattedEndDate, !dateQ, project_id]; 
+
+      const result = await db.query(query, values);
+      return result;
+    } catch (error) {
+      throw new Error(error);
+    }
   },
-  getPendingResponseCount: async (user_id, status) => {
-    return new Promise(function (resolve, reject) {
-      db.one(
-        `SELECT count(*) FROM "tbl_rfq" tr JOIN "tbl_quotes" tq on tr.id = tq.rfq_id where tr.created_by = $1 and tr.status = $2 and tr.is_published = 1 and tr.id = tq.rfq_id`,
-        [user_id, status]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
+  getQuotesChartData: async (user_id, chartFilter, start_date, end_date, product_id, vendor_ids) => {
+    const dateQ = ['past7days', 'currentMonth'].includes(chartFilter)
+    const query = `
+        SELECT 
+            ${dateQ 
+                ? `DATE(tqf.timestamp) AS date,`
+                : `TO_CHAR(tqf.timestamp, 'YYYY-MM') AS date,`}
+            tc.company_name,
+            tu.organization_name,
+            tu.name,
+            COUNT(tqf.id) AS data_value
+        FROM tbl_quote_finalization tqf
+        JOIN tbl_rfq tr 
+            ON tr.id = tqf.rfq_id
+        JOIN tbl_company tc 
+            ON tqf.vendor_id = tc.user_id
+        JOIN tbl_users tu 
+            ON tqf.vendor_id = tu.id
+        WHERE tqf.timestamp BETWEEN $3::timestamp AND $4::timestamp
+          AND tr.created_by = $1
+          ${product_id ? `AND tqf.product_id = $5` : `` }
+          ${vendor_ids ? `AND tqf.vendor_id = ANY($6)` : ``} 
+        ${dateQ 
+            ? `GROUP BY DATE(tqf.timestamp), tc.company_name, tu.organization_name, tu.name
+              ORDER BY date;`
+            : `GROUP BY TO_CHAR(tqf.timestamp, 'YYYY-MM'), tc.company_name, tu.organization_name, tu.name
+              ORDER BY date;`}
+    `;
+
+
+    try {
+      const formattedStartDate = new Date(start_date).toISOString();
+      const formattedEndDate = new Date(end_date).toISOString();
+      const values = [user_id, 1, formattedStartDate, formattedEndDate, product_id, vendor_ids];
+
+      const result = await db.query(query, values);
+      return result;
+    } catch (error) {
+      console.log(error)
+      throw new Error(error);
+    }
   },
+  getQuoteCostingData: async (user_id, chartFilter, start_date, end_date, product_id, vendor_ids) => {
+    const dateQ = ['past7days', 'currentMonth'].includes(chartFilter)
+    const query = `
+        SELECT 
+            ${dateQ 
+                ? `DATE(tqf.timestamp) AS date,`
+                : `TO_CHAR(tqf.timestamp, 'YYYY-MM') AS date,`}
+            tc.company_name,
+            tu.organization_name,
+            tu.name,
+            SUM(tqi.total_price) AS data_value
+        FROM tbl_quote_finalization tqf
+        JOIN tbl_quote_items tqi
+          ON tqf.id = tqi.quote_id
+        JOIN tbl_rfq tr 
+            ON tr.id = tqf.rfq_id
+        JOIN tbl_company tc 
+            ON tqf.vendor_id = tc.user_id
+        JOIN tbl_users tu 
+            ON tqf.vendor_id = tu.id
+        WHERE tqf.timestamp BETWEEN $3::timestamp AND $4::timestamp
+          AND tr.created_by = $1
+          ${product_id ? `AND tqf.product_id = $5` : `` }
+          ${vendor_ids ? `AND tqf.vendor_id = ANY($6)` : ``} 
+        ${dateQ 
+            ? `GROUP BY DATE(tqf.timestamp), tc.company_name, tu.organization_name, tu.name
+              ORDER BY date;`
+            : `GROUP BY TO_CHAR(tqf.timestamp, 'YYYY-MM'), tc.company_name, tu.organization_name, tu.name
+              ORDER BY date;`}
+    `;
+
+    try {
+      const formattedStartDate = new Date(start_date).toISOString();
+      const formattedEndDate = new Date(end_date).toISOString();
+      const values = [user_id, 1, formattedStartDate, formattedEndDate, product_id, vendor_ids];
+
+      const result = await db.query(query, values);
+      return result;
+    } catch (error) {
+      console.log(error)
+      throw new Error(error);
+    }
+  },
+  getAllRfqByUser: async (user_id, status = null) => {
+    const query = `
+      SELECT count(*)
+      FROM tbl_rfq
+      WHERE created_by = $1
+        ${ status ? `AND status = $2` : ``}
+        ${status == 1
+        ? `AND bid_end_date IS NOT NULL 
+            AND bid_end_date != '' 
+            AND DATE(bid_end_date) >= now()`
+        : ``}
+        AND is_published = 1     
+    `;
+
+    try {
+      let values = [user_id, status];
+
+      const result = await db.one(query, values);
+      return result;
+    } catch (error) {
+      throw new Error(error);
+    }
+  },
+  getCompletedRfqs: async (user_id) => {
+    const query = `
+      SELECT count(*)
+      FROM tbl_rfq tr
+      WHERE tr.status = 1
+        AND tr.created_by = $1
+        AND tr.id IN (
+          SELECT trp.rfq_id
+          FROM tbl_rfq_products trp
+          LEFT JOIN tbl_quote_finalization tqf
+            ON trp.product_id = tqf.product_id
+          AND trp.variant = tqf.variant
+          GROUP BY trp.rfq_id
+          HAVING count(trp.product_id) = count(tqf.product_id)
+        );
+    `;
+
+    try {
+      let values = [user_id]; 
+
+      const result = await db.one(query, values);
+      return result;
+    } catch (error) {
+      throw new Error(error);
+    }    
+  },
+  getClosedRfqs: async (user_id) => {
+    const query = `
+      SELECT count(*)
+      FROM tbl_rfq tr        
+      WHERE tr.created_by = $1
+        AND (
+          tr.status = 2
+          OR (
+            tr.bid_end_date IS NOT NULL 
+            AND tr.bid_end_date != '' 
+            AND DATE(tr.bid_end_date) < now()
+          )
+        );
+    `;
+
+    try {
+      let values = [user_id]; 
+
+      const result = await db.one(query, values);
+      return result;
+    } catch (error) {
+      throw new Error(error);
+    }    
+  },
+  getActiveQuotes: async (user_id, status) => {
+    const query = `
+      SELECT count(*) FROM "tbl_rfq" tr
+         JOIN "tbl_quotes" tq on tr.id = tq.rfq_id
+         WHERE tr.created_by = $1
+          AND tr.status = $2
+          AND tr.is_published = 1
+          AND bid_end_date IS NOT NULL
+            AND bid_end_date != ''
+            AND DATE(bid_end_date) >= now()
+    `; 
+
+    try {
+      let values = [user_id, status]; 
+
+      const result = await db.one(query, values);
+      return result;
+    } catch (error) {
+      throw new Error(error);
+    }    
+  },  
   getVendorReviews: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.query(
@@ -2156,8 +2452,9 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
   getRecentQuotes: async (user_id, status) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT  tr.id, tr.rfq_no , tq.timestamp as timestamp, tq.created_by FROM "tbl_rfq" tr
-      LEFT JOIN "tbl_quotes" tq ON tr.id = tq.rfq_id      
+        `SELECT  tr.id, tr.rfq_no , tq.timestamp as timestamp, tq.created_by, tu.organization_name, tu.name as vendor_name FROM "tbl_rfq" tr
+      LEFT JOIN "tbl_quotes" tq ON tr.id = tq.rfq_id  
+      LEFT JOIN "tbl_users" tu ON tq.created_by = tu.id    
       WHERE tr.created_by = $1 AND tr.status = '1' AND tr.is_published = 1 ORDER BY "id" DESC LIMIT 50`,
         [user_id]
       )
@@ -2414,44 +2711,44 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
   productPriceStatsMarket: async (product_name) => {
     return new Promise(function (resolve, reject) {
       db.query(`
-      WITH GeneralStats AS (
+        WITH GeneralStats AS (
+          SELECT
+              MIN(qi.unit_price) AS min_price,
+              MAX(qi.unit_price) AS max_price,
+              AVG(qi.unit_price) AS avg_price
+          FROM tbl_product AS p
+          JOIN tbl_quote_items AS qi ON p.id = qi.product_id
+          JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
+          WHERE p.name = $1
+              AND q.timestamp >= NOW() - INTERVAL '1 year'
+        ), MonthlyStats AS (
+          SELECT
+              EXTRACT(YEAR FROM q.timestamp) AS year,
+              EXTRACT(MONTH FROM q.timestamp) AS month,
+              MIN(qi.unit_price) AS min_price,
+              AVG(qi.unit_price) AS avg_price,
+              MAX(qi.unit_price) AS max_price
+          FROM tbl_product AS p
+          JOIN tbl_quote_items AS qi ON p.id = qi.product_id
+          JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
+          WHERE p.name = $1
+              AND q.timestamp >= NOW() - INTERVAL '1 year'
+          GROUP BY EXTRACT(YEAR FROM q.timestamp), EXTRACT(MONTH FROM q.timestamp)
+          ORDER BY year, month
+        )
         SELECT
-            MIN(qi.unit_price) AS min_price,
-            MAX(qi.unit_price) AS max_price,
-            AVG(qi.unit_price) AS avg_price
-        FROM tbl_product AS p
-        JOIN tbl_quote_items AS qi ON p.id = qi.product_id
-        JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
-        WHERE p.name = $1
-            AND to_timestamp(CAST(q.timestamp AS BIGINT) / 1000) >= NOW() - INTERVAL '1 year'
-      ), MonthlyStats AS (
-        SELECT
-            EXTRACT(YEAR FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)) AS year,
-            EXTRACT(MONTH FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)) AS month,
-            MIN(qi.unit_price) AS min_price,
-            AVG(qi.unit_price) AS avg_price,
-            MAX(qi.unit_price) AS max_price
-        FROM tbl_product AS p
-        JOIN tbl_quote_items AS qi ON p.id = qi.product_id
-        JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
-        WHERE p.name = $1
-            AND to_timestamp(CAST(q.timestamp AS BIGINT) / 1000) >= NOW() - INTERVAL '1 year'
-        GROUP BY EXTRACT(YEAR FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000)), EXTRACT(MONTH FROM to_timestamp(CAST(q.timestamp AS BIGINT) / 1000))
-        ORDER BY year, month
-      )
-      SELECT
-        JSON_BUILD_OBJECT(
-            'min', (SELECT min_price FROM GeneralStats),
-            'max', (SELECT max_price FROM GeneralStats),
-            'avg', (SELECT avg_price FROM GeneralStats)
-        ) AS general,
-        JSON_OBJECT_AGG(
-            CAST(year AS TEXT) || '-' || LPAD(CAST(month AS TEXT), 2, '0'),
-            JSON_BUILD_OBJECT('min', min_price, 'avg', avg_price, 'max', max_price)
-        ) AS monthly
-      FROM MonthlyStats;
-  `,
-    [ product_name]
+          JSON_BUILD_OBJECT(
+              'min', (SELECT min_price FROM GeneralStats),
+              'max', (SELECT max_price FROM GeneralStats),
+              'avg', (SELECT avg_price FROM GeneralStats)
+          ) AS general,
+          JSON_OBJECT_AGG(
+              CAST(year AS TEXT) || '-' || LPAD(CAST(month AS TEXT), 2, '0'),
+              JSON_BUILD_OBJECT('min', min_price, 'avg', avg_price, 'max', max_price)
+          ) AS monthly
+        FROM MonthlyStats;
+    `,
+        [product_name]
       )
         .then(function (data) {
           resolve(data);

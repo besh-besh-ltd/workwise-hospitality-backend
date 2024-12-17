@@ -521,6 +521,101 @@ const vendorModel = {
           reject(error);
         });
     });
+  },
+
+  topVendorsWithProducts: async (userId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `
+          SELECT 
+              p.user_id, 
+              u.name AS name,
+              u.email AS email,
+              u.mobile AS mobile,
+              u.address AS address,
+              COUNT(DISTINCT (pr.name, c.id))::INT AS product_count
+          FROM tbl_rfq_product_vendors p
+          JOIN tbl_rfq r
+              ON r.id = p.rfq_id
+          JOIN tbl_product pr
+              ON pr.id = p.product_id
+          JOIN tbl_product_categories pc
+              ON pc.product_id = pr.id   
+          JOIN tbl_category c
+              ON c.id = pc.category_id
+          JOIN tbl_users u
+              ON u.id = p.user_id     
+          WHERE 
+              r.created_by = $1 
+              AND c.parent_id = 0
+          GROUP BY 
+              p.user_id, u.name, u.email, u.mobile, u.address
+          ORDER BY 
+              product_count DESC
+          LIMIT 10;
+        `
+        , [userId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  getFinalizedVendors: async (userId) => {
+    const query = `
+        SELECT DISTINCT
+            TC.user_id,
+            TC.company_name,
+            TC.email,
+            TC.mobile,
+            TU.organization_name,
+            TU.name
+        FROM tbl_company TC
+        LEFT JOIN tbl_users TU
+            ON TC.user_id = TU.id
+        INNER JOIN tbl_quote_finalization TQF
+            ON TC.user_id = TQF.vendor_id
+        INNER JOIN tbl_rfq TR
+            ON TR.id = TQF.rfq_id
+        WHERE TR.status = 1
+            AND TR.is_published = 1
+            AND TR.created_by = $1
+      `;
+
+    try {
+      const data = db.query(query, [userId]);
+      return data;
+    } catch (error) {
+      throw new Error(error);
+    }
+  },
+
+  getFinalizedProducts: async (userId) => {
+    const query = `
+        SELECT DISTINCT
+            TP.id AS value,
+            TP.name AS label
+        FROM tbl_product TP        
+        INNER JOIN tbl_quote_finalization TQF
+            ON TP.id = TQF.product_id
+        INNER JOIN tbl_rfq TR
+            ON TR.id = TQF.rfq_id
+        WHERE TR.status = 1
+            AND TR.is_published = 1
+            AND TR.created_by = $1
+      `;
+
+    try {
+      const data = db.query(query, [userId]);
+      return data;
+    } catch (error) {
+      throw new Error(error);
+    }
   }
 };
 
