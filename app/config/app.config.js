@@ -5,7 +5,7 @@ import dateFormat from "dateformat";
 dotenv.config();
 
 // get env data
-const env = process.env.NODE_ENV || "uat";
+const env = process.env.NODE_ENV || "development";
 
 const userImageUploadPath = process.env.USER_IMAGE || null;
 const productExportImageUploadPath = process.env.PRODUCT_FILE || null;
@@ -36,15 +36,15 @@ const invoiceFileUploadPath = process.env.INVOICE_FILE || null;
 // const blogImageUploadPath = process.env.BLOG_IMAGE || null;
 
 const downloadURL = process.env.DOWNLOADD_URL || null;
-const jwtSecret = process.env.JWT_SECRET || null;
-const cryptSecret = process.env.CRYPT_SECRET || null;
+const jwtSecret = process.env.JWT_SECRET || "";
+const cryptSecret = process.env.CRYPT_SECRET || "";
 const globalAdminLimit = process.env.LIMIT || 20;
 const sgst = process.env.SGST || 0.0015;
 const cgst = process.env.CGST || 0.0015;
 const app_version = process.env.APP_VERSION || 1.0;
 const base_url =
   // process.env.BASE_URL || 'https://panacheapi.indusnettechnologies.com';
-  process.env.BASE_URL || "https://letsworkwise.com";
+  process.env.BASE_URL || "http://api.localhost:3001";
 
 if (
   (jwtSecret == undefined || jwtSecret == null) &&
@@ -302,7 +302,7 @@ const config = {
     port: 587,
     auth: {
       user: "b2bportal2023@gmail.com",
-      pass: "mjxsmtpsib-3b42f9886e4f809b920bfec2a77b5daa71c65fdcdf3e71d0c247d25261f4446e-J7znQEFTHW45M9Sw",
+      pass: "xsmtpsib-3b42f9886e4f809b920bfec2a77b5daa71c65fdcdf3e71d0c247d25261f4446e-J7znQEFTHW45M9Sw",
     },
   },
   developers: [
