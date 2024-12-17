@@ -2179,8 +2179,8 @@ WHERE row_num_by_name_category = 1
                 ) AS completed_rfqs
             FROM tbl_rfq tr            
             WHERE tr.created_by = $1 
-              AND tr.is_published = 1
-              ${project_id ? `AND tr.project_id = $6` : `` }
+                AND tr.is_published = 1
+                AND ($6 IS NULL OR tr.project_id = $6)
             GROUP BY period
         ),
         quotes_data AS (
@@ -2194,8 +2194,9 @@ WHERE row_num_by_name_category = 1
             WHERE EXISTS (
                 SELECT 1 FROM tbl_rfq tr 
                 WHERE tq.rfq_id = tr.id 
-                AND tr.created_by = $1 
-                AND tr.is_published = 1
+                    AND tr.created_by = $1 
+                    AND tr.is_published = 1
+                    AND ($6 IS NULL OR tr.project_id = $6)
             )
             GROUP BY period
         )
