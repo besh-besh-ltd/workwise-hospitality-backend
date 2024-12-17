@@ -6,7 +6,8 @@ import {
   generateOTPRandomNo,
   generateRandomString,
   createPay,
-  sendMail
+  sendMail,
+  getDateRange
 } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
 import userModel from '../../models/userModel.js';
@@ -1526,6 +1527,34 @@ const rfqController = {
         .end();
     }
   },
+
+  getRfqChartData: async (req, res, next) => {
+    const user_id = req.user.id;
+    const chartFilter = req.query.chart_filter || null;
+
+    try {
+      const { startDate, endDate } = getDateRange(chartFilter);
+      const rfq_data = await rfqModel.getRfqChartData(user_id, chartFilter, startDate, endDate);        
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: rfq_data
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
   getRfqByUser: async (req, res, next) => {
     let user_id = req.user.id;
     if (req.body.user_id) {
@@ -2103,7 +2132,6 @@ const rfqController = {
             status,
             created_by: user.id,
             updated_by: user.id,
-            timestamp: Date.now(),
             is_regret: req.body.is_regret ? req.body.is_regret : 0,
             global_payment_term: globalPaymentTerms,
             global_comment: globalComment,
@@ -4695,7 +4723,7 @@ const rfqController = {
           status: quoteExists[0].status,
           created_by: quoteExists[0].created_by,
           updated_by: quoteExists[0].updated_by,
-          timestamp: Date.now(),
+          timestamp: new Date().toISOString(),
           is_regret: 0,
           global_payment_term: globalPaymentTerms,
           global_comment: globalComment
