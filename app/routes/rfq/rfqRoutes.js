@@ -89,6 +89,14 @@ RfqRoutes.post(
   rfqController.getRfqReport
 );
 
+// RFQ Chart Data
+RfqRoutes.get(
+  '/rfq-chart-data',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  rfqController.getRfqChartData
+);
+
 RfqRoutes.post(
   '/getBuyerRfq',
   passportSignIn,
