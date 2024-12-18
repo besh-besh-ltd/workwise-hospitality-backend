@@ -245,6 +245,35 @@ const getFileNameFromUrl = async (url) => {
   }
 };
 
+const getDateRange = (filter) => {
+  const today = new Date();
+  const endDate = today; 
+  let startDate;
+
+  switch (filter) {
+      case 'past7days':
+          startDate = new Date();
+          startDate.setDate(today.getDate() - 6);
+          break;
+      case 'currentMonth':
+          startDate = new Date(today.getFullYear(), today.getMonth(), 1);
+          break;
+      case 'past3months':
+          startDate = new Date(today.getFullYear(), today.getMonth() - 2, 1);
+          break;
+      case 'past6months':
+          startDate = new Date(today.getFullYear(), today.getMonth() - 5, 1);
+          break;
+      case 'wholeYear':
+          startDate = new Date(today.getFullYear(), 0, 1);
+          break;
+      default:
+          throw new Error('Invalid chart filter');
+  }
+
+  return { startDate, endDate };
+};
+
 export {
   consoleLogData,
   calcTime,
@@ -263,5 +292,6 @@ export {
   notificationMail,
   addDefaultNotifications,
   arraysHaveSameData,
-  getFileNameFromUrl
+  getFileNameFromUrl,
+  getDateRange
 };
