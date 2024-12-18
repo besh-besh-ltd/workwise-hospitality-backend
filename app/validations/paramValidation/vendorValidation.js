@@ -79,7 +79,7 @@ const schemas = {
   vendor_register: Joi.object().keys({
     name: Joi.string().required(),
     email: Joi.string().required().email().max(100),
-    mobile: Joi.string().min(8).max(11).required().label('Mobile'),
+    mobile: Joi.string().min(10).max(15).required().label('Mobile'),
     organization_name: Joi.string().min(4).required(),
     address: Joi.string().optional().allow(null).allow(''),
     postal_code: Joi.string().optional().allow(null).allow(''),

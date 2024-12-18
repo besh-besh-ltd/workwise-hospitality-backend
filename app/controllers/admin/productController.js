@@ -990,10 +990,13 @@ const productController = {
             }
           }
 
-          let prodNameExists = await productModel.checkProductExists(
+          let prodNameExists = await productModel.productExistForVendor(
             productName,
-            vendor_id
+            vendor_id,
+            productCategory
           );
+
+
 
           // checking whehter the product exist with the same vendor
           // console.log("............................",prodNameExists);
@@ -1011,8 +1014,9 @@ const productController = {
 
           let productObj = '';
 
-          let check_master_exist = await productModel.checkMasterNameExist(
-            productName
+          let check_master_exist = await productModel.productWithCategoryExist(
+            productName,
+            productCategory
           );
 
           if (check_master_exist.length == 0) {
@@ -1034,9 +1038,7 @@ const productController = {
                 isMaster = 1;
                 break;
               }
-              // console.log(check_master_exist[i].id,categoryId,isMaster);
             }
-            // console.log("for loop over --->>> ",categoryId,isMaster);
             
             if(isMaster !== 1){
               errorsObj.push(
