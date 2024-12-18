@@ -1857,48 +1857,43 @@ WHERE tbl_product.name = $1`,
     return new Promise(function (resolve, reject) {
       db.any(
         `
+          WITH ranked_products AS (
+              SELECT 
+                  TP.id AS product_id,
+                  TP.name AS product_name,
+                  ARRAY (
+                      SELECT 
+                          json_build_object(
+                              'category_name', TC.title,
+                              'id', TC.id
+                          )
+                      FROM tbl_product_categories TPC
+                      LEFT JOIN tbl_category TC 
+                          ON TPC.category_id = TC.id
+                      WHERE TPC.product_id = TP.id
+                      AND TC.id IS NOT NULL
+                      ORDER BY TPC.id
+                  ) AS product_categories,
+                  COUNT(TR.id)::INT AS rfq_count,
+                  ROW_NUMBER() OVER (PARTITION BY TP.name ORDER BY COUNT(TR.id) DESC) AS rn
+              FROM tbl_rfq TR
+              JOIN tbl_rfq_products TRP
+                  ON TRP.rfq_id = TR.id
+              JOIN tbl_product TP
+                  ON TP.id = TRP.product_id
+              WHERE TR.created_by = $1
+              GROUP BY 
+                  TP.id, TP.name
+          )
           SELECT 
-              pr.id AS product_id,
-              pr.name AS product_name, 
-              ARRAY (
-                  SELECT 
-                      json_build_object(
-                          'category_name', tc.title,
-                          'id', tc.id
-                      )
-                  FROM 
-                      tbl_product_categories pc
-                  LEFT JOIN 
-                      tbl_category tc 
-                      ON pc.category_id = tc.id
-                  WHERE 
-                      pr.id = pc.product_id
-                  ORDER BY 
-                      pc.id
-              ) AS product_categories,
-              COUNT(DISTINCT p.user_id)::INT AS vendor_count 
-          FROM 
-              tbl_rfq_product_vendors p
-          JOIN 
-              tbl_rfq r
-              ON r.id = p.rfq_id
-          JOIN 
-              tbl_product pr
-              ON pr.id = p.product_id
-          JOIN 
-              tbl_product_categories pc
-              ON pc.product_id = pr.id
-          JOIN 
-              tbl_category c
-              ON c.id = pc.category_id
-          WHERE 
-              r.created_by = $1
-              AND c.parent_id = 0
-          GROUP BY 
-              pr.id, pr.name, c.id, c.title
-          ORDER BY 
-              vendor_count DESC
-          LIMIT 10
+              product_id,
+              product_name,
+              product_categories,
+              rfq_count
+          FROM ranked_products
+          WHERE rn = 1 
+          ORDER BY rfq_count DESC
+          LIMIT 10;
         `,
         [userId]
       )
