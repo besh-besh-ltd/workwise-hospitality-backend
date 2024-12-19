@@ -1462,6 +1462,28 @@ const rfqController = {
         .end();
     }
   },
+
+  getUnits: async (req, res, next) => {
+    try {
+      const result = await rfqModel.getAvailableUnits();
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: result
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   getRfqReport: async (req, res, next) => {
     let user_id = req.user.id;
     /* if (req.body.user_id) {
@@ -5448,5 +5470,108 @@ getTechEvaluationResult: async (req, res) => {
     });
   }
 },
+
+rfqProductWiseReport: async (req, res) => {
+  try {
+    const { startDate, endDate ,productName, productID} = req.query;
+    const userId = req.user.id;
+
+
+    const rfqData = await rfqModel.rfqProductReport(userId, productName, startDate, endDate);
+
+    res
+      .status(200)
+      .json(rfqData)
+      .end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+        success: false,
+        message: 'no data to return',
+        error: error
+    });
+  }
+},
+
+projectWiseReport: async (req, res) => {
+  try {
+    const { projectId, startDate, endDate } = req.query;
+    const userId = req.user.id;
+    console.log("Start Date, End Date, ProjectId:", startDate, endDate, projectId);
+
+
+    const rfqDetails = await rfqModel.getProjectDetailsReport(projectId, startDate, endDate);
+    const  quoteList = []
+
+    //  fetch quotes for each rfq preent in the project
+    for (let i = 0; i < rfqDetails.length; i++) {
+      for (let j = 0; j < rfqDetails[i].rfq_details.length; j++) {
+        const rfqId = rfqDetails[i].rfq_details[j].rfq_id;
+        let quoteDetails = await rfqModel.getQuotesByRfqById2(rfqId, userId, false);
+        quoteList.push(quoteDetails)
+      }
+    }
+
+    res.status(200).json({quoteList: quoteList,  rfqDetails:rfqDetails});
+  } catch (error) {
+    console.error("Error fetching project report:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Error processing RFQ details',
+      error: error.toString()
+    });
+  }
+},
+
+sendReportOnEmail: async (req, res) => {
+  try {
+    // Extracting email addresses from the request
+    const {emails, startDate, endDate} = req.body // Assuming 'emails' is a comma-separated list passed as a query parameter
+    const file = req.file;  // Assuming file data is sent via a multipart/form-data request
+    const fileName = file?.originalname?.split(".")[0] || "report"
+    const userDetails = req.user
+    const emailTemplate =  `
+        <div style="width: 80%; margin: 0 a uto; padding: 20px;">
+        <p>Greetings </p>
+        <p>Please find attached the zipped folder containing the complete data set for <strong> ${fileName}  </strong> covering the period <strong> ${ startDate + " to " +  endDate } </strong>. This report includes all relevant RFQ records, Quotes, and transaction logs compiled for auditing and review purposes.</p>
+        <p>If you have any questions or need additional information, please feel free to reach out.</p>
+        <p>Thank you for your time and consideration.</p>
+        <p>Best regards,</p>
+        <p>${userDetails.name}<br>
+        ${userDetails.organization_name}</p>
+    </div>
+    `
+
+    // Preparing email options with an attachment
+    const mailOptions = {
+      from: Config.webmasterMail, // Sender address
+      to: emails, // Sending email to all recipients directly from the query string
+      subject: `Project Report for ${fileName} of ${userDetails.organization_name || userDetails.name} `,     // subject: `${file.originalname.split(".")[0] || "Project Report"} || Workwise ` , // Subject line
+      html: emailTemplate, // HTML body content
+     attachments: [
+        {
+          filename: file.originalname,  // Using original file name
+          content: file.buffer          // Assuming the file is available as a buffer
+        }
+      ]
+    };
+
+    // Sending the email with the attachment
+    sendMail(mailOptions);
+
+    res.status(200).json({ message: "Report sent successfully." });
+
+  } catch (error) {
+    console.error("Error fetching project report:", error);
+    res.status(500).json({
+      success: false,
+      message: 'Error processing RFQ details',
+      error: error.toString()
+    });
+  }
+}
+
+
+
 };
 export default rfqController;

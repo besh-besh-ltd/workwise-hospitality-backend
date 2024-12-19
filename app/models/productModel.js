@@ -850,6 +850,36 @@ const productModel = {
         });
     });
   },
+  productExistForVendor: async (
+    name,
+    vendorId = null,
+    category
+  ) => {
+    return new Promise(function (resolve, reject) {
+      let dynamicQuery = '';
+      if (vendorId) {
+        dynamicQuery += ` AND p.created_by = ${vendorId}`;
+      }
+
+      db.any(
+        `SELECT p.*
+        FROM tbl_product p
+        JOIN tbl_product_categories tpc ON p.id = tpc.product_id
+        JOIN tbl_category tc ON tpc.category_id = tc.id
+        WHERE p.name = $1 AND tc.title = $2${dynamicQuery}`,
+        [name, category]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          console.log("......",err);
+          reject(error);
+        });
+    });
+  },
+  
   checkMasterNameExist: async (name, productId) => {
     let dynamicQuery = '';
     if (productId) {
@@ -857,7 +887,7 @@ const productModel = {
     }
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT * FROM tbl_product WHERE name = $1 AND created_by = 1 ${dynamicQuery}`,
+        `SELECT * FROM tbl_product WHERE is_deleted = 0 AND is_approve = 1 AND name = $1 AND created_by = 1 ${dynamicQuery}`,
         [name]
       )
         .then(function (data) {
@@ -869,6 +899,26 @@ const productModel = {
         });
     });
   },
+  productWithCategoryExist:( productName, catName )=> {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT p.*
+        FROM tbl_product p
+        JOIN tbl_product_categories tpc ON p.id = tpc.product_id
+        JOIN tbl_category tc ON tpc.category_id = tc.id
+        WHERE p.name = $1 AND tc.title = $2 AND p.is_deleted = 0 AND p.is_approve = 1;`,
+        [productName, catName]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
   getProductImages: async (productId, isFeatured) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -958,7 +1008,8 @@ const productModel = {
     vendorId,
     productName,
     filterProduct,
-    isFeatured
+    isFeatured,
+    userId
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
@@ -968,12 +1019,14 @@ const productModel = {
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
       }
-      if (vendorId && vendorId != '') {
-        dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
-      }
-      else{ // created_by 1 means admin added products
-        dynamicQuery += ` AND PD.created_by = 1`;
 
+      if(userId!=1 && userId!=111){
+        if (vendorId && vendorId != '') {
+          dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
+        }
+        else{ // created_by 1 means admin added products
+          dynamicQuery += ` AND PD.created_by = 1`;
+        }
       }
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;

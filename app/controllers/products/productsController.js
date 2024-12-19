@@ -1331,7 +1331,8 @@ const ProductsController = {
         vendorId,
         productName,
         filterProduct,
-        isFeatured
+        isFeatured,
+        req.user.id
       );
       let productCount = await productModel.getProductCount(
         vendorId,

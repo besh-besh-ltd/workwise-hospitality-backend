@@ -372,6 +372,19 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         });
     });
   },
+  getAvailableUnits: async () => {
+    return new Promise(function (resolve, reject) {
+      db.query(`SELECT * FROM tbl_rfq_units`)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
   getAllRfqBuyer: async (limit, offset, user_id, month, year) => {
     const query = `SELECT RFQ.id,RFQ.rfq_no,RFQ.is_published,RFQ.created_by,RFQ.status,RFQ.timestamp,  
       ARRAY(
@@ -4328,5 +4341,232 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
           });
   });
 },
+
+rfqProductReport: async (userId, productName, startDate, endDate) => {
+  return new Promise(function (resolve, reject) {
+      const query = `SELECT 
+    T.id AS rfq_id,
+    T.rfq_no,
+    TP.name AS product_name,
+    TP.description AS product_description,
+    T.comment AS rfq_comment,
+    T.company_name,
+    T.contact_name,
+    T.contact_number,
+    T.bid_end_date,
+    T.location,
+    T.status AS rfq_status,
+    T.timestamp AS rfq_timestamp,
+    JSONB_AGG(DISTINCT JSONB_BUILD_OBJECT(
+        'spec_title', TRPS.title,
+        'spec_value', TRPS.value,
+        'variant', TRPS.variant
+    )) AS product_specs,
+    JSONB_AGG(DISTINCT JSONB_BUILD_OBJECT(
+        'vendor_id', TU.id,
+        'vendor_name', TU.name,
+        'vendor_email', TU.email,
+        'vendor_mobile', TU.mobile,
+        'organization_name', TU.organization_name,
+        'variant', TRPV.variant,
+        'quote_details', COALESCE(
+            (SELECT JSONB_AGG(
+                JSONB_BUILD_OBJECT(
+                    'status', TQ.status,
+                    'quote_id', TQ.id,
+                    'is_regret', TQ.is_regret,
+                    'global_payment_term', TQ.global_payment_term,
+                    'global_comment', TQ.global_comment,
+                    'regret_reason', TQ.regret_reason,
+                    'quote_items', (
+                        SELECT JSONB_AGG(
+                            JSONB_BUILD_OBJECT(
+                                'tax', TQI.tax,
+                                'comment', TQI.comment,
+                                'quantity', TQI.quantity,
+                                'unit_price', TQI.unit_price,
+                                'total_price', TQI.total_price,
+                                'product_name', TQI.product_name,
+                                'freight_price', TQI.freight_price,
+                                'package_price', TQI.package_price,
+                                'delivery_period', TQI.delivery_period
+                            )
+                        ) FROM tbl_quote_items TQI WHERE TQI.quote_id = TQ.id AND TQI.product_id = TRP.product_id
+                    )
+                )
+            ) FROM tbl_quotes TQ WHERE TQ.rfq_id = T.id AND TQ.created_by = TU.id),
+            JSONB_BUILD_ARRAY(
+                JSONB_BUILD_OBJECT(
+                    'status', 0,
+                    'quote_id', 0,
+                    'is_regret', 0,
+                    'global_payment_term', '',
+                    'global_comment', '',
+                    'regret_reason', '',
+                    'quote_items', JSONB_BUILD_ARRAY(
+                        JSONB_BUILD_OBJECT(
+                            'tax', 0,
+                            'comment', 'quote not present',
+                            'quantity', '0',
+                            'unit_price', 0,
+                            'total_price', 0,
+                            'product_name', '',
+                            'freight_price', 0,
+                            'package_price', 0,
+                            'delivery_period', ''
+                        )
+                    )
+                )
+            )
+        )
+    )) AS vendors
+FROM tbl_rfq_products TRP
+JOIN tbl_product TP ON TP.id = TRP.product_id
+JOIN tbl_rfq T ON T.id = TRP.rfq_id
+LEFT JOIN tbl_rfq_products_specs TRPS ON TRPS.rfq_id = T.id AND TRPS.product_id = TRP.product_id
+LEFT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = T.id AND TRPV.product_id = TRP.product_id
+LEFT JOIN tbl_users TU ON TU.id = TRPV.user_id  -- Joining tbl_users for vendor details
+WHERE T.created_by = $1
+    AND LOWER(TP.name) = LOWER($2)
+    AND ($3::date IS NULL OR T.timestamp >= $3::date)
+    AND ($4::date IS NULL OR T.timestamp <= $4::date)
+GROUP BY T.id, TP.id
+ORDER BY T.timestamp DESC;
+
+
+`;
+
+      db.query(query, [userId, productName, startDate, endDate])
+      .then(data => resolve(data))
+      .catch(err => {
+          let error = new Error(err);
+          reject(error);
+      });
+  });
+},
+
+// project report including all rfq quote etc
+getProjectDetailsReport: async (projectId, startDate, endDate) => {
+  return new Promise(function (resolve, reject) {
+     const query = `SELECT 
+      p.id AS project_id,
+      p.name AS project_name,
+      p.description AS project_description,
+      p.location AS project_location,
+      p.status AS project_status,
+      json_agg(
+          json_build_object(
+              'rfq_id', r.id,
+              'rfq_no', r.rfq_no,
+              'comment', r.comment,
+              'company_name', r.company_name,
+              'response_email', r.response_email,
+              'contact_name', r.contact_name,
+              'contact_number', r.contact_number,
+              'bid_end_date', r.bid_end_date,
+              'location', r.location,
+              'is_published', r.is_published,
+              'status', r.status,
+              'rfq_type', r.rfq_type,
+              'reverse_auction', r.reverse_auction,
+              'rfq_files', (
+                  SELECT json_agg(
+                      json_build_object(
+                          'file_id', f.id,
+                          'file_type', f.file_type,
+                          'file_url', f.file_url
+                      )
+                  )
+                  FROM tbl_rfq_files f
+                  WHERE f.rfq_id = r.id
+              ),
+              'terms', (
+                  SELECT json_agg(
+                      json_build_object(
+                          'term_content', t.term_content
+                      )
+                  )
+                  FROM tbl_rfq_terms t
+                  JOIN tbl_rfq_terms_map tm ON t.id = tm.terms_id
+                  WHERE tm.rfq_id = r.id
+              ),
+'products', (
+    SELECT json_agg(
+        json_build_object(
+            'product_id', prod.product_id,
+            'product_name', tp.name,
+            'comment', prod.comment,
+            'datasheet', prod.datasheet,
+            'spec_file', prod.spec_file,
+            'qap_file', prod.qap_file,
+            'datasheet_file', prod.datasheet_file,
+            'variant', prod.variant,
+            'product_files', (
+                SELECT json_agg(
+                    json_build_object(
+                        'file_id', pf.id,
+                        'file_type', pf.file_type,
+                        'file_url', pf.file_url
+                    )
+                )
+                FROM tbl_rfq_product_files pf
+                WHERE pf.rfq_product_id = prod.id
+            ),
+            'specs', (
+                SELECT json_agg(
+                    json_build_object(
+                        'title', specs.title,
+                        'value', specs.value
+                    )
+                )
+                FROM tbl_rfq_products_specs specs
+                WHERE specs.rfq_id = r.id AND specs.product_id = prod.product_id
+            ),
+            'vendors', (
+                SELECT json_agg(
+                    json_build_object(
+                        'vendor_id', v.id,
+                        'vendor_name', v.name,
+                        'vendor_email', v.email,
+                        'vendor_mobile', v.mobile,
+                        'vendor_address', v.address
+                    )
+                )
+                FROM tbl_rfq_product_vendors pv
+                JOIN tbl_users v ON pv.user_id = v.id
+                WHERE pv.product_id = prod.product_id AND pv.rfq_id = r.id  -- Assuming a filter condition here
+            )
+        )
+    )
+    FROM tbl_rfq_products prod
+    JOIN tbl_product tp ON prod.product_id = tp.id
+    WHERE prod.rfq_id = r.id
+)
+
+          )
+      ) AS rfq_details
+  FROM 
+      tbl_projects p
+  JOIN 
+      tbl_rfq r ON p.id = r.project_id
+  WHERE 
+      p.id = $1 AND 
+     r.timestamp >= $2::timestamp AND 
+    r.timestamp < ($3::timestamp + interval '1 day')
+  GROUP BY 
+      p.id;
+  `;
+  
+  // Assuming $2 and $3 are your start and end dates respectively passed as 'YYYY-MM-DD' strings
+  ;
+
+      db.query(query, [projectId, startDate, endDate])
+      .then(data => resolve(data))
+      .catch(err => reject(new Error(err)));
+  });
+}
+
+
+
 }
 export default rfqModel;
