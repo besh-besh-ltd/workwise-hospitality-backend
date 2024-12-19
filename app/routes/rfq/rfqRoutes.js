@@ -194,6 +194,11 @@ RfqRoutes.post('/rfq-list', passportSignIn, rfqController.rfqList);
 
 RfqRoutes.get('/save-state-cities', rfqController.saveStateCities);
 
+// to show the available units
+RfqRoutes.get('/units',
+  // passportSignIn,
+  rfqController.getUnits
+)
 
 // to show the preview of the final data for the creation of the rfq
 RfqRoutes.post('/magic-search-rfq-preview',
