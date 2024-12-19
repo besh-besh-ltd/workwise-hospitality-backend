@@ -925,9 +925,7 @@ const schema_posts = {
         },
         fileFilter: (req, file, cb) => {
           let ext = path.extname(file.originalname).toLowerCase();
-          if (ext !== '.zip') {
-            return cb(new Error('Only zip files are allowed'), false);
-          }
+          
           cb(null, true);
         }
       }).single('file');

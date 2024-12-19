@@ -5526,15 +5526,28 @@ projectWiseReport: async (req, res) => {
 sendReportOnEmail: async (req, res) => {
   try {
     // Extracting email addresses from the request
-    const emails = req.body.emails // Assuming 'emails' is a comma-separated list passed as a query parameter
+    const {emails, startDate, endDate} = req.body // Assuming 'emails' is a comma-separated list passed as a query parameter
     const file = req.file;  // Assuming file data is sent via a multipart/form-data request
+    const fileName = file?.originalname?.split(".")[0] || "report"
+    const userDetails = req.user
+    const emailTemplate =  `
+        <div style="width: 80%; margin: 0 a uto; padding: 20px;">
+        <p>Greetings </p>
+        <p>Please find attached the zipped folder containing the complete data set for <strong> ${fileName}  </strong> covering the period <strong> ${ startDate + " to " +  endDate } </strong>. This report includes all relevant RFQ records, Quotes, and transaction logs compiled for auditing and review purposes.</p>
+        <p>If you have any questions or need additional information, please feel free to reach out.</p>
+        <p>Thank you for your time and consideration.</p>
+        <p>Best regards,</p>
+        <p>${userDetails.name}<br>
+        ${userDetails.organization_name}</p>
+    </div>
+    `
 
     // Preparing email options with an attachment
     const mailOptions = {
       from: Config.webmasterMail, // Sender address
       to: emails, // Sending email to all recipients directly from the query string
-      subject: `${file.originalname.split(".")[0] || "Project Report"} || Workwise ` , // Subject line
-      html: `<p>Sharing ${file.originalname.split(".")[0]} Project report. please find the attached zip file </p>`, // HTML body content
+      subject: `Project Report for ${fileName} of ${userDetails.organization_name || userDetails.name} `,     // subject: `${file.originalname.split(".")[0] || "Project Report"} || Workwise ` , // Subject line
+      html: emailTemplate, // HTML body content
      attachments: [
         {
           filename: file.originalname,  // Using original file name
