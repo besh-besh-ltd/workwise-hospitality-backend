@@ -913,7 +913,50 @@ const schema_posts = {
         message: 'server error'
       });
     }
+  },
+  
+
+  reportZipFileUpload: async (req, res, next) => {
+    try {
+      let upload = multer({
+        storage: multer.memoryStorage(),
+        limits: {
+          fileSize: 2000000 // Limit set to 2MB
+        },
+        fileFilter: (req, file, cb) => {
+          let ext = path.extname(file.originalname).toLowerCase();
+          
+          cb(null, true);
+        }
+      }).single('file');
+  
+      upload(req, res, function (err) {
+        if (err instanceof multer.MulterError) {
+          // A Multer error occurred when uploading.
+          return res.status(400).json({
+            status: 2,
+            errors: { file: err.message }
+          });
+        } else if (err) {
+          // An unknown error occurred when uploading.
+          return res.status(400).json({
+            status: 2,
+            errors: { file: 'File upload failed' }
+          });
+        }
+        // Everything went fine.
+        next();
+      });
+    } catch (err) {
+      logError(err);
+      res.status(400).json({
+        status: 3,
+        message: 'Server error'
+      });
+    }
   }
+  
+
 };
 
 export {

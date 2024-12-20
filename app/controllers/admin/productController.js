@@ -990,10 +990,13 @@ const productController = {
             }
           }
 
-          let prodNameExists = await productModel.checkProductExists(
+          let prodNameExists = await productModel.productExistForVendor(
             productName,
-            vendor_id
+            vendor_id,
+            productCategory
           );
+
+
 
           // checking whehter the product exist with the same vendor
           // console.log("............................",prodNameExists);
@@ -1011,8 +1014,9 @@ const productController = {
 
           let productObj = '';
 
-          let check_master_exist = await productModel.checkMasterNameExist(
-            productName
+          let check_master_exist = await productModel.productWithCategoryExist(
+            productName,
+            productCategory
           );
 
           if (check_master_exist.length == 0) {
@@ -1021,7 +1025,7 @@ const productController = {
               vendorEmail: value['Vendor Email'] || null,
               productName: productName,
               Row: index + 1,
-              errors: "product name not found in master database"
+              errors: "Product name either not found in master database or is deleted or not approved"
             }
             errorsObj.push(errObj)
             continue
@@ -1034,9 +1038,7 @@ const productController = {
                 isMaster = 1;
                 break;
               }
-              console.log(check_master_exist[i].id,categoryId,isMaster);
             }
-            console.log("for loop over --->>> ",categoryId,isMaster);
             
             if(isMaster !== 1){
               errorsObj.push(
@@ -1266,8 +1268,8 @@ const productController = {
 
 
           if (value['Vendor Approved By']) {
-            let vendorApproveArray = [value['Vendor Approved By']];
-            // let vendorApproveArray = value['Vendor Approved By'].split(',');
+            // let vendorApproveArray = [value['Vendor Approved By']];
+            let vendorApproveArray = value['Vendor Approved By']?.split(',');
             let vendorApproveArrayId = [];
             for (let index = 0; index < vendorApproveArray.length; index++) {
               const element = vendorApproveArray[index];
@@ -1738,14 +1740,10 @@ const productController = {
 
       const jsonData = xlsx.utils.sheet_to_json(sheet);
 
-      let productId = 0;
-      let product = 0;
       let errors = [];
 
-      let productWithCategoryArray = [];
       let productError = false;
-      let prodObj = {
-        category: [],
+      let prodObj = { category: [],
         name: "",
         productId: null,
       };
@@ -1780,7 +1778,7 @@ const productController = {
         
           }
           // Also check for product name exist or not afterwards 
-          let prodNameExists = await productModel.checkMasterNameExist(productName);
+          let prodNameExists  = await productModel.productWithCategoryExist(productName, productCategory);
 
           if (prodNameExists && prodNameExists.length == 0) {
             const productObj = {
@@ -1793,11 +1791,11 @@ const productController = {
               sku: productName,
               // vendor_approved_by: vendorApproveId == 0 ? null : vendorApproveId,
               status: 1,
-              created_by: req.user.id,
+              created_by: 1,
               vendor: null,
               is_review: 1,
               is_approve: 0,
-              added_by: req.user.id,
+              added_by: 1,
               brochure_file: value['Product Brochure\r\n(file)'] || null,
               qap_new_file_name: value['Product QAP\r\n(file)'] || null,
               qap_original_file_name: value['Product QAP\r\n(file)']
@@ -1831,6 +1829,7 @@ const productController = {
           prodObj.category = [],
           prodObj.name = productName;
           productError = false;
+          prodObj.productId=null;
           
           
           // first validation for the category
@@ -1852,27 +1851,6 @@ const productController = {
             continue;
 
           } else {
-            // category exist and checking its mapping
-            if (prodObj.productId != null) {
-              const catProductMapExist = await productModel.productCategoryExist(prodObj.productId, productCategory);
-
-              // if found then say already exist otherwise push the category in the object
-              if (catProductMapExist.length > 0) {
-                productError = true;
-                const err = {
-                  Row: index + 2,
-                  error: `Product ${prodObj.name} with category ${productCategory} already exist`
-                }
-                errors.push(err);
-                console.log("Product with category already exist", index+2);
-                prodObj = {
-                  category: [],
-                  name: "",
-                  productId: null,
-                };
-                continue;
-              }
-            } 
               prodObj.category.push(catNameExists[0]);
           }
         } else if (productCategory && prodObj.name && !productError) {
@@ -1896,27 +1874,6 @@ const productController = {
             };
             continue;
           } else {
-            // category exist and checking its mapping
-            if (prodObj.productId != null) {
-              const catProductMapExist = await productModel.productCategoryExist(prodObj.productId, productCategory);
-
-              // if found then say already exist otherwise push the category in the object
-              if (catProductMapExist.length > 0) {
-                productError = true;
-                const err = {
-                  Row: index + 2,
-                  error: `Product ${prodObj.name} with category ${productCategory} already exist`
-                }
-                errors.push(err);
-                console.log("Product with category already exist",index+2);
-                prodObj = {
-                  category: [],
-                  name: "",
-                  productId: null,
-                };
-                continue;
-              }
-            }
               prodObj.category.push(catNameExists[0]);
           }
 
@@ -2161,7 +2118,8 @@ const productController = {
         vendorId,
         productName,
         filterProduct,
-        isFeatured
+        isFeatured,
+        req.user.id
       );
       let productCount = await productModel.getProductCount(
         vendorId,

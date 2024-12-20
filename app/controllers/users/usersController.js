@@ -2626,10 +2626,14 @@ const UsersController = {
         // Buyer
         const total_rfqs = await rfqModel.getAllRfqByUser( user_id );
         const active_rfqs = await rfqModel.getAllRfqByUser(user_id, 1);
-        const closed_rfqs = await rfqModel.getClosedRfqs(user_id);
-        const completed_rfqs = await rfqModel.getCompletedRfqs(user_id);
+        // const closed_rfqs = await rfqModel.getClosedRfqs(user_id);
+        // const completed_rfqs = await rfqModel.getCompletedRfqs(user_id);
         const active_quotes = await rfqModel.getActiveQuotes(user_id, 1);
         const pending_responses = Math.max(parseInt(active_rfqs.count) - parseInt(active_quotes.count), 0);
+
+        const total_projects = await rfqModel.getAllProjects( user_id, false );
+        const active_projects = await rfqModel.getAllProjects( user_id, true );
+        const closed_projects = Math.max(parseInt(total_projects.count) - parseInt(active_projects.count), 0);
 
         // getting the data of all rfqs of a buyer
         let page, limit, offset;
@@ -2657,7 +2661,6 @@ const UsersController = {
 
         let temp_rfqs = rfq_data_for_notificaton.map((item) => {
           delete item.products;
-          delete item.id;
           delete item.comment;
           delete item.response_email;
           delete item.contact_name;
@@ -2725,18 +2728,21 @@ const UsersController = {
         });
 
         let rfq_data = await rfqModel.getAllBuyerRfq(limit, offset, user_id, project_id, sort, reverse_auction, rfq_type)
-        let cost = await rfqModel.getAllRfqCost(req.user.id, 2);
+        // let cost = await rfqModel.getAllRfqCost(req.user.id, 2);
 
         data = {
           total_rfqs: parseInt(total_rfqs.count),
           active_rfqs: parseInt(active_rfqs.count),
-          completed_rfqs: parseInt(completed_rfqs.count),
-          closed_rfqs: parseInt(closed_rfqs.count),
+          // completed_rfqs: parseInt(completed_rfqs.count),
+          // closed_rfqs: parseInt(closed_rfqs.count),
           pending_responses,
           quotes_received: parseInt(active_quotes.count),
+          total_projects: parseInt(total_projects.count),
+          active_projects: parseInt(active_projects.count),
+          closed_projects,
           notificaiton_data: readable_notification_date_data,
           rfq_data,
-          savings: parseInt(cost.total_price_formatted * 0.05)
+          // savings: parseInt(cost.total_price_formatted * 0.05)
         }
       } else if (req.user.user_type == 3) {
         // Vendor

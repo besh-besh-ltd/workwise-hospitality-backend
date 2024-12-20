@@ -194,6 +194,11 @@ RfqRoutes.post('/rfq-list', passportSignIn, rfqController.rfqList);
 
 RfqRoutes.get('/save-state-cities', rfqController.saveStateCities);
 
+// to show the available units
+RfqRoutes.get('/units',
+  // passportSignIn,
+  rfqController.getUnits
+)
 
 // to show the preview of the final data for the creation of the rfq
 RfqRoutes.post('/magic-search-rfq-preview',
@@ -336,5 +341,26 @@ RfqRoutes.post('/get-tech-evaluation-result',
   validateBody(rfqSchemas.getTechEvaluationResult),
   rfqController.getTechEvaluationResult
 )
+
+//  product wise audit report
+RfqRoutes.get('/report/rfq-product-wise',
+  passportSignIn,
+  rfqController.rfqProductWiseReport
+)
+
+//  product wise audit report
+RfqRoutes.get('/report/rfq-project-wise',
+  passportSignIn,
+  rfqController.projectWiseReport
+)
+
+
+//  product wise audit report
+RfqRoutes.post('/report/send-on-email',
+  passportSignIn,
+  schema_posts.reportZipFileUpload,
+  rfqController.sendReportOnEmail
+)
+
 
 export default RfqRoutes;
