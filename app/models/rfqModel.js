@@ -2396,8 +2396,8 @@ WHERE row_num_by_name_category = 1
   },
   getActiveQuotes: async (user_id, status) => {
     const query = `
-      SELECT count(*) FROM "tbl_rfq" tr
-         JOIN "tbl_quotes" tq on tr.id = tq.rfq_id
+      SELECT count(*) FROM tbl_rfq tr
+         JOIN tbl_quotes tq on tr.id = tq.rfq_id
          WHERE tr.created_by = $1
           AND tr.status = $2
           AND tr.is_published = 1
@@ -2408,6 +2408,30 @@ WHERE row_num_by_name_category = 1
 
     try {
       let values = [user_id, status]; 
+
+      const result = await db.one(query, values);
+      return result;
+    } catch (error) {
+      throw new Error(error);
+    }    
+  },  
+  getAllProjects: async (user_id, isActive) => {
+    const query = `
+        SELECT COUNT(DISTINCT TR.project_id)
+        FROM tbl_rfq TR
+        JOIN tbl_projects TP 
+            ON TR.project_id = TP.id
+        WHERE TR.created_by = $1
+            AND TR.is_published = 1
+            ${isActive ? `
+            AND (
+                TP.ended_at IS NULL
+                OR TP.ended_at >= NOW()
+            )` : ``}
+    `;
+
+    try {
+      let values = [user_id]; 
 
       const result = await db.one(query, values);
       return result;
