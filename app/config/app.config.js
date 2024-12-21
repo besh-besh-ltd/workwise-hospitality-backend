@@ -36,8 +36,8 @@ const invoiceFileUploadPath = process.env.INVOICE_FILE || null;
 // const blogImageUploadPath = process.env.BLOG_IMAGE || null;
 
 const downloadURL = process.env.DOWNLOADD_URL || null;
-const jwtSecret = process.env.JWT_SECRET || "sfs64SG4wg";
-const cryptSecret = process.env.CRYPT_SECRET || "Anha%43wsfse";
+const jwtSecret = process.env.JWT_SECRET || "";
+const cryptSecret = process.env.CRYPT_SECRET || "";
 const globalAdminLimit = process.env.LIMIT || 20;
 const sgst = process.env.SGST || 0.0015;
 const cgst = process.env.CGST || 0.0015;
