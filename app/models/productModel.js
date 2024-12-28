@@ -155,6 +155,29 @@ const productModel = {
         });
     });
   },
+  getParentCategoryList: async ()=> {
+    try {
+      const query = `
+          SELECT *
+          FROM (
+              SELECT DISTINCT ON (slug)
+                  id,
+                  title,
+                  slug
+              FROM tbl_category
+              WHERE parent_id = 0
+                AND is_deleted = 0
+              ORDER BY slug, id
+          ) AS distinct_categories
+          ORDER BY id;
+      `;
+      const result = await db.query(query);
+      return result;
+    } catch (error) {
+      console.log(error)
+      throw new Error("Error fetching parent categories.");
+    }
+  },
   getVendorList: async (product_name) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -1294,6 +1317,68 @@ const productModel = {
           reject(error);
         });
     });
+  },
+  productSearchByCategory: async (cat_id, limit, offset) => {
+    try {
+      const query = `
+        WITH RECURSIVE subcategories AS (
+            SELECT 
+                id,
+                parent_id,
+                title
+            FROM tbl_category
+            WHERE id = $1 AND is_deleted = 0
+
+            UNION ALL
+            SELECT 
+                c.id,
+                c.parent_id,
+                c.title
+            FROM tbl_category c
+            INNER JOIN subcategories sc ON c.parent_id = sc.id
+            WHERE c.is_deleted = 0
+        )
+        SELECT DISTINCT ON (TP.name)
+            TP.id AS product_id,
+            TP.name AS product_name,
+            TP.description,
+            TP.slug,
+            ARRAY (
+                SELECT 
+                    json_build_object(
+                        'category_name', TC.title,
+                        'id', TC.id,
+                        'parent_id', TC.parent_id
+                    )
+                FROM tbl_product_categories TPC
+                LEFT JOIN tbl_category TC 
+                    ON TPC.category_id = TC.id
+                WHERE TPC.product_id = TP.id
+                  AND TC.id IS NOT NULL
+                  AND TC.is_deleted = 0
+                  AND (TC.id IN (SELECT id FROM subcategories) OR TC.id = $1) 
+                ORDER BY TPC.id
+            ) AS product_categories
+        FROM tbl_product TP
+        WHERE TP.is_deleted = 0
+          AND EXISTS (
+              SELECT 1
+              FROM tbl_product_categories TPC
+              LEFT JOIN tbl_category TC 
+                  ON TPC.category_id = TC.id
+              WHERE TPC.product_id = TP.id
+                AND (TC.id IN (SELECT id FROM subcategories) OR TC.id = $1) 
+          )
+        ORDER BY TP.name, TP.id
+        LIMIT $2 OFFSET $3;
+      `;
+
+      const result = await db.query(query, [cat_id, limit, offset]);
+      return result;
+    } catch (error) {
+      console.error("Error in productSearchByCategory:", error.message);
+      throw new Error("Failed to fetch products by category");
+    }
   },
   /* getUserDetail: async (user_id) => {
     return new Promise(function (resolve, reject) {
