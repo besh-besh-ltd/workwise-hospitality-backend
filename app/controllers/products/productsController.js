@@ -123,6 +123,52 @@ const ProductsController = {
         .end();
     }
   },
+  getProductListbyCategory: async (req, res, next) => {
+    try {
+      let { cat_id, page, limit } = req.query;
+      let offset = 0;
+
+      if (page && page > 0) {
+        limit = limit || Config.globalAdminLimit;
+        offset = (page - 1) * limit;
+      } else {
+        limit = Config.globalAdminLimit;
+        offset = 0;
+      }
+
+      // Check if category exists and its parent category
+      const idExists = await productModel.categoryIDExist(cat_id);
+      if(!idExists) {
+        res
+        .status(404)
+        .json({
+          status: 3,
+          message: "Category not exists...!"
+        })
+        .end();
+      }
+
+      const productList = await productModel.productSearchByCategory(cat_id, limit, offset);
+      console.log(productList)
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: productList
+        })
+        .end();
+
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   categoryList: async (req, res, next) => {
     try {
       let categoryList = await productModel.getCategoryListFront();
@@ -134,6 +180,28 @@ const ProductsController = {
           data: categoryList
         })
         .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  parentCategoryList: async (req, res, next) => {
+    try {
+      const parentCategories = await productModel.getParentCategoryList();
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: parentCategories
+        })
+        .end();
+
     } catch (error) {
       logError(error);
       res
