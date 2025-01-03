@@ -504,7 +504,7 @@ const validateDbBody = {
       let errors = {};
       let err = 0;
       let { name, categories, approved_id, vendor } = req.body;
-      categories = JSON.parse(categories);
+      // categories = JSON.parse(categories);
       /* if (vendor) {
         let checkVendor = await userModel.findActiveVendor(vendor);
         if (checkVendor.length == 0) {
