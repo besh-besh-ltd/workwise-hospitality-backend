@@ -550,6 +550,8 @@ const vendorModel = {
           LEFT JOIN tbl_company TUC
               ON TUC.user_id = TU.id 
           WHERE TR.created_by = $1
+              AND TU.is_deleted = 0 
+              AND TU.status = 1 
           GROUP BY 
               TRPV.user_id, TU.name, TU.organization_name, TU.email, TU.mobile, TU.address, TUC.company_name
           ORDER BY 

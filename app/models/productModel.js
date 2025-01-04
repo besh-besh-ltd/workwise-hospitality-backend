@@ -714,14 +714,21 @@ const productModel = {
         });
     });
   },
-  createProductCategories: async (categoryObj) => {
+  createProductCategories: async (category_id, product_id) => {
     return new Promise(function (resolve, reject) {
-      // Construct the dynamic SQL query
-      const query =
-        pgp().helpers.insert(categoryObj, null, 'tbl_product_categories') +
-        ' RETURNING id';
+      const query = `
+        WITH category_info AS (
+          SELECT title
+          FROM tbl_category
+          WHERE id = $1
+        )
+        INSERT INTO tbl_product_categories (product_id, category_name, category_id)
+        SELECT $2, title, $1
+        FROM category_info
+        RETURNING *;
+      `;
 
-      db.one(query)
+      db.one(query, [category_id, product_id])
         .then(function (data) {
           resolve(data);
         })

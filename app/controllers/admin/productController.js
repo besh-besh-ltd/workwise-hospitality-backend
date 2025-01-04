@@ -2479,23 +2479,21 @@ const productController = {
         vendor,
         is_featured
       } = req.body;
-      categories = JSON.parse(categories);
-      variations = JSON.parse(variations);
-      if (approved_id) {
-        approved_id = JSON.parse(approved_id);
-      }
+      // categories = JSON.parse(categories);
+      // variations = JSON.parse(variations);
+      // if (approved_id) {
+      //   approved_id = JSON.parse(approved_id);
+      // }
 
       let vendorApproveId = 0;
       if (!approved_id && approved_name) {
-        let findVendorApprove =
-          await vendorapproveModel.findVendorApproveByName(approved_name);
+        let findVendorApprove = await vendorapproveModel.findVendorApproveByName(approved_name);
         if (findVendorApprove.length == 0) {
           let vendorApproveObj = {
             vendor_approve: approved_name,
             status: 1
           };
-          let createVendorApprove =
-            await vendorapproveModel.createVendorApprove(vendorApproveObj);
+          let createVendorApprove = await vendorapproveModel.createVendorApprove(vendorApproveObj);
           vendorApproveId = [createVendorApprove.id];
         } else {
           vendorApproveId = [findVendorApprove[0].id];
@@ -2520,21 +2518,20 @@ const productController = {
         is_approve: 1,
         added_by: req.user.id,
         qap_new_file_name:
-          req.files?.qap.length > 0
+          req.files?.qap?.length > 0
             ? `${Config.download_url}/product_image/${req.files.qap[0].filename}`
             : null,
         qap_original_file_name:
-          req.files?.qap.length > 0 ? req.files.qap[0].originalname : null,
+          req.files?.qap?.length > 0 ? req.files.qap[0].originalname : null,
         tds_new_file_name:
-          req.files?.tds.length > 0
+          req.files?.tds?.length > 0
             ? `${Config.download_url}/product_image/${req.files.tds[0].filename}`
             : null,
         tds_original_file_name:
-          req.files?.tds.length > 0 ? req.files.tds[0].originalname : null
+          req.files?.tds?.length > 0 ? req.files.tds[0].originalname : null
       };
 
       let product = await productModel.createProduct(productObj);
-      // console.log('product ==>>>>>>>>', product);
       let productId = product.id;
       if (vendorApproveId.length > 0) {
         let productApproveArray = [];
@@ -2548,15 +2545,9 @@ const productController = {
       }
 
       // ---------------- categories ---------------
-      // console.log(categories);
-      for await (const categoryId of categories) {
-        let categoryObj = {
-          category_id: categoryId,
-          product_id: productId
-        };
-        // console.log(categoryObj);
-
-        await productModel.createProductCategories(categoryObj);
+      for (const categoryId of categories) {
+        const res = await productModel.createProductCategories(categoryId, productId);
+        // console.log(res)
       }
 
       // ---------------- variations ----------------
@@ -2821,7 +2812,6 @@ const productController = {
   },
   adminProductUpdate: async (req, res, next) => {
     try {
-      console.log(req.files);
       let {
         name,
         description,
@@ -2836,33 +2826,33 @@ const productController = {
         is_featured
       } = req.body;
 
-      categories = JSON.parse(categories);
-      variations = JSON.parse(variations);
+      // categories = JSON.parse(categories);
+      // variations = JSON.parse(variations);
 
-      if (approved_id) {
-        approved_id = JSON.parse(approved_id);
-      }
+      // if (approved_id) {
+      //   approved_id = JSON.parse(approved_id);
+      // }
 
       let productId = req.params.id;
 
-      let vendorApproveId = 0;
-      if (!approved_id && approved_name) {
-        let findVendorApprove =
-          await vendorapproveModel.findVendorApproveByName(approved_name);
-        if (findVendorApprove.length == 0) {
-          let vendorApproveObj = {
-            vendor_approve: approved_name,
-            status: 1
-          };
-          let createVendorApprove =
-            await vendorapproveModel.createVendorApprove(vendorApproveObj);
-          vendorApproveId = createVendorApprove.id;
-        } else {
-          vendorApproveId = findVendorApprove[0].id;
-        }
-      } else {
-        vendorApproveId = approved_id;
-      }
+      // let vendorApproveId = 0;
+      // if (!approved_id && approved_name) {
+      //   let findVendorApprove =
+      //     await vendorapproveModel.findVendorApproveByName(approved_name);
+      //   if (findVendorApprove.length == 0) {
+      //     let vendorApproveObj = {
+      //       vendor_approve: approved_name,
+      //       status: 1
+      //     };
+      //     let createVendorApprove =
+      //       await vendorapproveModel.createVendorApprove(vendorApproveObj);
+      //     vendorApproveId = createVendorApprove.id;
+      //   } else {
+      //     vendorApproveId = findVendorApprove[0].id;
+      //   }
+      // } else {
+      //   vendorApproveId = approved_id;
+      // }
 
       // ---------------- products ----------------
 
@@ -2883,19 +2873,19 @@ const productController = {
         qap_new_file_name:
           req.files?.qap?.length > 0
             ? `${Config.download_url}/product_image/${req.files.qap[0].filename}`
-            : productDetails[0].qap_new_file_name,
+            : productDetails[0].qap_new_file_name || null,
         qap_original_file_name:
           req.files?.qap?.length > 0
             ? req.files.qap[0].originalname
-            : productDetails[0].qap_original_file_name,
+            : productDetails[0].qap_original_file_name || null,
         tds_new_file_name:
           req.files?.tds?.length > 0
             ? `${Config.download_url}/product_image/${req.files.tds[0].filename}`
-            : productDetails[0].tds_new_file_name,
+            : productDetails[0].tds_new_file_name || null,
         tds_original_file_name:
           req.files?.tds?.length > 0
             ? req.files.tds[0].originalname
-            : productDetails[0].tds_original_file_name
+            : productDetails[0].tds_original_file_name || null
       };
 
       await productModel.updateVendorProduct(productObj);
@@ -2906,62 +2896,39 @@ const productController = {
       // delete product approved by
       await productModel.deleteProductApproveBy(productId);
 
-      // console.log('product ==>>>>>>>>', product);
-      // let productId = product.id;
       // ---------------- categories ---------------
-      // console.log(categories);
-      for await (const categoryId of categories) {
-        let categoryObj = {
-          category_id: categoryId,
-          product_id: productId
-        };
-        // console.log(categoryObj);
-
-        await productModel.createProductCategories(categoryObj);
+      for (const category_id of categories) {        
+        const res = await productModel.createProductCategories(category_id, productId);
+        // console.log(res)
       }
 
       // ---------------- variations ----------------
       for await (const { attribute, attributeValue } of variations) {
-        // console.log(attribute, attributeValue);
         let variantObj = {
           product_id: productId,
           variant_name: attribute,
           variant_value: attributeValue
         };
-        // console.log(categoryObj);
-
         await productModel.createProductveriants(variantObj);
       }
 
       // -------------multiple approved by ------------------------------
-      if (vendorApproveId.length > 0) {
-        let productApproveArray = [];
-        vendorApproveId.forEach((item) => {
-          productApproveArray.push({
-            product_id: productId,
-            vendor_approve_id: item
-          });
-        });
-        await productModel.addProductApproveBy(productApproveArray, productId);
-      }
+      // if (vendorApproveId.length > 0) {
+      //   let productApproveArray = [];
+      //   vendorApproveId.forEach((item) => {
+      //     productApproveArray.push({
+      //       product_id: productId,
+      //       vendor_approve_id: item
+      //     });
+      //   });
+      //   await productModel.addProductApproveBy(productApproveArray, productId);
+      // }
 
       // ---------------- featured image ----------------
       if (req.files?.featured && req.files?.featured.length > 0) {
         let featuredImage = await productModel.getProductImages(productId, 1);
         if (featuredImage.length > 0) {
-          /* fs.unlink(
-            `${Config.upload.product_image}/${featuredImage[0].new_image_name}`,
-            (unlinkError) => {
-              if (unlinkError) {
-                console.error('Error deleting file:', unlinkError);
-              }
-            }
-          ); */
-          await productModel.deleteProductImages(
-            productId,
-            1,
-            featuredImage[0].id
-          );
+          await productModel.deleteProductImages( productId, 1, featuredImage[0].id );
         }
 
         let featuredImageObj = {
@@ -2972,19 +2939,12 @@ const productController = {
         };
         await productModel.insertProductImages(featuredImageObj);
       }
+
       // ---------------- gallery image ----------------
       if (req.files?.gallery && req.files?.gallery.length > 0) {
         let galleryImage = await productModel.getProductImages(productId, 0);
         if (galleryImage.length > 0) {
           for await (const { new_image_name, id } of galleryImage) {
-            /* fs.unlink(
-              `${Config.upload.product_image}/${new_image_name}`,
-              (unlinkError) => {
-                if (unlinkError) {
-                  console.error('Error deleting file:', unlinkError);
-                }
-              }
-            ); */
             await productModel.deleteProductImages(productId, 0, id);
           }
         }
