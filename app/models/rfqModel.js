@@ -2042,7 +2042,7 @@ WHERE row_num_by_name_category = 1
     if (active) {
       dynamicWhere = `AND status = 1`;
     }
-    const query = `SELECT count(id) FROM tbl_rfq WHERE RFQ.is_published = 1 ${dynamicWhere}`;
+    const query = `SELECT count(id) FROM tbl_rfq WHERE is_published = 1 ${dynamicWhere}`;
     return new Promise(function (resolve, reject) {
       db.one(query)
         .then(function (data) {

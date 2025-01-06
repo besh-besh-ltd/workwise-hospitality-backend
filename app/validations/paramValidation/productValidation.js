@@ -323,7 +323,7 @@ const schemas = {
       .required()
       .regex(/^[0|1]$/, 'numeric values only'), */
     availability: Joi.string().optional().allow('', null),
-    categories: Joi.string().required(),
+    categories: Joi.array().items(Joi.number()).min(1).required(),
     is_featured: Joi.string()
       .required()
       .regex(/^[0|1]$/, 'numeric values only'),
@@ -339,7 +339,10 @@ const schemas = {
     gallery: Joi.array().items(Joi.string().required()),
     qap: Joi.array().items(Joi.string().required()),
     tds: Joi.array().items(Joi.string().required()),
-    variations: Joi.string().required(),
+    variations: Joi.array().items(Joi.object({
+      attribute: Joi.string().allow('', null),
+      attributeValue: Joi.string().allow('', null)
+    })).min(1),
     /*  Joi.array().items(
       Joi.object({
         attribute: Joi.string().required(),
@@ -646,7 +649,7 @@ const schema_posts = {
       let upload = multer({
         storage: store_product_images,
         limits: {
-          fileSize: 2000000 // Compliant: 8MB
+          fileSize: 2000000 // Compliant: 2MB
         },
         fileFilter: (req, file, cb) => {
           let ext = path.extname(file.originalname).toLowerCase();
@@ -672,11 +675,12 @@ const schema_posts = {
           }
         }
       }).fields([
-        { name: 'featured', maxCount: 1 },
-        { name: 'gallery', maxCount: 8 },
-        { name: 'tds', maxCount: 1 },
-        { name: 'qap', maxCount: 1 }
+        { name: 'gallery[]', maxCount: 8 },
+        { name: 'featured[]', maxCount: 1 },
+        { name: 'tds[]', maxCount: 1 },
+        { name: 'qap[]', maxCount: 1 }
       ]);
+
       upload(req, res, async function (err) {
         if (err) {
           let data = {};
@@ -726,13 +730,13 @@ const schema_posts = {
 
             // console.log(req.files.featured[0]);
 
-            if (req.files?.featured && req.files?.featured.length > 0) {
-            } else {
-              if (req.method == 'POST') {
-                errCount++;
-                error.featured = 'Featured file required';
-              }
-            }
+            // if (req.files?.featured && req.files?.featured.length > 0) {
+            // } else {
+            //   if (req.method == 'POST') {
+            //     errCount++;
+            //     error.featured = 'Featured file required';
+            //   }
+            // }
 
             if (errCount > 0) {
               /*  if (req.files?.featured && req.files?.featured.length > 0) {

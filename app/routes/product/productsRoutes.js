@@ -24,9 +24,19 @@ ProductsRoutes.post(
   ProductsController.getProductSearch
 );
 ProductsRoutes.get(
+  '/product-list-by-category',
+  // validateDbBody.user_id_profileexists,
+  ProductsController.getProductListbyCategory
+);
+ProductsRoutes.get(
   '/category-list',
   // validateDbBody.user_id_profileexists,
   ProductsController.categoryList
+);
+ProductsRoutes.get(
+  '/parent-category-list',
+  // validateDbBody.user_id_profileexists,
+  ProductsController.parentCategoryList
 );
 ProductsRoutes.post(
   '/vendor-list',
