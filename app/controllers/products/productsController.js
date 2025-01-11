@@ -665,12 +665,8 @@ const ProductsController = {
           categories = [categories]; // If it's a single number, convert it to an array
         }
 
-        for await (const categoryId of categories) {
-          let categoryObj = {
-            category_id: categoryId,
-            product_id: productId
-          };
-          await productModel.createProductCategories(categoryObj);
+        for await (const categoryId of categories) {          
+          const res = await productModel.createProductCategories(categoryId, productId);
         }
       }  
 
