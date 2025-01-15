@@ -4441,8 +4441,8 @@ const rfqController = {
             row: jsonData.indexOf(value) + 1, // Assuming rows start at 1
             errors: {
               product_name: !productName ? "Missing product name" : productName,
-              size: !size ? "Missing size" : null,
-              specifications: !specifications ? "Missing specifications" : null,
+              // size: !size ? "Missing size" : null,
+              // specifications: !specifications ? "Missing specifications" : null,
               quantity: !quantity ? "Missing quantity" : null,
               unit: !unit ? "Missing unit" : null
             }
@@ -4522,7 +4522,12 @@ const rfqController = {
         }
 
         // transform vendor to required form
-        const transformedVendorResult = vendorResult.map(({ id, vendor_name }) => ({ user_id: id, name: vendor_name}));
+        const transformedVendorResult = vendorResult.map(
+          ({ id, vendor_name, ...otherData }) => ({
+            user_id: id,
+            name: vendor_name,
+            ...otherData
+          }));
 
         // Initialize the variant to 0
         let variant = 0;
