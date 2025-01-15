@@ -2960,7 +2960,7 @@ const UsersController = {
     }
   },
 
-  addApprovedPrivateVendor: async (req, res) => {
+  addApprovedPrivateVendor: async (req, res, next) => {
 
     try {
 
@@ -3189,7 +3189,7 @@ const UsersController = {
               category_id: categoryId,
               product_id: productId
             };
-            await productModel.createProductCategory(categoryObj);
+            await productModel.createProductCategories(categoryObj);
           }
         }
 
