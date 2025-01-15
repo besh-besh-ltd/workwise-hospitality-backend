@@ -2960,7 +2960,7 @@ const UsersController = {
     }
   },
 
-  addApprovedPrivateVendor: async (req, res) => {
+  addApprovedPrivateVendor: async (req, res, next) => {
 
     try {
 
