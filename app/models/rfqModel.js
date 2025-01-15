@@ -1844,7 +1844,7 @@ WHERE row_num_by_name_category = 1
     let q = `
     SELECT * FROM (
         SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
-               tu.address, tc.profile as about, tc.website, tc.company_name, lc.city_name, ls.state_name,
+               tu.address, tc.profile as about, tc.is_private, tc.website, tc.company_name, lc.city_name, ls.state_name,
                CASE
                    WHEN tu.new_profile_image IS NULL THEN NULL
                    ELSE tu.new_profile_image
