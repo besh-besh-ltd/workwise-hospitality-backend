@@ -3189,7 +3189,7 @@ const UsersController = {
               category_id: categoryId,
               product_id: productId
             };
-            await productModel.createProductCategories(categoryObj);
+            await productModel.createProductCategory(categoryObj);
           }
         }
 
