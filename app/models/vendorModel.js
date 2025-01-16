@@ -26,7 +26,7 @@ const vendorModel = {
         END AS profile_image  
         FROM tbl_users 
         LEFT JOIN tbl_reject_reason trr ON  tbl_users.reject_reason_id = trr.id
-        WHERE is_deleted = 0 AND user_type = 3  ${dynamicQuery}
+        WHERE user_type = 3  ${dynamicQuery}
         ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
       )

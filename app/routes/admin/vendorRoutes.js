@@ -14,7 +14,11 @@ const passportSignIn = passport.authenticate('jwtAdm', { session: false });
 
 const vendorRoutes = Router();
 
-vendorRoutes.get('/vendor-list', passportSignIn, vendorController.vendorList);
+vendorRoutes.get(
+  '/vendor-list', 
+  passportSignIn, 
+  vendorController.vendorList
+);
 vendorRoutes.post(
   '/create-vendor',
   passportSignIn,

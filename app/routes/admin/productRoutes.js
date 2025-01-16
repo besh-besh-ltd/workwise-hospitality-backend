@@ -168,4 +168,12 @@ productRoutes.delete(
   productController.adminProductDelete
 );
 
+productRoutes.post(
+  '/map-vendor-with-product',
+  passportSignIn,
+  validateBody(schemas.vendor_product_map),
+  validateDbBody.check_product,
+  productController.mapVendorWithProduct
+);
+
 export default productRoutes;

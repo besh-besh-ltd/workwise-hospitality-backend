@@ -23,7 +23,7 @@ const buyerModel = {
         WHEN new_profile_image IS NULL THEN
         NULL
         ELSE new_profile_image
-        END AS profile_image  FROM tbl_users WHERE is_deleted = 0 AND user_type = 2 ${dynamicQuery}
+        END AS profile_image  FROM tbl_users WHERE user_type = 2 ${dynamicQuery}
         ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
       )
