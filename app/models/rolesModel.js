@@ -77,9 +77,10 @@ const rolesModel = {
         WHEN new_profile_image IS NULL THEN
         NULL
         ELSE new_profile_image
-        END AS profile_image  FROM tbl_users WHERE is_deleted = 0 AND user_type = 5  ${dynamicQuery}
+        END AS profile_image  FROM tbl_users WHERE is_deleted = 0 AND user_type = any($3)
+        ${dynamicQuery}
         ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-        [limit, offset]
+        [limit, offset, [5, 6]]
       )
         .then(function (data) {
           resolve(data);
@@ -93,8 +94,8 @@ const rolesModel = {
   getSubAdminDrop: async () => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT id,name  FROM tbl_users WHERE is_deleted = 0 AND user_type = 5 AND status = 1 
-        ORDER BY name asc `
+        `SELECT id, name, user_type  FROM tbl_users WHERE is_deleted = 0 AND user_type = any($1) AND status = 1 
+        ORDER BY name asc `, [[5, 6]]
       )
         .then(function (data) {
           resolve(data);

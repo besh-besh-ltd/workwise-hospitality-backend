@@ -59,6 +59,7 @@ const authController = {
       userData.profile_image_new = req.user.new_profile_image
         ? req.user.new_profile_image
         : null;
+      userData.user_type = req.user.user_type;
 
       res
         .status(200)

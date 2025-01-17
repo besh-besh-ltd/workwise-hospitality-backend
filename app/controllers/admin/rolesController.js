@@ -18,7 +18,7 @@ const rolesController = {
   createSubadmin: async (req, res, next) => {
     try {
       let createdBy = req.user.id;
-      const { name, mobile, password } = req.body;
+      const { name, mobile, password, userType } = req.body;
       const email = req.body.email?.toLowerCase() || '';
       let fileName = req?.file?.filename;
       let originalFilename = req?.file?.originalname;
@@ -27,7 +27,7 @@ const rolesController = {
         name,
         email,
         mobile,
-        register_as: 5,
+        register_as: userType,
         status: 1,
         password: generatePassword(password),
         createdBy,
@@ -43,7 +43,7 @@ const rolesController = {
           .status(200)
           .json({
             status: 1,
-            message: 'Subadmin created successfully'
+            message: `${userType == 5 ? 'Subadmin' : 'Data Member'} created successfully`
           })
           .end();
       }
@@ -199,7 +199,6 @@ const rolesController = {
       // let buyerDetails = await buyerModel.getBuyerDetails(buyerId);
       let subadminObj = {
         name,
-
         mobile,
         fileName,
         originalFilename,

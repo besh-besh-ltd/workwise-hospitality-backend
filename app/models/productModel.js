@@ -1050,14 +1050,10 @@ const productModel = {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
       }
 
-      if(userId != 1 && userId != 111){
-        if (vendorId && vendorId != '') {
-          dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
-        }
-        else{ 
-          dynamicQuery += ` AND PD.added_by = ${userId}`;
-        }
+      if (vendorId && vendorId != '') {
+        dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
       }
+
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
@@ -1152,13 +1148,9 @@ const productModel = {
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND tbl_product.id IN (${filterProduct.id_array})`;
       }
-      if(userId != 1 && userId != 111) {
       if (vendorId && vendorId != '') {
-        dynamicQuery += ` AND tbl_product.created_by = '${vendorId}'`;
-      } else {
-        dynamicQuery += ` AND tbl_product.added_by = '${userId}'`;
+        dynamicQuery += ` AND tbl_product.created_by = ${vendorId}`;
       }
-    }
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND tbl_product.is_featured = '${isFeatured}'`;
       }      
