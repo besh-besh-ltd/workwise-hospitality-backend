@@ -2612,7 +2612,7 @@ const productController = {
         status: status || 1,
         // vendor_approved_by: vendorApproveId || null,
         is_featured: is_featured || 0,
-        is_approve: 1,
+        is_approve: 0,
         added_by: req.user.id,
         qap_new_file_name:
           req.files?.qap?.length > 0
