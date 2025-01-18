@@ -7,10 +7,10 @@ const vendorModel = {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (name) {
-        dynamicQuery += `AND name  ILIKE '%${name}%'`;
+        dynamicQuery += `AND (name ILIKE '%${name}%' OR organization_name ILIKE '%${name}%')`;
       }
       if (organization) {
-        dynamicQuery += `AND organization_name  ILIKE '%${organization}%'`;
+        dynamicQuery += `AND (organization_name ILIKE '%${organization}%' OR name ILIKE '%${organization}%')`;
       }
       if (verified == 't') {
         dynamicQuery += `AND tbl_users.status = 1 `;
@@ -39,32 +39,40 @@ const vendorModel = {
         });
     });
   },
-  getVendorListCount: async (organization, verified, name) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (name) {
-        dynamicQuery += `AND name  ILIKE '%${name}%'`;
-      }
-      if (organization) {
-        dynamicQuery += `AND organization_name  ILIKE '%${organization}%'`;
-      }
-      if (verified == 't') {
-        dynamicQuery += `AND status = 1 `;
-      } else if (verified == 'f') {
-        dynamicQuery += `AND status = 0 `;
-      }
-      db.one(
-        `SELECT COUNT(id) FROM tbl_users WHERE is_deleted = 0 AND user_type = 3 ${dynamicQuery}`
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
+ 
+getVendorListCount: async (organization, verified, name) => {
+  return new Promise(function (resolve, reject) {
+    let dynamicQuery = 'AND user_type = 3 ';
+    if (name) {
+      dynamicQuery += `AND (name ILIKE '%${name}%' OR organization_name ILIKE '%${name}%')`;
+    }
+    if (organization) {
+      dynamicQuery += `AND (organization_name ILIKE '%${organization}%' OR name ILIKE '%${organization}%')`;
+    }
+    if (verified == 't') {
+      dynamicQuery += `AND status = 1 `;
+    } else if (verified == 'f') {
+      dynamicQuery += `AND status = 0 `;
+    }
+    const query = `
+    SELECT
+      COUNT(*) FILTER (WHERE is_deleted = 0 ${dynamicQuery}) AS total_vendors,
+      COUNT(*) FILTER (WHERE is_deleted = 1 ${dynamicQuery}) AS deleted_vendors,
+      COUNT(*) FILTER (WHERE is_deleted = 0 AND status = 1 ${dynamicQuery}) AS active_vendors,
+      COUNT(*) FILTER (WHERE is_deleted = 0 AND status = 0 ${dynamicQuery}) AS deactivated_vendors
+    FROM tbl_users
+  `;
+
+    db.one(query)
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+  });
+},
   vendorEmailExist: async (email) => {
     return new Promise(function (resolve, reject) {
       db.any('SELECT * FROM tbl_users WHERE email = $1 AND is_deleted = 0', [
