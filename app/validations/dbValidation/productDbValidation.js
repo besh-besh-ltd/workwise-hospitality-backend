@@ -381,7 +381,7 @@ const validateDbBody = {
     try {
       let errors = {};
       let err = 0;
-      let productId = req.params.id;
+      let productId = req.params?.id || req.body?.product_id;
 
       let created_by = 0;
       if (req.user.user_type == 3 || req.user.user_type == 4) {

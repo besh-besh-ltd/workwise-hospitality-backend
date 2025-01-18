@@ -21,7 +21,11 @@ rolesRoutes.post(
   validateDbBody.subadmin_exists,
   rolesController.createSubadmin
 );
-rolesRoutes.get('/subadmin-list', passportSignIn, rolesController.subadminList);
+rolesRoutes.get(
+  '/subadmin-list', 
+  passportSignIn, 
+  rolesController.subadminList
+);
 rolesRoutes.get(
   '/subadmin-details/:id',
   passportSignIn,

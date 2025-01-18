@@ -374,7 +374,22 @@ const schemas = {
     reject_reason_id: Joi.string()
       .optional()
       .regex(/^\d+$/, 'numeric values only')
-  })
+  }),
+  vendor_product_map: Joi.object().keys({
+    product_id: Joi.number()
+      .integer()
+      .required()
+      .messages({ 'any.required': 'Product Id is required' }),
+    vendor_id: Joi.number()
+      .integer()
+      .required()
+      .messages({ 'any.required': 'Vendor Id is required' }),
+    approved_by: Joi.array()
+      .items(Joi.number().integer().optional()) 
+      .optional() 
+      .allow(null)
+      .default([]),
+  }),  
 };
 
 const schema_posts = {

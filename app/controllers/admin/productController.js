@@ -1939,7 +1939,103 @@ const productController = {
         .end();
     }
   },
+  mapVendorWithProduct: async (req, res, next) => {
+    try {
+      const { product_id, vendor_id, approved_by } = req.body;
 
+      const product = await productModel.vendorProductDetails(product_id);
+      const vendor = await vendorModel.getVendorDetails(vendor_id);
+
+      if (!vendor) {
+        return res
+          .status(404)
+          .json({
+            status: 3,
+            message: "Vendor not found, Please check and retry."
+          })
+          .end()
+      }
+
+      const prodAlreadyExists = await productModel.productExistForVendor(
+        product[0]?.name,
+        vendor_id,
+        product[0]?.product_categories[0]?.category_name);
+
+      if (prodAlreadyExists.length > 0) {
+        return res
+          .status(409)
+          .json({
+            status: 3,
+            message: "Product is already added with the Vendor."
+          })
+          .end()
+      }
+
+      const productObj = {
+        name: product[0].name,
+        description: product[0].description || "",
+        qap_new_file_name: product[0].qap_new_file_name || null,
+        qap_original_file_name: product[0].qap_original_file_name || null,
+        tds_new_file_name: product[0].tds_new_file_name || null,
+        tds_original_file_name: product[0].tds_original_file_name || null,
+        slug: titleToSlug(product[0].name),
+        availability: 1,
+        sku: product[0].name,
+        created_by: vendor_id,
+        added_by: req.user.id,
+        is_approve: 0,
+        vendor: vendor_id
+      };
+
+      const mappedProduct = await productModel.createProduct(productObj);
+
+      // ---------------- Categories ---------------
+      for (const { id } of product[0].product_categories) {
+        await productModel.createProductCategories(id, mappedProduct.id);
+      }
+
+      // ---------------- Approved By -----------------
+      if (approved_by && approved_by.length > 0) {
+        let approvedIdArray = [];
+        for (const approved_id of approved_by) {
+          approvedIdArray.push({
+            product_id,
+            vendor_approve_id: approved_id
+          })
+        };
+        await productModel.addProductApproveBy(approvedIdArray);
+      }
+
+      // ---------------- Featured Image Section -----------------
+      for await (const { product_image_url, product_image, is_featured } of product[0].product_images) {
+        let featuredImageObj = {
+          product_id: mappedProduct.id,
+          is_featured: is_featured,
+          original_image_name: product_image,
+          new_image_name: product_image_url
+        };
+        await productModel.insertProductImages(featuredImageObj);
+      }
+
+      return res
+        .status(200)
+        .json({
+          status: 1,
+          message: `${vendor[0]?.name} is successfully mapped with ${product[0]?.name}`
+        })
+        .end()
+
+    } catch (error) {
+      logError(error);
+      res
+        .status(500)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   bulkProductUploadPreview: async (req, res, next) => {
     try {
       let file = req.file;
@@ -2125,7 +2221,8 @@ const productController = {
         vendorId,
         productName,
         filterProduct,
-        isFeatured
+        isFeatured,
+        req.user.id
       );
       res
         .status(200)
@@ -2515,7 +2612,7 @@ const productController = {
         status: status || 1,
         // vendor_approved_by: vendorApproveId || null,
         is_featured: is_featured || 0,
-        is_approve: 1,
+        is_approve: 0,
         added_by: req.user.id,
         qap_new_file_name:
           req.files?.qap?.length > 0
@@ -2664,6 +2761,7 @@ const productController = {
 
       let productObj = {
         is_approve: status,
+        vendor_approved_by: req.user.id,
         reject_reason_id: reasonId || null
       };
 
@@ -2713,14 +2811,8 @@ const productController = {
 
         // ---------------- categories ---------------
         // console.log(categories);
-        for await (const { id } of productDetails[0].product_categories) {
-          let categoryObj = {
-            category_id: id,
-            product_id: product.id
-          };
-          // console.log(categoryObj);
-
-          await productModel.createProductCategories(categoryObj);
+        for await (const { id } of productDetails[0].product_categories) {        
+          await productModel.createProductCategories(id, product.id);
         }
 
         for await (const {
