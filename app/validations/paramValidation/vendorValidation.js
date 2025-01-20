@@ -68,6 +68,28 @@ const validateParam = (schema) => {
   };
 };
 
+
+// Define user_spoc schema separately
+const user_spoc = Joi.object().keys({
+  spoc_name: Joi.string()
+    .required()
+    .trim(),
+  spoc_role: Joi.string()
+    .optional()
+    .allow(null, ''),  // Allow null and empty string
+  spoc_email: Joi.string()
+    .required()
+    .trim()
+    .email({ tlds: { allow: false } }),  // Email validation only if non-empty
+  spoc_mobile: Joi.string()
+    .optional()
+    .allow(null, '') // Allow null or empty strings
+    .trim()
+    .regex(/^[0-9]*$/, 'numbers')  // Only digits if non-empty
+    .min(10)  // Minimum 10 digits if non-empty
+    .max(15)  // Maximum 15 digits if non-empty
+});
+
 const schemas = {
   // create_category: Joi.object().keys({
   //   name: Joi.string().required(),
@@ -89,10 +111,7 @@ const schemas = {
     website: Joi.string().optional().allow(null).allow(''),
     nature_business: Joi.string().optional().allow(null).allow(''),
     estd_year: Joi.string().optional().allow(null).allow(''),
-    sales_spoc_name: Joi.string().optional().allow(null).allow(''),
-    sales_spoc_position: Joi.string().optional().allow(null).allow(''),
-    sales_spoc_business_email: Joi.string().optional().allow(null).allow(''),
-    sales_spoc_mobile: Joi.string().optional().allow(null).allow(''),
+    spocs: Joi.array().items(user_spoc).optional().allow(null),
     gstin: Joi.string().optional().allow(null).allow(''),
     import_export_code: Joi.string().optional().allow(null).allow(''),
     cin: Joi.string().optional().allow(null).allow(''),
@@ -148,25 +167,7 @@ const schemas = {
       .optional()
       .regex(/^[0|1]$/, 'numeric values only')
   }),
-  user_spoc: Joi.object().keys({
-    spoc_name: Joi.string()
-      .required()
-      .trim(),
-    spoc_role: Joi.string()
-      .optional()
-      .allow(null, ''),  // Allow null and empty string
-    spoc_email: Joi.string()
-      .required()
-      .trim()
-      .email({ tlds: { allow: false } }),  // Email validation only if non-empty
-    spoc_mobile: Joi.string()
-      .optional()
-      .allow(null, '') // Allow null or empty strings
-      .trim()
-      .regex(/^[0-9]*$/, 'numbers')  // Only digits if non-empty
-      .min(10)  // Minimum 10 digits if non-empty
-      .max(15)  // Maximum 15 digits if non-empty
-  }),
+  user_spoc: user_spoc
 };
 
 const schema_posts = {
