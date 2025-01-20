@@ -1043,22 +1043,33 @@ const productModel = {
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
-      if (productName && productName != '') {
-        dynamicQuery += ` AND PD.name ILIKE '%${productName}%'`;
+
+      if (productName && productName !== '') {
+        dynamicQuery += `
+          AND (
+            to_tsvector('english', PD.name) @@ plainto_tsquery('english', '${productName}')
+            OR similarity(PD.name, '${productName}') > 0.2
+          )`;
       }
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
       }
 
-      if (vendorId && vendorId != '') {
+      if (vendorId && vendorId !== '') {
         dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
       }
 
-      if (isFeatured && isFeatured != '') {
+      if (isFeatured && isFeatured !== '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
-      db.any(
-        `SELECT 
+
+       // Determine the ORDER BY clause based on whether productName is provided
+    let orderByClause = productName && productName !== ''
+    ? `ORDER BY rank DESC, similarity_score DESC, PD.created_at DESC`
+    : `ORDER BY PD.created_at DESC`;
+  
+      const query = `
+        SELECT 
             PD.*,
             USERS.name as vendor_name,
             approved_user.name as vendor_approved_by,
@@ -1080,7 +1091,9 @@ const productModel = {
                 )
                 FROM tbl_product_variants pv 
                 WHERE PD.id = pv.product_id
-            ) AS "product_variants"
+            ) AS "product_variants",
+          similarity(PD.name, '${productName}') AS similarity_score,
+          ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank
         FROM tbl_product PD
         LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id
         LEFT JOIN tbl_users approved_user ON PD.vendor_approved_by = approved_user.id
@@ -1093,11 +1106,10 @@ const productModel = {
             FROM tbl_product_categories pc 
             WHERE pc.product_id = PD.id
         )
-        ${dynamicQuery} 
-        ORDER BY PD.created_at DESC 
-        LIMIT $1 OFFSET $2`,
-        [limit, offset]
-      )
+      ${dynamicQuery}
+      ${orderByClause}
+        LIMIT $1 OFFSET $2`;
+      db.any(query, [limit, offset])
         .then(function (data) {
           resolve(data);
         })
@@ -1160,6 +1172,7 @@ const productModel = {
       WHERE USERS.is_deleted = 0 AND tbl_product.is_deleted = 0 AND tbl_product.is_review = 0 ${dynamicQuery}`
       )
         .then(function (data) {
+          
           resolve(data);
         })
         .catch(function (err) {

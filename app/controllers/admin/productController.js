@@ -2224,12 +2224,17 @@ const productController = {
         isFeatured,
         req.user.id
       );
+
+    const approve_count = productCount?.filter((item)=>{ return item.is_approve==1  })?.length || 0
+
       res
         .status(200)
         .json({
           status: 1,
           data: productList,
-          total_count: productCount.length
+          total_count: productCount.length,
+          approve_count:  approve_count,
+          disapprove_count: productCount?.length - approve_count,
         })
         .end();
     } catch (error) {
