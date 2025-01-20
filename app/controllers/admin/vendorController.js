@@ -349,11 +349,13 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     try {
       let vendorId = req.params.id;
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
+      const spocDetails = await vendorModel.getSpocDetails(vendorId);
       res
         .status(200)
         .json({
           status: 1,
-          data: vendorDetails
+          data: vendorDetails,
+          spocDetails: spocDetails || []
         })
         .end();
     } catch (error) {
