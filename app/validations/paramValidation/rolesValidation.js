@@ -79,7 +79,8 @@ const schemas = {
     password: Joi.string().min(3).max(15).required().label('Password'),
     confirm_password: Joi.any().valid(Joi.ref('password')).required().messages({
       'any.only': 'Password and Confirm password not matched'
-    })
+    }),
+    userType: Joi.number().required()
   }),
   id: Joi.object().keys({
     id: Joi.string()

@@ -1050,38 +1050,53 @@ const productModel = {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
       }
 
-      if(userId!=1 && userId!=111){
-        if (vendorId && vendorId != '') {
-          dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
-        }
-        else{ // created_by 1 means admin added products
-          dynamicQuery += ` AND PD.created_by = 1`;
-        }
+      if (vendorId && vendorId != '') {
+        dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
       }
+
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
       db.any(
-        `SELECT PD.*,USERS.name as vendor_name,trr.reject_reason,tpi.new_image_name,
-        ARRAY
-        (SELECT json_build_object('category_name',  tc.title,'id',tc.id )
-          FROM tbl_product_categories pc
-          LEFT JOIN tbl_category tc ON pc.category_id = tc.id
-          WHERE PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
-        ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"
-            FROM tbl_product PD 
-            LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
-            LEFT JOIN tbl_reject_reason trr ON PD.reject_reason_id = trr.id
-            LEFT JOIN tbl_product_images tpi ON PD.id = tpi.product_id AND tpi.is_featured = 1
-            WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 AND PD.is_review = 0
-            AND EXISTS (
-            SELECT 1 FROM tbl_product_categories pc WHERE pc.product_id = PD.id
-           )
-            ${dynamicQuery}     
-        ORDER BY PD.created_at DESC LIMIT ${limit} OFFSET $1`,
-        [offset]
+        `SELECT 
+            PD.*,
+            USERS.name as vendor_name,
+            approved_user.name as vendor_approved_by,
+            added_user.name as added_by,
+            trr.reject_reason,
+            tpi.new_image_name,
+            ARRAY (
+                SELECT json_build_object('category_name', tc.title, 'id', tc.id)
+                FROM tbl_product_categories pc
+                LEFT JOIN tbl_category tc ON pc.category_id = tc.id
+                WHERE PD.id = pc.product_id 
+                ORDER BY pc.id
+            ) AS "product_categories",
+            ARRAY (
+                SELECT json_build_object(
+                    'variant_name', pv.variant_name,
+                    'variant_value', pv.variant_value,
+                    'id', pv.id
+                )
+                FROM tbl_product_variants pv 
+                WHERE PD.id = pv.product_id
+            ) AS "product_variants"
+        FROM tbl_product PD
+        LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id
+        LEFT JOIN tbl_users approved_user ON PD.vendor_approved_by = approved_user.id
+        LEFT JOIN tbl_users added_user ON PD.added_by = added_user.id
+        LEFT JOIN tbl_reject_reason trr ON PD.reject_reason_id = trr.id
+        LEFT JOIN tbl_product_images tpi ON PD.id = tpi.product_id AND tpi.is_featured = 1
+        WHERE USERS.is_deleted = 0
+        AND EXISTS (
+            SELECT 1 
+            FROM tbl_product_categories pc 
+            WHERE pc.product_id = PD.id
+        )
+        ${dynamicQuery} 
+        ORDER BY PD.created_at DESC 
+        LIMIT $1 OFFSET $2`,
+        [limit, offset]
       )
         .then(function (data) {
           resolve(data);
@@ -1124,7 +1139,7 @@ const productModel = {
         });
     });
   },
-  getProductCount: async (vendorId, productName, filterProduct, isFeatured) => {
+  getProductCount: async (vendorId, productName, filterProduct, isFeatured, userId) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (productName && productName != '') {
@@ -1134,11 +1149,11 @@ const productModel = {
         dynamicQuery += ` AND tbl_product.id IN (${filterProduct.id_array})`;
       }
       if (vendorId && vendorId != '') {
-        dynamicQuery += ` AND tbl_product.created_by = '${vendorId}'`;
+        dynamicQuery += ` AND tbl_product.created_by = ${vendorId}`;
       }
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND tbl_product.is_featured = '${isFeatured}'`;
-      }
+      }      
       db.any(
         `select * from tbl_product
       LEFT JOIN tbl_users USERS ON tbl_product.created_by = USERS.id 
@@ -1891,11 +1906,11 @@ WHERE tbl_product.name = $1`,
   },
   deleteProduct: async (productObj, productId) => {
     return new Promise(function (resolve, reject) {
-      const condition = `WHERE id = $1 RETURNING id`;
+      const condition = ` WHERE id = $1 RETURNING id`;
       const values = [productId];
       let query =
         pgp().helpers.update(productObj, null, 'tbl_product') + condition;
-
+        
       db.one(query, values)
         .then(function (data) {
           resolve(data);
@@ -2027,6 +2042,7 @@ WHERE tbl_product.name = $1`,
               JOIN tbl_product TP
                   ON TP.id = TRP.product_id
               WHERE TR.created_by = $1
+                  AND TP.is_deleted = 0 AND TP.is_approve = 1
               GROUP BY 
                   TP.id, TP.name
           )

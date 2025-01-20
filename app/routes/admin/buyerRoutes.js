@@ -15,7 +15,11 @@ const passportSignIn = passport.authenticate('jwtAdm', { session: false });
 
 const buyerRoutes = Router();
 
-buyerRoutes.get('/buyer-list', passportSignIn, buyerController.buyerList);
+buyerRoutes.get(
+  '/buyer-list', 
+  passportSignIn, 
+  buyerController.buyerList
+);
 buyerRoutes.get(
   '/buyer-details/:id',
   passportSignIn,

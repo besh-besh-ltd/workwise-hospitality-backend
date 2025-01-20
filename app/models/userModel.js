@@ -286,7 +286,7 @@ const userModel = {
   },
   get_vendorapprove_list: async (user_id) => {
     return new Promise(function (resolve, reject) {
-      db.any('select * from tbl_vendor_approve')
+      db.any(`SELECT * from tbl_vendor_approve WHERE status = 1`)
         .then(function (data) {
           resolve(data);
         })
@@ -691,6 +691,7 @@ const userModel = {
            FROM tbl_product P
            LEFT JOIN tbl_product_images PI ON P.id = PI.product_id
            WHERE P.created_by = tbl_users.id
+              AND P.is_deleted = 0 AND P.is_approve = 1
            GROUP BY P.id
        ) AS "product_list",
              CASE

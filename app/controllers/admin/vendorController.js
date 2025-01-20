@@ -61,7 +61,10 @@ const vendorController = {
         .json({
           status: 1,
           data: vendorList,
-          total_count: vendorCount.count
+          total_count: vendorCount?.total_vendors,
+          deactivated_vendors: vendorCount?.deactivated_vendors,
+          active_vendors: vendorCount?.active_vendors,
+          deleted_vendors: vendorCount?.deleted_vendors,
         })
         .end();
     } catch (error) {
@@ -91,10 +94,6 @@ const vendorController = {
         website,
         nature_business,
         estd_year,
-        sales_spoc_name,
-        sales_spoc_position,
-        sales_spoc_business_email,
-        sales_spoc_mobile,
         gstin,
         import_export_code,
         cin,
@@ -104,7 +103,8 @@ const vendorController = {
         ptr_project_description,
         ptr_project_start_date,
         ptr_project_end_date,
-        about_vendor_company
+        about_vendor_company,
+        spocs
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
       let orgChar = organization_name
@@ -131,7 +131,7 @@ const vendorController = {
         postal_code: postal_code || null,
         user_type: '3',
         password: generatePassword(password),
-        status: '1',
+        status: '0',
         new_profile_image:
           req.files?.image && req.files?.image.length > 0
             ? `${Config.download_url}/user_image/${req.files.image[0].filename}`
@@ -166,23 +166,22 @@ const vendorController = {
         project_end_date: ptr_project_end_date || null
       };
 
-      let spocObj = {
-        spoc_name: sales_spoc_name || null,
-        spoc_role: sales_spoc_position || null,
-        spoc_email: sales_spoc_business_email?.toLowerCase() || null,
-        spoc_mobile: sales_spoc_mobile || null,
-      }
 
       let vendor = await productModel.vendor_register(vendorObj);
 
-      // adding spoc data only when atleast one of the below data is empty
-      if (spocObj.spoc_email || spocObj.spoc_mobile || spocObj.spoc_name || spocObj.spoc_role) {
-        // adding the vendor id to the spocObj object
-        spocObj.user_id = vendor[0].id;
-
-        // now inserting the details of the spocObj to the table
-        await userModel.add_user_spoc(spocObj);
-      }
+    // Check if spocs array is provided and has valid objects
+if (Array.isArray(spocs) && spocs.length > 0) {
+  // Iterate through each SPOC object in the array
+  for (const spoc of spocs) {
+    // Validate if at least one field in the SPOC is not empty
+    if (spoc.spoc_email || spoc.spoc_name) {
+      // Add vendor ID to the SPOC object
+      spoc.user_id = vendor[0].id;
+      // Insert the SPOC details into the table
+      await userModel.add_user_spoc(spoc);
+    }
+  }
+}
 
       companyObj.user_id = vendor[0].id;
       await productModel.addCompany(companyObj);
@@ -350,11 +349,13 @@ const vendorController = {
     try {
       let vendorId = req.params.id;
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
+      const spocDetails = await vendorModel.getSpocDetails(vendorId);
       res
         .status(200)
         .json({
           status: 1,
-          data: vendorDetails
+          data: vendorDetails,
+          spocDetails: spocDetails || []
         })
         .end();
     } catch (error) {
