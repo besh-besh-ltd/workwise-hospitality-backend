@@ -455,7 +455,7 @@ getVendorListCount: async (organization, verified, name) => {
   getVendorDropdownList: async () => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT tbl_users.id,tbl_users.name,tbl_users.mobile,tbl_users.user_type
+        `SELECT tbl_users.id,tbl_users.name,tbl_users.mobile, tbl_users.email,tbl_users.organization_name,tbl_users.user_type
          FROM tbl_users 
          WHERE is_deleted = 0 AND user_type = 3 OR user_type = 4  AND status = 1
         ORDER BY created_at`
