@@ -15,6 +15,7 @@ import { sendNotification } from '../../services/notificationService.js';
 import excelJS from 'exceljs';
 import xlsx from 'xlsx';
 import vendorModel from '../../models/vendorModel.js';
+import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 
 
 const getNextRfQNumber = async () => {
@@ -377,25 +378,17 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
           `;
       }
 
+      const headerContent = ` <div>
+        <h2>Hello ${user_details[0].name}</h2>
+        <p style="font-size:16px;"> Great news! You’ve received a new enquiry from ${organization_name} </p>
+        </div>`
 
       // Construct the email content with the list of products
-      let dynamicHTML = `
-<div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background-color: #ffe4e4eb; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
-      <div>
-        <img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />
-        <p style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; font-size: 16px; font-weight: 600; color: #333333; margin-top: 10px;">
-          Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
-          Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063
-        </p>
-      </div>
-        <hr />
-        <h1>Hello ${user_details[0].name}</h1>
-        <p style="font-size:16px;"> Great news! You’ve received a new enquiry from ${organization_name} </p>
-       <div
-      style="border-radius: 24px; padding: 32px 16px; margin-bottom: 24px; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+      const containerContent = `   <div>
       <h3 style="font-family: 'Roboto', sans-serif; text-align: center; font-size: 24px; margin-bottom: 8px;">
         Enquiry Details
       </h3>
+
           <table style="width: 100%; padding: 8px;">
             <tbody>
             ${productHTML}
@@ -410,24 +403,17 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
         Submit Your Quote Now
       </a>
 
-        </div>
-        <hr />
-        <p style="font-size: 16px;">If you need assistance, contact us at <a href="mailto:hello@letsworkwise.com">hello@letsworkwise.com</a></p>
-        <p style="font-size: 16px;">© WorkWise. All Rights Reserved.</p>
-      </div>`;
+      <p style="margin-top:20px" >
+               Submit your quote promptly to access this opportunity with [Buyer Name] and stand out as a preferred vendor.
+      </p>
 
-      // Send the email
-      //  sendMail({
-      //   from: Config.webmasterMail,
-      //   to: user_details[0].email,
-      //   subject: `Work Wise | New RFQ Alert`,
-      //   html: dynamicHTML,
-      // });
+        </div>`;
 
+        const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
       let mailRecipients = {
         from: Config.webmasterMail,
-        subject: `Work Wise | New RFQ Alert`,
+        subject: `New RFQ Opportunity from ${user_details[0].name}`,
         html: dynamicHTML
       };
 
@@ -512,40 +498,22 @@ const sendMailtoVendors = async (req, rfqNumber) => {
 const sendQuotationMailToBuyer = async (req, rfqNumber) => {
   // send mail to vendors
   const { name, email, id } = req.user;
-  let dynamicHTML = `
-  <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
-    <tr>
-      <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />  </td>
-            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-            <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
-            Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
-        </table></td>
-    </tr>
-    <tr>
-    <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:5px 5px; background:#fff; line-height:1.5;'>
-      <strong>Dear ${name},</strong><br>
-      
-      </td>
-    </tr>
-    <tr>
-      <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>Your RFQ has been successfully shared with vendors.<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}">Click here to view </a></td>
-      
-    </tr>
-      
 
-    <tr>
-      <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#000; font-weight:normal; padding:5px; background:#efefef; line-height:30px;'><div>
-          <div>
-            <div>
-              <div>
-                <p>© WorkWise. All Rights Reserved.</p>
-              </div>
-            </div>
-          </div>
-        </div></td>
-    </tr>
-    </table>`;
+  const headerContent = `<h2> Dear ${name},</h2>  `;
+
+  const containerContent = `<div>
+      <p style="font-size: 15px; padding-bottom: 3px;">
+      Your RFQ has been successfully shared with vendors. </p>
+      
+           <a "${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
+        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+       Click here to view
+      </a>      
+    </div>`;
+
+  const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+
 
   const spocList = await vendorModel.getSpocDetails(id)
 
@@ -556,6 +524,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
     subject: `Work Wise | RFQ Creation Confirmation`,
     html: dynamicHTML
   };
+
 
   if (spocList && spocList.length > 0) {
     mailRecipients.to = spocList.map(spoc => spoc.email);
@@ -617,17 +586,6 @@ const sendQuoteNotificationToVendor = async (req) => {
     </tr>
     </table>`;
 
-  // sendMail({
-  //   from: Config.webmasterMail, // sender address
-  //   to: email, // list of receivers
-  //   subject:
-  //     req.body.is_regret && req.body.is_regret == 1
-  //       ? `Work Wise | Quotation Regreted`
-  //       : `Work Wise | Quotation Submitted`, // Subject line
-  //   html: dynamicHTML // plain text body
-  // });
-
-
   const spocList = await vendorModel.getSpocDetails(id)
 
   // console.log(" rfq contoller 569 spoc console  ", id, spocList)
@@ -652,57 +610,42 @@ const sendQuoteNotificationToVendor = async (req) => {
 
 };
 
+
+const sendRfqCloseEmail = async () =>{
+
+  const headerContent = ``
+  const containerContent = ``
+  const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
+
+  
+
+}
+
+
 const sendReminderRFQMAIL = async (vendoritem, org_name,rfq_id) => {
   let user_details = await userModel.user_profile_detail(vendoritem.user_id);
   const token = await rfqModel.getVendorRfqToken(vendoritem.user_id, rfq_id);
   if (user_details.length > 0) {
-    let dynamicHTML = `
-                  <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
-                    <tr>
-                      <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />  </td>
-                            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-                            <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
-                            Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
-                        </table></td>
-                    </tr>
-                    <tr>
-                    <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:5px 5px; background:#fff; line-height:1.5;'>
-                      <strong>Dear ${user_details[0].name},</strong><br>
-                      
-                      </td>
-                    </tr>
-                    <tr>
-                      <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>You have received a reminder from ${org_name} to provide a quote for the RFQ.</td>                      
-                    </tr>
-                     <tr>
-                      <td colspan="2" style="text-align: center; padding-bottom: 3px;">
-                        <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}
-                        style="font-size: 15px; color: blue; text-decoration: none;">
-                          click here
-                        </a>
-                      </td>
-                    </tr>
-                      
 
-                    <tr>
-                      <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#000; font-weight:normal; padding:5px; background:#efefef; line-height:30px;'><div>
-                          <div>
-                            <div>
-                              <div>
-                                <p>© WorkWise. All Rights Reserved.</p>
-                              </div>
-                            </div>
-                          </div>
-                        </div></td>
-                    </tr>
-                    </table>`;
+    
+  const headerContent = `<h2>Hello ${user_details[0].name},</h2> `;
 
+  const containerContent = ` 
+<div>
+<p style="font-size:16px; margin-top:-10px">You have received a reminder from ${org_name} to provide a quote for the RFQ. Please see the details below and respond promptly:</p>
 
+ <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}
+                     style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+                      Click here to view the RFQ
+                    </a>
+
+</div>
+  
+  `;
+  
+  const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
     const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
-
-    // console.log(" rfq contoller  632 spoc console ", user_details[0]?.id, spocList)
 
     
     let mailRecipients = {
@@ -710,7 +653,6 @@ const sendReminderRFQMAIL = async (vendoritem, org_name,rfq_id) => {
       subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
       html: dynamicHTML
     };
-
     if (spocList && spocList.length > 0) {
       mailRecipients.to = spocList.map(spoc => spoc.email);
       mailRecipients.cc = user_details[0].email;
@@ -718,14 +660,6 @@ const sendReminderRFQMAIL = async (vendoritem, org_name,rfq_id) => {
       mailRecipients.to = user_details[0].email;
     }
 
-    sendMail(mailRecipients);
-
-    // sendMail({
-    //   from: Config.webmasterMail, // sender address
-    //   to: user_details[0].email, // list of receivers
-    //   subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
-    //   html: dynamicHTML // plain text body
-    // });
     const notificationData = {
       type: 'RFQ Pending',
       title: `RFQ Pending`,
@@ -2175,32 +2109,8 @@ const rfqController = {
                 message: 'Quote is alredy present for this RFQ!'
               })
               .end();
-            // let quote_rsp = await rfqModel.update(
-            //   'tbl_quotes',
-            //   tbl_quotes_data,
-            //   alreadyExists[0].id
-            // );
-            // if (quote_rsp.length > 0) {
-            //   res
-            //     .status(200)
-            //     .json({
-            //       status: 1,
-            //       data: quote_rsp[0]
-            //     })
-            //     .end();
-            // } else {
-            //   res
-            //     .status(400)
-            //     .json({
-            //       status: 3,
-            //       message: 'Unable to update quote!'
-            //     })
-            //     .end();
-            // }
-
             return;
           }
-          // console.log("mukul 1908")
 
           var quote_items_data = [];
             products.map(
@@ -2618,6 +2528,9 @@ const rfqController = {
     try {
       const rfQItem = await rfqModel.changeRFQStatus(rfq_id, id);
       console.log(rfQItem.length);
+
+      
+
       res
         .status(200)
         .json({
