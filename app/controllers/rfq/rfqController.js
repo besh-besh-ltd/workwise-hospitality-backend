@@ -542,6 +542,117 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
   //   html: dynamicHTML // plain text body
   // });
 };
+
+const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_no) => {
+  
+  const token = await rfqModel.getVendorRfqToken(user.id, rfq_id);
+  const spocList = await vendorModel.getSpocDetails(user.id)
+
+  // Extract vendor details from user object
+  const vendorName = user.organization_name;
+
+  // Email content
+  const headerContent = `<h2>Hello ${vendorName || ''},</h2>`;
+
+  const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
+      <p style="padding-bottom: 3px;">
+                   Your updated quotation for #${rfq_no} has been successfully shared with ${buyerDetails[0]?.organization_name}. This update keeps you competitive and responsive to buyer requirements.      </p>
+                   </p>
+
+      <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0]?.token || ""}"
+         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; 
+         text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
+         width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+        Track RFQ Status
+      </a>      
+
+    </div>`;
+
+  // Generate final email layout
+  const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+  // Preparing the email details
+  let mailRecipients = {
+    from: Config.webmasterMail,
+    to: buyerDetails[0]?.email,
+    cc:"mukul@letsworkwise.com",
+    subject: `Work Wise | New Quotation Received for Your RFQ`,
+    html: dynamicHTML
+  };
+
+  if (spocList && spocList.length > 0) {
+    mailRecipients.to = spocList.map(spoc => spoc.email);
+    mailRecipients.cc = user.email;
+  } else {
+    mailRecipients.to = user.email;
+  }
+
+  // Sending the email
+  sendMail(mailRecipients);
+
+};
+
+
+const sendRevisedQuotationEmailToBuyer = async (buyerDetails, quoteItemChanges, user, rfq_id, rfq_no) => {
+  
+
+  // Extract vendor details from user object
+  const vendorName = user.organization_name;
+
+// Extract unique product names safely
+const productList = [...new Set(
+  quoteItemChanges
+    .filter(item => item.quote && item.quote.product_name)  // Ensure 'quote' and 'product_name' exist
+    .map(item => item.quote.product_name)
+)];
+
+// Format the product list
+const formattedProducts = productList.length > 0 
+  ? productList.slice(0, 2).join(', ') + (productList.length > 2 ? ', and more' : '') 
+  : '[Product 1], [Product 2], and more';
+  
+
+  // Email content
+  const headerContent = `<h2>Hello ${buyerDetails[0]?.organization_name || ''},</h2>`;
+
+  const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
+      <p style="padding-bottom: 3px;">
+        You’ve received a new quotation! Check out the details below:
+      </p>
+
+      <p><strong>RFQ:</strong> #${rfq_no}</p>
+      <p><strong>Vendor:</strong> ${vendorName}</p>
+      <p><strong>Products:</strong> ${formattedProducts}</p>
+
+      <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}"
+         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; 
+         text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
+         width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+         Compare Quote
+      </a>      
+
+      <p style="margin-top:20px;">
+        Stay updated with Workwise for more opportunities.
+      </p>
+    </div>`;
+
+  // Generate final email layout
+  const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+  // Preparing the email details
+  let mailRecipients = {
+    from: Config.webmasterMail,
+    to: buyerDetails[0]?.email,
+    subject: `Work Wise | New Quotation Received for Your RFQ`,
+    html: dynamicHTML
+  };
+
+  // Sending the email
+  sendMail(mailRecipients);
+
+};
+
+
 const sendQuoteNotificationToVendor = async (req) => {
   // send mail to vendors
   const { name, email, id } = req.user;
@@ -4658,14 +4769,15 @@ const rfqController = {
   updateQuoteItems: async (req, res, next) => {
     const { quoteId } = req.params;
     let {
-      // rfq_id,
-      // rfq_no,
+      rfq_id,
+      rfq_no,
       // status,
       products,
       globalPaymentTerms,
       globalComment,
       term_and_condition_files
     } = req.body;
+    const user = req.user
 
     // Check if all required fields are present in each product
     if (
@@ -4754,11 +4866,20 @@ const rfqController = {
       );
 
       const anyQuoteChanged = fileUpdates || quoteItemChanges.some((result) => result.changed);
+      // const changedProducts = quoteItemChanges.filter((result) =>  result.changed);
+      // console.log(" quoteItemChanges ", changedProducts)
 
       let status = true;
       if (!anyQuoteChanged && !paymentTermAndCommentChanges) {
         status = false;
       }
+
+      if(status){
+        const buyerDetails =  await rfqModel.getRFQCreatedBy(rfq_id) 
+        await sendRevisedQuotationEmailToVendor(buyerDetails, user, rfq_id, rfq_no)
+        await sendRevisedQuotationEmailToBuyer(buyerDetails, quoteItemChanges, user, rfq_id, rfq_no)
+      }
+
       return res.status(200).json({
         status: status,
         message: status ? 'Quote items updated successfully' : "No updates made as the quotes and global terms remain unchanged",
