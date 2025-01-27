@@ -5522,9 +5522,12 @@ sendReportOnEmail: async (req, res) => {
     const file = req.file;  // Assuming file data is sent via a multipart/form-data request
     const fileName = file?.originalname?.split(".")[0] || "report"
     const userDetails = req.user
-    const emailTemplate =  `
-        <div style="width: 80%; margin: 0 a uto; padding: 20px;">
-        <p>Greetings </p>
+
+    const headerContent = ` <p style="height:10px " > </p> `;
+
+    const containerContent =  `
+       <h2>Greetings,</h2>
+        <div style=" font-size:16px ">
         <p>Please find attached the zipped folder containing the complete data set for <strong> ${fileName}  </strong> covering the period <strong> ${ startDate + " to " +  endDate } </strong>. This report includes all relevant RFQ records, Quotes, and transaction logs compiled for auditing and review purposes.</p>
         <p>If you have any questions or need additional information, please feel free to reach out.</p>
         <p>Thank you for your time and consideration.</p>
@@ -5533,6 +5536,9 @@ sendReportOnEmail: async (req, res) => {
         ${userDetails.organization_name}</p>
     </div>
     `
+
+    const emailTemplate = generateEmailTemplate(headerContent, containerContent);
+
 
     // Preparing email options with an attachment
     const mailOptions = {
