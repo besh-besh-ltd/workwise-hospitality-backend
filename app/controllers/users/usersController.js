@@ -49,6 +49,7 @@ import rfqModel from '../../models/rfqModel.js';
 import vendorModel from '../../models/vendorModel.js';
 import productModel from '../../models/productModel.js';
 import vendorapproveModel from '../../models/vendorapproveModel.js';
+import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 
 
 const generatePassword = (password) => {
@@ -3044,24 +3045,50 @@ const UsersController = {
 
           const spocList = await vendorModel.getSpocDetails(vendor[0].id);
 
+          const headerContent = `<h2>Hello ${userDetails[0].vendor_name || 'Vendor'},</h2>`;
+
+
+                         // Email body content
+               const containerContent = `
+               <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+                 <p>
+                   We are pleased to inform you that <strong>${buyerName}</strong> has added you as a preferred vendor on the Workwise platform.
+                   Going forward, <strong>${buyerName}</strong> will manage their procurement activities through Workwise.
+                 </p>
+                 
+                 <p>
+                   To ensure you receive all enquiries promptly, Login to your account.
+                   Your login credentials are provided below:
+                 </p>
+             
+                 <p><strong>Email:</strong> ${userDetails[0]?.email || '[Vendor Email]'}</p>
+                 <p><strong>Password:</strong> ${password || '[Temporary Password]'}</p>
+             
+                 <p>
+                   We recommend changing your password after your first login for security reasons.
+                 </p>
+             
+                 <a href="https://letsworkwise.com"
+                   style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+                    Login
+                 </a>    
+             
+                 <p style="margin-top:20px; text-align:center;">
+                   We look forward to supporting your business growth.
+                 </p>
+             
+                
+               </div>`;
+             
+            // Generate final email layout
+            const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
           sendMail({
             from: Config.webmasterMail,
             to: spocList?.length ? spocList.map(spoc => spoc.email) : userDetails[0].email,
             cc: spocList?.length ? userDetails[0].email : '',
             subject: `${buyerName} Added You on Workwise`,
-            html: `Hello  ${userDetails[0].vendor_name},<br><br>
-  
-            We are pleased to inform you that ${buyerName} has added you as a preferred vendor on the Workwise platform. Going forward, ${buyerName} will manage their procurement activities through Workwise. <br><br>
-            To ensure you receive all enquiries promptly, please complete your registration with us. Your login credentials are provided below:<br><br>
-                    <strong>Email:</strong> ${userDetails[0].email}<br>
-                    <strong>Password:</strong> ${password}<br>
-                    We recommend changing your password after your first login for security reasons.<br><br>
-            We look forward to supporting your business growth.<br><br>
-            Best regards, <br>
-          The Workwise Team<br>
-          <a href="https://letsworkwise.com"> https://letsworkwise.com </a>   <br>     
-                    Best regards,<br>
-                    The Workwise Team`
+            html: dynamicHTML
           });
         }
       }
