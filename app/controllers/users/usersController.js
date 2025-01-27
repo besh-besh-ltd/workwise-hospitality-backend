@@ -49,6 +49,7 @@ import rfqModel from '../../models/rfqModel.js';
 import vendorModel from '../../models/vendorModel.js';
 import productModel from '../../models/productModel.js';
 import vendorapproveModel from '../../models/vendorapproveModel.js';
+import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
 
 
 const generatePassword = (password) => {
@@ -3035,6 +3036,17 @@ const UsersController = {
         await productModel.addCompany(companyObj);
 
         await userModel.mapBuyerToVendor(userDetails[0].buyer_id, vendor[0].id);
+
+
+        // send whatsapp notification
+        const payload = {
+          mobile:userDetails[0].mobile ,
+          buyerName:buyerName,
+          email:userDetails[0].email,
+          password:password
+
+        }
+        await whatsappNotificationFluxChat.buyerAddedVendorNotificationToVendor(payload)
 
         vendorId = vendor[0].id;
 

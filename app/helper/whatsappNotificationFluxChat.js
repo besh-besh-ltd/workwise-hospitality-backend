@@ -65,6 +65,75 @@ const whatsappNotificationFluxChat = {
         );
       });
   },
+
+  buyerAddedVendorNotificationToVendor: async (payload) => {
+    // Construct the data payload
+    const data = {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: formatPhoneNumber(payload.mobile) , 
+      type: "template",
+      template: {
+        name: "vendor_added_on_portal_by_buyer",
+        language: {
+          policy: "deterministic",
+          code: "en"
+        },
+        components: [
+          {
+            type: "header",
+            parameters: [
+              {
+                type: "text",
+                text: payload.buyerName // e.g., the buyer name
+              }
+            ]
+          },
+          // Body - The template has 4 placeholders for body text
+          {
+            type: "body",
+            parameters: [
+              {
+                type: "text",
+                text: payload?.buyerName // 1st placeholder, e.g., buyer name
+              },
+              {
+                type: "text",
+                text: payload?.email // 2nd placeholder, e.g., vendor name
+              },
+              {
+                type: "text",
+                text: payload?.password  // 3rd placeholder, e.g., project name
+              }
+            ]
+          }
+        ]
+      }
+    };
+  
+    // 3) Set your request headers (include your Flux API key)
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: flux_chat_bearer_token // Replace with your Flux API key
+    };
+  
+    console.log(data)
+
+    // 4) Make the POST request
+    await axios.post(flux_chat_api, data, { headers: headers })
+    .then(response => {
+        console.log('vendor added on workwise by buyer :', response.data);
+      })
+      .catch(error => {
+        console.error(
+          'Failed to add vendor on workwise by buyer :',
+          error.response ? error.response.data : error.message
+        );
+      });
+
+  }
+
+
 }
 
 
