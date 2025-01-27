@@ -4832,31 +4832,47 @@ sendQueryMessage: async (req, res) => {
     if (receiver_details.length > 0) {
       const receiverDetails = receiver_details[0];
       const spocList = await vendorModel.getSpocDetails(receiver_id);
-      const dynamicHTML = `
-      <table width='600' border='0' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #B6B6B6; background-color:#FFFFFF; margin-top:15px; margin-bottom:10px; font-family:Arial, sans-serif; color:#414141;'>
-        <tr>
-          <td colspan="2" align='center' style='background:#203367; padding:20px; color:#FFFFFF; font-size:18px; font-weight:bold;'>
-            You have a new message from ${senderDetails.name}
-          </td>
-        </tr>
-        <tr>
-          <td colspan="2" align='left' style='padding:20px; font-size:14px; line-height:1.6;'>
-            <strong>Hello ${receiverDetails.name},</strong><br><br>
-            You have received a new message regarding the RFQ #${rfqNumber}:<br>
-            <blockquote style='border-left:3px solid #203367; margin:10px 0; padding-left:15px; color:#333333;'>${message_text}</blockquote>
-          </td>
-        </tr>
-        <tr>
-          <td colspan="2" align='center' style='background:#F8F8F8; padding:15px; font-size:12px; color:#333333;'>
-            <p>© WorkWise. All Rights Reserved.</p>
-          </td>
-        </tr>
-      </table>
-    `;
-    
+
+
+      const headerContent = ` <div>
+           <h2>Hello ${req.user.name} </h2>
+           </div>`;
+
+
+           const containerContent = `
+              <div>
+                <div style="font-size:16px;">
+                  ${sender_type == 3 ?
+                   `${senderDetails.name} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`:
+                    `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here’s the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
+                </div>
+                              
+               <h4> Query </h4>
+                <blockquote style='border-left:3px solid #203367; font-size:16px; margin:10px 0; margin-top:-10px; padding-left:15px; padding:10px; border-radius:10px; background-color:#eef3f6; color:#333333; margin-bottom:30px;'>
+                  ${message_text}
+                </blockquote>
+              
+                <a href=${process.env.FRONT_END_WEBSITE}/dashboard/${sender_type == 2 ? "buyer" : "vendor"}/query?rfq_id=${rfq_id}&role=${sender_type == 2 ? "buyer" : "vendor"}
+                  style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+                  Respond to Query
+                </a>
+              
+                <p style="font-size:16px; text-align:center;">  
+                  ${sender_type == 2 ?
+                    "Your quick response can help avoid delays!" :
+                    "Thank you for helping ensure a smooth, transparent process."
+                  }
+                </p>
+              </div>
+              `;
+
+      const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
+
+    const emailSubject = sender_type==2? `Vendor Query on Your RFQ #${rfqNumber}`:  `Buyer Query for #${rfqNumber} – Your Response Needed`
+
     const mailRecipients = {
       from: Config.webmasterMail,
-      subject: `WorkWise | New Message Notification | RFQ #${rfqNumber}`,
+      subject: emailSubject,
       html: dynamicHTML
     };
     
