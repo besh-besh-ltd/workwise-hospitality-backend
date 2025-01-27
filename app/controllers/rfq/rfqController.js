@@ -812,6 +812,7 @@ const sendQuoteNotificationEmail = async (req) => {
 };
 
 const sendWinningNotificaion = async (
+  vendorNonLoginRfqAccessToken,
   vendor_id,
   rfQItem,
   winning_product,
@@ -820,83 +821,39 @@ const sendWinningNotificaion = async (
   winning_vendor_name
 ) => {
   return new Promise(async (resolve, reject) => {
-    let dynamicHTML = `
-      <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
-        <tr>
-          <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />  </td>
-                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-                <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
-                Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
-            </table></td>
-        </tr>
-        <tr>
-        <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:15px 30px; background:#fff; line-height:1.5;'>
-        <h1 style="text-align: center; color: #203367;">!!CONGRATULATIONS!!</h1>
-          <p><strong>Dear ${winning_vendor_name},</strong><br></p>   
-          <p>You're the <strong>winner</strong> for the quotation you've placed for <strong><u>RFQ#${rfQItem[0].rfq_no}</u></strong><p>       
-        </td>
-        </tr>
-        <tr>
-          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>Here are the product details:<br>
-            <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
-              <tr>
-                <th style='background-color: #203367;color: #fff;padding: 10px 15px; text-align: left;width: 140px;'>Product Name</th>
-                <td style="padding: 10px 15px;">${winning_product[0]?.product_details[0]?.name}</td>
-              </tr>
-              <tr>
-                <th style='background-color: #203367;color: #fff;padding: 10px 15px; text-align: left;width: 140px;'>Size</th>
-                <td style="padding: 10px 15px;">${winning_product[0]?.product_specs[0]?.value}</td>
-              </tr>
-              <tr>
-                <th style='background-color: #203367;color: #fff;padding: 10px 15px; text-align: left;width: 140px;'>Specification</th>
-                <td style="padding: 10px 15px;">${winning_product[0]?.product_specs[1]?.value}</td>
-              </tr>
-              <tr>
-                <th style='background-color: #203367;color: #fff;padding: 10px 15px; text-align: left;width: 140px;'>Quantity</th>
-                <td style="padding: 10px 15px;">${winning_product[0]?.product_specs[2]?.value}</td>
-              </tr>
-            </table>
-            <p>Here are the buyer details:</p>
-            <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
-              <tr>
-                <th style='background-color: #203367;color: #fff;padding: 10px 15px; text-align: left;width: 140px;'>Company Name</th>
-                <td style="padding: 10px 15px;">${rfQItem[0]?.company_name}</td>
-              </tr>
-              <tr>
-                <th style='background-color: #203367;color: #fff;padding: 10px 15px; text-align: left;width: 140px;'>Email</th>
-                <td style="padding: 10px 15px;">${rfQItem[0]?.response_email}</td>
-              </tr>
-              <tr>
-                <th style='background-color: #203367;color: #fff;padding: 10px 15px; text-align: left;width: 140px;'>Contact Person</th>
-                <td style="padding: 10px 15px;">${rfQItem[0]?.contact_name}</td>
-              </tr>
-              <tr>
-                <th style='background-color: #203367;color: #fff;padding: 10px 15px; text-align: left;width: 140px;'>Contact Number</th>
-                <td style="padding: 10px 15px;">${rfQItem[0]?.contact_number}</td>
-              </tr>
-              
-            </table>   
-            <br> 
-            <br> 
-            <p style="font-weight:normal;">*&nbsp;For detailed information, please <a href=${process.env.FRONT_END_WEBSITE}>login</a> to our portal</p>        
-          </td>
-          
-        </tr>
-          
 
-        <tr>
-          <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#000; font-weight:normal; padding:5px; background:#efefef; line-height:30px;'><div>
-              <div>
-                <div>
-                  <div>
-                    <p>© WorkWise. All Rights Reserved.</p>
-                  </div>
-                </div>
-              </div>
-            </div></td>
-        </tr>
-        </table>`;
+    const headerContent = `<h2>Hello ${winning_vendor_name || 'Mukul Vendor'},</h2>`;
+
+const containerContent = ` 
+<div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+  <p>
+    <strong>${rfQItem[0]?.company_name}</strong> has made a selection for 
+    <strong>#${rfQItem[0]?.rfq_no} </strong>. We appreciate your participation and encourage you to stay active on Workwise for future opportunities.
+  </p>
+
+
+  <h4> Product Details </h4> 
+  <ul>
+  <li> <strong> Product Name </strong> ${winning_product[0]?.product_details[0]?.name}  </li>
+  <li> <strong> Size </strong> ${winning_product[0]?.product_specs[0]?.value}  </li>
+  <li> <strong> Specification </strong> ${winning_product[0]?.product_specs[1]?.value}  </li>
+  <li> <strong> Quantity </strong> ${winning_product[0]?.product_specs[2]?.value} </li>
+  </ul>
+
+
+  <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfQItem[0]?.id}&token=${vendorNonLoginRfqAccessToken[0]?.token||''}"
+     style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+    Go to Dashboard
+  </a>
+
+     <p style="margin-top:20px; text-align:center;"> <strong> Explore More Leads: </strong> New RFQs are frequently posted, so check back regularly to find other opportunities.</p>
+  <p style="margin-top:20px; text-align:center;">
+    Thank you for partnering with us,
+  </p>
+</div>`;
+
+// Generate final email layout
+const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
     const spocList = await vendorModel.getSpocDetails(vendor_id)
 
@@ -2755,7 +2712,11 @@ const rfqController = {
             'tbl_quote_finalization',
             tbl_quote_finalization_data
           );
+
+          const vendorNonLoginRfqAccessToken = await rfqModel.getVendorRfqToken(vendor_id, rfq_id)
+
           await sendWinningNotificaion(
+            vendorNonLoginRfqAccessToken,
             vendor_id,
             rfQItem,
             winning_product,
