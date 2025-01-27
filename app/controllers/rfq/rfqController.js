@@ -861,7 +861,7 @@ const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
     let mailRecipients = {
       from: Config.webmasterMail,
-      subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
+      subject: `${rfQItem[0]?.company_name} Has Finalized Their Choice for #${rfQItem[0]?.rfq_no} `, // Subject line
       html: dynamicHTML
     };
 
