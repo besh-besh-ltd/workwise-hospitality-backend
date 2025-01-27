@@ -643,7 +643,7 @@ const formattedProducts = productList.length > 0
   let mailRecipients = {
     from: Config.webmasterMail,
     to: buyerDetails[0]?.email,
-    subject: `Work Wise | New Quotation Received for Your RFQ`,
+    subject: `New Quotation Received for Your RFQ`,
     html: dynamicHTML
   };
 
@@ -655,47 +655,33 @@ const formattedProducts = productList.length > 0
 
 const sendQuoteNotificationToVendor = async (req) => {
   // send mail to vendors
-  const { name, email, id } = req.user;
-  let dynamicHTML = `
-  <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
-    <tr>
-      <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />  </td>
-            <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-            <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
-            Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
-        </table></td>
-    </tr>
-    <tr>
-    <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:5px 5px; background:#fff; line-height:1.5;'>
-      <strong>Dear ${name},</strong><br>
-      
-      </td>
-    </tr>
-    <tr>
-      <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:5px;'>
-      ${req.body.is_regret && req.body.is_regret == 1
-      ? 'Your regret concern has been sent to the buyer.'
-      : 'Your quotation has been submitted to the buyer.'
-    }
-      
-      </td>
-      
-    </tr>
-      
+  const {rfq_id, rfq_no} = req.body
+  const { name, email, id, organization_name } = req.user;
+  const token = await rfqModel.getVendorRfqToken(id, rfq_id);
+  const BuyerDetails = await rfqModel.getRFQCreatedBy(rfq_id) 
+  
+  const headerContent = `<h2>Hello ${organization_name || name},</h2>`;
 
-    <tr>
-      <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#000; font-weight:normal; padding:5px; background:#efefef; line-height:30px;'><div>
-          <div>
-            <div>
-              <div>
-                <p>© WorkWise. All Rights Reserved.</p>
-              </div>
-            </div>
-          </div>
-        </div></td>
-    </tr>
-    </table>`;
+  const containerContent = ` 
+  <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+    <p>
+      ${req.body.is_regret && req.body.is_regret == 1
+        ? 'Your regret concern has been sent to the buyer.'
+        : `<div>
+            <p>Thank you for submitting your quotation for <strong>#${rfq_no}</strong>. 
+               We’ve shared it with <strong>${BuyerDetails[0]?.organization_name || ''}</strong>, who will review it and get back to you soon.</p>
+              <p><strong>Next Steps:</strong> Keep an eye out for any buyer queries or updates, 
+               and be ready to discuss terms to secure the order.</p>
+
+            <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}" 
+               style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+               View RFQ Status
+            </a>
+          </div>`}
+    </p>
+  </div>`;
+  
+    const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
   const spocList = await vendorModel.getSpocDetails(id)
 
@@ -703,10 +689,7 @@ const sendQuoteNotificationToVendor = async (req) => {
 
   let mailRecipients = {
     from: Config.webmasterMail,
-    subject:
-      req.body.is_regret && req.body.is_regret == 1
-        ? `Work Wise | Quotation Regreted`
-        : `Work Wise | Quotation Submitted`, // Subject line
+    subject: `Quotation Successfully Submitted for ${rfq_no}` , // Subject line
     html: dynamicHTML
   };
 
@@ -782,145 +765,63 @@ const containerContent = `
   }
 };
 
-const sendQuoteNotificationEmail = async (req) => {
-  let { name, email, organization_name } = req.user;
-  let { rfq_id, rfq_no, products } = req.body;
-  let dynamicHTML = '';
-  const getProducts = () => {
-    let phtml = '';
-    if (products.length > 0) {
-      phtml = '<ul style="padding-left: 0; margin-top: 40px;">';
-      products.map((item) => {
-        phtml = phtml + `<li>${item.product_name}</li>`;
-      });
-      phtml = phtml + '</ul>';
-    }
-    return phtml;
-  };
 
-  return new Promise(async (resolve, reject) => {
+const sendQuoteNotificationEmail = async (req) => {
+  let { name,  organization_name } = req.user;
+  let { rfq_id, rfq_no, products } = req.body;
+
     let u = await rfqModel.getRFQCreatedBy(rfq_id);
     if (u.length > 0) {
-      //This is the buyer
-      let vendor = u[0];
-      dynamicHTML = `
-      <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
-        <tr>
-          <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" />  </td>
-                <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-                <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
-                Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
-            </table></td>
-        </tr>
-        <tr>
-        <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:15px 30px; background:#fff; line-height:1.5;'>
-          <strong>Dear ${vendor.name},</strong><br>
-          
-          </td>
-        </tr>
-        <tr>
-          <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>You've received a new quote from <u>${organization_name
-        }</u> on <a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</u> </a>for bellow products:
-          ${getProducts()}
-          
-          </td>
-          
-        </tr>
-          
+      let buyer = u[0];
 
-        <tr>
-          <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#000; font-weight:normal; padding:5px; background:#efefef; line-height:30px;'><div>
-              <div>
-                <div>
-                  <div>
-                    <p>© WorkWise. All Rights Reserved.</p>
-                  </div>
-                </div>
-              </div>
-            </div></td>
-        </tr>
-        </table>`;
-
-      if (req.body.is_regret && req.body.is_regret == 1) {
-        dynamicHTML = `
-        <table width='600' border='1px' bordercolor='#B6B6B6' align='center' cellspacing='0' cellpadding='0' style='border:1px solid #000; border-collapse:collapse; background-color:#FFF; margin-top:15px; margin-bottom:10px;'>
-          <tr>
-            <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
-                  <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://letsworkwise.com/assets/images/logo.png" alt="workwise-Logo" /> </td>
-                  <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-                  <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
-                  Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
-              </table></td>
-          </tr>
-          <tr>
-          <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:15px 30px; background:#fff; line-height:1.5;'>
-            <strong>Dear ${vendor.name},</strong><br>
-            
-            </td>
-          </tr>
-          <tr>
-            <td align='left' valign='top'  style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:bold; background-color:#f2f2f2; padding:30px;'>
-            <u>${organization_name
-          }</u> has declined the RFQ request (<a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}><u>RFQ#${rfq_no}</a></u>) you've sent for bellow products:            
-             ${getProducts()}            
-            
-            </td>
-            <td colspan="2" align='left' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#414141; font-weight:normal; padding:15px 30px; background:#fff; line-height:1.5;'>
-            <strong>Reason: </strong><br>
-            ${req.body.regret_reason}
-            </td>
-            
-          </tr>
-            
-  
-          <tr>
-            <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#000; font-weight:normal; padding:5px; background:#efefef; line-height:30px;'><div>
-                <div>
-                  <div>
-                    <div>
-                      <p>© WorkWise. All Rights Reserved.</p>
-                    </div>
-                  </div>
-                </div>
-              </div></td>
-          </tr>
-          </table>`;
+      // Prepare product list with inline logic
+      let productNames = products.map(item => item.product_name);
+      let formattedProducts = productNames.slice(0, 3).join(', ');
+      if (productNames.length > 3) {
+        formattedProducts += `, <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
+          style="color: #f87171; text-decoration: none;">view more</a>`;
       }
 
+      // Email header content
+      const headerContent = `<h2>Hello ${buyer.organization_name || ''},</h2>`;
 
-      const spocList = await vendorModel.getSpocDetails(vendor?.id)
+      // Email body content
+      const containerContent = `
+      <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+        <p>
+          You’ve received a new quotation! Check out the details below:
+        </p>
+        <p><strong>Vendor:</strong> ${organization_name || name}</p>
+        <p><strong>Products:</strong> ${formattedProducts || '-'}</p>
 
-      // console.log(" rfq contoller 781 spoc console ", vendor?.id, spocList)
+        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
+            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+           Review the Quotation
+        </a>      
 
+        <p style="margin-top:20px; text-align:center; ">
+          We’re here to help you get the best deal.
+        </p>
+      </div>`;
+
+      // Generate final email layout
+      const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+      // Preparing the email details
       let mailRecipients = {
         from: Config.webmasterMail,
-        subject: `Work Wise | New RFQ Alert`,
+        to: buyer.email,
+        subject: `New Quotation Received for Your RFQ ${rfq_no}`,
         html: dynamicHTML
       };
 
-      if (spocList && spocList.length > 0) {
-        mailRecipients.to = spocList.map(spoc => spoc.email);
-        mailRecipients.cc =  vendor.email
-      } else {
-        mailRecipients.to =  vendor.email;
-      }
-
+      // Sending the email to the buyer
       sendMail(mailRecipients);
 
-      // sendMail({
-      //   from: Config.webmasterMail, // sender address
-      //   to: vendor.email, // list of receivers
-      //   subject:
-      //     req.body.is_regret && req.body.is_regret == 1
-      //       ? `Work Wise | RFQ#${rfq_no} | RFQ Request Declined`
-      //       : `Work Wise | RFQ#${rfq_no} | New Quotation Received`, // Subject line
-      //   html: dynamicHTML // plain text body
-      // });
-      resolve(u);
-    }
-  });
-};
+      console.log(`Quotation update email sent to buyer: ${buyer.email}`);
+    } 
+  }
+
 
 const sendWinningNotificaion = async (
   vendorNonLoginRfqAccessToken,
@@ -2358,7 +2259,7 @@ const rfqController = {
               });
             }
 
-            await sendQuoteNotificationEmail(req, rfq_id);
+            await sendQuoteNotificationEmail(req);
             await sendQuoteNotificationToVendor(req);
 
             res
