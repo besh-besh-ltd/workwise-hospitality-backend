@@ -15,6 +15,8 @@ import { sendNotification } from '../../services/notificationService.js';
 import excelJS from 'exceljs';
 import xlsx from 'xlsx';
 import vendorModel from '../../models/vendorModel.js';
+import projectModel from '../../models/projectModel.js';
+import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
 
 
 const getNextRfQNumber = async () => {
@@ -2389,11 +2391,41 @@ const rfqController = {
             await sendQuoteNotificationEmail(req, rfq_id);
             await sendQuoteNotificationToVendor(req);
 
+            //  send whatsapp notification
+            const buyerDetails = await rfqModel.getRFQCreatedBy(rfq_id);
+            const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id)
+            const projectID = rfqDetails[0]?.project_id
+            const projectDetails = await projectModel.getProjectTableDataById(projectID, buyerDetails[0]?.id)
+
+            
+            const payload = {
+              mobile:buyerDetails[0]?.mobile,
+              rfqNumber:rfq_no,
+              rfqID:rfq_id,
+              projectName:projectDetails[0]?.name || "-",
+              vendorName:req?.user?.name,
+              buyerName:buyerDetails[0]?.name
+            }
+     
+            await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(payload);
+
+            const payload2 = {
+              mobile:"+918630580027",
+              rfqNumber:rfq_no,
+              rfqID:rfq_id,
+              projectName:projectDetails[0]?.name || "-",
+              vendorName:req?.user?.name,
+              buyerName:buyerDetails[0]?.name
+            }
+
+            await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(payload2);
+
+
             res
               .status(200)
               .json({
                 status: 1,
-                data: quotes_items[0]
+                data: quotes_items[0],
               })
               .end();
           } else {

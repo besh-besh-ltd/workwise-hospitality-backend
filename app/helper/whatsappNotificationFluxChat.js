@@ -66,6 +66,88 @@ const whatsappNotificationFluxChat = {
       });
   },
 
+  sendNewQuoteNotificationToBuyer: async (payload) => {
+  
+    // Construct the data payload
+    const data = {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: formatPhoneNumber(payload.mobile) , 
+      type: "template",
+      template: {
+        name: "buyer_new_quote_receive",
+        language: {
+          policy: "deterministic",
+          code: "en"
+        },
+        components: [
+          {
+            type: "header",
+            parameters: [
+              {
+                type: "text",
+                text: payload.rfqNumber // e.g., the RFQ number
+              }
+            ]
+          },
+          // Body - The template has 4 placeholders for body text
+          {
+            type: "body",
+            parameters: [
+              {
+                type: "text",
+                text: payload?.buyerName // 1st placeholder, e.g., buyer name
+              },
+              {
+                type: "text",
+                text: payload?.vendorName // 2nd placeholder, e.g., vendor name
+              },
+              {
+                type: "text",
+                text: payload?.projectName || "" // 3rd placeholder, e.g., project name
+              },
+              {
+                type: "text",
+                text: payload.rfqNumber // 4th placeholder, e.g., other details
+              }
+            ]
+          },
+          {
+            type: "button",
+            sub_type: "url",
+            index: 0,
+            parameters: [
+              {
+                type: "text",
+                text: `https://letsworkwise.com/dashboard/buyer/quote-compare?rfq=${payload.rfqID}`
+              }
+            ]
+          }
+        ]
+      }
+    };
+  
+    // 3) Set your request headers (include your Flux API key)
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: flux_chat_bearer_token // Replace with your Flux API key
+    };
+  
+    console.log(data)
+
+    // 4) Make the POST request
+    await axios.post(flux_chat_api, data, { headers: headers })
+    .then(response => {
+        console.log('New Quote Notification Sent:', response.data);
+      })
+      .catch(error => {
+        console.error(
+          'Failed to send new quote notification:',
+          error.response ? error.response.data : error.message
+        );
+      });
+  },
+
   buyerAddedVendorNotificationToVendor: async (payload) => {
     // Construct the data payload
     const data = {
