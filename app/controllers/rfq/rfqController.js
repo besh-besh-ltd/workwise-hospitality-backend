@@ -611,26 +611,30 @@ const sendQuoteNotificationToVendor = async (req) => {
 };
 
 
-const sendReminderRFQMAIL = async (vendoritem, org_name,rfq_id) => {
+const sendReminderRFQMAIL = async (vendoritem, org_name,rfq_id, rfqBasicDetails) => {
   let user_details = await userModel.user_profile_detail(vendoritem.user_id);
   const token = await rfqModel.getVendorRfqToken(vendoritem.user_id, rfq_id);
   if (user_details.length > 0) {
 
-    
-  const headerContent = `<h2>Hello ${user_details[0].name},</h2> `;
+    const headerContent = `<h2>Hello ${user_details[0].name},</h2>`;
 
-  const containerContent = ` 
-<div>
-<p style="font-size:16px; margin-top:-10px">You have received a reminder from ${org_name} to provide a quote for the RFQ. Please see the details below and respond promptly:</p>
+const containerContent = ` 
+       <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+         <p>
+           This is a friendly reminder from <strong>${org_name}</strong> regarding the RFQ quotation. Ensure your quote is submitted on time to secure this opportunity.
+         </p>
+       
+         <p> <strong> Deadline: </strong> ${rfqBasicDetails?.bid_end_date || 'N/A'} </p>
+       
+         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}"
+            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+           Submit Your Quote Now
+         </a>
+       
+         <p style="margin-top:20px; font-weight:bold; text-align:center">   Don’t miss out on this opportunity!
+         </p>
+       </div>`;
 
- <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}
-                     style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-                      Click here to view the RFQ
-                    </a>
-
-</div>
-  
-  `;
   
   const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
@@ -648,6 +652,7 @@ const sendReminderRFQMAIL = async (vendoritem, org_name,rfq_id) => {
     } else {
       mailRecipients.to = user_details[0].email;
     }
+    sendMail(mailRecipients);
 
     const notificationData = {
       type: 'RFQ Pending',
@@ -2639,6 +2644,7 @@ const rfqController = {
             .end();
       }
 
+      const rfqBasicDetails = await rfqModel.getRfqDetailsById(rfq_id)
       let vendors = await rfqModel.gerRFQVendors(rfq_id);
       const quote_vendor = await rfqModel.quoteVendor(rfq_id);
 
@@ -2650,7 +2656,7 @@ const rfqController = {
       vendors = unmatchedVendors;
       let org_name = organization_name ? organization_name : name;
 
-      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item, org_name, rfq_id)))
+      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item, org_name, rfq_id,rfqBasicDetails)))
         .then(async () => {
           try {
             await rfqModel.insertRFQActivity(rfq_id, id);
