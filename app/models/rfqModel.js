@@ -1547,7 +1547,7 @@ LIMIT $5 OFFSET $4;`,
   getRFQCreatedBy: async (id) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT tbl_users.id, tbl_users.name,tbl_users.email,tbl_users.organization_name
+        `SELECT tbl_users.id, tbl_users.name,tbl_users.email,tbl_users.mobile,tbl_users.organization_name
         FROM tbl_rfq
         LEFT JOIN tbl_users ON tbl_rfq.created_by = tbl_users.id
         WHERE tbl_rfq.id = $1;`,
