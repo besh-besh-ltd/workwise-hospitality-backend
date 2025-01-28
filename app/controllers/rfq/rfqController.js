@@ -505,7 +505,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
       <p style="font-size: 15px; padding-bottom: 3px;">
       Your RFQ has been successfully shared with vendors. </p>
       
-           <a "${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
+           <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
        Click here to view
       </a>      
