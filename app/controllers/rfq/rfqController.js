@@ -17,6 +17,7 @@ import xlsx from 'xlsx';
 import vendorModel from '../../models/vendorModel.js';
 import projectModel from '../../models/projectModel.js';
 import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
+import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 
 
 const getNextRfQNumber = async () => {
@@ -1111,8 +1112,17 @@ const rfqController = {
         rfq_id
       );
 
+      // send notification email
       await sendMailtoVendors(req, rfq_id);
       await sendQuotationMailToBuyer(req, rfq_id);
+
+      // send notification whatsapp 
+      const buyerMsgPayload = {
+        mobile:req.user.mobile,
+        rfq_id:rfq_id,
+        rfq_no:response[0]?.rfq_no
+      }
+      whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload)
 
       res
         .status(200)

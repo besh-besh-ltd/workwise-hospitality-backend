@@ -23,6 +23,64 @@ const formatPhoneNumber = (input) => {
 //  contact us form submited 
 const whatsappNotificationFluxChat = {
 
+  // Function to send a notification when a buyer creates an RFQ
+buyerCreatesRFQNotification: async (payload) => {
+  // Construct the data payload for the WhatsApp message
+  const data = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: formatPhoneNumber(payload.mobile), // Assuming you have a function to format the phone number
+    type: "template",
+    template: {
+      name: "buyer_creates_rfq",
+      language: {
+        policy: "deterministic",
+        code: "en"
+      },
+      components: [
+        {
+          type: "body",
+          parameters: [
+            {
+              type: "text",
+              text: `${payload.rfq_no}`
+            }
+          ]
+        },
+        {
+          type: "button",
+          sub_type: "url",
+          index: 0,
+          parameters: [
+            {
+              type: "text",
+              text: `dashboard/buyer/rfq-management-details?type=buyer-view&id=${payload.rfq_id}` // Assuming you're passing RFQ ID to generate a URL
+            }
+          ]
+        }
+      ]
+    }
+  };
+
+  // Headers for the API request
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: flux_chat_bearer_token // Replace with your actual API key for the messaging service
+  };
+
+  // Make the POST request to the messaging API
+  await axios.post(flux_chat_api, data, { headers: headers })
+  .then(response => {
+      console.log('RFQ creation notification sent:', response.data);
+    })
+    .catch(error => {
+      console.error(
+        'Failed to send RFQ creation notification:',
+        error
+      );
+    });
+},
+
   contactUsFormWhatsAppMessage: async (payload) => {
     const data = {
       messaging_product: 'whatsapp',
