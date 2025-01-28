@@ -81,6 +81,147 @@ buyerCreatesRFQNotification: async (payload) => {
     });
 },
 
+vendorReceivesRFQNotification: async (payload) => {
+  // Construct the data payload for the WhatsApp message
+  const data = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: formatPhoneNumber(payload.mobile), // Ensure to format the vendor's phone number
+    type: "template",
+    template: {
+      name: "vendor_receives_rfq_from_buyer",
+      language: {
+        policy: "deterministic",
+        code: "en_US"
+      },
+      components: [
+        {
+          type: "body",
+          parameters: [
+            {
+              type: "text",
+              text: payload.vendorName // Example detail - RFQ number
+            },
+            {
+              type: "text",
+              text: payload.buyerName // Example detail - Buyer name
+            },
+            {
+              type: "text",
+              text: payload.productDetails[0] || '' // Example detail - Project name
+            },
+            {
+              type: "text",
+              text: payload.productDetails[1] || ' ' // Example detail - Delivery date
+            },
+            {
+              type: "text",
+              text: payload.productDetails[2] || ' ' // Example detail - List of items required
+            }
+          ]
+        },
+        {
+          type: "button",
+          sub_type: "url",
+          index: 0,
+          parameters: [
+            {
+              type: "text",
+              text: `dashboard/vendor/inquiries-details?id=${payload.rfq_id}&token=${payload.token}` // Direct URL to RFQ details
+            }
+          ]
+        }
+      ]
+    }
+  }
+  // Headers for the API request
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: flux_chat_bearer_token // Replace with your actual API key for the messaging service
+  };
+
+  // Make the POST request to the messaging API
+  await axios.post(flux_chat_api, data, { headers: headers })
+  .then(response => {
+      console.log('RFQ received notification sent to vendor:', response.data);
+    })
+    .catch(error => {
+      console.error(
+        'Failed to send RFQ received notification to vendor:',
+        error
+      );
+    });
+},
+
+
+sendQuoteSubmissionNotification: async (payload) =>{
+const data = {
+  "messaging_product": "whatsapp",
+  "recipient_type": "individual",
+  "to": formatPhoneNumber(payload.mobile),
+  "type": "template",
+  "template": {
+    "name": "vendor_submit_quote_to_buyer_temp_vendor",
+    "language": {
+      "policy": "deterministic",
+      "code": "en_US"
+    },
+    "components": [
+      {
+        "type": "header",
+        "parameters": [
+          {
+            "type": "text",
+            "text": "Submitted"
+          }
+        ]
+      },
+      {
+        "type": "body",
+        "parameters": [
+          {
+            "type": "text",
+            "text": payload.name
+          },
+          {
+            "type": "text",
+            "text": payload.message
+          }
+        ]
+      },
+      {
+        "type": "button",
+        "sub_type": "url",
+        "index": 0,
+        "parameters": [
+          {
+            "type": "text",
+            "text": `dashboard/vendor/inquiries-details?id=${payload.rfq_id}&token=${payload.token}`
+          }
+        ]
+      }
+    ]
+  }
+}
+
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: flux_chat_bearer_token // Replace with your Flux API key
+    };
+  
+   await axios
+      .post(flux_chat_api, data, { headers: headers })
+      .then((response) => {
+        console.log('WhatsApp Message Sent:', response.data);
+      })
+      .catch((error) => {
+        console.error(
+          'Failed to send WhatsApp message:',
+          error.response ? error.response.data : error.message
+        );
+      });
+},
+
   contactUsFormWhatsAppMessage: async (payload) => {
     const data = {
       messaging_product: 'whatsapp',
@@ -119,6 +260,74 @@ buyerCreatesRFQNotification: async (payload) => {
       .catch((error) => {
         console.error(
           'Failed to send WhatsApp message:',
+          error.response ? error.response.data : error.message
+        );
+      });
+  },
+
+  sendQuoteReminderNotificationToVendor: async (payload) => {
+  
+    // Construct the data payload
+    const data = {
+      "messaging_product": "whatsapp",
+      "recipient_type": "individual",
+      "to": formatPhoneNumber(payload.mobile),
+      "type": "template",
+      "template": {
+        "name": "rfq_quote_reminder_temp_vendor",
+        "language": {
+          "policy": "deterministic",
+          "code": "en_US"
+        },
+        "components": [
+          {
+            "type": "body",
+            "parameters": [
+              {
+                "type": "text",
+                "text": payload.name
+              },
+              {
+                "type": "text",
+                "text": payload.buyerName
+              },
+              {
+                "type": "text",
+                "text": payload.rfq_no
+              }
+            ]
+          },
+          {
+            "type": "button",
+            "sub_type": "url",
+            "index": 0,
+            "parameters": [
+              {
+                "type": "text",
+                "text": `dashboard/vendor/inquiries-details?id=${payload.rfq_id}&token=${payload.token}`
+              }
+            ]
+          }
+        ]
+      }
+    }
+  
+    // 3) Set your request headers (include your Flux API key)
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: flux_chat_bearer_token // Replace with your Flux API key
+    };
+  
+    console.log(data)
+
+    // 4) Make the POST request
+    await axios.post(flux_chat_api, data, { headers: headers })
+    .then(response => {
+        console.log('New Quote Notification Sent:', response.data);
+      })
+      .catch(error => {
+        console.error(
+          'Failed to send new quote notification:',
           error.response ? error.response.data : error.message
         );
       });
@@ -177,7 +386,7 @@ buyerCreatesRFQNotification: async (payload) => {
             parameters: [
               {
                 type: "text",
-                text: `https://letsworkwise.com/dashboard/buyer/quote-compare?rfq=${payload.rfqID}`
+                text: `dashboard/buyer/quote-compare?rfq=${payload.rfqID}`
               }
             ]
           }

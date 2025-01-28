@@ -428,7 +428,39 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
 
       // console.log(" rfq contoller 377 spoc console ", user_details[0]?.id, spocList)
 
+            // Construct an array of product descriptions
+            const productDescriptions = products.map((product) => {
+              const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
+              return `${product.name} - ${quantitySpec.value || '--'} ${product.unit || ''}`.trim();
+            });
+
       sendMail(mailRecipients);
+
+      spocList.map( async (spoc) =>  {
+      // Here, productDescriptions will be an array of strings like ["Product1 - 10 Units", "Product2 - 5 Units"]
+      const payloadForWhatsApp = {
+        mobile: spoc.mobile, // Assuming `mobile` is a property on the `vendor` object
+        vendorName: user_details[0]?.organization_name || user_details[0]?.name || "" ,
+        buyerName: organization_name ,
+        rfq_id: rfqNumber,
+        token: token,
+        productDetails: productDescriptions // Joining all product details into a single string for message
+      };
+
+      await whatsappNotificationFluxChat.vendorReceivesRFQNotification(payloadForWhatsApp);
+      });
+
+            // Here, productDescriptions will be an array of strings like ["Product1 - 10 Units", "Product2 - 5 Units"]
+       const payloadForWhatsApp = {
+         mobile: user_details[0]?.mobile, // Assuming `mobile` is a property on the `vendor` object
+         vendorName: user_details[0]?.organization_name || user_details[0]?.name || "" ,
+         buyerName: organization_name ,
+         rfq_id: rfqNumber,
+         token: token,
+         productDetails: productDescriptions // Joining all product details into a single string for message
+       };
+
+       await whatsappNotificationFluxChat.vendorReceivesRFQNotification(payloadForWhatsApp);
 
       // Send notification if applicable
       if (user_details[0].endpoint) {
@@ -658,7 +690,7 @@ const formattedProducts = productList.length > 0
 const sendQuoteNotificationToVendor = async (req) => {
   // send mail to vendors
   const {rfq_id, rfq_no} = req.body
-  const { name, email, id, organization_name } = req.user;
+  const { name, email, id, organization_name, mobile } = req.user;
   const token = await rfqModel.getVendorRfqToken(id, rfq_id);
   const BuyerDetails = await rfqModel.getRFQCreatedBy(rfq_id) 
   
@@ -704,15 +736,44 @@ const sendQuoteNotificationToVendor = async (req) => {
 
   sendMail(mailRecipients);
 
+
+  const message =  req.body.is_regret && req.body.is_regret == 1
+  ? `Your regret concern for #${rfq_no} has been sent to the buyer.`:
+  `Thank you for submitting your quotation for #${rfq_no}`
+
+  // send message to spoc
+  spocList.map(async (spoc) => {
+    const whatsappPayload ={
+      mobile:spoc.mobile,
+      token:token[0].token,
+      rfq_id:rfq_id,
+      message:message,
+      name:organization_name || name
+    }
+  
+    await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+  })
+
+  // send message to vendor
+  const whatsappPayload ={
+    mobile:mobile,
+    token:token[0].token,
+    rfq_id:rfq_id,
+    message:message,
+    name:organization_name || name
+  }  
+  await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+
 };
 
 
 const sendReminderRFQMAIL = async (vendoritem, org_name,rfq_id, rfqBasicDetails) => {
   let user_details = await userModel.user_profile_detail(vendoritem.user_id);
   const token = await rfqModel.getVendorRfqToken(vendoritem.user_id, rfq_id);
+  const vendorName =  user_details[0].organization_name || user_details[0].name
   if (user_details.length > 0) {
 
-    const headerContent = `<h2>Hello ${user_details[0].name},</h2>`;
+    const headerContent = `<h2>Hello ${vendorName},</h2>`;
 
 const containerContent = ` 
        <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
@@ -749,6 +810,32 @@ const containerContent = `
       mailRecipients.to = user_details[0].email;
     }
     sendMail(mailRecipients);
+
+    spocList.map( async (spoc) =>{
+      if (spoc.mobile) {  // Check if the mobile number is not null or undefined
+        const whatsappPayloadSPOC = {
+          mobile: spoc.mobile,
+          token: token[0].token,
+          rfq_id: rfq_id,
+          rfq_no: rfqBasicDetails?.rfq_no,
+          buyerName: org_name,
+          name: vendorName
+        };
+    
+        await whatsappNotificationFluxChat.sendQuoteReminderNotificationToVendor(whatsappPayloadSPOC);
+      }
+    });
+    
+    const whatsappPayloadForVendor= {
+      mobile:user_details[0].mobile,
+      token:token[0].token,
+      rfq_id: rfq_id,
+      rfq_no:rfqBasicDetails?.rfq_no,
+      buyerName:org_name,
+      name:vendorName
+    }
+
+    await whatsappNotificationFluxChat.sendQuoteReminderNotificationToVendor(whatsappPayloadForVendor)
 
     const notificationData = {
       type: 'RFQ Pending',
