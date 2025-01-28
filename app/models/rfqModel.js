@@ -1532,6 +1532,42 @@ LIMIT $5 OFFSET $4;`,
         });
     });
   },
+  getRfqVendorListAlongWithSPOC: async(rfq_id)=>{
+    return new Promise(function (resolve, reject) {
+      db.query(`SELECT 
+          u.id AS user_id, 
+          u.name AS user_name, 
+          u.email AS user_email, 
+          u.mobile AS user_mobile, 
+          COALESCE(
+              JSON_AGG(
+                  JSONB_BUILD_OBJECT(
+                      'spoc_id', s.id, 
+                      'spoc_name', s.name, 
+                      'spoc_email', s.email, 
+                      'spoc_mobile', s.mobile, 
+                      'spoc_role', s.role
+                  )
+              ) FILTER (WHERE s.id IS NOT NULL),
+              '[]'
+              ) AS spocs
+              FROM tbl_users u
+              INNER JOIN tbl_rfq_product_vendors v ON u.id = v.user_id
+              LEFT JOIN tbl_users_spoc s ON u.id = s.user_id AND (s.is_deleted IS NULL OR s.is_deleted = 0)
+              WHERE v.rfq_id = $1
+              GROUP BY u.id, u.name, u.email, u.mobile;
+              `,
+        [rfq_id]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   quoteVendor: async (id) => {
     return new Promise(function (resolve, reject) {
       db.query(`SELECT created_by  FROM "tbl_quotes" WHERE "rfq_id" = $1`,[id])
