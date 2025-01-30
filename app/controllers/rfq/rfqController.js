@@ -432,12 +432,14 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
             const productDescriptions = products.map((product) => {
               const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
               return `${product.name} - ${quantitySpec.value || '--'} ${product.unit || ''}`.trim();
-            });
+            }).join(', ');
 
       sendMail(mailRecipients);
 
+      // here we have to implement await Promise.allSettled(promises); for better perfomance
       spocList.map( async (spoc) =>  {
-      // Here, productDescriptions will be an array of strings like ["Product1 - 10 Units", "Product2 - 5 Units"]
+
+        if(spoc?.mobile){
       const payloadForWhatsApp = {
         mobile: spoc.mobile, // Assuming `mobile` is a property on the `vendor` object
         vendorName: user_details[0]?.organization_name || user_details[0]?.name || "" ,
@@ -446,8 +448,9 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
         token: token,
         productDetails: productDescriptions // Joining all product details into a single string for message
       };
-
+      
       await whatsappNotificationFluxChat.vendorReceivesRFQNotification(payloadForWhatsApp);
+      }
       });
 
             // Here, productDescriptions will be an array of strings like ["Product1 - 10 Units", "Product2 - 5 Units"]
@@ -583,7 +586,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
   const spocList = await vendorModel.getSpocDetails(user.id)
 
   // Extract vendor details from user object
-  const vendorName = user.organization_name;
+  const vendorName = user.organization_name || user?.name;
 
   // Email content
   const headerContent = `<h2>Hello ${vendorName || ''},</h2>`;
@@ -624,6 +627,37 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
   // Sending the email
   sendMail(mailRecipients);
 
+  const message = `Thank you for submitting your updated quotation for #${rfq_no}`
+
+
+  // Send notification message to vendor 
+    // here we have to implement await Promise.allSettled(promises); for better perfomance
+    spocList.map(async (spoc) => {
+      if (spoc.mobile) {
+      const whatsappPayload ={
+        mobile:spoc.mobile,
+        token:token[0].token,
+        rfq_id:rfq_id,
+        message:message,
+        name:vendorName
+      }
+    
+      await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+    }
+    })
+  
+    // send message to vendor
+    const whatsappPayload ={
+      mobile:user.mobile,
+      token:token[0].token,
+      rfq_id:rfq_id,
+      message:message,
+      name:vendorName
+    }  
+    await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+  
+  
+
 };
 
 
@@ -631,7 +665,7 @@ const sendRevisedQuotationEmailToBuyer = async (buyerDetails, quoteItemChanges, 
   
 
   // Extract vendor details from user object
-  const vendorName = user.organization_name;
+  const vendorName = user.organization_name || user?.name;
 
 // Extract unique product names safely
 const productList = [...new Set(
@@ -683,6 +717,18 @@ const formattedProducts = productList.length > 0
 
   // Sending the email
   sendMail(mailRecipients);
+
+  // send updated quote message to buyer
+  const payload = {
+    mobile:buyerDetails[0]?.mobile,
+    rfqNumber:rfq_no,
+    rfqID:rfq_id,
+    projectName:"-",
+    vendorName:vendorName,
+    buyerName:buyerDetails[0]?.name
+  }
+
+  await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(payload);
 
 };
 
@@ -742,7 +788,9 @@ const sendQuoteNotificationToVendor = async (req) => {
   `Thank you for submitting your quotation for #${rfq_no}`
 
   // send message to spoc
+  // here we have to implement await Promise.allSettled(promises); for better perfomance
   spocList.map(async (spoc) => {
+    if (spoc.mobile) {
     const whatsappPayload ={
       mobile:spoc.mobile,
       token:token[0].token,
@@ -752,6 +800,7 @@ const sendQuoteNotificationToVendor = async (req) => {
     }
   
     await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+  }
   })
 
   // send message to vendor
@@ -2377,17 +2426,6 @@ const rfqController = {
             }
      
             await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(payload);
-
-            const payload2 = {
-              mobile:"+918630580027",
-              rfqNumber:rfq_no,
-              rfqID:rfq_id,
-              projectName:projectDetails[0]?.name || "-",
-              vendorName:req?.user?.name,
-              buyerName:buyerDetails[0]?.name
-            }
-
-            await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(payload2);
 
 
             res

@@ -108,15 +108,7 @@ vendorReceivesRFQNotification: async (payload) => {
             },
             {
               type: "text",
-              text: payload.productDetails[0] || '' // Example detail - Project name
-            },
-            {
-              type: "text",
-              text: payload.productDetails[1] || ' ' // Example detail - Delivery date
-            },
-            {
-              type: "text",
-              text: payload.productDetails[2] || ' ' // Example detail - List of items required
+              text: payload.productDetails // Example detail - Project name
             }
           ]
         },
@@ -139,7 +131,6 @@ vendorReceivesRFQNotification: async (payload) => {
     'Content-Type': 'application/json',
     Authorization: flux_chat_bearer_token // Replace with your actual API key for the messaging service
   };
-
   // Make the POST request to the messaging API
   await axios.post(flux_chat_api, data, { headers: headers })
   .then(response => {
@@ -148,7 +139,7 @@ vendorReceivesRFQNotification: async (payload) => {
     .catch(error => {
       console.error(
         'Failed to send RFQ received notification to vendor:',
-        error
+        error.response ? error.response.data : error.message
       );
     });
 },
