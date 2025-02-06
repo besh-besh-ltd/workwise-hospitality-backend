@@ -135,6 +135,53 @@ const add_vendor_product = async (productDetails, vendorId) => {
 }
 
 const UsersController = {
+  userBookDemo: async (req, res, next) => {
+    try {
+      const { mobile } = req.body;
+
+      const bookDemoResult = userModel.user_book_demo(mobile);
+
+      // send whatsapp message to user
+      const payload = { name:" ", phone:mobile }
+      const sendWhatsapp =  await whatsappNotificationFluxChat.contactUsFormWhatsAppMessage(payload);
+
+      //  send email to Admin 
+      const emailHeader = ` <h5> Book A Call </h5> `
+      const emailContainer = ` 
+      <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+     <p> New Demo Request Received </p>
+     <p> User Mobile No - ${mobile} </p>
+       </div>
+      `
+      const dynamicEmailHtml = generateEmailTemplate(emailHeader, emailContainer)
+
+      sendMail({
+        from: Config.webmasterMail, // sender address
+        to: "siddharth@letsworkwise.com", // list of receivers
+        cc:"mukul@letsworkwise.com",
+        subject: `Work wise | Book A Call - Request `, // Subject line
+        html: dynamicEmailHtml // plain text body
+      });
+
+
+      res
+        .status(200)
+        .json({
+          status: true,
+          message: 'Call booked!'
+        })
+        .end();
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: false,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   user_registration: async (req, res, next) => {
     try {
       const now = currentDateTime();

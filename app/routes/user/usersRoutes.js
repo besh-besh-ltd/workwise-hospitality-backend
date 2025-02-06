@@ -19,6 +19,12 @@ const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
 const UsersRoutes = Router();
 
+
+UsersRoutes.post(
+  '/book-demo',
+  UsersController.userBookDemo
+);
+
 UsersRoutes.post(
   '/user-registration',
   validateBody(schemas.user_register),

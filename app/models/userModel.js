@@ -2,6 +2,23 @@ import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 
 const userModel = {
+
+user_book_demo: async (mobile) => {
+  return new Promise(function (resolve, reject) {
+    db.any(
+      `insert into users_book_demo(mobile) 
+       values($1) returning *`,
+      [ mobile ]
+    )
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+  });
+},
   user_register: async (usrobj) => {
     return new Promise(function (resolve, reject) {
       db.any(
