@@ -19,6 +19,7 @@ import jwtHelper from '../../helper/jwtHelper.js';
 import subscriptionModel from '../../models/subscriptionModel.js';
 import moment from 'moment';
 import userModel from '../../models/userModel.js';
+import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -233,20 +234,27 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       //     subject: `Work Wise | Registration`,
       //    html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
       // };
+
+      const emailHeader = ` <h2>Dear ${name} </h2>`
+          
+      const emailContent = `
+           <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+             <p>Thank you for registering with us! Your login credentials are as follows:</p>
+                <ul style="list-style-type: none; padding: 0;">
+                 <li><strong>Email:</strong> ${email}</li>
+                 <li><strong>Password:</strong> ${password}</li>
+             </ul>
+             <p>Your account is currently under review. We will notify you as soon as it is approved.</p>
+             <p>Meanwhile, please save this email securely as it contains your login credentials.</p>
+             <p>We appreciate your patience and look forward to having you on board!</p>
+           </div>
+            `
+           const dunamicHtmlTemplate = generateEmailTemplate(emailHeader, emailContent)
+
           let mailRecipients = {
             from: Config.webmasterMail,
             subject: `Work Wise | Registration`,
-            html: `
-                <div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #333;">
-                    <p>Dear <strong>${name}</strong>,</p>
-                    <p>Your login credentials are as follows:</p>
-                    <div style="background-color: #f9f9f9; border: 1px solid #ddd; padding: 10px; margin-top: 10px;">
-                        <p><strong>User ID:</strong> ${email}</p>
-                        <p><strong>Password:</strong> ${password}</p>
-                    </div>
-                    <p>Thank you for registering with us!</p>
-                </div>
-            `
+            html: dunamicHtmlTemplate
         };
   
         if (spocList && spocList.length > 0) {
@@ -720,12 +728,8 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           mailRecipients.to = userDetail[0].email;
         }
 
-        // sendMail({
-        //   from: Config.webmasterMail, // sender address
-        //   to: userDetail[0].email, // list of receivers
-        //   subject: `Work wise | Registration`, // Subject line
-        //   html: dynamic_html // plain text body
-        // });
+        sendMail(mailRecipients);
+
       }
 
       res

@@ -674,7 +674,7 @@ const UsersController = {
 
         // return false;
         // const verificationLink = `${process.env.FRONT_BASE_URL}/forgot-password/${verificationToken}/${otpseq}`;
-        const verificationLink = `${process.env.FRONT_BASE_URL}/validate-otp?otp=${otpseq}`;
+        const verificationLink = `${process.env.FRONT_BASE_URL || "http://letsworkwise.com"}/validate-otp?otp=${otpseq}`;
 
         // console.log('verificationLink-->', verificationLink);
         // return false;
