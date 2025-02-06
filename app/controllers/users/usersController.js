@@ -232,9 +232,22 @@ const UsersController = {
         let html_variables = [{ name: name }];
         let dynamic_html = '';
         if (register_as == '2') {
-          dynamic_html = fs
-            .readFileSync(`${Config.template_path}/user_register_template.txt`)
-            .toString();
+          
+          const emailHeaderContent = `<h2>Hello ${name || ''},</h2>`
+          const emailContainerContent = `
+          <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
+           <p>Welcome to WorkWise, Your account has been successfully registered.</p>
+            <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
+            <ul>
+            <li> <strong> Email: </strong> ${email} </li>
+            <li> <strong>Password: </strong> ${password} </li>
+            </ul>
+            <p>You can log in to your account using this link: <a href="https://letsworkwise.com/?user_registered=1" >Click Here</a></p>
+            <p style="font-size: 14px; color: #777;"><em>For security reasons, we recommend changing your password after your first login.</em></p>    
+          </div>`
+
+          dynamic_html = generateEmailTemplate(emailHeaderContent, emailContainerContent)
+          
         } else {
           dynamic_html = fs
             .readFileSync(`${Config.template_path}/user_vendor_template.txt`)
