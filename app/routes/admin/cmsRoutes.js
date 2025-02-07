@@ -121,6 +121,11 @@ cmsRoutes.get(
   cmsController.contactUsListing
 );
 
+cmsRoutes.get('/book-a-demo',
+  passportSignIn,
+  cmsController.demoBookingListing
+)
+
 cmsRoutes.post(
   '/create-faq',
   passportSignIn,
@@ -279,5 +284,7 @@ cmsRoutes.delete(
   validateDbBody.team_member_id_exists,
   cmsController.deleteTeamMember
 );
+
+
 
 export default cmsRoutes;

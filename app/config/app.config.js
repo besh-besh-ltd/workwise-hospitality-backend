@@ -259,8 +259,8 @@ const config = {
         : "/application/de_technico/web-backend/des-technico/app/uploads/bulk_product_file",
     magic_search_file:
       env == "development"
-        ? magicSearchFileUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/magic_search_file",
+        ? "app/uploads/magic_search_file"
+        : "app/uploads/magic_search_file",
     query_message_file:
       env == "development"
         ? queryMessageFilesUploadPath
@@ -301,19 +301,18 @@ const config = {
     host: "smtp-relay.brevo.com",
     port: 587,
     auth: {
-      user: process.env.SMTP_EMAIL,
-      pass: process.env.SMTP_USER_PASSWORD,
+      user: process.env.SMTP_EMAIL || "test b2bportal2023@gmail.com",
+      pass: process.env.SMTP_USER_PASSWORD || "xsmtpsib-3b42f9886e4f809b920bfec2a77b5daa71c65fdcdf3e71d0c247d25261f4446e-J7znQEFTHW45M9Sw",
     },
   },
   developers: [
-    "Gyan <gyan@letsworkwise.com>",
-    "Yash <yash@letsworkwise.com>",
-    "Imtiaj <imtiaj@letsworkwise.com >",
+    "Mukul Jatav <mukul@letsworkwise.com>",
     // "Sourav Maity <sourav.maity@indusnet.co.in>",
     // "Abhisek Pal <abhisek.pal@indusnet.co.in>",
   ],
   admin_email: [
     'mukul@letsworkwise.com',
+    'siddharth@letsworkwise.com',
     // 'sourav.maity@indusnet.co.in',
     // 'abhisek.pal@indusnet.co.in',
     // 'ranit.majumder@indusnet.co.in',

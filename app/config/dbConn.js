@@ -22,7 +22,7 @@ const initOptions = {
       sendMail({
         from: Config.webmasterMail, // sender address
         to: Config.developers, // list of receivers
-        subject: `URL || Work wise || DB Error`, // Subject line
+        subject: `URL || Work wise || Dev DB Error`, // Subject line
         html: `Error: ${JSON.stringify(e.cn)} <br> ${JSON.stringify(
           error.message
         )} <br> ${JSON.stringify(error)}` // plain text body
@@ -38,7 +38,10 @@ const cn = {
   database: process.env.DATABASE_NAME || null,
   host: process.env.HOST || null,
   port: process.env.DATABASE_PORT || null,
-  dialect: process.env.DATABASE_DIALECT || null
+  dialect: process.env.DATABASE_DIALECT || null,
+  ssl: {
+    rejectUnauthorized: false
+  }
 };
 // const cn = 'postgres://process.env.DB_USER:process.env.DB_PASS@process.env.DB_HOST:process.env.DB_PORT/process.env.DB_NAME';
 
@@ -49,6 +52,7 @@ const db = pgp(cn); // database instance;
 db.connect()
   .then((obj) => {
     obj.done(); // success, release the connection;
+    console.log(" ************** DATABASE CONNECT HAI **************** ")
   })
   .catch((error) => {
     console.log('ERROR:', error.message || error);
