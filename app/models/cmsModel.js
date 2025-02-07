@@ -520,6 +520,34 @@ const cmsModel = {
         });
     });
   },
+
+  
+  getDemoBookingList : async (limit , offset)=>{
+    return new Promise(function (resolve , reject){
+      db.any(
+        `select * from users_book_demo ORDER BY id desc  limit $1 offset $2`,
+        [limit, offset]
+      ).then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    })
+  },
+  getDemoBookingCount: async () => {
+    return new Promise(function (resolve, reject) {
+      db.any(`select * from users_book_demo`)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   getPageContentDetail: async (page_id) => {
     return new Promise(function (resolve, reject) {
       db.one(
