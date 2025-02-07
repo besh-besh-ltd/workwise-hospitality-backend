@@ -1180,7 +1180,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
 const rfqController = {
   create: async (req, res, next) => {
-
+    console.log("req recived from magic search")
     if (!req.user.subscription_plan_id) {
       res
         .status(400)

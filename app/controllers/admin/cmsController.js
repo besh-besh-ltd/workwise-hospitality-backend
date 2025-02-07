@@ -597,6 +597,45 @@ const cmsController = {
         .end();
     }
   },
+
+  demoBookingListing: async (req, res, next) => {
+    try {
+      let page, limit, offset;
+      
+      if (req.query.page && req.query.page > 0) {
+        page = parseInt(req.query.page, 10); // Ensure page is an integer
+        limit = parseInt(req.query.limit, 10) || Config.globalAdminLimit;
+        offset = (page - 1) * limit;
+      } else {
+        limit = Config.globalAdminLimit;
+        offset = 0;
+      }
+  
+      // Fetch paginated demo bookings and total count
+      let demoBookings = await cmsModel.getDemoBookingList(limit, offset);
+      let totalBookings = await cmsModel.getDemoBookingCount();
+  
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: demoBookings,
+          count: totalBookings.length
+        })
+        .end();
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  
+
   contactUsListing: async (req, res, next) => {
     try {
       let page, limit, offset;
