@@ -155,29 +155,36 @@ const productModel = {
         });
     });
   },
-  getParentCategoryList: async ()=> {
+  getParentCategoryList: async () => {
     try {
-      const query = `
-          SELECT *
-          FROM (
-              SELECT DISTINCT ON (slug)
-                  id,
-                  title,
-                  slug
-              FROM tbl_category
-              WHERE parent_id = 0
-                AND is_deleted = 0
-              ORDER BY slug, id
-          ) AS distinct_categories
-          ORDER BY id;
-      `;
-      const result = await db.query(query);
-      return result;
+        const query = `
+            SELECT *
+            FROM (
+                SELECT DISTINCT ON (c.slug)
+                    c.id,
+                    c.title,
+                    c.slug
+                FROM tbl_category c
+                JOIN tbl_product_categories pc ON c.id = pc.category_id
+                JOIN tbl_product p ON pc.product_id = p.id
+                WHERE c.parent_id = 0
+                  AND c.is_deleted = 0
+                  AND p.is_deleted = 0
+                  AND p.status = 1  -- Ensure product is active
+                  AND p.is_approve = 1  -- Ensure product is active
+                ORDER BY c.slug, c.id
+            ) AS distinct_categories
+            ORDER BY id;
+        `;
+
+        const result = await db.query(query);
+        return result;
     } catch (error) {
-      console.log(error)
-      throw new Error("Error fetching parent categories.");
+        console.log(error);
+        throw new Error("Error fetching parent categories with products.");
     }
-  },
+},
+
   getVendorList: async (product_name) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -1396,6 +1403,7 @@ const productModel = {
             ) AS product_categories
         FROM tbl_product TP
         WHERE TP.is_deleted = 0
+        AND TP.status = 1
           AND EXISTS (
               SELECT 1
               FROM tbl_product_categories TPC
