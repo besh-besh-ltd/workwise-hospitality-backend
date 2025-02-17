@@ -1380,6 +1380,8 @@ const productModel = {
             INNER JOIN subcategories sc ON c.parent_id = sc.id
             WHERE c.is_deleted = 0
         )
+SELECT *
+FROM (
         SELECT DISTINCT ON (TP.name)
             TP.id AS product_id,
             TP.name AS product_name,
@@ -1400,7 +1402,8 @@ const productModel = {
                   AND TC.is_deleted = 0
                   AND (TC.id IN (SELECT id FROM subcategories) OR TC.id = $1) 
                 ORDER BY TPC.id
-            ) AS product_categories
+            ) AS product_categories,
+        (SELECT COUNT(*) FROM tbl_product TP2 WHERE TP2.name = TP.name AND TP2.is_deleted = 0) AS product_count
         FROM tbl_product TP
         WHERE TP.is_deleted = 0
         AND TP.status = 1
@@ -1412,7 +1415,8 @@ const productModel = {
               WHERE TPC.product_id = TP.id
                 AND (TC.id IN (SELECT id FROM subcategories) OR TC.id = $1) 
           )
-        ORDER BY TP.name, TP.id
+) AS sorted_products 
+        ORDER BY product_count DESC, product_name, product_id  -- Sorting now applied in outer query
         LIMIT $2 OFFSET $3;
       `;
 
