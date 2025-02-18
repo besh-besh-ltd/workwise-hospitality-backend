@@ -22,7 +22,7 @@ const rolesModel = {
       )
         .then(function (data) {
           resolve(data);
-        })
+          })
         .catch(function (err) {
           let error = new Error(err);
           reject(error);

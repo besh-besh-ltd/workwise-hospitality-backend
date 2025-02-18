@@ -1568,6 +1568,129 @@ const cmsController = {
         })
         .end();
     }
+  },
+  
+  
+ 
+  addLocation: async (req, res, next) => {
+    const { state_name, city_name } = req.body; // Receive state_name and city_name from body
+  
+    try {
+      // Ensure state_name and city_name are provided
+      if (!state_name || !city_name) {
+        return res.status(400).json({ error: 'State name and city name are required' });
+      }
+  
+      // Capitalize each word in the city_name
+      const formattedCityName = city_name
+        .split(' ')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+        .join(' ');
+  
+      // Check if the state exists in tbl_location_states
+      const state = await cmsModel.findStateByName(state_name);
+  
+      if (!state) {
+        return res.status(404).json({ error: `State '${state_name}' not found` });
+      }
+  
+      // Check if the city already exists in tbl_location_cities for the given state_id
+      const cityExists = await cmsModel.checkCityExists(state.id, formattedCityName);
+      if (cityExists) {
+        return res.status(400).json({ error: `City '${formattedCityName}' already exists in this state` });
+      }
+  
+      // Create the location object and call the service model to add the city
+      const locationObj = { state_id: state.id, city_name: formattedCityName };
+      const result = await cmsModel.createLocation(locationObj);
+  
+      // Return the result
+      res.status(200).json({ message: 'Location added successfully', data: result });
+    } catch (err) {
+      next(err); // Pass the error to the error handler
+    }
+  },
+  
+ 
+  
+
+  
+    updateLocation: async (req, res, next) => {
+      const { state_id, city_id, state_name, city_name } = req.query; // Receive parameters from query
+    
+      try {
+        // Ensure either state_id or city_id is provided along with the corresponding name
+        if (!state_id && !city_id) {
+          return res.status(400).json({ error: "state_id or city_id is required" });
+        }
+    
+        // Prepare the update data based on the fields provided
+        const updateData = {};
+        if (state_name) {
+          updateData.state_name = state_name;
+        }
+        if (city_name) {
+          updateData.city_name = city_name;
+        }
+    
+        // Call the service to update the data
+        const result = await cmsModel.updateLocations(state_id, city_id, updateData);
+    
+        if (result) {
+          return res.status(200).json({ message: "Location updated successfully", data: result });
+        } else {
+          return res.status(404).json({ error: "Location not found" });
+        }
+      } catch (err) {
+        console.error("Error updating location:", err);
+        next(err); // Pass error to error handler
+      }
+    },
+    
+  
+  getAllLocations: async (req, res, next) => {
+    try {
+      const { 
+        limit = 10, 
+        offset = 0, 
+        search = '',
+        state = '' 
+      } = req.query;
+  
+      const locations = await cmsModel.getAllLocations(
+        Number(limit), 
+        Number(offset), 
+        search,
+        state
+      );
+  
+      res.status(200).json({
+        success: true,
+        data: locations,
+        message: 'Locations fetched successfully',
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false, 
+        message: 'Failed to fetch locations',
+        error: error.message,
+      });
+    }
+  },
+
+  deleteLocation: async (req, res, next) => {
+    const { city_id } = req.params;  // Changed from req.body to req.params
+     try {
+      // Call service to delete the city
+      const result = await cmsModel.deleteLocations(city_id);
+      console.log('Deletion result:', result);
+      res.status(200).json(result);
+    } catch (error) {
+      console.error('Error during deletion:', error);
+      next(error); // Pass error to error-handling middleware
+    }
   }
+  
+  
 };
 export default cmsController;

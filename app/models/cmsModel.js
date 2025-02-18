@@ -2378,7 +2378,171 @@ const cmsModel = {
           reject(error);
         });
     });
+  },
+   // Get all locations (states and cities)
+   getAllLocations :  async (limit, offset, search, state) => {
+    return new Promise(function (resolve, reject) {
+      let query = ''; 
+      const queryParams = [limit, offset];
+      let paramCount = 2;
+  
+      // Build search condition if provided
+      if (search) {
+        query += `AND (tbl_location_states.state_name ILIKE '%${search}%' OR tbl_location_cities.city_name ILIKE '%${search}%')`;
+      }
+  
+      // Add state filter if provided
+      if (state) {
+        paramCount++;
+        query += ` AND tbl_location_states.state_name ILIKE $${paramCount}`;
+        queryParams.push(`${state}`);
+      }
+  
+      db.any(
+        `SELECT 
+  COUNT(*) OVER() AS total_count,
+  tbl_location_states.id AS state_id, 
+  tbl_location_states.state_name,
+  tbl_location_cities.id AS city_id, 
+  tbl_location_cities.city_name
+FROM tbl_location_states
+LEFT JOIN tbl_location_cities ON tbl_location_cities.state_id = tbl_location_states.id
+WHERE 1=1 ${query}
+ORDER BY tbl_location_states.state_name ASC
+LIMIT $1 OFFSET $2
+`,
+        queryParams
+      )
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        reject(new Error(err));
+      });
+    });
+  },
+  updateLocations: async (state_id, city_id, updateData) => {
+    return new Promise((resolve, reject) => {
+      let query;
+      const values = [];
+
+      // If both state_id and city_id are provided, update both tables in a transaction
+      if (state_id && city_id) {
+        query = `
+          BEGIN;
+            UPDATE tbl_location_states SET state_name = $1 WHERE id = $2;
+            UPDATE tbl_location_cities SET city_name = $3 WHERE id = $4;
+          COMMIT;
+        `;
+        values.push(updateData.state_name, state_id, updateData.city_name, city_id);
+        
+        db.none(query, values)
+          .then(() => resolve({ message: 'State and City updated successfully' }))
+          .catch(err => reject(new Error("Error updating state and city: " + err)));
+      } 
+      // If only state_id is provided, update the state in the states table
+      else if (state_id) {
+        query = `UPDATE tbl_location_states SET state_name = $1 WHERE id = $2 RETURNING *`;
+        values.push(updateData.state_name, state_id);
+
+        db.one(query, values)
+          .then(result => resolve(result))
+          .catch(err => reject(new Error("Error updating state: " + err)));
+      } 
+      // If only city_id is provided, update the city in the cities table
+      else if (city_id) {
+        query = `UPDATE tbl_location_cities SET city_name = $1 WHERE id = $2 RETURNING *`;
+        values.push(updateData.city_name, city_id);
+
+        db.one(query, values)
+          .then(result => resolve(result))
+          .catch(err => reject(new Error("Error updating city: " + err)));
+      }
+    });
+  },
+
+  findStateByName: async (state_name) => {
+    const query = `SELECT id FROM tbl_location_states WHERE state_name = $1 LIMIT 1`;
+    try {
+      const result = await db.oneOrNone(query, [state_name]);
+      return result; // Return the state record if found, otherwise null
+    } catch (err) {
+      throw new Error('Error finding state: ' + err.message);
+    }
+  },
+
+  // Check if city already exists in the given state
+checkCityExists: async (state_id, city_name) => {
+  const query = `SELECT 1 FROM tbl_location_cities WHERE city_name = $1 AND state_id = $2 LIMIT 1`;
+  try {
+    const result = await db.oneOrNone(query, [city_name, state_id]);
+    return result !== null; // Return true if city exists, false otherwise
+  } catch (err) {
+    throw new Error('Error checking city existence: ' + err.message);
   }
+},
+  
+
+// Create location in tbl_location_cities
+createLocation: async (locationObj) => {
+  return new Promise((resolve, reject) => {
+    const tableName = 'tbl_location_cities';
+    const query = pgp().helpers.insert(locationObj, null, tableName) + ' RETURNING id';
+
+    db.one(query)
+      .then((data) => {
+        resolve(data); // Return the inserted data (id of the new city)
+      })
+      .catch((err) => {
+        reject(new Error('Error inserting location: ' + err.message)); // Handle insertion errors
+      });
+  });
+},
+   createLocation: async (locationObj) => {
+    return new Promise((resolve, reject) => {
+      // Define the table name for cities
+      const tableName = 'tbl_location_cities';
+      
+      // Create the query for insertion
+      const query = pgp().helpers.insert(locationObj, null, tableName) + ' RETURNING id';
+
+      // Execute the query
+      db.one(query)
+        .then((data) => {
+          resolve(data); // Return the inserted data (id of the new city)
+        })
+        .catch((err) => {
+          reject(new Error(err)); // Handle any errors during insertion
+        });
+    });
+  },
+//  deleteLocations: async (city_id) => {
+//   return new Promise((resolve, reject) => {
+//     if (!city_id) {
+//       reject(new Error("city_id is required"));
+//       return;
+//     }
+
+//     const query = `DELETE FROM tbl_location_cities WHERE id = $1 RETURNING *`;
+//     const values = [city_id];
+
+//     console.log(`Executing query: ${query} with values: ${values}`);
+
+//     db.one(query, values)
+//       .then(result => {
+//         if (result) {
+//           resolve({ message: 'City deleted successfully', deletedCity: result });
+//         } else {
+//           reject(new Error("City not found"));
+//         }
+//       })
+//       .catch(err => {
+//         console.error("Error deleting city:", err);
+//         reject(new Error("Error deleting city: " + err));
+//       });
+//   });
+// }
+
 };
 
 export default cmsModel;

@@ -4,7 +4,27 @@ import cmsModel from '../../models/cmsModel.js';
 // import blogModel from '../../models/blogModel.js';
 // import storeModel from '../../models/storeModel.js';
 import { encode } from 'html-entities';
+import { check, param, query, validationResult } from 'express-validator';
 import fs from 'fs';
+import db from '../../config/dbConn.js';
+import pgp from 'pg-promise';
+
+
+
+
+
+const validateRequest = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({
+      success: false,
+      errors: errors.array(),
+      message: 'Validation failed'
+    });
+  }
+  next();
+};
+
 
 const validateDbBody = {
   banner_exists: async (req, res, next) => {
@@ -528,7 +548,110 @@ const validateDbBody = {
         })
         .end();
     }
-  }
+    location_exists: [
+    query('state')
+      .optional()
+      .isString()
+      .trim()
+      .custom(async (value) => {
+        if (value) {
+          const state = await db.oneOrNone(
+            'SELECT id FROM tbl_location_states WHERE state_name ILIKE $1',
+            [value]
+          );
+          if (!state) {
+            throw new Error('State not found');
+          }
+        }
+        return true;
+      }),
+    validateRequest
+  ]
+  },
+  
+  update_location_valid: [
+    check('state_id')
+      .isInt()
+      .withMessage('State ID must be an integer')
+      .custom(async (value) => {
+        const state = await db.oneOrNone(
+          'SELECT id FROM tbl_location_states WHERE id = $1',
+          [value]
+        );
+        if (!state) {
+          throw new Error('State ID does not exist');
+        }
+        return true;
+      }),
+
+    check('city_id')
+      .isInt()
+      .withMessage('City ID must be an integer')
+      .custom(async (value) => {
+        const city = await db.oneOrNone(
+          'SELECT id FROM tbl_location_cities WHERE id = $1',
+          [value]
+        );
+        if (!city) {
+          throw new Error('City ID does not exist');
+        }
+        return true;
+      }),
+
+    check('state_name')
+      .optional()
+      .isString()
+      .trim()
+      .notEmpty()
+      .withMessage('State name cannot be empty')
+      .custom(async (value, { req }) => {
+        const existing = await db.oneOrNone(
+          'SELECT id FROM tbl_location_states WHERE state_name ILIKE $1 AND id != $2',
+          [value, req.body.state_id]
+        );
+        if (existing) {
+          throw new Error('State name already exists');
+        }
+        return true;
+      }),
+
+    check('city_name')
+      .optional()
+      .isString()
+      .trim()
+      .notEmpty()
+      .withMessage('City name cannot be empty')
+      .custom(async (value, { req }) => {
+        const existing = await db.oneOrNone(
+          'SELECT id FROM tbl_location_cities WHERE city_name ILIKE $1 AND state_id = $2 AND id != $3',
+          [value, req.body.state_id, req.body.city_id]
+        );
+        if (existing) {
+          throw new Error('City name already exists in this state');
+        }
+        return true;
+      }),
+    validateRequest
+  ],
+
+  delete_location_valid: [
+    param('city_id')
+      .isInt()
+      .withMessage('City ID must be an integer')
+      .custom(async (value) => {
+        const city = await db.oneOrNone(
+          'SELECT id FROM tbl_location_cities WHERE id = $1',
+          [value]
+        );
+        if (!city) {
+          throw new Error('City ID does not exist');
+        }
+       
+        return true;
+      }),
+    validateRequest
+  ]
+
   /*  gift_id_exists: async (req, res, next) => {
     try {
       let errors = {};
