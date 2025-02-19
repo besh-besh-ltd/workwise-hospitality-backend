@@ -2470,6 +2470,26 @@ LIMIT $1 OFFSET $2
       throw new Error('Error finding state: ' + err.message);
     }
   },
+  findStateById : async (state_id) => {
+    const query = `SELECT 1 FROM tbl_location_states WHERE id = $1 LIMIT 1`;
+    try {
+      const result = await db.oneOrNone(query,[state_id]);
+      return result;
+    } catch (error) {
+      throw new Error('Given State does not exists',+error.message);
+    }
+  },
+  findCityById : async (city_id) =>{
+    const query = `SELECT 1 FROM tbl_location_cities WHERE id = $1 LIMIT 1`;
+
+    try {
+      const result = await db.oneOrNone(query , [city_id]);
+      return result;
+    } 
+      catch (error) {
+        throw new Error('City Does Not exists',+error.message);
+    }
+  },
 
   // Check if city already exists in the given state
 checkCityExists: async (state_id, city_name) => {
