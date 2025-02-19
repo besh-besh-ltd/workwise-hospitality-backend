@@ -1576,10 +1576,7 @@ const cmsController = {
     const { state_name, city_name } = req.body; // Receive state_name and city_name from body
   
     try {
-      // Ensure state_name and city_name are provided
-      if (!state_name || !city_name) {
-        return res.status(400).json({ error: 'State name and city name are required' });
-      }
+     
   
       // Capitalize each word in the city_name
       const formattedCityName = city_name
@@ -1587,18 +1584,6 @@ const cmsController = {
         .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
         .join(' ');
   
-      // Check if the state exists in tbl_location_states
-      const state = await cmsModel.findStateByName(state_name);
-  
-      if (!state) {
-        return res.status(404).json({ error: `State '${state_name}' not found` });
-      }
-  
-      // Check if the city already exists in tbl_location_cities for the given state_id
-      const cityExists = await cmsModel.checkCityExists(state.id, formattedCityName);
-      if (cityExists) {
-        return res.status(400).json({ error: `City '${formattedCityName}' already exists in this state` });
-      }
   
       // Create the location object and call the service model to add the city
       const locationObj = { state_id: state.id, city_name: formattedCityName };
