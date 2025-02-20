@@ -13,7 +13,13 @@ import pgp from 'pg-promise';
 
 
 
-
+const validateField = (field, fieldName, errors) => {
+  if (typeof field !== 'string' || !field.trim()) {
+    errors[fieldName] = `${fieldName.replace('_', ' ')} must be a non-empty string`;
+    return false;
+  }
+  return true;
+};
 
 
 const validateDbBody = {
@@ -568,17 +574,14 @@ const validateDbBody = {
   
       // Check if state and city exist
       const stateExists = await cmsModel.findStateById(stateId);
-      const cityExists = await cmsModel.findCityById(cityId);
+      // const cityExists = await cmsModel.findCityById(cityId);
   
       // Error accumulation
       if (!stateExists) {  // Assuming findStateById returns true/false
         err++;
         errors.state = 'Given State does not exist';
       }
-      if (!cityExists) {
-        err++;
-        errors.city = 'Given City does not exist';
-      }
+     
   
       // If there are errors, return response
       if (err > 0) {
@@ -605,18 +608,25 @@ const validateDbBody = {
   },
   add_location_isValid: async (req, res, next) => {
     try {
+      const { country_name, state_name, country_id, city_name, state_id } = req.body;
+    
+
       let errors = {};
       let err = 0;
-      const { state_name: state, city_name: city } = req.body;
-  
-      // Input type validation
-      if (typeof state !== 'string' || state.trim() === '') {
-        err++;
-        errors.state_name = 'State name must be a non-empty string';
-      }
-      if (typeof city !== 'string' || city.trim() === '') {
-        err++;
-        errors.city_name = 'City name must be a non-empty string';
+    
+      // Validate each field
+      if (!validateField(country_name, 'country_name', errors)) err++;
+      if (!validateField(state_name, 'state_name', errors)) err++;
+      if (!validateField(country_id, 'country_id', errors)) err++;
+      if (!validateField(city_name, 'city_name', errors)) err++;
+      if (!validateField(state_id, 'state_id', errors)) err++;
+    
+      // If there are validation errors, return a 400 response
+      if (err > 0) {
+        return res.status(400).json({
+          status: 2,
+          errors,
+        });
       }
   
       // Only proceed with database checks if input validation passes

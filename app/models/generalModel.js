@@ -35,6 +35,20 @@ const generalModel = {
           reject(error);
         });
     });
+  },
+  getCountries: async () =>{
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT * FROM tbl_location_country ORDER BY country_name ASC`
+      ).then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+
+    })
   }
 };
 
