@@ -2497,60 +2497,47 @@ checkCityExists: async (state_id, city_name) => {
 
 
 createLocation: async (type, locationObj) => {
-  
-  try {
-    let query = '';
-    let values = [];
-    // Determine the table and fields based on the type
-    if (type === 'city') {
-      query = `INSERT INTO tbl_location_cities (state_id, city_name) VALUES ($1, $2) RETURNING *`;
-      values = [locationObj.state_id, locationObj.city_name];
-    }
-    else if (type === 'state') {
-      query = `INSERT INTO tbl_location_states (country_id, state_name) VALUES ($1, $2) RETURNING *`;
-      values = [locationObj.country_id, locationObj.state_name];
-    }
-    else if (type === 'country') {
-      query = `INSERT INTO tbl_location_country (country_name) VALUES ($1) RETURNING *`;
-      values = [locationObj.country_name];
-    }
-    else {
-      throw new Error('Invalid location type. Use "city", "state", or "country".');
-    }
-    // Execute the query safely
-    const result = await db.one(query, values);
-    return result; // Return inserted record
-  } catch (err) {
-    console.error("Database Error:", err);
-    throw new Error("Failed to insert location."); // Custom error message
-  }
-},
-//  deleteLocations: async (city_id) => {
-//   return new Promise((resolve, reject) => {
-//     if (!city_id) {
-//       reject(new Error("city_id is required"));
-//       return;
-//     }
+  return new Promise((resolve, reject) => {
+    const queries = {
+      city: {
+        check: `SELECT * FROM tbl_location_cities WHERE state_id = $1 AND city_name = $2`,
+        insert: `INSERT INTO tbl_location_cities (state_id, city_name) VALUES ($1, $2) RETURNING *`,
+        values: [locationObj.state_id, locationObj.city_name]
+      },
+      state: {
+        check: `SELECT * FROM tbl_location_states WHERE country_id = $1 AND state_name = $2`,
+        insert: `INSERT INTO tbl_location_states (country_id, state_name) VALUES ($1, $2) RETURNING *`,
+        values: [locationObj.country_id, locationObj.state_name]
+      },
+      country: {
+        check: `SELECT * FROM tbl_location_country WHERE country_name = $1`,
+        insert: `INSERT INTO tbl_location_country (country_name) VALUES ($1) RETURNING *`,
+        values: [locationObj.country_name]
+      }
+    };
 
-//     const query = `DELETE FROM tbl_location_cities WHERE id = $1 RETURNING *`;
-//     const values = [city_id];
+    const queryData = queries[type];
 
-//     console.log(`Executing query: ${query} with values: ${values}`);
+    if (!queryData) {
+       reject(new Error('Invalid location type. Use "city", "state", or "country".'));
+    }
 
-//     db.one(query, values)
-//       .then(result => {
-//         if (result) {
-//           resolve({ message: 'City deleted successfully', deletedCity: result });
-//         } else {
-//           reject(new Error("City not found"));
-//         }
-//       })
-//       .catch(err => {
-//         console.error("Error deleting city:", err);
-//         reject(new Error("Error deleting city: " + err));
-//       });
-//   });
-// }
+    db.oneOrNone(queryData.check, queryData.values)
+      .then(existingEntry => {
+        if (existingEntry) {
+           reject(new Error(`${type} already exists.`));
+        }
+        return db.one(queryData.insert, queryData.values);
+      })
+      .then(resolve)
+      .catch(err => {
+        console.error("Database Error:", err);
+        reject(new Error("Failed to insert location: " + err.message));
+      });
+  });
+}
+
+
 
 };
 

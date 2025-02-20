@@ -1604,7 +1604,7 @@ const cmsController = {
         .status(400)
         .json({
           status: 3,
-          message: Config.errorText.value
+          message: Config?.errorText?.value || "Failed to add location"
         })
         .end();
     }
