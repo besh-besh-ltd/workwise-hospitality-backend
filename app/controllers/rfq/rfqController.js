@@ -18,6 +18,10 @@ import vendorModel from '../../models/vendorModel.js';
 import projectModel from '../../models/projectModel.js';
 import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
+import fs from 'fs';
+import {GoogleGenerativeAI} from '@google/generative-ai';
+
+
 
 
 const getNextRfQNumber = async () => {
@@ -4520,7 +4524,7 @@ const rfqController = {
   },
   magicSearchRfqCreate: async (req, res, next) => {
     try {
-      let file = req.file;
+      const file = req.file;
       const user = req.user;
       const comment = req.body.comment;
       const response_email = user.email;
@@ -4533,11 +4537,48 @@ const rfqController = {
       const rfq_type = req.body.rfq_type || "";
       const reverse_auction = req.body.reverse_auction || "";
 
-      // convert excel to json
       const workbook = xlsx.readFile(file.path);
-      const sheetName = workbook.SheetNames[0];
+      const sheetName = workbook.SheetNames[0]; // Assuming data is in the first sheet
       const sheet = workbook.Sheets[sheetName];
-      const jsonData = xlsx.utils.sheet_to_json(sheet);
+      const boqData = xlsx.utils.sheet_to_csv(sheet); //
+
+
+          const genAI = new GoogleGenerativeAI("AIzaSyCX1Ma2jbNciOMcCVhPLzNJ_YTB6yaxdGw");
+          const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+          
+          const prompt = `You are an AI trained to extract product information from unstructured BOQ documents. 
+          Your task is to convert the given text into a structured JSON format.
+          
+          Extract the following details:
+          - Product Name : a valid product name 
+          - Size
+          - Specification
+          - Quantity : always a integer number
+          - Unit : always a valid measurement unit
+          
+          This is possible that some products don't have a product name. In these cases check if product name mention in specification and if not mention in specification then use the last available product name, or if any data is not presnet then just mebntion NA. In product name mention only product name if any other info present along with name add then in specification or in size accordingly. Make sure you dont miss any product. make a excausitive product list
+          
+          Sample Response:
+           productList: [
+               {product_name:"product1", size:"size1", specifications:"spec1", quantity:1, unit:"unit1"},
+               {product_name:"product2", size:"size2", specifications:"spec2", quantity:2, unit:"unit2"},
+               ]
+
+               Here is the BOQ data:
+               ${boqData}
+          `;
+
+            const result = await model.generateContent(prompt);
+            const aiResponseText = result.response.text();
+            
+            // Extract the JSON part from the response, it might be wrapped in backticks or other text
+            const jsonString = aiResponseText.includes('```json')
+               ? aiResponseText.substring(aiResponseText.indexOf('```json') + 7, aiResponseText.lastIndexOf('```')).trim()
+               : aiResponseText.trim();
+            
+            // Convert to the object
+            const boqDataJson = JSON.parse(jsonString);
+
 
       // get all terms list
       const termList = await rfqModel.getAllTerms();
@@ -4551,50 +4592,51 @@ const rfqController = {
 
 
       // run loop on excel data 
-      for await (const value of jsonData) {
+      for await (const value of boqDataJson?.productList) {
 
         // trim all inputs
-        const productName = (value["Product Name"] || "").trim();
-        const size = (value["Size"] || "").trim();
-        const specifications = (value["specifications"] || "").trim();
-        const quantity = (String(value["Quantity"]) || "").trim();
-        const unit = (value["Unit"] || "").trim();
+        const productName = value?.product_name;
+        const size = value?.size;
+        const specifications = value?.specifications;
+        const quantity = value?.quantity;
+        const unit = value?.unit;
+
 
         // check if all required fileds are present
-        if (!productName || !size || !specifications || !quantity || !unit) {
+        // if (!productName || !size || !specifications || !quantity || !unit) {
 
-          // push errors in validation array
-          validationErrors.push({
-            row: jsonData.indexOf(value) + 1, // Assuming rows start at 1
-            errors: {
-              product_name: !productName ? "Missing product name" : productName,
-              // size: !size ? "Missing size" : null,
-              // specifications: !specifications ? "Missing specifications" : null,
-              quantity: !quantity ? "Missing quantity" : null,
-              unit: !unit ? "Missing unit" : null
-            }
-          });
-          continue; // Skip this product
-        }
+        //   // push errors in validation array
+        //   validationErrors.push({
+        //     // row: jsonData.indexOf(value) + 1, // Assuming rows start at 1
+        //     errors: {
+        //       product_name: !productName ? "Missing product name" : productName,
+        //       // size: !size ? "Missing size" : null,
+        //       // specifications: !specifications ? "Missing specifications" : null,
+        //       quantity: !quantity ? "Missing quantity" : null,
+        //       unit: !unit ? "Missing unit" : null
+        //     }
+        //   });
+        //   continue; // Skip this product
+        // }
 
         // Check if quantity is a valid number
-        const parsedQuantity = parseFloat(quantity);
-        if (isNaN(parsedQuantity) || parsedQuantity <= 0) {
+        // const parsedQuantity = parseFloat(quantity);
+        // if (isNaN(parsedQuantity) || parsedQuantity <= 0) {
 
-          // push error in validation array
-          validationErrors.push({
-            row: jsonData.indexOf(value) + 1,
-            errors: {
-              product_name: productName,
-              quantity: "Quantity must be a valid number greater than zero"
-            }
-          });
-          continue; // Skip this product
-        }
+        //   // push error in validation array
+        //   validationErrors.push({
+        //     // row: jsonData.indexOf(value) + 1,
+        //     errors: {
+        //       product_name: productName,
+        //       quantity: "Quantity must be a valid number greater than zero"
+        //     }
+        //   });
+        //   continue; // Skip this product
+        // }
 
         // search product in our database
         const searchObj = {
-          search_key: value["Product Name"],
+          search_key: productName,
           category_id: "",
           approved_by_id: ""
         };
@@ -4607,8 +4649,8 @@ const rfqController = {
         // break if no product found
         if (!searchedPro || searchedPro.length === 0) {
           validationErrors.push({
-            row: jsonData.indexOf(value) + 1,
-            errors: { product: `No product found for "${productName}"` }
+            // row: jsonData.indexOf(value) + 1,
+            errors: { product: `No product found for "${productName} ."` }
           });
           continue; // Skip this product
         }
@@ -4642,7 +4684,7 @@ const rfqController = {
         // if no vendor found for the product, push error in validation array
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
-            row: jsonData.indexOf(value) + 1,
+            // row: jsonData.indexOf(value) + 1,
             errors: { vendor: `No vendor found for product "${productName}"` }
           });
           continue; // Skip this product
@@ -4712,17 +4754,21 @@ const rfqController = {
 
      
       // check if all row are failed in our validation
-      if (validationErrors.length === jsonData.length) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "All rows have validation errors. Please check your data and try again.",
-            validationErrors: validationErrors,
-          })
-          .end();
-        // Exit early if every row has an error
-      }
+      // if (validationErrors.length === 10) {
+      //   return res
+      //     .status(400)
+      //     .json({
+      //       success: false,
+      //       message: "All rows have validation errors. Please check your data and try again.",
+      //       validationErrors: validationErrors,
+      //     })
+      //     .end();
+      //   // Exit early if every row has an error
+      // }
+
+      // Delete the uploaded file to save space
+      fs.unlinkSync(file.path);
+
 
       res.status(200).json({
         status:1,
@@ -4731,97 +4777,6 @@ const rfqController = {
       })
       .end();
 
-      // // here we are dividing the api into two different parts
-      
-      //  // Step 2: Generate the next RFQ number
-      //  const nextRFQNumber = await getNextRfQNumber();
-
-      //  // Step 3: Insert the RFQ data into the database
-      //  const tbl_rfq_data = {
-      //    comment: finalObject.comment,
-      //    company_name: finalObject.company_name,
-      //    response_email: finalObject.response_email,
-      //    contact_name: finalObject.contact_name,
-      //    contact_number: finalObject.contact_number,
-      //    bid_end_date: finalObject.bid_end_date,
-      //    location: finalObject.location,
-      //    rfq_type: finalObject.rfq_type,
-      //    reverse_auction: finalObject.reverse_auction,
-      //    is_published: finalObject.is_published,
-      //    rfq_no: nextRFQNumber,
-      //    created_by: user.id,
-      //    updated_by: user.id,
-      //    project_id: project_id
-      //  };
-
-
-      // // insert basic rfq info in database
-      // const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
-      // var rfqtermsRsp = null;
-
-      // // if basic info successfully inserted in database
-      // if (response.length > 0) {
-      //   const created_rfq_id = response[0].id;
-
-      //   // Step 4: Insert the terms into the RFQ terms mapping table
-      //   if (finalObject.terms.length > 0) {
-      //     var tbl_rfq_terms_map_array = [];
-
-      //     finalObject.terms.map((item) => {
-      //       tbl_rfq_terms_map_array.push({
-      //         rfq_id: created_rfq_id,
-      //         terms_id: item.id
-      //       });
-      //     });
-      //     const tbl_rfq_terms_map_keys = ['rfq_id', 'terms_id'];
-      //     rfqtermsRsp = await rfqModel.insertArray(
-      //       tbl_rfq_terms_map_array,
-      //       tbl_rfq_terms_map_keys,
-      //       'tbl_rfq_terms_map'
-      //     );
-      //   }
-
-      //   // Step 5: Insert the products into the RFQ products table
-      //   Promise.all(finalObject.products.map((item) => insertProduct(item, created_rfq_id)))
-      //     .then(async (results) => {
-      //       response[0].otherDetails = results;
-      //       response[0].terms = rfqtermsRsp;
-
-      //       // Step 6: Send emails to vendors and buyer
-      //       req.body.products = products
-      //       await sendMailtoVendors(req, response[0].id);
-      //       await sendQuotationMailToBuyer(req, response[0].id);
-
-      //       // Step 7: Send the final response back to the client
-      //       res
-      //         .status(200)
-      //         .json({
-      //           status: 1,
-      //           data: response[0],
-      //           validation_errors: validationErrors.length ? validationErrors : null
-      //         })
-      //         .end();
-      //     })
-      //     .catch((error) => {
-      //       console.error('Error inserting data:', error);
-      //       res
-      //         .status(500)
-      //         .json({
-      //           success: false,
-      //           message: 'Error inserting RFQ data',
-      //           error: error.message
-      //         })
-      //         .end();
-      //     });
-      // } else {
-      //   res
-      //     .status(400)
-      //     .json({
-      //       status: 2,
-      //       data: response
-      //     })
-      //     .end();
-      // }
     } catch (error) {
       logError(error);
       res
