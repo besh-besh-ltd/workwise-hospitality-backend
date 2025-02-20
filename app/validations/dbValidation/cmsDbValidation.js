@@ -4,7 +4,23 @@ import cmsModel from '../../models/cmsModel.js';
 // import blogModel from '../../models/blogModel.js';
 // import storeModel from '../../models/storeModel.js';
 import { encode } from 'html-entities';
+
 import fs from 'fs';
+import db from '../../config/dbConn.js';
+import pgp from 'pg-promise';
+
+
+
+
+
+const validateField = (field, fieldName, errors) => {
+  if (typeof field !== 'string' || !field.trim()) {
+    errors[fieldName] = `${fieldName.replace('_', ' ')} must be a non-empty string`;
+    return false;
+  }
+  return true;
+};
+
 
 const validateDbBody = {
   banner_exists: async (req, res, next) => {
@@ -528,7 +544,218 @@ const validateDbBody = {
         })
         .end();
     }
+    location_exists: [
+    query('state')
+      .optional()
+      .isString()
+      .trim()
+      .custom(async (value) => {
+        if (value) {
+          const state = await db.oneOrNone(
+            'SELECT id FROM tbl_location_states WHERE state_name ILIKE $1',
+            [value]
+          );
+          if (!state) {
+            throw new Error('State not found');
+          }
+        }
+        return true;
+      }),
+    validateRequest
+  ]
+  },
+  
+  update_location_valid: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+      let stateId = req.query.state_id;
+      let cityId = req.query.city_id;
+  
+      // Check if state and city exist
+      const stateExists = await cmsModel.findStateById(stateId);
+      // const cityExists = await cmsModel.findCityById(cityId);
+  
+      // Error accumulation
+      if (!stateExists) {  // Assuming findStateById returns true/false
+        err++;
+        errors.state = 'Given State does not exist';
+      }
+     
+  
+      // If there are errors, return response
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors,
+          })
+          .end();
+      } else {
+        next(); // No errors, continue to next middleware
+      }
+    } catch (err) {
+      logError(err); // Ensure logError is defined or imported
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value || "An error occurred", // Default message if undefined
+        })
+        .end();
+    }
+  },
+  add_location_isValid: async (req, res, next) => {
+    try {
+      const { country_name, state_name, country_id, city_name, state_id } = req.body;
+    
+
+      let errors = {};
+      let err = 0;
+    
+      // Validate each field
+      if (!validateField(country_name, 'country_name', errors)) err++;
+      if (!validateField(state_name, 'state_name', errors)) err++;
+      if (!validateField(country_id, 'country_id', errors)) err++;
+      if (!validateField(city_name, 'city_name', errors)) err++;
+      if (!validateField(state_id, 'state_id', errors)) err++;
+    
+      // If there are validation errors, return a 400 response
+      if (err > 0) {
+        return res.status(400).json({
+          status: 2,
+          errors,
+        });
+      }
+  
+      // Only proceed with database checks if input validation passes
+      if (err === 0) {
+        const stateExists = await cmsModel.findStateByName(state);
+        if (!stateExists) {
+          err++;
+          errors.state_name = 'State does not exist';
+        }
+  
+        // Check city existence if state is valid
+        if (stateExists) {
+          const cityExists = await cmsModel.checkCityExists(stateExists.id, city);
+          if (cityExists) {
+            err++;
+            errors.city_name = 'City Already Exists in the given state';
+          }
+        }
+      }
+  
+      // If there are errors, return response
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors,
+          })
+          .end();
+      } else {
+        next(); // No errors, continue to next middleware
+      }
+    } catch (err) {
+      logError(err); // Ensure logError is defined or imported
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value || 'An error occurred', // Default message if undefined
+        })
+        .end();
+    }
   }
+  
+
+  
+  // update_location_valid: [
+  //   // check('state_id')
+  //   //   .isInt()
+  //   //   .withMessage('State ID must be an integer')
+  //   //   .custom(async (value) => {
+  //   //     const state = await db.oneOrNone(
+  //   //       'SELECT id FROM tbl_location_states WHERE id = $1',
+  //   //       [value]
+  //   //     );
+  //   //     if (!state) {
+  //   //       throw new Error('State ID does not exist');
+  //   //     }
+  //   //     return true;
+  //   //   }),
+
+  //   // check('city_id')
+  //   //   .isInt()
+  //   //   .withMessage('City ID must be an integer')
+  //   //   .custom(async (value) => {
+  //   //     const city = await db.oneOrNone(
+  //   //       'SELECT id FROM tbl_location_cities WHERE id = $1',
+  //   //       [value]
+  //   //     );
+  //   //     if (!city) {
+  //   //       throw new Error('City ID does not exist');
+  //   //     }
+  //   //     return true;
+  //   //   }),
+
+  //   // check('state_name')
+  //   //   .optional()
+  //   //   .isString()
+  //   //   .trim()
+  //   //   .notEmpty()
+  //   //   .withMessage('State name cannot be empty')
+  //   //   .custom(async (value, { req }) => {
+  //   //     const existing = await db.oneOrNone(
+  //   //       'SELECT id FROM tbl_location_states WHERE state_name ILIKE $1 AND id != $2',
+  //   //       [value, req.body.state_id]
+  //   //     );
+  //   //     if (existing) {
+  //   //       throw new Error('State name already exists');
+  //   //     }
+  //   //     return true;
+  //   //   }),
+
+  //   // check('city_name')
+  //   //   .optional()
+  //   //   .isString()
+  //   //   .trim()
+  //   //   .notEmpty()
+  //   //   .withMessage('City name cannot be empty')
+  //   //   .custom(async (value, { req }) => {
+  //   //     const existing = await db.oneOrNone(
+  //   //       'SELECT id FROM tbl_location_cities WHERE city_name ILIKE $1 AND state_id = $2 AND id != $3',
+  //   //       [value, req.body.state_id, req.body.city_id]
+  //   //     );
+  //   //     if (existing) {
+  //   //       throw new Error('City name already exists in this state');
+  //   //     }
+  //   //     return true;
+  //   //   }),
+  //   // validateRequest
+  // ],
+
+  // delete_location_valid: [
+  //   param('city_id')
+  //     .isInt()
+  //     .withMessage('City ID must be an integer')
+  //     .custom(async (value) => {
+  //       const city = await db.oneOrNone(
+  //         'SELECT id FROM tbl_location_cities WHERE id = $1',
+  //         [value]
+  //       );
+  //       if (!city) {
+  //         throw new Error('City ID does not exist');
+  //       }
+       
+  //       return true;
+  //     }),
+  //   validateRequest
+  // ]
+
   /*  gift_id_exists: async (req, res, next) => {
     try {
       let errors = {};
