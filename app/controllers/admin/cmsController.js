@@ -1568,6 +1568,129 @@ const cmsController = {
         })
         .end();
     }
+  },
+  
+  
+ 
+  addLocation: async (req, res, next) => {
+    //  country_name to add new country
+    // state_name and country_id to add new state
+    // city_name and state_id to add new city
+    const {country_name, state_name, country_id, city_name,state_id   } = req.body;
+    console.log(country_name);
+    let result = null;
+    try {
+     // Create the location object and call the service model to add the city
+      if(state_id && city_name){
+       // Capitalize each word in the city_name
+        const formattedCityName = city_name.split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+        const locationObj = { state_id: state_id, city_name: formattedCityName };
+        result = await cmsModel.createLocation("city", locationObj);
+      }
+      else if(country_id && state_name){
+        const formattedStateName = state_name.split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+        const locationObj = { country_id: country_id, state_name: formattedStateName };
+        result = await cmsModel.createLocation("state", locationObj);
+      }
+      else if(country_name){
+        const formattedCountryName = country_name.split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+        result = await cmsModel.createLocation("country", {country_name:formattedCountryName});
+      }
+      // Return the result
+      res.status(200).json({ message: 'Location added successfully', data: result });
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config?.errorText?.value || "Failed to add location"
+        })
+        .end();
+    }
+  },
+  
+ 
+  
+
+  
+  updateLocation: async (req, res) => {
+    const { state_id, city_id, city_name } = req.query; // Receive parameters from query
+  
+    try {
+      // Ensure that either state_id or city_id is provided
+      if (!state_id && !city_id) {
+        return res.status(400).json({ error: "Either state_id or city_id is required" });
+      }
+  
+      // Ensure city_name is provided for the update
+      if (!city_name) {
+        return res.status(400).json({ error: "city_name is required to perform the update" });
+      }
+  
+      // Prepare the update data
+      const updateData = { city_name };
+  
+      // Call the service to update the data
+      const result = await cmsModel.updateLocations(state_id, city_id, updateData);
+  
+      if (result) {
+        return res.status(200).json({ message: "Location updated successfully", data: result });
+      } else {
+        return res.status(404).json({ error: "Location not found" });
+      }
+    } catch (err) {
+      console.error("Error updating location:", err);
+      // Directly send an error response without calling next()
+      return res.status(500).json({ error: "An error occurred while updating location" });
+    }
   }
+  ,
+    
+  
+  getAllLocations: async (req, res, next) => {
+    try {
+      const { 
+        limit = 10, 
+        offset = 0, 
+        search = '',
+        state = '' 
+      } = req.query;
+  
+      const locations = await cmsModel.getAllLocations(
+        Number(limit), 
+        Number(offset), 
+        search,
+        state
+      );
+  
+      res.status(200).json({
+        success: true,
+        data: locations,
+        message: 'Locations fetched successfully',
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false, 
+        message: 'Failed to fetch locations',
+        error: error.message,
+      });
+    }
+  },
+
+  deleteLocation: async (req, res, next) => {
+    const { city_id } = req.params;  // Changed from req.body to req.params
+     try {
+      // Call service to delete the city
+      const result = await cmsModel.deleteLocations(city_id);
+      console.log('Deletion result:', result);
+      res.status(200).json(result);
+    } catch (error) {
+      console.error('Error during deletion:', error);
+      next(error); // Pass error to error-handling middleware
+    }
+  }
+  
+  
 };
 export default cmsController;

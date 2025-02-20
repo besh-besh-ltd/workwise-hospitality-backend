@@ -285,6 +285,28 @@ cmsRoutes.delete(
   cmsController.deleteTeamMember
 );
 
+cmsRoutes.post('/add-location',
+  passportSignIn,
+ 
+  cmsController.addLocation,
+  )
+
+  
+cmsRoutes.get('/get-location',
+  passportSignIn,
+  cmsController.getAllLocations
+)
+
+cmsRoutes.put('/update-location',
+  passportSignIn,
+  validateDbBody.update_location_valid,
+  cmsController.updateLocation
+)
+// cmsRoutes.delete('/delete-location/:city_id',
+//    passportSignIn, 
+//    validateDbBody.delete_location_valid,
+//    cmsController.deleteLocation
+//   )
 
 
 export default cmsRoutes;
