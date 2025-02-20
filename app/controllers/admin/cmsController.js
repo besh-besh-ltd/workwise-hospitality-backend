@@ -1614,35 +1614,38 @@ const cmsController = {
   
 
   
-    updateLocation: async (req, res, next) => {
-      const { state_id, city_id,  city_name } = req.query; // Receive parameters from query
-    
-      try {
-        // Ensure either state_id or city_id is provided along with the corresponding name
-        if (!state_id && !city_id) {
-          return res.status(400).json({ error: "state_id or city_id is required" });
-        }
-    
-        // Prepare the update data based on the fields provided
-        const updateData = {};
-       
-        if (city_name) {
-          updateData.city_name = city_name;
-        }
-    
-        // Call the service to update the data
-        const result = await cmsModel.updateLocations(state_id, city_id, updateData);
-    
-        if (result) {
-          return res.status(200).json({ message: "Location updated successfully", data: result });
-        } else {
-          return res.status(404).json({ error: "Location not found" });
-        }
-      } catch (err) {
-        console.error("Error updating location:", err);
-        next(err); // Pass error to error handler
+  updateLocation: async (req, res) => {
+    const { state_id, city_id, city_name } = req.query; // Receive parameters from query
+  
+    try {
+      // Ensure that either state_id or city_id is provided
+      if (!state_id && !city_id) {
+        return res.status(400).json({ error: "Either state_id or city_id is required" });
       }
-    },
+  
+      // Ensure city_name is provided for the update
+      if (!city_name) {
+        return res.status(400).json({ error: "city_name is required to perform the update" });
+      }
+  
+      // Prepare the update data
+      const updateData = { city_name };
+  
+      // Call the service to update the data
+      const result = await cmsModel.updateLocations(state_id, city_id, updateData);
+  
+      if (result) {
+        return res.status(200).json({ message: "Location updated successfully", data: result });
+      } else {
+        return res.status(404).json({ error: "Location not found" });
+      }
+    } catch (err) {
+      console.error("Error updating location:", err);
+      // Directly send an error response without calling next()
+      return res.status(500).json({ error: "An error occurred while updating location" });
+    }
+  }
+  ,
     
   
   getAllLocations: async (req, res, next) => {

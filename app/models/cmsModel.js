@@ -2385,8 +2385,8 @@ const cmsModel = {
       let query = ''; 
       const queryParams = [limit, offset];
       let paramCount = 2;
+    // Build search condition if provided
     
-      // Build search condition if provided
       if (search) {
         query += ` AND (tbl_location_states.state_name ILIKE $${++paramCount} OR tbl_location_cities.city_name ILIKE $${++paramCount})`;
         queryParams.push(`%${search}%`, `%${search}%`);
@@ -2427,36 +2427,30 @@ const cmsModel = {
       let query;
       const values = [];
   
-      // If both state_id and city_id are provided, only update the city
-      if (state_id && city_id) {
-        query = `
-          BEGIN;
-            UPDATE tbl_location_cities SET city_name = $1 WHERE id = $2;
-          COMMIT;
-        `;
-        values.push(updateData.city_name, city_id);
-  
-        db.none(query, values)
-          .then(() => resolve({ message: 'City updated successfully' }))
-          .catch(err => reject(new Error("Error updating city: " + err)));
-      } 
-      // If only state_id is provided, do nothing (no state update allowed)
-      else if (state_id) {
-        reject(new Error("Updating state name is not allowed"));
-      } 
-      // If only city_id is provided, update the city
-      else if (city_id) {
+      if (city_id) {
+        // If city_id is provided, update the specific city
         query = `UPDATE tbl_location_cities SET city_name = $1 WHERE id = $2 RETURNING *`;
         values.push(updateData.city_name, city_id);
   
         db.one(query, values)
           .then(result => resolve(result))
           .catch(err => reject(new Error("Error updating city: " + err)));
+      } else if (state_id) {
+        // If state_id is provided but city_id is null, update all cities for the state
+        query = `UPDATE tbl_location_cities SET city_name = $1 WHERE state_id = $2 RETURNING *`;
+        values.push(updateData.city_name, state_id);
+  
+        db.any(query, values)
+          .then(results => resolve(results))
+          .catch(err => reject(new Error("Error updating cities for state: " + err)));
       } else {
+        // If neither city_id nor state_id is provided, reject the request
         reject(new Error("state_id or city_id must be provided"));
       }
     });
   },
+  
+  
   
 
   findStateByName: async (state_name) => {

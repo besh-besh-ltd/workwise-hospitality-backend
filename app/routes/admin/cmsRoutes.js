@@ -287,7 +287,7 @@ cmsRoutes.delete(
 
 cmsRoutes.post('/add-location',
   passportSignIn,
-  validateDbBody.add_location_isValid,
+ 
   cmsController.addLocation,
   )
 
