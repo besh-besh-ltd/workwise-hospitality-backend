@@ -1573,26 +1573,40 @@ const cmsController = {
   
  
   addLocation: async (req, res, next) => {
-    const { state_name, city_name } = req.body; // Receive state_name and city_name from body
-  
+    //  country_name to add new country
+    // state_name and country_id to add new state
+    // city_name and state_id to add new city
+    const {country_name, state_name, country_id, city_name,state_id   } = req.body;
+    console.log(country_name);
+    let result = null;
     try {
-     
-  
-      // Capitalize each word in the city_name
-      const formattedCityName = city_name
-        .split(' ')
-        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-        .join(' ');
-  
-  
-      // Create the location object and call the service model to add the city
-      const locationObj = { state_id: state.id, city_name: formattedCityName };
-      const result = await cmsModel.createLocation(locationObj);
-  
+     // Create the location object and call the service model to add the city
+      if(state_id && city_name){
+       // Capitalize each word in the city_name
+        const formattedCityName = city_name.split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+        const locationObj = { state_id: state_id, city_name: formattedCityName };
+        result = await cmsModel.createLocation("city", locationObj);
+      }
+      else if(country_id && state_name){
+        const formattedStateName = state_name.split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+        const locationObj = { country_id: country_id, state_name: formattedStateName };
+        result = await cmsModel.createLocation("state", locationObj);
+      }
+      else if(country_name){
+        const formattedCountryName = country_name.split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+        result = await cmsModel.createLocation("country", {country_name:formattedCountryName});
+      }
       // Return the result
       res.status(200).json({ message: 'Location added successfully', data: result });
     } catch (err) {
-      next(err); // Pass the error to the error handler
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
     }
   },
   
@@ -1601,7 +1615,7 @@ const cmsController = {
 
   
     updateLocation: async (req, res, next) => {
-      const { state_id, city_id, state_name, city_name } = req.query; // Receive parameters from query
+      const { state_id, city_id,  city_name } = req.query; // Receive parameters from query
     
       try {
         // Ensure either state_id or city_id is provided along with the corresponding name
@@ -1611,9 +1625,7 @@ const cmsController = {
     
         // Prepare the update data based on the fields provided
         const updateData = {};
-        if (state_name) {
-          updateData.state_name = state_name;
-        }
+       
         if (city_name) {
           updateData.city_name = city_name;
         }
