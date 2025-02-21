@@ -14,6 +14,10 @@ GeneralRoutes.get(
   '/cities/:id?',
   generalController.getCities
 );
+GeneralRoutes.get(
+  '/countries',
+  generalController.getCountries
+);
 
 
 
