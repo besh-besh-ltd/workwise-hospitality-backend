@@ -15,6 +15,19 @@ const generalModel = {
         });
     });
   },
+  getCountryStates: async (country_id) => {
+    return new Promise(function (resolve, reject) {
+      db.any(`SELECT * FROM tbl_location_states WHERE country_id = $1`, [country_id])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
   getCities: async (state_id) => {
     let q = `SELECT * FROM tbl_location_cities ORDER BY city_name ASC`;
     let value = [];

@@ -2399,24 +2399,30 @@ const cmsModel = {
   
       db.any(
         `SELECT 
-           COUNT(*) OVER() AS total_count,
-           tbl_location_states.id AS state_id, 
-           tbl_location_states.state_name,
-           tbl_location_cities.id AS city_id, 
-           tbl_location_cities.city_name
-         FROM tbl_location_states
-         LEFT JOIN tbl_location_cities ON tbl_location_cities.state_id = tbl_location_states.id
-         WHERE 1=1 ${query}
-         ORDER BY tbl_location_states.state_name ASC, tbl_location_cities.city_name ASC
-         LIMIT $1 OFFSET $2`,
+    COUNT(*) OVER() AS total_count,
+    tbl_location_states.id AS state_id, 
+    tbl_location_states.state_name,
+    tbl_location_cities.id AS city_id, 
+    tbl_location_cities.city_name,
+    tbl_location_country.id AS country_id,
+    tbl_location_country.country_name
+FROM tbl_location_states
+LEFT JOIN tbl_location_cities 
+    ON tbl_location_cities.state_id = tbl_location_states.id
+LEFT JOIN tbl_location_country 
+    ON tbl_location_country.id = tbl_location_states.country_id
+WHERE 1=1 ${query}
+ORDER BY tbl_location_states.state_name ASC, tbl_location_cities.city_name ASC
+LIMIT $1 OFFSET $2;
+`,
         queryParams
       )
-      .then(function (data) {
-        resolve(data);
-      })
-      .catch(function (err) {
-        reject(new Error(err));
-      });
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          reject(new Error(err));
+        });
     });
   },
   
