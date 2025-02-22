@@ -501,6 +501,7 @@ const validateDbBody = {
   }, */
 
   user_id_exists: async (req, res, next) => {
+    console.log("req recived");
     try {
       let errors = {};
       let err = 0;
