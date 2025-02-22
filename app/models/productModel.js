@@ -2004,20 +2004,22 @@ WHERE tbl_product.name = $1`,
         });
     });
   },
-  getAllProduct: async () => {
+  getAllProduct: async (uniqueProduct = false) => {
     return new Promise(function (resolve, reject) {
-      db.one(
-        `SELECT count(id) FROM tbl_product WHERE  is_deleted = 0 AND is_review = 0`
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
+        let query = uniqueProduct
+            ? `SELECT DISTINCT name FROM tbl_product WHERE is_deleted = 0 AND is_review = 0`
+            : `SELECT COUNT(id) FROM tbl_product WHERE is_deleted = 0 AND is_review = 0`;
+
+        db.any(query)
+            .then(function (data) {
+                resolve(data);
+            })
+            .catch(function (err) {
+                let error = new Error(err);
+                reject(error);
+            });
     });
-  },
+},
   approvedProductList: async () => {
     return new Promise(function (resolve, reject) {
       db.any(

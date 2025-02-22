@@ -1,11 +1,6 @@
 import Config from '../../config/app.config.js';
 import {
   logError,
-  currentDateTime,
-  titleToSlug,
-  generateOTPRandomNo,
-  generateRandomString,
-  createPay,
   sendMail,
   getDateRange
 } from '../../helper/common.js';
@@ -20,6 +15,7 @@ import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxC
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import fs from 'fs';
 import {GoogleGenerativeAI} from '@google/generative-ai';
+import productModel from '../../models/productModel.js';
 
 
 
@@ -4540,33 +4536,68 @@ const rfqController = {
       const workbook = xlsx.readFile(file.path);
       const sheetName = workbook.SheetNames[0]; // Assuming data is in the first sheet
       const sheet = workbook.Sheets[sheetName];
-      const boqData = xlsx.utils.sheet_to_csv(sheet); //
+      const boqData =  xlsx.utils.sheet_to_csv(sheet); //
+
+      // get all terms list
+      // uniqueProduct=true
+      const uniqueProductList = await productModel.getAllProduct(true)
 
 
           const genAI = new GoogleGenerativeAI("AIzaSyCX1Ma2jbNciOMcCVhPLzNJ_YTB6yaxdGw");
           const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
           
-          const prompt = `You are an AI trained to extract product information from unstructured BOQ documents. 
-          Your task is to convert the given text into a structured JSON format.
+          const prompt = `You are an AI trained to extract product information from unstructured BOQ documents and cross-reference products against a provided database.
+
+          Your tasks:
           
-          Extract the following details:
-          - Product Name : a valid product name 
-          - Size
-          - Specification
-          - Quantity : always a integer number
-          - Unit : always a valid measurement unit
+          1.  Extract the following details from the provided BOQ text:
+              *   Product Name: Extract a valid product name. If absent, check in the specification or use the last available product name. When adding the Product Name extract only product name.
+              *   Size: This field captures specific attributes for product sizes.
+              *   Specification: Capture all specifications in the current row. If specification for a product is NA then use the last available valid specification if available.
+              *   Quantity: Always an integer. Ensure that the extracted quantity represents the actual quantity value and not any index, serial number, or unrelated numerical values.
+              *   Unit: Always a valid measurement unit. If unavailable use NA
           
-          This is possible that some products don't have a product name. In these cases check if product name mention in specification and if not mention in specification then use the last available product name, or if any data is not presnet then just mebntion NA. In product name mention only product name if any other info present along with name add then in specification or in size accordingly. Make sure you dont miss any product. make a excausitive product list
+          2.  Cross-reference each extracted product name against the provided product database list.
+              *   If the product exists in the database (even if the spelling or format differs slightly), rename the extracted product name to match exactly the product name from the database and set "productNotFound": false.
+              *   If the product does not exist in the database, add an additional key "productNotFound" with value true.
+          
+          Important Guidelines:
+              *   If any field is missing in the BOQ data, mark it as "NA".
+              *   Ensure every product is captured; be exhaustive.
+              *   When cells are merged in the BOQ, propagate values to all related rows until a new value appears.
+              *   Prioritize relevant Specifications over default names; capture specifics.
+              *   Avoid picking serial numbers or indices as the quantity.
+              *   Ensure only one product in the JSON and remove the duplicate entries.
+              *   Validate with unit types to further filter out incorrect extractions.
           
           Sample Response:
-           productList: [
-               {product_name:"product1", size:"size1", specifications:"spec1", quantity:1, unit:"unit1"},
-               {product_name:"product2", size:"size2", specifications:"spec2", quantity:2, unit:"unit2"},
-               ]
-
-               Here is the BOQ data:
-               ${boqData}
+              "productList": [
+                  {
+                      "product_name": "Product1 from DB",
+                      "size": "size1",
+                      "specifications": "spec1",
+                      "quantity": 1,
+                      "unit": "unit1",
+                      "productNotFound": false
+                  },
+                  {
+                      "product_name": "Unknown Product",
+                      "size": "size2",
+                      "specifications": "spec2",
+                      "quantity": 2,
+                      "unit": "unit2",
+                      "productNotFound": true
+                  }
+              ]
+          }
+              
+          Here is the BOQ data:
+          ${boqData}
+          
+          Products present in my database:
+          ${uniqueProductList}
           `;
+          
 
             const result = await model.generateContent(prompt);
             const aiResponseText = result.response.text();
@@ -4640,24 +4671,24 @@ const rfqController = {
           category_id: "",
           approved_by_id: ""
         };
-        const searchedPro = await rfqModel.searchProduct(
-          searchObj.search_key,
-          searchObj.category_id,
-          searchObj.approved_by_id
-        );
+        // const searchedPro = await rfqModel.searchProduct(
+        //   searchObj.search_key,
+        //   searchObj.category_id,
+        //   searchObj.approved_by_id
+        // );
 
-        // break if no product found
-        if (!searchedPro || searchedPro.length === 0) {
-          validationErrors.push({
-            // row: jsonData.indexOf(value) + 1,
-            errors: { product: `No product found for "${productName} ."` }
-          });
-          continue; // Skip this product
-        }
+        // // break if no product found
+        // if (!searchedPro || searchedPro.length === 0) {
+        //   validationErrors.push({
+        //     // row: jsonData.indexOf(value) + 1,
+        //     errors: { product: productName + " - No product name found " }
+        //   });
+        //   continue; // Skip this product
+        // }
 
         // check for unique product, and select first unique product from the list
-        const uniqueProducts = removeDuplicates(searchedPro);
-        let search_key = uniqueProducts[0];
+        // const uniqueProducts = removeDuplicates(searchedPro);
+        // let search_key = uniqueProducts[0];
 
         // product spec object
         const spec = [
@@ -4670,7 +4701,7 @@ const rfqController = {
         // seacrch vendor for the selected product
         const vendorResult = await rfqModel.searchVendor(
           user.id,
-          search_key.product_name,
+          searchObj.productName,
           searchObj.category_id,
           searchObj.approved_by_id,
           "",
@@ -4685,7 +4716,7 @@ const rfqController = {
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             // row: jsonData.indexOf(value) + 1,
-            errors: { vendor: `No vendor found for product "${productName}"` }
+            errors: { vendor: productName + " - `No vendor found for product " }
           });
           continue; // Skip this product
         }
@@ -4772,8 +4803,11 @@ const rfqController = {
 
       res.status(200).json({
         status:1,
+        prompt:prompt,
+        uniqueProductList:uniqueProductList,
+        boqDataJson:boqDataJson,
         data : finalObject,
-        validation_errors: validationErrors.length ? validationErrors : null
+        validation_errors: validationErrors.length ? validationErrors : null,
       })
       .end();
 
