@@ -238,7 +238,11 @@ const schemas = {
   update_profile: Joi.object().keys({
     company_name: Joi.string().optional().allow(null).allow(''),
     name: Joi.string().optional().allow(null).allow(''),
-    location: Joi.string().optional().allow(null).allow(''),
+    location: Joi.object({
+      country: Joi.string().optional().allow(null, ''),
+      state: Joi.string().optional().allow(null, ''),
+      city: Joi.string().optional().allow(null, ''),
+    }).optional().allow(null),
     email: Joi.string().optional().allow(null).allow(''),
     mobile: Joi.string().optional().allow(null).allow(''),
     gstin: Joi.string().optional().allow(null).allow(''),
