@@ -609,67 +609,90 @@ const validateDbBody = {
   add_location_isValid: async (req, res, next) => {
     try {
       const { country_name, state_name, country_id, city_name, state_id } = req.body;
-    
-
       let errors = {};
-      let err = 0;
-    
-      // Validate each field
-      if (!validateField(country_name, 'country_name', errors)) err++;
-      if (!validateField(state_name, 'state_name', errors)) err++;
-      if (!validateField(country_id, 'country_id', errors)) err++;
-      if (!validateField(city_name, 'city_name', errors)) err++;
-      if (!validateField(state_id, 'state_id', errors)) err++;
-    
-      // If there are validation errors, return a 400 response
-      if (err > 0) {
-        return res.status(400).json({
-          status: 2,
-          errors,
-        });
-      }
   
-      // Only proceed with database checks if input validation passes
-      if (err === 0) {
-        const stateExists = await cmsModel.findStateByName(state);
-        if (!stateExists) {
-          err++;
-          errors.state_name = 'State does not exist';
+      // Check if the country exists
+      try {
+        const countryExists = await cmsModel.findCountryByName(country_name);
+        if (countryExists) {
+          return res.status(400).json({
+            status: 2,
+            errors: { country_name: 'Country already exists in the table' },
+          });
         }
-  
-        // Check city existence if state is valid
-        if (stateExists) {
-          const cityExists = await cmsModel.checkCityExists(stateExists.id, city);
-          if (cityExists) {
-            err++;
-            errors.city_name = 'City Already Exists in the given state';
+        
+      
+        if (country_id && state_name) {
+
+
+          try {
+            const stateExists = await cmsModel.findByStateNameAndCountry(country_id,state_name );
+            
+            if (stateExists) {
+              
+              return res.status(400).json({
+                status: 2,
+                errors: { state_name: 'State already exists in the table' },
+              }).end();
+            }
+          } catch (error) {
+            console.error('Error finding state:', error);
+            return res.status(500).json({
+              status: 3,
+              message: 'Internal server error while checking state existence',
+            }).end();
           }
         }
-      }
+        console.log("error checking 2");
+        
   
-      // If there are errors, return response
-      if (err > 0) {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            errors,
-          })
-          .end();
-      } else {
-        next(); // No errors, continue to next middleware
+      // Check if city exists in the state
+      if (state_id && city_name) {
+        try {
+          const stateExist = await cmsModel.findStateById(state_id);
+          if (!stateExist) {
+            return res.status(400).json({
+              status: 2,
+              errors: { state_id: 'State does not exist in the table' },
+            });
+          }
+  
+          const cityExists = await cmsModel.findCityByNameAndState(state_id, city_name);
+          if (cityExists) {
+            return res.status(400).json({
+              status: 2,
+              errors: { city_name: 'City already exists in the table' },
+            });
+          }
+        } catch (error) {
+          console.error("Error checking city existence:", error);
+          return res.status(500).json({
+            status: 3,
+            message: "Internal server error while checking city existence",
+          });
+        }
       }
-    } catch (err) {
-      logError(err); // Ensure logError is defined or imported
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value || 'An error occurred', // Default message if undefined
-        })
-        .end();
+    } catch (error) {
+      console.error("Error checking country existence:", error);
+      return res.status(500).json({
+        status: 3,
+        message: "Internal server error while checking country existence",
+      });
     }
-  }
+  
+      next(); // No errors, continue to next middleware
+    } catch (err) {
+      console.error("Unexpected error:", err);
+      res.status(500).json({
+        status: 3,
+        message: "An unexpected error occurred",
+      });
+    }
+  },
+  
+  
+  
+  
   
 
   
