@@ -14,8 +14,8 @@ import projectModel from '../../models/projectModel.js';
 import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import fs from 'fs';
-import {GoogleGenerativeAI} from '@google/generative-ai';
 import productModel from '../../models/productModel.js';
+import generativeAI from '../../helper/processBOQWithAI.js';
 
 
 
@@ -4533,83 +4533,9 @@ const rfqController = {
       const rfq_type = req.body.rfq_type || "";
       const reverse_auction = req.body.reverse_auction || "";
 
-      const workbook = xlsx.readFile(file.path);
-      const sheetName = workbook.SheetNames[0]; // Assuming data is in the first sheet
-      const sheet = workbook.Sheets[sheetName];
-      const boqData =  xlsx.utils.sheet_to_csv(sheet); //
 
-      // get all terms list
-      // uniqueProduct=true
-      const uniqueProductList = await productModel.getAllProduct(true)
-
-
-          const genAI = new GoogleGenerativeAI("AIzaSyCX1Ma2jbNciOMcCVhPLzNJ_YTB6yaxdGw");
-          const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-          
-          const prompt = `You are an AI trained to extract product information from unstructured BOQ documents and cross-reference products against a provided database.
-
-          Your tasks:
-          
-          1.  Extract the following details from the provided BOQ text:
-              *   Product Name: Extract a valid product name. If absent, check in the specification or use the last available product name. When adding the Product Name extract only product name.
-              *   Size: This field captures specific attributes for product sizes.
-              *   Specification: Capture all specifications in the current row. If specification for a product is NA then use the last available valid specification if available.
-              *   Quantity: Always an integer. Ensure that the extracted quantity represents the actual quantity value and not any index, serial number, or unrelated numerical values.
-              *   Unit: Always a valid measurement unit. If unavailable use NA
-          
-          2.  Cross-reference each extracted product name against the provided product database list.
-              *   If the product exists in the database (even if the spelling or format differs slightly), rename the extracted product name to match exactly the product name from the database and set "productNotFound": false.
-              *   If the product does not exist in the database, add an additional key "productNotFound" with value true.
-          
-          Important Guidelines:
-              *   If any field is missing in the BOQ data, mark it as "NA".
-              *   Ensure every product is captured; be exhaustive.
-              *   When cells are merged in the BOQ, propagate values to all related rows until a new value appears.
-              *   Prioritize relevant Specifications over default names; capture specifics.
-              *   Avoid picking serial numbers or indices as the quantity.
-              *   Ensure only one product in the JSON and remove the duplicate entries.
-              *   Validate with unit types to further filter out incorrect extractions.
-          
-          Sample Response:
-              "productList": [
-                  {
-                      "product_name": "Product1 from DB",
-                      "size": "size1",
-                      "specifications": "spec1",
-                      "quantity": 1,
-                      "unit": "unit1",
-                      "productNotFound": false
-                  },
-                  {
-                      "product_name": "Unknown Product",
-                      "size": "size2",
-                      "specifications": "spec2",
-                      "quantity": 2,
-                      "unit": "unit2",
-                      "productNotFound": true
-                  }
-              ]
-          }
-              
-          Here is the BOQ data:
-          ${boqData}
-          
-          Products present in my database:
-          ${uniqueProductList}
-          `;
-          
-
-            const result = await model.generateContent(prompt);
-            const aiResponseText = result.response.text();
-            
-            // Extract the JSON part from the response, it might be wrapped in backticks or other text
-            const jsonString = aiResponseText.includes('```json')
-               ? aiResponseText.substring(aiResponseText.indexOf('```json') + 7, aiResponseText.lastIndexOf('```')).trim()
-               : aiResponseText.trim();
-            
-            // Convert to the object
-            const boqDataJson = JSON.parse(jsonString);
-
+      // process boq with AI
+      const boqDataJson = await generativeAI.processBOQWithAI(file);
 
       // get all terms list
       const termList = await rfqModel.getAllTerms();
@@ -4632,63 +4558,32 @@ const rfqController = {
         const quantity = value?.quantity;
         const unit = value?.unit;
 
-
-        // check if all required fileds are present
-        // if (!productName || !size || !specifications || !quantity || !unit) {
-
-        //   // push errors in validation array
-        //   validationErrors.push({
-        //     // row: jsonData.indexOf(value) + 1, // Assuming rows start at 1
-        //     errors: {
-        //       product_name: !productName ? "Missing product name" : productName,
-        //       // size: !size ? "Missing size" : null,
-        //       // specifications: !specifications ? "Missing specifications" : null,
-        //       quantity: !quantity ? "Missing quantity" : null,
-        //       unit: !unit ? "Missing unit" : null
-        //     }
-        //   });
-        //   continue; // Skip this product
-        // }
-
-        // Check if quantity is a valid number
-        // const parsedQuantity = parseFloat(quantity);
-        // if (isNaN(parsedQuantity) || parsedQuantity <= 0) {
-
-        //   // push error in validation array
-        //   validationErrors.push({
-        //     // row: jsonData.indexOf(value) + 1,
-        //     errors: {
-        //       product_name: productName,
-        //       quantity: "Quantity must be a valid number greater than zero"
-        //     }
-        //   });
-        //   continue; // Skip this product
-        // }
+        // if product name is not present then skip this product
+       if(!productName || productName=="NA"){
+          continue
+        }
 
         // search product in our database
         const searchObj = {
-          search_key: productName,
+          search_key: productName || "",
           category_id: "",
           approved_by_id: ""
         };
-        // const searchedPro = await rfqModel.searchProduct(
-        //   searchObj.search_key,
-        //   searchObj.category_id,
-        //   searchObj.approved_by_id
-        // );
+
+        const searchedPro = await productModel.checkProductExists(searchObj.search_key);
+
 
         // // break if no product found
-        // if (!searchedPro || searchedPro.length === 0) {
-        //   validationErrors.push({
-        //     // row: jsonData.indexOf(value) + 1,
-        //     errors: { product: productName + " - No product name found " }
-        //   });
-        //   continue; // Skip this product
-        // }
+        if (!searchedPro || searchedPro.length === 0) {
+          validationErrors.push({
+            // row: jsonData.indexOf(value) + 1,
+            errors: { product: productName + " - No product name found " }
+          });
+          continue; // Skip this product
+        }
 
         // check for unique product, and select first unique product from the list
-        // const uniqueProducts = removeDuplicates(searchedPro);
-        // let search_key = uniqueProducts[0];
+        let search_key = searchedPro[0];
 
         // product spec object
         const spec = [
@@ -4698,19 +4593,21 @@ const rfqController = {
           { title: "Unit", value: unit }
         ];
 
+        let vendorResult = null
         // seacrch vendor for the selected product
-        const vendorResult = await rfqModel.searchVendor(
-          user.id,
-          searchObj.productName,
-          searchObj.category_id,
-          searchObj.approved_by_id,
-          "",
-          "",
-          "",
-          false,
-          false
-        );
-
+        if(searchObj.search_key){
+          vendorResult = await rfqModel.searchVendor(
+            user.id,
+            searchObj?.search_key ,
+            searchObj.category_id,
+            searchObj.approved_by_id,
+            "",
+            "",
+            "",
+            false,
+            false
+          );  
+        }
 
         // if no vendor found for the product, push error in validation array
         if (!vendorResult || vendorResult.length === 0) {
@@ -4741,10 +4638,10 @@ const rfqController = {
 
         // create product object and push in products array
         const product = {
-          product_id: search_key.product_id,
+          product_id:  search_key?.id,
           predefined_tds_file: search_key.pd_tds_file_url,
           predefined_qap_file: search_key.pd_qap_file_url,
-          name: search_key.product_name,
+          name: search_key.name,
           variant: variant,
           spec: spec,
           vendors: transformedVendorResult,
@@ -4784,28 +4681,12 @@ const rfqController = {
       };
 
      
-      // check if all row are failed in our validation
-      // if (validationErrors.length === 10) {
-      //   return res
-      //     .status(400)
-      //     .json({
-      //       success: false,
-      //       message: "All rows have validation errors. Please check your data and try again.",
-      //       validationErrors: validationErrors,
-      //     })
-      //     .end();
-      //   // Exit early if every row has an error
-      // }
-
       // Delete the uploaded file to save space
       fs.unlinkSync(file.path);
 
 
       res.status(200).json({
         status:1,
-        prompt:prompt,
-        uniqueProductList:uniqueProductList,
-        boqDataJson:boqDataJson,
         data : finalObject,
         validation_errors: validationErrors.length ? validationErrors : null,
       })
