@@ -1868,7 +1868,7 @@ WHERE row_num_by_name_category = 1
   ,
   searchVendor: async (
     buyerId,
-    search_key,
+    search_key="",
     category_id,
     approved_by_id,
     state,
@@ -1877,6 +1877,8 @@ WHERE row_num_by_name_category = 1
     is_private, //for buyers private vendors
     preferred_vendor
   ) => {
+
+    search_key = search_key?.toLowerCase() 
     let q = `
     SELECT * FROM (
         SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
@@ -1899,7 +1901,7 @@ WHERE row_num_by_name_category = 1
         LEFT JOIN tbl_location_states ls ON tu.state = ls.id
         ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
         WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
-          AND p.name = '${search_key}' AND tu.email IS NOT NULL
+          AND LOWER(p.name) = '${search_key}' AND tu.email IS NOT NULL
           ${vendor_name != '' ? `
             AND (
                 to_tsvector('english', tu.name) @@ plainto_tsquery('english', $1)

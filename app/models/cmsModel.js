@@ -2457,6 +2457,32 @@ LIMIT $1 OFFSET $2;
   },
   
   
+  findCountryByName: async (country_name) => {
+    return new Promise(async (resolve, reject) => {
+      const query = `SELECT * FROM tbl_location_country WHERE LOWER(country_name) = LOWER($1)`;
+  
+      try {
+        const result = await db.oneOrNone(query, [country_name]);  // ✅ Await the result
+        resolve(result);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  },
+  findByStateNameAndCountry: async (country_id, state_name) => {
+    const query = `SELECT * FROM tbl_location_states WHERE state_name = $1 AND country_id = $2`;
+    try {
+      const data = await db.oneOrNone(query, [state_name, country_id]); // Returns state or null
+      console.log(" ohhh attitute ",data)
+      return data
+    } catch (error) {
+      console.error('Database query failed:', error);
+      return null; // Ensure it doesn't throw an error
+    }
+  },
+  
+  
+  
   
 
   findStateByName: async (state_name) => {
@@ -2488,7 +2514,18 @@ LIMIT $1 OFFSET $2;
         throw new Error('City Does Not exists',+error.message);
     }
   },
-
+  findCityByNameAndState: async (state_id, city_name) => {
+    return new Promise(async (resolve, reject) => {
+      const query = `SELECT * FROM tbl_location_cities WHERE city_name = $1 AND state_id = $2`;
+      try {
+        const result = await db.oneOrNone(query, [city_name, state_id]); // Corrected parameter order
+        resolve(result);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  },
+  
   // Check if city already exists in the given state
 checkCityExists: async (state_id, city_name) => {
   const query = `SELECT 1 FROM tbl_location_cities WHERE city_name = $1 AND state_id = $2 LIMIT 1`;
