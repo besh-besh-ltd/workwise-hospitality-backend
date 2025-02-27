@@ -875,9 +875,9 @@ const productModel = {
       if (added_by) {
         dynamicQuery += ` AND added_by = ${added_by} AND created_by = ${added_by}`;
       }
-      db.any(`SELECT * FROM tbl_product WHERE name = $1${dynamicQuery}`, [
-        name
-      ])
+      db.any(`SELECT * FROM tbl_product WHERE LOWER(name) = $1 ${dynamicQuery}`, [
+        name.toLowerCase() // Convert name to lowercase before passing it
+    ])
         .then(function (data) {
           resolve(data);
         })
@@ -2004,20 +2004,22 @@ WHERE tbl_product.name = $1`,
         });
     });
   },
-  getAllProduct: async () => {
+  getAllProduct: async (uniqueProduct = false) => {
     return new Promise(function (resolve, reject) {
-      db.one(
-        `SELECT count(id) FROM tbl_product WHERE  is_deleted = 0 AND is_review = 0`
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
+        let query = uniqueProduct
+            ? `SELECT DISTINCT name FROM tbl_product WHERE status = 1 AND is_deleted = 0 AND is_review = 0 AND is_approve = 1 AND created_by NOT IN (1, 111) `  
+            : `SELECT COUNT(id) FROM tbl_product WHERE is_deleted = 0 AND is_review = 0`;
+
+        db.any(query)
+            .then(function (data) {
+                resolve(data);
+            })
+            .catch(function (err) {
+                let error = new Error(err);
+                reject(error);
+            });
     });
-  },
+},
   approvedProductList: async () => {
     return new Promise(function (resolve, reject) {
       db.any(
