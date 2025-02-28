@@ -194,7 +194,7 @@ const schemas = {
   user_register: Joi.object().keys({
     name: Joi.string().required(),
     email: Joi.string().required().email().max(100),
-    mobile: Joi.string().min(8).max(11).required().label('Mobile'),
+    mobile: Joi.string().min(8).max(15).required().label('Mobile'),
     organization_name: Joi.string().optional().allow(null).allow(''),
     register_as: Joi.string()
       .required()

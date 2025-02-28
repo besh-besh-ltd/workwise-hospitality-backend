@@ -52,7 +52,7 @@ const generalController = {
     }
   },
   getCountries: async (req, res, next) => {
-    const state_id = req.params.id;
+    // const state_id = req.params.id;
     try {
       const cities = await generalModel.getCountries();
       res
@@ -72,6 +72,25 @@ const generalController = {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+  getCountryCodes : async (req , res , next ) => { 
+    try {
+      const countr_codes =  await generalModel.getCountryCode();
+      res.status(200).json({
+        status: 1,
+        data : countr_codes
+      })
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+      
     }
   }
 };

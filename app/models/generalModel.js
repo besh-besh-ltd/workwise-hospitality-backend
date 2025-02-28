@@ -62,6 +62,17 @@ const generalModel = {
       });
 
     })
+  },
+  getCountryCode : async () =>{
+    return new Promise (function (resolve , reject ){
+      db.any(`SELECT * FROM tbl_country_code ORDER BY phone_code ASC`)
+      .then(function (data){
+        resolve(data);
+      }).catch(function (err){
+        let error = new Error(err);
+        reject(error);
+      })
+    })
   }
 };
 
