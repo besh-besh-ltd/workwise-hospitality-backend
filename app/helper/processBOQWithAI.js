@@ -1,26 +1,23 @@
-import excelJS from 'exceljs';
+import axios from 'axios';
 import xlsx from 'xlsx';
-import {GoogleGenerativeAI} from '@google/generative-ai';
 import productModel from '../models/productModel.js';
-
-// Initialize AI Model
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+import { logError } from './common.js';
 
 const generativeAI = {
-    processBOQWithAI: async (file) => {
-        try {
-            const workbook = xlsx.readFile(file.path);
-            const sheetName = workbook.SheetNames[0]; // Assuming data is in the first sheet
-            const sheet = workbook.Sheets[sheetName];
-            const boqData = xlsx.utils.sheet_to_csv(sheet); //
-        
-            // get all terms list
-            // uniqueProduct=true
-            const uniqueProductList2 = await productModel.getAllProduct(true);
-            const uniqueProductList = uniqueProductList2.map((product) => product.name);
-        
-            const prompt = `
+  processBOQWithAI: async (file) => {
+    try {
+      const workbook = xlsx.readFile(file.path);
+      const sheetName = workbook.SheetNames[0]; // Assuming data is in the first sheet
+      const sheet = workbook.Sheets[sheetName];
+      const boqData = xlsx.utils.sheet_to_csv(sheet);
+
+      // get all terms list
+      const uniqueProductList2 = await productModel.getAllProduct(true);
+      const uniqueProductList = uniqueProductList2.map(
+        (product) => product.name
+      );
+
+      const prompt = `
         You are an AI trained to extract product information from unstructured BOQ documents and cross-reference products against a provided database. Your goal is to accurately identify products and match them to the database, even if there are slight variations in naming.
         
         Your tasks:
@@ -61,31 +58,51 @@ const generativeAI = {
         Products present in my database:
         ${uniqueProductList}
         `;
-        
-            const result = await model.generateContent(prompt);
-        
-            const aiResponseText = result.response.text();
-        
-            // Extract the JSON part from the response, it might be wrapped in backticks or other text
-            const jsonString = aiResponseText.includes('```json')
-              ? aiResponseText
-                  .substring(
-                    aiResponseText.indexOf('```json') + 7,
-                    aiResponseText.lastIndexOf('```')
-                  )
-                  .trim()
-              : aiResponseText.trim();
-        
-            // Convert to the object
-            const boqDataJson = JSON.parse(jsonString);
-            return boqDataJson;
-          } catch (error) {
-            console.error('Error processing BOQ with AI:', error);
-            return { error: 'Error processing BOQ with AI' };
+
+      const response = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GOOGLE_AI_API_KEY}`,
+        {
+          contents: [
+            {
+              parts: [{ text: prompt }]
+            }
+          ]
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json'
           }
+        }
+      );
+
+      if (
+        !response.data ||
+        !response.data.candidates ||
+        response.data.candidates.length === 0
+      ) {
+        // throw new Error({ error: 'Error processing BOQ with AI' });
+        return { error: 'Error processing BOQ with AI' };
+      }
+
+      const aiResponseText = response.data.candidates[0].content.parts[0].text;
+
+      const jsonString = aiResponseText.includes('```json')
+        ? aiResponseText
+            .substring(
+              aiResponseText.indexOf('```json') + 7,
+              aiResponseText.lastIndexOf('```')
+            )
+            .trim()
+        : aiResponseText.trim();
+
+      // Convert to object
+      const boqDataJson = JSON.parse(jsonString);
+      return boqDataJson;
+    } catch (error) {
+      logError(error);
+      return { error: 'Error processing BOQ with AI' };
     }
+  }
+};
 
-}
-
-
-export default  generativeAI;
+export default generativeAI;
