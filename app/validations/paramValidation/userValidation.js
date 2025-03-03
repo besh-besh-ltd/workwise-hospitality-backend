@@ -439,7 +439,7 @@ const schemas = {
       .optional()
       .allow(null, '') // Allow null or empty strings
       .trim()
-      .regex(/^[0-9]*$/, 'numbers')  // Only digits if non-empty
+      .regex(/^\+\d{1,3}-\d{7,14}$/, "Please enter a valid mobile number in the format +91-XXXXXXXXXX")
       .min(10)  // Minimum 10 digits if non-empty
       .max(15)  // Maximum 15 digits if non-empty
   })

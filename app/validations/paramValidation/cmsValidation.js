@@ -281,8 +281,8 @@ const schemas = {
     name: Joi.string().trim().required(),
     role: Joi.string().trim().required(),
     mobile: Joi.string()
-      .pattern(/^[0-9]+$/)  
-      .min(10)  
+      .pattern(/^\+\d{1,4}-\d{7,15}$/)  
+      .min(7)  
       .max(15)  
       .optional()
       .allow(null, ''),
