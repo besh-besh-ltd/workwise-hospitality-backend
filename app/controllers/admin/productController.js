@@ -2868,7 +2868,7 @@ const productController = {
       
       let mailRecipients = {
         from: Config.webmasterMail,
-        subject: `Work Wise | New RFQ Alert`,
+        subject: `Work Wise | Product Review Status`,
         html: dynamic_html
       };
 
