@@ -75,7 +75,7 @@ const schemas = {
   create_subadmin: Joi.object().keys({
     name: Joi.string().required(),
     email: Joi.string().required().email().max(100),
-    mobile: Joi.string().min(8).max(11).required().label('Mobile'),
+    mobile: Joi.string().min(10).max(15).required().label('Mobile'),
     password: Joi.string().min(3).max(15).required().label('Password'),
     confirm_password: Joi.any().valid(Joi.ref('password')).required().messages({
       'any.only': 'Password and Confirm password not matched'
@@ -103,7 +103,7 @@ const schemas = {
   }),
   update_subadmins: Joi.object().keys({
     name: Joi.string().required(),
-    mobile: Joi.string().min(8).max(11).required().label('Mobile')
+    mobile: Joi.string().min(10).max(15).required().label('Mobile')
   })
 };
 

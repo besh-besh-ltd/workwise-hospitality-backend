@@ -194,7 +194,7 @@ const schemas = {
   user_register: Joi.object().keys({
     name: Joi.string().required(),
     email: Joi.string().required().email().max(100),
-    mobile: Joi.string().min(8).max(11).required().label('Mobile'),
+    mobile: Joi.string().min(8).max(15).required().label('Mobile'),
     organization_name: Joi.string().optional().allow(null).allow(''),
     register_as: Joi.string()
       .required()
@@ -439,7 +439,7 @@ const schemas = {
       .optional()
       .allow(null, '') // Allow null or empty strings
       .trim()
-      .regex(/^[0-9]*$/, 'numbers')  // Only digits if non-empty
+      .regex(/^\+\d{1,3}-\d{7,14}$/, "Please enter a valid mobile number in the format +91-XXXXXXXXXX")
       .min(10)  // Minimum 10 digits if non-empty
       .max(15)  // Maximum 15 digits if non-empty
   })
