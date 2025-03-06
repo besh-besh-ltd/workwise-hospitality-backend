@@ -3353,6 +3353,26 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     });
   },
 
+  deleteSpoc : async (spocId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `DELETE FROM tbl_users_spoc WHERE id = $1 RETURNING *;`,
+        [spocId]
+      )
+        .then(function (data) {
+          if (data.length > 0) {
+            resolve({ success: true, message: "SPOC deleted successfully", data });
+          } else {
+            resolve({ success: false, message: "No matching SPOC found" });
+          }
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
   user_rfq_access_review: async (rfq_id, user_id, user_type) => {
     let query = null;
     let values = [];

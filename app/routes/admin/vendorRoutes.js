@@ -92,6 +92,14 @@ vendorRoutes.put(
   validateDbBody.spoc_id_exists,
   vendorController.updateSpoc
 )
+vendorRoutes.delete(
+  '/update-vendor/:id/delete-spoc/:spoc_id',
+  passportSignIn,
+  validateParam(schemas.spoc_params),
+  validateDbBody.vendor_id_exists,
+  validateDbBody.spoc_id_exists,
+  vendorController.deleteSpoc
+)
 vendorRoutes.put(
   '/accept-vendor/:id',
   passportSignIn,
