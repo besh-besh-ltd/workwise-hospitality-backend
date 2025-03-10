@@ -229,6 +229,13 @@ UsersRoutes.put(
   validateDbBody.spoc_id_exists,
   UsersController.updateSpoc
 )
+// to delete the spoc of the user
+UsersRoutes.delete(
+  '/delete-spoc/:spoc_id',
+  passportSignIn,
+  validateDbBody.spoc_id_exists,
+  UsersController.deleteSpoc
+)
 
 UsersRoutes.get(
   '/vendor-dashboard-data',

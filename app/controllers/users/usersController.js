@@ -3752,6 +3752,7 @@ const UsersController = {
             message: `spoc of ${response[0].role.toUpperCase()} ${response[0].name} updated`
           })
           .end();
+          return;
       }
 
     } catch (error) {
@@ -3765,6 +3766,50 @@ const UsersController = {
         .end();
     }
   },
+
+  deleteSpoc: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err=0;
+      const spocId = req.params.spoc_id;
+  
+      // Validate required fields
+      if (!spocId) {
+       
+        return res.status(400).json({
+          status: 2,
+          
+          errors: { empty_fields: "SPOC ID is required." }
+        });
+      }
+
+      
+      const deleteResult = await userModel.deleteSpoc(spocId);
+      
+  
+      // Check if deletion was successful
+      if (deleteResult && deleteResult.data.length > 0) {
+        return res.status(200).json({
+          status: 1,
+          message: "SPOC deleted successfully",
+          data: deleteResult
+        });
+      } else {
+        return res.status(404).json({
+          status: 2,
+          message: "SPOC not found"
+        });
+      }
+      
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 3,
+        message: "An internal server error occurred. chek"
+      });
+    }
+  },
+
 
   getTopVendorsandProducts: async (req, res) => {
     try {

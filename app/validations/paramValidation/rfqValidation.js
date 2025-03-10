@@ -102,7 +102,7 @@ export const rfqSchemas = {
       .min(10)
       .max(15)
       .required()
-      .regex(/^[0-9]*$/),
+      .regex(/^\+\d{1,4}-\d{6,15}$/), 
     bid_end_date: Joi.string()
     .optional()
     .allow(null)

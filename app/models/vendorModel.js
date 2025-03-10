@@ -531,6 +531,18 @@ getVendorListCount: async (organization, verified, name) => {
     });
   },
 
+  deleteSpoc: async (userId, spocId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `DELETE FROM tbl_users_spoc WHERE user_id = $1 AND id = $2 RETURNING *;`,
+        [userId, spocId] )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) { let error = new Error(err); reject(error); });
+    });
+  },
+
   topVendorsWithProducts: async (userId) => {
     return new Promise(function (resolve, reject) {
       db.any(

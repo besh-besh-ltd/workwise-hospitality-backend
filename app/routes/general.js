@@ -18,6 +18,10 @@ GeneralRoutes.get(
   '/countries',
   generalController.getCountries
 );
+GeneralRoutes.get(
+  '/country-codes',
+  generalController.getCountryCodes
+)
 
 
 
