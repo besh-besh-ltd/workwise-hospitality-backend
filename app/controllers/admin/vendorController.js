@@ -891,6 +891,48 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         .end();
     }
   },
+  deleteSpoc : async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+
+      const userId = req.params.id;
+      const spocId = req.params.spoc_id;
+
+      if(!userId && !spocId){
+        err++;
+        errors.empty_fields = 'All fields are empty or missing.';
+      }
+
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+        return;
+      }
+     const deletedSpoc = await vendorModel.deleteSpoc(userId, spocId);
+     if (deletedSpoc) {
+      res.status(200).json({
+        status: 1,   
+        message: 'spoc deleted successfully'
+      }).end();
+     }
+
+    }
+    catch (error) {
+      logError(error);
+      res.status(400).json({
+        status: 3,  
+        message: Config.errorText.value
+      }).end();
+    }
+    },
+
+
   addSpoc: async (req, res, next) => {
     try {
       let errors = {};
