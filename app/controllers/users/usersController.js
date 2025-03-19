@@ -3044,7 +3044,9 @@ const UsersController = {
       let companyExists = null;
 
       if (email && phone) {
-        userEmailExists = await userModel.user_exist(email.toLowerCase(), phone);
+        const phoneWithoutCode = phone.replace(/^\+\d+\D*/, '');
+       
+        userEmailExists = await userModel.user_exist(email.toLowerCase(), phoneWithoutCode);
         if (userEmailExists.length > 0 && userEmailExists[0].user_type == 3) {
           vendorId = userEmailExists[0].id;
           companyExists = await vendorModel.getCompanyDetails(vendorId);
@@ -3236,6 +3238,7 @@ const UsersController = {
           created_by: vendorId,
           vendor: vendorId,
           status: status || 0,
+          
           // vendor_approved_by: vendorApproveId || null,
           is_approve: master_id ? 1 : 0,
           added_by: req.user.id,
