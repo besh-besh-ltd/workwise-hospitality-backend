@@ -409,7 +409,7 @@ const schemas = {
   buyer_private_vendor_approved: Joi.object().keys({
     vendorName: Joi.string().required().trim().max(60),
     email: Joi.string().required().email().trim().max(50),
-    phone: Joi.string().required().trim().max(20),
+    phone: Joi.string().required().trim().max(15),
     productDetails: Joi.array().items(Joi.object().keys({
       master_id: Joi.number().required(),
       name: Joi.string().required(),
