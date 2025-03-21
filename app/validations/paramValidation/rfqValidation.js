@@ -99,20 +99,26 @@ export const rfqSchemas = {
     contact_name: Joi.string().required(),
     contact_number: Joi.string()
       .trim()
-      .min(10)
-      .max(15)
+      .min(7)
+      .max(20) // Increased to accommodate country codes
       .required()
-      .regex(/^\+\d{1,4}-\d{6,15}$/), 
+      .regex(/^(?:\+\d{1,4}-)?\d{6,15}$/)
+      .messages({
+        'string.pattern.base':
+          'Contact number must be in the format +<country_code>-<mobile_number> or just <mobile_number>.'
+      }),
     bid_end_date: Joi.string()
-    .optional()
-    .allow(null)
-    .allow('')
-    .custom((value, helpers) => {
+      .optional()
+      .allow(null)
+      .allow('')
+      .custom((value, helpers) => {
         if (value && new Date(value) <= tomorrow) {
-            return helpers.message(`bid_end_date must be greater than ${tomorrowString}`);
+          return helpers.message(
+            `bid_end_date must be greater than ${tomorrowString}`
+          );
         }
         return value;
-    }),
+      }),
     location: Joi.string().optional().allow('').allow(null),
     is_published: Joi.number().integer().min(0).max(1).required(),
     rfq_type: Joi.string().valid('firm', 'budgetary').allow('').allow(null),
@@ -120,7 +126,7 @@ export const rfqSchemas = {
     products: Joi.array().items(productItems).min(1).required(),
     terms: Joi.array().items(termsItems).allow(null).allow(''),
     project_id: Joi.number().integer().required(),
-    term_and_condition_files: Joi.array().items(Joi.string()).optional(),
+    term_and_condition_files: Joi.array().items(Joi.string()).optional()
   }),
   update: Joi.object().keys({
     rfq_id: Joi.number().required(),
@@ -134,15 +140,17 @@ export const rfqSchemas = {
       .max(15)
       .required()
       .regex(/^[0-9]*$/),
-      bid_end_date: Joi.string()
+    bid_end_date: Joi.string()
       .optional()
       .allow(null)
       .allow('')
       .custom((value, helpers) => {
-          if (value && new Date(value) <= tomorrow) {
-              return helpers.message(`bid_end_date must be greater than ${tomorrowString}`);
-          }
-          return value;
+        if (value && new Date(value) <= tomorrow) {
+          return helpers.message(
+            `bid_end_date must be greater than ${tomorrowString}`
+          );
+        }
+        return value;
       }),
     location: Joi.string().required(),
     is_published: Joi.number().integer().min(0).max(1).required(),
@@ -156,30 +164,33 @@ export const rfqSchemas = {
     product_id: Joi.number().required(),
     vendor_id: Joi.number().required(),
     quote_id: Joi.number().required(),
-    variant:Joi.number().required()
+    variant: Joi.number().required()
   }),
   getAllRfqsForAdminValidation: Joi.object().keys({
-    page: Joi.number().integer().optional(), 
+    page: Joi.number().integer().optional(),
     limit: Joi.number().integer().optional(),
-    offset: Joi.number().integer().optional(), 
-    rfq_status: Joi.string().valid('1', '2').allow(null).optional(), 
-    admin_service_status: Joi.string().valid('Pending', 'Working', 'Complete').allow(null).optional(), 
-    sort: Joi.string().valid('ASC', 'DESC').optional() 
+    offset: Joi.number().integer().optional(),
+    rfq_status: Joi.string().valid('1', '2').allow(null).optional(),
+    admin_service_status: Joi.string()
+      .valid('Pending', 'Working', 'Complete')
+      .allow(null)
+      .optional(),
+    sort: Joi.string().valid('ASC', 'DESC').optional()
   }),
   updateRfqStatusValidation: Joi.object().keys({
-    rfq_id: Joi.number().integer().required(), 
+    rfq_id: Joi.number().integer().required(),
     status: Joi.string().valid('Pending', 'Working', 'Complete').required(),
     comment: Joi.string().allow('').allow(null).optional()
   }),
   sendMessage: Joi.object().keys({
-    rfq_id: Joi.number().required(), 
+    rfq_id: Joi.number().required(),
     receiver_id: Joi.number().required(),
     message_text: Joi.string().trim().required(),
     files: Joi.array()
       .items(
         Joi.object({
           name: Joi.string().optional().allow(null, ''),
-          url: Joi.string().uri().required().optional().allow(null, ''),
+          url: Joi.string().uri().required().optional().allow(null, '')
         })
       )
       .optional()
@@ -190,9 +201,9 @@ export const rfqSchemas = {
       let upload = multer({
         storage: store_query_message_upload_file,
         limits: {
-          fileSize: 8000000, // 8MB
-        },
-      }).array("files", 10);
+          fileSize: 8000000 // 8MB
+        }
+      }).array('files', 10);
       upload(req, res, async function (err) {
         if (err) {
           res.status(400).json({ status: 2, errors: { file: err } });
@@ -203,14 +214,14 @@ export const rfqSchemas = {
           name: file.originalname,
           url: `${Config.base_url}/query_message_files/${file.filename}`
         }));
-  
+
         req.files = uploadedFiles;
-  
+
         next();
       });
     } catch (err) {
-      console.error("Server error:", err);
-      res.status(500).json({ status: 3, message: "server error" });
+      console.error('Server error:', err);
+      res.status(500).json({ status: 3, message: 'server error' });
     }
   },
 
@@ -219,13 +230,7 @@ export const rfqSchemas = {
     rfq_id: Joi.number().integer().required(),
     rfq_product_id: Joi.number().integer().required(),
     clause_text: Joi.string().required(),
-    file_url: Joi.array()
-    .items(
-      Joi.string()
-        .uri()
-    )
-    .optional()
-    .allow(null)
+    file_url: Joi.array().items(Joi.string().uri()).optional().allow(null)
     // file_url: Joi.alternatives().try(
     //   Joi.array()
     //     .items(
@@ -242,24 +247,18 @@ export const rfqSchemas = {
     //   Joi.allow(null)
     // ).default([]),
   }),
-  addClauseUsingFile:Joi.object({
+  addClauseUsingFile: Joi.object({
     rfq_id: Joi.number().integer().required(),
     rfq_product_id: Joi.number().integer().required()
   }),
   updateClause: Joi.object().keys({
     clause_id: Joi.number().integer().required(),
     clause_text: Joi.string().required(),
-    file_url: Joi.array()
-      .items(
-        Joi.string()
-          .uri()
-      )
-      .optional()
-      .allow(null)
+    file_url: Joi.array().items(Joi.string().uri()).optional().allow(null)
   }),
 
   id: Joi.object().keys({
-    id: Joi.number().integer().required(),
+    id: Joi.number().integer().required()
   }),
 
   getClauses: Joi.object().keys({
@@ -272,21 +271,15 @@ export const rfqSchemas = {
     sender_id: Joi.number().integer().required(),
     receiver_id: Joi.number().integer().required(),
     text: Joi.string().required(),
-    file_url: Joi.array()
-      .items(
-        Joi.string()
-          .uri()
-      )
-      .optional()
-      .allow(null)
+    file_url: Joi.array().items(Joi.string().uri()).optional().allow(null)
   }),
 
   getTechComments: Joi.object().keys({
     clause_id: Joi.number().integer().required(),
-    sender_id:Joi.number().integer().required(),
+    sender_id: Joi.number().integer().required(),
     receiver_id: Joi.number().integer().required()
   }),
-  
+
   getVendorNames: Joi.object().keys({
     rfq_id: Joi.number().integer().required(),
     rfq_product_id: Joi.number().integer().required()
@@ -298,22 +291,18 @@ export const rfqSchemas = {
     vendor_id: Joi.number().integer().required()
   }),
 
-addVendorResponse: Joi.array().items(
-    Joi.object({
-      rfq_id: Joi.number().integer().required(),
-      rfq_product_id: Joi.number().integer().required(),
-      vendor_id: Joi.number().integer().required(),
-      clause_id: Joi.number().integer().required(),
-      vendor_response: Joi.string().optional().allow("").allow(null),
-      file_url: Joi.array()
-        .items(
-          Joi.string()
-            .uri()
-        )
-        .optional()
-        .allow(null)
-    })
-  ).min(1),
+  addVendorResponse: Joi.array()
+    .items(
+      Joi.object({
+        rfq_id: Joi.number().integer().required(),
+        rfq_product_id: Joi.number().integer().required(),
+        vendor_id: Joi.number().integer().required(),
+        clause_id: Joi.number().integer().required(),
+        vendor_response: Joi.string().optional().allow('').allow(null),
+        file_url: Joi.array().items(Joi.string().uri()).optional().allow(null)
+      })
+    )
+    .min(1),
 
   addtechEvaluationClearedVendors: Joi.object({
     vendor_id: Joi.number().integer().required(),
@@ -332,5 +321,4 @@ addVendorResponse: Joi.array().items(
     rfq_product_id: Joi.number().integer().required(),
     vendor_id: Joi.number().integer().required()
   })
-
 };
