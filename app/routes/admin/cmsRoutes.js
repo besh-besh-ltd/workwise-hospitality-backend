@@ -308,5 +308,33 @@ cmsRoutes.put('/update-location',
 //    cmsController.deleteLocation
 //   )
 
+cmsRoutes.post(
+  '/product-description-add',
+  passportSignIn,
+ // validateDbBody
+ cmsController.addProductDescription
+)
+cmsRoutes.get(
+  '/product-description-get',
+  passportSignIn,
+  cmsController.getProductDescription
+)
+cmsRoutes.get(
+  '/product-description-get/:id',
+  passportSignIn,
+  cmsController.getOneProductDescription
 
+)
+
+cmsRoutes.put(
+  '/product-description-edit',
+  passportSignIn,
+  cmsController.updateProductdescription
+)
+
+cmsRoutes.delete(
+  '/product-description-delete/:id',
+  passportSignIn,
+  cmsController.deleteProductDescription
+)
 export default cmsRoutes;

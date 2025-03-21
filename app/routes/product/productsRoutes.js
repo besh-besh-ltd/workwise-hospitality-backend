@@ -116,6 +116,12 @@ ProductsRoutes.get(
   ProductsController.approvedProductList
 );
 
+
+ProductsRoutes.get(
+  '/products-search-by-name-or-category',
+   ProductsController.searchProductsByCategory
+  );
+
 //End API
 
 export default ProductsRoutes;

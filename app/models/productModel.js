@@ -155,6 +155,42 @@ const productModel = {
         });
     });
   },
+  getSubCategory: async (parent_id) => {
+    return new Promise((resolve, reject) => {
+      db.any(
+        `SELECT id, title, parent_id
+         FROM tbl_category
+         WHERE parent_id = $1 AND is_deleted != '1'`,
+        [parent_id]
+      )
+        .then((data) => resolve(data)) // Return data directly
+        .catch((err) => reject(new Error(err))); // Proper error handling
+    });
+  },
+  getProductBycategory : async (category_id) =>{
+    return new Promise((resolve, reject) => {
+      db.any(
+        `SELECT *
+         FROM tbl_product_categories tpc
+         JOIN tbl_product tp ON tpc.product_id = tp.id
+         WHERE tpc.category_id = $1
+         ORDER BY tp.created_at ASC
+         `,
+        [category_id]
+      )
+        .then((data) => resolve(data))
+        .catch((error) => reject(new Error(error)));
+    });
+  },
+  getProductById: async (product_id) => {
+    try {
+      return await db.any(`SELECT * FROM tbl_product WHERE id = $1 & created_by=1`, [product_id]);
+    } catch (error) {
+      throw new Error(error); // Rethrow the error so the caller can handle it
+    }
+  },
+  
+  
   getParentCategoryList: async () => {
     try {
         const query = `

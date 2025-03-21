@@ -69,7 +69,6 @@ const cmsModel = {
           } else {
             resolve(null);
           }
-
         })
         .catch(function (err) {
           let error = new Error(err);
@@ -165,7 +164,6 @@ const cmsModel = {
   }, */
   testimonialListing: async (pageId = null) => {
     return new Promise(function (resolve, reject) {
-
       db.any(
         `SELECT 
               tbl_testimonials.*,
@@ -459,7 +457,7 @@ const cmsModel = {
         NULL
         ELSE tbl_cms_banner.image
         END AS image_url from tbl_cms_banner LEFT JOIN tbl_cms_pages ON tbl_cms_banner.page_id = tbl_cms_pages.id limit $2 offset $1`,
-        [offset,limit]
+        [offset, limit]
       )
         .then(function (data) {
           resolve(data);
@@ -479,7 +477,7 @@ const cmsModel = {
         NULL
         ELSE tbl_company_logo.image
         END AS image_url from tbl_company_logo  limit $2 offset $1`,
-        [offset,limit]
+        [offset, limit]
       )
         .then(function (data) {
           resolve(data);
@@ -521,20 +519,20 @@ const cmsModel = {
     });
   },
 
-  
-  getDemoBookingList : async (limit , offset)=>{
-    return new Promise(function (resolve , reject){
+  getDemoBookingList: async (limit, offset) => {
+    return new Promise(function (resolve, reject) {
       db.any(
         `select * from users_book_demo ORDER BY id desc  limit $1 offset $2`,
         [limit, offset]
-      ).then(function (data) {
-        resolve(data);
-      })
-      .catch(function (err) {
-        let error = new Error(err);
-        reject(error);
-      });
-    })
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
   },
   getDemoBookingCount: async () => {
     return new Promise(function (resolve, reject) {
@@ -571,7 +569,7 @@ const cmsModel = {
       NULL
       ELSE tbl_cms_banner.image
       END AS image_url from tbl_cms_banner WHERE id = $1`,
-      [banner_id]
+        [banner_id]
       )
         .then(function (data) {
           resolve(data);
@@ -591,7 +589,7 @@ const cmsModel = {
       NULL
       ELSE tbl_company_logo.image
       END AS image_url from tbl_company_logo WHERE id = $1`,
-      [logo_id]
+        [logo_id]
       )
         .then(function (data) {
           resolve(data);
@@ -604,7 +602,7 @@ const cmsModel = {
   },
   getFaqDetail: async (faq_id) => {
     return new Promise(function (resolve, reject) {
-      db.one(`select * from tbl_faq WHERE id = $1`,[faq_id])
+      db.one(`select * from tbl_faq WHERE id = $1`, [faq_id])
         .then(function (data) {
           resolve(data);
         })
@@ -622,7 +620,8 @@ const cmsModel = {
       WHEN tbl_blog.image IS NULL THEN
       NULL
       ELSE tbl_blog.image
-      END AS image_url from tbl_blog WHERE id = $1`,[blog_id]
+      END AS image_url from tbl_blog WHERE id = $1`,
+        [blog_id]
       )
         .then(function (data) {
           resolve(data);
@@ -647,7 +646,7 @@ const cmsModel = {
       NULL
       ELSE tbl_testimonials.created_image
       END AS created_image_url from tbl_testimonials WHERE id = $1`,
-      [testimonial_id]
+        [testimonial_id]
       )
         .then(function (data) {
           resolve(data);
@@ -661,10 +660,7 @@ const cmsModel = {
 
   getTeamMemberDetails: async (memberId) => {
     return new Promise(function (resolve, reject) {
-      db.one(
-        `SELECT * from tbl_team_members WHERE id = $1`,
-        [memberId]
-      )
+      db.one(`SELECT * from tbl_team_members WHERE id = $1`, [memberId])
         .then(function (data) {
           resolve(data);
         })
@@ -2132,7 +2128,9 @@ const cmsModel = {
   },
   checkTeamMember: async (memberId) => {
     return new Promise(function (resolve, reject) {
-      db.one(`SELECT * FROM tbl_team_members WHERE id = $1 AND status!=2 `, [memberId])
+      db.one(`SELECT * FROM tbl_team_members WHERE id = $1 AND status!=2 `, [
+        memberId
+      ])
         .then(function (data) {
           resolve(data);
         })
@@ -2153,9 +2151,9 @@ const cmsModel = {
           SELECT *             
           FROM tbl_team_members
           WHERE status != 0 
-          ${search ? searchQuery : ""}
+          ${search ? searchQuery : ''}
           ORDER BY "createdAt" DESC LIMIT $1 OFFSET $2`;
-      
+
       db.any(query, [limit, offset])
         .then(function (data) {
           resolve(data);
@@ -2171,8 +2169,7 @@ const cmsModel = {
       const condition = `WHERE id = $1 RETURNING id`;
       const values = [memberId];
       let query =
-        pgp().helpers.update(memberObj, null, 'tbl_team_members') +
-        condition;
+        pgp().helpers.update(memberObj, null, 'tbl_team_members') + condition;
 
       db.one(query, values)
         .then(function (data) {
@@ -2193,10 +2190,10 @@ const cmsModel = {
 
       db.none(query, [memberId])
         .then(function (data) {
-          resolve({ message: "Team member deleted successfully" });
+          resolve({ message: 'Team member deleted successfully' });
         })
         .catch(function (err) {
-          reject(new Error(err.message || "Error deleting team member"));
+          reject(new Error(err.message || 'Error deleting team member'));
         });
     });
   },
@@ -2379,24 +2376,24 @@ const cmsModel = {
         });
     });
   },
-   // Get all locations (states and cities)
-   getAllLocations :  async (limit, offset, search, state) => {
+  // Get all locations (states and cities)
+  getAllLocations: async (limit, offset, search, state) => {
     return new Promise(function (resolve, reject) {
-      let query = ''; 
+      let query = '';
       const queryParams = [limit, offset];
       let paramCount = 2;
-    // Build search condition if provided
-    
+      // Build search condition if provided
+
       if (search) {
         query += ` AND (tbl_location_states.state_name ILIKE $${++paramCount} OR tbl_location_cities.city_name ILIKE $${++paramCount})`;
         queryParams.push(`%${search}%`, `%${search}%`);
       }
-  
+
       if (state) {
         query += ` AND tbl_location_states.state_name ILIKE $${++paramCount}`;
         queryParams.push(`${state}`);
       }
-  
+
       db.any(
         `SELECT 
     COUNT(*) OVER() AS total_count,
@@ -2425,44 +2422,44 @@ LIMIT $1 OFFSET $2;
         });
     });
   },
-  
 
-  //update locations 
+  //update locations
   updateLocations: async (state_id, city_id, updateData) => {
     return new Promise((resolve, reject) => {
       let query;
       const values = [];
-  
+
       if (city_id) {
         // If city_id is provided, update the specific city
         query = `UPDATE tbl_location_cities SET city_name = $1 WHERE id = $2 RETURNING *`;
         values.push(updateData.city_name, city_id);
-  
+
         db.one(query, values)
-          .then(result => resolve(result))
-          .catch(err => reject(new Error("Error updating city: " + err)));
+          .then((result) => resolve(result))
+          .catch((err) => reject(new Error('Error updating city: ' + err)));
       } else if (state_id) {
         // If state_id is provided but city_id is null, update all cities for the state
         query = `UPDATE tbl_location_cities SET city_name = $1 WHERE state_id = $2 RETURNING *`;
         values.push(updateData.city_name, state_id);
-  
+
         db.any(query, values)
-          .then(results => resolve(results))
-          .catch(err => reject(new Error("Error updating cities for state: " + err)));
+          .then((results) => resolve(results))
+          .catch((err) =>
+            reject(new Error('Error updating cities for state: ' + err))
+          );
       } else {
         // If neither city_id nor state_id is provided, reject the request
-        reject(new Error("state_id or city_id must be provided"));
+        reject(new Error('state_id or city_id must be provided'));
       }
     });
   },
-  
-  
+
   findCountryByName: async (country_name) => {
     return new Promise(async (resolve, reject) => {
       const query = `SELECT * FROM tbl_location_country WHERE LOWER(country_name) = LOWER($1)`;
-  
+
       try {
-        const result = await db.oneOrNone(query, [country_name]);  // ✅ Await the result
+        const result = await db.oneOrNone(query, [country_name]); // ✅ Await the result
         resolve(result);
       } catch (error) {
         reject(error);
@@ -2473,17 +2470,13 @@ LIMIT $1 OFFSET $2;
     const query = `SELECT * FROM tbl_location_states WHERE state_name = $1 AND country_id = $2`;
     try {
       const data = await db.oneOrNone(query, [state_name, country_id]); // Returns state or null
-      console.log(" ohhh attitute ",data)
-      return data
+      console.log(' ohhh attitute ', data);
+      return data;
     } catch (error) {
       console.error('Database query failed:', error);
       return null; // Ensure it doesn't throw an error
     }
   },
-  
-  
-  
-  
 
   findStateByName: async (state_name) => {
     const query = `SELECT id FROM tbl_location_states WHERE state_name = $1 LIMIT 1`;
@@ -2494,24 +2487,23 @@ LIMIT $1 OFFSET $2;
       throw new Error('Error finding state: ' + err.message);
     }
   },
-  findStateById : async (state_id) => {
+  findStateById: async (state_id) => {
     const query = `SELECT 1 FROM tbl_location_states WHERE id = $1 LIMIT 1`;
     try {
-      const result = await db.oneOrNone(query,[state_id]);
+      const result = await db.oneOrNone(query, [state_id]);
       return result;
     } catch (error) {
-      throw new Error('Given State does not exists',+error.message);
+      throw new Error('Given State does not exists', +error.message);
     }
   },
-  findCityById : async (city_id) =>{
+  findCityById: async (city_id) => {
     const query = `SELECT 1 FROM tbl_location_cities WHERE id = $1 LIMIT 1`;
 
     try {
-      const result = await db.oneOrNone(query , [city_id]);
+      const result = await db.oneOrNone(query, [city_id]);
       return result;
-    } 
-      catch (error) {
-        throw new Error('City Does Not exists',+error.message);
+    } catch (error) {
+      throw new Error('City Does Not exists', +error.message);
     }
   },
   findCityByNameAndState: async (state_id, city_name) => {
@@ -2525,63 +2517,200 @@ LIMIT $1 OFFSET $2;
       }
     });
   },
-  
+
   // Check if city already exists in the given state
-checkCityExists: async (state_id, city_name) => {
-  const query = `SELECT 1 FROM tbl_location_cities WHERE city_name = $1 AND state_id = $2 LIMIT 1`;
-  try {
-    const result = await db.oneOrNone(query, [city_name, state_id]);
-    return result !== null; // Return true if city exists, false otherwise
-  } catch (err) {
-    throw new Error('Error checking city existence: ' + err.message);
-  }
-},
-  
-
-
-createLocation: async (type, locationObj) => {
-  return new Promise((resolve, reject) => {
-    const queries = {
-      city: {
-        check: `SELECT * FROM tbl_location_cities WHERE state_id = $1 AND city_name = $2`,
-        insert: `INSERT INTO tbl_location_cities (state_id, city_name) VALUES ($1, $2) RETURNING *`,
-        values: [locationObj.state_id, locationObj.city_name]
-      },
-      state: {
-        check: `SELECT * FROM tbl_location_states WHERE country_id = $1 AND state_name = $2`,
-        insert: `INSERT INTO tbl_location_states (country_id, state_name) VALUES ($1, $2) RETURNING *`,
-        values: [locationObj.country_id, locationObj.state_name]
-      },
-      country: {
-        check: `SELECT * FROM tbl_location_country WHERE country_name = $1`,
-        insert: `INSERT INTO tbl_location_country (country_name) VALUES ($1) RETURNING *`,
-        values: [locationObj.country_name]
-      }
-    };
-
-    const queryData = queries[type];
-
-    if (!queryData) {
-       reject(new Error('Invalid location type. Use "city", "state", or "country".'));
+  checkCityExists: async (state_id, city_name) => {
+    const query = `SELECT 1 FROM tbl_location_cities WHERE city_name = $1 AND state_id = $2 LIMIT 1`;
+    try {
+      const result = await db.oneOrNone(query, [city_name, state_id]);
+      return result !== null; // Return true if city exists, false otherwise
+    } catch (err) {
+      throw new Error('Error checking city existence: ' + err.message);
     }
+  },
 
-    db.oneOrNone(queryData.check, queryData.values)
-      .then(existingEntry => {
-        if (existingEntry) {
-           reject(new Error(`${type} already exists.`));
+  createLocation: async (type, locationObj) => {
+    return new Promise((resolve, reject) => {
+      const queries = {
+        city: {
+          check: `SELECT * FROM tbl_location_cities WHERE state_id = $1 AND city_name = $2`,
+          insert: `INSERT INTO tbl_location_cities (state_id, city_name) VALUES ($1, $2) RETURNING *`,
+          values: [locationObj.state_id, locationObj.city_name]
+        },
+        state: {
+          check: `SELECT * FROM tbl_location_states WHERE country_id = $1 AND state_name = $2`,
+          insert: `INSERT INTO tbl_location_states (country_id, state_name) VALUES ($1, $2) RETURNING *`,
+          values: [locationObj.country_id, locationObj.state_name]
+        },
+        country: {
+          check: `SELECT * FROM tbl_location_country WHERE country_name = $1`,
+          insert: `INSERT INTO tbl_location_country (country_name) VALUES ($1) RETURNING *`,
+          values: [locationObj.country_name]
         }
-        return db.one(queryData.insert, queryData.values);
-      })
-      .then(resolve)
-      .catch(err => {
-        console.error("Database Error:", err);
-        reject(new Error("Failed to insert location: " + err.message));
-      });
-  });
-}
+      };
 
+      const queryData = queries[type];
 
+      if (!queryData) {
+        reject(
+          new Error('Invalid location type. Use "city", "state", or "country".')
+        );
+      }
 
+      db.oneOrNone(queryData.check, queryData.values)
+        .then((existingEntry) => {
+          if (existingEntry) {
+            reject(new Error(`${type} already exists.`));
+          }
+          return db.one(queryData.insert, queryData.values);
+        })
+        .then(resolve)
+        .catch((err) => {
+          console.error('Database Error:', err);
+          reject(new Error('Failed to insert location: ' + err.message));
+        });
+    });
+  },
+  addProductDescription: async (productDescriptionObj) => {
+    console.log('getting error here ', productDescriptionObj);
+    return new Promise((resolve, reject) => {
+      try {
+        let query = `insert into tbl_product_cms (product_id, description) values ($1, $2)`;
+        db.none(query, [
+          productDescriptionObj.product_id,
+          productDescriptionObj.description
+        ])
+          .then(() => {
+            resolve({ message: 'Product description added successfully' });
+          })
+          .catch((error) => {
+            reject(
+              new Error('Failed to add product description: ' + error.message)
+            );
+          });
+      } catch (error) {
+        reject(
+          new Error('Failed to add product description: ' + error.message)
+        );
+      }
+    });
+  },
+
+  getProductDescription: async () => {
+    return new Promise((resolve, reject) => {
+      const query = `
+        SELECT 
+          tbl_product_cms.*,
+          tbl_product.name,
+          tbl_product.description
+        FROM 
+          tbl_product_cms
+        LEFT JOIN 
+          tbl_product ON tbl_product_cms.product_id = tbl_product.id
+      `;
+      db.any(query)
+        .then((data) => {
+          resolve(data);
+        })
+        .catch((err) => {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  getProductDescriptionById: async (id) => {
+    return new Promise((resolve, reject) => {
+
+      
+      db.oneOrNone(`SELECT * FROM tbl_product_cms WHERE id = $1`, [id])
+        .then((data) => {
+          if (data) {
+            resolve(data);
+          } else {
+            reject(new Error('Product description not found'));
+          }
+        })
+        .catch((err) => {
+          reject(new Error('Database error: ' + err.message));
+        });
+    });
+  },
+  updateProductDescription: async (updateProductObj) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const { id, product_id, description } = updateProductObj;
+
+        // Update the product description
+        const query = `
+          UPDATE tbl_product_cms 
+          SET description = $1
+          WHERE id = $2
+          RETURNING *`;
+
+        const updatedProduct = await db.oneOrNone(query, [description, id]);
+
+        if (updatedProduct) {
+          resolve({
+            status: 1,
+            message: 'Product description updated successfully',
+            data: updatedProduct
+          });
+        } else {
+          reject(
+            new Error('Product description update failed or ID not found')
+          );
+        }
+      } catch (error) {
+        reject(new Error('Database error: ' + error.message));
+      }
+    });
+  },
+  deleteProductDescription: async (id) => {
+    return new Promise((resolve, reject) => {
+      try {
+        // Delete query
+        const query = 'DELETE FROM tbl_product_cms WHERE id = $1 RETURNING *';
+
+        db.oneOrNone(query, [id])
+          .then((deleted) => {
+            if (deleted) {
+              resolve({
+                status: 1,
+                message: 'Product description deleted successfully',
+                data: deleted
+              });
+            } else {
+              reject(new Error('Product description not found'));
+            }
+          })
+          .catch((error) => {
+            reject(new Error('Database error: ' + error.message));
+          });
+      } catch (error) {
+        reject(
+          new Error('Error deleting product description: ' + error.message)
+        );
+      }
+    });
+  },
+  getOneProductDescription : async (id) =>{
+    return new Promise ((resolve , reject)=>{
+      try {
+        const query = 'select * from tbl_product_cms where id = $1'
+        db.oneOrNone(query , [id])
+        .then((data)=>{
+          resolve(data)
+        })
+        .catch((error) => {
+          reject(new Error('Database error: ' + error.message));
+        });
+      }catch (error) {
+        reject(
+          new Error('Error deleting product description: ' + error.message)
+        );
+      }
+    })
+  }
 };
 
 export default cmsModel;

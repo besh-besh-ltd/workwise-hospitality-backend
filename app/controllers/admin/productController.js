@@ -195,6 +195,8 @@ const productController = {
   categoryList: async (req, res, next) => {
     try {
       let page, limit, offset;
+      let parent_id = req.query.parent_id; // Assign parent_id properly
+  
       if (req.query.page && req.query.page > 0) {
         page = req.query.page;
         limit = req.query.limit || Config.globalAdminLimit;
@@ -203,21 +205,33 @@ const productController = {
         limit = Config.globalAdminLimit;
         offset = 0;
       }
-
+  
+      // If parent_id is present, fetch subcategories and return response immediately
+      if (parent_id) {
+        let subcategories = await productModel.getSubCategory(parent_id);
+        return res.status(200)
+          .json({
+            status: 1,
+            data: subcategories
+          })
+          .end();
+      }
+  
+      // If no parent_id, fetch main category list
       let categoryList = await productModel.getCategoryList(limit, offset);
       let categoryCount = await productModel.getCategoryListCount();
-      res
-        .status(200)
+  
+      res.status(200)
         .json({
           status: 1,
           data: categoryList,
           total_count: categoryCount.length
         })
         .end();
+  
     } catch (error) {
       logError(error);
-      res
-        .status(400)
+      res.status(400)
         .json({
           status: 3,
           message: Config.errorText.value

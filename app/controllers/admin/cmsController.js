@@ -1689,8 +1689,161 @@ const cmsController = {
       console.error('Error during deletion:', error);
       next(error); // Pass error to error-handling middleware
     }
+  },
+  addProductDescription : async (req , res , next ) =>{
+     const { product_id , content  } = req.body
+
+     try {
+          const productDescriptionObj = {
+            product_id: product_id,
+           description: content
+          };
+          console.log("---------------------------",product_id,content);
+          const response = await cmsModel.addProductDescription(productDescriptionObj);
+         
+          if (response) {
+            res.status(200).json({
+              status: 1,
+              message: 'Product description added successfully'
+            }).end();
+          } else {
+            res.status(400).json({
+              status: 3,
+              message: Config.errorText.value
+            }).end();
+          }
+            } catch (error) {
+          logError(error);
+          res.status(500).json({
+            status: 3,
+            message: Config.errorText.value
+          }).end();
+            }
+  },
+  getProductDescription : async (req , res , next) =>{
+    try {
+      
+      const productDescription = await cmsModel.getProductDescription();
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: productDescription
+        })
+        .end();
+    } catch (error) {
+      res.status(500).json({
+        success: false, 
+        message: 'Failed to fetch locations',
+        error: error.message
+    })
+      
+    }
+  },
+  updateProductdescription: async (req, res, next) => {
+    const { id, product_id, description } = req.body;
+
+
+    
+  
+    // Check if the product description exists
+    try {
+      const existingProductDescription = await cmsModel.getProductDescriptionById(id);
+      
+      if (!existingProductDescription) {
+        return res.status(404).json({
+          status: 2,
+          message: "Product description not found"
+        }).end();
+      }
+  
+      const updateProductObj = {
+        id: id,
+        product_id: product_id,
+        description: description
+      };
+  
+      const response = await cmsModel.updateProductDescription(updateProductObj);
+  
+      if (!response) {
+        res.status(400).json({
+          status: 2,
+          message: "Unable to update Product description"
+        }).end();
+      } else {
+        res.status(200).json({
+          status: 1,
+          message: "Product description updated successfully"
+        }).end();
+      }
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
+        status: 3,
+        message: Config.errorText.value
+      }).end();
+    }
+  },
+  deleteProductDescription: async (req, res, next) => {
+    const { id } = req.params;
+  
+    try {
+      // Check if the product description exists
+      const existingProduct = await cmsModel.getProductDescriptionById(id);
+  
+      if (!existingProduct) {
+        return res.status(404).json({
+          status: 0,
+          message: "Product description not found",
+        }).end();
+      }
+  
+      // Proceed with deletion if it exists
+      const response = await cmsModel.deleteProductDescription(id);
+  
+      if (response) {
+        res.status(200).json({
+          status: 1,
+          message: "Product description deleted successfully",
+        }).end();
+      } else {
+        res.status(400).json({
+          status: 0,
+          message: "Failed to delete product description",
+        }).end();
+      }
+    } catch (error) {
+      res.status(500).json({
+        status: 0,
+        message: "Internal server error",
+      }).end();
+    }
+  },
+  getOneProductDescription : async (req , res , next) => {
+    const { id } = req.params;
+    try {
+      let response =  await cmsModel.getOneProductDescription(id);
+
+      if (response) {
+        res.status(200).json({
+          status: 1,
+          data: response,
+        }).end();
+      }  else {
+        res.status(400).json({
+          status: 0,
+          message: "Failed to delete product description",
+        }).end();
+      }
+    } catch (error) {
+      res.status(500).json({
+        status: 0,
+        message: "Internal server error",
+      }).end();
+    }
   }
   
+   
   
 };
 export default cmsController;
