@@ -1149,8 +1149,10 @@ const productModel = {
     productName,
     filterProduct,
     isFeatured,
-    userId
+    userId,
+    onlyAddedByAdmin = null
   ) => {
+
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
 
@@ -1172,6 +1174,12 @@ const productModel = {
       if (isFeatured && isFeatured !== '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
+
+      if(onlyAddedByAdmin) {
+        dynamicQuery += ` AND PD.created_by = 1`;
+
+      }
+
 
        // Determine the ORDER BY clause based on whether productName is provided
     let orderByClause = productName && productName !== ''
@@ -1261,7 +1269,7 @@ const productModel = {
         });
     });
   },
-  getProductCount: async (vendorId, productName, filterProduct, isFeatured, userId, onlyAddedByAdmin) => {
+  getProductCount: async (vendorId, productName, filterProduct, isFeatured, userId) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (productName && productName != '') {
@@ -1276,9 +1284,6 @@ const productModel = {
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND tbl_product.is_featured = '${isFeatured}'`;
       }      
-      if(onlyAddedByAdmin && onlyAddedByAdmin!= ''){
-        dynamicQuery += ` AND tbl_product.created_by = 1`;
-      }
       db.any(
         `select * from tbl_product
       LEFT JOIN tbl_users USERS ON tbl_product.created_by = USERS.id 

@@ -2217,10 +2217,11 @@ const productController = {
       let vendorId = req.query?.vendorId;
       let isFeatured = req.query?.isFeatured;
       let filterProduct = {};
+      const onlyAddedByAdmin = req.query?.onlyAddedByAdmin;
+     
       if (vendorApprove) {
         filterProduct = await productModel.getApprovedByProduct(vendorApprove);
       }
-
       let productList = await productModel.getProductList(
         limit,
         offset,
@@ -2228,14 +2229,15 @@ const productController = {
         productName,
         filterProduct,
         isFeatured,
-        req.user.id
+        req.user.id,
+        onlyAddedByAdmin   
       );
       let productCount = await productModel.getProductCount(
         vendorId,
         productName,
         filterProduct,
         isFeatured,
-        req.user.id
+        req.user.id,
       );
 
     const approve_count = productCount?.filter((item)=>{ return item.is_approve==1  })?.length || 0
@@ -2248,6 +2250,7 @@ const productController = {
           total_count: productCount.length,
           approve_count:  approve_count,
           disapprove_count: productCount?.length - approve_count,
+
         })
         .end();
     } catch (error) {
