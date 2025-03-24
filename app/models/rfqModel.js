@@ -1824,6 +1824,7 @@ WITH RankedProducts AS (
         p.id AS product_id,
         p.name AS product_name,
         p.description,
+        p.slug,
         pc.category_name AS category_name,
         pc.category_id AS category_id,
         CASE WHEN p.tds_new_file_name IS NULL THEN NULL ELSE p.tds_new_file_name END AS pd_tds_file_url,
@@ -1848,7 +1849,7 @@ WITH RankedProducts AS (
       AND p.created_by NOT IN (1, 111)  -- Exclude specific creators
 )
 SELECT 
-    product_id, product_name, description, category_name, category_id, pd_tds_file_url, pd_qap_file_url
+    product_id, product_name, description, category_name, category_id, pd_tds_file_url, pd_qap_file_url, slug
 FROM RankedProducts
 WHERE row_num_by_name_category = 1
   AND row_num_by_id = 1;  -- Ensure unique products both by ID and by name/category combination

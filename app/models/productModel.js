@@ -155,95 +155,80 @@ const productModel = {
         });
     });
   },
-  getSubCategory: async (parent_id=null, slug=null) => {
+  getSubCategory: async (parent_id = null, slug = null) => {
     return new Promise(async (resolve, reject) => {
       try {
- 
         if (!parent_id && !slug) {
           throw new Error('Either parent_id or slug must be provided');
         }
-
-        // fetch the data based on parent_id
+  
+        // Case 1: Fetch by parent_id directly
         if (parent_id) {
-          return await db.any(
+          const result = await db.any(
             `SELECT * FROM tbl_category WHERE parent_id = $1 AND is_deleted != '1'`,
             [parent_id]
           );
+          return resolve(result);
         }
-        
-        if(parent_id){
-          db.any(
-            `SELECT * FROM tbl_category WHERE parent_id = $1 AND is_deleted != '1'`,
-            [parent_id]
-          )
-            .then((data) => resolve(data))
-            .catch((error) => reject(new Error(error)));
-        }
-        // fetch data via parent_id over here
-
-
-        //  fetch the data based on slug
+  
+        // Case 2: Fetch by slug path
         const slugParts = slug.split(",");
         if (slugParts.length === 0) {
           return reject(new Error("Slug cannot be empty after splitting"));
         }
   
-        // Use a recursive CTE to build the category tree and find the matching path
         const query = `
           WITH RECURSIVE category_hierarchy AS (
-            -- Base case: Start with top-level categories (parent_id = 0)
             SELECT id, parent_id, slug, CAST(ARRAY[slug] AS character varying[]) AS slug_path, 1 AS depth
             FROM tbl_category
             WHERE parent_id = 0 AND is_deleted != '1'
   
             UNION ALL
   
-            -- Recursive case: Build the tree by adding child categories
             SELECT c.id, c.parent_id, c.slug, ch.slug_path || c.slug, ch.depth + 1
             FROM tbl_category c
             INNER JOIN category_hierarchy ch ON c.parent_id = ch.id
             WHERE c.is_deleted != '1'
           ),
           matching_path AS (
-            -- Find the path that matches the given slug parts
             SELECT id
             FROM category_hierarchy
             WHERE slug_path = $1::character varying[]
             AND depth = $2
             LIMIT 1
+          ),
+          selected_id AS (
+            SELECT id FROM matching_path
           )
-          -- Fetch subcategories of the matching category
           SELECT 
-            CASE 
-              WHEN (SELECT id FROM matching_path) IS NULL 
-              THEN NULL 
-              ELSE (
-                SELECT json_agg(
-                  json_build_object(
-                    'id', id,
-                    'title', title,
-                    'parent_id', parent_id,
-                    'slug', slug
-                  )
+            (SELECT id FROM selected_id) AS matched_category_id,
+            (
+              SELECT json_agg(
+                json_build_object(
+                  'id', id,
+                  'title', title,
+                  'parent_id', parent_id,
+                  'slug', slug
                 )
-                FROM tbl_category
-                WHERE parent_id = (SELECT id FROM matching_path) AND is_deleted != '1'
               )
-            END AS subcategories;
+              FROM tbl_category
+              WHERE parent_id = (SELECT id FROM selected_id) AND is_deleted != '1'
+            ) AS subcategories;
         `;
   
         const params = [slugParts, slugParts.length];
         const result = await db.one(query, params);
   
-        if (result.subcategories === null) {
-          return reject(
-            new Error(
-              `Category path '${slug}' not found (one or more slugs in the hierarchy do not exist)`
-            )
-          );
+        // Return 404-like response if slug matched but no subcategories found
+        if (!result.subcategories || result.subcategories.length === 0) {
+          return resolve({
+            status: 404,
+            message: 'No subcategories found for the given slug path.',
+            category_id: result.matched_category_id
+          });
         }
   
-        resolve(result.subcategories || []);
+        resolve(result.subcategories);
       } catch (err) {
         reject(new Error(err.message));
       }

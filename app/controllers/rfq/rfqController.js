@@ -2999,13 +2999,14 @@ const rfqController = {
       const category_id = req.body?.category_id ? req.body?.category_id : '';
 
       const subCategoryList = await rfqModel.getSubcategories(category_id)
-    
-      if(subCategoryList || subCategoryList?.length==0){
+   
+      if(!subCategoryList || subCategoryList?.length==0){
         return res
         .status(404)
         .json({
           status: 3,
-          message: "Products Not Found for the requested category"
+          message: "Products Not Found for the requested category",
+          subCategoryList: subCategoryList,
         })
         .end();
       }
