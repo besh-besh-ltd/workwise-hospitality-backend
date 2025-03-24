@@ -1261,7 +1261,7 @@ const productModel = {
         });
     });
   },
-  getProductCount: async (vendorId, productName, filterProduct, isFeatured, userId) => {
+  getProductCount: async (vendorId, productName, filterProduct, isFeatured, userId, onlyAddedByAdmin) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (productName && productName != '') {
@@ -1276,6 +1276,9 @@ const productModel = {
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND tbl_product.is_featured = '${isFeatured}'`;
       }      
+      if(onlyAddedByAdmin && onlyAddedByAdmin!= ''){
+        dynamicQuery += ` AND tbl_product.created_by = 1`;
+      }
       db.any(
         `select * from tbl_product
       LEFT JOIN tbl_users USERS ON tbl_product.created_by = USERS.id 
@@ -2197,6 +2200,55 @@ WHERE tbl_product.name = $1`,
         });
     });
   },  
+  getProductBySlugAndCategorySlug: async (productSlug) => {
+    return new Promise(function (resolve, reject) {
+      db.oneOrNone(
+        `
+WITH RECURSIVE category_hierarchy AS (
+    SELECT id, title, slug, parent_id, status, is_deleted, 1 AS depth
+    FROM tbl_category
+    WHERE slug = 'main-category' AND parent_id = 0 AND is_deleted = 0 AND status = 1
+    UNION ALL
+    SELECT c.id, c.title, c.slug, c.parent_id, c.status, c.is_deleted, ch.depth + 1 AS depth
+    FROM tbl_category c
+    INNER JOIN category_hierarchy ch ON c.parent_id = ch.id
+    WHERE c.slug = ANY(ARRAY['main-category', 'sub-category']::varchar[])
+      AND c.slug = (ARRAY['main-category', 'sub-category']::varchar[])[ch.depth + 1]
+      AND c.is_deleted = 0
+      AND c.status = 1
+)
+SELECT 
+    p.id AS product_id,
+    p.name AS product_name,
+    p.slug AS product_slug,
+    c.id AS category_id,
+    c.title AS category_title,
+    c.slug AS category_slug,
+    c.depth AS category_depth
+FROM 
+    tbl_product p
+INNER JOIN 
+    product_categories pc ON p.id = pc.product_id
+INNER JOIN 
+    category_hierarchy c ON pc.category_id = c.id
+WHERE 
+    p.slug = 'product-slug'
+    AND p.is_deleted = 0
+    AND p.status = 1
+    AND c.depth = 2
+LIMIT 1;
+        `,
+        [productSlug] // Parameters for $1 and $2
+      )
+        .then(function (data) {
+          resolve(data); // Returns the product object or null if not found
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
 };
 
 export default productModel;

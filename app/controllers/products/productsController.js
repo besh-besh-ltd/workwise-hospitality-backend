@@ -1437,6 +1437,7 @@ const ProductsController = {
         .end();
     }
   },
+  // not in use delete this ASAP, after reviewing all the code
   searchProductsByCategory: async (req, res, next) => {
     try {
       const { product_id, category_id } = req.query;
@@ -1470,6 +1471,31 @@ const ProductsController = {
         .json({ error: 'Internal server error. Please try again later.' })
         .end();
     }
+  },
+
+  getProductBySlugAndCategorySlug: async (req, res, next) => {
+    try {
+      const { productSlug } = req.query;
+
+      if (!productSlug) {
+        return res
+          .status(400)
+          .json({ error: 'Either productSlug is required.' })
+          .end();
+      }
+
+      const productData = await productModel.getProductBySlugAndCategorySlug(productSlug)
+
+      return res.status(200).json({ status: 1, data: productData }).end();
+      
+    } catch (error) {
+      console.error('Error in searchProductsByCategory:', error);
+      return res
+        .status(500)
+        .json({ error: 'Internal server error. Please try again later.' })
+        .end();
+    }
   }
+
 };
 export default ProductsController;
