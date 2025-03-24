@@ -125,7 +125,7 @@ ProductsRoutes.get(
 
   ProductsRoutes.get(
     '/products-by-name-category-slug',
-     ProductsController.searchProductsByCategory
+     ProductsController.getProductBySlugAndCategorySlug
     );
 //End API
 

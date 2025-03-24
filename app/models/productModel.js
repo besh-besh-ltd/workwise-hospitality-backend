@@ -2205,20 +2205,26 @@ WHERE tbl_product.name = $1`,
         });
     });
   },  
-  getProductBySlugAndCategorySlug: async (productSlug) => {
+  getProductBySlugAndCategorySlug: async (slugString) => {
+    // Split the slug string into array and separate category slugs from product slug
+    const slugs = slugString.split(',');
+    const productSlug = slugs.pop(); // Last item is product slug
+    const categorySlugs = slugs; // Remaining items are category slugs
+
     return new Promise(function (resolve, reject) {
-      db.oneOrNone(
-        `
+        db.oneOrNone(`
 WITH RECURSIVE category_hierarchy AS (
     SELECT id, title, slug, parent_id, status, is_deleted, 1 AS depth
     FROM tbl_category
-    WHERE slug = 'main-category' AND parent_id = 0 AND is_deleted = 0 AND status = 1
+    WHERE slug = $1
+      AND parent_id = 0 
+      AND is_deleted = 0 
+      AND status = 1
     UNION ALL
     SELECT c.id, c.title, c.slug, c.parent_id, c.status, c.is_deleted, ch.depth + 1 AS depth
     FROM tbl_category c
     INNER JOIN category_hierarchy ch ON c.parent_id = ch.id
-    WHERE c.slug = ANY(ARRAY['main-category', 'sub-category']::varchar[])
-      AND c.slug = (ARRAY['main-category', 'sub-category']::varchar[])[ch.depth + 1]
+    WHERE c.slug = ANY($2::varchar[])
       AND c.is_deleted = 0
       AND c.status = 1
 )
@@ -2226,34 +2232,45 @@ SELECT
     p.id AS product_id,
     p.name AS product_name,
     p.slug AS product_slug,
+    p.description AS product_description,
+    p.manufacturer,
+    p.availability,
+    p.sku,
     c.id AS category_id,
     c.title AS category_title,
     c.slug AS category_slug,
-    c.depth AS category_depth
+    c.depth AS category_depth,
+    cms.description AS cms_content,
+    cms.title AS cms_title
 FROM 
     tbl_product p
 INNER JOIN 
-    product_categories pc ON p.id = pc.product_id
+    tbl_product_categories pc ON p.id = pc.product_id
 INNER JOIN 
     category_hierarchy c ON pc.category_id = c.id
+LEFT JOIN 
+    tbl_product_cms cms ON p.id = cms.product_id
 WHERE 
-    p.slug = 'product-slug'
+    p.slug = $3
     AND p.is_deleted = 0
     AND p.status = 1
-    AND c.depth = 2
+    AND p.created_by = 1
 LIMIT 1;
         `,
-        [productSlug] // Parameters for $1 and $2
-      )
+        [
+            categorySlugs.length > 0 ? categorySlugs[0] : null, // $1: First category slug (root) or null
+            categorySlugs.length > 0 ? categorySlugs : '{}',    // $2: Array of category slugs or empty array
+            productSlug                                        // $3: Product slug
+        ])
         .then(function (data) {
-          resolve(data); // Returns the product object or null if not found
+            resolve(data);
         })
         .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
+            let error = new Error(err.message);
+            reject(error);
         });
     });
-  },
+},
 };
 
 export default productModel;
