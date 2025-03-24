@@ -196,12 +196,21 @@ const ProductsController = {
   },
   parentCategoryList: async (req, res, next) => {
     try {
+
+      const {slug } = req.query;
+      let subcategories = null    
+
       const parentCategories = await productModel.getParentCategoryList();
+
+        if (!slug || typeof slug !== "string" || slug != "all") {
+          subcategories = await productModel.getSubCategory("",slug);
+        }
+
       res
         .status(200)
         .json({
           status: 1,
-          data: parentCategories
+          data: {parentCategories: parentCategories, subcategories: subcategories || []}
         })
         .end();
     } catch (error) {
