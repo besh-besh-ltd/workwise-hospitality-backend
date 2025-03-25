@@ -1875,6 +1875,37 @@ const cmsController = {
         })
         .end();
     }
+  },
+  uploadProductImages:  async (req , res , next) => {
+    try {
+
+      const productId = req.body.productId
+      const productFiles = req.files.images;
+
+      let featuredImageObj = {
+        product_id: productId,
+        is_featured: 0,
+        original_image_name: productFiles[0]?.originalname,
+        new_image_name: `${Config.download_url}/product_image/${productFiles[0]?.filename}`        
+      };
+      const result = await productModel.insertProductImages(featuredImageObj);
+
+      res.status(200).json({
+        status: 1,
+        message: 'Images uploaded successfully',
+      }).end();
+      
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value,
+          data:"ok"
+        })
+        .end();
+    }
   }
   
    

@@ -343,4 +343,10 @@ cmsRoutes.post(
  cmsController.productTechSpecAdd
 )
 
+cmsRoutes.post(
+  '/upload-product-images',
+  passportSignIn,
+  schema_posts.upload_product_images,
+  cmsController.uploadProductImages
+)
 export default cmsRoutes;
