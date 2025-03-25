@@ -323,7 +323,6 @@ cmsRoutes.get(
   '/product-description-get/:id',
   passportSignIn,
   cmsController.getOneProductDescription
-
 )
 
 cmsRoutes.put(
@@ -337,4 +336,11 @@ cmsRoutes.delete(
   passportSignIn,
   cmsController.deleteProductDescription
 )
+
+cmsRoutes.post(
+  '/product-tech-specs-add',
+  passportSignIn,
+ cmsController.productTechSpecAdd
+)
+
 export default cmsRoutes;

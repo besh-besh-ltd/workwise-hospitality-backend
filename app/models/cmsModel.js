@@ -2710,7 +2710,49 @@ LIMIT $1 OFFSET $2;
         );
       }
     })
+  },
+  
+  saveProductTechSpec: (productID, techSpec) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        // Validate input
+        if (!productID || !Array.isArray(techSpec) || techSpec.length === 0) {
+          return reject(new Error("No specs to insert or invalid product ID"));
+        }
+  
+        // Convert input to array of arrays for parameterized query
+        const values = techSpec.map(item => [
+          productID,
+          item.key,
+          item.value
+        ]);
+  
+        const query = `
+          INSERT INTO tbl_product_tech_spec (product_id, title, value)
+          VALUES ($1:csv)
+          RETURNING *;
+        `;
+  
+        // Convert to pg-promise formatted values
+        const formatted = values.map(v => pgp.as.format("($1, $2, $3)", v)).join(',');
+  
+        const finalQuery = `
+          INSERT INTO tbl_product_tech_spec (product_id, title, value)
+          VALUES ${formatted}
+          RETURNING *;
+        `;
+  
+        const result = await db.manyOrNone(finalQuery);
+        resolve(result);
+  
+      } catch (error) {
+        console.error('Error saving product tech specs:', error);
+        reject(new Error('Failed to save product tech specs'));
+      }
+    });
   }
+  
+  
 };
 
 export default cmsModel;
