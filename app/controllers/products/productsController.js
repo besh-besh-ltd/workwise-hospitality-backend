@@ -1485,11 +1485,11 @@ const ProductsController = {
       }
 
       const productData = await productModel.getProductBySlugAndCategorySlug(productSlug)
-      // const productImages = await productModel.getProductImages(productData.id, 0)
+      const productImages = await productModel.getProductImages(productData?.product_id, 0)
       const productSpec = await productModel.getProductTechSpecByID(productData?.product_id)
       const result = {
         productData: productData,
-        // productImages: productImages,
+        productImages: productImages,
         productSpec: productSpec
       }
 
