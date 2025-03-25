@@ -1,6 +1,7 @@
 import db from '../config/dbConn.js';
 import pgp from 'pg-promise';
 import Config from '../config/app.config.js';
+import { logError } from '../helper/common.js';
 
 const productModel = {
   parentIdExists: async (id) => {
@@ -2271,6 +2272,27 @@ LIMIT 1;
         });
     });
 },
+
+getProductTechSpecByID: async (productId) => {
+  console.log('productId--', productId);
+  return new Promise(function (resolve, reject) {
+    db.any(  'SELECT title, value FROM tbl_product_tech_spec WHERE product_id = $1 ',[productId])
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        logError(err);
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: Config?.errorText?.value || 'Something went wrong',
+          })
+          .end();
+      });
+  });
+}
+
 };
 
 export default productModel;

@@ -1485,8 +1485,15 @@ const ProductsController = {
       }
 
       const productData = await productModel.getProductBySlugAndCategorySlug(productSlug)
+      // const productImages = await productModel.getProductImages(productData.id, 0)
+      const productSpec = await productModel.getProductTechSpecByID(productData?.product_id)
+      const result = {
+        productData: productData,
+        // productImages: productImages,
+        productSpec: productSpec
+      }
 
-      return res.status(200).json({ status: 1, data: productData }).end();
+      return res.status(200).json({ status: 1, data: result }).end();
       
     } catch (error) {
       console.error('Error in searchProductsByCategory:', error);
