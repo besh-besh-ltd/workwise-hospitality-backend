@@ -2274,7 +2274,6 @@ LIMIT 1;
 },
 
 getProductTechSpecByID: async (productId) => {
-  console.log('productId--', productId);
   return new Promise(function (resolve, reject) {
     db.any(  'SELECT title, value FROM tbl_product_tech_spec WHERE product_id = $1 ',[productId])
       .then(function (data) {
