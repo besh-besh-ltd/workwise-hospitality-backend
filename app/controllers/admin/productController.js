@@ -195,6 +195,7 @@ const productController = {
   categoryList: async (req, res, next) => {
     try {
       let page, limit, offset;
+      let parent_id = req.query.parent_id; // Assign parent_id properly  
       if (req.query.page && req.query.page > 0) {
         page = req.query.page;
         limit = req.query.limit || Config.globalAdminLimit;
@@ -203,21 +204,33 @@ const productController = {
         limit = Config.globalAdminLimit;
         offset = 0;
       }
-
+  
+      // If parent_id is present, fetch subcategories and return response immediately
+      if (parent_id) {
+        let subcategories = await productModel.getSubCategory(parent_id, "");
+        return res.status(200)
+          .json({
+            status: 1,
+            data: subcategories
+          })
+          .end();
+      }
+  
+      // If no parent_id, fetch main category list
       let categoryList = await productModel.getCategoryList(limit, offset);
       let categoryCount = await productModel.getCategoryListCount();
-      res
-        .status(200)
+  
+      res.status(200)
         .json({
           status: 1,
           data: categoryList,
           total_count: categoryCount.length
         })
         .end();
+  
     } catch (error) {
       logError(error);
-      res
-        .status(400)
+      res.status(400)
         .json({
           status: 3,
           message: Config.errorText.value
@@ -2204,10 +2217,11 @@ const productController = {
       let vendorId = req.query?.vendorId;
       let isFeatured = req.query?.isFeatured;
       let filterProduct = {};
+      const onlyAddedByAdmin = req.query?.onlyAddedByAdmin;
+     
       if (vendorApprove) {
         filterProduct = await productModel.getApprovedByProduct(vendorApprove);
       }
-
       let productList = await productModel.getProductList(
         limit,
         offset,
@@ -2215,14 +2229,15 @@ const productController = {
         productName,
         filterProduct,
         isFeatured,
-        req.user.id
+        req.user.id,
+        onlyAddedByAdmin   
       );
       let productCount = await productModel.getProductCount(
         vendorId,
         productName,
         filterProduct,
         isFeatured,
-        req.user.id
+        req.user.id,
       );
 
     const approve_count = productCount?.filter((item)=>{ return item.is_approve==1  })?.length || 0
@@ -2235,6 +2250,7 @@ const productController = {
           total_count: productCount.length,
           approve_count:  approve_count,
           disapprove_count: productCount?.length - approve_count,
+
         })
         .end();
     } catch (error) {

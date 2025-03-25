@@ -100,7 +100,7 @@ export const rfqSchemas = {
     contact_number: Joi.string()
       .trim()
       .min(7)
-      .max(15) // Increased to accommodate country codes
+      .max(20) // Increased to accommodate country codes
       .required()
       .regex(/^(?:\+\d{1,4}-)?\d{6,15}$/)
       .messages({

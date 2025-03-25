@@ -1,6 +1,7 @@
 import db from '../config/dbConn.js';
 import pgp from 'pg-promise';
 import Config from '../config/app.config.js';
+import { logError } from '../helper/common.js';
 
 const productModel = {
   parentIdExists: async (id) => {
@@ -155,6 +156,109 @@ const productModel = {
         });
     });
   },
+  getSubCategory: async (parent_id = null, slug = null) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        if (!parent_id && !slug) {
+          throw new Error('Either parent_id or slug must be provided');
+        }
+  
+        // Case 1: Fetch by parent_id directly
+        if (parent_id) {
+          const result = await db.any(
+            `SELECT * FROM tbl_category WHERE parent_id = $1 AND is_deleted != '1'`,
+            [parent_id]
+          );
+          return resolve(result);
+        }
+  
+        // Case 2: Fetch by slug path
+        const slugParts = slug.split(",");
+        if (slugParts.length === 0) {
+          return reject(new Error("Slug cannot be empty after splitting"));
+        }
+  
+        const query = `
+          WITH RECURSIVE category_hierarchy AS (
+            SELECT id, parent_id, slug, CAST(ARRAY[slug] AS character varying[]) AS slug_path, 1 AS depth
+            FROM tbl_category
+            WHERE parent_id = 0 AND is_deleted != '1'
+  
+            UNION ALL
+  
+            SELECT c.id, c.parent_id, c.slug, ch.slug_path || c.slug, ch.depth + 1
+            FROM tbl_category c
+            INNER JOIN category_hierarchy ch ON c.parent_id = ch.id
+            WHERE c.is_deleted != '1'
+          ),
+          matching_path AS (
+            SELECT id
+            FROM category_hierarchy
+            WHERE slug_path = $1::character varying[]
+            AND depth = $2
+            LIMIT 1
+          ),
+          selected_id AS (
+            SELECT id FROM matching_path
+          )
+          SELECT 
+            (SELECT id FROM selected_id) AS matched_category_id,
+            (
+              SELECT json_agg(
+                json_build_object(
+                  'id', id,
+                  'title', title,
+                  'parent_id', parent_id,
+                  'slug', slug
+                )
+              )
+              FROM tbl_category
+              WHERE parent_id = (SELECT id FROM selected_id) AND is_deleted != '1'
+            ) AS subcategories;
+        `;
+  
+        const params = [slugParts, slugParts.length];
+        const result = await db.one(query, params);
+  
+        // Return 404-like response if slug matched but no subcategories found
+        if (!result.subcategories || result.subcategories.length === 0) {
+          return resolve({
+            status: 404,
+            message: 'No subcategories found for the given slug path.',
+            category_id: result.matched_category_id
+          });
+        }
+  
+        resolve(result.subcategories);
+      } catch (err) {
+        reject(new Error(err.message));
+      }
+    });
+  },
+  getProductBycategory : async (category_id) =>{
+    return new Promise((resolve, reject) => {
+      db.any(
+        `SELECT *
+         FROM tbl_product_categories tpc
+         JOIN tbl_product tp ON tpc.product_id = tp.id
+         WHERE tpc.category_id = $1
+         ORDER BY tp.created_at ASC
+         `,
+        [category_id]
+      )
+        .then((data) => resolve(data))
+        .catch((error) => reject(new Error(error)));
+    });
+  },
+  getProductById: async (product_id) => {
+    try {
+      return await db.any(`SELECT * FROM tbl_product WHERE id = $1 & created_by=1`, [product_id]);
+    } catch (error) {
+      throw new Error(error); // Rethrow the error so the caller can handle it
+    }
+  },
+  
+  
   getParentCategoryList: async () => {
     try {
         const query = `
@@ -1046,8 +1150,10 @@ const productModel = {
     productName,
     filterProduct,
     isFeatured,
-    userId
+    userId,
+    onlyAddedByAdmin = null
   ) => {
+
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
 
@@ -1069,6 +1175,12 @@ const productModel = {
       if (isFeatured && isFeatured !== '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
+
+      if(onlyAddedByAdmin) {
+        dynamicQuery += ` AND PD.created_by = 1`;
+
+      }
+
 
        // Determine the ORDER BY clause based on whether productName is provided
     let orderByClause = productName && productName !== ''
@@ -2094,6 +2206,92 @@ WHERE tbl_product.name = $1`,
         });
     });
   },  
+  getProductBySlugAndCategorySlug: async (slugString) => {
+    // Split the slug string into array and separate category slugs from product slug
+    const slugs = slugString.split(',');
+    const productSlug = slugs.pop(); // Last item is product slug
+    const categorySlugs = slugs; // Remaining items are category slugs
+
+    return new Promise(function (resolve, reject) {
+        db.oneOrNone(`
+WITH RECURSIVE category_hierarchy AS (
+    SELECT id, title, slug, parent_id, status, is_deleted, 1 AS depth
+    FROM tbl_category
+    WHERE slug = $1
+      AND parent_id = 0 
+      AND is_deleted = 0 
+      AND status = 1
+    UNION ALL
+    SELECT c.id, c.title, c.slug, c.parent_id, c.status, c.is_deleted, ch.depth + 1 AS depth
+    FROM tbl_category c
+    INNER JOIN category_hierarchy ch ON c.parent_id = ch.id
+    WHERE c.slug = ANY($2::varchar[])
+      AND c.is_deleted = 0
+      AND c.status = 1
+)
+SELECT 
+    p.id AS product_id,
+    p.name AS product_name,
+    p.slug AS product_slug,
+    p.description AS product_description,
+    p.manufacturer,
+    p.availability,
+    p.sku,
+    c.id AS category_id,
+    c.title AS category_title,
+    c.slug AS category_slug,
+    c.depth AS category_depth,
+    cms.description AS cms_content,
+    cms.title AS cms_title
+FROM 
+    tbl_product p
+INNER JOIN 
+    tbl_product_categories pc ON p.id = pc.product_id
+INNER JOIN 
+    category_hierarchy c ON pc.category_id = c.id
+LEFT JOIN 
+    tbl_product_cms cms ON p.id = cms.product_id
+WHERE 
+    p.slug = $3
+    AND p.is_deleted = 0
+    AND p.status = 1
+    AND p.created_by = 1
+LIMIT 1;
+        `,
+        [
+            categorySlugs.length > 0 ? categorySlugs[0] : null, // $1: First category slug (root) or null
+            categorySlugs.length > 0 ? categorySlugs : '{}',    // $2: Array of category slugs or empty array
+            productSlug                                        // $3: Product slug
+        ])
+        .then(function (data) {
+            resolve(data);
+        })
+        .catch(function (err) {
+            let error = new Error(err.message);
+            reject(error);
+        });
+    });
+},
+
+getProductTechSpecByID: async (productId) => {
+  return new Promise(function (resolve, reject) {
+    db.any(  'SELECT title, value FROM tbl_product_tech_spec WHERE product_id = $1 ',[productId])
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        logError(err);
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: Config?.errorText?.value || 'Something went wrong',
+          })
+          .end();
+      });
+  });
+}
+
 };
 
 export default productModel;
