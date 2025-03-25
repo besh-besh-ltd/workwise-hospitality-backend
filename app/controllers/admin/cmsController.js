@@ -1704,7 +1704,8 @@ const cmsController = {
           if (response) {
             res.status(200).json({
               status: 1,
-              message: 'Product description added successfully'
+              message: 'Product description added successfully',
+              data: response
             }).end();
           } else {
             res.status(400).json({

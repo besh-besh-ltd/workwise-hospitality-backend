@@ -2575,13 +2575,15 @@ LIMIT $1 OFFSET $2;
     console.log('getting error here ', productDescriptionObj);
     return new Promise((resolve, reject) => {
       try {
-        let query = `insert into tbl_product_cms (product_id, description) values ($1, $2)`;
-        db.none(query, [
+        let query = `insert into tbl_product_cms (product_id, description) values ($1, $2) RETURNING id
+`;
+        db.one(query, [
           productDescriptionObj.product_id,
           productDescriptionObj.description
         ])
-          .then(() => {
-            resolve({ message: 'Product description added successfully' });
+          .then((data) => {
+            resolve({ message: 'Product description added successfully', id: data.id
+            });
           })
           .catch((error) => {
             reject(
