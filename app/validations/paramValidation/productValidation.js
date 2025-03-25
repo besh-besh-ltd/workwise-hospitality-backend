@@ -664,11 +664,11 @@ const schema_posts = {
       let upload = multer({
         storage: store_product_images,
         limits: {
-          fileSize: 2000000 // Compliant: 2MB
+          fileSize: 20000000 // Compliant: 20MB
         },
         fileFilter: (req, file, cb) => {
           let ext = path.extname(file.originalname).toLowerCase();
-          if (file.fieldname == 'tds' || file.fieldname == 'qap') {
+          if (file.fieldname == 'tds[]' || file.fieldname == 'qap[]') {
             if (ext == '.pdf') {
               cb(null, true);
             } else {

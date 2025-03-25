@@ -9,6 +9,17 @@ import cmsModel from '../../models/cmsModel.js';
 import productModel from '../../models/productModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
 
+let store_product_images = multer.diskStorage({
+  destination: function (req, file, callback) {
+    callback(null, Config.upload.product_image);
+  },
+  filename: function (req, file, callback) {
+    var extention = path.extname(file.originalname);
+    var new_file_name = +new Date() + '-' + uuidv4() + extention;
+    callback(null, new_file_name);
+  }
+});
+
 let store_banner_images = multer.diskStorage({
   destination: function (req, file, callback) {
     callback(null, Config.upload.banner_image);
@@ -1459,82 +1470,52 @@ const schema_posts = {
       });
     }
   },
-  /* create_testimonial: async (req, res, next) => {
+  upload_product_images : async (req, res, next) => {
     try {
-      let upload = multer({
-        storage: store_testimonial_images,
+      const upload = multer({
+        storage: store_product_images,
         limits: {
-          fileSize: 2000000 // Compliant: 8MB
+          fileSize: 20 * 1024 * 1024 // 20MB
         },
         fileFilter: (req, file, cb) => {
-          let ext = path.extname(file.originalname).toLowerCase();
-
-          if (
-            ext == '.png' ||
-            ext == '.jpg' ||
-            ext == '.jpeg' ||
-            ext == '.webp'
-          ) {
+          const ext = path.extname(file.originalname).toLowerCase();
+          const allowedExts = ['.png', '.jpg', '.jpeg', '.webp'];
+          if (allowedExts.includes(ext)) {
             cb(null, true);
           } else {
-            cb(null, false);
-            return cb('Only .png, .jpg, .jpeg format allowed!', null);
+            cb(new Error('Only .png, .jpg, .jpeg, .webp formats allowed!'));
           }
         }
-      }).single('image');
-      upload(req, res, async function (err) {
+      }).fields([
+        { name: 'images', maxCount: 5 }
+      ]);
+  
+      upload(req, res, function (err) {
         if (err) {
-          let data = {};
-          data.file_name = err;
-          res
-            .status(400)
-            .json({
-              status: 2,
-              message: data.file_name
-            })
-            .end();
-        } else {
-          const result = schemas.create_testimonial.validate(req.body, {
-            abortEarly: false
+          return res.status(400).json({
+            status: 2,
+            errors: { file: err.message || err }
           });
-          if (result.error) {
-            let err_msg = {};
-            for (let counter in result.error.details) {
-              let k = result.error.details[counter].context.key;
-              let val = result.error.details[counter].message;
-              err_msg[k] = val;
-            }
-            let return_err = { status: 2, errors: err_msg };
-            return res.status(400).json(return_err);
-          } else {
-            let error = {};
-            let errCount = 0;
-            if (req.method == 'POST' && !req.file) {
-              errCount++;
-              error.file = 'Testimonial image is required';
-            }
-            if (errCount > 0) {
-              res
-                .status(400)
-                .json({
-                  status: 2,
-                  errors: error
-                })
-                .end();
-            } else {
-              next();
-            }
-          }
         }
+  
+        // Optional: check if files were uploaded
+        if (!req.files || !req.files['images']) {
+          return res.status(400).json({
+            status: 2,
+            errors: { images: 'At least one image is required.' }
+          });
+        }
+  
+        next();
       });
     } catch (err) {
-      logError(err);
-      res.status(400).json({
+      console.error(err);
+      res.status(500).json({
         status: 3,
-        message: 'server error'
+        message: 'Server error'
       });
     }
-  }, */
+  },
   create_testimonial: async (req, res, next) => {
     try {
       let upload = multer({

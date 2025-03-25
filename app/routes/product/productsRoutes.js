@@ -116,6 +116,17 @@ ProductsRoutes.get(
   ProductsController.approvedProductList
 );
 
+
+//  delete this api ASAP, after review route again
+ProductsRoutes.get(
+  '/products-search-by-name-or-category',
+   ProductsController.searchProductsByCategory
+  );
+
+  ProductsRoutes.get(
+    '/products-by-name-category-slug',
+     ProductsController.getProductBySlugAndCategorySlug
+    );
 //End API
 
 export default ProductsRoutes;

@@ -138,18 +138,22 @@ const ProductsController = {
 
       // Check if category exists and its parent category
       const idExists = await productModel.categoryIDExist(cat_id);
-      if(!idExists) {
+      if (!idExists) {
         res
-        .status(404)
-        .json({
-          status: 3,
-          message: "Category not exists...!"
-        })
-        .end();
+          .status(404)
+          .json({
+            status: 3,
+            message: 'Category not exists...!'
+          })
+          .end();
       }
 
-      const productList = await productModel.productSearchByCategory(cat_id, limit, offset);
-      console.log(productList)
+      const productList = await productModel.productSearchByCategory(
+        cat_id,
+        limit,
+        offset
+      );
+     
       res
         .status(200)
         .json({
@@ -157,7 +161,6 @@ const ProductsController = {
           data: productList
         })
         .end();
-
     } catch (error) {
       logError(error);
       res
@@ -193,15 +196,23 @@ const ProductsController = {
   },
   parentCategoryList: async (req, res, next) => {
     try {
+
+      const {slug } = req.query;
+      let subcategories = null    
+
       const parentCategories = await productModel.getParentCategoryList();
+
+        if (!slug || typeof slug !== "string" || slug != "all") {
+          subcategories = await productModel.getSubCategory("",slug);
+        }
+
       res
         .status(200)
         .json({
           status: 1,
-          data: parentCategories
+          data: {parentCategories: parentCategories, subcategories: subcategories || []}
         })
         .end();
-
     } catch (error) {
       logError(error);
       res
@@ -574,17 +585,17 @@ const ProductsController = {
       } = req.body;
       // categories = JSON.parse(categories);
       // variations = JSON.parse(variations);
-        // ---------------- approved by ---------------
-        if (approved_id) {
-          // Check if it's a string, and parse only if necessary
-          if (typeof approved_id === 'string') {
-            approved_id = JSON.parse(approved_id); // Ensure it's parsed from a JSON string
-          }
-          // Ensure it's an array of numbers
-          else if (!Array.isArray(approved_id)) {
-            approved_id = [approved_id]; // If it's a single number, convert it to an array
-          }
+      // ---------------- approved by ---------------
+      if (approved_id) {
+        // Check if it's a string, and parse only if necessary
+        if (typeof approved_id === 'string') {
+          approved_id = JSON.parse(approved_id); // Ensure it's parsed from a JSON string
         }
+        // Ensure it's an array of numbers
+        else if (!Array.isArray(approved_id)) {
+          approved_id = [approved_id]; // If it's a single number, convert it to an array
+        }
+      }
       let vendorApproveId = 0;
       if (!approved_id && approved_name) {
         let findVendorApprove =
@@ -665,18 +676,21 @@ const ProductsController = {
           categories = [categories]; // If it's a single number, convert it to an array
         }
 
-        for await (const categoryId of categories) {          
-          const res = await productModel.createProductCategories(categoryId, productId);
+        for await (const categoryId of categories) {
+          const res = await productModel.createProductCategories(
+            categoryId,
+            productId
+          );
         }
-      }  
+      }
 
-       // ---------------- variations ----------------
-       if (variations && Array.isArray(variations)) {
-        for (const { attribute = "", attributeValue = "" } of variations) {
+      // ---------------- variations ----------------
+      if (variations && Array.isArray(variations)) {
+        for (const { attribute = '', attributeValue = '' } of variations) {
           let variantObj = {
             product_id: productId,
             variant_name: attribute,
-            variant_value: attributeValue,
+            variant_value: attributeValue
           };
           await productModel.createProductVariants(variantObj);
         }
@@ -1422,6 +1436,73 @@ const ProductsController = {
         })
         .end();
     }
+  },
+  // not in use delete this ASAP, after reviewing all the code
+  searchProductsByCategory: async (req, res, next) => {
+    try {
+      const { product_id, category_id } = req.query;
+
+      if (!product_id && !category_id) {
+        return res
+          .status(400)
+          .json({ error: 'Either product_id or category_id is required.' })
+          .end();
+      }
+
+      let response;
+
+      if (category_id) {
+        response = await productModel.getProductBycategory(category_id);
+
+        console.log("-------------------------->",response);
+      } else if (product_id) {
+        response = await productModel.getProductById(product_id);
+      }
+
+      if (!response || response.length === 0) {
+        return res.status(404).json({ error: 'No products found.' }).end();
+      }
+
+      return res.status(200).json({ status: 1, data: response }).end();
+    } catch (error) {
+      console.error('Error in searchProductsByCategory:', error);
+      return res
+        .status(500)
+        .json({ error: 'Internal server error. Please try again later.' })
+        .end();
+    }
+  },
+
+  getProductBySlugAndCategorySlug: async (req, res, next) => {
+    try {
+      const { productSlug } = req.query;
+
+      if (!productSlug) {
+        return res
+          .status(400)
+          .json({ error: 'Either productSlug is required.' })
+          .end();
+      }
+
+      const productData = await productModel.getProductBySlugAndCategorySlug(productSlug)
+      const productImages = await productModel.getProductImages(productData?.product_id, 0)
+      const productSpec = await productModel.getProductTechSpecByID(productData?.product_id)
+      const result = {
+        productData: productData,
+        productImages: productImages,
+        productSpec: productSpec
+      }
+
+      return res.status(200).json({ status: 1, data: result }).end();
+      
+    } catch (error) {
+      console.error('Error in searchProductsByCategory:', error);
+      return res
+        .status(500)
+        .json({ error: 'Internal server error. Please try again later.' })
+        .end();
+    }
   }
+
 };
 export default ProductsController;
