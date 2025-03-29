@@ -3,31 +3,59 @@ import Config from '../config/app.config.js';
 import pgp from 'pg-promise';
 
 const vendorModel = {
-  getVendorList: async (limit, offset, organization, verified, name) => {
+  getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (name) {
-        dynamicQuery += `AND (name ILIKE '%${name}%' OR organization_name ILIKE '%${name}%')`;
+        dynamicQuery += `AND (tbl_users.name ILIKE '%${name}%' OR tbl_users.organization_name ILIKE '%${name}%')`;
       }
       if (organization) {
-        dynamicQuery += `AND (organization_name ILIKE '%${organization}%' OR name ILIKE '%${organization}%')`;
+        dynamicQuery += `AND (tbl_users.organization_name ILIKE '%${organization}%' OR tbl_users.name ILIKE '%${organization}%')`;
       }
       if (verified == 't') {
         dynamicQuery += `AND tbl_users.status = 1 `;
       } else if (verified == 'f') {
         dynamicQuery += `AND tbl_users.status = 0 `;
       }
+      if (email) {
+        dynamicQuery += `AND tbl_users.email ILIKE '%${email}%'`;
+      }
+      if (status !== undefined && status !== null) {
+        dynamicQuery += `AND tbl_users.status = ${status}`;
+      }
+      if (dateFrom) {
+        dynamicQuery += `AND tbl_users.created_at >= '${dateFrom}'`;
+      }
+      if (dateTo) {
+        dynamicQuery += `AND tbl_users.created_at <= '${dateTo}'`;
+      }
+
       db.any(
-        `SELECT tbl_users.*,trr.reject_reason,
-        CASE
-        WHEN new_profile_image IS NULL THEN
-        NULL
-        ELSE new_profile_image
-        END AS profile_image  
+        `SELECT 
+          tbl_users.id,
+          tbl_users.name,
+          tbl_users.email,
+          tbl_users.mobile,
+          tbl_users.organization_name,
+          tbl_users.status,
+          tbl_users.new_profile_image,
+          tbl_users.original_profile_image,
+          tbl_users.created_at,
+          tbl_users.updated_at,
+          creator.name AS created_by_name,
+          updater.name AS updated_by_name,
+          trr.reject_reason,
+          CASE
+            WHEN tbl_users.new_profile_image IS NULL THEN NULL
+            ELSE tbl_users.new_profile_image
+          END AS profile_image  
         FROM tbl_users 
-        LEFT JOIN tbl_reject_reason trr ON  tbl_users.reject_reason_id = trr.id
-        WHERE user_type = 3  ${dynamicQuery}
-        ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+        LEFT JOIN tbl_reject_reason trr ON tbl_users.reject_reason_id = trr.id
+        LEFT JOIN tbl_users creator ON tbl_users.created_by = creator.id
+        LEFT JOIN tbl_users updater ON tbl_users.updated_by = updater.id
+        WHERE tbl_users.is_deleted = 0 AND tbl_users.user_type = 3 ${dynamicQuery}
+        ORDER BY tbl_users.created_at DESC 
+        LIMIT $1 OFFSET $2`,
         [limit, offset]
       )
         .then(function (data) {
@@ -40,7 +68,7 @@ const vendorModel = {
     });
   },
  
-getVendorListCount: async (organization, verified, name) => {
+getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo) => {
   return new Promise(function (resolve, reject) {
     let dynamicQuery = 'AND user_type = 3 ';
     if (name) {
@@ -53,6 +81,18 @@ getVendorListCount: async (organization, verified, name) => {
       dynamicQuery += `AND status = 1 `;
     } else if (verified == 'f') {
       dynamicQuery += `AND status = 0 `;
+    }
+    if (email) {
+      dynamicQuery += `AND email ILIKE '%${email}%'`;
+    }
+    if (status !== undefined && status !== null) {
+      dynamicQuery += `AND status = ${status}`;
+    }
+    if (dateFrom) {
+      dynamicQuery += `AND created_at >= '${dateFrom}'`;
+    }
+    if (dateTo) {
+      dynamicQuery += `AND created_at <= '${dateTo}'`;
     }
     const query = `
     SELECT

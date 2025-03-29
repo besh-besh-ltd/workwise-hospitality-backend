@@ -26,7 +26,7 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 const vendorController = {
   vendorList: async (req, res, next) => {
     try {
-      let page, limit, offset, organization, verified, name;
+      let page, limit, offset, organization, verified, name, email, status, dateFrom, dateTo;
       if (req.query.page && req.query.page > 0) {
         page = req.query.page;
         limit = req.query.limit || Config.globalAdminLimit;
@@ -35,28 +35,38 @@ const vendorController = {
         limit = Config.globalAdminLimit;
         offset = 0;
       }
-      if (req.query.name) {
-        name = req.query.name;
-      }
-      if (req.query.organization) {
-        organization = req.query.organization;
-      }
-      if (req.query.verified) {
-        verified = req.query.verified;
-      }
+      
+      // Extract all filter parameters
+      name = req.query.name || null;
+      organization = req.query.organization || null;
+      verified = req.query.verified || null;
+      email = req.query.email?.toLowerCase() || null;
+      status = req.query.status !== undefined ? parseInt(req.query.status) : null;
+      dateFrom = req.query.date_from || null;
+      dateTo = req.query.date_to || null;
 
       let vendorList = await vendorModel.getVendorList(
         limit,
         offset,
         organization,
         verified,
-        name
+        name,
+        email,
+        status,
+        dateFrom,
+        dateTo
       );
+
       let vendorCount = await vendorModel.getVendorListCount(
         organization,
         verified,
-        name
+        name,
+        email,
+        status,
+        dateFrom,
+        dateTo
       );
+
       res
         .status(200)
         .json({
