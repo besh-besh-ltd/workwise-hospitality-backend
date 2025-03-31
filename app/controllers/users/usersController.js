@@ -28,14 +28,13 @@ import puppeteer from 'puppeteer';
 import fs from 'fs';
 import { v4 } from 'uuid';
 import admin from 'firebase-admin';
-import fcm from 'fcm-notification';
 // var serviceAccount = require('../config/privateKey.json');
 import serviceAccount from '../../config/privateKey.json' assert { type: 'json' };
 const certPath = admin.credential.cert(serviceAccount);
 import JWT from 'jsonwebtoken';
 import excelJS from 'exceljs';
 import xlsx from 'xlsx';
-var FCM = new fcm(certPath);
+//var FCM = new fcm(certPath);
 import child_process from 'child_process';
 import {
   schemas,

@@ -21,7 +21,6 @@ import FormData from 'form-data';
 import fs from 'fs';
 import { v4 } from 'uuid';
 import admin from 'firebase-admin';
-import fcm from 'fcm-notification';
 import serviceAccount from '../../config/privateKey.json' assert { type: 'json' };
 import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
 
