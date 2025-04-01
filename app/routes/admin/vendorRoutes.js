@@ -19,6 +19,13 @@ vendorRoutes.get(
   passportSignIn, 
   vendorController.vendorList
 );
+
+vendorRoutes.get(
+  '/admin-users-list',
+  passportSignIn,
+  vendorController.getAdminUsers
+);
+
 vendorRoutes.post(
   '/create-vendor',
   passportSignIn,

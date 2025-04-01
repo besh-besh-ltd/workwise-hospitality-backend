@@ -3,7 +3,7 @@ import Config from '../config/app.config.js';
 import pgp from 'pg-promise';
 
 const vendorModel = {
-  getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo) => {
+  getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (name) {
@@ -28,6 +28,9 @@ const vendorModel = {
       }
       if (dateTo) {
         dynamicQuery += `AND tbl_users.created_at <= '${dateTo}'`;
+      }
+      if (created_by) {
+        dynamicQuery += `AND tbl_users.created_by = ${created_by}`;
       }
 
       db.any(
@@ -68,7 +71,7 @@ const vendorModel = {
     });
   },
  
-getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo) => {
+getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo, created_by) => {
   return new Promise(function (resolve, reject) {
     let dynamicQuery = 'AND user_type = 3 ';
     if (name) {
@@ -94,6 +97,10 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     if (dateTo) {
       dynamicQuery += `AND created_at <= '${dateTo}'`;
     }
+    if (created_by) {
+      dynamicQuery += `AND created_by = ${created_by}`;
+    }
+
     const query = `
     SELECT
       COUNT(*) FILTER (WHERE is_deleted = 0 ${dynamicQuery}) AS total_vendors,
@@ -680,7 +687,25 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     } catch (error) {
       throw new Error(error);
     }
-  }
+  },
+  getAdminUsers: async () => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT id, name, user_type 
+         FROM tbl_users 
+         WHERE is_deleted = 0 
+         AND user_type IN (1, 5, 6)
+         ORDER BY name ASC`
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
 };
 
 export default vendorModel;

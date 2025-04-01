@@ -26,7 +26,7 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 const vendorController = {
   vendorList: async (req, res, next) => {
     try {
-      let page, limit, offset, organization, verified, name, email, status, dateFrom, dateTo;
+      let page, limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by;
       if (req.query.page && req.query.page > 0) {
         page = req.query.page;
         limit = req.query.limit || Config.globalAdminLimit;
@@ -44,6 +44,7 @@ const vendorController = {
       status = req.query.status !== undefined ? parseInt(req.query.status) : null;
       dateFrom = req.query.date_from || null;
       dateTo = req.query.date_to || null;
+      created_by = req.query.created_by || null;
 
       let vendorList = await vendorModel.getVendorList(
         limit,
@@ -54,7 +55,8 @@ const vendorController = {
         email,
         status,
         dateFrom,
-        dateTo
+        dateTo,
+        created_by
       );
 
       let vendorCount = await vendorModel.getVendorListCount(
@@ -64,8 +66,11 @@ const vendorController = {
         email,
         status,
         dateFrom,
-        dateTo
+        dateTo,
+        created_by
       );
+
+      console.log('Filters:', { organization, verified, name, email, status, dateFrom, dateTo, created_by });
 
       res
         .status(200)
@@ -994,6 +999,27 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         .end();
       }
 
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  getAdminUsers: async (req, res, next) => {
+    try {
+      const adminUsers = await vendorModel.getAdminUsers();
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: adminUsers
+        })
+        .end();
     } catch (error) {
       logError(error);
       res
