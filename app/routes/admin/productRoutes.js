@@ -113,6 +113,12 @@ productRoutes.post(
   productController.onlyProductBulkUpload
 ); 
 productRoutes.get(
+  '/product-count',
+  passportSignIn,
+  productController.productCount
+);
+
+productRoutes.get(
   '/product-list',
   passportSignIn,
   productController.productList

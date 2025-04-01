@@ -141,6 +141,55 @@ const spocInputsValidation = (value) => {
 
 
 const productController = {
+  productCount: async (req, res, next) => {
+    try {
+      // Get query parameters
+      let productName = req.query?.productName;
+      let vendorApprove = req.query?.vendorApprove;
+      let vendorId = req.query?.vendorId;
+      let isFeatured = req.query?.isFeatured;
+      let filterProduct = {};
+      const onlyAddedByAdmin = req.query?.onlyAddedByAdmin;
+      
+      if (vendorApprove) {
+        filterProduct = await productModel.getApprovedByProduct(vendorApprove);
+      }
+      
+      // Get all products for counting
+      let productCount = await productModel.getProductCount(
+        vendorId,
+        productName,
+        filterProduct,
+        isFeatured,
+        req.user.id
+      );
+      
+      // Calculate counts
+      const approve_count = productCount?.filter((item) => { return item.is_approve == 1 })?.length || 0;
+      const total_count = productCount?.length || 0;
+      const disapprove_count = total_count - approve_count;
+      
+      res
+        .status(200)
+        .json({
+          status: 1,
+          total_count: total_count,
+          approve_count: approve_count,
+          disapprove_count: disapprove_count
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  
   createCategory: async (req, res, next) => {
     try {
       let adm_id = req.user.id;
