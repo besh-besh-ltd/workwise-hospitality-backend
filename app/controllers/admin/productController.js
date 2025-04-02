@@ -2260,6 +2260,7 @@ const productController = {
       let vendorId = req.query?.vendorId;
       let isFeatured = req.query?.isFeatured;
       let categoryId = req.query?.categoryId;
+      let addedBy = req.query?.addedBy;
       let onlyAddedByAdmin = req.query?.onlyAddedByAdmin === 'true';
       let filterProduct = {};
 
@@ -2285,7 +2286,7 @@ const productController = {
         productName,
         filterProduct,
         isFeatured,
-        req.user.id,
+        addedBy,  // Use the addedBy parameter instead of req.user.id
         onlyAddedByAdmin,
         categoryId
       );
@@ -2296,7 +2297,7 @@ const productController = {
         productName,
         filterProduct,
         isFeatured,
-        req.user.id,
+        addedBy,  // Use the addedBy parameter for consistent filtering
         categoryId
       );
 
@@ -2316,13 +2317,16 @@ const productController = {
       res.status(200).json({
         status: 1,
         data: productList,
-        total_count: total_unfiltered,
-        approve_count: total_approve_unfiltered,
-        disapprove_count: total_disapprove_unfiltered,
+        total_count: total_count,  // Use filtered count as the main count
+        approve_count: approve_count,
+        disapprove_count: disapprove_count,
         is_filtered: Object.values(activeFilters).some(f => f),
         filtered_count: total_count,
         filtered_approve_count: approve_count,
-        filtered_disapprove_count: disapprove_count
+        filtered_disapprove_count: disapprove_count,
+        page,
+        limit,
+        total_pages: Math.ceil(total_count / limit)
       }).end();
 
     } catch (error) {

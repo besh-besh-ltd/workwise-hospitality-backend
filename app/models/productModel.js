@@ -1182,10 +1182,13 @@ const productModel = {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
 
+      // Filter by added_by
+      if (userId && userId !== '') {
+        dynamicQuery += ` AND (PD.added_by = '${userId}' OR PD.created_by = '${userId}')`;
+      }
       // Filter admin-added products
       if (onlyAddedByAdmin) {
         dynamicQuery += ` AND PD.created_by = 1`;
-
       }
 
 
@@ -1233,6 +1236,11 @@ const productModel = {
             WHERE pc.product_id = PD.id
         )
       ${dynamicQuery}
+      ${categoryId ? `AND EXISTS (
+            SELECT 1 FROM tbl_product_categories pc2
+            WHERE pc2.product_id = PD.id 
+            AND pc2.category_id = ${categoryId}
+          )` : ''}
       ${orderByClause}
         LIMIT $1 OFFSET $2`;
       db.any(query, [limit, offset])
