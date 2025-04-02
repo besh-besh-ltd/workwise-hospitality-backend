@@ -2117,7 +2117,7 @@ const productController = {
       // };
 
       // Convert sheet to JSON
-      // console.log(sheet);
+      //      //      // console.log(sheet);
       const jsonData = xlsx.utils.sheet_to_json(sheet);
 
       console.log(jsonData);
@@ -2251,26 +2251,33 @@ const productController = {
   },
   productList: async (req, res, next) => {
     try {
-      let page, limit, offset;
-      if (req.query.page && req.query.page > 0) {
-        page = req.query.page;
-        limit = req.query.limit || Config.globalAdminLimit;
-        offset = (page - 1) * limit;
-      } else {
-        limit = Config.globalAdminLimit;
-        offset = 0;
-      }
+      let page = parseInt(req.query.page) || 1;
+      let limit = parseInt(req.query.limit) || Config.globalAdminLimit;
+      let offset = (page - 1) * limit;
 
       let productName = req.query?.productName;
       let vendorApprove = req.query?.vendorApprove;
       let vendorId = req.query?.vendorId;
       let isFeatured = req.query?.isFeatured;
+      let categoryId = req.query?.categoryId;
+      let onlyAddedByAdmin = req.query?.onlyAddedByAdmin === 'true';
       let filterProduct = {};
-      const onlyAddedByAdmin = req.query?.onlyAddedByAdmin;
-     
+
+      // Track which filters are active
+      const activeFilters = {
+        productName: !!productName,
+        vendorApprove: !!vendorApprove,
+        vendorId: !!vendorId,
+        isFeatured: !!isFeatured,
+        categoryId: !!categoryId,
+        onlyAddedByAdmin: onlyAddedByAdmin
+      };
+
       if (vendorApprove) {
         filterProduct = await productModel.getApprovedByProduct(vendorApprove);
       }
+
+      // Get filtered products
       let productList = await productModel.getProductList(
         limit,
         offset,
@@ -2279,38 +2286,51 @@ const productController = {
         filterProduct,
         isFeatured,
         req.user.id,
-        onlyAddedByAdmin   
+        onlyAddedByAdmin,
+        categoryId
       );
-      let productCount = await productModel.getProductCount(
+
+      // Get total counts with all active filters
+      let filteredCount = await productModel.getProductCount(
         vendorId,
         productName,
         filterProduct,
         isFeatured,
         req.user.id,
+        categoryId
       );
 
-    const approve_count = productCount?.filter((item)=>{ return item.is_approve==1  })?.length || 0
+      // Calculate counts
+      const approve_count = filteredCount.filter(item => item.is_approve === 1).length;
+      const total_count = filteredCount.length;
+      const disapprove_count = total_count - approve_count;
 
-      res
-        .status(200)
-        .json({
-          status: 1,
-          data: productList,
-          total_count: productCount.length,
-          approve_count:  approve_count,
-          disapprove_count: productCount?.length - approve_count,
+      // Get unfiltered total counts for comparison
+      let unfilteredCount = await productModel.getProductCount(
+        null, null, null, null, req.user.id, null
+      );
+      const total_unfiltered = unfilteredCount.length;
+      const total_approve_unfiltered = unfilteredCount.filter(item => item.is_approve === 1).length;
+      const total_disapprove_unfiltered = total_unfiltered - total_approve_unfiltered;
 
-        })
-        .end();
+      res.status(200).json({
+        status: 1,
+        data: productList,
+        total_count: total_unfiltered,
+        approve_count: total_approve_unfiltered,
+        disapprove_count: total_disapprove_unfiltered,
+        is_filtered: Object.values(activeFilters).some(f => f),
+        filtered_count: total_count,
+        filtered_approve_count: approve_count,
+        filtered_disapprove_count: disapprove_count
+      }).end();
+
     } catch (error) {
       logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
+      res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      }).end();
     }
   },
   adminProductListReview: async (req, res, next) => {
@@ -2478,38 +2498,6 @@ const productController = {
         .end();
     }
   },
-  /*  exportProducts: async (req, res, next) => {
-    try {
-      const { product_id } = req.body;
-
-      let prodList = await productModel.getExportProductList(product_id);
-      if (prodList.length > 0) {
-        const json2csvParser = new Parser();
-        const csv = json2csvParser.parse(prodList);
-        res.attachment('product_list.csv');
-        res.status(200).send(csv);
-        res.download('product_list.csv');
-      } else {
-        res
-          .status(200)
-          .json({
-            status: 1,
-            data: prodList,
-            total_count: prodList.count
-          })
-          .end();
-      }
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  }, */
   exportProducts: async (req, res, next) => {
     try {
       const { product_id } = req.body;
@@ -2881,8 +2869,14 @@ const productController = {
 
         // ---------------- categories ---------------
         // console.log(categories);
-        for await (const { id } of productDetails[0].product_categories) {        
-          await productModel.createProductCategories(id, product.id);
+        for await (const { id } of productDetails[0].product_categories) {
+          let categoryObj = {
+            category_id: id,
+            product_id: product.id
+          };
+          // console.log(categoryObj);
+
+          await productModel.createProductCategories(categoryObj);
         }
 
         for await (const {
