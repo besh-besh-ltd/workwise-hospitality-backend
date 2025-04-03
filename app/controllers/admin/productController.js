@@ -2307,6 +2307,14 @@ const productController = {
       const disapprove_count = total_count - approve_count;
 
       // Get unfiltered total counts for comparison
+      // Parameters for getProductCount in order:
+      // 1. vendorId - null to not filter by vendor
+      // 2. productName - null to not filter by product name
+      // 3. filterProduct - null to not apply any product filters 
+      // 4. isFeatured - null to include both featured and non-featured products
+      // 5. addedBy - req.user.id to get counts for products added by current user
+      // 6. categoryId - null to not filter by category
+      // Passing null for most parameters to get unfiltered total counts across all categories
       let unfilteredCount = await productModel.getProductCount(
         null, null, null, null, req.user.id, null
       );
@@ -3088,7 +3096,11 @@ const productController = {
       if (req.files?.featured && req.files?.featured.length > 0) {
         let featuredImage = await productModel.getProductImages(productId, 1);
         if (featuredImage.length > 0) {
-          await productModel.deleteProductImages( productId, 1, featuredImage[0].id );
+          await productModel.deleteProductImages(
+            productId,
+            1,
+            featuredImage[0].id
+          );
         }
 
         let featuredImageObj = {

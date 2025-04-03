@@ -2256,7 +2256,7 @@ WITH RECURSIVE category_hierarchy AS (
 SELECT 
     p.id AS product_id,
     p.name AS product_name,
-    p.slugAS product_slug,
+    p.slug AS product_slug,
     p.description AS product_description,
     p.manufacturer,
     p.availability,
