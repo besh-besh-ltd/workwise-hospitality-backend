@@ -1151,12 +1151,14 @@ const productModel = {
     filterProduct,
     isFeatured,
     userId,
-    onlyAddedByAdmin = null
+    onlyAddedByAdmin = null,
+    categoryId = null
   ) => {
 
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
 
+      // Product name search with full-text search and similarity
       if (productName && productName !== '') {
         dynamicQuery += `
           AND (
@@ -1164,21 +1166,29 @@ const productModel = {
             OR similarity(PD.name, '${productName}') > 0.2
           )`;
       }
+
+      // Filter by approved products
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
       }
 
+      // Filter by vendor
       if (vendorId && vendorId !== '') {
         dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
       }
 
+      // Filter by featured status
       if (isFeatured && isFeatured !== '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
 
-      if(onlyAddedByAdmin) {
+      // Filter by added_by
+      if (userId && userId !== '') {
+        dynamicQuery += ` AND (PD.added_by = '${userId}' OR PD.created_by = '${userId}')`;
+      }
+      // Filter admin-added products
+      if (onlyAddedByAdmin) {
         dynamicQuery += ` AND PD.created_by = 1`;
-
       }
 
 
@@ -1226,6 +1236,11 @@ const productModel = {
             WHERE pc.product_id = PD.id
         )
       ${dynamicQuery}
+      ${categoryId ? `AND EXISTS (
+            SELECT 1 FROM tbl_product_categories pc2
+            WHERE pc2.product_id = PD.id 
+            AND pc2.category_id = ${categoryId}
+          )` : ''}
       ${orderByClause}
         LIMIT $1 OFFSET $2`;
       db.any(query, [limit, offset])
@@ -1270,7 +1285,7 @@ const productModel = {
         });
     });
   },
-  getProductCount: async (vendorId, productName, filterProduct, isFeatured, userId) => {
+  getProductCount: async (vendorId, productName, filterProduct, isFeatured, userId, categoryId) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (productName && productName != '') {
@@ -1284,14 +1299,23 @@ const productModel = {
       }
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND tbl_product.is_featured = '${isFeatured}'`;
-      }      
+      }
+      if (categoryId) {
+        dynamicQuery += ` AND EXISTS (
+          SELECT 1 FROM tbl_product_categories
+          WHERE tbl_product_categories.product_id = tbl_product.id 
+          AND tbl_product_categories.category_id = ${categoryId}
+        )`;
+      }
+      
       db.any(
-        `select * from tbl_product
-      LEFT JOIN tbl_users USERS ON tbl_product.created_by = USERS.id 
-      WHERE USERS.is_deleted = 0 AND tbl_product.is_deleted = 0 AND tbl_product.is_review = 0 ${dynamicQuery}`
+        `SELECT tbl_product.* FROM tbl_product
+         LEFT JOIN tbl_users ON tbl_product.created_by = tbl_users.id 
+         WHERE tbl_users.is_deleted = 0 
+         AND tbl_product.is_deleted = 0 
+         AND tbl_product.is_review = 0 ${dynamicQuery}`
       )
         .then(function (data) {
-          
           resolve(data);
         })
         .catch(function (err) {
