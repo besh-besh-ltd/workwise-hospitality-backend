@@ -1152,9 +1152,11 @@ const productModel = {
     isFeatured,
     userId,
     onlyAddedByAdmin = null,
-    categoryId = null
+    categoryId = null,
+    dateFrom = null,
+    dateTo = null,
+    status = null
   ) => {
-
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
 
@@ -1186,41 +1188,67 @@ const productModel = {
       if (userId && userId !== '') {
         dynamicQuery += ` AND (PD.added_by = '${userId}' OR PD.created_by = '${userId}')`;
       }
+
       // Filter admin-added products
       if (onlyAddedByAdmin) {
         dynamicQuery += ` AND PD.created_by = 1`;
       }
 
+      // Filter by category
+      if (categoryId) {
+        dynamicQuery += ` AND EXISTS (
+          SELECT 1 FROM tbl_product_categories
+          WHERE tbl_product_categories.product_id = PD.id 
+          AND tbl_product_categories.category_id = ${categoryId}
+        )`;
+      }
 
-       // Determine the ORDER BY clause based on whether productName is provided
-    let orderByClause = productName && productName !== ''
-    ? `ORDER BY rank DESC, similarity_score DESC, PD.created_at DESC`
-    : `ORDER BY PD.created_at DESC`;
-  
-      const query = `
+      // Filter by date range
+      if (dateFrom) {
+        dynamicQuery += ` AND DATE(PD.created_at) >= DATE('${dateFrom}')`;
+      }
+      if (dateTo) {
+        dynamicQuery += ` AND DATE(PD.created_at) <= DATE('${dateTo}')`;
+      }
+
+      // Filter by status (approval status)
+      if (status !== null && status !== undefined && status !== '') {
+        // Convert status to integer to avoid type conversion issues
+        const statusInt = parseInt(status, 10);
+        if (!isNaN(statusInt)) {
+          dynamicQuery += ` AND PD.is_approve = ${statusInt}`;
+        }
+      }
+
+      // Determine the ORDER BY clause based on whether productName is provided
+      let orderByClause = productName && productName !== ''
+        ? `ORDER BY rank DESC, similarity_score DESC, PD.created_at DESC`
+        : `ORDER BY PD.created_at DESC`;
+
+      db.any(`
         SELECT 
-            PD.*,
-            USERS.name as vendor_name,
-            approved_user.name as vendor_approved_by,
-            added_user.name as added_by,
-            trr.reject_reason,
-            tpi.new_image_name,
-            ARRAY (
-                SELECT json_build_object('category_name', tc.title, 'id', tc.id)
-                FROM tbl_product_categories pc
-                LEFT JOIN tbl_category tc ON pc.category_id = tc.id
-                WHERE PD.id = pc.product_id 
-                ORDER BY pc.id
-            ) AS "product_categories",
-            ARRAY (
-                SELECT json_build_object(
-                    'variant_name', pv.variant_name,
-                    'variant_value', pv.variant_value,
-                    'id', pv.id
-                )
-                FROM tbl_product_variants pv 
-                WHERE PD.id = pv.product_id
-            ) AS "product_variants",
+          PD.*,
+          USERS.name as vendor_name,
+          approved_user.name as vendor_approved_by,
+          added_user.name as added_by,
+          trr.reject_reason,
+          tpi.new_image_name,
+          ARRAY (
+            SELECT json_build_object('category_name', tc.title, 'id', tc.id)
+            FROM tbl_product_categories pc
+            LEFT JOIN tbl_category tc ON pc.category_id = tc.id
+            WHERE PD.id = pc.product_id 
+            ORDER BY pc.id
+          ) AS "product_categories",
+          ARRAY (
+            SELECT json_build_object(
+              'variant_name', pv.variant_name,
+              'variant_value', pv.variant_value,
+              'id', pv.id
+            )
+            FROM tbl_product_variants pv 
+            WHERE PD.id = pv.product_id
+          ) AS "product_variants",
           similarity(PD.name, '${productName}') AS similarity_score,
           ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank
         FROM tbl_product PD
@@ -1231,19 +1259,14 @@ const productModel = {
         LEFT JOIN tbl_product_images tpi ON PD.id = tpi.product_id AND tpi.is_featured = 1
         WHERE USERS.is_deleted = 0
         AND EXISTS (
-            SELECT 1 
-            FROM tbl_product_categories pc 
-            WHERE pc.product_id = PD.id
+          SELECT 1 
+          FROM tbl_product_categories pc 
+          WHERE pc.product_id = PD.id
         )
-      ${dynamicQuery}
-      ${categoryId ? `AND EXISTS (
-            SELECT 1 FROM tbl_product_categories pc2
-            WHERE pc2.product_id = PD.id 
-            AND pc2.category_id = ${categoryId}
-          )` : ''}
-      ${orderByClause}
-        LIMIT $1 OFFSET $2`;
-      db.any(query, [limit, offset])
+        ${dynamicQuery}
+        ${orderByClause}
+        LIMIT ${limit} OFFSET ${offset}
+      `)
         .then(function (data) {
           resolve(data);
         })
@@ -1285,7 +1308,7 @@ const productModel = {
         });
     });
   },
-  getProductCount: async (vendorId, productName, filterProduct, isFeatured, userId, categoryId) => {
+  getProductCount: async (vendorId, productName, filterProduct, isFeatured, userId, categoryId, dateFrom, dateTo, status) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (productName && productName != '') {
@@ -1306,6 +1329,19 @@ const productModel = {
           WHERE tbl_product_categories.product_id = tbl_product.id 
           AND tbl_product_categories.category_id = ${categoryId}
         )`;
+      }
+      if (dateFrom) {
+        dynamicQuery += ` AND DATE(tbl_product.created_at) >= DATE('${dateFrom}')`;
+      }
+      if (dateTo) {
+        dynamicQuery += ` AND DATE(tbl_product.created_at) <= DATE('${dateTo}')`;
+      }
+      if (status !== null && status !== undefined && status !== '') {
+        // Convert status to integer to avoid type conversion issues
+        const statusInt = parseInt(status, 10);
+        if (!isNaN(statusInt)) {
+          dynamicQuery += ` AND tbl_product.is_approve = ${statusInt}`;
+        }
       }
       
       db.any(
@@ -1401,921 +1437,7 @@ const productModel = {
           reject(error);
         });
     });
-  },
-  /*  productSearch: async (cat_id, product_name, approve_by) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (product_name && product_name != '') {
-        dynamicQuery += `AND P.name LIKE '%${product_name}%'`;
-      }
-      if (approve_by && approve_by != '') {
-        dynamicQuery += `AND P.created_by = '${approve_by}'`;
-      }
-
-      db.any(
-        `SELECT PC.*,C.title, P.name as product_name,
-        ARRAY
-        (SELECT json_build_object('category_name', TC.title,'id',TC.id,'product_name', PD.name )
-          FROM tbl_category TC 
-          LEFT JOIN tbl_product_categories PCC ON TC.id = PCC.category_id 
-          LEFT JOIN tbl_product PD ON PD.id = PCC.product_id 
-          WHERE  C.parent_id = TC.id) AS "child_category"
-        FROM tbl_product_categories PC 
-         LEFT JOIN tbl_product P ON PC.product_id = P.id 
-         LEFT JOIN tbl_category C ON PC.category_id = C.id 
-         WHERE PC.category_id = $1 ${dynamicQuery}`,
-        [cat_id]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  }, */
-  /*  productSearch: async (prdObj) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (prdObj.product_name && prdObj.product_name != '') {
-        dynamicQuery += ` AND P.name LIKE '%${prdObj.product_name}%'`;
-      }
-      if (prdObj.user_id && prdObj.user_id != '') {
-        dynamicQuery += ` AND P.created_by = '${prdObj.user_id}'`;
-      }
-      if (prdObj.cat_id && prdObj.cat_id != '') {
-        dynamicQuery += ` AND PC.category_id = '${prdObj.cat_id}'`;
-      }
-
-      db.any(
-        `SELECT DISTINCT P.id as product_id,PC.*,C.title as category_name, P.name as product_name,P.description,P.created_by
-        FROM tbl_product P  
-         LEFT JOIN tbl_product_categories PC ON P.id = PC.product_id AND PC.id = (  SELECT id FROM tbl_product_categories 
-          WHERE P.id = tbl_product_categories.product_id 
-          LIMIT 1
-       )
-         LEFT JOIN tbl_category C ON PC.category_id = C.id 
-         WHERE P.status = '1' ${dynamicQuery}`
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  }, */
-  productSearch: async (prdObj) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (prdObj.product_name && prdObj.product_name != '') {
-        dynamicQuery += ` AND P.name LIKE '%${prdObj.product_name}%'`;
-      }
-      if (prdObj.user_id && prdObj.user_id != '') {
-        dynamicQuery += ` AND P.created_by = '${prdObj.user_id}'`;
-      }
-      if (prdObj.cat_id && prdObj.cat_id != '') {
-        dynamicQuery += ` AND C.id = '${prdObj.cat_id}'`;
-      }
-
-      db.any(
-        `SELECT DISTINCT P.id as product_id, C.title as category_name, P.name as product_name,P.description,P.created_by
-        FROM tbl_product P  
-         LEFT JOIN tbl_product_categories PC ON P.id = PC.product_id 
-         LEFT JOIN tbl_category C ON PC.category_id = C.id 
-         WHERE P.status = '1' ${dynamicQuery}`
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  productSearchByCategory: async (cat_id, limit, offset) => {
-    try {
-      const query = `
-        WITH RECURSIVE subcategories AS (
-            SELECT 
-                id,
-                parent_id,
-                title
-            FROM tbl_category
-            WHERE id = $1 AND is_deleted = 0
-
-            UNION ALL
-            SELECT 
-                c.id,
-                c.parent_id,
-                c.title
-            FROM tbl_category c
-            INNER JOIN subcategories sc ON c.parent_id = sc.id
-            WHERE c.is_deleted = 0
-        )
-SELECT *
-FROM (
-        SELECT DISTINCT ON (TP.name)
-            TP.id AS product_id,
-            TP.name AS product_name,
-            TP.description,
-            TP.slug,
-            ARRAY (
-                SELECT 
-                    json_build_object(
-                        'category_name', TC.title,
-                        'id', TC.id,
-                        'parent_id', TC.parent_id
-                    )
-                FROM tbl_product_categories TPC
-                LEFT JOIN tbl_category TC 
-                    ON TPC.category_id = TC.id
-                WHERE TPC.product_id = TP.id
-                  AND TC.id IS NOT NULL
-                  AND TC.is_deleted = 0
-                  AND (TC.id IN (SELECT id FROM subcategories) OR TC.id = $1) 
-                ORDER BY TPC.id
-            ) AS product_categories,
-        (SELECT COUNT(*) FROM tbl_product TP2 WHERE TP2.name = TP.name AND TP2.is_deleted = 0) AS product_count
-        FROM tbl_product TP
-        WHERE TP.is_deleted = 0
-        AND TP.status = 1
-          AND EXISTS (
-              SELECT 1
-              FROM tbl_product_categories TPC
-              LEFT JOIN tbl_category TC 
-                  ON TPC.category_id = TC.id
-              WHERE TPC.product_id = TP.id
-                AND (TC.id IN (SELECT id FROM subcategories) OR TC.id = $1) 
-          )
-) AS sorted_products 
-        ORDER BY product_count DESC, product_name, product_id  -- Sorting now applied in outer query
-        LIMIT $2 OFFSET $3;
-      `;
-
-      const result = await db.query(query, [cat_id, limit, offset]);
-      return result;
-    } catch (error) {
-      console.error("Error in productSearchByCategory:", error.message);
-      throw new Error("Failed to fetch products by category");
-    }
-  },
-  /* getUserDetail: async (user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT U.name,U.email,U.address,U.new_profile_image,TC.website, TC.profile FROM tbl_users U
-        LEFT JOIN tbl_company TC ON U.id = TC.user_id
-        WHERE id = $1`,
-        [user_id]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  }, */
-  getUserDetail: async (user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT U.name,U.email,U.address,U.new_profile_image,TC.website, TC.profile FROM tbl_users U
-        LEFT JOIN tbl_company TC ON U.id = TC.user_id
-        WHERE U.id = $1`,
-        [user_id]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  getUserIdByApproveBy: async (approve_by) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        'SELECT user_id FROM tbl_vendorapprove_user_mapping WHERE vendor_approve_id = $1',
-        [approve_by]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  getProductDetail: async (item, product_name, cat_id, approve_by) => {
-    console.log('item--', item);
-    console.log('product_name--', product_name);
-    console.log('cat_id--', cat_id);
-    console.log('approve_by--', approve_by);
-    return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (product_name && product_name != '') {
-        dynamicQuery += ` AND P.name LIKE '%${product_name}%'`;
-      }
-      if (approve_by && approve_by != '') {
-        dynamicQuery += ` AND P.vendor_approved_by = '${approve_by}'`;
-      }
-      if (cat_id && cat_id != '') {
-        dynamicQuery += ` AND tbc.category_id = '${cat_id}'`;
-      }
-      db.any(
-        `SELECT P.id, P.name,tbc.category_id FROM tbl_product P 
-        LEFT JOIN tbl_product_categories tbc ON P.id = tbc.product_id
-        WHERE P.created_by = ${item.id} ${dynamicQuery}`
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  vendor_register: async (usrobj) => {
-    return new Promise(function (resolve, reject) {
-      const query =
-        pgp().helpers.insert(usrobj, null, 'tbl_users') + ' RETURNING id';
-
-      db.any(query)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-
-      /*  db.any(
-        `insert into tbl_users(name, email,address, user_type, password, status) 
-        values($1, $2,$3,$4,$5,$6) returning id`,
-        [
-          usrobj.name,
-          usrobj.email,
-          usrobj.address,
-          usrobj.user_type,
-          usrobj.password,
-          usrobj.status
-        ]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        }); */
-    });
-  },
-  addCompany: async (companyObj) => {
-    return new Promise(function (resolve, reject) {
-      const query =
-        pgp().helpers.insert(companyObj, null, 'tbl_company') + ' RETURNING id';
-
-      db.any(query)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  addFile: async (fileObj) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT * FROM tbl_files WHERE doc_type = '${fileObj.doc_type}' AND user_id = '${fileObj.user_id}'`
-      )
-        .then(function (file) {
-          if (file.length > 0) {
-            const condition = ` WHERE id = '${file[0].id}' RETURNING id`;
-            // const values = [userObj.email];
-            let query =
-              pgp().helpers.update(fileObj, null, 'tbl_files') + condition;
-
-            db.any(query)
-              .then(function (data) {
-                resolve(data);
-              })
-              .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-              });
-          } else {
-            const query =
-              pgp().helpers.insert(fileObj, null, 'tbl_files') +
-              ' RETURNING id';
-
-            db.any(query)
-              .then(function (data) {
-                resolve(data);
-              })
-              .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-              });
-          }
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  updateVendorDetail: async (userObj, user_id) => {
-    return new Promise(function (resolve, reject) {
-      const condition = ` WHERE id = $1 RETURNING id`;
-
-      let query = pgp().helpers.update(userObj, null, 'tbl_users') + condition;
-
-      db.any(query, [user_id])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-
-      /* db.any(
-        `update 
-				tbl_users set 
-				name = ($1),
-				address = ($3)
-       	where email=($2)`,
-        [userObj.name, userObj.email, userObj.address]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          reject(err);
-        }); */
-    });
-  },
-  updateCompany: async (companyObj) => {
-    return new Promise(function (resolve, reject) {
-      const condition = ` WHERE user_id = $1 RETURNING id`;
-      const values = [companyObj.user_id];
-      let query =
-        pgp().helpers.update(companyObj, null, 'tbl_company') + condition;
-      db.any(query, values)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  checkVendorExist: async (email) => {
-    return new Promise(function (resolve, reject) {
-      db.any(`SELECT * FROM tbl_users  WHERE email = $1`, [email])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  getVendorProductList: async (
-    limit,
-    offset,
-    vendorId,
-    productName,
-    filterProduct,
-    products
-  ) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (productName && productName != '') {
-        dynamicQuery += ` AND PD.name ILIKE '%${productName}%'`;
-      }
-      if (filterProduct?.id_array) {
-        dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
-      }
-      if (products && products.length > 0) {
-        dynamicQuery += `AND PD.id IN (${products})`;
-      }
-      db.any(
-        `SELECT PD.*,tva.vendor_approve,trr.reject_reason,
-        ARRAY
-        (SELECT json_build_object('category_name', tc.title,'id',tc.id )
-          FROM tbl_product_categories pc 
-          LEFT JOIN tbl_category tc ON pc.category_id = tc.id
-          WHERE PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
-          ARRAY
-        (SELECT json_build_object('vendor_approve_name', tva.vendor_approve,'id',tva.id )
-          FROM tbl_vendorapprove_product_mapping tvpm 
-        LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
-        WHERE PD.id = tvpm.product_id) AS "product_approve_by",
-        ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"  
-          FROM tbl_product PD 
-          LEFT JOIN tbl_vendor_approve tva ON PD.vendor_approved_by = tva.id
-           LEFT JOIN tbl_reject_reason trr ON PD.reject_reason_id = trr.id
-          WHERE PD.created_by = $2 AND PD.is_deleted = 0  AND PD.is_review = 0 ${dynamicQuery}
-        ORDER BY PD.created_at DESC LIMIT ${limit} OFFSET $1`,
-        [offset, vendorId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  getVendorProductCount: async (vendorId, productName, filterProduct) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (productName && productName != '') {
-        dynamicQuery += ` AND name ILIKE '%${productName}%'`;
-      }
-      if (filterProduct?.id_array) {
-        dynamicQuery += ` AND vendor_approved_by IN (${filterProduct.id_array})`;
-      }
-      db.one(
-        `SELECT count(id) FROM tbl_product WHERE created_by = $1 AND is_deleted = 0 AND is_review = 0 ${dynamicQuery}`,
-        [vendorId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  vendorProductListReview: async (
-    limit,
-    offset,
-    vendorId,
-    productName,
-    filterProduct,
-    products
-  ) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (productName && productName != '') {
-        dynamicQuery += ` AND PD.name ILIKE '%${productName}%'`;
-      }
-      if (filterProduct?.id_array) {
-        dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
-      }
-      if (products && products.length > 0) {
-        dynamicQuery += `AND PD.id IN (${products})`;
-      }
-      db.any(
-        `SELECT PD.*,tva.vendor_approve,
-        ARRAY
-        (SELECT json_build_object('category_name', tc.title,'id',tc.id )
-          FROM tbl_product_categories pc 
-          LEFT JOIN tbl_category tc ON pc.category_id = tc.id
-          WHERE PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
-          ARRAY
-        (SELECT json_build_object('vendor_approve_name', tva.vendor_approve,'id',tva.id )
-          FROM tbl_vendorapprove_product_mapping tvpm 
-        LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
-        WHERE PD.id = tvpm.product_id) AS "product_approve_by",
-        ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"  
-          FROM tbl_product PD 
-          LEFT JOIN tbl_vendor_approve tva ON PD.vendor_approved_by = tva.id
-          WHERE PD.created_by = $2 AND PD.is_deleted = 0  AND PD.is_review = 1 AND added_by !=1 ${dynamicQuery}
-        ORDER BY PD.name ASC LIMIT ${limit} OFFSET $1`,
-        [offset, vendorId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  getVendorReviewProductCount: async (vendorId, productName, filterProduct) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (productName && productName != '') {
-        dynamicQuery += ` AND name ILIKE '%${productName}%'`;
-      }
-      if (filterProduct?.id_array) {
-        dynamicQuery += ` AND id IN (${filterProduct.id_array})`;
-      }
-      db.one(
-        `SELECT count(id) FROM tbl_product WHERE created_by = $1 AND is_deleted = 0 AND is_review = 1 ${dynamicQuery}`,
-        [vendorId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  check_product: async (productId, created_by = null) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (created_by) {
-        dynamicQuery = ` AND created_by = '${created_by}'`;
-      }
-      db.any(
-        `SELECT * FROM tbl_product WHERE id = $1 AND is_deleted = 0 ${dynamicQuery}`,
-        [productId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  productDetails: async (productId) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT PD.*,USERS.name as vendor_name,
-        CASE
-        WHEN PD.qap_new_file_name IS NULL THEN
-          NULL
-          ELSE pd.qap_new_file_name
-          END AS qap_new_file_name,
-          CASE
-          WHEN PD.tds_new_file_name IS NULL THEN
-          NULL
-          ELSE pd.tds_new_file_name
-          END AS tds_new_file_name,
-        ARRAY
-        (SELECT json_build_object('category_name', tc.title,'id',pc.category_id )
-          FROM tbl_product_categories pc
-          LEFT JOIN tbl_category tc ON pc.category_id = tc.id   WHERE  PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
-        ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants",
-            ARRAY
-          (SELECT json_build_object('product_image', tbl_product_images.new_image_name,'is_featured',tbl_product_images.is_featured,
-          'product_image_url',  CASE
-          WHEN tbl_product_images.new_image_name IS NULL THEN
-          NULL
-          ELSE tbl_product_images.new_image_name
-          END)
-            FROM tbl_product_images WHERE PD.id = tbl_product_images.product_id ) AS "product_images",
-            ARRAY
-          (SELECT tvpm.vendor_approve_id
-            FROM tbl_vendorapprove_product_mapping tvpm WHERE  PD.id = tvpm.product_id) AS "vendor_approved_by"
-            FROM tbl_product PD 
-            LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
-            WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 And PD.id = $1`,
-        [productId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  vendorListProductWise: async (productName) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT DISTINCT
-    ON (tbl_users.name) tbl_users.name AS vendor_name, ARRAY 
-    (SELECT json_build_object ('id',tvpm.vendor_approve_id,'name',tbl_vendor_approve.vendor_approve,'logo', tbl_vendor_approve.vendor_logo)
-    FROM tbl_vendorapprove_product_mapping tvpm
-    LEFT JOIN tbl_vendor_approve
-        ON tvpm.vendor_approve_id = tbl_vendor_approve.id
-    WHERE tbl_product.id = tvpm.product_id) AS "vendor_approved_by"
-FROM tbl_product
-LEFT JOIN tbl_users
-    ON tbl_product.created_by = tbl_users.id
-WHERE tbl_product.name = $1`,
-        [productName]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  vendorProductDetails: async (productId, vendorId) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicWhere = ``;
-      if (vendorId) {
-        dynamicWhere = `AND PD.created_by = ${vendorId}`;
-      }
-      db.any(
-        `SELECT PD.*,USERS.name as vendor_name,
-        ARRAY
-        (SELECT json_build_object('category_name', tc.title,'id',pc.category_id )
-          FROM tbl_product_categories pc
-          LEFT JOIN tbl_category tc ON pc.category_id = tc.id   WHERE  PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
-        ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants",
-            ARRAY
-          (SELECT json_build_object('product_image', tbl_product_images.new_image_name,'is_featured',tbl_product_images.is_featured,
-          'product_image_url',  CASE
-          WHEN tbl_product_images.new_image_name IS NULL THEN
-          NULL
-          ELSE tbl_product_images.new_image_name
-          END)
-            FROM tbl_product_images WHERE PD.id = tbl_product_images.product_id ) AS "product_images",
-            ARRAY
-          (SELECT tvpm.vendor_approve_id
-            FROM tbl_vendorapprove_product_mapping tvpm WHERE  PD.id = tvpm.product_id) AS "vendor_approved_by"
-            FROM tbl_product PD 
-            LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
-            WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 And PD.id = $1 ${dynamicWhere}`,
-        [productId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  deleteProduct: async (productObj, productId) => {
-    return new Promise(function (resolve, reject) {
-      const condition = ` WHERE id = $1 RETURNING id`;
-      const values = [productId];
-      let query =
-        pgp().helpers.update(productObj, null, 'tbl_product') + condition;
-        
-      db.one(query, values)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  approveProduct: async (productObj, productId) => {
-    return new Promise(function (resolve, reject) {
-      const condition = ` WHERE id = $1 RETURNING id,name,created_by`;
-      const values = [productId];
-      let query =
-        pgp().helpers.update(productObj, null, 'tbl_product') + condition;
-
-      db.one(query, values)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  vendorProductAcceptReview: async (acceptReviewObj, vendorId, productId) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicCondition = '';
-      if (productId) {
-        dynamicCondition = `AND id = ${productId}`;
-      }
-      const condition = `WHERE created_by = $1  AND is_review = 1 ${dynamicCondition} RETURNING id`;
-      const values = [vendorId];
-      let query =
-        pgp().helpers.update(acceptReviewObj, null, 'tbl_product') + condition;
-
-      db.any(query, values)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  adminProductAcceptReview: async (acceptReviewObj, productId) => {
-    return new Promise(function (resolve, reject) {
-      let dynamicCondition = '';
-      if (productId) {
-        dynamicCondition = `AND id = ${productId}`;
-      }
-      const condition = ` WHERE is_review = 1 ${dynamicCondition} RETURNING id`;
-      let query =
-        pgp().helpers.update(acceptReviewObj, null, 'tbl_product') + condition;
-
-      db.any(query)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  getAllProduct: async (uniqueProduct = false) => {
-    return new Promise(function (resolve, reject) {
-        let query = uniqueProduct
-            ? `SELECT DISTINCT name FROM tbl_product WHERE status = 1 AND is_deleted = 0 AND is_review = 0 AND is_approve = 1 AND created_by NOT IN (1, 111) `  
-            : `SELECT COUNT(id) FROM tbl_product WHERE is_deleted = 0 AND is_review = 0`;
-
-        db.any(query)
-            .then(function (data) {
-                resolve(data);
-            })
-            .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-            });
-    });
-},
-  approvedProductList: async () => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT MIN(id) AS id,
-         name
-        FROM tbl_product
-        WHERE is_approve = 1 AND is_deleted = 0 AND created_by = 1
-        GROUP BY name
-        ORDER BY id DESC`
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-
-  topProductsWithVendors: async (userId) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `
-          WITH ranked_products AS (
-              SELECT 
-                  TP.id AS product_id,
-                  TP.name AS product_name,
-                  ARRAY (
-                      SELECT 
-                          json_build_object(
-                              'category_name', TC.title,
-                              'id', TC.id
-                          )
-                      FROM tbl_product_categories TPC
-                      LEFT JOIN tbl_category TC 
-                          ON TPC.category_id = TC.id
-                      WHERE TPC.product_id = TP.id
-                      AND TC.id IS NOT NULL
-                      ORDER BY TPC.id
-                  ) AS product_categories,
-                  COUNT(TR.id)::INT AS rfq_count,
-                  ROW_NUMBER() OVER (PARTITION BY TP.name ORDER BY COUNT(TR.id) DESC) AS rn
-              FROM tbl_rfq TR
-              JOIN tbl_rfq_products TRP
-                  ON TRP.rfq_id = TR.id
-              JOIN tbl_product TP
-                  ON TP.id = TRP.product_id
-              WHERE TR.created_by = $1
-                  AND TP.is_deleted = 0 AND TP.is_approve = 1
-              GROUP BY 
-                  TP.id, TP.name
-          )
-          SELECT 
-              product_id,
-              product_name,
-              product_categories,
-              rfq_count
-          FROM ranked_products
-          WHERE rn = 1 
-          ORDER BY rfq_count DESC
-          LIMIT 10;
-        `,
-        [userId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },  
-  getProductBySlugAndCategorySlug: async (slugString) => {
-    // Split the slug string into array and separate category slugs from product slug
-    const slugs = slugString.split(',');
-    const productSlug = slugs.pop(); // Last item is product slug
-    const categorySlugs = slugs; // Remaining items are category slugs
-
-    return new Promise(function (resolve, reject) {
-        db.oneOrNone(`
-WITH RECURSIVE category_hierarchy AS (
-    SELECT id, title, slug, parent_id, status, is_deleted, 1 AS depth
-    FROM tbl_category
-    WHERE slug = $1
-      AND parent_id = 0 
-      AND is_deleted = 0 
-      AND status = 1
-    UNION ALL
-    SELECT c.id, c.title, c.slug, c.parent_id, c.status, c.is_deleted, ch.depth + 1 AS depth
-    FROM tbl_category c
-    INNER JOIN category_hierarchy ch ON c.parent_id = ch.id
-    WHERE c.slug = ANY($2::varchar[])
-      AND c.is_deleted = 0
-      AND c.status = 1
-)
-SELECT 
-    p.id AS product_id,
-    p.name AS product_name,
-    p.slug AS product_slug,
-    p.description AS product_description,
-    p.manufacturer,
-    p.availability,
-    p.sku,
-    c.id AS category_id,
-    c.title AS category_title,
-    c.slug AS category_slug,
-    c.depth AS category_depth,
-    cms.description AS cms_content,
-    cms.title AS cms_title
-FROM 
-    tbl_product p
-INNER JOIN 
-    tbl_product_categories pc ON p.id = pc.product_id
-INNER JOIN 
-    category_hierarchy c ON pc.category_id = c.id
-LEFT JOIN 
-    tbl_product_cms cms ON p.id = cms.product_id
-WHERE 
-    p.slug = $3
-    AND p.is_deleted = 0
-    AND p.status = 1
-    AND p.created_by = 1
-LIMIT 1;
-        `,
-        [
-            categorySlugs.length > 0 ? categorySlugs[0] : null, // $1: First category slug (root) or null
-            categorySlugs.length > 0 ? categorySlugs : '{}',    // $2: Array of category slugs or empty array
-            productSlug                                        // $3: Product slug
-        ])
-        .then(function (data) {
-            resolve(data);
-        })
-        .catch(function (err) {
-            let error = new Error(err.message);
-            reject(error);
-        });
-    });
-},
-
-getProductTechSpecByID: async (productId) => {
-  return new Promise(function (resolve, reject) {
-    db.any(  'SELECT title, value FROM tbl_product_tech_spec WHERE product_id = $1 ',[productId])
-      .then(function (data) {
-        resolve(data);
-      })
-      .catch(function (err) {
-        logError(err);
-        res
-          .status(400)
-          .json({
-            status: 3,
-            message: Config?.errorText?.value || 'Something went wrong',
-          })
-          .end();
-      });
-  });
-}
-
+  }
 };
 
 export default productModel;

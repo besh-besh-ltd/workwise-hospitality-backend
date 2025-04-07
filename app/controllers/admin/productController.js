@@ -2262,6 +2262,9 @@ const productController = {
       let categoryId = req.query?.categoryId;
       let addedBy = req.query?.addedBy;
       let onlyAddedByAdmin = req.query?.onlyAddedByAdmin === 'true';
+      let dateFrom = req.query?.date_from;
+      let dateTo = req.query?.date_to;
+      let status = req.query?.status;
       let filterProduct = {};
 
       // Track which filters are active
@@ -2271,7 +2274,10 @@ const productController = {
         vendorId: !!vendorId,
         isFeatured: !!isFeatured,
         categoryId: !!categoryId,
-        onlyAddedByAdmin: onlyAddedByAdmin
+        onlyAddedByAdmin: onlyAddedByAdmin,
+        dateFrom: !!dateFrom,
+        dateTo: !!dateTo,
+        status: status !== undefined && status !== null
       };
 
       if (vendorApprove) {
@@ -2286,9 +2292,12 @@ const productController = {
         productName,
         filterProduct,
         isFeatured,
-        addedBy,  // Use the addedBy parameter instead of req.user.id
+        addedBy,
         onlyAddedByAdmin,
-        categoryId
+        categoryId,
+        dateFrom,
+        dateTo,
+        status
       );
 
       // Get total counts with all active filters
@@ -2297,8 +2306,11 @@ const productController = {
         productName,
         filterProduct,
         isFeatured,
-        addedBy,  // Use the addedBy parameter for consistent filtering
-        categoryId
+        addedBy,
+        categoryId,
+        dateFrom,
+        dateTo,
+        status
       );
 
       // Calculate counts
@@ -2307,17 +2319,10 @@ const productController = {
       const disapprove_count = total_count - approve_count;
 
       // Get unfiltered total counts for comparison
-      // Parameters for getProductCount in order:
-      // 1. vendorId - null to not filter by vendor
-      // 2. productName - null to not filter by product name
-      // 3. filterProduct - null to not apply any product filters 
-      // 4. isFeatured - null to include both featured and non-featured products
-      // 5. addedBy - req.user.id to get counts for products added by current user
-      // 6. categoryId - null to not filter by category
-      // Passing null for most parameters to get unfiltered total counts across all categories
       let unfilteredCount = await productModel.getProductCount(
-        null, null, null, null, req.user.id, null
+        null, null, null, null, req.user.id, null, null, null, null
       );
+
       const total_unfiltered = unfilteredCount.length;
       const total_approve_unfiltered = unfilteredCount.filter(item => item.is_approve === 1).length;
       const total_disapprove_unfiltered = total_unfiltered - total_approve_unfiltered;
@@ -2325,7 +2330,7 @@ const productController = {
       res.status(200).json({
         status: 1,
         data: productList,
-        total_count: total_count,  // Use filtered count as the main count
+        total_count: total_count,
         approve_count: approve_count,
         disapprove_count: disapprove_count,
         is_filtered: Object.values(activeFilters).some(f => f),
