@@ -2262,9 +2262,9 @@ const productController = {
       let categoryId = req.query?.categoryId;
       let addedBy = req.query?.addedBy;
       let onlyAddedByAdmin = req.query?.onlyAddedByAdmin === 'true';
-      let dateFrom = req.query?.date_from;
-      let dateTo = req.query?.date_to;
-      let status = req.query?.status;
+      let dateFrom = req.query?.dateFrom;
+      let dateTo = req.query?.dateTo;
+      let is_approve = req.query?.is_approve !== undefined ? parseInt(req.query.is_approve) : null;
       let filterProduct = {};
 
       // Track which filters are active
@@ -2277,7 +2277,7 @@ const productController = {
         onlyAddedByAdmin: onlyAddedByAdmin,
         dateFrom: !!dateFrom,
         dateTo: !!dateTo,
-        status: status !== undefined && status !== null
+        is_approve: is_approve !== null
       };
 
       if (vendorApprove) {
@@ -2292,12 +2292,11 @@ const productController = {
         productName,
         filterProduct,
         isFeatured,
-        addedBy,
-        onlyAddedByAdmin,
+        addedBy,  // Use the addedBy parameter instead of req.user.id
         categoryId,
         dateFrom,
         dateTo,
-        status
+        is_approve
       );
 
       // Get total counts with all active filters
@@ -2306,11 +2305,11 @@ const productController = {
         productName,
         filterProduct,
         isFeatured,
-        addedBy,
+        addedBy,  // Use the addedBy parameter for consistent filtering
         categoryId,
         dateFrom,
         dateTo,
-        status
+        is_approve
       );
 
       // Calculate counts
@@ -2320,9 +2319,8 @@ const productController = {
 
       // Get unfiltered total counts for comparison
       let unfilteredCount = await productModel.getProductCount(
-        null, null, null, null, req.user.id, null, null, null, null
+        null, null, null, null, null, null, null, null, null
       );
-
       const total_unfiltered = unfilteredCount.length;
       const total_approve_unfiltered = unfilteredCount.filter(item => item.is_approve === 1).length;
       const total_disapprove_unfiltered = total_unfiltered - total_approve_unfiltered;
@@ -2330,13 +2328,13 @@ const productController = {
       res.status(200).json({
         status: 1,
         data: productList,
-        total_count: total_count,
-        approve_count: approve_count,
-        disapprove_count: disapprove_count,
+        total_count: total_unfiltered,  // Total count without filters
+        approve_count: total_approve_unfiltered,  // Total approved without filters
+        disapprove_count: total_disapprove_unfiltered,  // Total disapproved without filters
         is_filtered: Object.values(activeFilters).some(f => f),
-        filtered_count: total_count,
-        filtered_approve_count: approve_count,
-        filtered_disapprove_count: disapprove_count,
+        filtered_count: total_count,  // Count with filters applied
+        filtered_approve_count: approve_count,  // Approved count with filters
+        filtered_disapprove_count: disapprove_count,  // Disapproved count with filters
         page,
         limit,
         total_pages: Math.ceil(total_count / limit)
