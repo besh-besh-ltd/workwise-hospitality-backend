@@ -1947,6 +1947,7 @@ WHERE row_num_by_name_category = 1
             tu.mobile, 
             tu.organization_name AS company_name,
             tu.address,
+            ${vendor_name ? 'similarity(tu.name, $2) as similarity_score,' : ''}
             CASE
                 WHEN bvm.vendor_id IS NOT NULL THEN 1
                 ELSE 0
@@ -1977,7 +1978,7 @@ WHERE row_num_by_name_category = 1
             )` : ''}
     ) AS distinct_vendors
     ORDER BY 
-        is_linked_with_buyer DESC, RANDOM();
+        is_linked_with_buyer DESC, ${vendor_name ? 'similarity_score DESC' : ''};
     `;
   
     const values = vendor_name ? [buyerId, vendor_name] : [buyerId];
