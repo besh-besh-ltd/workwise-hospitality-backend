@@ -3081,16 +3081,19 @@ const productController = {
       }
 
       // -------------multiple approved by ------------------------------
-      // if (vendorApproveId.length > 0) {
-      //   let productApproveArray = [];
-      //   vendorApproveId.forEach((item) => {
-      //     productApproveArray.push({
-      //       product_id: productId,
-      //       vendor_approve_id: item
-      //     });
-      //   });
-      //   await productModel.addProductApproveBy(productApproveArray, productId);
-      // }
+      if (approved_id && approved_id.length > 0) {
+        let productApproveArray = [];
+        const approvedIds = approved_id.split(',');
+        
+        approvedIds.forEach((item) => {
+          productApproveArray.push({
+            product_id: productId,
+            vendor_approve_id: parseInt(item.trim())
+          });
+        });
+        
+        await productModel.addProductApproveBy(productApproveArray, productId);
+      }
 
       // ---------------- featured image ----------------
       if (req.files?.featured && req.files?.featured.length > 0) {
