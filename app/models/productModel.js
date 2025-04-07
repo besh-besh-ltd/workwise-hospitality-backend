@@ -1167,6 +1167,9 @@ const productModel = {
       if (vendorId && vendorId != '') {
         dynamicQuery += ` AND PD.created_by = ${vendorId}`;
       }
+      if (userId && userId != '') {
+        dynamicQuery += ` AND PD.added_by = ${userId}`;
+      }
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
@@ -1263,6 +1266,9 @@ const productModel = {
       if (vendorId && vendorId != '') {
         dynamicQuery += ` AND tbl_product.created_by = ${vendorId}`;
       }
+      if (userId && userId != '') {
+        dynamicQuery += ` AND tbl_product.added_by = ${userId}`;
+      }
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND tbl_product.is_featured = '${isFeatured}'`;
       }
@@ -1284,7 +1290,7 @@ const productModel = {
       }
       
       db.any(
-        `SELECT tbl_product.* FROM tbl_product
+        `SELECT COUNT(*) as count FROM tbl_product
          LEFT JOIN tbl_users ON tbl_product.created_by = tbl_users.id 
          WHERE tbl_users.is_deleted = 0 
          AND tbl_product.is_deleted = 0 

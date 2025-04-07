@@ -2312,32 +2312,39 @@ const productController = {
         is_approve
       );
 
-      // Calculate counts
-      const approve_count = filteredCount.filter(item => item.is_approve === 1).length;
-      const total_count = filteredCount.length;
-      const disapprove_count = total_count - approve_count;
-
       // Get unfiltered total counts for comparison
       let unfilteredCount = await productModel.getProductCount(
         null, null, null, null, null, null, null, null, null
       );
-      const total_unfiltered = unfilteredCount.length;
-      const total_approve_unfiltered = unfilteredCount.filter(item => item.is_approve === 1).length;
-      const total_disapprove_unfiltered = total_unfiltered - total_approve_unfiltered;
+
+      const total_count = parseInt(unfilteredCount[0].count);
+      const filtered_total = parseInt(filteredCount[0].count);
+
+      // Calculate approve/disapprove counts for filtered results
+      const approve_count = productList.filter(item => item.is_approve === 1).length;
+      const disapprove_count = filtered_total - approve_count;
+
+      // Calculate approve/disapprove counts for unfiltered results
+      const total_approve = await productModel.getProductCount(
+        null, null, null, null, null, null, null, null, 1
+      );
+      const total_disapprove = await productModel.getProductCount(
+        null, null, null, null, null, null, null, null, 0
+      );
 
       res.status(200).json({
         status: 1,
         data: productList,
-        total_count: total_unfiltered,  // Total count without filters
-        approve_count: total_approve_unfiltered,  // Total approved without filters
-        disapprove_count: total_disapprove_unfiltered,  // Total disapproved without filters
+        total_count: total_count,  // Total count without filters
+        approve_count: parseInt(total_approve[0].count),  // Total approved without filters
+        disapprove_count: parseInt(total_disapprove[0].count),  // Total disapproved without filters
         is_filtered: Object.values(activeFilters).some(f => f),
-        filtered_count: total_count,  // Count with filters applied
+        filtered_count: filtered_total,  // Count with filters applied
         filtered_approve_count: approve_count,  // Approved count with filters
         filtered_disapprove_count: disapprove_count,  // Disapproved count with filters
         page,
         limit,
-        total_pages: Math.ceil(total_count / limit)
+        total_pages: Math.ceil(filtered_total / limit)
       }).end();
 
     } catch (error) {
