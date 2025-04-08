@@ -27,7 +27,7 @@ const vendorModel = {
         dynamicQuery += `AND tbl_users.created_at >= '${dateFrom}'`;
       }
       if (dateTo) {
-        dynamicQuery += `AND tbl_users.created_at <= '${dateTo}'`;
+        dynamicQuery += `AND tbl_users.created_at <= '${dateTo} 23:59:59'`;
       }
       if (created_by) {
         dynamicQuery += `AND tbl_users.created_by = ${created_by}`;
@@ -95,7 +95,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
       dynamicQuery += `AND created_at >= '${dateFrom}'`;
     }
     if (dateTo) {
-      dynamicQuery += `AND created_at <= '${dateTo}'`;
+      dynamicQuery += `AND created_at <= '${dateTo} 23:59:59'`;
     }
     if (created_by) {
       dynamicQuery += `AND created_by = ${created_by}`;
