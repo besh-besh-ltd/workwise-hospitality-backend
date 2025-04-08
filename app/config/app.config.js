@@ -196,67 +196,67 @@ const config = {
     user_image:
       env == "development"
         ? userImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/user_image",
+        : "app/uploads/user_image",
     product_export:
       env == "development"
         ? productExportImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/product_export",
+        : "app/uploads/product_export",
     vendor_approve:
       env == "development"
         ? vendorApproveImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/vendor_approve",
+        : "app/uploads/vendor_approve",
     media_image:
       env == "development"
         ? mediaImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/media_image",
+        : "app/uploads/media_image",
     team_member_image:
       env == "development"
         ? teamMemberImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/team_member_image",
+        : "app/uploads/team_member_image",
     testimonial_image:
       env == "development"
         ? testimonialImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/testimonial_image",
+        : "app/uploads/testimonial_image",
     product_image:
       env == "development"
         ? productImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/product_image",
+        : "app/uploads/product_image",
     company_image:
       env == "development"
         ? companyImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/company_image",
+        : "app/uploads/company_image",
     management_image:
       env == "development"
         ? managementImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/management_image",
+        : "app/uploads/management_image",
     banner_image:
       env == "development"
-        ? bannerImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/banner_image",
+        ? "app/uploads/banner_image"
+        : "app/uploads/banner_image",
     blog_image:
       env == "development"
         ? blogImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/blog_image",
+        : "app/uploads/blog_image",
     agent_user_image:
       env == "development"
         ? agentImageUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/agent_user_image",
+        : "app/uploads/agent_user_image",
     user_document:
       env == "development"
         ? documentPathUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/user_document/",
+        : "app/uploads/user_document/",
     program_brochure:
       env == "development"
         ? documentPathUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/course_brochure",
+        : "app/uploads/course_brochure",
     term_condition:
       env == "development"
         ? termConditionPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/term_condition",
+        : "app/uploads/term_condition",
     bulk_product_file:
       env == "development"
         ? bulkProductUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/bulk_product_file",
+        : "app/uploads/bulk_product_file",
     magic_search_file:
       env == "development"
         ? "app/uploads/magic_search_file"
@@ -264,30 +264,31 @@ const config = {
     query_message_file:
       env == "development"
         ? queryMessageFilesUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/query_message_files",
+        : "app/uploads/query_message_files",
     invoice_file:
       env == "development"
         ? invoiceFileUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/invoice_file",
+        : "app/uploads/invoice_file",
     project_file:
       env == "development"
         ? projectFileUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/project_file",
+        : "app/uploads/project_file",
     buyer_upload_vendor_file:
       env == "development"
         ? buyerUploadVendorFile
-        : "/application/de_technico/web-backend/des-technico/app/uploads/buyer_upload_vendor_file",
+        : "app/uploads/buyer_upload_vendor_file",
     add_clause_file:
       env == "development"
         ? addClauseUploadPath
-        : "/application/de_technico/web-backend/des-technico/app/uploads/add_clause_file",
+        : "app/uploads/add_clause_file",
   },
   download_url:
     // env == 'development' ? downloadURL : 'http://143.110.242.57:8112',
-    env == "development" ? downloadURL : "https://api.letsworkwise.com",
+   // env == "development" ? downloadURL : "https://api.letsworkwise.com", download url needs to be  updated
+   env == 'development' ?  downloadURL : "http://api.workwise.42web.io",
   // base_url: env == 'development' ? base_url : 'http://localhost:3000',
   // base_url: 'http://143.110.242.57:8112',
-  base_url: "https://api.letsworkwise.com",
+  base_url: 'http://api.workwise.42web.io',     // needs  to be changed
   globalAdminLimit: globalAdminLimit,
   errorText: {
     value: "An internal error has occurred. Please try again later.",
@@ -307,7 +308,7 @@ const config = {
   },
   developers: [
     "Mukul Jatav <mukul@letsworkwise.com>",
-    // "Sourav Maity <sourav.maity@indusnet.co.in>",
+    "Ayush Singh <ayush@letsworkwise.com>",
     // "Abhisek Pal <abhisek.pal@indusnet.co.in>",
   ],
   admin_email: [
@@ -321,7 +322,7 @@ const config = {
   webmasterMail: "Work Wise <hello@letsworkwise.com>",
   template_path:
     process.env.TEMPLATE_PATH ||
-    "/application/de_technico/web-backend/des-technico/app/helper/email_template",
+    "/app/helper/email_template",
   razorpay: {
     razorpay_key: process.env.RAZORPAY_KEY,
     razorpay_secret: process.env.RAZORPAY_SECRET,
