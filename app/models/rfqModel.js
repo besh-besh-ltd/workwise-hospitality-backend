@@ -1580,6 +1580,54 @@ LIMIT $5 OFFSET $4;`,
         });
     });
   },
+  getVendorProductsCount: async (rfq_id, vendor_id) => {
+    try {
+      const q = `
+      SELECT
+        rpv.product_id,
+        p.name,
+        COUNT(rpv.id)
+      FROM
+        tbl_rfq_product_vendors rpv
+      JOIN
+        tbl_product p ON p.id = rpv.product_id
+      WHERE
+        rpv.rfq_id = $1
+        AND rpv.user_id = $2
+      GROUP BY
+        rpv.product_id, p.name;
+      `;
+  
+      return await db.query(q, [rfq_id, vendor_id]);
+    } catch (e) {
+      throw e;
+    }
+  },
+  getVendorProductsQuoted: async (rfq_id, vendor_id) => {
+    try {
+      const q = `
+        SELECT
+          qi.product_id,
+          p.name AS product_name,
+          COUNT(qi.id)
+        FROM
+          tbl_quotes q
+        JOIN
+          tbl_quote_items qi ON q.id = qi.quote_id
+        JOIN
+          tbl_product p ON p.id = qi.product_id
+        WHERE
+          qi.rfq_id = $1
+          AND q.created_by = $2
+        GROUP BY
+          qi.product_id, p.name;
+    `;
+
+    return await db.query(q, [rfq_id, vendor_id])
+    } catch (e) {
+      throw e;
+    }
+  },
   getRFQCreatedBy: async (id) => {
     return new Promise(function (resolve, reject) {
       db.query(
