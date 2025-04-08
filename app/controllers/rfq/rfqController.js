@@ -2778,15 +2778,15 @@ const rfqController = {
   
       const lastActivity = await rfqModel.getRFQActivity(rfq_id, id, date);
 
-      // if ( lastActivity?.length > 2) {
-      //     return res
-      //       .status(403)
-      //       .json({
-      //         status: 1,
-      //         message: "You have already sent a reminder today for this RFQ!"
-      //       })
-      //       .end();
-      // }
+      if ( lastActivity?.length > 2) {
+          return res
+            .status(403)
+            .json({
+              status: 1,
+              message: "You have already sent a reminder today for this RFQ!"
+            })
+            .end();
+      }
 
       const rfqBasicDetails = await rfqModel.getRfqDetailsById(rfq_id)
       let vendors = await rfqModel.gerRFQVendors(rfq_id);
