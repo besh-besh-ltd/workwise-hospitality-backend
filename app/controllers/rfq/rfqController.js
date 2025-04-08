@@ -816,7 +816,7 @@ const sendQuoteNotificationToVendor = async (req) => {
 };
 
 
-const sendReminderRFQMAIL = async (vendoritem, org_name,rfq_id, rfqBasicDetails) => {
+const sendReminderRFQMAIL = async (vendoritem, remainingProducts, org_name,rfq_id, rfqBasicDetails) => {
   let user_details = await userModel.user_profile_detail(vendoritem.user_id);
   const token = await rfqModel.getVendorRfqToken(vendoritem.user_id, rfq_id);
   const vendorName =  user_details[0].organization_name || user_details[0].name
@@ -828,6 +828,14 @@ const containerContent = `
        <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
          <p>
            This is a friendly reminder from <strong>${org_name}</strong> regarding the RFQ quotation. Ensure your quote is submitted on time to secure this opportunity.
+         </p>
+         <p>
+           Please submit quote for the following products:
+         </p>
+         <p>
+           ${remainingProducts.map(product => (
+            `<strong>${product.name}</strong><br>`
+           ))}
          </p>
        
          <p> <strong> Deadline: </strong> ${rfqBasicDetails?.bid_end_date || 'N/A'} </p>
@@ -841,6 +849,7 @@ const containerContent = `
          </p>
        </div>`;
 
+  console.log(containerContent)
   
   const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
@@ -2769,15 +2778,15 @@ const rfqController = {
   
       const lastActivity = await rfqModel.getRFQActivity(rfq_id, id, date);
 
-      if ( lastActivity?.length > 2) {
-          return res
-            .status(403)
-            .json({
-              status: 1,
-              message: "You have already sent a reminder today for this RFQ!"
-            })
-            .end();
-      }
+      // if ( lastActivity?.length > 2) {
+      //     return res
+      //       .status(403)
+      //       .json({
+      //         status: 1,
+      //         message: "You have already sent a reminder today for this RFQ!"
+      //       })
+      //       .end();
+      // }
 
       const rfqBasicDetails = await rfqModel.getRfqDetailsById(rfq_id)
       let vendors = await rfqModel.gerRFQVendors(rfq_id);
@@ -2785,13 +2794,41 @@ const rfqController = {
 
       const createdByIds = new Set(quote_vendor.map((item) => item.created_by));
 
-      const unmatchedVendors = vendors.filter(
-        (vendor) => !createdByIds.has(vendor.user_id)
-      );
+      // const unmatchedVendors = vendors.filter(
+      //   async (vendor) => {
+      //     const vendorProducts = await rfqModel.getVendorProductsCount(rfq_id, vendor.user_id)
+      //     const vendorProductsQuoted = await rfqModel.getVendorProductsQuoted(rfq_id, vendor.user_id)
+      //     if(vendorProducts) {
+      //       const productsCount = vendorProducts[0].count
+      //     }
+      //     return !createdByIds.has(vendor.user_id)
+      //   }
+      // );
+
+      const unmatchedVendors = (
+        await Promise.all(
+          vendors.map(async (vendor) => {
+            const vendorProducts = await rfqModel.getVendorProductsCount(rfq_id, vendor.user_id);
+            const vendorProductsQuoted = await rfqModel.getVendorProductsQuoted(rfq_id, vendor.user_id);
+      
+            const requiredCount = vendorProducts.length;
+            const quotedCount = vendorProductsQuoted.length;
+      
+            const isUnmatched =
+              !createdByIds.has(vendor.user_id) || requiredCount !== quotedCount;
+      
+            return isUnmatched ? {
+              vendor,
+              remainingProducts: vendorProducts.filter(product => !vendorProductsQuoted.some(_product => _product.product_id == product.product_id))
+            } : null;
+          })
+        )
+      ).filter(Boolean);
+      
       vendors = unmatchedVendors;
       let org_name = organization_name ? organization_name : name;
 
-      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item, org_name, rfq_id,rfqBasicDetails)))
+      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item.vendor, item.remainingProducts, org_name, rfq_id,rfqBasicDetails)))
         .then(async () => {
           try {
             await rfqModel.insertRFQActivity(rfq_id, id);
