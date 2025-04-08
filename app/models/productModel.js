@@ -1151,99 +1151,68 @@ const productModel = {
     filterProduct,
     isFeatured,
     userId,
-    onlyAddedByAdmin = null,
-    categoryId = null
+    categoryId,
+    dateFrom,
+    dateTo,
+    is_approve
   ) => {
-
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
-
-      // Product name search with full-text search and similarity
-      if (productName && productName !== '') {
-        dynamicQuery += `
-          AND (
-            to_tsvector('english', PD.name) @@ plainto_tsquery('english', '${productName}')
-            OR similarity(PD.name, '${productName}') > 0.2
-          )`;
+      if (productName && productName != '') {
+        dynamicQuery += ` AND PD.name ILIKE '%${productName}%'`;
       }
-
-      // Filter by approved products
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
       }
-
-      // Filter by vendor
-      if (vendorId && vendorId !== '') {
-        dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
+      if (vendorId && vendorId != '') {
+        dynamicQuery += ` AND PD.created_by = ${vendorId}`;
       }
-
-      // Filter by featured status
-      if (isFeatured && isFeatured !== '') {
+      if (userId && userId != '') {
+        dynamicQuery += ` AND PD.added_by = ${userId}`;
+      }
+      if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
-
-      // Filter by added_by
-      if (userId && userId !== '') {
-        dynamicQuery += ` AND (PD.added_by = '${userId}' OR PD.created_by = '${userId}')`;
+      if (categoryId) {
+        dynamicQuery += ` AND EXISTS (
+          SELECT 1 FROM tbl_product_categories
+          WHERE tbl_product_categories.product_id = PD.id 
+          AND tbl_product_categories.category_id = ${categoryId}
+        )`;
       }
-      // Filter admin-added products
-      if (onlyAddedByAdmin) {
-        dynamicQuery += ` AND PD.created_by = 1`;
+      if (dateFrom) {
+        dynamicQuery += ` AND DATE(PD.created_at) >= '${dateFrom}'`;
       }
-
-
-       // Determine the ORDER BY clause based on whether productName is provided
-    let orderByClause = productName && productName !== ''
-    ? `ORDER BY rank DESC, similarity_score DESC, PD.created_at DESC`
-    : `ORDER BY PD.created_at DESC`;
-  
-      const query = `
-        SELECT 
-            PD.*,
-            USERS.name as vendor_name,
-            approved_user.name as vendor_approved_by,
-            added_user.name as added_by,
-            trr.reject_reason,
-            tpi.new_image_name,
-            ARRAY (
-                SELECT json_build_object('category_name', tc.title, 'id', tc.id)
-                FROM tbl_product_categories pc
-                LEFT JOIN tbl_category tc ON pc.category_id = tc.id
-                WHERE PD.id = pc.product_id 
-                ORDER BY pc.id
-            ) AS "product_categories",
-            ARRAY (
-                SELECT json_build_object(
-                    'variant_name', pv.variant_name,
-                    'variant_value', pv.variant_value,
-                    'id', pv.id
-                )
-                FROM tbl_product_variants pv 
-                WHERE PD.id = pv.product_id
-            ) AS "product_variants",
-          similarity(PD.name, '${productName}') AS similarity_score,
-          ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank
-        FROM tbl_product PD
-        LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id
-        LEFT JOIN tbl_users approved_user ON PD.vendor_approved_by = approved_user.id
-        LEFT JOIN tbl_users added_user ON PD.added_by = added_user.id
-        LEFT JOIN tbl_reject_reason trr ON PD.reject_reason_id = trr.id
-        LEFT JOIN tbl_product_images tpi ON PD.id = tpi.product_id AND tpi.is_featured = 1
-        WHERE USERS.is_deleted = 0
-        AND EXISTS (
-            SELECT 1 
-            FROM tbl_product_categories pc 
-            WHERE pc.product_id = PD.id
-        )
-      ${dynamicQuery}
-      ${categoryId ? `AND EXISTS (
-            SELECT 1 FROM tbl_product_categories pc2
-            WHERE pc2.product_id = PD.id 
-            AND pc2.category_id = ${categoryId}
-          )` : ''}
-      ${orderByClause}
-        LIMIT $1 OFFSET $2`;
-      db.any(query, [limit, offset])
+      if (dateTo) {
+        dynamicQuery += ` AND DATE(PD.created_at) <= '${dateTo}'`;
+      }
+      if (is_approve !== null && is_approve !== undefined) {
+        dynamicQuery += ` AND PD.is_approve = ${is_approve}`;
+      }
+      
+      db.any(
+        `SELECT PD.*, USERS.name as vendor_name,
+        ARRAY
+        (SELECT json_build_object('category_name', tc.title,'id',tc.id )
+          FROM tbl_product_categories pc
+          LEFT JOIN tbl_category tc ON pc.category_id = tc.id
+          WHERE PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
+          ARRAY
+        (SELECT json_build_object('vendor_approve_name', tva.vendor_approve,'id',tva.id )
+          FROM tbl_vendorapprove_product_mapping tvpm 
+        LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
+        WHERE PD.id = tvpm.product_id) AS "product_approve_by",
+        ARRAY
+          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
+            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"
+            FROM tbl_product PD 
+            LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
+            WHERE USERS.is_deleted = 0 
+            AND PD.is_deleted = 0 
+            AND PD.is_review = 0 ${dynamicQuery}     
+        ORDER BY PD.created_at DESC LIMIT ${limit} OFFSET $1`,
+        [offset]
+      )
         .then(function (data) {
           resolve(data);
         })
@@ -1285,7 +1254,7 @@ const productModel = {
         });
     });
   },
-  getProductCount: async (vendorId, productName, filterProduct, isFeatured, userId, categoryId) => {
+  getProductCount: async (vendorId, productName, filterProduct, isFeatured, userId, categoryId, dateFrom, dateTo, is_approve) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (productName && productName != '') {
@@ -1297,6 +1266,9 @@ const productModel = {
       if (vendorId && vendorId != '') {
         dynamicQuery += ` AND tbl_product.created_by = ${vendorId}`;
       }
+      if (userId && userId != '') {
+        dynamicQuery += ` AND tbl_product.added_by = ${userId}`;
+      }
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND tbl_product.is_featured = '${isFeatured}'`;
       }
@@ -1307,9 +1279,18 @@ const productModel = {
           AND tbl_product_categories.category_id = ${categoryId}
         )`;
       }
+      if (dateFrom) {
+        dynamicQuery += ` AND DATE(tbl_product.created_at) >= '${dateFrom}'`;
+      }
+      if (dateTo) {
+        dynamicQuery += ` AND DATE(tbl_product.created_at) <= '${dateTo}'`;
+      }
+      if (is_approve !== null && is_approve !== undefined) {
+        dynamicQuery += ` AND tbl_product.is_approve = ${is_approve}`;
+      }
       
       db.any(
-        `SELECT tbl_product.* FROM tbl_product
+        `SELECT COUNT(*) as count FROM tbl_product
          LEFT JOIN tbl_users ON tbl_product.created_by = tbl_users.id 
          WHERE tbl_users.is_deleted = 0 
          AND tbl_product.is_deleted = 0 

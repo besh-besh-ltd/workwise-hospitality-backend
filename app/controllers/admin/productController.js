@@ -2262,6 +2262,9 @@ const productController = {
       let categoryId = req.query?.categoryId;
       let addedBy = req.query?.addedBy;
       let onlyAddedByAdmin = req.query?.onlyAddedByAdmin === 'true';
+      let dateFrom = req.query?.dateFrom;
+      let dateTo = req.query?.dateTo;
+      let is_approve = req.query?.is_approve !== undefined ? parseInt(req.query.is_approve) : null;
       let filterProduct = {};
 
       // Track which filters are active
@@ -2271,7 +2274,10 @@ const productController = {
         vendorId: !!vendorId,
         isFeatured: !!isFeatured,
         categoryId: !!categoryId,
-        onlyAddedByAdmin: onlyAddedByAdmin
+        onlyAddedByAdmin: onlyAddedByAdmin,
+        dateFrom: !!dateFrom,
+        dateTo: !!dateTo,
+        is_approve: is_approve !== null
       };
 
       if (vendorApprove) {
@@ -2287,8 +2293,10 @@ const productController = {
         filterProduct,
         isFeatured,
         addedBy,  // Use the addedBy parameter instead of req.user.id
-        onlyAddedByAdmin,
-        categoryId
+        categoryId,
+        dateFrom,
+        dateTo,
+        is_approve
       );
 
       // Get total counts with all active filters
@@ -2298,43 +2306,45 @@ const productController = {
         filterProduct,
         isFeatured,
         addedBy,  // Use the addedBy parameter for consistent filtering
-        categoryId
+        categoryId,
+        dateFrom,
+        dateTo,
+        is_approve
       );
-
-      // Calculate counts
-      const approve_count = filteredCount.filter(item => item.is_approve === 1).length;
-      const total_count = filteredCount.length;
-      const disapprove_count = total_count - approve_count;
 
       // Get unfiltered total counts for comparison
-      // Parameters for getProductCount in order:
-      // 1. vendorId - null to not filter by vendor
-      // 2. productName - null to not filter by product name
-      // 3. filterProduct - null to not apply any product filters 
-      // 4. isFeatured - null to include both featured and non-featured products
-      // 5. addedBy - req.user.id to get counts for products added by current user
-      // 6. categoryId - null to not filter by category
-      // Passing null for most parameters to get unfiltered total counts across all categories
       let unfilteredCount = await productModel.getProductCount(
-        null, null, null, null, req.user.id, null
+        null, null, null, null, null, null, null, null, null
       );
-      const total_unfiltered = unfilteredCount.length;
-      const total_approve_unfiltered = unfilteredCount.filter(item => item.is_approve === 1).length;
-      const total_disapprove_unfiltered = total_unfiltered - total_approve_unfiltered;
+
+      const total_count = parseInt(unfilteredCount[0].count);
+      const filtered_total = parseInt(filteredCount[0].count);
+
+      // Calculate approve/disapprove counts for filtered results
+      const approve_count = productList.filter(item => item.is_approve === 1).length;
+      const disapprove_count = filtered_total - approve_count;
+
+      // Calculate approve/disapprove counts for unfiltered results
+      const total_approve = await productModel.getProductCount(
+        null, null, null, null, null, null, null, null, 1
+      );
+      const total_disapprove = await productModel.getProductCount(
+        null, null, null, null, null, null, null, null, 0
+      );
 
       res.status(200).json({
         status: 1,
         data: productList,
-        total_count: total_count,  // Use filtered count as the main count
-        approve_count: approve_count,
-        disapprove_count: disapprove_count,
+        total_count: total_count,  // Total count without filters
+        approve_count: parseInt(total_approve[0].count),  // Total approved without filters
+        disapprove_count: parseInt(total_disapprove[0].count),  // Total disapproved without filters
         is_filtered: Object.values(activeFilters).some(f => f),
-        filtered_count: total_count,
-        filtered_approve_count: approve_count,
-        filtered_disapprove_count: disapprove_count,
+        filtered_count: filtered_total,  // Count with filters applied
+        filtered_approve_count: approve_count,  // Approved count with filters
+        filtered_disapprove_count: disapprove_count,  // Disapproved count with filters
         page,
         limit,
-        total_pages: Math.ceil(total_count / limit)
+        total_pages: Math.ceil(filtered_total / limit)
       }).end();
 
     } catch (error) {
@@ -3081,16 +3091,19 @@ const productController = {
       }
 
       // -------------multiple approved by ------------------------------
-      // if (vendorApproveId.length > 0) {
-      //   let productApproveArray = [];
-      //   vendorApproveId.forEach((item) => {
-      //     productApproveArray.push({
-      //       product_id: productId,
-      //       vendor_approve_id: item
-      //     });
-      //   });
-      //   await productModel.addProductApproveBy(productApproveArray, productId);
-      // }
+      if (approved_id && approved_id.length > 0) {
+        let productApproveArray = [];
+        const approvedIds = approved_id.split(',');
+        
+        approvedIds.forEach((item) => {
+          productApproveArray.push({
+            product_id: productId,
+            vendor_approve_id: parseInt(item.trim())
+          });
+        });
+        
+        await productModel.addProductApproveBy(productApproveArray, productId);
+      }
 
       // ---------------- featured image ----------------
       if (req.files?.featured && req.files?.featured.length > 0) {
