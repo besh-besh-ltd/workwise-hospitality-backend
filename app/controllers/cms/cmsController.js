@@ -469,6 +469,62 @@ const CmsController = {
         })
         .end();
     }
+  },
+
+  // temp route to work with zapier webhooks, kindly remove this APAS after testing
+  zapierWebhook: async (req, res, next) => {
+
+    try {
+      // Function to safely stringify the object, avoiding circular references
+      function safeStringify(obj) {
+        const seen = new Set();
+        return JSON.stringify(obj, (key, value) => {
+          if (typeof value === "object" && value !== null) {
+            if (seen.has(value)) {
+              return; // Circular reference found, return undefined to prevent infinite loop
+            }
+            seen.add(value);
+          }
+          return value;
+        }, 2);
+      }
+  
+      // Create a string of the req object data to be sent in the email
+      const reqData = `
+        <h3>Request Details:</h3>
+        <p><strong>Body:</strong> ${safeStringify(req.body)}</p>
+        <p><strong>Headers:</strong> ${safeStringify(req.headers)}</p>
+        <p><strong>Query:</strong> ${safeStringify(req.query)}</p>
+        <p><strong>Params:</strong> ${safeStringify(req.params)}</p>
+      `;
+  
+      // Send another email with the same data
+      sendMail({
+        from: Config.webmasterMail, // sender address
+        to: "mukul@letsworkwise.com", // list of receivers
+        subject: `Zapier webhook request is in progress with data`, // Subject line
+        html: `${reqData}` // HTML body with formatted req data
+      });
+  
+      // Send response back to the client
+      res.status(200).json({
+        message: "Zapier webhook request is in progress",
+        data: {
+          body: req.body,
+          query: req.query,
+          params: req.params,
+          headers: req.headers
+        }
+      }).end();
+  
+    } catch (error) {
+      logError(error);
+      res.status(400).json({
+        status: 3,
+        message: "Zapier webhook error"
+      }).end();
+    }
   }
+  
 };
 export default CmsController;
