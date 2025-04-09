@@ -2090,6 +2090,7 @@ const rfqController = {
 
 
       const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort,reverse_auction,rfq_type,rfq_no);
+      console.dir(listRfq, {depth: null})
 
       let count = await rfqModel.getBuyerRfqCount(user_id,project_id,rfq_type,reverse_auction,rfq_no);
       res
@@ -2810,6 +2811,10 @@ const rfqController = {
           vendors.map(async (vendor) => {
             const vendorProducts = await rfqModel.getVendorProductsCount(rfq_id, vendor.user_id);
             const vendorProductsQuoted = await rfqModel.getVendorProductsQuoted(rfq_id, vendor.user_id);
+
+            console.dir(vendorProducts, {depth: null})
+            console.dir(vendorProductsQuoted, {depth: null})
+            console.log()
       
             const requiredCount = vendorProducts.length;
             const quotedCount = vendorProductsQuoted.length;
@@ -4811,8 +4816,11 @@ const rfqController = {
             // Process each product in the request
         const quoteItemChanges = await Promise.all(
           products.map((product) => {
+            if ((product.comment == "" && product.document_files?.length <= 0) && (product.unit_price=='' || product.unit_price==0)) {
+              return null;
+            }
             return rfqModel.updateQuoteItemWithHistory(quoteId, product,quoteExists[0]);
-          })
+          }).filter(Boolean)
         );
 
         // console.log("mj ", quoteItemChanges)
