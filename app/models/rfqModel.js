@@ -1011,16 +1011,31 @@ LIMIT 1;`;
         WHERE TQ.rfq_id = RFQ.id
     ) AS "quotes",            
     ARRAY(
-        SELECT json_build_object(
-            'total_vendors', COUNT(DISTINCT TRPV.user_id), 
-            'quote_received', 
-            (SELECT COUNT(DISTINCT TQ.created_by)
-             FROM tbl_quotes TQ
-             WHERE TQ.rfq_id = RFQ.id)
-        ) AS "vendors"
-        FROM tbl_rfq_product_vendors TRPV
-        WHERE TRPV.rfq_id = RFQ.id
-        GROUP BY TRPV.rfq_id
+      SELECT json_build_object(
+        'total_vendors', COUNT(DISTINCT TRPV.user_id), 
+        'quote_received',
+        (
+          SELECT COUNT(*) FROM (
+            SELECT
+              trpv.user_id
+            FROM
+              tbl_rfq_product_vendors trpv
+            LEFT JOIN tbl_quote_items qi
+              ON trpv.product_id = qi.product_id AND trpv.rfq_id = qi.rfq_id AND qi.quote_id IN (
+                SELECT tq.id FROM tbl_quotes tq WHERE tq.rfq_id = trpv.rfq_id AND tq.created_by = trpv.user_id
+              ) AND qi.unit_price != 0
+            WHERE
+              trpv.rfq_id = rfq.id
+            GROUP BY
+              trpv.user_id
+            HAVING
+              COUNT(DISTINCT trpv.product_id) = COUNT(DISTINCT qi.product_id)
+          ) AS fully_quoted_vendors
+        )
+      )
+      FROM tbl_rfq_product_vendors trpv
+      WHERE trpv.rfq_id = rfq.id
+      GROUP BY trpv.rfq_id
     ) AS "vendors",
     ARRAY(
         SELECT json_build_object(
@@ -1609,6 +1624,7 @@ LIMIT $5 OFFSET $4;`,
         SELECT
           qi.product_id,
           p.name AS product_name,
+          qi.unit_price,
           COUNT(qi.id)
         FROM
           tbl_quotes q
@@ -1619,8 +1635,9 @@ LIMIT $5 OFFSET $4;`,
         WHERE
           qi.rfq_id = $1
           AND q.created_by = $2
+          AND qi.unit_price != 0
         GROUP BY
-          qi.product_id, p.name;
+          qi.product_id, p.name, qi.unit_price;
     `;
 
     return await db.query(q, [rfq_id, vendor_id])
@@ -2744,7 +2761,8 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               variant: product.variant
             }];
 
-            if ((product.comment != "" || product.document_files?.length > 0) && product.unit_price=='') {
+            // From frontend the `unit_price` will never come as empty string now.
+            if ((product.comment != "" || product.document_files?.length > 0) && (product.unit_price=='' || product.unit_price==0)) {
               quote_items_data[0].unit_price = 0;
             }
 

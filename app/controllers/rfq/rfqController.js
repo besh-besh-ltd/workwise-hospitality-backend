@@ -4811,8 +4811,11 @@ const rfqController = {
             // Process each product in the request
         const quoteItemChanges = await Promise.all(
           products.map((product) => {
+            if ((product.comment == "" && product.document_files?.length <= 0) && (product.unit_price=='' || product.unit_price==0)) {
+              return null;
+            }
             return rfqModel.updateQuoteItemWithHistory(quoteId, product,quoteExists[0]);
-          })
+          }).filter(Boolean)
         );
 
         // console.log("mj ", quoteItemChanges)
