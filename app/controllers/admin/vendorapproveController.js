@@ -370,23 +370,25 @@ const vendorController = {
         vendor_approve: name,
         vendor_logo:
           req?.files?.logo?.length > 0
-            ? `${Config.download_url}/vendor_approve/${req.files.logo[0].filename}`
+            ? req.files.logo[0].location // S3 file URL
             : null,
         status: status || 1,
         show_in_website: show_in_website || 1,
         datasheet_file:
           req?.files?.tds?.length > 0
-            ? `${Config.download_url}/vendor_approve/${req.files.tds[0].filename}`
-            : null
-        // qap_file: req?.files?.qap?.length > 0 ? req.files.qap[0].filename : null
+            ? req.files.tds[0].location // S3 file URL
+            : null,
+        // Uncomment this when QAP is handled
+        // qap_file: req?.files?.qap?.length > 0 ? req.files.qap[0].location : null
       };
       vendorApproveObj = Object.fromEntries(
         Object.entries(vendorApproveObj).filter(
           ([key, value]) => value !== null
         )
       );
-      console.log('vendorApproveObj-->', vendorApproveObj);
+  
       await vendorapproveModel.createVendorApprove(vendorApproveObj);
+  
       res
         .status(200)
         .json({
@@ -416,19 +418,22 @@ const vendorController = {
         show_in_website: show_in_website || 1,
         vendor_logo:
           req?.files?.logo?.length > 0
-            ? `${Config.download_url}/vendor_approve/${req.files.logo[0].filename}`
-            : checkVendorApproveID[0].logo,
+            ? req.files.logo[0].location // updated S3 URL
+            : checkVendorApproveID[0]?.vendor_logo,
         status: status || 1,
         datasheet_file:
           req?.files?.tds?.length > 0
-            ? `${Config.download_url}/vendor_approve/${req.files.tds[0].filename}`
-            : checkVendorApproveID[0].tds
-        /* qap_file:
-          req?.files?.qap?.length > 0
-            ? req.files.qap[0].filename
-            : checkVendorApproveID[0].qap */
+            ? req.files.tds[0].location // updated S3 URL
+            : checkVendorApproveID[0]?.datasheet_file,
+        // qap_file:
+        //   req?.files?.qap?.length > 0
+        //     ? req.files.qap[0].location
+        //     : checkVendorApproveID[0]?.qap_file
       };
-      console.log('vendorApproveObj-->', vendorApproveObj);
+  
+      // console.log("vendorApproveObj-->", vendorApproveObj);
+  
+      // Remove undefined keys (if any)
       vendorApproveObj = Object.fromEntries(
         Object.entries(vendorApproveObj).filter(
           ([key, value]) => value !== undefined

@@ -725,6 +725,19 @@ const cmsModel = {
         });
     });
   },
+  //to fetch the image url to delete from s3
+  getBannerImageUrl: async (banner_id) => {    
+    return new Promise(function (resolve, reject) {
+      db.any(`select image from tbl_cms_banner WHERE id=($1)`, [
+        banner_id
+      ]).then(function (data) {
+        resolve(data);
+      });
+    }).catch(function (err) {
+      let error = new Error(err);
+      reject(error);
+    });
+  },
   deleteLogo: async (logo_id) => {
     return new Promise(function (resolve, reject) {
       db.any(`DELETE from tbl_company_logo WHERE id=($1)`, [logo_id])
@@ -2108,6 +2121,21 @@ const cmsModel = {
         });
     });
   },
+  getTestimonialImageUrl: async (testimonialId) => {
+    return new Promise(function (resolve, reject) {
+      db.one(`SELECT created_image FROM tbl_testimonials WHERE id = $1`, [
+        testimonialId
+      ])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+
+          reject(error);
+        });
+    });
+  },
   deleteTestimonial: async (testimonialObj, testimonialId) => {
     return new Promise(function (resolve, reject) {
       const condition = ` WHERE id = $1 RETURNING id`;
@@ -2316,9 +2344,21 @@ const cmsModel = {
         });
     });
   },
+  getBlogImageUrl: async (blogId) => {
+    return new Promise(function (resolve, reject) { 
+      db.one(`SELECT image FROM tbl_blog WHERE id = $1`, [blogId])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);   
+          reject(error);
+        });
+    });
+  },
   deleteBlog: async (blogObj, blogId) => {
     return new Promise(function (resolve, reject) {
-      const condition = `WHERE id = $1 RETURNING id`;
+      const condition = ` WHERE id = $1 RETURNING id`;
       const values = [blogId];
       let query = pgp().helpers.update(blogObj, null, 'tbl_blog') + condition;
 
@@ -2582,7 +2622,9 @@ LIMIT $1 OFFSET $2;
           productDescriptionObj.description
         ])
           .then((data) => {
-            resolve({ message: 'Product description added successfully', id: data.id
+            resolve({
+              message: 'Product description added successfully',
+              id: data.id
             });
           })
           .catch((error) => {
@@ -2622,8 +2664,6 @@ LIMIT $1 OFFSET $2;
   },
   getProductDescriptionById: async (id) => {
     return new Promise((resolve, reject) => {
-
-      
       db.oneOrNone(`SELECT * FROM tbl_product_cms WHERE id = $1`, [id])
         .then((data) => {
           if (data) {
@@ -2695,66 +2735,65 @@ LIMIT $1 OFFSET $2;
       }
     });
   },
-  getOneProductDescription : async (id) =>{
-    return new Promise ((resolve , reject)=>{
+  getOneProductDescription: async (id) => {
+    return new Promise((resolve, reject) => {
       try {
-        const query = 'select * from tbl_product_cms where id = $1'
-        db.oneOrNone(query , [id])
-        .then((data)=>{
-          resolve(data)
-        })
-        .catch((error) => {
-          reject(new Error('Database error: ' + error.message));
-        });
-      }catch (error) {
+        const query = 'select * from tbl_product_cms where id = $1';
+        db.oneOrNone(query, [id])
+          .then((data) => {
+            resolve(data);
+          })
+          .catch((error) => {
+            reject(new Error('Database error: ' + error.message));
+          });
+      } catch (error) {
         reject(
           new Error('Error deleting product description: ' + error.message)
         );
       }
-    })
+    });
   },
-  
+
   saveProductTechSpec: (productID, techSpec) => {
     return new Promise(async (resolve, reject) => {
       try {
         // Validate input
         if (!productID || !Array.isArray(techSpec) || techSpec.length === 0) {
-          return reject(new Error("No specs to insert or invalid product ID"));
+          return reject(new Error('No specs to insert or invalid product ID'));
         }
-  
+
         // Convert input to array of arrays for parameterized query
-        const values = techSpec.map(item => [
+        const values = techSpec.map((item) => [
           productID,
           item.key,
           item.value
         ]);
-  
+
         const query = `
           INSERT INTO tbl_product_tech_spec (product_id, title, value)
           VALUES ($1:csv)
           RETURNING *;
         `;
-  
+
         // Convert to pg-promise formatted values
-        const formatted = values.map(v => pgp.as.format("($1, $2, $3)", v)).join(',');
-  
+        const formatted = values
+          .map((v) => pgp.as.format('($1, $2, $3)', v))
+          .join(',');
+
         const finalQuery = `
           INSERT INTO tbl_product_tech_spec (product_id, title, value)
           VALUES ${formatted}
           RETURNING *;
         `;
-  
+
         const result = await db.manyOrNone(finalQuery);
         resolve(result);
-  
       } catch (error) {
         console.error('Error saving product tech specs:', error);
         reject(new Error('Failed to save product tech specs'));
       }
     });
   }
-  
-  
 };
 
 export default cmsModel;

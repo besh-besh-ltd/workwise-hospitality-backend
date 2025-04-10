@@ -1,11 +1,27 @@
 import Joi from 'joi';
 import { encode } from 'html-entities';
 import multer from 'multer';
+import multerS3 from 'multer-s3';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import Config from '../../config/app.config.js';
 import userModel from '../../models/userModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { S3Client } from '@aws-sdk/client-s3';
+
+
+const s3Client = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  }
+});
+
+
+
+
+
 
 var store_profile_images = multer.diskStorage({
   destination: function (req, file, callback) {
@@ -28,16 +44,28 @@ var store_agent_profile_images = multer.diskStorage({
   }
 });
 
-var store_document = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.user_document);
-  },
-  filename: function (req, file, callback) {
-    var extention = path.extname(file.originalname);
-    var new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+const store_document = multerS3({
+  s3: s3Client,
+  bucket: process.env.AWS_S3_BUCKET,
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    const ext = path.extname(file.originalname);
+    const newFileName = `${Date.now()}-${uuidv4()}${ext}`;
+    cb(null, newFileName);
   }
 });
+
+
+// var store_document = multer.diskStorage({
+//   destination: function (req, file, callback) {
+//     callback(null, Config.upload.user_document);
+//   },
+//   filename: function (req, file, callback) {
+//     var extention = path.extname(file.originalname);
+//     var new_file_name = +new Date() + '-' + uuidv4() + extention;
+//     callback(null, new_file_name);
+//   }
+// });
 
 // multer configuration for without authentiation files.
 var store_document_without_auth = multer.diskStorage({
@@ -760,30 +788,36 @@ const schema_posts = {
           // fileSize: 2000000 // Compliant: 8MB
           fileSize: 26214400 // Compliant: 25MB, changes by mukul, 27-11-2024
         },
-        fileFilter: (req, file, cb) => {
-          var ext = path.extname(file.originalname).toLowerCase();
+        // fileFilter: (req, file, cb) => {
+        //   var ext = path.extname(file.originalname).toLowerCase();
+        //   console.log('File extension:===============================================', ext);
+        //   if (
+        //     ext == '.png' ||
+        //     ext == '.jpg' ||
+        //     ext == '.jpeg' ||
+        //     ext == '.pdf' ||
+        //     ext == '.doc' ||
+        //     ext == '.docx' ||
+        //     ext == '.xlsx'
+        //   ) 
+        //   {
+        //     // var validateImage = validatingImage(schemas.user_document);
 
-          if (
-            ext == '.png' ||
-            ext == '.jpg' ||
-            ext == '.jpeg' ||
-            ext == '.pdf' ||
-            ext == '.doc' ||
-            ext == '.docx' ||
-            ext == '.xlsx'
-          ) {
-            var validateImage = validatingImage(schemas.user_document);
-            if (validateImage) {
-              cb(null, true);
-            }
-          } else {
-            cb(null, false);
-            return cb('File format not allowed!', null);
-          }
-        }
+        //     console.log('Validation result:==========>');
+        //     // if (validateImage) {
+        //     //   cb(null, true);
+        //     // }
+        //   } else {
+        //     cb(null, false);
+        //     console.log('File rejected:==============================', file.originalname);
+        //     return cb('File format not allowed!', null);
+        //   }
+        // }
       }).fields([{ name: 'file', maxCount: 8 }]);
       upload(req, res, async function (err) {
+      
         if (err) {
+         
           let data = {};
           data.file = err;
           res

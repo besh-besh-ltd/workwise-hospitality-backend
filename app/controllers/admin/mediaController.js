@@ -50,14 +50,18 @@ const mediaController = {
     }
   },
   upload_documents: async (req, res, next) => {
-    console.log('FILES======', req.files.file);
+    // console.log('FILES======', req.files.file);
     try {
       var user_id = req.user.id;
       let doc_type = 'media';
 
-      if (req.files) {
+      // console.log('req.file', req.files);
+
+      if (req.files && req.files.file && req.files.file.length > 0) {
+        const uploadedFiles = req.files.file;
+      
         const result = await mediaModel.uploadFiles(
-          req.files.file,
+          uploadedFiles,
           user_id,
           doc_type
         );

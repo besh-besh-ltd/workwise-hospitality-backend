@@ -8,6 +8,8 @@ import userModel from '../../models/userModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
 import fs from 'fs';
 import { log } from 'console';
+import multerS3 from 'multer-s3';
+import s3Client from '../../config/s3config.js';
 
 var store_category_images = multer.diskStorage({
   destination: function (req, file, callback) {
@@ -20,14 +22,16 @@ var store_category_images = multer.diskStorage({
   }
 });
 
-let store_product_images = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.product_image);
-  },
-  filename: function (req, file, callback) {
-    var extention = path.extname(file.originalname);
-    var new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+let store_product_images = multerS3({
+  s3: s3Client,
+  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+     const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    const fullPath = `product_image/${fileName}`; // Exact path you want
+    cb(null, fullPath);
   }
 });
 
@@ -42,16 +46,28 @@ let store_bulk_product_file = multer.diskStorage({
   }
 });
 
-let store_magic_search_file = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.magic_search_file);
-  },
-  filename: function (req, file, callback) {
-    var extention = path.extname(file.originalname);
-    var new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+let store_magic_search_file = multerS3({
+  s3: s3Client,
+  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+     const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    const fullPath = `magic_search_file/${fileName}`; // Exact path you want
+    cb(null, fullPath);
   }
 });
+// let store_magic_search_file = multer.diskStorage({
+//   destination: function (req, file, callback) {
+//     callback(null, Config.upload.magic_search_file);
+//   },
+//   filename: function (req, file, callback) {
+//     var extention = path.extname(file.originalname);
+//     var new_file_name = +new Date() + '-' + uuidv4() + extention;
+//     callback(null, new_file_name);
+//   }
+// });
 
 let store_add_clause_file = multer.diskStorage({
   destination: function (req, file, callback) {
@@ -690,10 +706,10 @@ const schema_posts = {
           }
         }
       }).fields([
-        { name: 'gallery[]', maxCount: 8 },
-        { name: 'featured[]', maxCount: 1 },
-        { name: 'tds[]', maxCount: 1 },
-        { name: 'qap[]', maxCount: 1 }
+        { name: 'gallery', maxCount: 8 },
+        { name: 'featured', maxCount: 1 },
+        { name: 'tds', maxCount: 1 },
+        { name: 'qap', maxCount: 1 }
       ]);
 
       upload(req, res, async function (err) {

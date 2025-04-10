@@ -4569,7 +4569,7 @@ const rfqController = {
   },
   magicSearchRfqCreate: async (req, res, next) => {
     try {
-      const file = req.file;
+      const file = req.file.location;
       const user = req.user;
       const comment = req.body.comment;
       const response_email = user.email;
