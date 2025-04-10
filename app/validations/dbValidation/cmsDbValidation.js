@@ -544,25 +544,25 @@ const validateDbBody = {
         })
         .end();
     }
-    location_exists: [
-    query('state')
-      .optional()
-      .isString()
-      .trim()
-      .custom(async (value) => {
-        if (value) {
-          const state = await db.oneOrNone(
-            'SELECT id FROM tbl_location_states WHERE state_name ILIKE $1',
-            [value]
-          );
-          if (!state) {
-            throw new Error('State not found');
-          }
-        }
-        return true;
-      }),
-    validateRequest
-  ]
+  //   location_exists: [
+  //   query('state')
+  //     .optional()
+  //     .isString()
+  //     .trim()
+  //     .custom(async (value) => {
+  //       if (value) {
+  //         const state = await db.oneOrNone(
+  //           'SELECT id FROM tbl_location_states WHERE state_name ILIKE $1',
+  //           [value]
+  //         );
+  //         if (!state) {
+  //           throw new Error('State not found');
+  //         }
+  //       }
+  //       return true;
+  //     }),
+  //   validateRequest
+  // ]
   },
   
   update_location_valid: async (req, res, next) => {

@@ -189,7 +189,7 @@ const buyerController = {
         skype
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
-      let fileName = req?.file?.filename;
+      let fileName = req?.file?.location;   //get file url from s3 bucket
       let originalFilename = req?.file?.originalname;
       let buyerDetails = await buyerModel.getBuyerDetails(buyerId);
       let buyerObj = {

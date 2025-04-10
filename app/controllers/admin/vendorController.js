@@ -15,7 +15,7 @@ import {
   notificationMail,
   addDefaultNotifications
 } from '../../helper/common.js';
-import jwtHelper from '../../helper/jwtHelper.js';
+// import jwtHelper from '../../helper/jwtHelper.js';
 import subscriptionModel from '../../models/subscriptionModel.js';
 import moment from 'moment';
 import userModel from '../../models/userModel.js';
@@ -148,24 +148,15 @@ const vendorController = {
         user_type: '3',
         password: generatePassword(password),
         status: '0',
-        new_profile_image:
-          req.files?.image && req.files?.image.length > 0
-            ? `${Config.download_url}/user_image/${req.files.image[0].filename}`
-            : null,
-        original_profile_image:
-          req.files?.image && req.files?.image.length > 0
-            ? req.files.image[0].originalname
-            : null,
+        new_profile_image: req.files.image?.[0]?.location || null,
+        original_profile_image: req.files.image?.[0]?.location || null,
         created_by: createdBy,
         organization_name: organization_name || null
       };
 
       let companyObj = {
         profile: about_vendor_company || null,
-        logo:
-          req.files?.logo && req.files?.logo.length > 0
-            ? `${Config.download_url}/user_image/${req.files.logo[0].filename}`
-            : null,
+        logo: req.files.logo?.[0]?.location || null,
         email: email || null,
         mobile: mobile || null,
         company_name: organization_name || null,
@@ -203,17 +194,18 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       await productModel.addCompany(companyObj);
 
       if (req.files?.ptr_track && req.files?.ptr_track.length > 0) {
-        const pathname = `${Config.download_url}/user_image/${req.files.ptr_track[0].filename}`;
+        const pathname = req.files.ptr_track[0].location;
         let filesObj = {
-          file_path: pathname || null,
+          file_path: pathname,
           file_name: req.files.ptr_track[0].originalname || null,
           doc_type: 'ptr',
           user_id: vendor[0].id
         };
         await productModel.addFile(filesObj);
       }
+      
       if (req.files?.certifications && req.files?.certifications.length > 0) {
-        const pathname = `${Config.download_url}/user_image/${req.files.certifications[0].filename}`;
+        const pathname = req.files.certifications[0].location;
         let filesObj = {
           file_path: pathname,
           file_name: req.files.certifications[0].originalname || null,
@@ -503,8 +495,8 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         about_vendor_company
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
-      let fileName = req?.file?.filename;
-      let originalFilename = req?.file?.originalname;
+      // let fileName = req?.file?.filename;
+      // let originalFilename = req?.file?.originalname;
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
       let vendorObj = {
         name: name || vendorDetails[0].name,
@@ -516,14 +508,8 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         mobile: mobile || vendorDetails[0].mobile,
         website: website || vendorDetails[0].website,
         postal_code: postal_code || vendorDetails[0].postal_code,
-        new_profile_image:
-          req.files?.image && req.files?.image.length > 0
-            ? `${Config.download_url}/user_image/${req.files.image[0].filename}`
-            : vendorDetails[0].new_profile_image,
-        original_profile_image:
-          req.files?.image && req.files?.image.length > 0
-            ? req.files.image[0].originalname
-            : vendorDetails[0].original_profile_image,
+        new_profile_image: req.files.image?.[0]?.location,
+        original_profile_image: vendorDetails[0].original_profile_image,
         updated_by: updatedBy,
         organization_name:
           organization_name || vendorDetails[0].organization_name
@@ -536,8 +522,8 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         let companyObj = {
           profile: about_vendor_company || companyDetails[0].profile,
           logo:
-            req.files?.logo && req.files?.logo.length > 0
-              ? `${Config.download_url}/user_image/${req.files.logo[0].filename}`
+            req.files?.logo
+              ? req.files?.logo[0].location
               : companyDetails[0].logo,
           email: email || companyDetails[0].email,
           mobile: mobile || companyDetails[0].mobile,
@@ -597,9 +583,9 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       }
 
       if (req.files?.ptr_track && req.files?.ptr_track.length > 0) {
-        const pathname = `${Config.download_url}/user_image/${req.files.ptr_track[0].filename}`;
+        const pathname = req.files.ptr_track[0].location;
         let filesObj = {
-          file_path: pathname || null,
+          file_path: pathname,
           file_name: req.files.ptr_track[0].originalname || null,
           doc_type: 'ptr',
           user_id: vendorId
@@ -607,7 +593,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         await productModel.addFile(filesObj);
       }
       if (req.files?.certifications && req.files?.certifications.length > 0) {
-        const pathname = `${Config.download_url}/user_image/${req.files.certifications[0].filename}`;
+        const pathname = req.files.certifications[0].location;
         let filesObj = {
           file_path: pathname,
           file_name: req.files.certifications[0].originalname || null,
@@ -617,7 +603,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         await productModel.addFile(filesObj);
       }
       if (req.files?.brochure && req.files?.brochure.length > 0) {
-        const pathname = `${Config.download_url}/user_image/${req.files.brochure[0].filename}`;
+        const pathname = req.files.brochure[0].location;
         let filesObj = {
           file_path: pathname,
           file_name: req.files.brochure[0].originalname || null,

@@ -2656,12 +2656,7 @@ const productController = {
         vendor,
         is_featured
       } = req.body;
-      // categories = JSON.parse(categories);
-      // variations = JSON.parse(variations);
-      // if (approved_id) {
-      //   approved_id = JSON.parse(approved_id);
-      // }
-
+  
       let vendorApproveId = 0;
       if (!approved_id && approved_name) {
         let findVendorApprove = await vendorapproveModel.findVendorApproveByName(approved_name);
@@ -2678,7 +2673,7 @@ const productController = {
       } else {
         vendorApproveId = approved_id;
       }
-
+  
       // ---------------- products ----------------
       let productObj = {
         name: name,
@@ -2690,76 +2685,62 @@ const productController = {
         created_by: vendor || req.user.id,
         vendor: vendor || null,
         status: status || 1,
-        // vendor_approved_by: vendorApproveId || null,
         is_featured: is_featured || 0,
         is_approve: 0,
         added_by: req.user.id,
-        qap_new_file_name:
-          req.files?.qap?.length > 0
-            ? `${Config.download_url}/product_image/${req.files.qap[0].filename}`
-            : null,
-        qap_original_file_name:
-          req.files?.qap?.length > 0 ? req.files.qap[0].originalname : null,
-        tds_new_file_name:
-          req.files?.tds?.length > 0
-            ? `${Config.download_url}/product_image/${req.files.tds[0].filename}`
-            : null,
-        tds_original_file_name:
-          req.files?.tds?.length > 0 ? req.files.tds[0].originalname : null
+        qap_new_file_name: req.files?.['qap[]']?.[0]?.location || null,
+        qap_original_file_name: req.files?.['qap[]']?.[0]?.originalname || null,
+        tds_new_file_name: req.files?.['tds[]']?.[0]?.location || null,
+        tds_original_file_name: req.files?.['tds[]']?.[0]?.originalname || null
       };
 
       let product = await productModel.createProduct(productObj);
       let productId = product.id;
       if (vendorApproveId.length > 0) {
-        let productApproveArray = [];
-        vendorApproveId.forEach((item) => {
-          productApproveArray.push({
-            product_id: productId,
-            vendor_approve_id: item
-          });
-        });
+        let productApproveArray = vendorApproveId.map((id) => ({
+          product_id: productId,
+          vendor_approve_id: id
+        }));
         await productModel.addProductApproveBy(productApproveArray, productId);
       }
-
-      // ---------------- categories ---------------
+  
+      // ---------------- categories ----------------
       for (const categoryId of categories) {
-        const res = await productModel.createProductCategories(categoryId, productId);
-        // console.log(res)
+        await productModel.createProductCategories(categoryId, productId);
       }
-
+  
       // ---------------- variations ----------------
       for await (const { attribute, attributeValue } of variations) {
-        // console.log(attribute, attributeValue);
         let varientObj = {
           product_id: productId,
           variant_name: attribute,
           variant_value: attributeValue
         };
-        // console.log(categoryObj);
-
         await productModel.createProductveriants(varientObj);
       }
 
       // ---------------- featured image ----------------
-      if (req.files?.featured && req.files?.featured.length > 0) {
+      if (req.files?.['featured[]']?.length > 0) {
+        const file = req.files['featured[]'][0];
         let featuredImageObj = {
           product_id: productId,
           is_featured: 1,
-          original_image_name: req.files.featured[0].originalname,
-          new_image_name: `${Config.download_url}/product_image/${req.files.featured[0].filename}`
+          original_image_name: file.originalname,
+          new_image_name: file.location
         };
         await productModel.insertProductImages(featuredImageObj);
       }
-      // ---------------- gallery image ----------------
-      if (req.files?.gallery && req.files?.gallery.length > 0) {
-        for await (const { originalname, filename } of req.files?.gallery) {
-          let featuredImageObj = {
+  
+      // ---------------- gallery images ----------------
+      if (req.files?.['gallery[]']?.length > 0) {
+        for await (const file of req.files['gallery[]']) {
+          let imageObj = {
             product_id: productId,
             is_featured: 0,
-            original_image_name: originalname,
-            new_image_name: `${Config.download_url}/product_image/${filename}`
+            original_image_name: file.originalname,
+            new_image_name: file.location
           };
-          await productModel.insertProductImages(featuredImageObj);
+          await productModel.insertProductImages(imageObj);
         }
       }
 
@@ -3003,38 +2984,29 @@ const productController = {
         vendor,
         is_featured
       } = req.body;
-
-      // categories = JSON.parse(categories);
-      // variations = JSON.parse(variations);
-
-      // if (approved_id) {
-      //   approved_id = JSON.parse(approved_id);
-      // }
-
-      let productId = req.params.id;
-
-      // let vendorApproveId = 0;
-      // if (!approved_id && approved_name) {
-      //   let findVendorApprove =
-      //     await vendorapproveModel.findVendorApproveByName(approved_name);
-      //   if (findVendorApprove.length == 0) {
-      //     let vendorApproveObj = {
-      //       vendor_approve: approved_name,
-      //       status: 1
-      //     };
-      //     let createVendorApprove =
-      //       await vendorapproveModel.createVendorApprove(vendorApproveObj);
-      //     vendorApproveId = createVendorApprove.id;
-      //   } else {
-      //     vendorApproveId = findVendorApprove[0].id;
-      //   }
-      // } else {
-      //   vendorApproveId = approved_id;
-      // }
-
-      // ---------------- products ----------------
-
-      let productDetails = await productModel.check_product(productId);
+  
+      const productId = req.params.id;
+      const productDetails = await productModel.check_product(productId);
+  
+      // ---------------- vendor approval ----------------
+      let vendorApproveId = [];
+      if (!approved_id && approved_name) {
+        let findVendorApprove = await vendorapproveModel.findVendorApproveByName(approved_name);
+        if (findVendorApprove.length === 0) {
+          let vendorApproveObj = {
+            vendor_approve: approved_name,
+            status: 1
+          };
+          let createVendorApprove = await vendorapproveModel.createVendorApprove(vendorApproveObj);
+          vendorApproveId = [createVendorApprove.id];
+        } else {
+          vendorApproveId = [findVendorApprove[0].id];
+        }
+      } else if (approved_id) {
+        vendorApproveId = approved_id.split(',').map((id) => parseInt(id.trim()));
+      }
+  
+      // ---------------- update product ----------------
       let productObj = {
         name: name,
         description: description || null,
@@ -3048,39 +3020,25 @@ const productController = {
         // vendor_approved_by: vendorApproveId || null,
         productId: productId,
         is_featured: is_featured || 0,
-        qap_new_file_name:
-          req.files?.qap?.length > 0
-            ? `${Config.download_url}/product_image/${req.files.qap[0].filename}`
-            : productDetails[0].qap_new_file_name || null,
-        qap_original_file_name:
-          req.files?.qap?.length > 0
-            ? req.files.qap[0].originalname
-            : productDetails[0].qap_original_file_name || null,
-        tds_new_file_name:
-          req.files?.tds?.length > 0
-            ? `${Config.download_url}/product_image/${req.files.tds[0].filename}`
-            : productDetails[0].tds_new_file_name || null,
-        tds_original_file_name:
-          req.files?.tds?.length > 0
-            ? req.files.tds[0].originalname
-            : productDetails[0].tds_original_file_name || null
+        qap_new_file_name: req.files?.['qap[]']?.[0]?.location || null,
+        qap_original_file_name: req.files?.['qap[]']?.[0]?.originalname || null,
+        tds_new_file_name: req.files?.['tds[]']?.[0]?.location || null,
+        tds_original_file_name: req.files?.['tds[]']?.[0]?.originalname || productDetails[0].tds_original_file_name || null
       };
-
+  
       await productModel.updateVendorProduct(productObj);
-      // Delete variants
+  
+      // ---------------- remove old data ----------------
       await productModel.deleteProductVariants(productId);
-      // Delete product category
       await productModel.deleteProductCategory(productId);
-      // delete product approved by
       await productModel.deleteProductApproveBy(productId);
-
-      // ---------------- categories ---------------
-      for (const category_id of categories) {        
-        const res = await productModel.createProductCategories(category_id, productId);
-        // console.log(res)
+  
+      // ---------------- add categories ----------------
+      for (const categoryId of categories) {
+        await productModel.createProductCategories(categoryId, productId);
       }
-
-      // ---------------- variations ----------------
+  
+      // ---------------- add variations ----------------
       for await (const { attribute, attributeValue } of variations) {
         let variantObj = {
           product_id: productId,
@@ -3089,59 +3047,50 @@ const productController = {
         };
         await productModel.createProductveriants(variantObj);
       }
-
-      // -------------multiple approved by ------------------------------
-      if (approved_id && approved_id.length > 0) {
-        let productApproveArray = [];
-        const approvedIds = approved_id.split(',');
-        
-        approvedIds.forEach((item) => {
-          productApproveArray.push({
-            product_id: productId,
-            vendor_approve_id: parseInt(item.trim())
-          });
-        });
-        
+  
+      // ---------------- add approval ----------------
+      if (vendorApproveId.length > 0) {
+        let productApproveArray = vendorApproveId.map((id) => ({
+          product_id: productId,
+          vendor_approve_id: id
+        }));
         await productModel.addProductApproveBy(productApproveArray, productId);
       }
-
+  
       // ---------------- featured image ----------------
-      if (req.files?.featured && req.files?.featured.length > 0) {
+      if (req.files?.['featured[]']?.length > 0) {
         let featuredImage = await productModel.getProductImages(productId, 1);
         if (featuredImage.length > 0) {
-          await productModel.deleteProductImages(
-            productId,
-            1,
-            featuredImage[0].id
-          );
+          await productModel.deleteProductImages(productId, 1, featuredImage[0].id);
         }
-
+  
+        const file = req.files['featured[]'][0];
         let featuredImageObj = {
           product_id: productId,
           is_featured: 1,
-          original_image_name: req.files.featured[0].originalname,
-          new_image_name: `${Config.download_url}/product_image/${req.files.featured[0].filename}`
+          original_image_name: file.originalname,
+          new_image_name: file.location
         };
         await productModel.insertProductImages(featuredImageObj);
       }
-
-      // ---------------- gallery image ----------------
-      if (req.files?.gallery && req.files?.gallery.length > 0) {
+  
+      // ---------------- gallery images ----------------
+      if (req.files?.['gallery[]']?.length > 0) {
         let galleryImage = await productModel.getProductImages(productId, 0);
         if (galleryImage.length > 0) {
-          for await (const { new_image_name, id } of galleryImage) {
+          for await (const { id } of galleryImage) {
             await productModel.deleteProductImages(productId, 0, id);
           }
         }
-
-        for await (const { originalname, filename } of req.files?.gallery) {
-          let featuredImageObj = {
+  
+        for await (const file of req.files['gallery[]']) {
+          let imageObj = {
             product_id: productId,
             is_featured: 0,
-            original_image_name: originalname,
-            new_image_name: `${Config.download_url}/product_image/${filename}`
+            original_image_name: file.originalname,
+            new_image_name: file.location
           };
-          await productModel.insertProductImages(featuredImageObj);
+          await productModel.insertProductImages(imageObj);
         }
       }
 
