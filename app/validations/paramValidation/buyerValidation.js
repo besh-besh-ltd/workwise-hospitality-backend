@@ -1,22 +1,58 @@
 import Joi from 'joi';
 import { encode } from 'html-entities';
+import multerS3 from 'multer-s3';
+import s3Client from '../../config/s3config.js';
 import multer from 'multer';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import Config from '../../config/app.config.js';
-import userModel from '../../models/userModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
 
-var store_profile_images = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.user_image);
-  },
-  filename: function (req, file, callback) {
-    var extention = path.extname(file.originalname);
-    var new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+
+
+const store_profile_images = multerS3({
+  s3: s3Client,
+  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+    
+    // 2. Generate unique filename with timestamp + UUID
+    const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    
+    // 3. Create full S3 path matching your URL structure
+    const fullPath = `user_image/${fileName}`; // Exact path you want
+    
+    // 4. Pass the complete path to callback
+    cb(null, fullPath);
   }
 });
+
+
+// var store_profile_images = multerS3({
+//   s3: s3Client,
+//   bucket: process.env.AWS_S3_BUCKET,
+//   contentType: multerS3.AUTO_CONTENT_TYPE,
+//   key: function (req, file, cb) {
+//     // 1. Define your target directory path
+//     const targetDirectory = 'user_image/'; // <- Change this to your desired path
+    
+//     // 2. Get file extension from original filename
+//     const ext = path.extname(file.originalname);
+    
+//     // 3. Generate unique filename using timestamp + UUID
+//     const uniqueFileName = `${Date.now()}-${uuidv4()}${ext}`;
+    
+//     // 4. Combine directory path with filename
+//     const fullPath = `${targetDirectory}${uniqueFileName}`;
+    
+//     // 5. Return the complete path through callback
+//     cb(null, fullPath);
+//   }
+// });
+
+
 var store_agent_profile_images = multer.diskStorage({
   destination: function (req, file, callback) {
     callback(null, Config.upload.agent_user_image);
@@ -238,6 +274,7 @@ const schema_posts = {
                 })
                 .end();
             } else {
+              
               next();
             }
           }

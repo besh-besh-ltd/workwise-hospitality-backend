@@ -8,28 +8,61 @@ import Config from '../../config/app.config.js';
 import cmsModel from '../../models/cmsModel.js';
 import productModel from '../../models/productModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import multerS3 from 'multer-s3';
+import s3Client from '../../config/s3config.js';
 
-let store_product_images = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.product_image);
-  },
-  filename: function (req, file, callback) {
-    var extention = path.extname(file.originalname);
-    var new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+
+
+
+
+
+let store_product_images = multerS3({
+  s3: s3Client,
+  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+     const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    const fullPath = `product_image/${fileName}`; // Exact path you want
+    cb(null, fullPath);
   }
 });
 
-let store_banner_images = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.banner_image);
-  },
-  filename: function (req, file, callback) {
-    let extention = path.extname(file.originalname);
-    let new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+// let store_product_images = multer.diskStorage({
+//   destination: function (req, file, callback) {
+//     callback(null, Config.upload.product_image);
+//   },
+//   filename: function (req, file, callback) {
+//     var extention = path.extname(file.originalname);
+//     var new_file_name = +new Date() + '-' + uuidv4() + extention;
+//     callback(null, new_file_name);
+//   }
+// });
+
+let store_banner_images = multerS3({
+  s3: s3Client,
+  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+     const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    const fullPath = `banner_image/${fileName}`; // Exact path you want
+    cb(null, fullPath);
   }
 });
+
+// let store_banner_images = multer.diskStorage({
+//   destination: function (req, file, callback) {
+//     callback(null, Config.upload.banner_image);
+//   },
+//   filename: function (req, file, callback) {
+//     let extention = path.extname(file.originalname);
+//     let new_file_name = +new Date() + '-' + uuidv4() + extention;
+//     callback(null, new_file_name);
+//   }
+// });
 let store_logo_images = multer.diskStorage({
   destination: function (req, file, callback) {
     callback(null, Config.upload.company_image);
@@ -80,36 +113,80 @@ let store_lookbooks_images = multer.diskStorage({
     callback(null, new_file_name);
   }
 });
-let store_testimonial_images = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.testimonial_image);
-  },
-  filename: function (req, file, callback) {
-    let extention = path.extname(file.originalname);
-    let new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+
+let store_testimonial_images = multerS3({
+  s3: s3Client,
+  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+     const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    const fullPath = `testimonial_image/${fileName}`; // Exact path you want
+    cb(null, fullPath);
   }
 });
-let store_team_member_images = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.team_member_image);
-  },
-  filename: function (req, file, callback) {
-    let extention = path.extname(file.originalname);
-    let new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+
+
+// let store_testimonial_images = multer.diskStorage({
+//   destination: function (req, file, callback) {
+//     callback(null, Config.upload.testimonial_image);
+//   },
+//   filename: function (req, file, callback) {
+//     let extention = path.extname(file.originalname);
+//     let new_file_name = +new Date() + '-' + uuidv4() + extention;
+//     callback(null, new_file_name);
+//   }
+// });
+
+let store_team_member_images = multerS3({
+  s3: s3Client,
+  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+     const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    const fullPath = `user_document/${fileName}`; // Exact path you want
+    cb(null, fullPath);
   }
 });
-let store_blog_images = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.blog_image);
-  },
-  filename: function (req, file, callback) {
-    let extention = path.extname(file.originalname);
-    let new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+
+// let store_team_member_images = multer.diskStorage({
+//   destination: function (req, file, callback) {
+//     callback(null, Config.upload.team_member_image);
+//   },
+//   filename: function (req, file, callback) {
+//     let extention = path.extname(file.originalname);
+//     let new_file_name = +new Date() + '-' + uuidv4() + extention;
+//     callback(null, new_file_name);
+//   }
+// });
+// let store_blog_images = multer.diskStorage({
+//   destination: function (req, file, callback) {
+//     callback(null, Config.upload.blog_image);
+//   },
+//   filename: function (req, file, callback) {
+//     let extention = path.extname(file.originalname);
+//     let new_file_name = +new Date() + '-' + uuidv4() + extention;
+//     callback(null, new_file_name);
+//   }
+// });
+
+let store_blog_images = multerS3({
+  s3: s3Client,
+  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+     const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    const fullPath = `blog_image/${fileName}`; // Exact path you want
+    cb(null, fullPath);
   }
 });
+
+
 let store_collection_images = multer.diskStorage({
   destination: function (req, file, callback) {
     callback(null, Config.upload.collection_image);

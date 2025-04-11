@@ -1,7 +1,7 @@
 //import blogModel from '../../models/blogModel.js';
 import cmsModel from '../../models/cmsModel.js';
 import Config from '../../config/app.config.js';
-import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logError, currentDateTime, titleToSlug, deleteFileFromS3 } from '../../helper/common.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
@@ -9,6 +9,9 @@ import fs from 'fs';
 import Moment from 'moment';
 import rfqModel from '../../models/rfqModel.js';
 import productModel from '../../models/productModel.js';
+import s3Client from '../../config/s3config.js';
+
+
 
 const cmsController = {
   pageList: async (req, res, next) => {
@@ -88,12 +91,12 @@ const cmsController = {
       const { page_id, content, status } = req.body;
       // console.log('page_id--', page_id);
 
-      let filename = req.file.filename;
+      let fileurl = req.file.location;   //fetch  file location from s3 bucket
       let original_filename = req.file.originalname;
       let banner = await cmsModel.bannerInsert(
         page_id,
         content,
-        `${Config.download_url}/banner_image/${filename}`,
+        fileurl,
         status || 1,
         created_by
       );
@@ -242,8 +245,8 @@ const cmsController = {
       let filename = '';
       let original_filename = '';
       let banner = '';
-      if (req.file?.filename) {
-        filename = `${Config.download_url}/banner_image/${req.file.filename}`;
+      if (req.file) {
+        filename = req.file.location;;
         original_filename = req.file.originalname;
         banner = await cmsModel.bannerUpdateFilename(
           page_id,
@@ -390,6 +393,12 @@ const cmsController = {
     try {
       let banner_id = req.params.banner_id;
       let updatedBy = req.user.id;
+      let imageurl = await cmsModel.getBannerImageUrl(banner_id);
+      
+      if(imageurl){
+       await deleteFileFromS3(s3Client,imageurl[0].image); 
+      }
+      
       await cmsModel.deleteBanner(banner_id);
       res
         .status(200)
@@ -1031,15 +1040,15 @@ const cmsController = {
         url: url,
         page_id: pageId,
         status: status,
+        thumbnail_image : req.files['created_image']?.[0]?.location,
+          
         // thumbnail_image:
         //   req?.files?.image?.length > 0
         //     ? `${Config.download_url}/testimonial_image/${req.files.image[0].filename}`
         //     : null,
         created_name,
-        created_image:
-          req?.files?.created_image?.length > 0
-            ? `${Config.download_url}/testimonial_image/${req.files.created_image[0].filename}`
-            : null
+        created_image: req.files['created_image']?.[0]?.location
+          
         // original_filename: original_filename
       };
 
@@ -1151,7 +1160,11 @@ const cmsController = {
       let testimonialObj = {
         status: 2
       };
+      let imageUrl = await cmsModel.getTestimonialImageUrl(testimonialId);
 
+      if(imageUrl){
+        await deleteFileFromS3(s3Client,imageUrl.created_image); 
+      }
       await cmsModel.deleteTestimonial(testimonialObj, testimonialId);
       res
         .status(200)
@@ -1195,18 +1208,12 @@ const cmsController = {
         url: url,
         page_id: req.body.pageId ? req.body.pageId : findOneTestimonial[0]?.page_id,
         status: status,
-        thumbnail_image:
-          req?.files?.image?.length > 0
-            ? `${Config.download_url}/testimonial_image/${req.files.image[0].filename}`
-            : findOneTestimonial[0].thumbnail_image,
+        thumbnail_image:  req.files['created_image']?.[0]?.location,
+          
         created_name,
-        created_image:
-          req?.files?.created_image?.length > 0
-            ? `${Config.download_url}/testimonial_image/${req.files.created_image[0].filename}`
-            : findOneTestimonial[0].created_image
-        /* original_filename: req.file
-          ? req.file.originalname
-          : findOneTestimonial[0].original_filename */
+        created_image:  req.files['created_image']?.[0]?.location,
+          
+        original_filename:  req.files['created_image']?.[0]?.originalname,
       };
       // console.log('testimonialObj-->', testimonialObj);
       await cmsModel.testimonialUpdateOne(testimonialObj, testimonialId);
@@ -1378,7 +1385,7 @@ const cmsController = {
     try {
       let createdBy = req.user.id;
       const { title, description, blog_category, slug, status } = req.body;
-      let filename = `${Config.download_url}/blog_image/${req.file.filename}`;
+      let filename = req.file?.location;
       let original_filename = req.file.originalname;
       let blogObj = {
         title: title,
@@ -1459,7 +1466,7 @@ const cmsController = {
         slug: slug || titleToSlug(title),
         status: status || 1,
         image: req.file
-          ? `${Config.download_url}/blog_image/${req.file.filename}`
+          ? req.file?.location
           : findOneBlog[0].image,
         original_filename: req.file
           ? req.file.originalname
@@ -1500,7 +1507,10 @@ const cmsController = {
       let blogObj = {
         status: 2
       };
-
+      const imageUrl = await cmsModel.getBlogImageUrl(blogId);
+      if (imageUrl) {
+        await deleteFileFromS3(s3Client, imageUrl.image); // Delete the image from S3
+      }
       await cmsModel.deleteBlog(blogObj, blogId);
       res
         .status(200)
@@ -1876,17 +1886,23 @@ const cmsController = {
         .end();
     }
   },
-  uploadProductImages:  async (req , res , next) => {
+  uploadProductImages: async (req, res, next) => {
     try {
-
-      const productId = req.body.productId
+      const productId = req.body.productId;
       const productFiles = req.files.images;
+  
+      if (!productFiles || productFiles.length === 0) {
+        return res.status(400).json({
+          status: 0,
+          message: 'No image files uploaded',
+        }).end();
+      }
 
       let featuredImageObj = {
         product_id: productId,
         is_featured: 0,
-        original_image_name: productFiles[0]?.originalname,
-        new_image_name: `${Config.download_url}/product_image/${productFiles[0]?.filename}`        
+        original_image_name: productFiles[0].originalname,
+        new_image_name: productFiles[0].location  // ✅ Use S3 URL
       };
       const result = await productModel.insertProductImages(featuredImageObj);
 

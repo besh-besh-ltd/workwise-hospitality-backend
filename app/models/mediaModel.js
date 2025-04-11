@@ -43,18 +43,17 @@ const vendorModel = {
     });
   },
   uploadFiles: async (files, user_id, doc_type) => {
-    let dataArray = [];
-
-    files.map((item) => {
-      dataArray.push({
-        user_id,
-        file_name: item.originalname,
-        new_file_name: item.filename,
-        file_path: `${Config.base_url}/user_document/${item.filename}`,
-        file_type: item.mimetype,
-        doc_type: doc_type
-      });
-    });
+    
+    
+    let dataArray = files.map((item) => ({
+      user_id,
+      file_name: item.originalname,
+      new_file_name: item.key, // Usually the 'key' field in multer-s3
+      file_path: item.location, // Full S3 URL
+      file_type: item.mimetype,
+      doc_type: doc_type
+    }));
+  
     const keys = [
       'user_id',
       'file_name',

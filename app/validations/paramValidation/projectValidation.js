@@ -3,17 +3,43 @@ import Config from '../../config/app.config.js';
 import multer from 'multer';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import multerS3 from 'multer-s3';
+import s3Client from '../../config/s3config.js';
 
-let store_project_files = multer.diskStorage({
-    destination: function (req, file, callback) {
-      callback(null, Config.upload.project_file);
-    },
-    filename: function (req, file, callback) {
-      var extention = path.extname(file.originalname);
-      var new_file_name = +new Date() + '-' + uuidv4() + extention;
-      callback(null, new_file_name);
-    }
+
+
+
+let store_project_files = multerS3({
+  s3: s3Client,
+  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+    
+    // 2. Generate unique filename with timestamp + UUID
+    const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    
+    // 3. Create full S3 path matching your URL structure
+    const fullPath = `project_file/${fileName}`; // Exact path you want
+    
+    // 4. Pass the complete path to callback
+    cb(null, fullPath);
+  }
 });
+
+
+
+// let store_project_files = multer.diskStorage({
+//     destination: function (req, file, callback) {
+//       callback(null, Config.upload.project_file);
+//     },
+//     filename: function (req, file, callback) {
+//       var extention = path.extname(file.originalname);
+//       var new_file_name = +new Date() + '-' + uuidv4() + extention;
+//       callback(null, new_file_name);
+//     }
+// });
 
 // Calculate tomorrow's date
 const today = new Date();
@@ -82,11 +108,11 @@ export const projectSchemas = {
               res.status(400).json({ status: 2, errors: { file: err } });
               return;
             }
-      
-            req.files = req.files?.map((file) => ({
-              name: file.originalname,
-              url: `${Config.base_url}/project_file/${file.filename}`,
-            }));
+            // console.log("req files ----------------->", req.files);
+            // req.files = req.files?.map((file) => ({
+            //   name: file.originalname,
+            //   url: `${Config.base_url}/project_file/${file.filename}`,
+            // }));
       
             next();
           });

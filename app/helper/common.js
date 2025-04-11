@@ -7,6 +7,8 @@ import config from '../config/app.config.js';
 import nodemailer from 'nodemailer';
 import bcrypt from 'bcryptjs';
 import userModel from '../models/userModel.js';
+import { URL } from 'url';
+import { DeleteObjectCommand, S3Client } from '@aws-sdk/client-s3';
 /** Log data for debugging purpose
  * Only work when in DEV env
  */
@@ -274,6 +276,28 @@ const getDateRange = (filter) => {
   return { startDate, endDate };
 };
 
+async function deleteFileFromS3(s3Client, fileUrl) {
+  try {
+    // Parse the S3 file URL to get the Key (path inside the bucket)
+    const url = new URL(fileUrl); // e.g. https://bucket-name.s3.amazonaws.com/banner_image/abc.jpg
+    const key = decodeURIComponent(url.pathname.slice(1)); // removes leading '/'
+
+    const params = {
+      Bucket: "test-workwise-bucket",
+      Key: key,
+    };
+
+    const command = new DeleteObjectCommand(params);
+    const response = await s3Client.send(command);
+    console.log("✅ File deleted:", response);
+  } catch (error) {
+    console.error("❌ Error deleting file from S3:", error);
+  }
+}
+
+
+
+
 export {
   consoleLogData,
   calcTime,
@@ -293,5 +317,6 @@ export {
   addDefaultNotifications,
   arraysHaveSameData,
   getFileNameFromUrl,
-  getDateRange
+  getDateRange,
+  deleteFileFromS3
 };
