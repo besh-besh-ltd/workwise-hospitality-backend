@@ -4965,9 +4965,10 @@ sendQueryMessage: async (req, res) => {
 
     const filesData = files.map(file => ({
       message_id: message_id,
-      file_name: file.name,
-      file_url: file.url
+      file_name: file.originalname,
+      file_url: file.location
     }));
+    console.log("--------------------->filedata", filesData);
 
     if (filesData.length) await rfqModel.insertArray(filesData, ['message_id', 'file_name', 'file_url'], 'tbl_query_message_files');
 
