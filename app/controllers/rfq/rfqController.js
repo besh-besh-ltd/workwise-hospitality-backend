@@ -382,7 +382,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
 
       const headerContent = ` <div>
         <h2>Hello ${user_details[0].name}</h2>
-        <p style="font-size:16px;"> Great news! You’ve received a new enquiry from ${organization_name} </p>
+        <p style="font-size:16px;"> Great news! You've received a new enquiry from ${organization_name} </p>
         </div>`
 
       // Construct the email content with the list of products
@@ -685,7 +685,7 @@ const formattedProducts = productList.length > 0
 
   const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
       <p style="padding-bottom: 3px;">
-        You’ve received a new quotation! Check out the details below:
+        You've received a new quotation! Check out the details below:
       </p>
 
       <p><strong>RFQ:</strong> #${rfq_no}</p>
@@ -749,7 +749,7 @@ const sendQuoteNotificationToVendor = async (req) => {
         ? 'Your regret concern has been sent to the buyer.'
         : `<div>
             <p>Thank you for submitting your quotation for <strong>#${rfq_no}</strong>. 
-               We’ve shared it with <strong>${BuyerDetails[0]?.organization_name || ''}</strong>, who will review it and get back to you soon.</p>
+               We've shared it with <strong>${BuyerDetails[0]?.organization_name || ''}</strong>, who will review it and get back to you soon.</p>
               <p><strong>Next Steps:</strong> Keep an eye out for any buyer queries or updates, 
                and be ready to discuss terms to secure the order.</p>
 
@@ -845,7 +845,7 @@ const containerContent = `
            Submit Your Quote Now
          </a>
        
-         <p style="margin-top:20px; font-weight:bold; text-align:center">   Don’t miss out on this opportunity!
+         <p style="margin-top:20px; font-weight:bold; text-align:center">   Don't miss out on this opportunity!
          </p>
        </div>`;
 
@@ -936,7 +936,7 @@ const sendQuoteNotificationEmail = async (req) => {
       const containerContent = `
       <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
         <p>
-          You’ve received a new quotation! Check out the details below:
+          You've received a new quotation! Check out the details below:
         </p>
         <p><strong>Vendor:</strong> ${organization_name || name}</p>
         <p><strong>Products:</strong> ${formattedProducts || '-'}</p>
@@ -947,7 +947,7 @@ const sendQuoteNotificationEmail = async (req) => {
         </a>      
 
         <p style="margin-top:20px; text-align:center; ">
-          We’re here to help you get the best deal.
+          We're here to help you get the best deal.
         </p>
       </div>`;
 
@@ -1215,7 +1215,7 @@ const rfqController = {
         project_id
       } = req.body;
       const response_email = req.body.response_email?.toLowerCase();
-
+      const is_update = !!rfq_id;
       const user_id = req.user.id;
 
       if(!rfq_id){
@@ -1257,26 +1257,33 @@ const rfqController = {
         rfq_id
       );
 
-      // send notification email
-      await sendMailtoVendors(req, rfq_id);
-      await sendQuotationMailToBuyer(req, rfq_id);
-
-      // send notification whatsapp 
-      const buyerMsgPayload = {
-        mobile:req.user.mobile,
-        rfq_id:rfq_id,
-        rfq_no:response[0]?.rfq_no
+      // Send appropriate notifications based on whether this is a new RFQ or an update
+      if (is_update && req.body.send_mail) {
+        // For updates, send notifications to vendors about the changes
+        await sendMailtoVendors(req, rfq_id);
+        await sendQuotationMailToBuyer(req, rfq_id);
+      } else if (!is_update) {
+        // For new RFQs, send initial notifications
+        await sendMailtoVendors(req, rfq_id);
+        await sendQuotationMailToBuyer(req, rfq_id);
       }
-      whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload)
+
+      // Send WhatsApp notification
+      const buyerMsgPayload = {
+        mobile: req.user.mobile,
+        rfq_id: rfq_id,
+        rfq_no: response[0]?.rfq_no
+      };
+      whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload);
 
       res
         .status(200)
         .json({
-          status: 2,
-          data: response[0]
+          status: 1,
+          data: response[0],
+          mail_sent: true
         })
         .end();
-
     } catch (error) {
       logError(error);
       res
@@ -2676,7 +2683,7 @@ const rfqController = {
 
 
     const buyerContainerContent = `<div style="font-size:16px;">
-        You’ve marked your RFQ as closed. Here are the details for your records:<br>
+        You've marked your RFQ as closed. Here are the details for your records:<br>
         <strong>RFQ Number:</strong> ${rfQItem[0]?.rfq_no}<br>
         <strong>Closed By:</strong> ${req.user.name}<br>
         <br>
@@ -4991,7 +4998,7 @@ sendQueryMessage: async (req, res) => {
                 <div style="font-size:16px;">
                   ${sender_type == 3 ?
                    `${senderDetails.name} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`:
-                    `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here’s the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
+                    `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
                 </div>
                               
                <h4> Query </h4>
