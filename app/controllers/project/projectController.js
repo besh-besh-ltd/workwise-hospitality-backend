@@ -215,6 +215,8 @@ const projectController = {
     saveProjectFiles: async (req, res) => {
       const { project_id, file_type } = req.body;
       const files = req.files;
+
+      // console.log('Files:------------------------->', files);
     
       if (!files || !files.length) {
         return res.status(400).json({ status: 2, message: 'No files uploaded' });
@@ -223,8 +225,8 @@ const projectController = {
       try {
         const filesData = files.map((file) => ({
           project_id,
-          file_name: file.name,
-          file_url: file.url,
+          file_name: file.originalname,
+          file_url: file.location,
           file_type
         }));
     
