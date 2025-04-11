@@ -1383,6 +1383,9 @@ const ProductsController = {
     }
   },
   approvedProductList: async (req, res, next) => {
+
+    // change by mukul (11-04-2025), removed req.user.id from getProductList parameters and in response replaced productCount.length with productCount[0]?.count
+
     try {
       let page, limit, offset;
       if (req.query.page && req.query.page > 0) {
@@ -1403,6 +1406,7 @@ const ProductsController = {
         filterProduct = await productModel.getApprovedByProduct(vendorApprove);
       }
 
+      // @getProductList(limit, offset, vendorId, productName, filterProduct, isFeatured, addedBy, categoryId, dateFrom, dateTo, is_approve)
       let productList = await productModel.getProductList(
         limit,
         offset,
@@ -1410,8 +1414,9 @@ const ProductsController = {
         productName,
         filterProduct,
         isFeatured,
-        req.user.id
       );
+
+      // getProductCount(vendorId, productName, filterProduct, isFeatured, userId, categoryId, dateFrom, dateTo, is_approve)
       let productCount = await productModel.getProductCount(
         vendorId,
         productName,
@@ -1423,7 +1428,7 @@ const ProductsController = {
         .json({
           status: 1,
           data: productList,
-          total_count: productCount.length
+          total_count: productCount[0]?.count || 0
         })
         .end();
     } catch (error) {
