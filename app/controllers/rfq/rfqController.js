@@ -412,9 +412,9 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
         </div>`;
 
         const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
-
-      let mailRecipients = {
-        from: Config.webmasterMail,
+        const org_name = user_details[0].organization_name || user_details[0].name || ""
+       let mailRecipients = {
+        from: `${organization_name} ${Config.masterEmail}`,
         subject: `New RFQ Opportunity from ${user_details[0].name}`,
         html: dynamicHTML
       };
@@ -709,7 +709,7 @@ const formattedProducts = productList.length > 0
 
   // Preparing the email details
   let mailRecipients = {
-    from: Config.webmasterMail,
+    from: `${vendorName} ${Config.masterEmail}`,
     to: buyerDetails[0]?.email,
     subject: `New Quotation Received for Your RFQ`,
     html: dynamicHTML
@@ -849,7 +849,7 @@ const containerContent = `
          </p>
        </div>`;
 
-  console.log(containerContent)
+  // console.log(containerContent)
   
   const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
@@ -857,7 +857,7 @@ const containerContent = `
 
     
     let mailRecipients = {
-      from: Config.webmasterMail,
+      from:  `${vendorName} ${Config.masterEmail}`,
       subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
       html: dynamicHTML
     };
@@ -956,7 +956,8 @@ const sendQuoteNotificationEmail = async (req) => {
 
       // Preparing the email details
       let mailRecipients = {
-        from: Config.webmasterMail,
+        from: `${organization_name || name} ${Config.masterEmail}`, // sender address
+        //  organization_name : Config.webmasterMail,
         to: buyer.email,
         subject: `New Quotation Received for Your RFQ ${rfq_no}`,
         html: dynamicHTML
@@ -2661,7 +2662,8 @@ const rfqController = {
   },
   closeRFQ: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { id } = req.user;
+    const { id , organization_name , name} = req.user;
+  
 
     try {
 
@@ -2732,7 +2734,7 @@ const rfqController = {
           const spocList = vendor.spocs;
         
             let mailRecipients ={
-              from: Config.webmasterMail,
+              from: `${organization_name} ${Config.masterEmail}`,
               subject: `RFQ Marked as Closed for #${rfQItem[0]?.rfq_no}`,
               html: dynamicHTMLVendor,
             }
@@ -4965,7 +4967,7 @@ sendQueryMessage: async (req, res) => {
       file_name: file.originalname,
       file_url: file.location
     }));
-    console.log("--------------------->filedata", filesData);
+    // console.log("--------------------->filedata", filesData);
 
     if (filesData.length) await rfqModel.insertArray(filesData, ['message_id', 'file_name', 'file_url'], 'tbl_query_message_files');
 
@@ -4979,14 +4981,14 @@ sendQueryMessage: async (req, res) => {
 
 
       const headerContent = ` <div>
-           <h2>Hello ${req.user.name} </h2>
+           <h2>Hello ${receiverDetails.name} </h2>
            </div>`;
 
 
            const containerContent = `
               <div>
                 <div style="font-size:16px;">
-                  ${sender_type == 3 ?
+                  ${sender_type == 2 ?
                    `${senderDetails.name} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`:
                     `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here’s the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
                 </div>
@@ -5012,10 +5014,10 @@ sendQueryMessage: async (req, res) => {
 
       const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
-    const emailSubject = sender_type==2? `Vendor Query on Your RFQ #${rfqNumber}`:  `Buyer Query for #${rfqNumber} – Your Response Needed`
+    const emailSubject = sender_type==3? `Vendor Query on Your RFQ #${rfqNumber}`:  `Buyer Query for #${rfqNumber} – Your Response Needed`
 
     const mailRecipients = {
-      from: Config.webmasterMail,
+      from: `${senderDetails.name} ${Config.masterEmail}`,
       subject: emailSubject,
       html: dynamicHTML
     };

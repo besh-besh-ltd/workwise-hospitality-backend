@@ -3157,7 +3157,7 @@ const UsersController = {
             const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
           sendMail({
-            from: Config.webmasterMail,
+            from: `${buyerName}  ${Config.masterEmail}`,
             to: spocList?.length ? spocList.map(spoc => spoc.email) : userDetails[0].email,
             cc: spocList?.length ? userDetails[0].email : '',
             subject: `${buyerName} Added You on Workwise`,
