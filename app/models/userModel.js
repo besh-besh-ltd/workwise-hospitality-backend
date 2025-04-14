@@ -2835,7 +2835,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         user_id,
         file_name: item.originalname,
         new_file_name: item.filename,
-        file_path: `${Config.base_url}/user_document/${item.filename}`,
+        file_path: item.location,
         file_type: item.mimetype,
         doc_type: doc_type
       });
