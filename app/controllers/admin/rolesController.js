@@ -20,8 +20,8 @@ const rolesController = {
       let createdBy = req.user.id;
       const { name, mobile, password, userType } = req.body;
       const email = req.body.email?.toLowerCase() || '';
-      let fileName = req?.file?.filename;
-      let originalFilename = req?.file?.originalname;
+      let fileName = req?.file?.location;
+      let originalFilename = req?.file?.location;
 
       let admObj = {
         name,
@@ -194,8 +194,8 @@ const rolesController = {
       let subadminId = req.params.id;
       let updatedBy = req.user.id;
       const { name, mobile } = req.body;
-      let fileName = req?.file?.filename;
-      let originalFilename = req?.file?.originalname;
+      let fileName = req?.file?.location;
+      let originalFilename = req?.file?.location;
       // let buyerDetails = await buyerModel.getBuyerDetails(buyerId);
       let subadminObj = {
         name,

@@ -4569,7 +4569,7 @@ const rfqController = {
   },
   magicSearchRfqCreate: async (req, res, next) => {
     try {
-      const file = req.file;
+      const file = req.file.location;
       const user = req.user;
       const comment = req.body.comment;
       const response_email = user.email;
@@ -4731,7 +4731,7 @@ const rfqController = {
 
      
       // Delete the uploaded file to save space
-      fs.unlinkSync(file.path);
+      // fs.unlinkSync(file.path);
 
 
       res.status(200).json({
@@ -4811,8 +4811,11 @@ const rfqController = {
             // Process each product in the request
         const quoteItemChanges = await Promise.all(
           products.map((product) => {
+            if ((product.comment == "" && product.document_files?.length <= 0) && (product.unit_price=='' || product.unit_price==0)) {
+              return null;
+            }
             return rfqModel.updateQuoteItemWithHistory(quoteId, product,quoteExists[0]);
-          })
+          }).filter(Boolean)
         );
 
         // console.log("mj ", quoteItemChanges)
@@ -4962,9 +4965,10 @@ sendQueryMessage: async (req, res) => {
 
     const filesData = files.map(file => ({
       message_id: message_id,
-      file_name: file.name,
-      file_url: file.url
+      file_name: file.originalname,
+      file_url: file.location
     }));
+    console.log("--------------------->filedata", filesData);
 
     if (filesData.length) await rfqModel.insertArray(filesData, ['message_id', 'file_name', 'file_url'], 'tbl_query_message_files');
 
