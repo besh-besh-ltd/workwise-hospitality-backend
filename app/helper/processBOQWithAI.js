@@ -2,11 +2,31 @@ import axios from 'axios';
 import xlsx from 'xlsx';
 import productModel from '../models/productModel.js';
 import { logError } from './common.js';
+import s3Client from '../config/s3config.js';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import pkg from 'nodemailer/lib/xoauth2/index.js';
+const { Readable } = pkg;
 
 const generativeAI = {
   processBOQWithAI: async (file) => {
     try {
-      const workbook = xlsx.readFile(file.path);
+
+      const s3Url = new URL(file);
+      const bucket = s3Url.hostname.split('.')[0];
+      const key = decodeURIComponent(s3Url.pathname).slice(1); // remove leading '/'
+      const command = new GetObjectCommand({
+        Bucket: bucket,
+        Key: key,
+      });
+      const result = await s3Client.send(command);
+      const webStream = Readable.toWeb(result.Body);
+      // const buffer = await streamToBuffer(result.Body);
+      const ressult2 = new Response(webStream);
+      const arrayBuffer = await ressult2.arrayBuffer();   // temporary fix for web stream to array buffer
+      const buffer = Buffer.from(arrayBuffer);
+      const workbook = xlsx.read(buffer, { type: "buffer" });
+
+      // console.log('workbook', workbook);
       const sheetName = workbook.SheetNames[0]; // Assuming data is in the first sheet
       const sheet = workbook.Sheets[sheetName];
       const boqData = xlsx.utils.sheet_to_csv(sheet);
