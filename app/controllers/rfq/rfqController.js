@@ -4761,7 +4761,7 @@ const rfqController = {
 
      
       // Delete the uploaded file to save space
-      fs.unlinkSync(file.path);
+      // fs.unlinkSync(file.path);
 
 
       res.status(200).json({
