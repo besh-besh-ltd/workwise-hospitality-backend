@@ -496,88 +496,111 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
   }
 };
 
-const sendMailtoVendors = async (req, rfqNumber) => {
-  // Extract products from request body
-  const { products } = req.body;
-
-  // Create a map to group vendors and their products
-  const vendorProductMap = {};
-
-  // Iterate over products to group them by vendors
-  products.forEach((item) => {
-    item.vendors.forEach((vendor) => {
-      if (!vendorProductMap[vendor.user_id]) {
-        vendorProductMap[vendor.user_id] = {
-          vendorDetails: vendor,
-          products: [],
-        };
+const sendMailWithRetry = async (mailOptions, maxRetries = 3) => {
+  let retries = 0;
+  while (retries < maxRetries) {
+    try {
+      await sendMail(mailOptions);
+      console.log(`Email sent successfully to ${mailOptions.to}`);
+      return true;
+    } catch (error) {
+      retries++;
+      console.error(`Email send attempt ${retries} failed:`, error);
+      if (retries === maxRetries) {
+        throw error;
       }
-      // Push product details for this vendor
-      vendorProductMap[vendor.user_id].products.push(item);
-    });
-  });
+      // Wait for 2 seconds before retrying
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+};
 
-  // Now send mail to each vendor with the grouped products
+const validateEmailAddresses = (emails) => {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emails.every(email => emailRegex.test(email));
+};
+
+// Update the sendMailtoVendors function
+const sendMailtoVendors = async (req, rfqNumber) => {
   try {
-    await Promise.all(
-      Object.keys(vendorProductMap).map(async (vendorId) => {
-        const vendorInfo = vendorProductMap[vendorId];
+    const { products } = req.body;
+    const vendorProductMap = {};
+
+    products.forEach((item) => {
+      item.vendors.forEach((vendor) => {
+        if (!vendorProductMap[vendor.user_id]) {
+          vendorProductMap[vendor.user_id] = {
+            vendorDetails: vendor,
+            products: [],
+          };
+        }
+        vendorProductMap[vendor.user_id].products.push(item);
+      });
+    });
+
+    const emailPromises = Object.keys(vendorProductMap).map(async (vendorId) => {
+      const vendorInfo = vendorProductMap[vendorId];
+      try {
         await sendMailEachVendor(vendorInfo.vendorDetails, req.user, rfqNumber, vendorInfo.products);
-      })
-    );
+        console.log(`Email sent successfully to vendor ${vendorId}`);
+      } catch (error) {
+        console.error(`Failed to send email to vendor ${vendorId}:`, error);
+        throw error;
+      }
+    });
+
+    await Promise.all(emailPromises);
     return true;
   } catch (error) {
-    console.error('Error sending emails:', error);
+    console.error('Error in sendMailtoVendors:', error);
     throw error;
   }
 };
 
+// Update the sendQuotationMailToBuyer function
 const sendQuotationMailToBuyer = async (req, rfqNumber) => {
-  // send mail to vendors
-  const { name, email, id } = req.user;
+  try {
+    const { name, email, id } = req.user;
+    const spocList = await vendorModel.getSpocDetails(id);
 
-  const headerContent = `<h2> Dear ${name},</h2>  `;
+    // Validate email addresses
+    const allEmails = [email, ...(spocList?.map(spoc => spoc.email) || [])];
+    if (!validateEmailAddresses(allEmails)) {
+      throw new Error('Invalid email address format');
+    }
 
-  const containerContent = `<div>
+    const headerContent = `<h2> Dear ${name},</h2>`;
+    const containerContent = `<div>
       <p style="font-size: 15px; padding-bottom: 3px;">
       Your RFQ has been successfully shared with vendors. </p>
       
-           <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
+      <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
        Click here to view
       </a>      
     </div>`;
 
-  const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+    const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      subject: `Work Wise | RFQ Creation Confirmation`,
+      html: dynamicHTML
+    };
 
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map(spoc => spoc.email);
+      mailRecipients.cc = email;
+    } else {
+      mailRecipients.to = email;
+    }
 
-  const spocList = await vendorModel.getSpocDetails(id)
-
-  // console.log(" rfq contoller 488 spoc console ", id, spocList)
-
-  let mailRecipients = {
-    from: Config.webmasterMail,
-    subject: `Work Wise | RFQ Creation Confirmation`,
-    html: dynamicHTML
-  };
-
-
-  if (spocList && spocList.length > 0) {
-    mailRecipients.to = spocList.map(spoc => spoc.email);
-    mailRecipients.cc = email;
-  } else {
-    mailRecipients.to = email;
+    await sendMailWithRetry(mailRecipients);
+    console.log(`Confirmation email sent successfully to buyer ${id}`);
+  } catch (error) {
+    console.error('Error in sendQuotationMailToBuyer:', error);
+    throw error;
   }
-
-  sendMail(mailRecipients);
-
-  // sendMail({
-  //   from: Config.webmasterMail, // sender address
-  //   to: email, // list of receivers
-  //   subject: `Work Wise | RFQ Creation Confirmation`, // Subject line
-  //   html: dynamicHTML // plain text body
-  // });
 };
 
 const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_no) => {
