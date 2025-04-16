@@ -3112,21 +3112,29 @@ const rfqController = {
     let approved_by_id = '';
     let state = '';
     let city = '';
+    let country = '';
+    let turnOver = null;
+    let vendorType = '';
+    let prevWorkedWith = '';
+    let myVendorType = '';
     search_key = req.body?.search_key ? req.body?.search_key : '';
     category_id = req.body?.category_id ? req.body?.category_id : '';
     approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
     state = req.body?.state ? req.body?.state : '';
     city = req.body?.city ? req.body?.city : '';
+    country = req.body?.country ? req.body?.country : '';
+    turnOver = req.body?.turnOver ? req.body?.turnOver : null;
+    vendorType = req.body?.vendorType ? req.body?.vendorType : '';
+    prevWorkedWith = req.body?.prevWorkedWith ? req.body?.prevWorkedWith : '';
+    myVendorType = req.body?.myVendorType ? req.body?.myVendorType : '';
     let vendor_name = req.body.vendor_name;
-    let is_private = req.body.is_private;
-    let preferred_vendor = req.body.preferred_vendor;
     
     // If user is not logged in
     if (!req.is_verified) {
       try {
 
         // Call the searchVendor method
-        const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
+        const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city, country, turnOver, vendorType, prevWorkedWith);
         // console.log(vendorResult);
 
         // Check if vendorResult is not empty and has the expected structure
@@ -3169,24 +3177,6 @@ const rfqController = {
       let user = req.user;
       if (user && user.user_type != 3) {
 
-        // Type validation for the is_private check
-        if (is_private && typeof is_private !== "boolean") {
-          return res.status(400).json({ 
-            status: 1,
-            message: "is_private must be a boolean"
-          });
-        }
-
-        // Type validation for the preferred_vendor check
-        if (preferred_vendor && typeof preferred_vendor !== "boolean") {
-          return res.status(400).json({ 
-            status: 1,
-            message: "preferred_vendor must be a boolean"
-          });
-        }
-
-
-
         try {
           const vendorResult = await rfqModel.searchVendor(
             req.user.id,
@@ -3195,9 +3185,12 @@ const rfqController = {
             approved_by_id,
             state,
             city,
+            country,
+            turnOver,
+            vendorType,
+            prevWorkedWith,
             vendor_name,
-            is_private = is_private ? true : false,
-            preferred_vendor = preferred_vendor ? true : false,
+            myVendorType,
           );
 
           let dummyOBJ = {
@@ -4612,7 +4605,6 @@ const rfqController = {
       const rfq_type = req.body.rfq_type || "";
       const reverse_auction = req.body.reverse_auction || "";
 
-
       // process boq with AI
       const boqDataJson = await generativeAI.processBOQWithAI(file);
 
@@ -4683,8 +4675,11 @@ const rfqController = {
             "",
             "",
             "",
-            false,
-            false
+            "",
+            "",
+            "",
+            "",
+            "",
           );  
         }
 
@@ -4710,8 +4705,10 @@ const rfqController = {
 
         // Iterate over the existing products array to find the same product name and increment the variant
         products.forEach((product) => {
-          if (product.name === search_key.product_name && product.product_id === search_key.product_id) {
-            variant = Math.max(variant, product.variant + 1);
+          console.log("PRODUCT: ", product)
+          console.log("SEARCH KEY: ", search_key)
+          if (product.name === search_key.name && product.product_id === search_key.id) {
+            variant = Math.max(variant, product.variant) + 1;
           }
         });
 
