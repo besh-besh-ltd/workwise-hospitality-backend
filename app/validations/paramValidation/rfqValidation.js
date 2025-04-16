@@ -179,7 +179,10 @@ export const rfqSchemas = {
     is_published: Joi.number().integer().min(0).max(1).required(),
     products: Joi.array().items(productItems).min(1).required(),
     vendors: Joi.array().items(vendorItems).allow(null).allow(''),
-    terms: Joi.array().items(termsItems).allow(null).allow('')
+    terms: Joi.array().items(termsItems).allow(null).allow(''),
+    project_id: Joi.number().integer().allow(null).optional(),
+    rfq_type: Joi.string().valid('firm', 'budgetary').allow('').allow(null).optional(),
+    reverse_auction: Joi.valid(0, 1).allow('').optional()
   }),
   finalize: Joi.object().keys({
     rfq_id: Joi.number().required(),
