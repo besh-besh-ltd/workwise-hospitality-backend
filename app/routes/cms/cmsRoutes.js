@@ -34,4 +34,10 @@ CmsRoutes.get(
   subscriptionController.buyerSubscriptionList
 );
 
+
+//  temp route to work with zapier webhooks
+CmsRoutes.post(
+  '/zapier-webhook',
+  CmsController.zapierWebhook
+);
 export default CmsRoutes;

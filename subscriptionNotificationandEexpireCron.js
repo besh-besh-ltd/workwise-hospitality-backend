@@ -12,7 +12,7 @@ async function expireDayNotification(date, days) {
   let query = `SELECT tus.* ,users.user_type,users.name,users.email,users.endpoint
     FROM tbl_user_subscriptions tus
     LEFT JOIN tbl_users users ON tus.user_id = users.id
-    WHERE tus.status = 1 AND end_date <= '${date}'`;
+    WHERE tus.status = 1 AND end_date = '${date}'`;
   let expireSubscriptions = await db.any(query);
 
   for await (const expSubscriptions of expireSubscriptions) {
@@ -111,7 +111,7 @@ try {
   let query = `SELECT tus.* ,users.user_type,users.name,users.email,users.endpoint
     FROM tbl_user_subscriptions tus
     LEFT JOIN tbl_users users ON tus.user_id = users.id
-    WHERE tus.status = 1 AND renew_date <= '${today}'`;
+    WHERE tus.status = 1 AND renew_date = '${today}'`;
   let expireSubscriptions = await db.any(query);
   for await (const expSubscriptions of expireSubscriptions) {
     let expQuery = `UPDATE tbl_user_subscriptions SET status = 3 WHERE id = ${expSubscriptions.id} 
