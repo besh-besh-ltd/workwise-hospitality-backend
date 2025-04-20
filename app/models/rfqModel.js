@@ -893,13 +893,20 @@ LIMIT 1;`;
     category_id,
     approved_by_id,
     state,
-    city
+    city,
+    country,
+    turnOver,
+    vendorType,
+    prevWorkedWith,
   ) => {
+
+    console.log("------- VENDOR TYPE -------", vendorType)
 
     // query changes by mukul jatav 30-08-2024,
     // include city and state name in response, left join of tbl_location_states and tbl_location_cities
 
     // Query to fetch the total count of vendors
+
     let countQuery = `
       WITH vendor_data AS (
         SELECT DISTINCT tu.id
@@ -916,6 +923,7 @@ LIMIT 1;`;
          AND tu.is_deleted = 0 AND tu.status = 1 AND p.name = '${search_key}' AND tc.is_private = 0 
         ${state != '' ? `AND tu.state = ${state}` : ``}
         ${city != '' ? `AND tu.city = ${city}` : ``}
+        ${country != '' ? `AND tu.country = ${country}` : ``}
         ${category_id != '' ? `AND c.id = ${category_id}` : ``}
         ${approved_by_id != ''
         ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
@@ -926,6 +934,26 @@ LIMIT 1;`;
     `;
 
     // Query to fetch only one vendor
+
+    // Adding dynamic turnover condition
+    let turnoverCondition = '';
+
+    if (turnOver && (turnOver.from > 0 || turnOver.to > 0)) {
+      turnoverCondition = `AND tc.turnover IS NOT NULL AND TRIM(tc.turnover) != '' AND (`;
+
+      const turnoverField = `NULLIF(TRIM(tc.turnover), '')::bigint`;
+
+      if (turnOver.from > 0 && turnOver.to > 0) {
+          turnoverCondition += `${turnoverField} BETWEEN ${turnOver.from * 10000000} AND ${turnOver.to * 10000000}`;
+      } else if (turnOver.from > 0) {
+          turnoverCondition += `${turnoverField} >= ${turnOver.from * 10000000}`;
+      } else if (turnOver.to > 0) {
+          turnoverCondition += `${turnoverField} <= ${turnOver.to * 10000000}`;
+      }
+
+      turnoverCondition += ")";
+  }
+
     let dataQuery = `
     WITH vendor_data AS (
       SELECT DISTINCT tu.id, tu.name as vendor_name, tu.organization_name as company_name,
@@ -947,17 +975,72 @@ LIMIT 1;`;
         : ``
       }
       WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 AND p.name = '${search_key}' AND tc.is_private = 0  
-      ${state != '' ? `AND tu.state = ${state}` : ``}
-      ${city != '' ? `AND tu.city = ${city}` : ``}
+      ${state != '' ? `AND tu.state::int IN (${state.map(s => s.id).join(",")})` : ``}
+      ${city != '' ? `AND tu.city::int IN (${city.map(c => c.id).join(",")})` : ``}
+      ${country != '' ? `AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(",")})` : ``}
+      ${turnoverCondition}
       ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-      ${approved_by_id != ''
-        ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)`
-        : ``
-      }
+      ${vendorType.length > 0 ? `
+        AND EXISTS (
+          SELECT 1
+          FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
+          WHERE TRIM(nb) IN (${vendorType.map(vt => `'${vt.value.toLowerCase().trim()}'`).join(", ")})
+        )
+      ` : ``}     
+      ${approved_by_id != '' ? `AND (vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")}) OR vum.vendor_approve_id IS NULL)` : ``} 
     )
     SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 1;
   `;
 
+  // let dataQuery = `
+  //   WITH vendor_data AS (
+  //     SELECT DISTINCT tu.id, tu.name as vendor_name, tu.organization_name as company_name,
+  //     tu.address, tc.profile as about, tc.website, tc.company_name, lc.city_name, ls.state_name,
+  //     CASE
+  //         WHEN tu.new_profile_image IS NULL THEN NULL
+  //         ELSE tu.new_profile_image
+  //     END AS image_url
+  //     FROM tbl_product p
+  //     JOIN tbl_product_categories pc ON p.id = pc.product_id
+  //     JOIN tbl_category c ON pc.category_id = c.id
+  //     JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3,4)
+  //     LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+  //     LEFT JOIN tbl_location_cities lc ON tu.city = lc.id 
+  //     LEFT JOIN tbl_location_states ls ON tu.state = ls.id 
+
+  //     ${prevWorkedWith === 'prev_finalized' ? 
+  //       `LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.user_id = ${userId}` 
+  //       : ``}
+
+  //     ${prevWorkedWith === 'rfq_added' ? 
+  //       `LEFT JOIN tbl_rfq_product_vendors rpv ON rpv.vendor_id = tu.id
+  //       LEFT JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id AND rfq.created_by = ${userId}` 
+  //       : ``}
+
+  //     ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+      
+  //     WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 
+  //       AND tu.is_deleted = 0 AND tu.status = 1 
+  //       AND p.name = '${search_key}' 
+  //       AND tc.is_private = 0
+  //       ${state != '' ? `AND tu.state = ${state}` : ``}
+  //       ${city != '' ? `AND tu.city = ${city}` : ``}
+  //       ${country != '' ? `AND tu.country = ${country}` : ``}
+  //       ${turnoverCondition}
+  //       ${category_id != '' ? `AND c.id = ${category_id}` : ``}
+  //       ${vendorType !== '' ? `
+  //         AND tc.nature_of_business IS NOT NULL
+  //         AND '${vendorType.toLowerCase()}' = ANY (
+  //           SELECT TRIM(LOWER(unnest(string_to_array(tc.nature_of_business, ','))))
+  //         )
+  //       ` : ``}
+  //       ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``}
+
+  //       ${prevWorkedWith === 'prev_finalized' ? `AND qf.vendor_id IS NOT NULL` : ``}
+  //       ${prevWorkedWith === 'rfq_added' ? `AND rpv.vendor_id IS NOT NULL AND rfq.id IS NOT NULL` : ``}
+  //   )
+  //   SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 1;
+  // `;
 
 
     try {
@@ -1939,53 +2022,140 @@ WHERE row_num_by_name_category = 1
     approved_by_id,
     state,
     city,
+    country,
+    turnOver,
+    vendorType,
+    prevWorkedWith,
     vendor_name, // Added vendor_name parameter
-    is_private, //for buyers private vendors
-    preferred_vendor
+    myVendorType,
   ) => {
 
+    // Adding dynamic turnover condition
+    let turnoverCondition = '';
+
+    turnOver = {
+      from: parseInt(turnOver.from),
+      to: parseInt(turnOver.to),
+    }
+
+    if (turnOver && (turnOver.from > 0 || turnOver.to > 0)) {
+        turnoverCondition = `AND tc.turnover IS NOT NULL AND TRIM(tc.turnover) != '' AND (`;
+
+        const turnoverField = `NULLIF(TRIM(tc.turnover), '')::bigint`;
+
+        if (turnOver.from > 0 && turnOver.to > 0) {
+            turnoverCondition += `${turnoverField} BETWEEN ${turnOver.from * 10000000} AND ${turnOver.to * 10000000}`;
+        } else if (turnOver.from > 0) {
+            turnoverCondition += `${turnoverField} >= ${turnOver.from * 10000000}`;
+        } else if (turnOver.to > 0) {
+            turnoverCondition += `${turnoverField} <= ${turnOver.to * 10000000}`;
+        }
+
+        turnoverCondition += ")";
+    }
+
     search_key = search_key?.toLowerCase() 
-    let q = `
-    SELECT * FROM (
-        SELECT DISTINCT tu.id, tu.name as vendor_name, tu.email, tu.mobile, tu.organization_name as company_name,
-               tu.address, tc.profile as about, tc.is_private, tc.website, tc.company_name, lc.city_name, ls.state_name,
-               CASE
-                   WHEN tu.new_profile_image IS NULL THEN NULL
-                   ELSE tu.new_profile_image
-               END AS image_url,
-               CASE
-                   WHEN bvm.vendor_id IS NOT NULL THEN 1
-                   ELSE 0
-               END AS is_linked_with_buyer
-        FROM tbl_product p
-        JOIN tbl_product_categories pc ON p.id = pc.product_id
-        JOIN tbl_category c ON pc.category_id = c.id
-        JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
-        LEFT JOIN tbl_company tc ON tc.user_id = tu.id
-        LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
-        LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-        LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-        ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
-        WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND tu.is_deleted = 0 AND tu.status = 1 
-          AND LOWER(p.name) = '${search_key}' AND tu.email IS NOT NULL
-          ${vendor_name != '' ? `
-            AND (
-                to_tsvector('english', tu.name) @@ plainto_tsquery('english', $1)
-                OR (char_length($1) = 1 AND similarity(tu.name, $1) > 0)
-                OR (char_length($1) > 1 AND similarity(tu.name, $1) > 0.1)
-            )
+
+  let q = `
+    SELECT *,
+      json_build_object(
+        'is_private', is_private,
+        'is_linked_with_buyer', is_linked_with_buyer,
+        'prev_finalized', prev_finalized,
+        'rfq_added', rfq_added
+      ) AS vendor_info
+    FROM (
+      SELECT DISTINCT ON (tu.id)
+        tu.id,
+        tu.name AS vendor_name,
+        tu.email,
+        tu.mobile,
+        tu.organization_name AS company_name,
+        tu.address,
+        tc.profile AS about,
+        tc.is_private,
+        tc.website,
+        tc.turnover,
+        tc.nature_of_business,
+        tc.company_name,
+        lc.city_name,
+        ls.state_name,
+        lcn.country_name,
+        CASE
+          WHEN tu.new_profile_image IS NULL THEN NULL
+          ELSE tu.new_profile_image
+        END AS image_url,
+        CASE
+          WHEN bvm.vendor_id IS NOT NULL THEN 1
+          ELSE 0
+        END AS is_linked_with_buyer,
+        CASE
+          WHEN qf.vendor_id IS NOT NULL THEN 1
+          ELSE 0
+        END AS prev_finalized,
+        CASE
+          WHEN rfqv.user_id IS NOT NULL THEN 1
+          ELSE 0
+        END AS rfq_added
+      FROM tbl_product p
+      JOIN tbl_product_categories pc ON p.id = pc.product_id
+      JOIN tbl_category c ON pc.category_id = c.id
+      JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
+      LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+      LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+      LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
+      LEFT JOIN tbl_location_states ls ON tu.state = ls.id
+      LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
+      LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
+      LEFT JOIN (
+        SELECT DISTINCT rpv.user_id
+        FROM tbl_rfq_product_vendors rpv
+        JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
+        WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
+      ) rfqv ON rfqv.user_id = tu.id
+      
+      ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+
+      WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 
+        AND tu.is_deleted = 0 AND tu.status = 1 
+        AND LOWER(p.name) = '${search_key}' 
+        AND tu.email IS NOT NULL
+
+        ${vendor_name != '' ? `
+          AND (
+            to_tsvector('english', tu.name) @@ plainto_tsquery('english', $1)
+            OR (char_length($1) = 1 AND similarity(tu.name, $1) > 0)
+            OR (char_length($1) > 1 AND similarity(tu.name, $1) > 0.1)
+          )
         ` : ''}
-          ${state != '' ? `AND tu.state = ${state}` : ``}
-          ${city != '' ? `AND tu.city = ${city}` : ``}
-          ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-          ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``} 
-          AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
-          ${is_private ? `AND tc.is_private = 1` : ``}
-          ${preferred_vendor ? `AND bvm.vendor_id IS NOT NULL` : ``}
+
+        ${state != '' ? `AND tu.state::int IN (${state.map(s => s.id).join(",")})` : ``}
+        ${city != '' ? `AND tu.city::int IN (${city.map(c => c.id).join(",")})` : ``}
+        ${country != '' ? `AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(",")})` : ``}
+        ${turnoverCondition}
+        ${vendorType.length > 0 ? `
+          AND EXISTS (
+            SELECT 1
+            FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
+            WHERE TRIM(nb) IN (${vendorType.map(vt => `'${vt.value.toLowerCase().trim()}'`).join(", ")})
+          )
+        ` : ``}                  
+        ${category_id != '' ? `AND c.id = ${category_id}` : ``}
+        ${approved_by_id != '' ? `AND (vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")}) OR vum.vendor_approve_id IS NULL)` : ``} 
+
+        AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
+        ${myVendorType == 'is_private' ? `AND tc.is_private = 1 AND bvm.vendor_id IS NOT NULL` : ``}
+        ${myVendorType == 'is_public' ? `AND tc.is_private = 0 AND bvm.vendor_id IS NOT NULL` : ``}
+        ${myVendorType == 'both' ? `AND bvm.vendor_id IS NOT NULL` : ``}
+
+        ${prevWorkedWith === 'prev_finalized' ? `AND qf.id IS NOT NULL` : ``}
+        ${prevWorkedWith === 'rfq_sent' ? `AND rfqv.user_id IS NOT NULL` : ``}
+
     ) AS distinct_vendors
     ORDER BY is_linked_with_buyer DESC, RANDOM();
-    `;
-        
+`;
+
+  console.log("QUERY: ", q) 
 
 
     const values = vendor_name ? [vendor_name] : [];

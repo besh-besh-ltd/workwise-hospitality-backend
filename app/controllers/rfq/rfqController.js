@@ -382,7 +382,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
 
       const headerContent = ` <div>
         <h2>Hello ${user_details[0].name}</h2>
-        <p style="font-size:16px;"> Great news! You’ve received a new enquiry from ${organization_name} </p>
+        <p style="font-size:16px;"> Great news! You've received a new enquiry from ${organization_name} </p>
         </div>`
 
       // Construct the email content with the list of products
@@ -496,88 +496,111 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
   }
 };
 
-const sendMailtoVendors = async (req, rfqNumber) => {
-  // Extract products from request body
-  const { products } = req.body;
-
-  // Create a map to group vendors and their products
-  const vendorProductMap = {};
-
-  // Iterate over products to group them by vendors
-  products.forEach((item) => {
-    item.vendors.forEach((vendor) => {
-      if (!vendorProductMap[vendor.user_id]) {
-        vendorProductMap[vendor.user_id] = {
-          vendorDetails: vendor,
-          products: [],
-        };
+const sendMailWithRetry = async (mailOptions, maxRetries = 3) => {
+  let retries = 0;
+  while (retries < maxRetries) {
+    try {
+      await sendMail(mailOptions);
+      console.log(`Email sent successfully to ${mailOptions.to}`);
+      return true;
+    } catch (error) {
+      retries++;
+      console.error(`Email send attempt ${retries} failed:`, error);
+      if (retries === maxRetries) {
+        throw error;
       }
-      // Push product details for this vendor
-      vendorProductMap[vendor.user_id].products.push(item);
-    });
-  });
+      // Wait for 2 seconds before retrying
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+};
 
-  // Now send mail to each vendor with the grouped products
+const validateEmailAddresses = (emails) => {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emails.every(email => emailRegex.test(email));
+};
+
+// Update the sendMailtoVendors function
+const sendMailtoVendors = async (req, rfqNumber) => {
   try {
-    await Promise.all(
-      Object.keys(vendorProductMap).map(async (vendorId) => {
-        const vendorInfo = vendorProductMap[vendorId];
+    const { products } = req.body;
+    const vendorProductMap = {};
+
+    products.forEach((item) => {
+      item.vendors.forEach((vendor) => {
+        if (!vendorProductMap[vendor.user_id]) {
+          vendorProductMap[vendor.user_id] = {
+            vendorDetails: vendor,
+            products: [],
+          };
+        }
+        vendorProductMap[vendor.user_id].products.push(item);
+      });
+    });
+
+    const emailPromises = Object.keys(vendorProductMap).map(async (vendorId) => {
+      const vendorInfo = vendorProductMap[vendorId];
+      try {
         await sendMailEachVendor(vendorInfo.vendorDetails, req.user, rfqNumber, vendorInfo.products);
-      })
-    );
+        console.log(`Email sent successfully to vendor ${vendorId}`);
+      } catch (error) {
+        console.error(`Failed to send email to vendor ${vendorId}:`, error);
+        throw error;
+      }
+    });
+
+    await Promise.all(emailPromises);
     return true;
   } catch (error) {
-    console.error('Error sending emails:', error);
+    console.error('Error in sendMailtoVendors:', error);
     throw error;
   }
 };
 
+// Update the sendQuotationMailToBuyer function
 const sendQuotationMailToBuyer = async (req, rfqNumber) => {
-  // send mail to vendors
-  const { name, email, id } = req.user;
+  try {
+    const { name, email, id } = req.user;
+    const spocList = await vendorModel.getSpocDetails(id);
 
-  const headerContent = `<h2> Dear ${name},</h2>  `;
+    // Validate email addresses
+    const allEmails = [email, ...(spocList?.map(spoc => spoc.email) || [])];
+    if (!validateEmailAddresses(allEmails)) {
+      throw new Error('Invalid email address format');
+    }
 
-  const containerContent = `<div>
+    const headerContent = `<h2> Dear ${name},</h2>`;
+    const containerContent = `<div>
       <p style="font-size: 15px; padding-bottom: 3px;">
       Your RFQ has been successfully shared with vendors. </p>
       
-           <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
+      <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
        Click here to view
       </a>      
     </div>`;
 
-  const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+    const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      subject: `Work Wise | RFQ Creation Confirmation`,
+      html: dynamicHTML
+    };
 
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map(spoc => spoc.email);
+      mailRecipients.cc = email;
+    } else {
+      mailRecipients.to = email;
+    }
 
-  const spocList = await vendorModel.getSpocDetails(id)
-
-  // console.log(" rfq contoller 488 spoc console ", id, spocList)
-
-  let mailRecipients = {
-    from: Config.webmasterMail,
-    subject: `Work Wise | RFQ Creation Confirmation`,
-    html: dynamicHTML
-  };
-
-
-  if (spocList && spocList.length > 0) {
-    mailRecipients.to = spocList.map(spoc => spoc.email);
-    mailRecipients.cc = email;
-  } else {
-    mailRecipients.to = email;
+    await sendMailWithRetry(mailRecipients);
+    console.log(`Confirmation email sent successfully to buyer ${id}`);
+  } catch (error) {
+    console.error('Error in sendQuotationMailToBuyer:', error);
+    throw error;
   }
-
-  sendMail(mailRecipients);
-
-  // sendMail({
-  //   from: Config.webmasterMail, // sender address
-  //   to: email, // list of receivers
-  //   subject: `Work Wise | RFQ Creation Confirmation`, // Subject line
-  //   html: dynamicHTML // plain text body
-  // });
 };
 
 const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_no) => {
@@ -685,7 +708,7 @@ const formattedProducts = productList.length > 0
 
   const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
       <p style="padding-bottom: 3px;">
-        You’ve received a new quotation! Check out the details below:
+        You've received a new quotation! Check out the details below:
       </p>
 
       <p><strong>RFQ:</strong> #${rfq_no}</p>
@@ -749,7 +772,7 @@ const sendQuoteNotificationToVendor = async (req) => {
         ? 'Your regret concern has been sent to the buyer.'
         : `<div>
             <p>Thank you for submitting your quotation for <strong>#${rfq_no}</strong>. 
-               We’ve shared it with <strong>${BuyerDetails[0]?.organization_name || ''}</strong>, who will review it and get back to you soon.</p>
+               We've shared it with <strong>${BuyerDetails[0]?.organization_name || ''}</strong>, who will review it and get back to you soon.</p>
               <p><strong>Next Steps:</strong> Keep an eye out for any buyer queries or updates, 
                and be ready to discuss terms to secure the order.</p>
 
@@ -845,7 +868,7 @@ const containerContent = `
            Submit Your Quote Now
          </a>
        
-         <p style="margin-top:20px; font-weight:bold; text-align:center">   Don’t miss out on this opportunity!
+         <p style="margin-top:20px; font-weight:bold; text-align:center">   Don't miss out on this opportunity!
          </p>
        </div>`;
 
@@ -936,7 +959,7 @@ const sendQuoteNotificationEmail = async (req) => {
       const containerContent = `
       <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
         <p>
-          You’ve received a new quotation! Check out the details below:
+          You've received a new quotation! Check out the details below:
         </p>
         <p><strong>Vendor:</strong> ${organization_name || name}</p>
         <p><strong>Products:</strong> ${formattedProducts || '-'}</p>
@@ -947,7 +970,7 @@ const sendQuoteNotificationEmail = async (req) => {
         </a>      
 
         <p style="margin-top:20px; text-align:center; ">
-          We’re here to help you get the best deal.
+          We're here to help you get the best deal.
         </p>
       </div>`;
 
@@ -1216,7 +1239,7 @@ const rfqController = {
         project_id
       } = req.body;
       const response_email = req.body.response_email?.toLowerCase();
-
+      const is_update = !!rfq_id;
       const user_id = req.user.id;
 
       if(!rfq_id){
@@ -1258,26 +1281,33 @@ const rfqController = {
         rfq_id
       );
 
-      // send notification email
-      await sendMailtoVendors(req, rfq_id);
-      await sendQuotationMailToBuyer(req, rfq_id);
-
-      // send notification whatsapp 
-      const buyerMsgPayload = {
-        mobile:req.user.mobile,
-        rfq_id:rfq_id,
-        rfq_no:response[0]?.rfq_no
+      // Send appropriate notifications based on whether this is a new RFQ or an update
+      if (is_update && req.body.send_mail) {
+        // For updates, send notifications to vendors about the changes
+        await sendMailtoVendors(req, rfq_id);
+        await sendQuotationMailToBuyer(req, rfq_id);
+      } else if (!is_update) {
+        // For new RFQs, send initial notifications
+        await sendMailtoVendors(req, rfq_id);
+        await sendQuotationMailToBuyer(req, rfq_id);
       }
-      whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload)
+
+      // Send WhatsApp notification
+      const buyerMsgPayload = {
+        mobile: req.user.mobile,
+        rfq_id: rfq_id,
+        rfq_no: response[0]?.rfq_no
+      };
+      whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload);
 
       res
         .status(200)
         .json({
-          status: 2,
-          data: response[0]
+          status: 1,
+          data: response[0],
+          mail_sent: true
         })
         .end();
-
     } catch (error) {
       logError(error);
       res
@@ -2678,7 +2708,7 @@ const rfqController = {
 
 
     const buyerContainerContent = `<div style="font-size:16px;">
-        You’ve marked your RFQ as closed. Here are the details for your records:<br>
+        You've marked your RFQ as closed. Here are the details for your records:<br>
         <strong>RFQ Number:</strong> ${rfQItem[0]?.rfq_no}<br>
         <strong>Closed By:</strong> ${req.user.name}<br>
         <br>
@@ -3084,21 +3114,29 @@ const rfqController = {
     let approved_by_id = '';
     let state = '';
     let city = '';
+    let country = '';
+    let turnOver = null;
+    let vendorType = '';
+    let prevWorkedWith = '';
+    let myVendorType = '';
     search_key = req.body?.search_key ? req.body?.search_key : '';
     category_id = req.body?.category_id ? req.body?.category_id : '';
     approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
     state = req.body?.state ? req.body?.state : '';
     city = req.body?.city ? req.body?.city : '';
+    country = req.body?.country ? req.body?.country : '';
+    turnOver = req.body?.turnOver ? req.body?.turnOver : null;
+    vendorType = req.body?.vendorType ? req.body?.vendorType : '';
+    prevWorkedWith = req.body?.prevWorkedWith ? req.body?.prevWorkedWith : '';
+    myVendorType = req.body?.myVendorType ? req.body?.myVendorType : '';
     let vendor_name = req.body.vendor_name;
-    let is_private = req.body.is_private;
-    let preferred_vendor = req.body.preferred_vendor;
     
     // If user is not logged in
     if (!req.is_verified) {
       try {
 
         // Call the searchVendor method
-        const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
+        const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city, country, turnOver, vendorType, prevWorkedWith);
         // console.log(vendorResult);
 
         // Check if vendorResult is not empty and has the expected structure
@@ -3141,24 +3179,6 @@ const rfqController = {
       let user = req.user;
       if (user && user.user_type != 3) {
 
-        // Type validation for the is_private check
-        if (is_private && typeof is_private !== "boolean") {
-          return res.status(400).json({ 
-            status: 1,
-            message: "is_private must be a boolean"
-          });
-        }
-
-        // Type validation for the preferred_vendor check
-        if (preferred_vendor && typeof preferred_vendor !== "boolean") {
-          return res.status(400).json({ 
-            status: 1,
-            message: "preferred_vendor must be a boolean"
-          });
-        }
-
-
-
         try {
           const vendorResult = await rfqModel.searchVendor(
             req.user.id,
@@ -3167,9 +3187,12 @@ const rfqController = {
             approved_by_id,
             state,
             city,
+            country,
+            turnOver,
+            vendorType,
+            prevWorkedWith,
             vendor_name,
-            is_private = is_private ? true : false,
-            preferred_vendor = preferred_vendor ? true : false,
+            myVendorType,
           );
 
           let dummyOBJ = {
@@ -4584,7 +4607,6 @@ const rfqController = {
       const rfq_type = req.body.rfq_type || "";
       const reverse_auction = req.body.reverse_auction || "";
 
-
       // process boq with AI
       const boqDataJson = await generativeAI.processBOQWithAI(file);
 
@@ -4655,8 +4677,11 @@ const rfqController = {
             "",
             "",
             "",
-            false,
-            false
+            "",
+            "",
+            "",
+            "",
+            "",
           );  
         }
 
@@ -4682,8 +4707,10 @@ const rfqController = {
 
         // Iterate over the existing products array to find the same product name and increment the variant
         products.forEach((product) => {
-          if (product.name === search_key.product_name && product.product_id === search_key.product_id) {
-            variant = Math.max(variant, product.variant + 1);
+          console.log("PRODUCT: ", product)
+          console.log("SEARCH KEY: ", search_key)
+          if (product.name === search_key.name && product.product_id === search_key.id) {
+            variant = Math.max(variant, product.variant) + 1;
           }
         });
 
@@ -4993,7 +5020,7 @@ sendQueryMessage: async (req, res) => {
                 <div style="font-size:16px;">
                   ${sender_type == 2 ?
                    `${senderDetails.name} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`:
-                    `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here’s the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
+                    `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
                 </div>
                               
                <h4> Query </h4>
