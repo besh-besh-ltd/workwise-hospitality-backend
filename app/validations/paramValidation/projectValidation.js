@@ -11,7 +11,7 @@ import s3Client from '../../config/s3config.js';
 
 let store_project_files = multerS3({
   s3: s3Client,
-  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  bucket: process.env.AWS_S3_BUCKET, // Directly specified bucket name
   contentType: multerS3.AUTO_CONTENT_TYPE,
   key: function (req, file, cb) {
     // 1. Extract file extension

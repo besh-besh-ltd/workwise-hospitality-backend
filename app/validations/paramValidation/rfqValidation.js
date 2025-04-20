@@ -79,7 +79,7 @@ const productItems = Joi.object({
 
 let store_query_message_upload_file = multerS3({
   s3: s3Client,
-  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  bucket: process.env.AWS_S3_BUCKET, // Directly specified bucket name
   contentType: multerS3.AUTO_CONTENT_TYPE,
   key: function (req, file, cb) {
     // 1. Extract file extension
@@ -89,7 +89,7 @@ let store_query_message_upload_file = multerS3({
     const fileName = `${Date.now()}-${uuidv4()}${ext}`;
     
     // 3. Create full S3 path matching your URL structure
-    const fullPath = `query_message_file/${fileName}`; // Exact path you want
+    const fullPath = `query_message_files/${fileName}`; // Exact path you want
     
     // 4. Pass the complete path to callback
     cb(null, fullPath);

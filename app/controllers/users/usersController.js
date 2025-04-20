@@ -1056,7 +1056,7 @@ const UsersController = {
         // password = generatePassword(password);
         let update_password = await userModel.update_profile_image(
           user_id,
-          `${Config.download_url}/user_image/${filename}`,
+          req.file.location,
           original_filename
         );
 
