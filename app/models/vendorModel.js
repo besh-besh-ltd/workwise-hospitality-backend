@@ -7,10 +7,26 @@ const vendorModel = {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (name) {
-        dynamicQuery += `AND (tbl_users.name ILIKE '%${name}%' OR tbl_users.organization_name ILIKE '%${name}%')`;
+        dynamicQuery += `
+          AND (
+            to_tsvector('english', tbl_users.name) @@ plainto_tsquery('english', '${name}')
+            OR (char_length('${name}') = 1 AND similarity(tbl_users.name, '${name}') > 0)
+            OR (char_length('${name}') > 1 AND similarity(tbl_users.name, '${name}') > 0.1)
+            OR to_tsvector('english', tbl_users.organization_name) @@ plainto_tsquery('english', '${name}')
+            OR (char_length('${name}') = 1 AND similarity(tbl_users.organization_name, '${name}') > 0)
+            OR (char_length('${name}') > 1 AND similarity(tbl_users.organization_name, '${name}') > 0.1)
+          )`;
       }
       if (organization) {
-        dynamicQuery += `AND (tbl_users.organization_name ILIKE '%${organization}%' OR tbl_users.name ILIKE '%${organization}%')`;
+        dynamicQuery += `
+          AND (
+            to_tsvector('english', tbl_users.organization_name) @@ plainto_tsquery('english', '${organization}')
+            OR (char_length('${organization}') = 1 AND similarity(tbl_users.organization_name, '${organization}') > 0)
+            OR (char_length('${organization}') > 1 AND similarity(tbl_users.organization_name, '${organization}') > 0.1)
+            OR to_tsvector('english', tbl_users.name) @@ plainto_tsquery('english', '${organization}')
+            OR (char_length('${organization}') = 1 AND similarity(tbl_users.name, '${organization}') > 0)
+            OR (char_length('${organization}') > 1 AND similarity(tbl_users.name, '${organization}') > 0.1)
+          )`;
       }
       if (verified == 't') {
         dynamicQuery += `AND tbl_users.status = 1 `;
@@ -33,8 +49,8 @@ const vendorModel = {
         dynamicQuery += `AND tbl_users.created_by = ${created_by}`;
       }
 
-      db.any(
-        `SELECT 
+      let q = `
+        SELECT 
           tbl_users.id,
           tbl_users.name,
           tbl_users.email,
@@ -48,6 +64,18 @@ const vendorModel = {
           creator.name AS created_by_name,
           updater.name AS updated_by_name,
           trr.reject_reason,
+          ${name ? `
+            ts_rank_cd(to_tsvector('english', tbl_users.name), plainto_tsquery('english', '${name}')) AS name_rank,
+            similarity(tbl_users.name, '${name}') AS name_similarity,
+            ts_rank_cd(to_tsvector('english', tbl_users.organization_name), plainto_tsquery('english', '${name}')) AS org_rank,
+            similarity(tbl_users.organization_name, '${name}') AS org_similarity,
+          ` : ''}
+          ${organization ? `
+            ts_rank_cd(to_tsvector('english', tbl_users.organization_name), plainto_tsquery('english', '${organization}')) AS org_rank_by_org,
+            similarity(tbl_users.organization_name, '${organization}') AS org_similarity_by_org,
+            ts_rank_cd(to_tsvector('english', tbl_users.name), plainto_tsquery('english', '${organization}')) AS name_rank_by_org,
+            similarity(tbl_users.name, '${organization}') AS name_similarity_by_org,
+          ` : ''}
           CASE
             WHEN tbl_users.new_profile_image IS NULL THEN NULL
             ELSE tbl_users.new_profile_image
@@ -57,10 +85,23 @@ const vendorModel = {
         LEFT JOIN tbl_users creator ON tbl_users.created_by = creator.id
         LEFT JOIN tbl_users updater ON tbl_users.updated_by = updater.id
         WHERE tbl_users.is_deleted = 0 AND tbl_users.user_type = 3 ${dynamicQuery}
-        ORDER BY tbl_users.created_at DESC 
-        LIMIT $1 OFFSET $2`,
-        [limit, offset]
-      )
+        ${name ? `
+          ORDER BY 
+            GREATEST(name_rank, org_rank) DESC, 
+            GREATEST(name_similarity, org_similarity) DESC,
+            tbl_users.created_at DESC
+        ` : organization ? `
+          ORDER BY 
+            GREATEST(org_rank_by_org, name_rank_by_org) DESC, 
+            GREATEST(org_similarity_by_org, name_similarity_by_org) DESC,
+            tbl_users.created_at DESC
+        ` : `
+          ORDER BY tbl_users.created_at DESC
+        `}
+        LIMIT $1 OFFSET $2
+      `;
+
+      db.any(q, [limit, offset])
         .then(function (data) {
           resolve(data);
         })
@@ -75,10 +116,26 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
   return new Promise(function (resolve, reject) {
     let dynamicQuery = 'AND user_type = 3 ';
     if (name) {
-      dynamicQuery += `AND (name ILIKE '%${name}%' OR organization_name ILIKE '%${name}%')`;
+      dynamicQuery += `
+        AND (
+          to_tsvector('english', name) @@ plainto_tsquery('english', '${name}')
+          OR (char_length('${name}') = 1 AND similarity(name, '${name}') > 0)
+          OR (char_length('${name}') > 1 AND similarity(name, '${name}') > 0.1)
+          OR to_tsvector('english', organization_name) @@ plainto_tsquery('english', '${name}')
+          OR (char_length('${name}') = 1 AND similarity(organization_name, '${name}') > 0)
+          OR (char_length('${name}') > 1 AND similarity(organization_name, '${name}') > 0.1)
+        )`;
     }
     if (organization) {
-      dynamicQuery += `AND (organization_name ILIKE '%${organization}%' OR name ILIKE '%${organization}%')`;
+      dynamicQuery += `
+        AND (
+          to_tsvector('english', organization_name) @@ plainto_tsquery('english', '${organization}')
+          OR (char_length('${organization}') = 1 AND similarity(organization_name, '${organization}') > 0)
+          OR (char_length('${organization}') > 1 AND similarity(organization_name, '${organization}') > 0.1)
+          OR to_tsvector('english', name) @@ plainto_tsquery('english', '${organization}')
+          OR (char_length('${organization}') = 1 AND similarity(name, '${organization}') > 0)
+          OR (char_length('${organization}') > 1 AND similarity(name, '${organization}') > 0.1)
+        )`;
     }
     if (verified == 't') {
       dynamicQuery += `AND status = 1 `;
