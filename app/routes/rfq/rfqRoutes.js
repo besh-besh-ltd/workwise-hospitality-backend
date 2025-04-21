@@ -52,7 +52,7 @@ RfqRoutes.put(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   validateBody(rfqSchemas.update),
-  rfqController.create
+  rfqController.update
 );
 
 // RfqRoutes.get(
