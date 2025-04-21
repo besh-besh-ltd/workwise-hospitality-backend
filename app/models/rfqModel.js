@@ -533,8 +533,15 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 
           -- Selected Terms
           'terms', (
-              SELECT COALESCE(json_agg(json_build_object('id', RFQ_TM.terms_id)), '[]'::json)
+              SELECT COALESCE(json_agg(
+                  json_build_object(
+                      'id', RFQ_TM.terms_id,
+                      'term_content', RFQ_T.term_content,
+                      'name', RFQ_T.term_content
+                  )
+              ), '[]'::json)
               FROM tbl_rfq_terms_map RFQ_TM
+              JOIN tbl_rfq_terms RFQ_T ON RFQ_T.id = RFQ_TM.terms_id
               WHERE RFQ_TM.rfq_id = RFQ.id
           ),
           
@@ -702,13 +709,15 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id
   ) AS "finalizations",
     ARRAY(
-      SELECT json_build_object('id', RFQ_TM.id,
-        'content', (
-          SELECT json_agg(json_build_object('title', RFQ_T.term_content))
-          FROM tbl_rfq_terms RFQ_T
-          WHERE CAST(RFQ_TM.terms_id AS INTEGER) = RFQ_T.id
-        )
-      ) FROM tbl_rfq_terms_map RFQ_TM WHERE RFQ_TM.rfq_id = RFQ.id
+      SELECT json_build_object(
+        'id', RFQ_TM.terms_id,
+        'term_content', RFQ_T.term_content,
+        'name', RFQ_T.term_content,
+        'term_id', RFQ_TM.terms_id
+      )
+      FROM tbl_rfq_terms_map RFQ_TM
+      JOIN tbl_rfq_terms RFQ_T ON RFQ_T.id = RFQ_TM.terms_id
+      WHERE RFQ_TM.rfq_id = RFQ.id
     ) AS "terms",
     (
       SELECT json_agg(RF.file_url)
