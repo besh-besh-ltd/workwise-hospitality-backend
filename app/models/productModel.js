@@ -1158,8 +1158,13 @@ const productModel = {
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
-      if (productName && productName != '') {
-        dynamicQuery += ` AND PD.name ILIKE '%${productName}%'`;
+      // Product name search with full-text search and similarity
+      if (productName && productName !== '') {
+        dynamicQuery += `
+          AND (
+            to_tsvector('english', PD.name) @@ plainto_tsquery('english', '${productName}')
+            OR similarity(PD.name, '${productName}') > 0.1
+          )`;
       }
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
@@ -1190,8 +1195,14 @@ const productModel = {
         dynamicQuery += ` AND PD.is_approve = ${is_approve}`;
       }
       
-      db.any(
-        `SELECT PD.*, USERS.name as vendor_name,
+      let q = `
+      SELECT 
+        PD.*, 
+        USERS.name as vendor_name,
+        ${productName ? `
+          similarity(PD.name, '${productName}') AS similarity_score,
+          ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank,
+        ` : ''}
         ARRAY
         (SELECT json_build_object('category_name', tc.title,'id',tc.id )
           FROM tbl_product_categories pc
@@ -1210,7 +1221,12 @@ const productModel = {
             WHERE USERS.is_deleted = 0 
             AND PD.is_deleted = 0 
             AND PD.is_review = 0 ${dynamicQuery}     
-        ORDER BY PD.created_at DESC LIMIT ${limit} OFFSET $1`,
+        ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
+        LIMIT ${limit} OFFSET $1
+      `;
+
+      db.any(
+        q,
         [offset]
       )
         .then(function (data) {
@@ -1258,7 +1274,11 @@ const productModel = {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (productName && productName != '') {
-        dynamicQuery += ` AND tbl_product.name ILIKE '%${productName}%'`;
+        dynamicQuery += `
+          AND (
+            to_tsvector('english', tbl_product.name) @@ plainto_tsquery('english', '${productName}')
+            OR similarity(tbl_product.name, '${productName}') > 0.1
+          )`;
       }
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND tbl_product.id IN (${filterProduct.id_array})`;
@@ -1315,7 +1335,11 @@ const productModel = {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (productName && productName != '') {
-        dynamicQuery += ` AND PD.name ILIKE '%${productName}%'`;
+        dynamicQuery += `
+          AND (
+            to_tsvector('english', PD.name) @@ plainto_tsquery('english', '${productName}')
+            OR similarity(PD.name, '${productName}') > 0.1
+          )`;
       }
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND id IN (${filterProduct.id_array})`;
@@ -1323,27 +1347,36 @@ const productModel = {
       if (vendorId && vendorId != '') {
         dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
       }
-      db.any(
-        `SELECT PD.*,USERS.name as vendor_name,
-        ARRAY
-        (SELECT json_build_object('category_name',  tc.title,'id',tc.id )
-          FROM tbl_product_categories pc
-          LEFT JOIN tbl_category tc ON pc.category_id = tc.id
-          WHERE PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
+
+      let q = `
+        SELECT 
+          PD.*,
+          USERS.name as vendor_name,
+          ${productName ? `
+            similarity(PD.name, '${productName}') AS similarity_score,
+            ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank,
+          ` : ''}
           ARRAY
-        (SELECT json_build_object('vendor_approve_name', tva.vendor_approve,'id',tva.id )
-          FROM tbl_vendorapprove_product_mapping tvpm 
-        LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
-        WHERE PD.id = tvpm.product_id) AS "product_approve_by",
-        ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"
-            FROM tbl_product PD 
-            LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
-            WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 AND PD.is_review = 1 ${dynamicQuery}     
-        ORDER BY PD.created_at DESC LIMIT ${limit} OFFSET $1`,
-        [offset]
-      )
+          (SELECT json_build_object('category_name',  tc.title,'id',tc.id )
+            FROM tbl_product_categories pc
+            LEFT JOIN tbl_category tc ON pc.category_id = tc.id
+            WHERE PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
+            ARRAY
+          (SELECT json_build_object('vendor_approve_name', tva.vendor_approve,'id',tva.id )
+            FROM tbl_vendorapprove_product_mapping tvpm 
+          LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
+          WHERE PD.id = tvpm.product_id) AS "product_approve_by",
+          ARRAY
+            (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
+              FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"
+              FROM tbl_product PD 
+              LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
+              WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 AND PD.is_review = 1 ${dynamicQuery}     
+          ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`}
+          LIMIT ${limit} OFFSET $1
+      `;
+
+      db.any(q, [offset])
         .then(function (data) {
           resolve(data);
         })
@@ -1361,7 +1394,11 @@ const productModel = {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (productName && productName != '') {
-        dynamicQuery += ` AND PD.name ILIKE '%${productName}%'`;
+        dynamicQuery += `
+          AND (
+            to_tsvector('english', PD.name) @@ plainto_tsquery('english', '${productName}')
+            OR similarity(PD.name, '${productName}') > 0.1
+          )`;
       }
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
@@ -1370,9 +1407,9 @@ const productModel = {
         dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
       }
       db.any(
-        `select * from tbl_product
-      LEFT JOIN tbl_users USERS ON tbl_product.created_by = USERS.id 
-      WHERE USERS.is_deleted = 0 AND tbl_product.is_deleted = 0 AND tbl_product.is_review = 1 ${dynamicQuery}`
+        `select * from tbl_product PD
+      LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
+      WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 AND PD.is_review = 1 ${dynamicQuery}`
       )
         .then(function (data) {
           resolve(data);
@@ -1451,9 +1488,6 @@ const productModel = {
   productSearch: async (prdObj) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
-      if (prdObj.product_name && prdObj.product_name != '') {
-        dynamicQuery += ` AND P.name LIKE '%${prdObj.product_name}%'`;
-      }
       if (prdObj.user_id && prdObj.user_id != '') {
         dynamicQuery += ` AND P.created_by = '${prdObj.user_id}'`;
       }
@@ -1461,13 +1495,32 @@ const productModel = {
         dynamicQuery += ` AND C.id = '${prdObj.cat_id}'`;
       }
 
-      db.any(
-        `SELECT DISTINCT P.id as product_id, C.title as category_name, P.name as product_name,P.description,P.created_by
+      let q = `
+        SELECT DISTINCT 
+          P.id as product_id, 
+          C.title as category_name, 
+          P.name as product_name,
+          P.description,
+          P.created_by,
+          ${prdObj.product_name ? `
+            similarity(P.name, '${prdObj.product_name}') AS similarity_score,
+            ts_rank_cd(to_tsvector('english', P.name), plainto_tsquery('english', '${prdObj.product_name}')) AS rank
+          ` : ''}
         FROM tbl_product P  
-         LEFT JOIN tbl_product_categories PC ON P.id = PC.product_id 
-         LEFT JOIN tbl_category C ON PC.category_id = C.id 
-         WHERE P.status = '1' ${dynamicQuery}`
-      )
+        LEFT JOIN tbl_product_categories PC ON P.id = PC.product_id 
+        LEFT JOIN tbl_category C ON PC.category_id = C.id 
+        WHERE P.status = '1' AND P.is_deleted = 0
+          ${prdObj.product_name ? `
+            AND (
+              to_tsvector('english', P.name) @@ plainto_tsquery('english', '${prdObj.product_name}')
+              OR similarity(P.name, '${prdObj.product_name}') > 0.1
+            )
+          ` : ''}
+          ${dynamicQuery}
+        ${prdObj.product_name ? `ORDER BY rank DESC, similarity_score DESC, P.name ASC` : `ORDER BY P.name ASC`}
+      `;
+
+      db.any(q)
         .then(function (data) {
           resolve(data);
         })
