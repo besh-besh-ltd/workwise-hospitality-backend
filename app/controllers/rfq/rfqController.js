@@ -1161,19 +1161,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
       updated_by: user_id
   };
 
-  // let { rfq_id } = reqBody;
-  // if(!rfq_id){
-  //   const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: user_id });
-  //   if (rfqList.length > 0) {
-  //     rfq_id = rfqList[0].id;
-  //   } else {
-  //       return {
-  //         success: true,
-  //         message: 'No RFQ draft found!'
-  //       };
-  //   }
-  // }
-
 
   if (project_id && project_id !== -1) {
       rfqData.project_id = project_id;
@@ -1234,7 +1221,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
 const rfqController = {
   create: async (req, res, next) => {
-    console.log("req recived from magic search")
     if (!req.user.subscription_plan_id) {
       res
         .status(400)
@@ -1302,16 +1288,9 @@ const rfqController = {
         rfq_id
       );
 
-      // Send appropriate notifications based on whether this is a new RFQ or an update
-      if (is_update && req.body.send_mail) {
-        // For updates, send notifications to vendors about the changes
-        await sendMailtoVendors(req, rfq_id);
-        await sendQuotationMailToBuyer(req, rfq_id);
-      } else if (!is_update) {
-        // For new RFQs, send initial notifications
-        await sendMailtoVendors(req, rfq_id);
-        await sendQuotationMailToBuyer(req, rfq_id);
-      }
+      // send notification email
+      await sendMailtoVendors(req, rfq_id);
+      await sendQuotationMailToBuyer(req, rfq_id);
 
       // Send WhatsApp notification
       const buyerMsgPayload = {
@@ -5050,7 +5029,7 @@ sendQueryMessage: async (req, res) => {
 
 
       const headerContent = ` <div>
-           <h2>Hello ${receiverDetails.name} </h2>
+           <h2>Hello ${receiverDetails?.organization_name || receiverDetails?.name} </h2>
            </div>`;
 
 
