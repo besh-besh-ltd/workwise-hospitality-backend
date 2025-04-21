@@ -126,8 +126,8 @@ const user_spoc = Joi.object().keys({
     .optional()
     .allow(null, '') // Allow null or empty strings
     .trim()
-    .regex(/^\+\d{1,4}-\d{7,14}$/, 'Invalid number format') // Only digits if non-empty
-    .min(7)  // Minimum 10 digits if non-empty
+    .regex(/^\+\d{1,4}-\d{6,15}$/, 'Invalid number format') // Only digits if non-empty
+    .min(6)  // Minimum 10 digits if non-empty
     .max(15)  // Maximum 15 digits if non-empty
 });
 
