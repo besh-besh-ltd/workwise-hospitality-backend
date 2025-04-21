@@ -8,31 +8,42 @@ import Config from '../../config/app.config.js';
 import userModel from '../../models/userModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
 import { S3Client } from '@aws-sdk/client-s3';
+import s3Client from '../../config/s3config.js';
 
 
-const s3Client = new S3Client({
-  region: process.env.AWS_REGION,
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+
+
+
+var store_profile_images = multerS3({
+  s3: s3Client,
+  bucket: process.env.AWS_S3_BUCKET, // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();
+    
+    // 2. Generate unique filename with timestamp + UUID
+    const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    
+    // 3. Create full S3 path matching your URL structure
+    const fullPath = `user_image/${fileName}`; // Exact path you want
+    
+    // 4. Pass the complete path to callback
+    cb(null, fullPath);
   }
 });
 
 
-
-
-
-
-var store_profile_images = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.user_image);
-  },
-  filename: function (req, file, callback) {
-    var extention = path.extname(file.originalname);
-    var new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
-  }
-});
+// var store_profile_images = multer.diskStorage({
+//   destination: function (req, file, callback) {
+//     callback(null, Config.upload.user_image);
+//   },
+//   filename: function (req, file, callback) {
+//     var extention = path.extname(file.originalname);
+//     var new_file_name = +new Date() + '-' + uuidv4() + extention;
+//     callback(null, new_file_name);
+//   }
+// });
 var store_agent_profile_images = multer.diskStorage({
   destination: function (req, file, callback) {
     callback(null, Config.upload.agent_user_image);
@@ -522,7 +533,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      
       res.status(400).json({
         status: 3,
         message: 'server error'

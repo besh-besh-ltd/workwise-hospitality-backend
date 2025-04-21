@@ -21,7 +21,7 @@ var store_profile_images = multer.diskStorage({
 });
 var store_document  = multerS3({
   s3: s3Client,
-  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  bucket: process.env.AWS_S3_BUCKET, // Directly specified bucket name
   contentType: multerS3.AUTO_CONTENT_TYPE,
   key: function (req, file, cb) {
     // 1. Extract file extension
