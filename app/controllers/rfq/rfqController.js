@@ -1177,13 +1177,32 @@ const saveRfqDraft = async (user_id, reqBody) => {
       rfqData.project_id = project_id;
   }
 
-
   await rfqModel.update('tbl_rfq', rfqData, rfq_id);
   await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id);
-  await deleteRelatedRecords(rfq_id);
+  
+  
+  // Only delete product-related records, preserve terms
+  await Promise.all([
+      rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }),
+      rfqModel.deleteWithReturnIds('tbl_rfq_product_vendors', { rfq_id }),
+      rfqModel.deleteWithReturnIds('tbl_rfq_products_specs', { rfq_id })
+  ]);
 
+  const rfqProductIds = await rfqModel.deleteWithReturnIds('tbl_rfq_products', { rfq_id });
+  if (rfqProductIds.length > 0) {
+      await rfqModel.deleteProductFilesByIds(rfqProductIds);
+  }
+
+  // Handle terms update
   if (terms && terms.length > 0) {
-      const rfqTerms = terms.map(term => ({ rfq_id, terms_id: term.id }));
+      // First delete existing terms
+      await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id });
+      
+      // Then insert new terms
+      const rfqTerms = terms.map(term => ({ 
+          rfq_id, 
+          terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
+      }));
       await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
   }
 
