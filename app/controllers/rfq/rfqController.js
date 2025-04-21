@@ -1000,8 +1000,7 @@ const sendQuoteNotificationEmail = async (req) => {
   const sendRfqUpdatedMailToVendors = async (vendorData, rfq_id, rfq_no, buyer_name, updated_data) => {
     try {
       for (const vendor of vendorData) {
-        const { vendor_name, vendor_email, spocs = [], rfq_auth_token } = vendor;
-
+        const { vendor_name, vendor_email, spocs = [], token } = vendor;
   
         // Skip if no main email and no spocs
         const validSpocEmails = spocs
@@ -1013,7 +1012,7 @@ const sendQuoteNotificationEmail = async (req) => {
           <p style="font-size: 15px;">
             RFQ #${rfq_no} has been updated by ${buyer_name}.
           </p>
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${rfq_auth_token}"
+          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}"
              style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
             View RFQ
           </a>
