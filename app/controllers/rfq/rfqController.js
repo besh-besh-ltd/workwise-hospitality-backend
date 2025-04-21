@@ -341,7 +341,7 @@ const getQUOTES = async ({ id }, user_id) => {
 
 const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
   try {
-    let organization_name = user.organization_name || user.name;
+    let organization_name = user?.organization_name || user?.name;
 
     // Fetch user details of the vendor
     const user_details = await userModel.user_profile_detail(vendor.user_id);
@@ -415,7 +415,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
         const org_name = user_details[0].organization_name || user_details[0].name || ""
        let mailRecipients = {
         from: `${organization_name} ${Config.masterEmail}`,
-        subject: `New RFQ Opportunity from ${user_details[0].name}`,
+        subject: `New RFQ Opportunity from ${organization_name}`,
         html: dynamicHTML
       };
 
@@ -433,6 +433,8 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
               const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
               return `${product.name} - ${quantitySpec.value || '--'} ${product.unit || ''}`.trim();
             }).join(', ');
+
+            console.log(" rfq contoller 437 spoc console ", mailRecipients?.to, mailRecipients.cc)
 
       sendMail(mailRecipients);
 
@@ -5056,7 +5058,7 @@ sendQueryMessage: async (req, res) => {
               <div>
                 <div style="font-size:16px;">
                   ${sender_type == 2 ?
-                   `${senderDetails.name} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`:
+                   `${senderDetails?.organization_name || senderDetails?.name} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`:
                     `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
                 </div>
                               
@@ -5084,7 +5086,7 @@ sendQueryMessage: async (req, res) => {
     const emailSubject = sender_type==3? `Vendor Query on Your RFQ #${rfqNumber}`:  `Buyer Query for #${rfqNumber} – Your Response Needed`
 
     const mailRecipients = {
-      from: `${senderDetails.name} ${Config.masterEmail}`,
+      from: `${senderDetails?.organization_name || senderDetails?.name} ${Config.masterEmail}`,
       subject: emailSubject,
       html: dynamicHTML
     };
