@@ -1056,7 +1056,7 @@ const UsersController = {
         // password = generatePassword(password);
         let update_password = await userModel.update_profile_image(
           user_id,
-          `${Config.download_url}/user_image/${filename}`,
+          req.file.location,
           original_filename
         );
 
@@ -3157,7 +3157,7 @@ const UsersController = {
             const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
           sendMail({
-            from: Config.webmasterMail,
+            from: `${buyerName}  ${Config.masterEmail}`,
             to: spocList?.length ? spocList.map(spoc => spoc.email) : userDetails[0].email,
             cc: spocList?.length ? userDetails[0].email : '',
             subject: `${buyerName} Added You on Workwise`,
