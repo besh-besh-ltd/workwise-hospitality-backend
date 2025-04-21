@@ -3311,6 +3311,24 @@ const rfqController = {
     }
   },
 
+  vendorTypes: async (req, res) => {
+    try {
+      const result = await rfqModel.fetchVendorTypes();
+      return res.status(200).json({
+        status: 1,
+        data: result?.[0]?.nature_of_business_options ?? [],
+      });
+    } catch (error) {
+      logError(error);
+        // Error handling and response
+        res.status(500).json({
+          success: false,
+          message: 'An error occurred while fetching vendor types',
+          error: error.message,
+        });
+    }
+  },
+
   getPastRFQs: async (req, res, next) => {
     let vendor_id = req.params.id;
     const { id } = req.user;

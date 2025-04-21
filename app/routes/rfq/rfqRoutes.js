@@ -233,6 +233,11 @@ RfqRoutes.post(
   rfqController.listQueries
 );
 
+RfqRoutes.get(
+  '/vendor-types',
+  rfqController.vendorTypes
+);
+
 // to create the rfq using magic search rfq feature
 RfqRoutes.post('/magic-search-rfq-create',
   passportSignIn,
