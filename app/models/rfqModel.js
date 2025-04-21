@@ -66,6 +66,26 @@ const rfqModel = {
               .catch(err => reject(new Error(err)));
       });
   },
+
+  fetchVendorTypes: async () => {
+    try {
+      const query = `
+            SELECT json_agg(DISTINCT jsonb_build_object(
+        'label', trimmed_value,
+        'value', lower(replace(trimmed_value, ' ', '_'))
+                         )) AS nature_of_business_options
+          FROM (
+         SELECT DISTINCT trim(unnested_value) AS trimmed_value
+         FROM tbl_company,
+              unnest(string_to_array(nature_of_business, ',')) AS unnested_value
+         WHERE nature_of_business IS NOT NULL AND nature_of_business != ''
+     ) AS cleaned_values;
+        `;
+      return await db.query(query)
+    } catch (error) {
+      throw error;
+    }
+  },
   
   getBuyerForRfq: async (rfq_id) => {
       const query = `
@@ -1225,13 +1245,15 @@ LIMIT $5 OFFSET $4;`,
       TU.mobile,
       TU.address,
       TU.organization_name,
+      TC.company_name,
       ARRAY(
         SELECT json_build_object('id', TP.id, 'name', TP.name)
         FROM tbl_product TP
         WHERE TU.id = TP.created_by
       ) AS "products"
       FROM tbl_users TU
-      WHERE id IN (${placeholders})`;
+      JOIN tbl_company TC ON TU.id = TC.user_id
+      WHERE TU.id IN (${placeholders})`;
     console.log(query);
     return new Promise(function (resolve, reject) {
       db.any(query, vendors)
@@ -2132,9 +2154,9 @@ WHERE row_num_by_name_category = 1
 
         ${vendor_name != '' ? `
           AND (
-            to_tsvector('english', tu.name) @@ plainto_tsquery('english', $1)
-            OR (char_length($1) = 1 AND similarity(tu.name, $1) > 0)
-            OR (char_length($1) > 1 AND similarity(tu.name, $1) > 0.1)
+            to_tsvector('english', tc.company_name) @@ plainto_tsquery('english', $1)
+            OR (char_length($1) = 1 AND similarity(tc.company_name, $1) > 0)
+            OR (char_length($1) > 1 AND similarity(tc.company_name, $1) > 0.1)
           )
         ` : ''}
 
