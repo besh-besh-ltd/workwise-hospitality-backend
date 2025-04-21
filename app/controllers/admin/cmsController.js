@@ -1625,7 +1625,7 @@ const cmsController = {
 
   
   updateLocation: async (req, res) => {
-    const { state_id, city_id, city_name } = req.query; // Receive parameters from query
+    const { state_id, city_id, city_name , state_name} = req.query; // Receive parameters from query
   
     try {
       // Ensure that either state_id or city_id is provided
@@ -1639,15 +1639,16 @@ const cmsController = {
       }
   
       // Prepare the update data
-      const updateData = { city_name };
-  
-      // Call the service to update the data
-      const result = await cmsModel.updateLocations(state_id, city_id, updateData);
-  
-      if (result) {
-        return res.status(200).json({ message: "Location updated successfully", data: result });
+      const updateData = {};
+
+      if (city_name) updateData.city_name = city_name;
+      if (state_name) updateData.state_name = state_name;
+      
+      if (Object.keys(updateData).length > 0) {
+        const result = await cmsModel.updateLocations(state_id, city_id, updateData);
+        return res.json({ success: true, data: result });
       } else {
-        return res.status(404).json({ error: "Location not found" });
+        return res.status(400).json({ error: 'No data provided to update.' });
       }
     } catch (err) {
       console.error("Error updating location:", err);
