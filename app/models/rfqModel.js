@@ -944,11 +944,11 @@ LIMIT 1;`;
       const turnoverField = `NULLIF(TRIM(tc.turnover), '')::bigint`;
 
       if (turnOver.from > 0 && turnOver.to > 0) {
-          turnoverCondition += `${turnoverField} BETWEEN ${turnOver.from * 10000000} AND ${turnOver.to * 10000000}`;
+          turnoverCondition += `${turnoverField} BETWEEN ${turnOver.from } AND ${turnOver.to }`;
       } else if (turnOver.from > 0) {
-          turnoverCondition += `${turnoverField} >= ${turnOver.from * 10000000}`;
+          turnoverCondition += `${turnoverField} >= ${turnOver.from }`;
       } else if (turnOver.to > 0) {
-          turnoverCondition += `${turnoverField} <= ${turnOver.to * 10000000}`;
+          turnoverCondition += `${turnoverField} <= ${turnOver.to }`;
       }
 
       turnoverCondition += ")";
@@ -2044,11 +2044,11 @@ WHERE row_num_by_name_category = 1
         const turnoverField = `NULLIF(TRIM(tc.turnover), '')::bigint`;
 
         if (turnOver.from > 0 && turnOver.to > 0) {
-            turnoverCondition += `${turnoverField} BETWEEN ${turnOver.from * 10000000} AND ${turnOver.to * 10000000}`;
+            turnoverCondition += `${turnoverField} BETWEEN ${turnOver.from } AND ${turnOver.to }`;
         } else if (turnOver.from > 0) {
-            turnoverCondition += `${turnoverField} >= ${turnOver.from * 10000000}`;
+            turnoverCondition += `${turnoverField} >= ${turnOver.from }`;
         } else if (turnOver.to > 0) {
-            turnoverCondition += `${turnoverField} <= ${turnOver.to * 10000000}`;
+            turnoverCondition += `${turnoverField} <= ${turnOver.to }`;
         }
 
         turnoverCondition += ")";
@@ -2118,7 +2118,7 @@ WHERE row_num_by_name_category = 1
 
       WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 
         AND tu.is_deleted = 0 AND tu.status = 1 
-        AND LOWER(p.name) = '${search_key}' 
+        AND LOWER(p.name) = LOWER('${search_key}')
         AND tu.email IS NOT NULL
 
         ${vendor_name != '' ? `
@@ -2182,7 +2182,20 @@ WHERE row_num_by_name_category = 1
             tu.mobile, 
             tu.organization_name AS company_name,
             tu.address,
-            ${vendor_name ? 'similarity(tu.name, $2) as similarity_score,' : ''}
+            ${vendor_name ? "ts_rank_cd(to_tsvector('english', tu.name), plainto_tsquery('english', $2)) AS rank," : ''}
+            ${vendor_name ? 'word_similarity(lower(tu.name), lower($2)) as similarity_score,' : ''}
+            ${vendor_name ? `CASE 
+                WHEN lower(tu.name) LIKE lower($2) || '%' THEN 1 
+                ELSE 0 
+            END AS starts_with_input,` : ''}
+            ${vendor_name ? `CASE 
+              WHEN lower(tu.name) ~* ('(^|\\s)' || lower($2) || '(\\s|$)') THEN 1
+              ELSE 0
+            END AS exact_word_match,` : ''}
+            ${vendor_name ? `CASE 
+              WHEN position(lower($2) in lower(tu.name)) > 0 THEN 1
+              ELSE 0
+            END AS partial_word_match,` : ''}
             CASE
                 WHEN bvm.vendor_id IS NOT NULL THEN 1
                 ELSE 0
@@ -2213,7 +2226,12 @@ WHERE row_num_by_name_category = 1
             )` : ''}
     ) AS distinct_vendors
     ORDER BY 
-        is_linked_with_buyer DESC, ${vendor_name ? 'similarity_score DESC' : ''};
+      is_linked_with_buyer DESC,
+      ${vendor_name ? 'rank DESC,' : ''}
+      ${vendor_name ? 'starts_with_input DESC,' : ''}
+      ${vendor_name ? 'exact_word_match DESC,' : ''}
+      ${vendor_name ? 'partial_word_match DESC,' : ''}
+      ${vendor_name ? 'similarity_score DESC' : ''};
     `;
   
     const values = vendor_name ? [buyerId, vendor_name] : [buyerId];
