@@ -996,6 +996,57 @@ const sendQuoteNotificationEmail = async (req) => {
   }
 
 
+  //  vendorData, rfq_id, rfq_no, buyerName
+  const sendRfqUpdatedMailToVendors = async (vendorData, rfq_id, rfq_no, buyer_name, updated_data) => {
+    try {
+      for (const vendor of vendorData) {
+        const { vendor_name, vendor_email, spocs = [], rfq_auth_token } = vendor;
+
+  
+        // Skip if no main email and no spocs
+        const validSpocEmails = spocs
+        .map(spoc => spoc?.email)
+        .filter(email => typeof email === 'string' && email.includes('@'));
+        
+        const headerContent = `<h2>Hello ${vendor_name},</h2>`;
+        const containerContent = `
+          <p style="font-size: 15px;">
+            RFQ #${rfq_no} has been updated by ${buyer_name}.
+          </p>
+          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${rfq_auth_token}"
+             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+            View RFQ
+          </a>
+        `;
+  
+        const html = generateEmailTemplate(headerContent, containerContent);
+  
+        const mail = {
+          from:  `${buyer_name} ${Config.masterEmail}`,
+          subject: `RFQ #${rfq_no} Details has beed updated by ${buyer_name}`,
+          html
+        };
+  
+
+        if (validSpocEmails.length > 0) {
+          mail.to = validSpocEmails;
+          mail.cc = vendor_email || '';
+          mail.bcc = "mukuljatav1010+if@gmail.com";
+        } else {
+          mail.to = vendor_email || '';
+          mail.bcc = "mukuljatav1010+else@gmail.com";
+        }
+
+         sendMail(mail);
+      }
+    } catch (err) {
+      console.error("Error in sendRfqUpdatedMailToVendors:", err);
+      throw err;
+    }
+  };
+  
+
+
 const sendWinningNotificaion = async (
   vendorNonLoginRfqAccessToken,
   vendor_id,
@@ -1315,6 +1366,71 @@ const rfqController = {
         .json({
           status: 3,
           message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
+  update: async (req, res, next) => {
+
+    if (!req.user.subscription_plan_id) {
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: 'You need to purchase subscription to create RFQ'
+        })
+        .end();
+      return;
+    }
+
+    try {
+
+      const data = req.body;
+
+      const rfq_id = data.rfq_id;   
+      delete data.rfq_id; // Remove rfq_id from update fields
+
+
+      const rfqDetails =  await rfqModel.getRFQDetails(rfq_id)
+
+      const buyerName = req.user.organization_name || req.user.name
+      const rfq_no = rfqDetails[0]?.rfq_no || ''
+
+      //  Ensure project_id is either an integer or null
+      if ('project_id' in data && data.project_id !== null && data.project_id !== undefined) {
+        data.project_id = parseInt(data.project_id);
+      } else {
+        delete data.project_id; // Avoid updating with undefined/null
+      }
+  
+      // get rfq vendors list
+      let vendors = await rfqModel.gerRFQVendors(rfq_id);
+      let vendorIdList  = vendors.map(vendor => vendor.user_id);
+
+      // get vendor details along with spoc
+      const vendorData = await vendorModel.getVendorsWithSpocsAndToken(vendorIdList, rfq_id)
+
+      // get vendor details along with spoc
+      const updatedData = await rfqModel.updateWithTimestamp('tbl_rfq', data, rfq_id);
+      
+      await sendRfqUpdatedMailToVendors(vendorData, rfq_id, rfq_no, buyerName, data);
+
+      res.status(200).json({
+        status: 1,
+        data: updatedData || {},
+        vendors: vendorData,
+        rfqDetails:rfqDetails,
+        message: 'RFQ updated successfully'
+      });
+      
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: error
         })
         .end();
     }

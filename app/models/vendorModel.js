@@ -924,6 +924,53 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         });
     });
   },
+
+  getVendorsWithSpocsAndToken: async (userIds, rfqNo) => {
+    return new Promise(function (resolve, reject) {
+      const query = `
+        SELECT 
+          u.id AS vendor_id,
+          u.name AS vendor_name,
+          u.email AS vendor_email,
+          u.mobile AS vendor_mobile,
+          u.organization_name AS vendor_organization,
+          c.company_name,
+          -- Pick only ONE token using subquery (latest or earliest)
+          (
+            SELECT token FROM tbl_vendor_rfq_tokens_non_login
+            WHERE vendor_id = u.id AND rfq_no = $2
+            LIMIT 1
+          ) AS token,
+          COALESCE(
+            json_agg(DISTINCT jsonb_build_object(
+              'spoc_id', s.id,
+              'name', s.name,
+              'email', s.email,
+              'mobile', s.mobile,
+              'role', s.role
+            )) FILTER (WHERE s.id IS NOT NULL),
+            '[{"spoc_id": null, "name": null, "email": null, "mobile": null, "role": null}]'::json
+          ) AS spocs
+        FROM tbl_users u
+        LEFT JOIN tbl_users_spoc s ON s.user_id = u.id AND s.is_deleted = 0
+        LEFT JOIN tbl_company c ON c.user_id = u.id
+        WHERE u.id = ANY($1)
+        GROUP BY u.id, c.company_name
+      `;
+  
+      db.any(query, [userIds, rfqNo])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          reject(new Error(err));
+        });
+    });
+  }
+  
+  
+  
+  
 };
 
 export default vendorModel;

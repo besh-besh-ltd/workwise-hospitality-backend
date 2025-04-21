@@ -153,16 +153,13 @@ export const rfqSchemas = {
   }),
   update: Joi.object().keys({
     rfq_id: Joi.number().required(),
-    comment: Joi.string().optional().allow(''),
-    company_name: Joi.string().required(),
     response_email: Joi.string().required(),
     contact_name: Joi.string().required(),
     contact_number: Joi.string()
       .trim()
-      .min(10)
-      .max(15)
-      .required()
-      .regex(/^[0-9]*$/),
+      .min(6)
+      .max(17)
+      .required(),
     bid_end_date: Joi.string()
       .optional()
       .allow(null)
@@ -175,14 +172,7 @@ export const rfqSchemas = {
         }
         return value;
       }),
-    location: Joi.string().required(),
-    is_published: Joi.number().integer().min(0).max(1).required(),
-    products: Joi.array().items(productItems).min(1).required(),
-    vendors: Joi.array().items(vendorItems).allow(null).allow(''),
-    terms: Joi.array().items(termsItems).allow(null).allow(''),
     project_id: Joi.number().integer().allow(null).optional(),
-    rfq_type: Joi.string().valid('firm', 'budgetary').allow('').allow(null).optional(),
-    reverse_auction: Joi.valid(0, 1).allow('').optional()
   }),
   finalize: Joi.object().keys({
     rfq_id: Joi.number().required(),
