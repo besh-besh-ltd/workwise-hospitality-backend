@@ -2191,18 +2191,18 @@ WHERE row_num_by_name_category = 1
             tu.mobile, 
             tu.organization_name AS company_name,
             tu.address,
-            ${vendor_name ? "ts_rank_cd(to_tsvector('english', tu.name), plainto_tsquery('english', $2)) AS rank," : ''}
-            ${vendor_name ? 'word_similarity(lower(tu.name), lower($2)) as similarity_score,' : ''}
+            ${vendor_name ? "ts_rank_cd(to_tsvector('english', tc.company_name), plainto_tsquery('english', $2)) AS rank," : ''}
+            ${vendor_name ? 'word_similarity(lower(tc.company_name), lower($2)) as similarity_score,' : ''}
             ${vendor_name ? `CASE 
-                WHEN lower(tu.name) LIKE lower($2) || '%' THEN 1 
+                WHEN lower(tc.company_name) LIKE lower($2) || '%' THEN 1 
                 ELSE 0 
             END AS starts_with_input,` : ''}
             ${vendor_name ? `CASE 
-              WHEN lower(tu.name) ~* ('(^|\\s)' || lower($2) || '(\\s|$)') THEN 1
+              WHEN lower(tc.company_name) ~* ('(^|\\s)' || lower($2) || '(\\s|$)') THEN 1
               ELSE 0
             END AS exact_word_match,` : ''}
             ${vendor_name ? `CASE 
-              WHEN position(lower($2) in lower(tu.name)) > 0 THEN 1
+              WHEN position(lower($2) in lower(tc.company_name)) > 0 THEN 1
               ELSE 0
             END AS partial_word_match,` : ''}
             CASE
@@ -2229,9 +2229,9 @@ WHERE row_num_by_name_category = 1
                 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL) -- Privately mapped vendors for this buyer
             )
             ${vendor_name ? `AND (
-                to_tsvector('english', tu.name) @@ plainto_tsquery('english', $2)
-                OR (char_length($2) = 1 AND similarity(tu.name, $2) > 0)
-                OR (char_length($2) > 1 AND similarity(tu.name, $2) > 0.1)
+                to_tsvector('english', tc.company_name) @@ plainto_tsquery('english', $2)
+                OR (char_length($2) = 1 AND similarity(tc.company_name, $2) > 0)
+                OR (char_length($2) > 1 AND similarity(tc.company_name, $2) > 0.1)
             )` : ''}
     ) AS distinct_vendors
     ORDER BY 
