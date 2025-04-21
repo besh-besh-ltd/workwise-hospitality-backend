@@ -2466,31 +2466,35 @@ LIMIT $1 OFFSET $2;
   //update locations
   updateLocations: async (state_id, city_id, updateData) => {
     return new Promise((resolve, reject) => {
-      let query;
-      const values = [];
-
-      if (city_id) {
-        // If city_id is provided, update the specific city
-        query = `UPDATE tbl_location_cities SET city_name = $1 WHERE id = $2 RETURNING *`;
-        values.push(updateData.city_name, city_id);
-
-        db.one(query, values)
-          .then((result) => resolve(result))
-          .catch((err) => reject(new Error('Error updating city: ' + err)));
-      } else if (state_id) {
-        // If state_id is provided but city_id is null, update all cities for the state
-        query = `UPDATE tbl_location_cities SET city_name = $1 WHERE state_id = $2 RETURNING *`;
-        values.push(updateData.city_name, state_id);
-
-        db.any(query, values)
-          .then((results) => resolve(results))
-          .catch((err) =>
-            reject(new Error('Error updating cities for state: ' + err))
-          );
-      } else {
-        // If neither city_id nor state_id is provided, reject the request
-        reject(new Error('state_id or city_id must be provided'));
+      if (!city_id) {
+        return reject(new Error('city_id is required for update.'));
       }
+  
+      const fields = [];
+      const values = [];
+  
+      // Conditionally add city_name and state_id to update list
+      if (updateData.city_name) {
+        fields.push(`city_name = $${fields.length + 1}`);
+        values.push(updateData.city_name);
+      }
+  
+      if (state_id) {
+        fields.push(`state_id = $${fields.length + 1}`);
+        values.push(state_id);
+      }
+  
+      if (fields.length === 0) {
+        return reject(new Error('No fields provided to update.'));
+      }
+  
+      // Append WHERE clause with city_id
+      const query = `UPDATE tbl_location_cities SET ${fields.join(', ')} WHERE id = $${values.length + 1} RETURNING *`;
+      values.push(city_id);
+  
+      db.one(query, values)
+        .then(resolve)
+        .catch(err => reject(new Error('Error updating city record: ' + err)));
     });
   },
 

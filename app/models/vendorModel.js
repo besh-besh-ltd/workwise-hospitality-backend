@@ -3,14 +3,38 @@ import Config from '../config/app.config.js';
 import pgp from 'pg-promise';
 
 const vendorModel = {
+  // Helper function to escape SQL strings
+  _escapeSqlString: (str) => {
+    if (!str) return str;
+    // Replace single quotes with double single quotes to escape them in SQL
+    return str.replace(/'/g, "''");
+  },
+
   getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by) => {
     return new Promise(function (resolve, reject) {
+      // Escape input strings to prevent SQL injection and syntax errors
+      const escapedName = name ? vendorModel._escapeSqlString(name) : null;
+      const escapedOrganization = organization ? vendorModel._escapeSqlString(organization) : null;
+      const escapedEmail = email ? vendorModel._escapeSqlString(email) : null;
+      
       let dynamicQuery = '';
       if (name) {
-        dynamicQuery += `AND (tbl_users.name ILIKE '%${name}%' OR tbl_users.organization_name ILIKE '%${name}%')`;
+        dynamicQuery += `
+          AND (
+            to_tsvector('english', tbl_users.name) @@ plainto_tsquery('english', '${escapedName}')
+            OR similarity(tbl_users.name, '${escapedName}') > 0.1
+            OR to_tsvector('english', tbl_users.organization_name) @@ plainto_tsquery('english', '${escapedName}')
+            OR similarity(tbl_users.organization_name, '${escapedName}') > 0.1
+          )`;
       }
       if (organization) {
-        dynamicQuery += `AND (tbl_users.organization_name ILIKE '%${organization}%' OR tbl_users.name ILIKE '%${organization}%')`;
+        dynamicQuery += `
+          AND (
+            to_tsvector('english', tbl_users.organization_name) @@ plainto_tsquery('english', '${escapedOrganization}')
+            OR similarity(tbl_users.organization_name, '${escapedOrganization}') > 0.1
+            OR to_tsvector('english', tbl_users.name) @@ plainto_tsquery('english', '${escapedOrganization}')
+            OR similarity(tbl_users.name, '${escapedOrganization}') > 0.1
+          )`;
       }
       if (verified == 't') {
         dynamicQuery += `AND tbl_users.status = 1 `;
@@ -18,7 +42,7 @@ const vendorModel = {
         dynamicQuery += `AND tbl_users.status = 0 `;
       }
       if (email) {
-        dynamicQuery += `AND tbl_users.email ILIKE '%${email}%'`;
+        dynamicQuery += `AND tbl_users.email ILIKE '%${escapedEmail}%'`;
       }
       if (status !== undefined && status !== null) {
         dynamicQuery += `AND tbl_users.status = ${status}`;
@@ -31,6 +55,40 @@ const vendorModel = {
       }
       if (created_by) {
         dynamicQuery += `AND tbl_users.created_by = ${created_by}`;
+      }
+
+      let orderByClause = 'ORDER BY tbl_users.created_at DESC';
+      if (name || organization) {
+        // If searching by name or organization, order by both exact matches, ts_rank and similarity score
+        const searchTerm = escapedName || escapedOrganization;
+        
+        orderByClause = `
+          ORDER BY
+            CASE
+              WHEN LOWER(tbl_users.name) = LOWER('${searchTerm}') THEN 10
+              WHEN LOWER(tbl_users.organization_name) = LOWER('${searchTerm}') THEN 10
+              ELSE 0
+            END DESC,
+            CASE
+              WHEN LOWER(tbl_users.name) ILIKE LOWER('${searchTerm}%') THEN 8
+              WHEN LOWER(tbl_users.organization_name) ILIKE LOWER('${searchTerm}%') THEN 8
+              ELSE 0
+            END DESC,
+            CASE
+              WHEN LOWER(tbl_users.name) ILIKE LOWER('%${searchTerm}%') THEN 6
+              WHEN LOWER(tbl_users.organization_name) ILIKE LOWER('%${searchTerm}%') THEN 6
+              ELSE 0
+            END DESC,
+            GREATEST(
+              COALESCE(ts_rank_cd(to_tsvector('english', tbl_users.name), plainto_tsquery('english', '${searchTerm}')), 0),
+              COALESCE(ts_rank_cd(to_tsvector('english', tbl_users.organization_name), plainto_tsquery('english', '${searchTerm}')), 0)
+            ) DESC,
+            GREATEST(
+              COALESCE(similarity(tbl_users.name, '${searchTerm}'), 0),
+              COALESCE(similarity(tbl_users.organization_name, '${searchTerm}'), 0)
+            ) DESC,
+            tbl_users.created_at DESC
+        `;
       }
 
       db.any(
@@ -48,6 +106,25 @@ const vendorModel = {
           creator.name AS created_by_name,
           updater.name AS updated_by_name,
           trr.reject_reason,
+          ${(name || organization) ? `
+          CASE
+            WHEN LOWER(tbl_users.name) = LOWER('${escapedName || escapedOrganization}') THEN 10
+            WHEN LOWER(tbl_users.organization_name) = LOWER('${escapedName || escapedOrganization}') THEN 10
+            WHEN LOWER(tbl_users.name) ILIKE LOWER('${escapedName || escapedOrganization}%') THEN 8
+            WHEN LOWER(tbl_users.organization_name) ILIKE LOWER('${escapedName || escapedOrganization}%') THEN 8
+            WHEN LOWER(tbl_users.name) ILIKE LOWER('%${escapedName || escapedOrganization}%') THEN 6
+            WHEN LOWER(tbl_users.organization_name) ILIKE LOWER('%${escapedName || escapedOrganization}%') THEN 6
+            ELSE 0
+          END AS exact_match_score,
+          GREATEST(
+            COALESCE(ts_rank_cd(to_tsvector('english', tbl_users.name), plainto_tsquery('english', '${escapedName || escapedOrganization}')), 0),
+            COALESCE(ts_rank_cd(to_tsvector('english', tbl_users.organization_name), plainto_tsquery('english', '${escapedName || escapedOrganization}')), 0)
+          ) AS rank,
+          GREATEST(
+            COALESCE(similarity(tbl_users.name, '${escapedName || escapedOrganization}'), 0),
+            COALESCE(similarity(tbl_users.organization_name, '${escapedName || escapedOrganization}'), 0)
+          ) AS similarity_score,
+          ` : ''}
           CASE
             WHEN tbl_users.new_profile_image IS NULL THEN NULL
             ELSE tbl_users.new_profile_image
@@ -57,7 +134,7 @@ const vendorModel = {
         LEFT JOIN tbl_users creator ON tbl_users.created_by = creator.id
         LEFT JOIN tbl_users updater ON tbl_users.updated_by = updater.id
         WHERE tbl_users.is_deleted = 0 AND tbl_users.user_type = 3 ${dynamicQuery}
-        ORDER BY tbl_users.created_at DESC 
+        ${orderByClause}
         LIMIT $1 OFFSET $2`,
         [limit, offset]
       )
@@ -73,12 +150,29 @@ const vendorModel = {
  
 getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo, created_by) => {
   return new Promise(function (resolve, reject) {
+    // Escape input strings
+    const escapedName = name ? vendorModel._escapeSqlString(name) : null;
+    const escapedOrganization = organization ? vendorModel._escapeSqlString(organization) : null;
+    const escapedEmail = email ? vendorModel._escapeSqlString(email) : null;
+    
     let dynamicQuery = 'AND user_type = 3 ';
     if (name) {
-      dynamicQuery += `AND (name ILIKE '%${name}%' OR organization_name ILIKE '%${name}%')`;
+      dynamicQuery += `
+        AND (
+          to_tsvector('english', name) @@ plainto_tsquery('english', '${escapedName}')
+          OR similarity(name, '${escapedName}') > 0.1
+          OR to_tsvector('english', organization_name) @@ plainto_tsquery('english', '${escapedName}')
+          OR similarity(organization_name, '${escapedName}') > 0.1
+        )`;
     }
     if (organization) {
-      dynamicQuery += `AND (organization_name ILIKE '%${organization}%' OR name ILIKE '%${organization}%')`;
+      dynamicQuery += `
+        AND (
+          to_tsvector('english', organization_name) @@ plainto_tsquery('english', '${escapedOrganization}')
+          OR similarity(organization_name, '${escapedOrganization}') > 0.1
+          OR to_tsvector('english', name) @@ plainto_tsquery('english', '${escapedOrganization}')
+          OR similarity(name, '${escapedOrganization}') > 0.1
+        )`;
     }
     if (verified == 't') {
       dynamicQuery += `AND status = 1 `;
@@ -86,7 +180,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
       dynamicQuery += `AND status = 0 `;
     }
     if (email) {
-      dynamicQuery += `AND email ILIKE '%${email}%'`;
+      dynamicQuery += `AND email ILIKE '%${escapedEmail}%'`;
     }
     if (status !== undefined && status !== null) {
       dynamicQuery += `AND status = ${status}`;
@@ -151,9 +245,30 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
   },
   vendorNameExist: async (name) => {
     return new Promise(function (resolve, reject) {
+      const escapedName = vendorModel._escapeSqlString(name);
+      
       db.any(
-        'SELECT id, vendor_approve FROM tbl_vendor_approve WHERE vendor_approve = $1 ',
-        [name]
+        `SELECT 
+          id, 
+          vendor_approve,
+          CASE
+            WHEN LOWER(vendor_approve) = LOWER($1) THEN 10
+            WHEN LOWER(vendor_approve) ILIKE LOWER($1 || '%') THEN 8
+            WHEN LOWER(vendor_approve) ILIKE LOWER('%' || $1 || '%') THEN 6
+            ELSE 0
+          END AS exact_match_score,
+          ts_rank_cd(to_tsvector('english', vendor_approve), plainto_tsquery('english', $1)) AS rank,
+          similarity(vendor_approve, $1) AS similarity_score
+        FROM tbl_vendor_approve 
+        WHERE 
+          similarity(vendor_approve, $1) > 0.1
+          OR to_tsvector('english', vendor_approve) @@ plainto_tsquery('english', $1)
+        ORDER BY 
+          exact_match_score DESC,
+          rank DESC,
+          similarity_score DESC,
+          vendor_approve ASC`,
+        [escapedName]
       )
         .then(function (data) {
           resolve(data);
@@ -167,8 +282,10 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
 
   checkState: async (stateName) => {
     return new Promise(function (resolve, reject) {
+      const escapedStateName = vendorModel._escapeSqlString(stateName);
+      
       db.any(
-        `SELECT * FROM tbl_location_states WHERE "state_name" ILIKE '%${stateName}%'`
+        `SELECT * FROM tbl_location_states WHERE "state_name" ILIKE '%${escapedStateName}%'`
       )
         .then(function (data) {
           resolve(data);
@@ -181,8 +298,10 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
   },
   checkCity: async (cityName) => {
     return new Promise(function (resolve, reject) {
+      const escapedCityName = vendorModel._escapeSqlString(cityName);
+      
       db.any(
-        `SELECT * FROM tbl_location_cities  WHERE city_name ILIKE '%${cityName}%'`
+        `SELECT * FROM tbl_location_cities WHERE city_name ILIKE '%${escapedCityName}%'`
       )
         .then(function (data) {
           resolve(data);
@@ -226,12 +345,30 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
               END)
                 FROM tbl_product left join tbl_product_images on tbl_product.id = tbl_product_images.product_id AND  tbl_product_images.is_featured = '1' WHERE  tbl_product.created_by = $1 ) AS "products",
        ARRAY
-        (SELECT json_build_object('vendor_approve', tbl_vendor_approve.vendor_approve,'vendor_approve', tbl_vendor_approve.vendor_approve,'id',tbl_vendor_approve.id, 'vendor_approve_url',  CASE
-        WHEN tbl_vendor_approve.vendor_logo IS NULL THEN
-        NULL
-        ELSE tbl_vendor_approve.vendor_logo
-        END)
-          FROM tbl_vendorapprove_user_mapping VM left join tbl_vendor_approve on tbl_vendor_approve.id = VM.vendor_approve_id  WHERE  tbl_users.id = VM.user_id) AS "vendor_approve",
+        (SELECT json_build_object(
+          'vendor_approve', tbl_vendor_approve.vendor_approve,
+          'id', tbl_vendor_approve.id, 
+          'vendor_approve_url', CASE
+            WHEN tbl_vendor_approve.vendor_logo IS NULL THEN NULL
+            ELSE tbl_vendor_approve.vendor_logo
+          END,
+          'similarity_score', 
+            CASE 
+              WHEN tbl_users.name IS NOT NULL THEN 
+                similarity(tbl_vendor_approve.vendor_approve, tbl_users.name)
+              ELSE 0
+            END
+        )
+          FROM tbl_vendorapprove_user_mapping VM 
+          LEFT JOIN tbl_vendor_approve on tbl_vendor_approve.id = VM.vendor_approve_id  
+          WHERE tbl_users.id = VM.user_id
+          ORDER BY 
+            CASE 
+              WHEN tbl_users.name IS NOT NULL THEN 
+                similarity(tbl_vendor_approve.vendor_approve, tbl_users.name)
+              ELSE 0
+            END DESC
+        ) AS "vendor_approve",
         CASE
         WHEN new_profile_image IS NULL THEN
         NULL
@@ -499,13 +636,94 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         });
     });
   },
-  getVendorDropdownList: async () => {
+  getVendorDropdownList: async (search = null) => {
     return new Promise(function (resolve, reject) {
+      let dynamicQuery = '';
+      let orderClause = 'ORDER BY name ASC';
+      
+      if (search) {
+        const escapedSearch = vendorModel._escapeSqlString(search);
+        
+        dynamicQuery = `
+          AND (
+            to_tsvector('english', name) @@ plainto_tsquery('english', '${escapedSearch}')
+            OR similarity(name, '${escapedSearch}') > 0.1
+            OR to_tsvector('english', organization_name) @@ plainto_tsquery('english', '${escapedSearch}')
+            OR similarity(organization_name, '${escapedSearch}') > 0.1
+            OR to_tsvector('english', email) @@ plainto_tsquery('english', '${escapedSearch}')
+            OR similarity(email, '${escapedSearch}') > 0.1
+          )`;
+          
+        orderClause = `
+          ORDER BY 
+            CASE
+              WHEN LOWER(name) = LOWER('${escapedSearch}') THEN 10
+              WHEN LOWER(organization_name) = LOWER('${escapedSearch}') THEN 10
+              WHEN LOWER(email) = LOWER('${escapedSearch}') THEN 10
+              ELSE 0
+            END DESC,
+            CASE
+              WHEN LOWER(name) ILIKE LOWER('${escapedSearch}%') THEN 8
+              WHEN LOWER(organization_name) ILIKE LOWER('${escapedSearch}%') THEN 8
+              WHEN LOWER(email) ILIKE LOWER('${escapedSearch}%') THEN 8
+              ELSE 0
+            END DESC,
+            CASE
+              WHEN LOWER(name) ILIKE LOWER('%${escapedSearch}%') THEN 6
+              WHEN LOWER(organization_name) ILIKE LOWER('%${escapedSearch}%') THEN 6
+              WHEN LOWER(email) ILIKE LOWER('%${escapedSearch}%') THEN 6
+              ELSE 0
+            END DESC,
+            GREATEST(
+              COALESCE(ts_rank_cd(to_tsvector('english', name), plainto_tsquery('english', '${escapedSearch}')), 0),
+              COALESCE(ts_rank_cd(to_tsvector('english', organization_name), plainto_tsquery('english', '${escapedSearch}')), 0),
+              COALESCE(ts_rank_cd(to_tsvector('english', email), plainto_tsquery('english', '${escapedSearch}')), 0)
+            ) DESC,
+            GREATEST(
+              COALESCE(similarity(name, '${escapedSearch}'), 0),
+              COALESCE(similarity(organization_name, '${escapedSearch}'), 0), 
+              COALESCE(similarity(email, '${escapedSearch}'), 0)
+            ) DESC,
+            name ASC`;
+      }
+      
+      const escapedSearch = search ? vendorModel._escapeSqlString(search) : '';
+      
       db.any(
-        `SELECT tbl_users.id,tbl_users.name,tbl_users.mobile, tbl_users.email,tbl_users.organization_name,tbl_users.user_type
+        `SELECT 
+          tbl_users.id,
+          tbl_users.name,
+          tbl_users.mobile, 
+          tbl_users.email,
+          tbl_users.organization_name,
+          tbl_users.user_type
+          ${search ? `,
+          CASE
+            WHEN LOWER(name) = LOWER('${escapedSearch}') THEN 10
+            WHEN LOWER(organization_name) = LOWER('${escapedSearch}') THEN 10 
+            WHEN LOWER(email) = LOWER('${escapedSearch}') THEN 10
+            WHEN LOWER(name) ILIKE LOWER('${escapedSearch}%') THEN 8
+            WHEN LOWER(organization_name) ILIKE LOWER('${escapedSearch}%') THEN 8
+            WHEN LOWER(email) ILIKE LOWER('${escapedSearch}%') THEN 8
+            WHEN LOWER(name) ILIKE LOWER('%${escapedSearch}%') THEN 6
+            WHEN LOWER(organization_name) ILIKE LOWER('%${escapedSearch}%') THEN 6
+            WHEN LOWER(email) ILIKE LOWER('%${escapedSearch}%') THEN 6
+            ELSE 0
+          END AS exact_match_score,
+          GREATEST(
+            COALESCE(ts_rank_cd(to_tsvector('english', name), plainto_tsquery('english', '${escapedSearch}')), 0),
+            COALESCE(ts_rank_cd(to_tsvector('english', organization_name), plainto_tsquery('english', '${escapedSearch}')), 0),
+            COALESCE(ts_rank_cd(to_tsvector('english', email), plainto_tsquery('english', '${escapedSearch}')), 0)
+          ) AS rank,
+          GREATEST(
+            COALESCE(similarity(name, '${escapedSearch}'), 0),
+            COALESCE(similarity(organization_name, '${escapedSearch}'), 0),
+            COALESCE(similarity(email, '${escapedSearch}'), 0)
+          ) AS similarity_score` : ''}
          FROM tbl_users 
-         WHERE is_deleted = 0 AND user_type = 3 OR user_type = 4  AND status = 1
-        ORDER BY created_at`
+         WHERE is_deleted = 0 AND (user_type = 3 OR user_type = 4) AND status = 1
+         ${dynamicQuery}
+         ${orderClause}`
       )
         .then(function (data) {
           resolve(data);
@@ -706,6 +924,53 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         });
     });
   },
+
+  getVendorsWithSpocsAndToken: async (userIds, rfqNo) => {
+    return new Promise(function (resolve, reject) {
+      const query = `
+        SELECT 
+          u.id AS vendor_id,
+          u.name AS vendor_name,
+          u.email AS vendor_email,
+          u.mobile AS vendor_mobile,
+          u.organization_name AS vendor_organization,
+          c.company_name,
+          -- Pick only ONE token using subquery (latest or earliest)
+          (
+            SELECT token FROM tbl_vendor_rfq_tokens_non_login
+            WHERE vendor_id = u.id AND rfq_no = $2
+            LIMIT 1
+          ) AS token,
+          COALESCE(
+            json_agg(DISTINCT jsonb_build_object(
+              'spoc_id', s.id,
+              'name', s.name,
+              'email', s.email,
+              'mobile', s.mobile,
+              'role', s.role
+            )) FILTER (WHERE s.id IS NOT NULL),
+            '[{"spoc_id": null, "name": null, "email": null, "mobile": null, "role": null}]'::json
+          ) AS spocs
+        FROM tbl_users u
+        LEFT JOIN tbl_users_spoc s ON s.user_id = u.id AND s.is_deleted = 0
+        LEFT JOIN tbl_company c ON c.user_id = u.id
+        WHERE u.id = ANY($1)
+        GROUP BY u.id, c.company_name
+      `;
+  
+      db.any(query, [userIds, rfqNo])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          reject(new Error(err));
+        });
+    });
+  }
+  
+  
+  
+  
 };
 
 export default vendorModel;

@@ -341,7 +341,7 @@ const getQUOTES = async ({ id }, user_id) => {
 
 const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
   try {
-    let organization_name = user.organization_name || user.name;
+    let organization_name = user?.organization_name || user?.name;
 
     // Fetch user details of the vendor
     const user_details = await userModel.user_profile_detail(vendor.user_id);
@@ -382,7 +382,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
 
       const headerContent = ` <div>
         <h2>Hello ${user_details[0].name}</h2>
-        <p style="font-size:16px;"> Great news! You’ve received a new enquiry from ${organization_name} </p>
+        <p style="font-size:16px;"> Great news! You've received a new enquiry from ${organization_name} </p>
         </div>`
 
       // Construct the email content with the list of products
@@ -412,10 +412,10 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
         </div>`;
 
         const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
-
-      let mailRecipients = {
-        from: Config.webmasterMail,
-        subject: `New RFQ Opportunity from ${user_details[0].name}`,
+        const org_name = user_details[0].organization_name || user_details[0].name || ""
+       let mailRecipients = {
+        from: `${organization_name} ${Config.masterEmail}`,
+        subject: `New RFQ Opportunity from ${organization_name}`,
         html: dynamicHTML
       };
 
@@ -433,6 +433,8 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
               const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
               return `${product.name} - ${quantitySpec.value || '--'} ${product.unit || ''}`.trim();
             }).join(', ');
+
+            console.log(" rfq contoller 437 spoc console ", mailRecipients?.to, mailRecipients.cc)
 
       sendMail(mailRecipients);
 
@@ -496,88 +498,111 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
   }
 };
 
-const sendMailtoVendors = async (req, rfqNumber) => {
-  // Extract products from request body
-  const { products } = req.body;
-
-  // Create a map to group vendors and their products
-  const vendorProductMap = {};
-
-  // Iterate over products to group them by vendors
-  products.forEach((item) => {
-    item.vendors.forEach((vendor) => {
-      if (!vendorProductMap[vendor.user_id]) {
-        vendorProductMap[vendor.user_id] = {
-          vendorDetails: vendor,
-          products: [],
-        };
+const sendMailWithRetry = async (mailOptions, maxRetries = 3) => {
+  let retries = 0;
+  while (retries < maxRetries) {
+    try {
+      await sendMail(mailOptions);
+      console.log(`Email sent successfully to ${mailOptions.to}`);
+      return true;
+    } catch (error) {
+      retries++;
+      console.error(`Email send attempt ${retries} failed:`, error);
+      if (retries === maxRetries) {
+        throw error;
       }
-      // Push product details for this vendor
-      vendorProductMap[vendor.user_id].products.push(item);
-    });
-  });
+      // Wait for 2 seconds before retrying
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+};
 
-  // Now send mail to each vendor with the grouped products
+const validateEmailAddresses = (emails) => {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emails.every(email => emailRegex.test(email));
+};
+
+// Update the sendMailtoVendors function
+const sendMailtoVendors = async (req, rfqNumber) => {
   try {
-    await Promise.all(
-      Object.keys(vendorProductMap).map(async (vendorId) => {
-        const vendorInfo = vendorProductMap[vendorId];
+    const { products } = req.body;
+    const vendorProductMap = {};
+
+    products.forEach((item) => {
+      item.vendors.forEach((vendor) => {
+        if (!vendorProductMap[vendor.user_id]) {
+          vendorProductMap[vendor.user_id] = {
+            vendorDetails: vendor,
+            products: [],
+          };
+        }
+        vendorProductMap[vendor.user_id].products.push(item);
+      });
+    });
+
+    const emailPromises = Object.keys(vendorProductMap).map(async (vendorId) => {
+      const vendorInfo = vendorProductMap[vendorId];
+      try {
         await sendMailEachVendor(vendorInfo.vendorDetails, req.user, rfqNumber, vendorInfo.products);
-      })
-    );
+        console.log(`Email sent successfully to vendor ${vendorId}`);
+      } catch (error) {
+        console.error(`Failed to send email to vendor ${vendorId}:`, error);
+        throw error;
+      }
+    });
+
+    await Promise.all(emailPromises);
     return true;
   } catch (error) {
-    console.error('Error sending emails:', error);
+    console.error('Error in sendMailtoVendors:', error);
     throw error;
   }
 };
 
+// Update the sendQuotationMailToBuyer function
 const sendQuotationMailToBuyer = async (req, rfqNumber) => {
-  // send mail to vendors
-  const { name, email, id } = req.user;
+  try {
+    const { name, email, id } = req.user;
+    const spocList = await vendorModel.getSpocDetails(id);
 
-  const headerContent = `<h2> Dear ${name},</h2>  `;
+    // Validate email addresses
+    const allEmails = [email, ...(spocList?.map(spoc => spoc.email) || [])];
+    if (!validateEmailAddresses(allEmails)) {
+      throw new Error('Invalid email address format');
+    }
 
-  const containerContent = `<div>
+    const headerContent = `<h2> Dear ${name},</h2>`;
+    const containerContent = `<div>
       <p style="font-size: 15px; padding-bottom: 3px;">
       Your RFQ has been successfully shared with vendors. </p>
       
-           <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
+      <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
        Click here to view
       </a>      
     </div>`;
 
-  const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+    const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      subject: `Work Wise | RFQ Creation Confirmation`,
+      html: dynamicHTML
+    };
 
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map(spoc => spoc.email);
+      mailRecipients.cc = email;
+    } else {
+      mailRecipients.to = email;
+    }
 
-  const spocList = await vendorModel.getSpocDetails(id)
-
-  // console.log(" rfq contoller 488 spoc console ", id, spocList)
-
-  let mailRecipients = {
-    from: Config.webmasterMail,
-    subject: `Work Wise | RFQ Creation Confirmation`,
-    html: dynamicHTML
-  };
-
-
-  if (spocList && spocList.length > 0) {
-    mailRecipients.to = spocList.map(spoc => spoc.email);
-    mailRecipients.cc = email;
-  } else {
-    mailRecipients.to = email;
+    await sendMailWithRetry(mailRecipients);
+    console.log(`Confirmation email sent successfully to buyer ${id}`);
+  } catch (error) {
+    console.error('Error in sendQuotationMailToBuyer:', error);
+    throw error;
   }
-
-  sendMail(mailRecipients);
-
-  // sendMail({
-  //   from: Config.webmasterMail, // sender address
-  //   to: email, // list of receivers
-  //   subject: `Work Wise | RFQ Creation Confirmation`, // Subject line
-  //   html: dynamicHTML // plain text body
-  // });
 };
 
 const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_no) => {
@@ -685,7 +710,7 @@ const formattedProducts = productList.length > 0
 
   const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
       <p style="padding-bottom: 3px;">
-        You’ve received a new quotation! Check out the details below:
+        You've received a new quotation! Check out the details below:
       </p>
 
       <p><strong>RFQ:</strong> #${rfq_no}</p>
@@ -709,7 +734,7 @@ const formattedProducts = productList.length > 0
 
   // Preparing the email details
   let mailRecipients = {
-    from: Config.webmasterMail,
+    from: `${vendorName} ${Config.masterEmail}`,
     to: buyerDetails[0]?.email,
     subject: `New Quotation Received for Your RFQ`,
     html: dynamicHTML
@@ -749,7 +774,7 @@ const sendQuoteNotificationToVendor = async (req) => {
         ? 'Your regret concern has been sent to the buyer.'
         : `<div>
             <p>Thank you for submitting your quotation for <strong>#${rfq_no}</strong>. 
-               We’ve shared it with <strong>${BuyerDetails[0]?.organization_name || ''}</strong>, who will review it and get back to you soon.</p>
+               We've shared it with <strong>${BuyerDetails[0]?.organization_name || ''}</strong>, who will review it and get back to you soon.</p>
               <p><strong>Next Steps:</strong> Keep an eye out for any buyer queries or updates, 
                and be ready to discuss terms to secure the order.</p>
 
@@ -845,11 +870,11 @@ const containerContent = `
            Submit Your Quote Now
          </a>
        
-         <p style="margin-top:20px; font-weight:bold; text-align:center">   Don’t miss out on this opportunity!
+         <p style="margin-top:20px; font-weight:bold; text-align:center">   Don't miss out on this opportunity!
          </p>
        </div>`;
 
-  console.log(containerContent)
+  // console.log(containerContent)
   
   const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
@@ -857,7 +882,7 @@ const containerContent = `
 
     
     let mailRecipients = {
-      from: Config.webmasterMail,
+      from:  `${vendorName} ${Config.masterEmail}`,
       subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
       html: dynamicHTML
     };
@@ -936,7 +961,7 @@ const sendQuoteNotificationEmail = async (req) => {
       const containerContent = `
       <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
         <p>
-          You’ve received a new quotation! Check out the details below:
+          You've received a new quotation! Check out the details below:
         </p>
         <p><strong>Vendor:</strong> ${organization_name || name}</p>
         <p><strong>Products:</strong> ${formattedProducts || '-'}</p>
@@ -947,7 +972,7 @@ const sendQuoteNotificationEmail = async (req) => {
         </a>      
 
         <p style="margin-top:20px; text-align:center; ">
-          We’re here to help you get the best deal.
+          We're here to help you get the best deal.
         </p>
       </div>`;
 
@@ -956,7 +981,8 @@ const sendQuoteNotificationEmail = async (req) => {
 
       // Preparing the email details
       let mailRecipients = {
-        from: Config.webmasterMail,
+        from: `${organization_name || name} ${Config.masterEmail}`, // sender address
+        //  organization_name : Config.webmasterMail,
         to: buyer.email,
         subject: `New Quotation Received for Your RFQ ${rfq_no}`,
         html: dynamicHTML
@@ -968,6 +994,56 @@ const sendQuoteNotificationEmail = async (req) => {
       console.log(`Quotation update email sent to buyer: ${buyer.email}`);
     } 
   }
+
+
+  //  vendorData, rfq_id, rfq_no, buyerName
+  const sendRfqUpdatedMailToVendors = async (vendorData, rfq_id, rfq_no, buyer_name, updated_data) => {
+    try {
+      for (const vendor of vendorData) {
+        const { vendor_name, vendor_email, spocs = [], token } = vendor;
+  
+        // Skip if no main email and no spocs
+        const validSpocEmails = spocs
+        .map(spoc => spoc?.email)
+        .filter(email => typeof email === 'string' && email.includes('@'));
+        
+        const headerContent = `<h2>Hello ${vendor_name},</h2>`;
+        const containerContent = `
+          <p style="font-size: 15px;">
+            RFQ #${rfq_no} has been updated by ${buyer_name}.
+          </p>
+          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}"
+             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+            View RFQ
+          </a>
+        `;
+  
+        const html = generateEmailTemplate(headerContent, containerContent);
+  
+        const mail = {
+          from:  `${buyer_name} ${Config.masterEmail}`,
+          subject: `RFQ #${rfq_no} Details has beed updated by ${buyer_name}`,
+          html
+        };
+  
+
+        if (validSpocEmails.length > 0) {
+          mail.to = validSpocEmails;
+          mail.cc = vendor_email || '';
+          mail.bcc = "mukuljatav1010+if@gmail.com";
+        } else {
+          mail.to = vendor_email || '';
+          mail.bcc = "mukuljatav1010+else@gmail.com";
+        }
+
+         sendMail(mail);
+      }
+    } catch (err) {
+      console.error("Error in sendRfqUpdatedMailToVendors:", err);
+      throw err;
+    }
+  };
+  
 
 
 const sendWinningNotificaion = async (
@@ -1135,31 +1211,37 @@ const saveRfqDraft = async (user_id, reqBody) => {
       updated_by: user_id
   };
 
-  // let { rfq_id } = reqBody;
-  // if(!rfq_id){
-  //   const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: user_id });
-  //   if (rfqList.length > 0) {
-  //     rfq_id = rfqList[0].id;
-  //   } else {
-  //       return {
-  //         success: true,
-  //         message: 'No RFQ draft found!'
-  //       };
-  //   }
-  // }
-
 
   if (project_id && project_id !== -1) {
       rfqData.project_id = project_id;
   }
 
-
   await rfqModel.update('tbl_rfq', rfqData, rfq_id);
   await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id);
-  await deleteRelatedRecords(rfq_id);
+  
+  
+  // Only delete product-related records, preserve terms
+  await Promise.all([
+      rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }),
+      rfqModel.deleteWithReturnIds('tbl_rfq_product_vendors', { rfq_id }),
+      rfqModel.deleteWithReturnIds('tbl_rfq_products_specs', { rfq_id })
+  ]);
 
+  const rfqProductIds = await rfqModel.deleteWithReturnIds('tbl_rfq_products', { rfq_id });
+  if (rfqProductIds.length > 0) {
+      await rfqModel.deleteProductFilesByIds(rfqProductIds);
+  }
+
+  // Handle terms update
   if (terms && terms.length > 0) {
-      const rfqTerms = terms.map(term => ({ rfq_id, terms_id: term.id }));
+      // First delete existing terms
+      await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id });
+      
+      // Then insert new terms
+      const rfqTerms = terms.map(term => ({ 
+          rfq_id, 
+          terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
+      }));
       await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
   }
 
@@ -1189,7 +1271,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
 const rfqController = {
   create: async (req, res, next) => {
-    console.log("req recived from magic search")
     if (!req.user.subscription_plan_id) {
       res
         .status(400)
@@ -1215,7 +1296,7 @@ const rfqController = {
         project_id
       } = req.body;
       const response_email = req.body.response_email?.toLowerCase();
-
+      const is_update = !!rfq_id;
       const user_id = req.user.id;
 
       if(!rfq_id){
@@ -1261,22 +1342,22 @@ const rfqController = {
       await sendMailtoVendors(req, rfq_id);
       await sendQuotationMailToBuyer(req, rfq_id);
 
-      // send notification whatsapp 
+      // Send WhatsApp notification
       const buyerMsgPayload = {
-        mobile:req.user.mobile,
-        rfq_id:rfq_id,
-        rfq_no:response[0]?.rfq_no
-      }
-      whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload)
+        mobile: req.user.mobile,
+        rfq_id: rfq_id,
+        rfq_no: response[0]?.rfq_no
+      };
+      whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload);
 
       res
         .status(200)
         .json({
-          status: 2,
-          data: response[0]
+          status: 1,
+          data: response[0],
+          mail_sent: true
         })
         .end();
-
     } catch (error) {
       logError(error);
       res
@@ -1284,6 +1365,71 @@ const rfqController = {
         .json({
           status: 3,
           message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
+  update: async (req, res, next) => {
+
+    if (!req.user.subscription_plan_id) {
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: 'You need to purchase subscription to create RFQ'
+        })
+        .end();
+      return;
+    }
+
+    try {
+
+      const data = req.body;
+
+      const rfq_id = data.rfq_id;   
+      delete data.rfq_id; // Remove rfq_id from update fields
+
+
+      const rfqDetails =  await rfqModel.getRFQDetails(rfq_id)
+
+      const buyerName = req.user.organization_name || req.user.name
+      const rfq_no = rfqDetails[0]?.rfq_no || ''
+
+      //  Ensure project_id is either an integer or null
+      if ('project_id' in data && data.project_id !== null && data.project_id !== undefined) {
+        data.project_id = parseInt(data.project_id);
+      } else {
+        delete data.project_id; // Avoid updating with undefined/null
+      }
+  
+      // get rfq vendors list
+      let vendors = await rfqModel.gerRFQVendors(rfq_id);
+      let vendorIdList  = vendors.map(vendor => vendor.user_id);
+
+      // get vendor details along with spoc
+      const vendorData = await vendorModel.getVendorsWithSpocsAndToken(vendorIdList, rfq_id)
+
+      // get vendor details along with spoc
+      const updatedData = await rfqModel.updateWithTimestamp('tbl_rfq', data, rfq_id);
+      
+      await sendRfqUpdatedMailToVendors(vendorData, rfq_id, rfq_no, buyerName, data);
+
+      res.status(200).json({
+        status: 1,
+        data: updatedData || {},
+        vendors: vendorData,
+        rfqDetails:rfqDetails,
+        message: 'RFQ updated successfully'
+      });
+      
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: error
         })
         .end();
     }
@@ -2661,7 +2807,8 @@ const rfqController = {
   },
   closeRFQ: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { id } = req.user;
+    const { id , organization_name , name} = req.user;
+  
 
     try {
 
@@ -2676,7 +2823,7 @@ const rfqController = {
 
 
     const buyerContainerContent = `<div style="font-size:16px;">
-        You’ve marked your RFQ as closed. Here are the details for your records:<br>
+        You've marked your RFQ as closed. Here are the details for your records:<br>
         <strong>RFQ Number:</strong> ${rfQItem[0]?.rfq_no}<br>
         <strong>Closed By:</strong> ${req.user.name}<br>
         <br>
@@ -2732,7 +2879,7 @@ const rfqController = {
           const spocList = vendor.spocs;
         
             let mailRecipients ={
-              from: Config.webmasterMail,
+              from: `${organization_name} ${Config.masterEmail}`,
               subject: `RFQ Marked as Closed for #${rfQItem[0]?.rfq_no}`,
               html: dynamicHTMLVendor,
             }
@@ -3082,21 +3229,29 @@ const rfqController = {
     let approved_by_id = '';
     let state = '';
     let city = '';
+    let country = '';
+    let turnOver = null;
+    let vendorType = '';
+    let prevWorkedWith = '';
+    let myVendorType = '';
     search_key = req.body?.search_key ? req.body?.search_key : '';
     category_id = req.body?.category_id ? req.body?.category_id : '';
     approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
     state = req.body?.state ? req.body?.state : '';
     city = req.body?.city ? req.body?.city : '';
+    country = req.body?.country ? req.body?.country : '';
+    turnOver = req.body?.turnOver ? req.body?.turnOver : null;
+    vendorType = req.body?.vendorType ? req.body?.vendorType : '';
+    prevWorkedWith = req.body?.prevWorkedWith ? req.body?.prevWorkedWith : '';
+    myVendorType = req.body?.myVendorType ? req.body?.myVendorType : '';
     let vendor_name = req.body.vendor_name;
-    let is_private = req.body.is_private;
-    let preferred_vendor = req.body.preferred_vendor;
     
     // If user is not logged in
     if (!req.is_verified) {
       try {
 
         // Call the searchVendor method
-        const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city);
+        const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city, country, turnOver, vendorType, prevWorkedWith);
         // console.log(vendorResult);
 
         // Check if vendorResult is not empty and has the expected structure
@@ -3139,24 +3294,6 @@ const rfqController = {
       let user = req.user;
       if (user && user.user_type != 3) {
 
-        // Type validation for the is_private check
-        if (is_private && typeof is_private !== "boolean") {
-          return res.status(400).json({ 
-            status: 1,
-            message: "is_private must be a boolean"
-          });
-        }
-
-        // Type validation for the preferred_vendor check
-        if (preferred_vendor && typeof preferred_vendor !== "boolean") {
-          return res.status(400).json({ 
-            status: 1,
-            message: "preferred_vendor must be a boolean"
-          });
-        }
-
-
-
         try {
           const vendorResult = await rfqModel.searchVendor(
             req.user.id,
@@ -3165,9 +3302,12 @@ const rfqController = {
             approved_by_id,
             state,
             city,
+            country,
+            turnOver,
+            vendorType,
+            prevWorkedWith,
             vendor_name,
-            is_private = is_private ? true : false,
-            preferred_vendor = preferred_vendor ? true : false,
+            myVendorType,
           );
 
           let dummyOBJ = {
@@ -3264,6 +3404,24 @@ const rfqController = {
           })
           .end();
       }
+    }
+  },
+
+  vendorTypes: async (req, res) => {
+    try {
+      const result = await rfqModel.fetchVendorTypes();
+      return res.status(200).json({
+        status: 1,
+        data: result?.[0]?.nature_of_business_options ?? [],
+      });
+    } catch (error) {
+      logError(error);
+        // Error handling and response
+        res.status(500).json({
+          success: false,
+          message: 'An error occurred while fetching vendor types',
+          error: error.message,
+        });
     }
   },
 
@@ -4582,7 +4740,6 @@ const rfqController = {
       const rfq_type = req.body.rfq_type || "";
       const reverse_auction = req.body.reverse_auction || "";
 
-
       // process boq with AI
       const boqDataJson = await generativeAI.processBOQWithAI(file);
 
@@ -4653,8 +4810,11 @@ const rfqController = {
             "",
             "",
             "",
-            false,
-            false
+            "",
+            "",
+            "",
+            "",
+            "",
           );  
         }
 
@@ -4680,8 +4840,10 @@ const rfqController = {
 
         // Iterate over the existing products array to find the same product name and increment the variant
         products.forEach((product) => {
-          if (product.name === search_key.product_name && product.product_id === search_key.product_id) {
-            variant = Math.max(variant, product.variant + 1);
+          console.log("PRODUCT: ", product)
+          console.log("SEARCH KEY: ", search_key)
+          if (product.name === search_key.name && product.product_id === search_key.id) {
+            variant = Math.max(variant, product.variant) + 1;
           }
         });
 
@@ -4968,7 +5130,7 @@ sendQueryMessage: async (req, res) => {
       file_name: file.originalname,
       file_url: file.location
     }));
-    console.log("--------------------->filedata", filesData);
+    // console.log("--------------------->filedata", filesData);
 
     if (filesData.length) await rfqModel.insertArray(filesData, ['message_id', 'file_name', 'file_url'], 'tbl_query_message_files');
 
@@ -4982,16 +5144,16 @@ sendQueryMessage: async (req, res) => {
 
 
       const headerContent = ` <div>
-           <h2>Hello ${req.user.name} </h2>
+           <h2>Hello ${receiverDetails?.organization_name || receiverDetails?.name} </h2>
            </div>`;
 
 
            const containerContent = `
               <div>
                 <div style="font-size:16px;">
-                  ${sender_type == 3 ?
-                   `${senderDetails.name} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`:
-                    `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here’s the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
+                  ${sender_type == 2 ?
+                   `${senderDetails?.organization_name || senderDetails?.name} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`:
+                    `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
                 </div>
                               
                <h4> Query </h4>
@@ -5015,10 +5177,10 @@ sendQueryMessage: async (req, res) => {
 
       const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
-    const emailSubject = sender_type==2? `Vendor Query on Your RFQ #${rfqNumber}`:  `Buyer Query for #${rfqNumber} – Your Response Needed`
+    const emailSubject = sender_type==3? `Vendor Query on Your RFQ #${rfqNumber}`:  `Buyer Query for #${rfqNumber} – Your Response Needed`
 
     const mailRecipients = {
-      from: Config.webmasterMail,
+      from: `${senderDetails?.organization_name || senderDetails?.name} ${Config.masterEmail}`,
       subject: emailSubject,
       html: dynamicHTML
     };

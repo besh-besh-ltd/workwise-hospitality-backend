@@ -320,6 +320,7 @@ const config = {
     // 'anumita.banerjee@indusnet.co.in'
   ],
   webmasterMail: "Work Wise <hello@letsworkwise.com>",
+  masterEmail : "<hello@letsworkwise.com>",
   template_path:
     process.env.TEMPLATE_PATH ||
     "/app/helper/email_template",

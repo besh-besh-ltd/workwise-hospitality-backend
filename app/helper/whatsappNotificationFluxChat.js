@@ -71,12 +71,11 @@ buyerCreatesRFQNotification: async (payload) => {
   // Make the POST request to the messaging API
   await axios.post(flux_chat_api, data, { headers: headers })
   .then(response => {
-      console.log('RFQ creation notification sent:', response.data);
+      console.log('RFQ creation notification sent:');
     })
     .catch(error => {
       console.error(
-        'Failed to send RFQ creation notification:',
-        error
+        'Failed to send RFQ creation notification:'
       );
     });
 },

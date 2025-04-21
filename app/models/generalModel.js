@@ -17,7 +17,7 @@ const generalModel = {
   },
   getCountryStates: async (country_id) => {
     return new Promise(function (resolve, reject) {
-      db.any(`SELECT * FROM tbl_location_states WHERE country_id = $1`, [country_id])
+      db.any(`SELECT * FROM tbl_location_states WHERE country_id = $1 ORDER BY state_name ASC`, [country_id])
         .then(function (data) {
           resolve(data);
         })
@@ -29,11 +29,16 @@ const generalModel = {
   },
   
   getCities: async (state_id) => {
-    let q = `SELECT * FROM tbl_location_cities ORDER BY city_name ASC`;
+    let q = `SELECT tlc.*, tls.country_id FROM tbl_location_cities tlc JOIN tbl_location_states tls ON tlc.state_id = tls.id ORDER BY city_name ASC`;
     let value = [];
     if(state_id){
-      q = `SELECT * FROM tbl_location_cities where state_id = $1 ORDER BY city_name ASC`;
-      value = [state_id]
+      q = `SELECT tlc.*, tls.country_id 
+     FROM tbl_location_cities tlc
+     JOIN tbl_location_states tls 
+     ON tlc.state_id = tls.id 
+     WHERE tlc.state_id = $1 
+     ORDER BY city_name ASC`;
+ value = [state_id]
     }
 
 

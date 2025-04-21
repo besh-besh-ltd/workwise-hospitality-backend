@@ -11,7 +11,7 @@ import s3Client from '../../config/s3config.js';
 
 const store_profile_images = multerS3({
   s3: s3Client,
-  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  bucket: process.env.AWS_S3_BUCKET, // Directly specified bucket name
   contentType: multerS3.AUTO_CONTENT_TYPE,
   key: function (req, file, cb) {
     // 1. Extract file extension
@@ -46,7 +46,7 @@ const store_profile_images = multerS3({
 
 let store_vendor_approve_docs = multerS3({
   s3: s3Client,
-  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  bucket: process.env.AWS_S3_BUCKET, // Directly specified bucket name
   contentType: multerS3.AUTO_CONTENT_TYPE,
   key: function (req, file, cb) {
     // 1. Extract file extension
@@ -126,8 +126,8 @@ const user_spoc = Joi.object().keys({
     .optional()
     .allow(null, '') // Allow null or empty strings
     .trim()
-    .regex(/^\+\d{1,4}-\d{7,14}$/, 'Invalid number format') // Only digits if non-empty
-    .min(7)  // Minimum 10 digits if non-empty
+    .regex(/^\+\d{1,4}-\d{6,15}$/, 'Invalid number format') // Only digits if non-empty
+    .min(6)  // Minimum 10 digits if non-empty
     .max(15)  // Maximum 15 digits if non-empty
 });
 

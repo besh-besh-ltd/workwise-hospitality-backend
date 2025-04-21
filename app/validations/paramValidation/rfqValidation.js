@@ -79,7 +79,7 @@ const productItems = Joi.object({
 
 let store_query_message_upload_file = multerS3({
   s3: s3Client,
-  bucket: 'test-workwise-bucket', // Directly specified bucket name
+  bucket: process.env.AWS_S3_BUCKET, // Directly specified bucket name
   contentType: multerS3.AUTO_CONTENT_TYPE,
   key: function (req, file, cb) {
     // 1. Extract file extension
@@ -89,7 +89,7 @@ let store_query_message_upload_file = multerS3({
     const fileName = `${Date.now()}-${uuidv4()}${ext}`;
     
     // 3. Create full S3 path matching your URL structure
-    const fullPath = `query_message_file/${fileName}`; // Exact path you want
+    const fullPath = `query_message_files/${fileName}`; // Exact path you want
     
     // 4. Pass the complete path to callback
     cb(null, fullPath);
@@ -153,16 +153,13 @@ export const rfqSchemas = {
   }),
   update: Joi.object().keys({
     rfq_id: Joi.number().required(),
-    comment: Joi.string().optional().allow(''),
-    company_name: Joi.string().required(),
     response_email: Joi.string().required(),
     contact_name: Joi.string().required(),
     contact_number: Joi.string()
       .trim()
-      .min(10)
-      .max(15)
-      .required()
-      .regex(/^[0-9]*$/),
+      .min(6)
+      .max(17)
+      .required(),
     bid_end_date: Joi.string()
       .optional()
       .allow(null)
@@ -175,11 +172,7 @@ export const rfqSchemas = {
         }
         return value;
       }),
-    location: Joi.string().required(),
-    is_published: Joi.number().integer().min(0).max(1).required(),
-    products: Joi.array().items(productItems).min(1).required(),
-    vendors: Joi.array().items(vendorItems).allow(null).allow(''),
-    terms: Joi.array().items(termsItems).allow(null).allow('')
+    project_id: Joi.number().integer().allow(null).optional(),
   }),
   finalize: Joi.object().keys({
     rfq_id: Joi.number().required(),

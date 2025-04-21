@@ -52,7 +52,7 @@ RfqRoutes.put(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   validateBody(rfqSchemas.update),
-  rfqController.create
+  rfqController.update
 );
 
 // RfqRoutes.get(
@@ -231,6 +231,11 @@ RfqRoutes.post(
   noLogin.customer_auth,
   validateDbBody.rfq_access_check_req_body,
   rfqController.listQueries
+);
+
+RfqRoutes.get(
+  '/vendor-types',
+  rfqController.vendorTypes
 );
 
 // to create the rfq using magic search rfq feature
