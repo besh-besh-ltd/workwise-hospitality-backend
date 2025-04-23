@@ -4758,11 +4758,11 @@ const rfqController = {
       for await (const value of boqDataJson?.productList) {
 
         // trim all inputs
-        const productName = value?.product_name;
-        const size = value?.size;
-        const specifications = value?.specifications;
-        const quantity = value?.quantity;
-        const unit = value?.unit;
+        const productName = value?.product_name.toString();
+        const size = value?.size.toString();
+        const specifications = value?.specifications.toString();
+        const quantity = value?.quantity.toString();
+        const unit = value?.unit.toString();
 
         // if product name is not present then skip this product
        if(!productName || productName=="NA"){
@@ -5280,6 +5280,7 @@ listQueries: async (req, res) => {
           return {
               user_id: other_user_id,
               user_name: summaryResult[0]?.user_name || '',
+              company_name: summaryResult[0]?.company_name || '',
               unseen_count: summaryResult[0]?.unseen_count || 0,
               last_message: summaryResult[0]?.last_message || '',
               last_message_timestamp: summaryResult[0]?.last_message_timestamp || null
