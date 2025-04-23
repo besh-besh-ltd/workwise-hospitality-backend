@@ -1293,11 +1293,34 @@ const rfqController = {
         location,
         rfq_type,
         reverse_auction,
-        project_id
+        project_id,
+        ra_start_date,
+        ra_end_date
       } = req.body;
       const response_email = req.body.response_email?.toLowerCase();
       const is_update = !!rfq_id;
       const user_id = req.user.id;
+
+      // Set default auction dates if reverse auction is enabled
+      if (reverse_auction == 1) {
+        console.log("Auction dates from request:", { ra_start_date, ra_end_date, bid_end_date });
+        
+        // FORCE set auction start date to today if not provided or empty
+        if (!ra_start_date || ra_start_date === '') {
+          ra_start_date = new Date().toISOString().split('T')[0];
+          console.log("FORCED default ra_start_date on backend:", ra_start_date);
+        }
+        
+        // FORCE set auction end date to bid_end_date if not provided or empty
+        if ((!ra_end_date || ra_end_date === '') && bid_end_date) {
+          ra_end_date = bid_end_date;
+          console.log("FORCED default ra_end_date on backend:", ra_end_date);
+        }
+      } else {
+        // If reverse auction is disabled, set auction dates to null
+        ra_start_date = null;
+        ra_end_date = null;
+      }
 
       if(!rfq_id){
         const nextRFQNumber = await getNextRfQNumber();
@@ -1315,11 +1338,33 @@ const rfqController = {
           rfq_no: nextRFQNumber,
           created_by: user_id,
           updated_by: user_id,
-          reverse_auction
+          reverse_auction,
+          ra_start_date,
+          ra_end_date
         };
+
+        console.log("Final RFQ auction data:", {
+          reverse_auction: tbl_rfq_data.reverse_auction,
+          ra_start_date: tbl_rfq_data.ra_start_date,
+          ra_end_date: tbl_rfq_data.ra_end_date
+        });
 
         if(project_id!=-1){
           tbl_rfq_data.project_id=project_id;
+        }
+
+        // Force format dates to ensure proper database storage
+        if (tbl_rfq_data.reverse_auction == 1) {
+          // Ensure dates are in YYYY-MM-DD format for database
+          tbl_rfq_data.ra_start_date = tbl_rfq_data.ra_start_date ? new Date(tbl_rfq_data.ra_start_date).toISOString().split('T')[0] : null;
+          tbl_rfq_data.ra_end_date = tbl_rfq_data.ra_end_date ? new Date(tbl_rfq_data.ra_end_date).toISOString().split('T')[0] : null;
+          
+          console.log("Final RFQ auction data before DB insert:", {
+            reverse_auction: tbl_rfq_data.reverse_auction,
+            ra_start_date: tbl_rfq_data.ra_start_date,
+            ra_end_date: tbl_rfq_data.ra_end_date,
+            format: "YYYY-MM-DD"
+          });
         }
 
         const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
@@ -1327,6 +1372,15 @@ const rfqController = {
         if (response.length > 0) {
           req.body.rfq_id = response[0].id;
           rfq_id = response[0].id;
+          
+          // Verify the saved data
+          const savedRfq = await rfqModel.getRFQDetails(rfq_id);
+          console.log("Saved RFQ auction data from DB:", {
+            id: rfq_id,
+            reverse_auction: savedRfq[0].reverse_auction,
+            ra_start_date: savedRfq[0].ra_start_date,
+            ra_end_date: savedRfq[0].ra_end_date
+          });
         }  
       }
 
@@ -1897,6 +1951,65 @@ const rfqController = {
         req.user.user_type
       );
 
+      // Fix for auction dates - Enhanced logging and data transformation
+      if (rfQItem && rfQItem.length > 0) {
+        // Log the raw data we received from the database
+        console.log("CONTROLLER - Raw RFQ data received:", {
+          id: rfQItem[0].id,
+          reverse_auction: rfQItem[0].reverse_auction,
+          ra_start_date: rfQItem[0].ra_start_date,
+          ra_start_date_type: typeof rfQItem[0].ra_start_date,
+          ra_end_date: rfQItem[0].ra_end_date,
+          ra_end_date_type: typeof rfQItem[0].ra_end_date
+        });
+        
+        // Ensure auction dates are properly formatted strings, not null/undefined
+        if (rfQItem[0].reverse_auction === 1) {
+          // If reverse auction is enabled but dates are empty, set default values
+          if (!rfQItem[0].ra_start_date || rfQItem[0].ra_start_date === '' || rfQItem[0].ra_start_date === 'null') {
+            rfQItem[0].ra_start_date = new Date().toISOString().split('T')[0];
+            console.log("CONTROLLER - Setting default ra_start_date:", rfQItem[0].ra_start_date);
+          }
+          
+          if (!rfQItem[0].ra_end_date || rfQItem[0].ra_end_date === '' || rfQItem[0].ra_end_date === 'null') {
+            if (rfQItem[0].bid_end_date) {
+              rfQItem[0].ra_end_date = rfQItem[0].bid_end_date;
+            } else {
+              // If no bid_end_date, set to 7 days from now
+              const endDate = new Date();
+              endDate.setDate(endDate.getDate() + 7);
+              rfQItem[0].ra_end_date = endDate.toISOString().split('T')[0];
+            }
+            console.log("CONTROLLER - Setting default ra_end_date:", rfQItem[0].ra_end_date);
+          }
+          
+          // Update the database with these defaults if they were missing
+          if (rfQItem[0].ra_start_date && rfQItem[0].ra_end_date) {
+            try {
+              await rfqModel.update('tbl_rfq', {
+                ra_start_date: rfQItem[0].ra_start_date,
+                ra_end_date: rfQItem[0].ra_end_date
+              }, id);
+              console.log("CONTROLLER - Updated missing auction dates in database");
+            } catch (updateError) {
+              console.error("Error updating auction dates:", updateError);
+            }
+          }
+        } else {
+          // If reverse auction is disabled, explicitly set dates to empty strings for frontend
+          rfQItem[0].ra_start_date = '';
+          rfQItem[0].ra_end_date = '';
+        }
+        
+        // Log the transformed data before sending to frontend
+        console.log("CONTROLLER - Transformed RFQ data for frontend:", {
+          id: rfQItem[0].id,
+          reverse_auction: rfQItem[0].reverse_auction,
+          ra_start_date: rfQItem[0].ra_start_date,
+          ra_end_date: rfQItem[0].ra_end_date
+        });
+      }
+
       if (req.user.user_type != 2) {
         const userProducts = await rfqModel.getUserProducts(id, req.user.id);
         if (
@@ -2348,6 +2461,46 @@ const rfqController = {
       if (listRfq.length > 0) {
         let filteredRFQ = listRfq.filter((item) => item.id == rfq_id);
         if (filteredRFQ.length > 0) {
+          // Get RFQ details to check dates
+          const rfqDetails = await rfqModel.getRFQDetails(rfq_id);
+          if (!rfqDetails || rfqDetails.length === 0) {
+            return res
+              .status(404)
+              .json({
+                status: 0,
+                message: 'RFQ not found!'
+              })
+              .end();
+          }
+          
+          const now = new Date();
+          const bidEndDate = rfqDetails[0].bid_end_date ? new Date(rfqDetails[0].bid_end_date) : null;
+          const raStartDate = rfqDetails[0].ra_start_date ? new Date(rfqDetails[0].ra_start_date) : null;
+          const raEndDate = rfqDetails[0].ra_end_date ? new Date(rfqDetails[0].ra_end_date) : null;
+          const isReverseAuction = rfqDetails[0].reverse_auction === 1;
+          
+          // Check if bidding period is over (not in reverse auction mode)
+          if (bidEndDate && now > bidEndDate && (!isReverseAuction || !raStartDate)) {
+            return res
+              .status(400)
+              .json({
+                status: 3,
+                message: 'The bidding period for this RFQ has ended!'
+              })
+              .end();
+          }
+          
+          // If in reverse auction mode, check if we're past the reverse auction end date
+          if (isReverseAuction && raEndDate && now > raEndDate) {
+            return res
+              .status(400)
+              .json({
+                status: 3,
+                message: 'The reverse auction period for this RFQ has ended!'
+              })
+              .end();
+          }
+
           const tbl_quotes_data = {
             rfq_id,
             rfq_no,
@@ -4945,6 +5098,45 @@ const rfqController = {
       );
       if (!quoteExists) {
         return res.status(404).json({ message: 'Quote not found.' });
+      }
+
+      // Get RFQ details to check dates
+      const rfqDetails = await rfqModel.getRFQDetails(quoteExists[0].rfq_id);
+      if (!rfqDetails || rfqDetails.length === 0) {
+        return res.status(404).json({ 
+          status: 0,
+          message: 'RFQ not found!' 
+        });
+      }
+      
+      const now = new Date();
+      const bidEndDate = rfqDetails[0].bid_end_date ? new Date(rfqDetails[0].bid_end_date) : null;
+      const raStartDate = rfqDetails[0].ra_start_date ? new Date(rfqDetails[0].ra_start_date) : null;
+      const raEndDate = rfqDetails[0].ra_end_date ? new Date(rfqDetails[0].ra_end_date) : null;
+      const isReverseAuction = rfqDetails[0].reverse_auction === 1;
+      
+      // Check if bidding period is over and we're not in reverse auction mode
+      if (bidEndDate && now > bidEndDate && !isReverseAuction) {
+        return res.status(400).json({
+          status: 3,
+          message: 'The bidding period for this RFQ has ended!'
+        });
+      }
+      
+      // If in reverse auction mode, check if we're in the valid period
+      if (isReverseAuction) {
+        // If before auction start, update is allowed (normal bidding period)
+        if (raStartDate && now < raStartDate) {
+          // This is fine, within normal bidding period
+        } 
+        // If auction started but past end date, updates not allowed
+        else if (raEndDate && now > raEndDate) {
+          return res.status(400).json({
+            status: 3,
+            message: 'The reverse auction period for this RFQ has ended!'
+          });
+        }
+        // Otherwise we're in the auction period, updates are allowed
       }
 
       let paymentTermAndCommentChanges = false;

@@ -111,7 +111,13 @@ let store_query_message_upload_file = multerS3({
 
 const today = new Date();
 const tomorrow = new Date(today);
+tomorrow.setDate(tomorrow.getDate() + 1);
 const tomorrowString = tomorrow.toISOString().slice(0, 10); // Format as YYYY-MM-DD
+
+// Get today's date at the beginning of the day for comparison
+const todayForComparison = new Date(today);
+todayForComparison.setHours(0, 0, 0, 0);
+const todayString = todayForComparison.toISOString().slice(0, 10); // Format as YYYY-MM-DD
 
 export const rfqSchemas = {
   create: Joi.object().keys({
@@ -140,6 +146,50 @@ export const rfqSchemas = {
             `bid_end_date must be greater than ${tomorrowString}`
           );
         }
+        return value;
+      }),
+    ra_start_date: Joi.string()
+      .optional()
+      .allow(null)
+      .allow('')
+      .custom((value, helpers) => {
+        if (value) {
+          const selectedDate = new Date(value);
+          selectedDate.setHours(0, 0, 0, 0); // Set to beginning of day for proper comparison
+          
+          if (selectedDate < todayForComparison) {
+            return helpers.message(
+              `ra_start_date must be today (${todayString}) or later`
+            );
+          }
+        }
+        return value;
+      }),
+    ra_end_date: Joi.string()
+      .optional()
+      .allow(null)
+      .allow('')
+      .custom((value, helpers) => {
+        const { bid_end_date, ra_start_date } = helpers.state.ancestors[0];
+        
+        if (value && new Date(value) <= tomorrow) {
+          return helpers.message(
+            `ra_end_date must be greater than ${tomorrowString}`
+          );
+        }
+        
+        if (value && bid_end_date && new Date(value) > new Date(bid_end_date)) {
+          return helpers.message(
+            `ra_end_date cannot be after bid_end_date`
+          );
+        }
+        
+        if (value && ra_start_date && new Date(value) <= new Date(ra_start_date)) {
+          return helpers.message(
+            `ra_end_date must be after ra_start_date`
+          );
+        }
+        
         return value;
       }),
     location: Joi.string().optional().allow('').allow(null),

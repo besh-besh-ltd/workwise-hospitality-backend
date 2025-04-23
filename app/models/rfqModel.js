@@ -548,6 +548,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           'bid_end_date', RFQ.bid_end_date,
           'rfq_type', RFQ.rfq_type,
           'reverse_auction', RFQ.reverse_auction,
+          'ra_start_date', RFQ.ra_start_date,
+          'ra_end_date', RFQ.ra_end_date,
           'project_id', RFQ.project_id,
           'location', RFQ.location,
 
@@ -672,13 +674,54 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 
 
   getRfqById: async (id, user_id, user_type) => {
+    // First, let's directly check the auction dates in the database
+    try {
+      const dateCheckQuery = `
+        SELECT id, reverse_auction, ra_start_date, ra_end_date 
+        FROM tbl_rfq 
+        WHERE id = $1
+      `;
+      const dateCheckResult = await db.query(dateCheckQuery, [id]);
+      
+      if (dateCheckResult && dateCheckResult.length > 0) {
+        console.log("DATABASE CHECK - Raw auction dates:", {
+          id: dateCheckResult[0].id,
+          reverse_auction: dateCheckResult[0].reverse_auction,
+          ra_start_date: dateCheckResult[0].ra_start_date,
+          ra_end_date: dateCheckResult[0].ra_end_date,
+          ra_start_date_type: typeof dateCheckResult[0].ra_start_date,
+          ra_end_date_type: typeof dateCheckResult[0].ra_end_date
+        });
+      }
+    } catch (error) {
+      console.error("Error checking auction dates:", error);
+    }
 
     //query changes by mukul on 20-11-2024 
     // type casting for TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
 
     //  query changed by mukul,
-    let q = `SELECT RFQ.*,
-    (SELECT COUNT(*)
+    let q = `SELECT 
+      RFQ.id,
+      RFQ.rfq_no,
+      RFQ.comment,
+      RFQ.company_name,
+      RFQ.response_email,
+      RFQ.contact_name,
+      RFQ.contact_number,
+      RFQ.bid_end_date,
+      RFQ.location,
+      RFQ.is_published,
+      RFQ.created_by,
+      RFQ.updated_by,
+      RFQ.timestamp,
+      RFQ.status,
+      RFQ.rfq_type,
+      RFQ.reverse_auction,
+      COALESCE(TO_CHAR(RFQ.ra_start_date, 'YYYY-MM-DD'), '') as ra_start_date,
+      COALESCE(TO_CHAR(RFQ.ra_end_date, 'YYYY-MM-DD'), '') as ra_end_date,
+      RFQ.project_id,
+      (SELECT COUNT(*)
      FROM tbl_query_messages TQM
      WHERE TQM.receiver_id = ${user_id}
      AND TQM.rfq_id = RFQ.id
@@ -852,11 +895,27 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                         AND TQI.total_price > 0 
                         AND RFQ.reverse_auction = 1
                         AND (
-                            (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != '' 
-                            AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
-                        OR
-                            (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = '' 
-                            AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '1 days') <= CURRENT_TIMESTAMP)
+                            -- Show lowest quote if current time is within auction period
+                            (
+                                RFQ.ra_start_date IS NOT NULL 
+                                AND RFQ.ra_end_date IS NOT NULL
+                                AND CURRENT_TIMESTAMP BETWEEN 
+                                    CAST(RFQ.ra_start_date AS TIMESTAMP) 
+                                    AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
+                            )
+                            OR
+                            -- Fallback to old logic if auction dates aren't set
+                            (
+                                (RFQ.ra_start_date IS NULL OR RFQ.ra_end_date IS NULL)
+                                AND 
+                                (
+                                    (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != '' 
+                                    AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
+                                    OR
+                                    (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = '' 
+                                    AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '1 days') <= CURRENT_TIMESTAMP)
+                                )
+                            )
                         )
                         ORDER BY TQI.total_price ASC  -- Get the lowest total_price
                         LIMIT 1  -- Limit to the lowest price for that product and variant
