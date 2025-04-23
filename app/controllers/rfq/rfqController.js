@@ -1305,9 +1305,16 @@ const rfqController = {
       if (reverse_auction == 1) {
         console.log("Auction dates from request:", { ra_start_date, ra_end_date, bid_end_date });
         
-        // FORCE set auction start date to today if not provided or empty
+        // FORCE set auction start date to one day before bid_end_date if not provided or empty
         if (!ra_start_date || ra_start_date === '') {
-          ra_start_date = new Date().toISOString().split('T')[0];
+          if (bid_end_date) {
+            const bidEndDate = new Date(bid_end_date);
+            const startDate = new Date(bidEndDate);
+            startDate.setDate(startDate.getDate() - 1);
+            ra_start_date = startDate.toISOString().split('T')[0];
+          } else {
+            ra_start_date = new Date().toISOString().split('T')[0];
+          }
           console.log("FORCED default ra_start_date on backend:", ra_start_date);
         }
         
@@ -1967,7 +1974,14 @@ const rfqController = {
         if (rfQItem[0].reverse_auction === 1) {
           // If reverse auction is enabled but dates are empty, set default values
           if (!rfQItem[0].ra_start_date || rfQItem[0].ra_start_date === '' || rfQItem[0].ra_start_date === 'null') {
-            rfQItem[0].ra_start_date = new Date().toISOString().split('T')[0];
+            if (rfQItem[0].bid_end_date) {
+              const bidEndDate = new Date(rfQItem[0].bid_end_date);
+              const startDate = new Date(bidEndDate);
+              startDate.setDate(startDate.getDate() - 1);
+              rfQItem[0].ra_start_date = startDate.toISOString().split('T')[0];
+            } else {
+              rfQItem[0].ra_start_date = new Date().toISOString().split('T')[0];
+            }
             console.log("CONTROLLER - Setting default ra_start_date:", rfQItem[0].ra_start_date);
           }
           
