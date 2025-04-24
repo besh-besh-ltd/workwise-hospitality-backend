@@ -753,8 +753,9 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     }
   },
   vendorDropdownList: async (req, res, next) => {
+    const is_approve = req.query.is_approve;
     try {
-      let vendorList = await vendorModel.getVendorDropdownList();
+      let vendorList = await vendorModel.getVendorDropdownList(is_approve);
       res
         .status(200)
         .json({

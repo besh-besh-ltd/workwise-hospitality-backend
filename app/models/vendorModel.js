@@ -636,7 +636,10 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         });
     });
   },
-  getVendorDropdownList: async (search = null) => {
+  /**
+   * @param isApproved (undefined | string) will add a condition in query to fetch only approved, disapproved or all vendors (if undefined)
+   */
+  getVendorDropdownList: async (search = null, isApproved = null) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       let orderClause = 'ORDER BY name ASC';
@@ -721,9 +724,8 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
             COALESCE(similarity(email, '${escapedSearch}'), 0)
           ) AS similarity_score` : ''}
          FROM tbl_users 
-         WHERE is_deleted = 0 AND (user_type = 3 OR user_type = 4) AND status = 1
-         ${dynamicQuery}
-         ${orderClause}`
+         WHERE is_deleted = 0 AND user_type = 3 OR user_type = 4 ${isApproved != null ? isApproved == 'true' ? 'AND status = 1' : 'AND status = 0' : ''}
+        ORDER BY created_at`
       )
         .then(function (data) {
           resolve(data);
