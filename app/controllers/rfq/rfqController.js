@@ -1191,6 +1191,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
       terms,
       rfq_type,
       reverse_auction,
+      ra_start_date,
+      ra_end_date,
       project_id,
       term_and_condition_files
   } = reqBody;
@@ -1207,6 +1209,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
       location,
       rfq_type,
       reverse_auction,
+      ra_start_date: reverse_auction == 1 ? ra_start_date : null,
+      ra_end_date: reverse_auction == 1 ? ra_end_date : null,
       is_published: 0,
       updated_by: user_id
   };

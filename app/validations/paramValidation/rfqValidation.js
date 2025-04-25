@@ -178,11 +178,6 @@ export const rfqSchemas = {
           );
         }
         
-        if (value && bid_end_date && new Date(value) > new Date(bid_end_date)) {
-          return helpers.message(
-            `ra_end_date cannot be after bid_end_date`
-          );
-        }
         
         if (value && ra_start_date && new Date(value) <= new Date(ra_start_date)) {
           return helpers.message(
