@@ -71,15 +71,18 @@ const rfqModel = {
     try {
       const query = `
             SELECT json_agg(DISTINCT jsonb_build_object(
-        'label', trimmed_value,
-        'value', lower(replace(trimmed_value, ' ', '_'))
-                         )) AS nature_of_business_options
-          FROM (
-         SELECT DISTINCT trim(unnested_value) AS trimmed_value
-         FROM tbl_company,
-              unnest(string_to_array(nature_of_business, ',')) AS unnested_value
-         WHERE nature_of_business IS NOT NULL AND nature_of_business != ''
-     ) AS cleaned_values;
+                'label', trimmed_value,
+                'value', lower(replace(trimmed_value, ' ', '_')))
+            ) AS nature_of_business_options
+            FROM (
+                SELECT DISTINCT INITCAP(TRIM(unnested_value)) AS trimmed_value
+                FROM (
+                    SELECT UNNEST(STRING_TO_ARRAY(nature_of_business, ',')) AS unnested_value
+                    FROM tbl_company
+                    WHERE nature_of_business IS NOT NULL AND nature_of_business != ''
+                ) AS unnested
+                WHERE TRIM(unnested_value) <> ''
+            ) AS cleaned_values;
         `;
       return await db.query(query)
     } catch (error) {
