@@ -718,8 +718,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       RFQ.status,
       RFQ.rfq_type,
       RFQ.reverse_auction,
-      COALESCE(TO_CHAR(RFQ.ra_start_date, 'YYYY-MM-DD'), '') as ra_start_date,
-      COALESCE(TO_CHAR(RFQ.ra_end_date, 'YYYY-MM-DD'), '') as ra_end_date,
+      RFQ.ra_start_date, -- Select raw timestamp
+      RFQ.ra_end_date,   -- Select raw timestamp
       RFQ.project_id,
       (SELECT COUNT(*)
      FROM tbl_query_messages TQM

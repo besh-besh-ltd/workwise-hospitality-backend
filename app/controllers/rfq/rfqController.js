@@ -1339,8 +1339,8 @@ const rfqController = {
           created_by: user_id,
           updated_by: user_id,
           reverse_auction,
-          ra_start_date,
-          ra_end_date
+          ra_start_date: ra_start_date || null,
+          ra_end_date: ra_end_date || null
         };
 
         console.log("Final RFQ auction data:", {
@@ -1351,20 +1351,6 @@ const rfqController = {
 
         if(project_id!=-1){
           tbl_rfq_data.project_id=project_id;
-        }
-
-        // Force format dates to ensure proper database storage
-        if (tbl_rfq_data.reverse_auction == 1) {
-          // Ensure dates are in YYYY-MM-DD format for database
-          tbl_rfq_data.ra_start_date = tbl_rfq_data.ra_start_date ? new Date(tbl_rfq_data.ra_start_date).toISOString().split('T')[0] : null;
-          tbl_rfq_data.ra_end_date = tbl_rfq_data.ra_end_date ? new Date(tbl_rfq_data.ra_end_date).toISOString().split('T')[0] : null;
-          
-          console.log("Final RFQ auction data before DB insert:", {
-            reverse_auction: tbl_rfq_data.reverse_auction,
-            ra_start_date: tbl_rfq_data.ra_start_date,
-            ra_end_date: tbl_rfq_data.ra_end_date,
-            format: "YYYY-MM-DD"
-          });
         }
 
         const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
@@ -1444,11 +1430,20 @@ const rfqController = {
       const rfq_id = data.rfq_id;   
       delete data.rfq_id; // Remove rfq_id from update fields
 
-
-      const rfqDetails =  await rfqModel.getRFQDetails(rfq_id)
-
-      const buyerName = req.user.organization_name || req.user.name
-      const rfq_no = rfqDetails[0]?.rfq_no || ''
+      // Explicitly handle potential empty strings from frontend, converting them to null
+      if ('ra_start_date' in data && data.ra_start_date === '') {
+          data.ra_start_date = null;
+      }
+      if ('ra_end_date' in data && data.ra_end_date === '') {
+          data.ra_end_date = null;
+      }
+      if ('bid_end_date' in data && data.bid_end_date === '') {
+          data.bid_end_date = null;
+      }
+      // Ensure reverse_auction is boolean/integer if present
+       if ('reverse_auction' in data) {
+         data.reverse_auction = data.reverse_auction ? 1 : 0;
+       }
 
       //  Ensure project_id is either an integer or null
       if ('project_id' in data && data.project_id !== null && data.project_id !== undefined) {
@@ -2067,155 +2062,6 @@ const rfqController = {
         .end();
     }
   },
-  /*   rfqList: async (req, res, next) => {
-    try {
-      let vendorId = req.user.id;
-      let page,
-        limit,
-        offset,
-        products = [];
-      if (req.query.page && req.query.page > 0) {
-        page = req.query.page;
-        limit = req.query.limit || Config.globalAdminLimit;
-        offset = (page - 1) * limit;
-      } else {
-        limit = Config.globalAdminLimit;
-        offset = 0;
-      }
-      let productName = req.query?.productName;
-      let filterProduct = {};
-      let vendorApprove = req.query?.vendorApprove;
-      if (vendorApprove) {
-        filterProduct = await productModel.getApprovedByProduct(vendorApprove);
-      }
-      if (req.query?.download == 'true' && req.query?.downloadAll === 'true') {
-        offset = 0;
-        limit = 'ALL';
-      }
-      if (req.query?.download == 'true' && req.query?.product_ids) {
-        products = JSON.parse(req.query.product_ids);
-      }
-
-      let productList = await productModel.getVendorProductList(
-        limit,
-        offset,
-        vendorId,
-        productName,
-        filterProduct,
-        products
-      );
-      let productCount = await productModel.getVendorProductCount(
-        vendorId,
-        productName,
-        filterProduct
-      );
-
-      if (req.query.download == 'true') {
-        const workbook = new excelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Products');
-
-        // Add headers
-        worksheet.columns = [
-          { header: 'S no.', key: 's_no', width: 5 },
-          { header: 'Name', key: 'name', width: 20 },
-          { header: 'Manufacturer', key: 'manufacturer', width: 20 },
-          // { header: 'Slug', key: 'slug', width: 20 },
-          { header: 'Category', key: 'category', width: 20 },
-          { header: 'Specification Key', key: 'specification_Key', width: 20 },
-          {
-            header: 'Specification Value',
-            key: 'specification_value',
-            width: 20
-          },
-          { header: 'Approved By', key: 'vendor_approve', width: 20 },
-          { header: 'Availability', key: 'availability', width: 20 },
-          { header: 'Status', key: 'status', width: 20 }
-        ];
-
-        let counter = 1;
-
-        productList.forEach((prod) => {
-          prod.s_no = counter;
-          prod.availability =
-            prod.availability == 1 ? 'Available' : 'Not Available';
-          prod.status = prod.status == 1 ? 'Active' : 'Not active';
-          prod.category = prod.product_categories[0]?.category_name || '';
-          prod.specification_Key = prod.product_variants[0]?.variant_name || '';
-          prod.vendor_approve =
-            prod.product_approve_by.length > 0
-              ? prod.product_approve_by
-                  .map((item) => item.vendor_approve_name)
-                  .join(',')
-              : '';
-          prod.specification_value =
-            prod.product_variants[0]?.variant_value || '';
-          worksheet.addRow(prod); // Add data in worksheet
-          if (
-            prod.product_categories?.length > 1 ||
-            prod.product_variants?.length > 1
-          ) {
-            let maxCount = Math.max(
-              prod.product_categories?.length || 0,
-              prod.product_variants?.length || 0
-            );
-            for (let index = 1; index < maxCount; index++) {
-              let newData = {};
-              if (prod.product_categories[index]?.category_name) {
-                newData.category = prod.product_categories[index].category_name;
-              }
-              if (prod.product_variants[index]?.variant_name) {
-                newData.specification_Key =
-                  prod.product_variants[index].variant_name;
-                newData.specification_value =
-                  prod.product_variants[index].variant_value;
-              }
-              worksheet.addRow(newData);
-            }
-          }
-
-          counter++;
-        });
-
-        // Making first line in excel bold
-        worksheet.getRow(1).eachCell((cell) => {
-          cell.font = { bold: true };
-        });
-
-        // Set content type and disposition
-        res.setHeader(
-          'Content-Type',
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        );
-        res.setHeader(
-          'Content-Disposition',
-          'attachment; filename=products.xlsx'
-        );
-
-        // Write workbook to response
-        workbook.xlsx.write(res).then(() => {
-          res.end();
-        });
-      } else {
-        res
-          .status(200)
-          .json({
-            status: 1,
-            data: productList,
-            total_count: productCount.count
-          })
-          .end();
-      }
-    } catch (error) {
-      logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  }, */
   rfqList: async (req, res, next) => {
     try {
       let user_id = req.user.id;
@@ -4272,7 +4118,6 @@ const rfqController = {
         'Sedam',
         'Shikaripur',
         'Mahalingapura',
-        'Mudalagi',
         'Muddebihal',
         'Pavagada',
         'Malur',
