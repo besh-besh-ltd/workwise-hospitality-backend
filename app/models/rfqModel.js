@@ -686,16 +686,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       `;
       const dateCheckResult = await db.query(dateCheckQuery, [id]);
       
-      if (dateCheckResult && dateCheckResult.length > 0) {
-        console.log("DATABASE CHECK - Raw auction dates:", {
-          id: dateCheckResult[0].id,
-          reverse_auction: dateCheckResult[0].reverse_auction,
-          ra_start_date: dateCheckResult[0].ra_start_date,
-          ra_end_date: dateCheckResult[0].ra_end_date,
-          ra_start_date_type: typeof dateCheckResult[0].ra_start_date,
-          ra_end_date_type: typeof dateCheckResult[0].ra_end_date
-        });
-      }
     } catch (error) {
       console.error("Error checking auction dates:", error);
     }
