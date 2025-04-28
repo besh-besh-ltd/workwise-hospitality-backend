@@ -875,7 +875,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           ),
             ${
               user_type == 3
-        ? `-- Changes made to implement new reverse auction rules (modified 2024)
+        ? `-- Changes made by Imtiaj 28/09/2024 [Added logic to get the lowest_total from quotes for each unique product with the specified RFQ_id.] 
                 'lowest_quotation', (
                         -- Check if this product has technical evaluation enabled (has clauses)
                         WITH tech_eval AS (
@@ -885,6 +885,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                             WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
                             LIMIT 1
                         ),
+                        
                         -- Check if current vendor is technically accepted for this product
                         tech_accepted AS (
                             SELECT 1 AS is_accepted
@@ -893,6 +894,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                             WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
                             LIMIT 1
                         )
+                        -- Changes made by Agnij 28/04/2025 [Added logic to handle reverse auction timing conditions and visibility rules for lowest quote prices]
                         SELECT json_build_object(
                             'quote_id', TQI.quote_id,
                             'total_price', TQI.total_price

@@ -1307,18 +1307,15 @@ const rfqController = {
 
       // Set default auction dates if reverse auction is enabled
       if (reverse_auction == 1) {
-        console.log("Auction dates from request:", { ra_start_date, ra_end_date, bid_end_date });
         
         // FORCE set auction start date to today if not provided or empty
         if (!ra_start_date || ra_start_date === '') {
           ra_start_date = new Date().toISOString().split('T')[0];
-          console.log("FORCED default ra_start_date on backend:", ra_start_date);
         }
         
         // FORCE set auction end date to bid_end_date if not provided or empty
         if ((!ra_end_date || ra_end_date === '') && bid_end_date) {
           ra_end_date = bid_end_date;
-          console.log("FORCED default ra_end_date on backend:", ra_end_date);
         }
       } else {
         // If reverse auction is disabled, set auction dates to null
@@ -1347,11 +1344,6 @@ const rfqController = {
           ra_end_date: ra_end_date || null
         };
 
-        console.log("Final RFQ auction data:", {
-          reverse_auction: tbl_rfq_data.reverse_auction,
-          ra_start_date: tbl_rfq_data.ra_start_date,
-          ra_end_date: tbl_rfq_data.ra_end_date
-        });
 
         if(project_id!=-1){
           tbl_rfq_data.project_id=project_id;
@@ -1365,12 +1357,6 @@ const rfqController = {
           
           // Verify the saved data
           const savedRfq = await rfqModel.getRFQDetails(rfq_id);
-          console.log("Saved RFQ auction data from DB:", {
-            id: rfq_id,
-            reverse_auction: savedRfq[0].reverse_auction,
-            ra_start_date: savedRfq[0].ra_start_date,
-            ra_end_date: savedRfq[0].ra_end_date
-          });
         }  
       }
 
@@ -1952,22 +1938,12 @@ const rfqController = {
 
       // Fix for auction dates - Enhanced logging and data transformation
       if (rfQItem && rfQItem.length > 0) {
-        // Log the raw data we received from the database
-        console.log("CONTROLLER - Raw RFQ data received:", {
-          id: rfQItem[0].id,
-          reverse_auction: rfQItem[0].reverse_auction,
-          ra_start_date: rfQItem[0].ra_start_date,
-          ra_start_date_type: typeof rfQItem[0].ra_start_date,
-          ra_end_date: rfQItem[0].ra_end_date,
-          ra_end_date_type: typeof rfQItem[0].ra_end_date
-        });
         
         // Ensure auction dates are properly formatted strings, not null/undefined
         if (rfQItem[0].reverse_auction === 1) {
           // If reverse auction is enabled but dates are empty, set default values
           if (!rfQItem[0].ra_start_date || rfQItem[0].ra_start_date === '' || rfQItem[0].ra_start_date === 'null') {
             rfQItem[0].ra_start_date = new Date().toISOString().split('T')[0];
-            console.log("CONTROLLER - Setting default ra_start_date:", rfQItem[0].ra_start_date);
           }
           
           if (!rfQItem[0].ra_end_date || rfQItem[0].ra_end_date === '' || rfQItem[0].ra_end_date === 'null') {
@@ -1979,7 +1955,6 @@ const rfqController = {
               endDate.setDate(endDate.getDate() + 7);
               rfQItem[0].ra_end_date = endDate.toISOString().split('T')[0];
             }
-            console.log("CONTROLLER - Setting default ra_end_date:", rfQItem[0].ra_end_date);
           }
           
           // Update the database with these defaults if they were missing
@@ -1989,7 +1964,6 @@ const rfqController = {
                 ra_start_date: rfQItem[0].ra_start_date,
                 ra_end_date: rfQItem[0].ra_end_date
               }, id);
-              console.log("CONTROLLER - Updated missing auction dates in database");
             } catch (updateError) {
               console.error("Error updating auction dates:", updateError);
             }
@@ -2000,13 +1974,6 @@ const rfqController = {
           rfQItem[0].ra_end_date = '';
         }
         
-        // Log the transformed data before sending to frontend
-        console.log("CONTROLLER - Transformed RFQ data for frontend:", {
-          id: rfQItem[0].id,
-          reverse_auction: rfQItem[0].reverse_auction,
-          ra_start_date: rfQItem[0].ra_start_date,
-          ra_end_date: rfQItem[0].ra_end_date
-        });
       }
 
       if (req.user.user_type != 2) {
