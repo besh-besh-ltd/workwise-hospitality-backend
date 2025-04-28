@@ -71,15 +71,18 @@ const rfqModel = {
     try {
       const query = `
             SELECT json_agg(DISTINCT jsonb_build_object(
-        'label', trimmed_value,
-        'value', lower(replace(trimmed_value, ' ', '_'))
-                         )) AS nature_of_business_options
-          FROM (
-         SELECT DISTINCT trim(unnested_value) AS trimmed_value
-         FROM tbl_company,
-              unnest(string_to_array(nature_of_business, ',')) AS unnested_value
-         WHERE nature_of_business IS NOT NULL AND nature_of_business != ''
-     ) AS cleaned_values;
+                'label', trimmed_value,
+                'value', lower(replace(trimmed_value, ' ', '_')))
+            ) AS nature_of_business_options
+            FROM (
+                SELECT DISTINCT INITCAP(TRIM(unnested_value)) AS trimmed_value
+                FROM (
+                    SELECT UNNEST(STRING_TO_ARRAY(nature_of_business, ',')) AS unnested_value
+                    FROM tbl_company
+                    WHERE nature_of_business IS NOT NULL AND nature_of_business != ''
+                ) AS unnested
+                WHERE TRIM(unnested_value) <> ''
+            ) AS cleaned_values;
         `;
       return await db.query(query)
     } catch (error) {
@@ -2065,8 +2068,8 @@ WHERE row_num_by_name_category = 1
     let turnoverCondition = '';
 
     turnOver = {
-      from: parseInt(turnOver.from),
-      to: parseInt(turnOver.to),
+      from: parseInt(turnOver?.from ?? 0),
+      to: parseInt(turnOver?.to ?? 0),
     }
 
     if (turnOver && (turnOver.from > 0 || turnOver.to > 0)) {
@@ -3462,11 +3465,12 @@ rfq_project_exist: async (project_id,user_id) => {
       SELECT 
           user_data.user_id AS "user_id",
           user_data.user_name AS "user_name",
+          user_data.company_name,
           COALESCE(unseen_data.unseen_count, 0) AS "unseen_count",
           COALESCE(latest_message_data.last_message, '') AS "last_message",
           COALESCE(latest_message_data.last_message_timestamp, NULL) AS "last_message_timestamp"
       FROM 
-          (SELECT id AS user_id, name AS user_name FROM tbl_users WHERE id = $3) AS user_data
+          (SELECT tu.id AS user_id, tu.name AS user_name, tc.company_name FROM tbl_users tu JOIN tbl_company tc ON tc.user_id = tu.id WHERE tu.id = $3) AS user_data
       LEFT JOIN 
           (SELECT COUNT(*) AS unseen_count
            FROM tbl_query_messages
