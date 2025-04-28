@@ -71,15 +71,18 @@ const rfqModel = {
     try {
       const query = `
             SELECT json_agg(DISTINCT jsonb_build_object(
-        'label', trimmed_value,
-        'value', lower(replace(trimmed_value, ' ', '_'))
-                         )) AS nature_of_business_options
-          FROM (
-         SELECT DISTINCT trim(unnested_value) AS trimmed_value
-         FROM tbl_company,
-              unnest(string_to_array(nature_of_business, ',')) AS unnested_value
-         WHERE nature_of_business IS NOT NULL AND nature_of_business != ''
-     ) AS cleaned_values;
+                'label', trimmed_value,
+                'value', lower(replace(trimmed_value, ' ', '_')))
+            ) AS nature_of_business_options
+            FROM (
+                SELECT DISTINCT INITCAP(TRIM(unnested_value)) AS trimmed_value
+                FROM (
+                    SELECT UNNEST(STRING_TO_ARRAY(nature_of_business, ',')) AS unnested_value
+                    FROM tbl_company
+                    WHERE nature_of_business IS NOT NULL AND nature_of_business != ''
+                ) AS unnested
+                WHERE TRIM(unnested_value) <> ''
+            ) AS cleaned_values;
         `;
       return await db.query(query)
     } catch (error) {
@@ -1854,6 +1857,7 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
                       ts_rank_cd(to_tsvector('english', p.name), plainto_tsquery('english', $1)) AS rank
       FROM tbl_product p
       JOIN tbl_product_categories pc ON p.id = pc.product_id
+      JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = p.id
       LEFT JOIN tbl_product_images img ON p.id = img.product_id
       JOIN tbl_category c ON pc.category_id = c.id
       JOIN tbl_users u ON u.id = p.created_by
@@ -1862,9 +1866,9 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
         AND p.is_deleted = 0 
         AND p.is_review = 0 
         AND p.is_approve = 1 
-        AND p.created_by NOT IN (1, 111) 
         AND u.is_deleted = 0 
         AND u.status = 1 
+        AND pvvm.id IS NOT NULL
         AND (
           to_tsvector('english', p.name) @@ plainto_tsquery('english', $1) 
           OR similarity(p.name, $1) > 0.1
@@ -2128,10 +2132,11 @@ WHERE row_num_by_name_category = 1
           WHEN rfqv.user_id IS NOT NULL THEN 1
           ELSE 0
         END AS rfq_added
-      FROM tbl_product p
+      FROM tbl_product_variant_vendor_mapping pvvm
+      JOIN tbl_product p ON p.id = pvvm.product_variant_id
       JOIN tbl_product_categories pc ON p.id = pc.product_id
       JOIN tbl_category c ON pc.category_id = c.id
-      JOIN tbl_users tu ON tu.id = p.created_by AND tu.user_type IN (3, 4)
+      JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
       LEFT JOIN tbl_company tc ON tc.user_id = tu.id
       LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
       LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
@@ -2147,7 +2152,7 @@ WHERE row_num_by_name_category = 1
       
       ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
 
-      WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 
+      WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pvvm.is_approved
         AND tu.is_deleted = 0 AND tu.status = 1 
         AND LOWER(p.name) = LOWER('${search_key}')
         AND tu.email IS NOT NULL

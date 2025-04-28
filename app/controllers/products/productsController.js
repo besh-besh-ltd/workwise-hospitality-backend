@@ -685,16 +685,6 @@ const ProductsController = {
       }
 
       // ---------------- variations ----------------
-      if (variations && Array.isArray(variations)) {
-        for (const { attribute = '', attributeValue = '' } of variations) {
-          let variantObj = {
-            product_id: productId,
-            variant_name: attribute,
-            variant_value: attributeValue
-          };
-          await productModel.createProductVariants(variantObj);
-        }
-      }
 
       // ---------------- featured image ----------------
       if (req.files?.featured && req.files?.featured.length > 0) {
