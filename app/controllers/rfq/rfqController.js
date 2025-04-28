@@ -1535,15 +1535,15 @@ const rfqController = {
 
         // Add products to the RFQ
         const product = req.body;
-        if (!product || !product.product_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
+        if (!product || !product.variant_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
           return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
         }
 
-        const variant = await rfqModel.getNextVariant(rfq_id, product.product_id);
+        const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
 
         const productData = {
             rfq_id,
-            product_id: product.product_id,
+            product_variant_id: product.variant_id,
             variant: variant,
             comment: "",
             datasheet: "",
@@ -1559,7 +1559,7 @@ const rfqController = {
 
             const vendorData = {
                 rfq_id,
-                product_id: product.product_id,
+                product_variant_id: product.variant_id,
                 user_id: vendor.vendor_id,
                 variant: variant
             };
