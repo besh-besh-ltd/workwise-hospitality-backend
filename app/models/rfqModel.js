@@ -888,9 +888,10 @@ deleteProductFilesByIds: async (rfqProductIds) => {
        
     ) AS "products"
     
-FROM tbl_rfq RFQ WHERE id=$1
-ORDER BY RFQ.id DESC
-LIMIT 1;`;
+    FROM tbl_rfq RFQ WHERE id=$1
+    ORDER BY RFQ.id DESC
+    LIMIT 1;`
+;
 
 
     // MODIFIED ON 23TH AUG MUKUL
@@ -2237,10 +2238,10 @@ WHERE row_num_by_name_category = 1
   getPastRFQS: async (vendor_id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT tbl_rfq.id,tbl_rfq.rfq_no, tbl_quote_finalization.rfq_id,tbl_quote_finalization.vendor_id,tbl_quote_finalization.product_id, tbl_product.name
+        `SELECT tbl_rfq.id,tbl_rfq.rfq_no, tbl_quote_finalization.rfq_id,tbl_quote_finalization.vendor_id,tbl_quote_finalization.product_variant_id, tbl_product_variant.name
         FROM tbl_rfq
         LEFT JOIN tbl_quote_finalization ON tbl_rfq.id = tbl_quote_finalization.rfq_id
-        LEFT JOIN tbl_product ON tbl_quote_finalization.product_id = tbl_product.id
+        LEFT JOIN tbl_product_variant ON tbl_quote_finalization.product_variant_id = tbl_product_variant.id
         WHERE tbl_rfq.created_by = ${user_id} AND tbl_quote_finalization.vendor_id = $1;`,
         [vendor_id]
       )
@@ -2446,10 +2447,10 @@ WHERE row_num_by_name_category = 1
                         SELECT trp.rfq_id
                         FROM tbl_rfq_products trp
                         LEFT JOIN tbl_quote_finalization tqf 
-                            ON trp.product_id = tqf.product_id
+                            ON trp.product_variant_id = tqf.product_variant_id
                             AND trp.variant = tqf.variant
                         GROUP BY trp.rfq_id
-                        HAVING count(trp.product_id) = count(tqf.product_id)
+                        HAVING count(trp.product_variant_id) = count(tqf.product_variant_id)
                     )
                 ) AS completed_rfqs
             FROM tbl_rfq tr            

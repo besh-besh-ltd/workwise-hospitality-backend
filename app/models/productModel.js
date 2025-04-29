@@ -864,21 +864,24 @@ const productModel = {
   checkProductExists: async (
     name,
     vendorId = null,
-    productId = null,
+    variantId = null,
     added_by = null
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
+      let joinQuery = '';
       if (vendorId) {
-        dynamicQuery += ` AND vendor = ${vendorId}`;
+        // dynamicQuery += ` AND vendor = ${vendorId}`;
+        joinQuery += `JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id AND pvvm.vendor_id = ${vendorId} `
+        dynamicQuery += ` AND pvvm.id IS NOT NULL`;
       }
-      if (productId) {
-        dynamicQuery += ` AND id != ${productId}`;
+      if (variantId) {
+        dynamicQuery += ` AND id != ${variantId}`;
       }
       if (added_by) {
         dynamicQuery += ` AND added_by = ${added_by} AND created_by = ${added_by}`;
       }
-      db.any(`SELECT * FROM tbl_product WHERE LOWER(name) = $1 ${dynamicQuery}`, [
+      db.any(`SELECT * FROM tbl_product_variant pv ${joinQuery} WHERE LOWER(name) = $1 ${dynamicQuery}`, [
         name.toLowerCase() // Convert name to lowercase before passing it
     ])
         .then(function (data) {
@@ -890,6 +893,7 @@ const productModel = {
         });
     });
   },
+
   productExistForVendor: async (
     name,
     vendorId = null,
@@ -897,16 +901,20 @@ const productModel = {
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
+      let joinQuery = '';
       if (vendorId) {
+        joinQuery += `JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id AND pvvm.vendor_id = ${vendorId} `;
         dynamicQuery += ` AND p.created_by = ${vendorId}`;
       }
 
       db.any(
         `SELECT p.*
-        FROM tbl_product p
+        FROM tbl_product_variant pv
+        JOIN tbl_product p ON p.id = pv.product_id
         JOIN tbl_product_categories tpc ON p.id = tpc.product_id
         JOIN tbl_category tc ON tpc.category_id = tc.id
-        WHERE p.name = $1 AND tc.title = $2${dynamicQuery}`,
+        ${joinQuery}
+        WHERE p.name = $1 AND tc.title = $2 ${dynamicQuery}`,
         [name, category]
       )
         .then(function (data) {
@@ -1942,11 +1950,12 @@ FROM (
     FROM tbl_vendorapprove_product_mapping tvpm
     LEFT JOIN tbl_vendor_approve
         ON tvpm.vendor_approve_id = tbl_vendor_approve.id
-    WHERE tbl_product.id = tvpm.product_id) AS "vendor_approved_by"
-FROM tbl_product
+    WHERE pv.id = tvpm.product_id) AS "vendor_approved_by"
+FROM tbl_product_variant pv
+JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
 LEFT JOIN tbl_users
-    ON tbl_product.created_by = tbl_users.id
-WHERE tbl_product.name = $1`,
+    ON pvvm.vendor_id = tbl_users.id
+WHERE pv.name = $1`,
         [productName]
       )
         .then(function (data) {
@@ -2114,43 +2123,47 @@ WHERE tbl_product.name = $1`,
       db.any(
         `
           WITH ranked_products AS (
-              SELECT 
-                  TP.id AS product_id,
-                  TP.name AS product_name,
-                  ARRAY (
-                      SELECT 
-                          json_build_object(
-                              'category_name', TC.title,
-                              'id', TC.id
-                          )
-                      FROM tbl_product_categories TPC
-                      LEFT JOIN tbl_category TC 
-                          ON TPC.category_id = TC.id
-                      WHERE TPC.product_id = TP.id
+            SELECT 
+                TPV.id AS product_id,
+                TPV.name AS product_name,
+                COALESCE(product_categories.categories, ARRAY[]::jsonb[]) AS product_categories,
+                COUNT(TR.id)::INT AS rfq_count,
+                ROW_NUMBER() OVER (PARTITION BY TPV.name ORDER BY COUNT(TR.id) DESC) AS rn
+            FROM tbl_rfq TR
+            JOIN tbl_rfq_products TRP ON TRP.rfq_id = TR.id
+            JOIN tbl_product_variant TPV ON TPV.id = TRP.product_variant_id
+            JOIN tbl_product TP ON TP.id = TPV.product_id
+            LEFT JOIN LATERAL (
+                SELECT ARRAY(
+                    SELECT jsonb_build_object(
+                        'category_name', TC.title,
+                        'id', TC.id
+                    )
+                    FROM tbl_product_categories TPC
+                    LEFT JOIN tbl_category TC ON TPC.category_id = TC.id
+                    WHERE TPC.product_id = TP.id
                       AND TC.id IS NOT NULL
-                      ORDER BY TPC.id
-                  ) AS product_categories,
-                  COUNT(TR.id)::INT AS rfq_count,
-                  ROW_NUMBER() OVER (PARTITION BY TP.name ORDER BY COUNT(TR.id) DESC) AS rn
-              FROM tbl_rfq TR
-              JOIN tbl_rfq_products TRP
-                  ON TRP.rfq_id = TR.id
-              JOIN tbl_product TP
-                  ON TP.id = TRP.product_id
-              WHERE TR.created_by = $1
-                  AND TP.is_deleted = 0 AND TP.is_approve = 1
-              GROUP BY 
-                  TP.id, TP.name
-          )
-          SELECT 
-              product_id,
-              product_name,
-              product_categories,
-              rfq_count
-          FROM ranked_products
-          WHERE rn = 1 
-          ORDER BY rfq_count DESC
-          LIMIT 10;
+                    ORDER BY TPC.id
+                ) AS categories
+            ) AS product_categories ON true
+            WHERE TR.created_by = $1
+              AND TP.is_deleted = 0 
+              AND TP.is_approve = 1
+            GROUP BY 
+                TPV.id, 
+                TPV.name, 
+                product_categories.categories
+        )
+
+        SELECT 
+            product_id,
+            product_name,
+            product_categories,
+            rfq_count
+        FROM ranked_products
+        WHERE rn = 1 
+        ORDER BY rfq_count DESC
+        LIMIT 10;
         `,
         [userId]
       )
