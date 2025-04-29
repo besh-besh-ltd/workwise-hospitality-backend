@@ -1101,10 +1101,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             'product_details', (
                 SELECT json_agg(json_build_object(
                     'id', T_P.id,
-                    'name', T_P.name, 
-                    'description', T_P.description, 
-                    'manufacturer', T_P.manufacturer, 
-                    'availability', T_P.availability))
+                    'name', T_P.name))
                 FROM tbl_product_variant T_P
                 WHERE RFQ_P.product_variant_id = T_P.id
             ),
@@ -1257,7 +1254,7 @@ LIMIT $5 OFFSET $4;`,
         )`;
 
         const mainQuery = 
-            `SELECT TRP.product_id, TRP.variant, TRP.rfq_id,
+            `SELECT TRP.product_variant_id, TRP.variant, TRP.rfq_id,
             (
                 SELECT json_build_object(
                 'unit_price', TQI1.unit_price,
@@ -1271,7 +1268,7 @@ LIMIT $5 OFFSET $4;`,
                 FROM tbl_quote_items TQI1
                 JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
                 WHERE TQF1.created_by = $2
-                AND TQI1.product_id = TRP.product_id
+                AND TQI1.product_variant_id = TRP.product_variant_id
                 AND TQF1.rfq_id != $1
                 ORDER BY TQF1.timestamp DESC
                 LIMIT 1
@@ -1279,7 +1276,7 @@ LIMIT $5 OFFSET $4;`,
             ARRAY(
                 SELECT json_build_object('name', TP.name,'description', TP.description) 
                 FROM tbl_product TP 
-                WHERE TP.id = TRP.product_id 
+                WHERE TP.id = TRP.product_variant_id 
             ) AS "product_details",
             ARRAY(
                 SELECT json_build_object(
@@ -1327,7 +1324,7 @@ LIMIT $5 OFFSET $4;`,
                     ),
                     'quote_details', (
                         SELECT json_agg(json_build_object(
-                            'product_id', TQI.product_id,
+                            'product_id', TQI.product_variant_id,
                             'variant', TQI.variant,
                             'product_name', TQI.product_name, 
                             'unit_price', TQI.unit_price,
@@ -1346,13 +1343,13 @@ LIMIT $5 OFFSET $4;`,
                             'rfq_details', (
                                 SELECT json_agg(json_build_object('title', TPS.title, 'value', TPS.value))
                                 FROM tbl_rfq_products_specs TPS 
-                                WHERE TPS.product_id = TQI.product_id AND TPS.variant = TQI.variant AND TPS.rfq_id = TRP.rfq_id
+                                WHERE TPS.product_variant_id = TQI.product_variant_id AND TPS.variant = TQI.variant AND TPS.rfq_id = TRP.rfq_id
                             )
                         ))
                         FROM tbl_quote_items TQI 
                         JOIN tbl_quotes TQ_inner ON TQI.quote_id = TQ_inner.id
                         JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
-                        WHERE TQI.quote_id = TQ.id AND TQI.product_id = TRP.product_id AND TQI.variant = TRP.variant
+                        WHERE TQI.quote_id = TQ.id AND TQI.product_variant_id = TRP.product_variant_id AND TQI.variant = TRP.variant
                         ${TA_Vendors === "TA" ? vendorCondition : ''}
                     )
                 )
@@ -1360,7 +1357,7 @@ LIMIT $5 OFFSET $4;`,
                 JOIN tbl_users TU ON TU.id = TQ.created_by
                 JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id 
                 WHERE TQ.rfq_id = TRP.rfq_id AND 
-                      TQI.product_id = TRP.product_id AND 
+                      TQI.product_variant_id = TRP.product_variant_id AND 
                       TQI.variant = TRP.variant 
                       ${TA_Vendors === "TA" ? vendorCondition : ''}
                 ORDER BY TQ.created_by ASC
@@ -1368,7 +1365,7 @@ LIMIT $5 OFFSET $4;`,
             ARRAY(
                 SELECT json_build_object('title', TPS.title, 'value', TPS.value)
                 FROM tbl_rfq_products_specs TPS
-                WHERE TPS.product_id = TRP.product_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
+                WHERE TPS.product_variant_id = TRP.product_variant_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
             ) AS "product_specs"
             FROM tbl_rfq_products TRP WHERE TRP.rfq_id=$1`;
 
@@ -1425,7 +1422,7 @@ LIMIT $5 OFFSET $4;`,
           FROM tbl_quote_items TQI1
           JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
           WHERE TQF1.created_by = $2 -- buyer's ID
-            AND TQI1.product_id = TRF.product_id
+            AND TQI1.product_variant_id = TRF.product_variant_id
             AND TQF1.rfq_id != $1 -- different RFQ
           ORDER BY TQF1.timestamp DESC
           LIMIT 1
@@ -1433,7 +1430,7 @@ LIMIT $5 OFFSET $4;`,
           ,
           ARRAY(
             SELECT json_build_object(
-              'product_name', TP.name,
+              'product_name', TV.name,
               'rfq_details', (
                 SELECT json_agg(
                   json_build_object(
@@ -1442,13 +1439,14 @@ LIMIT $5 OFFSET $4;`,
                   )
                 )
                 FROM tbl_rfq_products_specs TPS
-                WHERE TPS.product_id = TRF.product_id
+                WHERE TPS.product_variant_id = TRF.product_variant_id
                   AND TPS.variant = TRF.variant
                   AND TPS.rfq_id = $1
               )
             )
-            FROM tbl_product TP
-            WHERE TP.id = TRF.product_id
+            FROM tbl_product_variant TV
+            JOIN tbl_product TP ON TP.id = TV.product_id
+            WHERE TV.id = TRF.product_variant_id
           ) AS "product_details",
           ARRAY(
             SELECT json_build_object(
@@ -1464,7 +1462,7 @@ LIMIT $5 OFFSET $4;`,
               'finalization', (
                 SELECT json_build_object(
                   'id', TQF.id,
-                  'product_id', TQF.product_id,
+                  'product_id', TQF.product_variant_id,
                   'timestamp', TQF.timestamp,
                   'winning_vendor', (
                     SELECT json_build_object(
@@ -1481,7 +1479,7 @@ LIMIT $5 OFFSET $4;`,
                 )
                 FROM tbl_quote_finalization TQF
                 WHERE TQF.quote_id = TQI.quote_id
-                  AND TQF.product_id = TQI.product_id
+                  AND TQF.product_variant_id = TQI.product_variant_id
                   AND TQF.variant = TQI.variant
               ),
               'quote_details', (
@@ -1523,7 +1521,7 @@ LIMIT $5 OFFSET $4;`,
                     'id', TH.id,
                     'quote_item_id', TH.quote_item_id,
                     'rfq_id', TH.rfq_id,
-                    'product_id', TH.product_id,
+                    'product_id', TH.product_variant_id,
                     'unit_price', TH.unit_price,
                     'package_price', TH.package_price,
                     'tax', TH.tax,
@@ -1543,7 +1541,7 @@ LIMIT $5 OFFSET $4;`,
             )
             FROM tbl_quote_items TQI
             WHERE TQI.rfq_id = $1
-              AND TQI.product_id = TRF.product_id
+              AND TQI.product_variant_id = TRF.product_variant_id
               AND TQI.variant = TRF.variant              
               ${TA_Vendors === "TA" ? vendorCondition : ''}
           ) AS "quotations"
@@ -4382,7 +4380,7 @@ getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
               ARRAY(
                   SELECT json_build_object(
                       'id', RFQ_P.id,
-                      'product_id', RFQ_P.product_id,
+                      'product_id', RFQ_P.product_variant_id,
                       'tbl_rfq_product_tech_evaluation_id', (
                           SELECT TE.id
                           FROM tbl_rfq_product_tech_evaluation TE
@@ -4398,22 +4396,23 @@ getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
                               )
                           )
                           FROM tbl_rfq_products_specs RFQ_P_SPEC
-                          WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id
+                          WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id
                             AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
                             AND RFQ_P.variant = RFQ_P_SPEC.variant
                       ),
                       'product_details', (
                           SELECT json_agg(
                               json_build_object(
-                                  'id', T_P.id,
-                                  'name', T_P.name,
-                                  'description', T_P.description,
+                                  'id', TV.id,
+                                  'name', TV.name,
+                                  'description', TV.description,
                                   'manufacturer', T_P.manufacturer,
                                   'availability', T_P.availability
                               )
                           )
-                          FROM tbl_product T_P
-                          WHERE RFQ_P.product_id = T_P.id
+                          FROM tbl_product_variant TV
+                          JOIN tbl_product T_P ON TV.product_id = T_P.id
+                          WHERE RFQ_P.product_variant_id = T_P.id
                       )
                   )
                   FROM tbl_rfq_products RFQ_P
