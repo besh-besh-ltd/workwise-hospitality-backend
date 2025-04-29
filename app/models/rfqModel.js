@@ -2178,7 +2178,10 @@ WHERE row_num_by_name_category = 1
         WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
       ) rfqv ON rfqv.user_id = tu.id
       
-${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON pvvm.id = vum.product_variant_id` : ``}
+${approved_by_id != '' ? `
+  JOIN tbl_vendorapprove_product_mapping vum 
+    ON vum.variant_vendor_mapping_id = pvvm.id
+` : ``}
 
       WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pvvm.is_approved
         AND tu.is_deleted = 0 AND tu.status = 1 
@@ -2205,7 +2208,9 @@ ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON pvvm.id 
           )
         ` : ``}                  
         ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-        ${approved_by_id != '' ? `AND (vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")}) OR vum.vendor_approve_id IS NULL)` : ``} 
+${approved_by_id != '' ? `
+  AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")})
+` : ``}
 
         AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
         ${myVendorType == 'is_private' ? `AND tc.is_private = 1 AND bvm.vendor_id IS NOT NULL` : ``}
@@ -4500,10 +4505,7 @@ getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
                           SELECT json_agg(
                               json_build_object(
                                   'id', TV.id,
-                                  'name', TV.name,
-                                  'description', TV.description,
-                                  'manufacturer', T_P.manufacturer,
-                                  'availability', T_P.availability
+                                  'name', TV.name
                               )
                           )
                           FROM tbl_product_variant TV
