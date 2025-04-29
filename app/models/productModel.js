@@ -2253,8 +2253,8 @@ WHERE tbl_product.name = $1`,
               FROM tbl_rfq TR
               JOIN tbl_rfq_products TRP
                   ON TRP.rfq_id = TR.id
-              JOIN tbl_product TP
-                  ON TP.id = TRP.product_id
+              JOIN tbl_product_variant PV ON PV.id = TRP.product_variant_id
+            JOIN tbl_product TP ON TP.id = PV.product_id
               WHERE TR.created_by = $1
                   AND TP.is_deleted = 0 AND TP.is_approve = 1
               GROUP BY 
