@@ -463,7 +463,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             AND TQM.is_seen = false
             ) AS "unseen_query_count",         
             ARRAY(
-                SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_id,
+                SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_variant_id,
                     'product_categories', (
                         SELECT json_agg(json_build_object('category_id',TPC.category_id,'category_name',TC.title))
                         FROM tbl_product_categories TPC
@@ -471,14 +471,15 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                         WHERE TPC.product_id = RFQ_P.id
                     ),
                     'product_specs', (
-                        SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'product_id', RFQ_P_SPEC.product_id, 'rfq_id', RFQ_P_SPEC.rfq_id))
+                        SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'product_id', RFQ_P_SPEC.product_variant_id, 'rfq_id', RFQ_P_SPEC.rfq_id))
                         FROM tbl_rfq_products_specs RFQ_P_SPEC
-                        WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
+                        WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
                     ),
                     'product_details', (
-                        SELECT json_agg(json_build_object('id', T_P.id,'name', T_P.name, 'description', T_P.description, 'manufacturer', T_P.manufacturer, 'availability', T_P.availability, 'description', T_P.description ))
-                        FROM tbl_product T_P
-                        WHERE RFQ_P.product_id = T_P.id
+                        SELECT json_agg(json_build_object('id', T_V.id,'name', T_V.name, 'description', T_P.description ))
+                        FROM tbl_product_variant T_V
+                        JOIN tbl_product T_P ON T_P.id = T_V.product_id
+                        WHERE RFQ_P.product_variant_id = T_P.id
                     ),
                     'vendor_details', (
                         SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id,
@@ -493,13 +494,13 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                             )
                         ))
                         FROM tbl_rfq_product_vendors RFQ_P_V
-                        WHERE RFQ_P.product_id = RFQ_P_V.product_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
+                        WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
                         AND RFQ_P_V.user_id = ${user_id} 
                     )
                 )
                 FROM tbl_rfq_products RFQ_P
-                JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.product_id = RFQ_P.product_id
-                WHERE RFQ.id = RFQ_P.rfq_id AND trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.product_id = RFQ_P.product_id
+                JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.product_variant_id = RFQ_P.product_variant_id
+                WHERE RFQ.id = RFQ_P.rfq_id AND trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.product_variant_id = RFQ_P.product_variant_id
             ) AS "products" ,
             CASE 
                 WHEN EXISTS (
