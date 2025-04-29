@@ -207,7 +207,7 @@ const insertProduct = async (
 ) => {
   try {
     let tbl_rfq_products_data = {
-      product_id,
+      product_variant_id: product_id,
       variant,
       comment,
       datasheet,
@@ -220,18 +220,18 @@ const insertProduct = async (
     
     let spec_array = spec?.map((item) => {
       item.rfq_id = created_rfq_id;
-      item.product_id = product_id;
+      item.product_variant_id = product_id;
       item.variant = variant;
       return item;
     });
-    const spec_keys = ['title', 'value', 'rfq_id', 'product_id', 'variant'];
+    const spec_keys = ['title', 'value', 'rfq_id', 'product_variant_id', 'variant'];
 
-    const vendor_keys = ['user_id', 'rfq_id', 'product_id', 'variant'];
+    const vendor_keys = ['user_id', 'rfq_id', 'product_variant_id', 'variant'];
     var vendor_array = [];
     if (vendors.length > 0) {
       vendor_array = vendors.map((item) => {
         item.rfq_id = created_rfq_id;
-        item.product_id = product_id;
+        item.product_variant_id = product_id;
         item.variant = variant;
         return item;
       });
@@ -1510,6 +1510,7 @@ const rfqController = {
             data: rfqItem.length > 0 ? rfqItem[0] : rfqItem
         });
     } catch (error) {
+        console.log(error)
         logError("Error fetching RFQ creation data:", error);
         res.status(500).json({
             status: 3,
@@ -1574,15 +1575,15 @@ const rfqController = {
 
         // Add products to the RFQ
         const product = req.body;
-        if (!product || !product.product_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
+        if (!product || !product.variant_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
           return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
         }
 
-        const variant = await rfqModel.getNextVariant(rfq_id, product.product_id);
+        const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
 
         const productData = {
             rfq_id,
-            product_id: product.product_id,
+            product_variant_id: product.variant_id,
             variant: variant,
             comment: "",
             datasheet: "",
@@ -1598,7 +1599,7 @@ const rfqController = {
 
             const vendorData = {
                 rfq_id,
-                product_id: product.product_id,
+                product_variant_id: product.variant_id,
                 user_id: vendor.vendor_id,
                 variant: variant
             };
@@ -1614,6 +1615,7 @@ const rfqController = {
         });
 
     } catch (error) {
+      console.log(error)
         logError("Error while creating or updating RFQ with products:", error);    
         res.status(500).json({
             status: 3,
@@ -2367,7 +2369,7 @@ const rfqController = {
                   quote_items_data.push({
                     rfq_id,
                     rfq_no,
-                    product_id,
+                    product_variant_id: product_id,
                     product_name,
                     unit_price,
                     package_price,
@@ -2383,7 +2385,7 @@ const rfqController = {
                   quote_items_data.push({
                     rfq_id,
                     rfq_no,
-                    product_id,
+                    product_variant_id: product_id,
                     product_name,
                     unit_price:0,
                     package_price,
@@ -2399,7 +2401,7 @@ const rfqController = {
                   quote_items_data.push({
                     rfq_id,
                     rfq_no,
-                    product_id,
+                    product_variant_id: product_id,
                     product_name,
                     unit_price:0,
                     package_price,
@@ -2428,7 +2430,7 @@ const rfqController = {
                 'rfq_id',
                 'rfq_no',
                 'quote_id',
-                'product_id',
+                'product_variant_id',
                 'product_name',
                 'unit_price',
                 'package_price',
@@ -2496,7 +2498,7 @@ const rfqController = {
               'rfq_id',
               'rfq_no',
               'quote_id',
-              'product_id',
+              'product_variant_id',
               'product_name',
               'unit_price',
               'package_price',
@@ -4752,7 +4754,7 @@ const rfqController = {
         if (!searchedPro || searchedPro.length === 0) {
           validationErrors.push({
             // row: jsonData.indexOf(value) + 1,
-            errors: { product: productName + " - No product name found " }
+            errors: { product: productName + " - No variant name found " }
           });
           continue; // Skip this product
         }
@@ -4791,7 +4793,7 @@ const rfqController = {
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             // row: jsonData.indexOf(value) + 1,
-            errors: { vendor: productName + " - `No vendor found for product " }
+            errors: { vendor: productName + " - `No vendor found for variant " }
           });
           continue; // Skip this product
         }
@@ -4809,8 +4811,6 @@ const rfqController = {
 
         // Iterate over the existing products array to find the same product name and increment the variant
         products.forEach((product) => {
-          console.log("PRODUCT: ", product)
-          console.log("SEARCH KEY: ", search_key)
           if (product.name === search_key.name && product.product_id === search_key.id) {
             variant = Math.max(variant, product.variant) + 1;
           }
@@ -4819,8 +4819,6 @@ const rfqController = {
         // create product object and push in products array
         const product = {
           product_id:  search_key?.id,
-          predefined_tds_file: search_key.pd_tds_file_url,
-          predefined_qap_file: search_key.pd_qap_file_url,
           name: search_key.name,
           variant: variant,
           spec: spec,

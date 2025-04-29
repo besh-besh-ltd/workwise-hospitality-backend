@@ -624,6 +624,11 @@ const productModel = {
       resolve();
       
       /* Original code commented out
+      // Returning a success response without adding to missing table
+      console.log('Warning: tbl_vendorapprove_product_mapping table does not exist. Skipping approval mapping.');
+      resolve();
+      
+      /* Original code commented out
       // Construct the dynamic SQL query
       const { ColumnSet } = pgp().helpers;
       const cs = new ColumnSet(['product_id', 'vendor_approve_id'], {

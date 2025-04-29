@@ -584,88 +584,8 @@ const productController = {
         await productModel.createProductCategories(categoryObj);
       }
 
-      // ---------------- variations ----------------
-      for await (const { attribute, selectedValues } of values.variations) {
-        console.log(attribute, selectedValues);
-        let attributeObj = {
-          product_id: productId,
-          attribute_id: attribute
-        };
-        let attributeId = await productModel.createProductAttribute(
-          attributeObj
-        );
-
-        const productAttributeId = attributeId.id;
-
-        for await (const attributeValueId of selectedValues) {
-          let attributeValuesObj = {
-            product_attribute_id: productAttributeId,
-            attribute_value_id: attributeValueId
-          };
-          let productAttributeValueId =
-            await productModel.createProductAttributeValue(attributeValuesObj);
-        }
-      }
-
       console.log('=====>>>>>>>>>>>>>>>>', values.variationOptions);
 
-      // ---------------- variation_options ----------------
-      for await (const optValues of values.variationOptions) {
-        // insert variant_options
-
-        let variantOptionsObj = {
-          title: optValues.title,
-          product_id: productId,
-          price: optValues.price,
-          quantity: optValues.quantity,
-          sku: optValues.sku,
-          status: optValues.status
-        };
-        let productVariantOptions =
-          await productModel.createProductVariantOptions(variantOptionsObj);
-
-        const variantOptionId = productVariantOptions.id;
-
-        let variantObj = {
-          variant_option: optValues.title,
-          product_id: productId,
-          variant_option_id: variantOptionId
-        };
-
-        let productVariant = await productModel.createProductVariant(
-          variantObj
-        );
-
-        const variantId = productVariant.id;
-
-        for await (const attributeValueId of optValues.options) {
-          let getAttributeValue = await productModel.getAttributeValue(
-            attributeValueId
-          );
-
-          let attributeId = getAttributeValue[0].attribute_id;
-
-          let getProductAttributeId = await productModel.getProductAttribute(
-            attributeId,
-            productId
-          );
-          let productAttributeId = getProductAttributeId[0].id;
-
-          let getProductAttributeValueId =
-            await productModel.getProductAttributeValue(
-              productAttributeId,
-              attributeValueId
-            );
-          let optionProductAttributeValueId = getProductAttributeValueId[0].id;
-          let variantValueObj = {
-            variant_id: variantId,
-            product_attribute_value_id: optionProductAttributeValueId
-          };
-          let productVariant = await productModel.insertVariantValue(
-            variantValueObj
-          );
-        }
-      }
 
       res
         .status(200)
