@@ -1174,6 +1174,8 @@ const productModel = {
     dateTo,
     is_approve
   ) => {
+
+    // mukul 30/apr/20230, implemented changes related to new product flowe ( product variant and variant mapping )
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       // Product name search with full-text search and similarity
@@ -1187,13 +1189,20 @@ const productModel = {
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
       }
-      if (vendorId && vendorId != '') {
-        dynamicQuery += ` AND PD.created_by = ${vendorId}`;
+  
+      if (vendorId && vendorId !== '') {
+        dynamicQuery += `
+          AND EXISTS (
+            SELECT 1 FROM tbl_product_variant pv
+            JOIN tbl_product_variant_vendor_mapping pvm
+            ON pv.id = pvm.product_variant_id
+            WHERE pv.product_id = PD.id AND pvm.vendor_id = ${vendorId}
+          )`;
       }
-      if (userId && userId != '') {
+      if (userId && userId !== '') {
         dynamicQuery += ` AND PD.added_by = ${userId}`;
       }
-      if (isFeatured && isFeatured != '') {
+      if (isFeatured && isFeatured !== '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
       if (categoryId) {
@@ -1216,24 +1225,23 @@ const productModel = {
       let q = `
       SELECT 
         PD.*, 
-        USERS.name as vendor_name,
+          NULL AS vendor_name,
         ${productName ? `
           similarity(PD.name, '${productName}') AS similarity_score,
           ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank,
         ` : ''}
         ARRAY
-        (SELECT json_build_object('category_name', tc.title,'id',tc.id )
+        (SELECT json_build_object('category_name', tc.title, 'id', tc.id)
           FROM tbl_product_categories pc
           LEFT JOIN tbl_category tc ON pc.category_id = tc.id
-          WHERE PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
+          WHERE PD.id = pc.product_id ORDER BY pc.id
+          ) AS product_categories,
         ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"
-            FROM tbl_product PD 
-            LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
-            WHERE USERS.is_deleted = 0 
-            AND PD.is_deleted = 0 
-            AND PD.is_review = 0 ${dynamicQuery}     
+        (SELECT json_build_object('name', pv.name, 'sku', pv.sku, 'id', pv.id)
+            FROM tbl_product_variant pv WHERE PD.id = pv.product_id) AS product_variants
+        FROM tbl_product PD 
+        WHERE PD.is_deleted = 0 
+          AND PD.is_review = 0 ${dynamicQuery}
         ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
         LIMIT ${limit} OFFSET $1
       `;
