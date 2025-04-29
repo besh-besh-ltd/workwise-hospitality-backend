@@ -1124,7 +1124,7 @@ ${approved_by_id != '' ? `AND (vum.vendor_id IN (${approved_by_id.map(vui => vui
   getUserProducts: async (rfq_id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `select DISTINCT product_id, variant from tbl_rfq_product_vendors where rfq_id = $1 AND user_id=$2`,
+        `select DISTINCT product_variant_id AS product_id, variant from tbl_rfq_product_vendors where rfq_id = $1 AND user_id=$2`,
         [rfq_id,user_id]
       )
         .then(function (data) {
@@ -2918,7 +2918,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
       try {
 
         // For existing product or not
-        const existingProductQuery = `SELECT * FROM tbl_quote_items WHERE quote_id = $1 AND product_id = $2 AND variant = $3`
+        const existingProductQuery = `SELECT * FROM tbl_quote_items WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3`
         let existingProductWithNoChange = false;
         const existingProduct = await db.query(existingProductQuery,[quoteId, product.product_id,product.variant])
         if(existingProduct.length > 0){
@@ -2928,7 +2928,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         // Fetch existing quote item only if there are differences in specified fields
         const existingItemQuery = `
       SELECT * FROM tbl_quote_items
-      WHERE quote_id = $1 AND product_id = $2 AND variant = $3
+      WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3
        AND (unit_price != $4 OR package_price != $5 OR tax != $6 OR freight_price != $7 OR total_price != $8 OR comment != $9 OR delivery_period != $10)
    `;
         const result = await db.query(existingItemQuery, [
@@ -2957,13 +2957,13 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           if (item) {
             // Move existing quote to quote history table
             const insertHistoryQuery = `INSERT INTO tbl_quote_item_history 
-          (quote_item_id, rfq_id, product_id, unit_price, package_price, tax, freight_price, total_price,
+          (quote_item_id, rfq_id, product_variant_id, unit_price, package_price, tax, freight_price, total_price,
            comment, delivery_period, quantity, variant, timestamp)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`;
             await db.query(insertHistoryQuery, [
               item.id,
               item.rfq_id,
-              item.product_id,
+              item.product_variant_id,
               item.unit_price,
               item.package_price,
               item.tax,
@@ -3000,7 +3000,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               rfq_id: quoteExists.rfq_id,
               rfq_no: quoteExists.rfq_no,
               quote_id: parseInt(quoteId),
-              product_id: product.product_id,
+              product_variant_id: product.product_id,
               product_name: product.product_name,
               unit_price: product.unit_price,
               package_price: product.package_price,
@@ -3022,7 +3022,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               'rfq_id',
               'rfq_no',
               'quote_id',
-              'product_id',
+              'product_variant_id',
               'product_name',
               'unit_price',
               'package_price',
@@ -3086,7 +3086,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     try {
       const existingItemQuery = `
         SELECT * FROM tbl_quote_items
-        WHERE quote_id = $1 AND product_id = $2 AND variant = $3`;
+        WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3`;
 
       const result = await db.query(existingItemQuery, [
         quoteId,
