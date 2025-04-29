@@ -582,10 +582,11 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       ARRAY(
           SELECT json_build_object(
               'id', RFQ_P.id,
-              'product_id', RFQ_P.product_id,
+              'product_id', RFQ_P.product_variant_id,
               'predefined_tds_file', RFQ_P.datasheet_file,
               'predefined_qap_file', RFQ_P.qap_file,
-              'name', T_P.name,
+              'name', TV.name,
+              'product_name', T_P.name,
               'variant', RFQ_P.variant,
               'spec', (
                   SELECT json_agg(json_build_object(
@@ -593,7 +594,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                       'value', RFQ_P_SPEC.value
                   ))
                   FROM tbl_rfq_products_specs RFQ_P_SPEC
-                  WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id 
+                  WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id 
                     AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
                     AND RFQ_P.variant = RFQ_P_SPEC.variant
               ),
@@ -604,7 +605,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                   ))
                   FROM tbl_rfq_product_vendors RFQ_P_V
                   LEFT JOIN tbl_users U ON RFQ_P_V.user_id = U.id
-                  WHERE RFQ_P.product_id = RFQ_P_V.product_id 
+                  WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
                     AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
                     AND RFQ_P.variant = RFQ_P_V.variant
               ),
@@ -630,7 +631,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
               'user_selected_predefined_qap', (RFQ_P.qap = '1')
           )
           FROM tbl_rfq_products RFQ_P
-          LEFT JOIN tbl_product T_P ON RFQ_P.product_id = T_P.id
+          LEFT JOIN tbl_product_variant TV ON RFQ_P.product_variant_id = TV.id
+          LEFT JOIN tbl_product T_P ON T_P.id = TV.product_id
           WHERE RFQ.id = RFQ_P.rfq_id
           ORDER BY RFQ_P.id
       ) AS rfq_products
@@ -658,7 +660,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       const query = `
           SELECT COALESCE(MAX(variant), -1) AS max_variant
           FROM tbl_rfq_products
-          WHERE rfq_id = $1 AND variant_id = $2
+          WHERE rfq_id = $1 AND product_variant_id = $2
       `;
       const values = [rfq_id, product_id];
 
@@ -760,7 +762,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             SELECT json_build_object( 'id', TUU.id, 'name', TUU.name, 'email', TUU.email, 'mobile', TUU.mobile, 'address', TUU.address, 'organization_name', TUU.organization_name ) FROM tbl_users TUU WHERE TUU.id = TQF.vendor_id
           ),
         'product_details', (
-          SELECT json_build_object( 'id', TPP.id, 'name', TPP.name, 'description', TPP.description, 'manufacturer', TPP.manufacturer, 'availability', TPP.availability, 'description', TPP.description ) FROM tbl_product_variant TPP WHERE TPP.id = TQF.product_variant_id
+          SELECT json_build_object( 'id', TV.id, 'name', TV.name, 'description', TPP.description ) FROM tbl_product_variant TV JOIN tbl_product TPP ON TPP.id = TV.product_id WHERE TV.id = TQF.product_variant_id
         )
       ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id
   ) AS "finalizations",
@@ -845,17 +847,10 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id AND RFQ_P.variant = RFQ_P_SPEC.variant
           ),
           'product_details', (
-            SELECT json_agg(json_build_object('id', T_P.id,'name', T_P.name, 'description', T_P.description, 'manufacturer', T_P.manufacturer, 'availability', T_P.availability, 'description', T_P.description,
-                'predefined_tds_file',
-                CASE
-                  WHEN T_P.tds_new_file_name IS NULL THEN NULL
-                  ELSE T_P.tds_new_file_name END,
-                'predefined_qap_file',
-                CASE
-                  WHEN T_P.qap_new_file_name IS NULL THEN NULL
-                  ELSE T_P.qap_new_file_name END))
-            FROM tbl_product_variant T_P
-            WHERE RFQ_P.product_variant_id = T_P.id
+            SELECT json_agg(json_build_object('id', T_V.id,'name', T_V.name, 'description', T_P.description))
+            FROM tbl_product_variant T_V
+            JOIN tbl_product T_P ON T_P.id = T_V.product_id
+            WHERE RFQ_P.product_variant_id = T_V.id
           ),
           -- New finalization_status field for each product
           'finalization_status', COALESCE(

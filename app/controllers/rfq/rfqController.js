@@ -207,7 +207,7 @@ const insertProduct = async (
 ) => {
   try {
     let tbl_rfq_products_data = {
-      product_id,
+      product_variant_id: product_id,
       variant,
       comment,
       datasheet,
@@ -220,18 +220,18 @@ const insertProduct = async (
     
     let spec_array = spec?.map((item) => {
       item.rfq_id = created_rfq_id;
-      item.product_id = product_id;
+      item.product_variant_id = product_id;
       item.variant = variant;
       return item;
     });
-    const spec_keys = ['title', 'value', 'rfq_id', 'product_id', 'variant'];
+    const spec_keys = ['title', 'value', 'rfq_id', 'product_variant_id', 'variant'];
 
-    const vendor_keys = ['user_id', 'rfq_id', 'product_id', 'variant'];
+    const vendor_keys = ['user_id', 'rfq_id', 'product_variant_id', 'variant'];
     var vendor_array = [];
     if (vendors.length > 0) {
       vendor_array = vendors.map((item) => {
         item.rfq_id = created_rfq_id;
-        item.product_id = product_id;
+        item.product_variant_id = product_id;
         item.variant = variant;
         return item;
       });
@@ -1510,6 +1510,7 @@ const rfqController = {
             data: rfqItem.length > 0 ? rfqItem[0] : rfqItem
         });
     } catch (error) {
+        console.log(error)
         logError("Error fetching RFQ creation data:", error);
         res.status(500).json({
             status: 3,
@@ -1614,6 +1615,7 @@ const rfqController = {
         });
 
     } catch (error) {
+      console.log(error)
         logError("Error while creating or updating RFQ with products:", error);    
         res.status(500).json({
             status: 3,
@@ -4752,7 +4754,7 @@ const rfqController = {
         if (!searchedPro || searchedPro.length === 0) {
           validationErrors.push({
             // row: jsonData.indexOf(value) + 1,
-            errors: { product: productName + " - No product name found " }
+            errors: { product: productName + " - No variant name found " }
           });
           continue; // Skip this product
         }
@@ -4791,7 +4793,7 @@ const rfqController = {
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             // row: jsonData.indexOf(value) + 1,
-            errors: { vendor: productName + " - `No vendor found for product " }
+            errors: { vendor: productName + " - `No vendor found for variant " }
           });
           continue; // Skip this product
         }
@@ -4809,8 +4811,6 @@ const rfqController = {
 
         // Iterate over the existing products array to find the same product name and increment the variant
         products.forEach((product) => {
-          console.log("PRODUCT: ", product)
-          console.log("SEARCH KEY: ", search_key)
           if (product.name === search_key.name && product.product_id === search_key.id) {
             variant = Math.max(variant, product.variant) + 1;
           }
@@ -4819,8 +4819,6 @@ const rfqController = {
         // create product object and push in products array
         const product = {
           product_id:  search_key?.id,
-          predefined_tds_file: search_key.pd_tds_file_url,
-          predefined_qap_file: search_key.pd_qap_file_url,
           name: search_key.name,
           variant: variant,
           spec: spec,
