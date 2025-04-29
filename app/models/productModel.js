@@ -1347,6 +1347,7 @@ const productModel = {
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
+      let joinQuery = '';
       if (productName && productName != '') {
         dynamicQuery += `
           AND (
@@ -1358,7 +1359,8 @@ const productModel = {
         dynamicQuery += ` AND id IN (${filterProduct.id_array})`;
       }
       if (vendorId && vendorId != '') {
-        dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
+        joinQuery += `JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = PV.id AND pvvm.vendor_id = ${vendorId} `
+        dynamicQuery += ` AND pvvm.id IS NOT NULL'`;
       }
 
       let q = `
@@ -1377,12 +1379,14 @@ const productModel = {
             ARRAY
           (SELECT json_build_object('vendor_approve_name', tva.vendor_approve,'id',tva.id )
             FROM tbl_vendorapprove_product_mapping tvpm 
+          ${joinQuery}
           LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
           WHERE PD.id = tvpm.product_id) AS "product_approve_by",
           ARRAY
             (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
               FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"
-              FROM tbl_product PD 
+              FROM tbl_product_variant PV
+              JOIN tbl_product PD ON PD.id = PV.product_id
               LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
               WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 AND PD.is_review = 1 ${dynamicQuery}     
           ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`}
@@ -2011,7 +2015,7 @@ FROM (
           ELSE pd.qap_new_file_name
           END AS qap_new_file_name,
           CASE
-          WHEN PD.tds_new_file_name IS NULL THEN
+        WHEN PD.tds_new_file_name IS NULL THEN
           NULL
           ELSE pd.tds_new_file_name
           END AS tds_new_file_name,
