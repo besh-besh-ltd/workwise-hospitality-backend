@@ -1191,6 +1191,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
       terms,
       rfq_type,
       reverse_auction,
+      ra_start_date,
+      ra_end_date,
       project_id,
       term_and_condition_files
   } = reqBody;
@@ -1207,6 +1209,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
       location,
       rfq_type,
       reverse_auction,
+      ra_start_date: reverse_auction == 1 ? ra_start_date : null,
+      ra_end_date: reverse_auction == 1 ? ra_end_date : null,
       is_published: 0,
       updated_by: user_id
   };
@@ -1293,11 +1297,31 @@ const rfqController = {
         location,
         rfq_type,
         reverse_auction,
-        project_id
+        project_id,
+        ra_start_date,
+        ra_end_date
       } = req.body;
       const response_email = req.body.response_email?.toLowerCase();
       const is_update = !!rfq_id;
       const user_id = req.user.id;
+
+      // Set default auction dates if reverse auction is enabled
+      if (reverse_auction == 1) {
+        
+        // FORCE set auction start date to today if not provided or empty
+        if (!ra_start_date || ra_start_date === '') {
+          ra_start_date = new Date().toISOString().split('T')[0];
+        }
+        
+        // FORCE set auction end date to bid_end_date if not provided or empty
+        if ((!ra_end_date || ra_end_date === '') && bid_end_date) {
+          ra_end_date = bid_end_date;
+        }
+      } else {
+        // If reverse auction is disabled, set auction dates to null
+        ra_start_date = null;
+        ra_end_date = null;
+      }
 
       if(!rfq_id){
         const nextRFQNumber = await getNextRfQNumber();
@@ -1315,8 +1339,11 @@ const rfqController = {
           rfq_no: nextRFQNumber,
           created_by: user_id,
           updated_by: user_id,
-          reverse_auction
+          reverse_auction,
+          ra_start_date: ra_start_date || null,
+          ra_end_date: ra_end_date || null
         };
+
 
         if(project_id!=-1){
           tbl_rfq_data.project_id=project_id;
@@ -1327,6 +1354,9 @@ const rfqController = {
         if (response.length > 0) {
           req.body.rfq_id = response[0].id;
           rfq_id = response[0].id;
+          
+          // Verify the saved data
+          const savedRfq = await rfqModel.getRFQDetails(rfq_id);
         }  
       }
 
@@ -1390,11 +1420,20 @@ const rfqController = {
       const rfq_id = data.rfq_id;   
       delete data.rfq_id; // Remove rfq_id from update fields
 
-
-      const rfqDetails =  await rfqModel.getRFQDetails(rfq_id)
-
-      const buyerName = req.user.organization_name || req.user.name
-      const rfq_no = rfqDetails[0]?.rfq_no || ''
+      // Explicitly handle potential empty strings from frontend, converting them to null
+      if ('ra_start_date' in data && data.ra_start_date === '') {
+          data.ra_start_date = null;
+      }
+      if ('ra_end_date' in data && data.ra_end_date === '') {
+          data.ra_end_date = null;
+      }
+      if ('bid_end_date' in data && data.bid_end_date === '') {
+          data.bid_end_date = null;
+      }
+      // Ensure reverse_auction is boolean/integer if present
+       if ('reverse_auction' in data) {
+         data.reverse_auction = data.reverse_auction ? 1 : 0;
+       }
 
       //  Ensure project_id is either an integer or null
       if ('project_id' in data && data.project_id !== null && data.project_id !== undefined) {
@@ -1897,6 +1936,46 @@ const rfqController = {
         req.user.user_type
       );
 
+      // Fix for auction dates - Enhanced logging and data transformation
+      if (rfQItem && rfQItem.length > 0) {
+        
+        // Ensure auction dates are properly formatted strings, not null/undefined
+        if (rfQItem[0].reverse_auction === 1) {
+          // If reverse auction is enabled but dates are empty, set default values
+          if (!rfQItem[0].ra_start_date || rfQItem[0].ra_start_date === '' || rfQItem[0].ra_start_date === 'null') {
+            rfQItem[0].ra_start_date = new Date().toISOString().split('T')[0];
+          }
+          
+          if (!rfQItem[0].ra_end_date || rfQItem[0].ra_end_date === '' || rfQItem[0].ra_end_date === 'null') {
+            if (rfQItem[0].bid_end_date) {
+              rfQItem[0].ra_end_date = rfQItem[0].bid_end_date;
+            } else {
+              // If no bid_end_date, set to 7 days from now
+              const endDate = new Date();
+              endDate.setDate(endDate.getDate() + 7);
+              rfQItem[0].ra_end_date = endDate.toISOString().split('T')[0];
+            }
+          }
+          
+          // Update the database with these defaults if they were missing
+          if (rfQItem[0].ra_start_date && rfQItem[0].ra_end_date) {
+            try {
+              await rfqModel.update('tbl_rfq', {
+                ra_start_date: rfQItem[0].ra_start_date,
+                ra_end_date: rfQItem[0].ra_end_date
+              }, id);
+            } catch (updateError) {
+              console.error("Error updating auction dates:", updateError);
+            }
+          }
+        } else {
+          // If reverse auction is disabled, explicitly set dates to empty strings for frontend
+          rfQItem[0].ra_start_date = '';
+          rfQItem[0].ra_end_date = '';
+        }
+        
+      }
+
       if (req.user.user_type != 2) {
         const userProducts = await rfqModel.getUserProducts(id, req.user.id);
         if (
@@ -1954,155 +2033,6 @@ const rfqController = {
         .end();
     }
   },
-  /*   rfqList: async (req, res, next) => {
-    try {
-      let vendorId = req.user.id;
-      let page,
-        limit,
-        offset,
-        products = [];
-      if (req.query.page && req.query.page > 0) {
-        page = req.query.page;
-        limit = req.query.limit || Config.globalAdminLimit;
-        offset = (page - 1) * limit;
-      } else {
-        limit = Config.globalAdminLimit;
-        offset = 0;
-      }
-      let productName = req.query?.productName;
-      let filterProduct = {};
-      let vendorApprove = req.query?.vendorApprove;
-      if (vendorApprove) {
-        filterProduct = await productModel.getApprovedByProduct(vendorApprove);
-      }
-      if (req.query?.download == 'true' && req.query?.downloadAll === 'true') {
-        offset = 0;
-        limit = 'ALL';
-      }
-      if (req.query?.download == 'true' && req.query?.product_ids) {
-        products = JSON.parse(req.query.product_ids);
-      }
-
-      let productList = await productModel.getVendorProductList(
-        limit,
-        offset,
-        vendorId,
-        productName,
-        filterProduct,
-        products
-      );
-      let productCount = await productModel.getVendorProductCount(
-        vendorId,
-        productName,
-        filterProduct
-      );
-
-      if (req.query.download == 'true') {
-        const workbook = new excelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Products');
-
-        // Add headers
-        worksheet.columns = [
-          { header: 'S no.', key: 's_no', width: 5 },
-          { header: 'Name', key: 'name', width: 20 },
-          { header: 'Manufacturer', key: 'manufacturer', width: 20 },
-          // { header: 'Slug', key: 'slug', width: 20 },
-          { header: 'Category', key: 'category', width: 20 },
-          { header: 'Specification Key', key: 'specification_Key', width: 20 },
-          {
-            header: 'Specification Value',
-            key: 'specification_value',
-            width: 20
-          },
-          { header: 'Approved By', key: 'vendor_approve', width: 20 },
-          { header: 'Availability', key: 'availability', width: 20 },
-          { header: 'Status', key: 'status', width: 20 }
-        ];
-
-        let counter = 1;
-
-        productList.forEach((prod) => {
-          prod.s_no = counter;
-          prod.availability =
-            prod.availability == 1 ? 'Available' : 'Not Available';
-          prod.status = prod.status == 1 ? 'Active' : 'Not active';
-          prod.category = prod.product_categories[0]?.category_name || '';
-          prod.specification_Key = prod.product_variants[0]?.variant_name || '';
-          prod.vendor_approve =
-            prod.product_approve_by.length > 0
-              ? prod.product_approve_by
-                  .map((item) => item.vendor_approve_name)
-                  .join(',')
-              : '';
-          prod.specification_value =
-            prod.product_variants[0]?.variant_value || '';
-          worksheet.addRow(prod); // Add data in worksheet
-          if (
-            prod.product_categories?.length > 1 ||
-            prod.product_variants?.length > 1
-          ) {
-            let maxCount = Math.max(
-              prod.product_categories?.length || 0,
-              prod.product_variants?.length || 0
-            );
-            for (let index = 1; index < maxCount; index++) {
-              let newData = {};
-              if (prod.product_categories[index]?.category_name) {
-                newData.category = prod.product_categories[index].category_name;
-              }
-              if (prod.product_variants[index]?.variant_name) {
-                newData.specification_Key =
-                  prod.product_variants[index].variant_name;
-                newData.specification_value =
-                  prod.product_variants[index].variant_value;
-              }
-              worksheet.addRow(newData);
-            }
-          }
-
-          counter++;
-        });
-
-        // Making first line in excel bold
-        worksheet.getRow(1).eachCell((cell) => {
-          cell.font = { bold: true };
-        });
-
-        // Set content type and disposition
-        res.setHeader(
-          'Content-Type',
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        );
-        res.setHeader(
-          'Content-Disposition',
-          'attachment; filename=products.xlsx'
-        );
-
-        // Write workbook to response
-        workbook.xlsx.write(res).then(() => {
-          res.end();
-        });
-      } else {
-        res
-          .status(200)
-          .json({
-            status: 1,
-            data: productList,
-            total_count: productCount.count
-          })
-          .end();
-      }
-    } catch (error) {
-      logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  }, */
   rfqList: async (req, res, next) => {
     try {
       let user_id = req.user.id;
@@ -2348,6 +2278,46 @@ const rfqController = {
       if (listRfq.length > 0) {
         let filteredRFQ = listRfq.filter((item) => item.id == rfq_id);
         if (filteredRFQ.length > 0) {
+          // Get RFQ details to check dates
+          const rfqDetails = await rfqModel.getRFQDetails(rfq_id);
+          if (!rfqDetails || rfqDetails.length === 0) {
+            return res
+              .status(404)
+              .json({
+                status: 0,
+                message: 'RFQ not found!'
+              })
+              .end();
+          }
+          
+          const now = new Date();
+          const bidEndDate = rfqDetails[0].bid_end_date ? new Date(rfqDetails[0].bid_end_date) : null;
+          const raStartDate = rfqDetails[0].ra_start_date ? new Date(rfqDetails[0].ra_start_date) : null;
+          const raEndDate = rfqDetails[0].ra_end_date ? new Date(rfqDetails[0].ra_end_date) : null;
+          const isReverseAuction = rfqDetails[0].reverse_auction === 1;
+          
+          // Check if bidding period is over (not in reverse auction mode)
+          if (bidEndDate && now > bidEndDate && (!isReverseAuction || !raStartDate)) {
+            return res
+              .status(400)
+              .json({
+                status: 3,
+                message: 'The bidding period for this RFQ has ended!'
+              })
+              .end();
+          }
+          
+          // If in reverse auction mode, check if we're past the reverse auction end date
+          if (isReverseAuction && raEndDate && now > raEndDate) {
+            return res
+              .status(400)
+              .json({
+                status: 3,
+                message: 'The reverse auction period for this RFQ has ended!'
+              })
+              .end();
+          }
+
           const tbl_quotes_data = {
             rfq_id,
             rfq_no,
@@ -4119,7 +4089,6 @@ const rfqController = {
         'Sedam',
         'Shikaripur',
         'Mahalingapura',
-        'Mudalagi',
         'Muddebihal',
         'Pavagada',
         'Malur',
@@ -4945,6 +4914,45 @@ const rfqController = {
       );
       if (!quoteExists) {
         return res.status(404).json({ message: 'Quote not found.' });
+      }
+
+      // Get RFQ details to check dates
+      const rfqDetails = await rfqModel.getRFQDetails(quoteExists[0].rfq_id);
+      if (!rfqDetails || rfqDetails.length === 0) {
+        return res.status(404).json({ 
+          status: 0,
+          message: 'RFQ not found!' 
+        });
+      }
+      
+      const now = new Date();
+      const bidEndDate = rfqDetails[0].bid_end_date ? new Date(rfqDetails[0].bid_end_date) : null;
+      const raStartDate = rfqDetails[0].ra_start_date ? new Date(rfqDetails[0].ra_start_date) : null;
+      const raEndDate = rfqDetails[0].ra_end_date ? new Date(rfqDetails[0].ra_end_date) : null;
+      const isReverseAuction = rfqDetails[0].reverse_auction === 1;
+      
+      // Check if bidding period is over and we're not in reverse auction mode
+      if (bidEndDate && now > bidEndDate && !isReverseAuction) {
+        return res.status(400).json({
+          status: 3,
+          message: 'The bidding period for this RFQ has ended!'
+        });
+      }
+      
+      // If in reverse auction mode, check if we're in the valid period
+      if (isReverseAuction) {
+        // If before auction start, update is allowed (normal bidding period)
+        if (raStartDate && now < raStartDate) {
+          // This is fine, within normal bidding period
+        } 
+        // If auction started but past end date, updates not allowed
+        else if (raEndDate && now > raEndDate) {
+          return res.status(400).json({
+            status: 3,
+            message: 'The reverse auction period for this RFQ has ended!'
+          });
+        }
+        // Otherwise we're in the auction period, updates are allowed
       }
 
       let paymentTermAndCommentChanges = false;

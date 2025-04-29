@@ -551,6 +551,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           'bid_end_date', RFQ.bid_end_date,
           'rfq_type', RFQ.rfq_type,
           'reverse_auction', RFQ.reverse_auction,
+          'ra_start_date', RFQ.ra_start_date,
+          'ra_end_date', RFQ.ra_end_date,
           'project_id', RFQ.project_id,
           'location', RFQ.location,
 
@@ -675,13 +677,44 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 
 
   getRfqById: async (id, user_id, user_type) => {
+    // First, let's directly check the auction dates in the database
+    try {
+      const dateCheckQuery = `
+        SELECT id, reverse_auction, ra_start_date, ra_end_date 
+        FROM tbl_rfq 
+        WHERE id = $1
+      `;
+      const dateCheckResult = await db.query(dateCheckQuery, [id]);
+      
+    } catch (error) {
+      console.error("Error checking auction dates:", error);
+    }
 
     //query changes by mukul on 20-11-2024 
     // type casting for TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
 
     //  query changed by mukul,
-    let q = `SELECT RFQ.*,
-    (SELECT COUNT(*)
+    let q = `SELECT 
+      RFQ.id,
+      RFQ.rfq_no,
+      RFQ.comment,
+      RFQ.company_name,
+      RFQ.response_email,
+      RFQ.contact_name,
+      RFQ.contact_number,
+      RFQ.bid_end_date,
+      RFQ.location,
+      RFQ.is_published,
+      RFQ.created_by,
+      RFQ.updated_by,
+      RFQ.timestamp,
+      RFQ.status,
+      RFQ.rfq_type,
+      RFQ.reverse_auction,
+      RFQ.ra_start_date, -- Select raw timestamp
+      RFQ.ra_end_date,   -- Select raw timestamp
+      RFQ.project_id,
+      (SELECT COUNT(*)
      FROM tbl_query_messages TQM
      WHERE TQM.receiver_id = ${user_id}
      AND TQM.rfq_id = RFQ.id
@@ -844,6 +877,24 @@ deleteProductFilesByIds: async (rfqProductIds) => {
               user_type == 3
         ? `-- Changes made by Imtiaj 28/09/2024 [Added logic to get the lowest_total from quotes for each unique product with the specified RFQ_id.] 
                 'lowest_quotation', (
+                        -- Check if this product has technical evaluation enabled (has clauses)
+                        WITH tech_eval AS (
+                            SELECT TE.id AS tech_eval_id
+                            FROM tbl_rfq_product_tech_evaluation TE
+                            JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON TE.id = TEC.tbl_rfq_product_tech_evaluation_id
+                            WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
+                            LIMIT 1
+                        ),
+                        
+                        -- Check if current vendor is technically accepted for this product
+                        tech_accepted AS (
+                            SELECT 1 AS is_accepted
+                            FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
+                            JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                            WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
+                            LIMIT 1
+                        )
+                        -- Changes made by Agnij 28/04/2025 [Added logic to handle reverse auction timing conditions and visibility rules for lowest quote prices]
                         SELECT json_build_object(
                             'quote_id', TQI.quote_id,
                             'total_price', TQI.total_price
@@ -854,15 +905,82 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                         AND TQI.rfq_id = RFQ_P.rfq_id  -- Ensure you're getting quotes for the specific RFQ
                         AND TQI.total_price > 0 
                         AND RFQ.reverse_auction = 1
+                        -- Apply technical evaluation filtering if enabled for this product
                         AND (
-                            (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != '' 
-                            AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
-                        OR
-                            (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = '' 
-                            AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '1 days') <= CURRENT_TIMESTAMP)
+                            -- If no technical evaluation exists for this product OR
+                            -- vendor is technically accepted, OR
+                            -- if reverse auction ends before/with RFQ end date
+                            (SELECT COUNT(*) FROM tech_eval) = 0
+                            OR (SELECT COUNT(*) FROM tech_accepted) > 0
+                            OR (
+                                -- Special case: For technically evaluated products where RA ends before RFQ end date
+                                -- Show lowest quote only to technically accepted vendors
+                                (SELECT COUNT(*) FROM tech_eval) > 0
+                                AND RFQ.ra_end_date IS NOT NULL
+                                AND RFQ.bid_end_date IS NOT NULL
+                                AND CAST(RFQ.ra_end_date AS TIMESTAMP) <= CAST(RFQ.bid_end_date AS TIMESTAMP)
+                                AND (
+                                    -- Check if vendor is technically accepted
+                                    (SELECT COUNT(*) FROM tech_accepted) > 0
+                                )
+                            )
+                        )
+                        -- Timing conditions for when lowest quote should be visible
+                        AND (
+                            -- Show lowest quote if current time is within auction period
+                            (
+                                RFQ.ra_start_date IS NOT NULL 
+                                AND RFQ.ra_end_date IS NOT NULL
+                                AND CURRENT_TIMESTAMP BETWEEN 
+                                    CAST(RFQ.ra_start_date AS TIMESTAMP) 
+                                    AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
+                            )
+                            OR
+                            -- If reverse auction starts after RFQ ends
+                            (
+                                RFQ.ra_start_date IS NOT NULL
+                                AND RFQ.bid_end_date IS NOT NULL
+                                AND CAST(RFQ.ra_start_date AS TIMESTAMP) >= CAST(RFQ.bid_end_date AS TIMESTAMP)
+                            )
+                            OR
+                            -- Fallback to old logic if auction dates aren't set
+                            (
+                                (RFQ.ra_start_date IS NULL OR RFQ.ra_end_date IS NULL)
+                                AND 
+                                (
+                                    (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != '' 
+                                    AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
+                                    OR
+                                    (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = '' 
+                                    AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '1 days') <= CURRENT_TIMESTAMP)
+                                )
+                            )
                         )
                         ORDER BY TQI.total_price ASC  -- Get the lowest total_price
                         LIMIT 1  -- Limit to the lowest price for that product and variant
+                    ),
+                    -- Get technical evaluation status for this product/vendor
+                    'tech_evaluation_status', (
+                        WITH tech_eval AS (
+                            SELECT TE.id AS tech_eval_id
+                            FROM tbl_rfq_product_tech_evaluation TE
+                            JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON TE.id = TEC.tbl_rfq_product_tech_evaluation_id
+                            WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
+                            LIMIT 1
+                        )
+                        SELECT json_build_object(
+                            'has_tech_eval', (SELECT COUNT(*) > 0 FROM tech_eval),
+                            'is_accepted', (
+                                SELECT COALESCE(
+                                    (SELECT status = 1 
+                                     FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
+                                     JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                                     WHERE TECV.vendor_id = ${user_id}
+                                     LIMIT 1), 
+                                    false
+                                )
+                            )
+                        )
                     ),
                     `
         : ''
@@ -4681,8 +4799,7 @@ rfqProductReport: async (userId, productName, startDate, endDate) => {
                             )
                         ) FROM tbl_quote_items TQI WHERE TQI.quote_id = TQ.id AND TQI.product_id = TRP.product_id
                     )
-                )
-            ) FROM tbl_quotes TQ WHERE TQ.rfq_id = T.id AND TQ.created_by = TU.id),
+                ) FROM tbl_quotes TQ WHERE TQ.rfq_id = T.id AND TQ.created_by = TU.id),
             JSONB_BUILD_ARRAY(
                 JSONB_BUILD_OBJECT(
                     'status', 0,
