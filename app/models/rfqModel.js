@@ -1012,22 +1012,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 ;
 
 
-    // MODIFIED ON 23TH AUG MUKUL
-    // modified query for veriants
-
-    // MODIFIED ON 28TH MAY RANIT
-    // ${
-    //   user_type != 2
-    //     ? `JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = ${id} AND trpv.user_id = ${user_id} AND trpv.product_id = RFQ_P.product_id`
-    //     : ``
-    // }
-    // WHERE RFQ.id = RFQ_P.rfq_id
-    // ${
-    //   user_type != 2
-    //     ? `AND trpv.rfq_id = ${id} AND trpv.user_id = ${user_id} AND trpv.product_id = RFQ_P.product_id`
-    //     : ``
-    // }
-
     return new Promise(function (resolve, reject) {
       db.query(q,[id])
         .then(function (data) {
@@ -1119,7 +1103,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           WHERE TRIM(nb) IN (${vendorType.map(vt => `'${vt.value.toLowerCase().trim()}'`).join(", ")})
         )
       ` : ``}
-      ${approved_by_id != '' ? `AND (vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")}) OR vum.vendor_approve_id IS NULL)` : ``}
+${approved_by_id != '' ? `AND (vum.vendor_id IN (${approved_by_id.map(vui => vui.id).join(",")}) OR vum.vendor_id IS NULL)` : ``}
     )
     SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 1;
   `;
@@ -1898,8 +1882,6 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
                       c.title AS category_name,
                       c.id AS category_id,
                       c.parent_id AS parent_category_id,
-                      CASE WHEN p.tds_new_file_name IS NULL THEN NULL ELSE p.tds_new_file_name END AS pd_tds_file_url,
-                      CASE WHEN p.qap_new_file_name IS NULL THEN NULL ELSE p.qap_new_file_name END AS pd_qap_file_url,
                       img.new_image_name AS image_url,
                       similarity(p.name, $1) AS similarity_score,
                       ts_rank_cd(to_tsvector('english', p.name), plainto_tsquery('english', $1)) AS rank
@@ -2200,7 +2182,7 @@ WHERE row_num_by_name_category = 1
         WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
       ) rfqv ON rfqv.user_id = tu.id
       
-      ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON pvvm.id = vum.product_variant_id` : ``}
 
       WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pvvm.is_approved
         AND tu.is_deleted = 0 AND tu.status = 1 
