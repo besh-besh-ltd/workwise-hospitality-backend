@@ -3832,6 +3832,7 @@ const UsersController = {
 
 
     } catch (error) {
+      console.log("ERROR --------- ", error)
       logError("Error in getting top vendors and products for user dashboard: ", error);
       res.status(400)
       .json({
