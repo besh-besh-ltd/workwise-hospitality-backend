@@ -182,4 +182,35 @@ productRoutes.post(
   productController.mapVendorWithProduct
 );
 
+// Product Variant Routes
+productRoutes.post(
+  '/product-variant',
+  passportSignIn,
+  productController.addProductVariant
+);
+
+productRoutes.get(
+  '/product-variant/:product_id',
+  passportSignIn,
+  productController.getProductVariants
+);
+
+productRoutes.put(
+  '/product-variant/:variant_id',
+  passportSignIn,
+  productController.updateProductVariant
+);
+
+productRoutes.delete(
+  '/product-variant/:variant_id',
+  passportSignIn,
+  productController.deleteProductVariant
+);
+
+productRoutes.post(
+  '/map-variant-with-vendor',
+  passportSignIn,
+  productController.mapVariantWithVendor
+);
+
 export default productRoutes;

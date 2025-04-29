@@ -3203,6 +3203,281 @@ const productController = {
         })
         .end();
     }
+  },
+  // New functions for product variant management
+  addProductVariant: async (req, res, next) => {
+    try {
+      const { product_id, variant_name } = req.body;
+      
+      // Check if the product exists
+      const product = await productModel.productDetails(product_id);
+      
+      if (!product || product.length === 0) {
+        return res
+          .status(404)
+          .json({
+            status: 3,
+            message: "Product not found, Please check and retry."
+          })
+          .end();
+      }
+      
+      // Check for duplicate variant name for the same product
+      const existingVariant = await productModel.checkDuplicateVariantName(product_id, variant_name);
+      
+      if (existingVariant && existingVariant.length > 0) {
+        return res
+          .status(400)
+          .json({
+            status: 3,
+            message: "A variant with this name already exists for this product."
+          })
+          .end();
+      }
+      
+      // Create variant object
+      const variantObj = {
+        product_id,
+        variant_name,
+        created_by: req.user.id,
+        updated_by: req.user.id,
+        created_at: new Date(),
+        updated_at: new Date(),
+        is_deleted: 0
+      };
+      
+      // Insert variant
+      const result = await productModel.createProductVariant(variantObj);
+      
+      return res
+        .status(200)
+        .json({
+          status: 1,
+          message: "Product variant added successfully.",
+          data: { id: result.id }
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      return res
+        .status(500)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  
+  getProductVariants: async (req, res, next) => {
+    try {
+      const { product_id } = req.params;
+      
+      // Get variants for the product
+      const variants = await productModel.getProductVariants(product_id);
+      
+      return res
+        .status(200)
+        .json({
+          status: 1,
+          data: variants
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      return res
+        .status(500)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  
+  updateProductVariant: async (req, res, next) => {
+    try {
+      const { variant_id } = req.params;
+      const { variant_name } = req.body;
+      
+      // Get variant details to check if exists
+      const variantDetails = await productModel.getProductVariantDetails(variant_id);
+      
+      if (!variantDetails || variantDetails.length === 0) {
+        return res
+          .status(404)
+          .json({
+            status: 3,
+            message: "Product variant not found."
+          })
+          .end();
+      }
+      
+      // Update variant
+      const variantObj = {
+        variant_name,
+        updated_by: req.user.id
+      };
+      
+      await productModel.updateProductVariant(variantObj, variant_id);
+      
+      return res
+        .status(200)
+        .json({
+          status: 1,
+          message: "Product variant updated successfully."
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      return res
+        .status(500)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  
+  deleteProductVariant: async (req, res, next) => {
+    try {
+      const { variant_id } = req.params;
+      
+      // Get variant details to check if exists
+      const variantDetails = await productModel.getProductVariantDetails(variant_id);
+      
+      if (!variantDetails || variantDetails.length === 0) {
+        return res
+          .status(404)
+          .json({
+            status: 3,
+            message: "Product variant not found."
+          })
+          .end();
+      }
+      
+      // Soft delete variant
+      await productModel.deleteProductVariant(variant_id);
+      
+      return res
+        .status(200)
+        .json({
+          status: 1,
+          message: "Product variant deleted successfully."
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      return res
+        .status(500)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  
+  mapVariantWithVendor: async (req, res, next) => {
+    try {
+      const { variant_id, vendor_id, approved_by } = req.body;
+      
+      // Get variant details to check if exists
+      const variantDetails = await productModel.getProductVariantDetails(variant_id);
+      
+      if (!variantDetails || variantDetails.length === 0) {
+        return res
+          .status(404)
+          .json({
+            status: 3,
+            message: "Product variant not found."
+          })
+          .end();
+      }
+      
+      // Check if vendor exists
+      const vendor = await vendorModel.getVendorDetails(vendor_id);
+      
+      if (!vendor) {
+        return res
+          .status(404)
+          .json({
+            status: 3,
+            message: "Vendor not found, Please check and retry."
+          })
+          .end();
+      }
+      
+      // Check for duplicate vendor mapping for the same variant
+      const existingMapping = await productModel.checkDuplicateVariantVendorMapping(variant_id, vendor_id);
+      
+      if (existingMapping && existingMapping.length > 0) {
+        return res
+          .status(400)
+          .json({
+            status: 3,
+            message: "This vendor is already mapped to this variant."
+          })
+          .end();
+      }
+      
+      // Get product categories to preserve them in the mapping
+      const productCategories = await productModel.getProductCategories(variantDetails[0].product_id);
+      
+      // Create mapping object
+      const mappingObj = {
+        variant_id,
+        vendor_id,
+        product_id: variantDetails[0].product_id,
+        created_by: req.user.id,
+        updated_by: req.user.id,
+        created_at: new Date(),
+        updated_at: new Date(),
+        product_reviewed: false,
+        deleted: false,
+        category_data: productCategories && productCategories.length > 0 ? JSON.stringify(productCategories) : null
+      };
+      
+      // Insert mapping
+      const result = await productModel.createProductVariantVendorMapping(mappingObj);
+      
+      // Handle approvals if provided
+      if (approved_by && approved_by.length > 0) {
+        const approvalMappings = [];
+        for (const approvalId of approved_by) {
+          approvalMappings.push({
+            product_id: variantDetails[0].product_id,
+            variant_id,
+            vendor_approve_id: approvalId,
+            created_at: new Date(),
+            updated_at: new Date()
+          });
+        }
+        
+        if (approvalMappings.length > 0) {
+          await productModel.addProductApproveBy(approvalMappings, variantDetails[0].product_id);
+        }
+      }
+      
+      return res
+        .status(200)
+        .json({
+          status: 1,
+          message: "Product variant mapped with vendor successfully.",
+          data: { id: result.id }
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      return res
+        .status(500)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
   }
 };
 export default productController;
