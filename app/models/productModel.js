@@ -1262,12 +1262,10 @@ const productModel = {
           FROM tbl_product_categories pc
           LEFT JOIN tbl_category tc ON pc.category_id = tc.id
           WHERE PD.id = pc.product_id ORDER BY pc.id
-          ) AS product_categories,
-        ARRAY
-        (SELECT json_build_object('name', pv.name, 'sku', pv.sku, 'id', pv.id)
-            FROM tbl_product_variant pv WHERE PD.id = pv.product_id) AS product_variants
+          ) AS product_categories
         FROM tbl_product PD 
-        WHERE PD.is_deleted = 0 
+        JOIN tbl_users tu ON tu.id = PD.created_by
+        WHERE tu.user_type IN (2, 3) AND PD.is_deleted = 0 
           AND PD.is_review = 0 ${dynamicQuery}
         ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
         LIMIT ${limit} OFFSET $1
@@ -1359,8 +1357,8 @@ const productModel = {
       
       db.any(
         `SELECT COUNT(*) as count FROM tbl_product
-         LEFT JOIN tbl_users ON tbl_product.id IN (SELECT product_id FROM tbl_product_variant WHERE status = 1)
-         WHERE tbl_product.status = 1 ${dynamicQuery}`
+         LEFT JOIN tbl_users tu ON tbl_product.created_by = tu.id
+         WHERE tbl_product.status = 1 AND tu.user_type IN (2, 3) ${dynamicQuery}`
       )
         .then(function (data) {
           resolve(data);
