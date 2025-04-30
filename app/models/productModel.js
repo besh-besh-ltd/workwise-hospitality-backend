@@ -909,26 +909,30 @@ const productModel = {
   },
   createProductVariant: async (variantObj) => {
     return new Promise(function (resolve, reject) {
-      // Changes by Agnij May 22, 2024 [Fixed variant creation to match example structure]
+      // Changes by Agnij April 30, 2025 [Fixed column names to match actual database schema]
       try {
         // Ensure we have all required fields with proper defaults
-        if (!variantObj.product_id || !variantObj.name) {
+        // Accept 'variant_name' from frontend but use 'name' for the database
+        if (!variantObj.product_id || (!variantObj.variant_name && !variantObj.name)) {
           console.error("Missing required fields for variant creation:", variantObj);
-          return reject(new Error("Missing required fields: product_id and name are required"));
+          return reject(new Error("Missing required fields: product_id and variant name are required"));
         }
         
         // Set up all the fields with appropriate defaults
+        // Use variant_name from input if available, otherwise use name
+        const variantName = variantObj.variant_name || variantObj.name;
+        
         const fields = {
           product_id: variantObj.product_id,
-          name: variantObj.name,
-          slug: variantObj.slug || variantObj.name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-          sku: variantObj.sku || variantObj.name,
+          name: variantName, // Database column is 'name'
           status: variantObj.status !== undefined ? variantObj.status : 1,
           is_deleted: variantObj.is_deleted !== undefined ? variantObj.is_deleted : 0,
           is_review: variantObj.is_review !== undefined ? variantObj.is_review : 0,
           is_approve: variantObj.is_approve !== undefined ? variantObj.is_approve : 1,
           created_at: variantObj.created_at || new Date(),
+          updated_at: variantObj.updated_at || new Date(),
           created_by: variantObj.created_by || null,
+          updated_by: variantObj.updated_by || null,
           added_by: variantObj.added_by || null
         };
 
@@ -2390,26 +2394,30 @@ getProductTechSpecByID: async (productId) => {
 
   createProductVariant: async (variantObj) => {
     return new Promise(function (resolve, reject) {
-      // Changes by Agnij May 22, 2024 [Fixed variant creation to match example structure]
+      // Changes by Agnij April 30, 2025 [Fixed column names to match actual database schema]
       try {
         // Ensure we have all required fields with proper defaults
-        if (!variantObj.product_id || !variantObj.name) {
+        // Accept 'variant_name' from frontend but use 'name' for the database
+        if (!variantObj.product_id || (!variantObj.variant_name && !variantObj.name)) {
           console.error("Missing required fields for variant creation:", variantObj);
-          return reject(new Error("Missing required fields: product_id and name are required"));
+          return reject(new Error("Missing required fields: product_id and variant name are required"));
         }
         
         // Set up all the fields with appropriate defaults
+        // Use variant_name from input if available, otherwise use name
+        const variantName = variantObj.variant_name || variantObj.name;
+        
         const fields = {
           product_id: variantObj.product_id,
-          name: variantObj.name,
-          slug: variantObj.slug || variantObj.name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-          sku: variantObj.sku || variantObj.name,
+          name: variantName, // Database column is 'name'
           status: variantObj.status !== undefined ? variantObj.status : 1,
           is_deleted: variantObj.is_deleted !== undefined ? variantObj.is_deleted : 0,
           is_review: variantObj.is_review !== undefined ? variantObj.is_review : 0,
           is_approve: variantObj.is_approve !== undefined ? variantObj.is_approve : 1,
           created_at: variantObj.created_at || new Date(),
+          updated_at: variantObj.updated_at || new Date(),
           created_by: variantObj.created_by || null,
+          updated_by: variantObj.updated_by || null,
           added_by: variantObj.added_by || null
         };
 
@@ -2445,14 +2453,21 @@ getProductTechSpecByID: async (productId) => {
   
   getProductVariants: async (productId) => {
     return new Promise(function (resolve, reject) {
-      // Changes by Agnij May 22, 2024 [Fixed GROUP BY clause and variant name mapping]
+      // Changes by Agnij April 30, 2025 [Fixed column names to match actual database schema]
       console.log("Getting variants for product:", productId);
       
       try {
-        // Use a simpler query with better GROUP BY handling
+        // Use a query that explicitly lists all needed columns instead of pv.*
         const query = `
           SELECT 
-            pv.*,
+            pv.id, 
+            pv.product_id, 
+            pv.name, 
+            pv.created_at,
+            pv.updated_at,
+            pv.created_by,
+            pv.updated_by,
+            pv.is_deleted,
             p.name as product_name,
             ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
           FROM 
@@ -2465,19 +2480,21 @@ getProductTechSpecByID: async (productId) => {
             tbl_category c ON pc.category_id = c.id
           WHERE 
             pv.product_id = $1
+            AND pv.is_deleted = 0
           GROUP BY 
-            pv.id, p.name
+            pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
+            pv.created_by, pv.updated_by, pv.is_deleted, p.name
           ORDER BY 
             pv.id DESC
         `;
         
-        console.log("Executing simplified query for product variants");
+        console.log("Executing fixed query for product variants");
         
         db.any(query, [productId])
           .then(function (data) {
             console.log("Query successful, rows returned:", data.length);
             
-            // Transform the data to include category_info string and ensure name is mapped to variant_name
+            // Transform the data to include category_info string and map name to variant_name
             if (data && data.length > 0) {
               data.forEach(item => {
                 // Handle category names
@@ -2485,10 +2502,8 @@ getProductTechSpecByID: async (productId) => {
                   item.category_info = item.category_names.join(', ');
                 }
                 
-                // Map name to variant_name for backwards compatibility
-                if (item.name) {
-                  item.variant_name = item.name;
-                }
+                // Map name to variant_name for frontend compatibility
+                item.variant_name = item.name;
               });
             }
             
@@ -2507,13 +2522,16 @@ getProductTechSpecByID: async (productId) => {
   
   updateProductVariant: async (variantObj, variantId) => {
     return new Promise(function (resolve, reject) {
+      // Accept variant_name from frontend but use name for database
+      const name = variantObj.variant_name || variantObj.name;
+      
       db.one(
         `UPDATE tbl_product_variant 
         SET name = $1, 
             updated_at = NOW()
         WHERE id = $2 
         RETURNING id`,
-        [variantObj.name, variantId]
+        [name, variantId]
       )
         .then(function (data) {
           resolve(data);
@@ -2563,14 +2581,21 @@ getProductTechSpecByID: async (productId) => {
   
   getProductVariantDetails: async (variantId) => {
     return new Promise(function (resolve, reject) {
-      // Changes by Agnij May 22, 2024 [Fixed GROUP BY clause and variant name mapping]
+      // Changes by Agnij April 30, 2025 [Fixed column names to match actual database schema]
       console.log("Getting variant details for:", variantId);
       
       try {
-        // Use a simpler query with better GROUP BY handling
+        // Use a query that explicitly lists all needed columns instead of pv.*
         const query = `
           SELECT 
-            pv.*,
+            pv.id, 
+            pv.product_id, 
+            pv.name, 
+            pv.created_at,
+            pv.updated_at,
+            pv.created_by,
+            pv.updated_by,
+            pv.is_deleted,
             p.name as product_name,
             ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
           FROM 
@@ -2583,17 +2608,19 @@ getProductTechSpecByID: async (productId) => {
             tbl_category c ON pc.category_id = c.id
           WHERE 
             pv.id = $1
+            AND pv.is_deleted = 0
           GROUP BY 
-            pv.id, p.name
+            pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
+            pv.created_by, pv.updated_by, pv.is_deleted, p.name
         `;
         
-        console.log("Executing simplified query for variant details");
+        console.log("Executing fixed query for variant details");
         
         db.any(query, [variantId])
           .then(function (data) {
             console.log("Query successful, rows returned:", data.length);
             
-            // Transform the data to include category_info string and ensure name is mapped to variant_name
+            // Transform the data to include category_info string and map name to variant_name
             if (data && data.length > 0) {
               data.forEach(item => {
                 // Handle category names
@@ -2601,10 +2628,8 @@ getProductTechSpecByID: async (productId) => {
                   item.category_info = item.category_names.join(', ');
                 }
                 
-                // Map name to variant_name for backwards compatibility
-                if (item.name) {
-                  item.variant_name = item.name;
-                }
+                // Map name to variant_name for frontend compatibility
+                item.variant_name = item.name;
               });
             }
             
@@ -2639,7 +2664,7 @@ getProductTechSpecByID: async (productId) => {
   
   checkDuplicateVariantName: async (productId, variantName) => {
     return new Promise(function (resolve, reject) {
-      // Changes by Agnij May 22, 2024 [Fixed variant duplicate checking]
+      // Changes by Agnij April 30, 2025 [Fixed column name to match actual database schema]
       if (!productId || !variantName) {
         console.log("Missing parameters in checkDuplicateVariantName:", { productId, variantName });
         resolve([]);
@@ -2652,6 +2677,7 @@ getProductTechSpecByID: async (productId) => {
         FROM tbl_product_variant 
         WHERE LOWER(name) = LOWER($1) 
         AND product_id = $2
+        AND is_deleted = 0
       `;
       
       console.log("Checking duplicate variant:", { variantName, productId });

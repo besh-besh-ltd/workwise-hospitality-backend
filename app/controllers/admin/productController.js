@@ -3300,11 +3300,15 @@ const productController = {
   
   updateProductVariant: async (req, res) => {
     try {
-      const { id } = req.params;
-      const { variant_name } = req.body;
+      // Changes by Agnij April 30, 2025 [Fixed field names to match database schema]
+      const { variant_id } = req.params;
+      const { variant_name, name } = req.body;
+      
+      // Get the variant name from either variant_name or name field
+      const variantNameValue = variant_name || name;
       
       // Validate input
-      if (!id || !variant_name) {
+      if (!variant_id || !variantNameValue) {
         return res.status(400).json({ 
           status: 3, 
           message: 'Variant ID and name are required' 
@@ -3312,7 +3316,7 @@ const productController = {
       }
       
       // Check if variant exists
-      const variant = await productModel.getProductVariantDetails(id);
+      const variant = await productModel.getProductVariantDetails(variant_id);
       if (!variant || variant.length === 0) {
         return res.status(404).json({ 
           status: 3, 
@@ -3322,17 +3326,20 @@ const productController = {
       
       // Update variant
       const variantObj = {
-        name: variant_name,
+        name: variantNameValue, // Database field is 'name'
         updated_at: new Date()
       };
       
-      await productModel.updateProductVariant(variantObj, id);
+      await productModel.updateProductVariant(variantObj, variant_id);
       
       return res.status(200).json({
         status: 1,
-        message: 'Product variant updated successfully'
+        message: 'Product variant updated successfully',
+        data: {
+          id: variant_id,
+          variant_name: variantNameValue
+        }
       });
-      
     } catch (error) {
       logError(error);
       return res.status(500).json({
@@ -3344,6 +3351,7 @@ const productController = {
   
   deleteProductVariant: async (req, res) => {
     try {
+      // Changes by Agnij April 30, 2025 [Fixed parameter name to match route]
       const { variant_id } = req.params;
       
       // Validate input
@@ -3370,7 +3378,6 @@ const productController = {
         status: 1,
         message: 'Product variant deleted successfully'
       });
-      
     } catch (error) {
       logError(error);
       return res.status(500).json({
