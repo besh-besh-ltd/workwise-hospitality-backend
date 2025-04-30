@@ -450,13 +450,24 @@ const schemas = {
     email: Joi.string().required().email().trim().max(50),
     phone: Joi.string().required().trim().max(15),
     productDetails: Joi.array().items(Joi.object().keys({
-      master_id: Joi.number().required(),
-      name: Joi.string().required(),
-      description: Joi.string().allow('', null),
-      status: Joi.number().optional(),
-      approved_id: Joi.array().items(Joi.number()).optional(),
-      approved_name: Joi.array().items(Joi.string()).optional(),
-      categories: Joi.array().items(Joi.number()).optional()
+      approvedByIds: Joi.array().items(Joi.object().keys({
+        label: Joi.string(),
+        value: Joi.number(),
+      })),
+      product: Joi.array().items(Joi.object().keys({
+        master_id: Joi.number().required(),
+        name: Joi.string().required(),
+        description: Joi.string().allow('', null),
+        status: Joi.number().optional(),
+        approved_id: Joi.array().items(Joi.number()).optional(),
+        approved_name: Joi.array().items(Joi.string()).optional(),
+        categories: Joi.array().items(Joi.number()).optional()
+      })),
+      variant: Joi.array().items(Joi.object().keys({
+        label: Joi.string(),
+        value: Joi.number(),
+        master_id: Joi.number(),
+      }))
     })).optional(),
     is_private: Joi.number().optional().valid(0, 1),
   }),

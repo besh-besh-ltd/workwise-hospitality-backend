@@ -1036,6 +1036,20 @@ const productModel = {
         });
     });
   },
+  checkVariantExistsForVendor: async (vendorId, variantId, productId) => {
+    try {
+      let q = `
+      SELECT pvvm.id
+      FROM tbl_product_variant_vendor_mapping pvvm
+      JOIN tbl_product_variant pv ON pv.id = pvvm.product_variant_id
+      WHERE pvvm.vendor_id = $1 AND pv.id = $2 AND pv.product_id = $3
+      `
+  
+      return db.any(q, [vendorId, variantId, productId])
+    } catch (e) {
+      throw e;
+    }
+  },
   productExistForVendor: async (
     name,
     vendorId = null,
@@ -2023,12 +2037,8 @@ FROM (
   },
   check_product: async (productId, created_by = null) => {
     return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (created_by) {
-        dynamicQuery = ` AND created_by = '${created_by}'`;
-      }
       db.any(
-        `SELECT * FROM tbl_product WHERE id = $1 AND is_deleted = 0 ${dynamicQuery}`,
+        `SELECT * FROM tbl_product tp JOIN tbl_users tu ON tp.created_by = tu.id WHERE id = $1 AND is_deleted = 0 AND tu.user_type NOT IN (2, 3)`,
         [productId]
       )
         .then(function (data) {
@@ -2108,7 +2118,7 @@ WHERE tbl_product.name = $1`,
         dynamicWhere = `AND PD.id IN (SELECT product_id FROM tbl_product_variant)`;
       }
       db.any(
-        `SELECT PD.*,USERS.name as vendor_name,
+        `SELECT PD.*,
         ARRAY
         (SELECT json_build_object('category_name', tc.title,'id',pc.category_id )
           FROM tbl_product_categories pc
@@ -2128,7 +2138,6 @@ WHERE tbl_product.name = $1`,
           (SELECT tvpm.vendor_approve_id
             FROM tbl_vendorapprove_product_mapping tvpm WHERE  PD.id = tvpm.product_id) AS "vendor_approved_by"
             FROM tbl_product PD 
-            LEFT JOIN tbl_users USERS ON PD.status = 1 
             WHERE PD.status = 1 And PD.id = $1 ${dynamicWhere}`,
         [productId]
       )

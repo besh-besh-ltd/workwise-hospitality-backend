@@ -73,10 +73,10 @@ const add_vendor_product = async (productDetails, vendorId) => {
     let errors = {};
     let err = 0;
 
-    let { name, categories, approved_id, master_id } = productDetails;
+    let {approvedByIds, product, variant} = productDetails;
 
-    if (categories.length > 0) {
-      for await (const categoryId of categories) {
+    if (product?.categories?.length > 0) {
+      for await (const categoryId of product?.categories) {
         let categoryExist = await productModel.parentIdExists(categoryId);
         if (categoryExist.length == 0) {
           err++;
@@ -88,14 +88,12 @@ const add_vendor_product = async (productDetails, vendorId) => {
       errors.categories = 'Please select a category';
     }
 
-    let prodNameExists = await productModel.checkProductExists(
-      name,
-      vendorId,
-    );
-    if (prodNameExists.length > 0) {
+    let variantNameExists = await productModel.checkVariantExistsForVendor(vendorId, variant.id, product.id)
+    if (variantNameExists.length > 0) {
       err++;
-      errors.name = 'Product name already exist';
+      errors.name = 'Variant is already mapped for this vendor';
     }
+    
     // if (is_approve != 1) {
     //   let checkMasterNameExist = await productModel.checkMasterNameExist(
     //     name
@@ -105,18 +103,9 @@ const add_vendor_product = async (productDetails, vendorId) => {
     //     errors.name = 'This product is available in master product';
     //   }
     // } else 
-    if (!master_id) {
-      let checkMasterNameExist = await productModel.checkMasterNameExist(
-        name
-      );
-      if (checkMasterNameExist.length > 0) {
-        err++;
-        errors.name = 'This product is available in master product';
-      }
-    }
 
-    if (master_id) {
-      let findProduct = await productModel.check_product(master_id);
+    if (product.master_id) {
+      let findProduct = await productModel.check_product(product.master_id);
       if (findProduct.length == 0) {
         err++;
         errors.master_id = 'Product not found';
@@ -3241,22 +3230,6 @@ const UsersController = {
           // vendor_approved_by: vendorApproveId || null,
           is_approve: master_id ? 1 : 0,
           added_by: req.user.id,
-          qap_new_file_name:
-            req.files?.qap?.length > 0
-              ? `${Config.download_url}/product_image/${req.files.qap[0].filename}`
-              : productdetails[0].qap_new_file_name,
-          qap_original_file_name:
-            req.files?.qap?.length > 0
-              ? req.files.qap[0].originalname
-              : productdetails[0].qap_original_file_name,
-          tds_new_file_name:
-            req.files?.tds?.length > 0
-              ? `${Config.download_url}/product_image/${req.files.tds[0].filename}`
-              : productdetails[0].tds_new_file_name,
-          tds_original_file_name:
-            req.files?.tds?.length > 0
-              ? req.files.tds[0].originalname
-              : productdetails[0].tds_original_file_name
         };
 
         let product = await productModel.createProduct(productObj);
