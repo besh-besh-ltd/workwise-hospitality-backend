@@ -2740,12 +2740,14 @@ getProductTechSpecByID: async (productId) => {
           let query;
           if (columns && columns.length > 0) {
             // Table has 'deleted' column
+            // Changes by Agnij April 30, 2025 [Fixed column name from variant_id to product_variant_id]
             query = `SELECT * FROM tbl_product_variant_vendor_mapping 
-                    WHERE variant_id = $1 AND vendor_id = $2 AND deleted = false`;
+                    WHERE product_variant_id = $1 AND vendor_id = $2 AND deleted = false`;
           } else {
             // Table doesn't have 'deleted' column
+            // Changes by Agnij April 30, 2025 [Fixed column name from variant_id to product_variant_id]
             query = `SELECT * FROM tbl_product_variant_vendor_mapping 
-                    WHERE variant_id = $1 AND vendor_id = $2`;
+                    WHERE product_variant_id = $1 AND vendor_id = $2`;
           }
           
           // Execute the appropriate query

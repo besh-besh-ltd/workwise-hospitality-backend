@@ -3442,10 +3442,12 @@ const productController = {
       // Create mapping
       console.log('Creating mapping');
       const mappingObj = {
-        variant_id,
+        // Changes by Agnij April 30, 2025 [Fixed column name from variant_id to product_variant_id]
+        product_variant_id: variant_id,
         vendor_id,
         created_at: new Date(),
-        status: 1
+        // Changes by Agnij April 30, 2025 [Fixed status value from integer to boolean]
+        status: true
       };
       
       const result = await productModel.createProductVariantVendorMapping(mappingObj);
