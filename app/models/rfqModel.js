@@ -587,7 +587,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
               'predefined_tds_file', RFQ_P.datasheet_file,
               'predefined_qap_file', RFQ_P.qap_file,
               'name', TV.name,
-              'product_name', T_P.name,
               'variant', RFQ_P.variant,
               'spec', (
                   SELECT json_agg(json_build_object(
