@@ -584,8 +584,88 @@ const productController = {
         await productModel.createProductCategories(categoryObj);
       }
 
+      // ---------------- variations ----------------
+      for await (const { attribute, selectedValues } of values.variations) {
+        console.log(attribute, selectedValues);
+        let attributeObj = {
+          product_id: productId,
+          attribute_id: attribute
+        };
+        let attributeId = await productModel.createProductAttribute(
+          attributeObj
+        );
+
+        const productAttributeId = attributeId.id;
+
+        for await (const attributeValueId of selectedValues) {
+          let attributeValuesObj = {
+            product_attribute_id: productAttributeId,
+            attribute_value_id: attributeValueId
+          };
+          let productAttributeValueId =
+            await productModel.createProductAttributeValue(attributeValuesObj);
+        }
+      }
+
       console.log('=====>>>>>>>>>>>>>>>>', values.variationOptions);
 
+      // ---------------- variation_options ----------------
+      for await (const optValues of values.variationOptions) {
+        // insert variant_options
+
+        let variantOptionsObj = {
+          title: optValues.title,
+          product_id: productId,
+          price: optValues.price,
+          quantity: optValues.quantity,
+          sku: optValues.sku,
+          status: optValues.status
+        };
+        let productVariantOptions =
+          await productModel.createProductVariantOptions(variantOptionsObj);
+
+        const variantOptionId = productVariantOptions.id;
+
+        let variantObj = {
+          variant_option: optValues.title,
+          product_id: productId,
+          variant_option_id: variantOptionId
+        };
+
+        let productVariant = await productModel.createProductVariant(
+          variantObj
+        );
+
+        const variantId = productVariant.id;
+
+        for await (const attributeValueId of optValues.options) {
+          let getAttributeValue = await productModel.getAttributeValue(
+            attributeValueId
+          );
+
+          let attributeId = getAttributeValue[0].attribute_id;
+
+          let getProductAttributeId = await productModel.getProductAttribute(
+            attributeId,
+            productId
+          );
+          let productAttributeId = getProductAttributeId[0].id;
+
+          let getProductAttributeValueId =
+            await productModel.getProductAttributeValue(
+              productAttributeId,
+              attributeValueId
+            );
+          let optionProductAttributeValueId = getProductAttributeValueId[0].id;
+          let variantValueObj = {
+            variant_id: variantId,
+            product_attribute_value_id: optionProductAttributeValueId
+          };
+          let productVariant = await productModel.insertVariantValue(
+            variantValueObj
+          );
+        }
+      }
 
       res
         .status(200)
@@ -2631,12 +2711,13 @@ const productController = {
   
       // ---------------- variations ----------------
       for await (const { attribute, attributeValue } of variations) {
-        let varientObj = {
+        let variantObj = {
           product_id: productId,
-          variant_name: attribute,
-          variant_value: attributeValue
+          name: attribute,
+          status: 1,
+          created_at: new Date()
         };
-        await productModel.createProductveriants(varientObj);
+        await productModel.createProductVariant(variantObj);
       }
 
       // ---------------- featured image ----------------
@@ -2672,40 +2753,6 @@ const productController = {
         })
         .end();
     } catch (err) {
-      /* if (req.files?.featured && req.files?.featured.length > 0) {
-         fs.unlink(req.files.featured[0].path, (unlinkError) => {
-          if (unlinkError) {
-            console.error('Error deleting file:', unlinkError);
-          }
-        });
-      }
-      if (req.files?.gallery && req.files?.gallery.length > 0) {
-        req.files.gallery.forEach((file) => {
-          fs.unlink(file.path, (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          });
-        });
-      }
-      if (req.files?.qap && req.files?.qap.length > 0) {
-        req.files.qap.forEach((file) => {
-          fs.unlink(file.path, (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          });
-        });
-      }
-      if (req.files?.tds && req.files?.tds.length > 0) {
-        req.files.tds.forEach((file) => {
-          fs.unlink(file.path, (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          });
-        });
-      } */
       logError(err);
       res
         .status(400)
@@ -2962,10 +3009,11 @@ const productController = {
       for await (const { attribute, attributeValue } of variations) {
         let variantObj = {
           product_id: productId,
-          variant_name: attribute,
-          variant_value: attributeValue
+          name: attribute,
+          status: 1,
+          created_at: new Date()
         };
-        await productModel.createProductveriants(variantObj);
+        await productModel.createProductVariant(variantObj);
       }
   
       // ---------------- add approval ----------------
@@ -3125,279 +3173,306 @@ const productController = {
     }
   },
   // New functions for product variant management
-  addProductVariant: async (req, res, next) => {
+  addProductVariant: async (req, res) => {
     try {
-      const { product_id, variant_name } = req.body;
+      // Changes by Agnij May 22, 2024 [Fixed variant creation with proper field structure]
+      console.log('addProductVariant called with:', JSON.stringify(req.body, null, 2));
       
-      // Check if the product exists
-      const product = await productModel.productDetails(product_id);
+      // Get input parameters, supporting both name and variant_name
+      const { product_id, variant_name, name } = req.body;
+      const variantNameValue = variant_name || name;
       
+      // Validate input
+      if (!product_id || !variantNameValue) {
+        console.log('Validation failed: missing product_id or variant name');
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Product ID and variant name are required' 
+        });
+      }
+      
+      // Check if product exists
+      console.log('Checking if product exists:', product_id);
+      const product = await productModel.check_product(product_id);
+      console.log('Product check result:', product);
       if (!product || product.length === 0) {
-        return res
-          .status(404)
-          .json({
-            status: 3,
-            message: "Product not found, Please check and retry."
-          })
-          .end();
+        console.log('Product not found:', product_id);
+        return res.status(404).json({ 
+          status: 3, 
+          message: 'Product not found' 
+        });
       }
       
-      // Check for duplicate variant name for the same product
-      const existingVariant = await productModel.checkDuplicateVariantName(product_id, variant_name);
-      
+      // Check if variant name already exists for this product
+      console.log('Checking for duplicate variant name:', variantNameValue);
+      const existingVariant = await productModel.checkDuplicateVariantName(product_id, variantNameValue);
+      console.log('Duplicate check result:', existingVariant);
       if (existingVariant && existingVariant.length > 0) {
-        return res
-          .status(400)
-          .json({
-            status: 3,
-            message: "A variant with this name already exists for this product."
-          })
-          .end();
+        console.log('Duplicate variant name found');
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Variant name already exists for this product' 
+        });
       }
       
-      // Create variant object
+      // Create variant with complete structure matching the example in tbl_product_variant_query_output.txt
+      console.log('Creating variant with:', { product_id, name: variantNameValue });
       const variantObj = {
         product_id,
-        variant_name,
-        created_by: req.user.id,
-        updated_by: req.user.id,
+        name: variantNameValue, // Store in name field as per DB structure
+        slug: variantNameValue.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+        sku: variantNameValue, // Use variant name as sku
+        status: 1,
+        is_deleted: 0,
+        is_review: 0,
+        is_approve: 1,
         created_at: new Date(),
-        updated_at: new Date(),
-        is_deleted: 0
+        created_by: req.userData?.id || null,
+        added_by: req.userData?.id || null
       };
       
-      // Insert variant
-      const result = await productModel.createProductVariant(variantObj);
-      
-      return res
-        .status(200)
-        .json({
+      try {
+        const result = await productModel.createProductVariant(variantObj);
+        console.log('Variant creation result:', result);
+        
+        if (!result || !result.id) {
+          return res.status(500).json({
+            status: 3,
+            message: 'Failed to create product variant: No ID returned from database',
+          });
+        }
+        
+        return res.status(201).json({
           status: 1,
-          message: "Product variant added successfully.",
-          data: { id: result.id }
-        })
-        .end();
-    } catch (error) {
-      logError(error);
-      return res
-        .status(500)
-        .json({
+          message: 'Product variant added successfully',
+          data: { 
+            id: result.id,
+            product_id: product_id,
+            variant_name: variantNameValue
+          }
+        });
+      } catch (createError) {
+        console.error('Error creating variant:', createError);
+        return res.status(500).json({
           status: 3,
-          message: Config.errorText.value
-        })
-        .end();
+          message: 'Error creating variant',
+          error: createError.message
+        });
+      }
+      
+    } catch (error) {
+      console.error('Error in addProductVariant:', error);
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong',
+        error: error.message
+      });
     }
   },
   
-  getProductVariants: async (req, res, next) => {
+  getProductVariants: async (req, res) => {
     try {
       const { product_id } = req.params;
+      
+      // Validate input
+      if (!product_id) {
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Product ID is required' 
+        });
+      }
       
       // Get variants for the product
       const variants = await productModel.getProductVariants(product_id);
       
-      return res
-        .status(200)
-        .json({
-          status: 1,
-          data: variants
-        })
-        .end();
+      return res.status(200).json({
+        status: 1,
+        data: variants
+      });
     } catch (error) {
       logError(error);
-      return res
-        .status(500)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong'
+      });
     }
   },
   
-  updateProductVariant: async (req, res, next) => {
+  updateProductVariant: async (req, res) => {
     try {
-      const { variant_id } = req.params;
+      const { id } = req.params;
       const { variant_name } = req.body;
       
-      // Get variant details to check if exists
-      const variantDetails = await productModel.getProductVariantDetails(variant_id);
+      // Validate input
+      if (!id || !variant_name) {
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Variant ID and name are required' 
+        });
+      }
       
-      if (!variantDetails || variantDetails.length === 0) {
-        return res
-          .status(404)
-          .json({
-            status: 3,
-            message: "Product variant not found."
-          })
-          .end();
+      // Check if variant exists
+      const variant = await productModel.getProductVariantDetails(id);
+      if (!variant || variant.length === 0) {
+        return res.status(404).json({ 
+          status: 3, 
+          message: 'Variant not found' 
+        });
       }
       
       // Update variant
       const variantObj = {
-        variant_name,
-        updated_by: req.user.id
+        name: variant_name,
+        updated_at: new Date()
       };
       
-      await productModel.updateProductVariant(variantObj, variant_id);
+      await productModel.updateProductVariant(variantObj, id);
       
-      return res
-        .status(200)
-        .json({
-          status: 1,
-          message: "Product variant updated successfully."
-        })
-        .end();
+      return res.status(200).json({
+        status: 1,
+        message: 'Product variant updated successfully'
+      });
+      
     } catch (error) {
       logError(error);
-      return res
-        .status(500)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong'
+      });
     }
   },
   
-  deleteProductVariant: async (req, res, next) => {
+  deleteProductVariant: async (req, res) => {
     try {
       const { variant_id } = req.params;
       
-      // Get variant details to check if exists
-      const variantDetails = await productModel.getProductVariantDetails(variant_id);
-      
-      if (!variantDetails || variantDetails.length === 0) {
-        return res
-          .status(404)
-          .json({
-            status: 3,
-            message: "Product variant not found."
-          })
-          .end();
+      // Validate input
+      if (!variant_id) {
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Variant ID is required' 
+        });
       }
       
-      // Soft delete variant
+      // Check if variant exists
+      const variant = await productModel.getProductVariantDetails(variant_id);
+      if (!variant || variant.length === 0) {
+        return res.status(404).json({ 
+          status: 3, 
+          message: 'Variant not found' 
+        });
+      }
+      
+      // Delete variant
       await productModel.deleteProductVariant(variant_id);
       
-      return res
-        .status(200)
-        .json({
-          status: 1,
-          message: "Product variant deleted successfully."
-        })
-        .end();
+      return res.status(200).json({
+        status: 1,
+        message: 'Product variant deleted successfully'
+      });
+      
     } catch (error) {
       logError(error);
-      return res
-        .status(500)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong'
+      });
     }
   },
   
-  mapVariantWithVendor: async (req, res, next) => {
+  mapVariantWithVendor: async (req, res) => {
     try {
-      const { variant_id, vendor_id, approved_by } = req.body;
+      // Changes by Agnij 2023-05-30 [Added better error handling]
+      console.log('mapVariantWithVendor called with:', JSON.stringify(req.body, null, 2));
+      const { variant_id, vendor_id } = req.body;
       
-      // Get variant details to check if exists
-      const variantDetails = await productModel.getProductVariantDetails(variant_id);
+      // Validate input
+      if (!variant_id || !vendor_id) {
+        console.log('Validation failed: missing variant_id or vendor_id');
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Variant ID and vendor ID are required' 
+        });
+      }
       
-      if (!variantDetails || variantDetails.length === 0) {
-        return res
-          .status(404)
-          .json({
-            status: 3,
-            message: "Product variant not found."
-          })
-          .end();
+      // Check if variant exists
+      console.log('Checking if variant exists:', variant_id);
+      const variant = await productModel.getProductVariantDetails(variant_id);
+      console.log('Variant check result:', variant);
+      if (!variant || variant.length === 0) {
+        console.log('Variant not found:', variant_id);
+        return res.status(404).json({ 
+          status: 3, 
+          message: 'Variant not found' 
+        });
       }
       
       // Check if vendor exists
+      console.log('Checking if vendor exists:', vendor_id);
       const vendor = await vendorModel.getVendorDetails(vendor_id);
-      
-      if (!vendor) {
-        return res
-          .status(404)
-          .json({
-            status: 3,
-            message: "Vendor not found, Please check and retry."
-          })
-          .end();
+      console.log('Vendor check result:', vendor);
+      if (!vendor || vendor.length === 0) {
+        console.log('Vendor not found:', vendor_id);
+        return res.status(404).json({ 
+          status: 3, 
+          message: 'Vendor not found' 
+        });
       }
       
-      // Check for duplicate vendor mapping for the same variant
+      // Check if mapping already exists
+      console.log('Checking for existing mapping');
       const existingMapping = await productModel.checkDuplicateVariantVendorMapping(variant_id, vendor_id);
-      
+      console.log('Existing mapping result:', existingMapping);
       if (existingMapping && existingMapping.length > 0) {
-        return res
-          .status(400)
-          .json({
-            status: 3,
-            message: "This vendor is already mapped to this variant."
-          })
-          .end();
+        console.log('Mapping already exists');
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Variant is already mapped with this vendor' 
+        });
       }
       
-      // Get product categories to preserve them in the mapping
-      const productCategories = await productModel.getProductCategories(variantDetails[0].product_id);
-      
-      // Create mapping object
+      // Create mapping
+      console.log('Creating mapping');
       const mappingObj = {
         variant_id,
         vendor_id,
-        product_id: variantDetails[0].product_id,
-        created_by: req.user.id,
-        updated_by: req.user.id,
         created_at: new Date(),
-        updated_at: new Date(),
-        product_reviewed: false,
-        deleted: false,
-        category_data: productCategories && productCategories.length > 0 ? JSON.stringify(productCategories) : null
+        status: 1
       };
       
-      // Insert mapping
       const result = await productModel.createProductVariantVendorMapping(mappingObj);
+      console.log('Mapping created successfully:', result);
       
-      // Handle approvals if provided
-      if (approved_by && approved_by.length > 0) {
-        const approvalMappings = [];
-        for (const approvalId of approved_by) {
-          approvalMappings.push({
-            product_id: variantDetails[0].product_id,
-            variant_id,
-            vendor_approve_id: approvalId,
-            created_at: new Date(),
-            updated_at: new Date()
-          });
-        }
-        
-        if (approvalMappings.length > 0) {
-          await productModel.addProductApproveBy(approvalMappings, variantDetails[0].product_id);
-        }
-      }
+      return res.status(200).json({
+        status: 1,
+        message: 'Variant mapped with vendor successfully'
+      });
       
-      return res
-        .status(200)
-        .json({
-          status: 1,
-          message: "Product variant mapped with vendor successfully.",
-          data: { id: result.id }
-        })
-        .end();
     } catch (error) {
-      logError(error);
-      return res
-        .status(500)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
+      console.error('Error in mapVariantWithVendor:', error);
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong',
+        error: error.message
+      });
     }
-  }
+  },
+  createProductVariant: async (variantObj) => {
+    return new Promise(function (resolve, reject) {
+      // Construct the dynamic SQL query
+      const query =
+        pgp().helpers.insert(variantObj, null, 'tbl_product_variant') +
+        ' RETURNING id';
+
+      db.one(query)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
 };
 export default productController;
