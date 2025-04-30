@@ -855,7 +855,7 @@ const containerContent = `
            This is a friendly reminder from <strong>${org_name}</strong> regarding the RFQ quotation. Ensure your quote is submitted on time to secure this opportunity.
          </p>
          <p>
-           Please submit quote for the following products:
+           Please submit quote for the following product variant(s):
          </p>
          <p>
            ${remainingProducts.map(product => (
@@ -2989,7 +2989,7 @@ const rfqController = {
   
   finalize: async (req, res, next) => {
     const { organization_name, name } = req.user;
-    const { product_id, vendor_id, rfq_id, rfq_no, quote_id, variant } = req.body;
+    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, variant } = req.body;
 
     try {
       const vendor_details = await userModel.user_profile_detail(vendor_id);
@@ -3000,13 +3000,13 @@ const rfqController = {
       let winning_vendor_name = null;
 
       if (vendor_details.length > 0) {
-        winning_vendor_organization = vendor_details[0].organization_name;
+        winning_vendor_organization = vendor_details[0]?.organization_name ?? vendor_details[0]?.company_name;
         winning_vendor_email = vendor_details[0].email;
         winning_vendor_name = vendor_details[0].name;
       }
       if (rfQItem.length > 0 && rfQItem[0].products.length > 0) {
         winning_product = rfQItem[0].products.filter(
-          (p) => p.product_id == product_id && p.variant == variant
+          (p) => p.product_id == product_variant_id && p.variant == variant
         );
       }
 
@@ -3021,8 +3021,9 @@ const rfqController = {
 
         let alreadyExists = await rfqModel.checkIfExists(
           'tbl_quote_finalization',
-          `rfq_id=${rfq_id} AND product_id=${product_id} AND variant=${variant} AND created_by=${req.user.id} LIMIT 1`
+          `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} AND created_by=${req.user.id} LIMIT 1`
         );
+
         if (alreadyExists.length > 0) {
           res
             .status(409)
@@ -3035,7 +3036,7 @@ const rfqController = {
           const tbl_quote_finalization_data = {
             rfq_id,
             rfq_no,
-            product_id,
+            product_variant_id,
             vendor_id,
             quote_id,
             created_by: req.user.id,
@@ -3075,7 +3076,7 @@ const rfqController = {
           .status(400)
           .json({
             status: 3,
-            message: Config.errorText.value
+            message: "Required fields are not present for vendors, aborting finalization."
           })
           .end();
       }

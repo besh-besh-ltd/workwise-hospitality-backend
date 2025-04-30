@@ -223,7 +223,7 @@ export const rfqSchemas = {
   finalize: Joi.object().keys({
     rfq_id: Joi.number().required(),
     rfq_no: Joi.number().required(),
-    product_id: Joi.number().required(),
+    product_variant_id: Joi.number().required(),
     vendor_id: Joi.number().required(),
     quote_id: Joi.number().required(),
     variant: Joi.number().required()

@@ -1566,12 +1566,14 @@ LIMIT $5 OFFSET $4;`,
                     SELECT json_build_object(
                       'id', TUU.id,
                       'name', TUU.name,
+                      'company_name', TC.company_name,
                       'email', TUU.email,
                       'mobile', TUU.mobile,
                       'address', TUU.address,
                       'organization_name', TUU.organization_name
                     )
                     FROM tbl_users TUU
+                    JOIN tbl_company TC ON TUU.id = TC.user_id
                     WHERE TUU.id = TQF.vendor_id
                   )
                 )
@@ -1742,18 +1744,20 @@ LIMIT $5 OFFSET $4;`,
     try {
       const q = `
       SELECT
-        rpv.product_id,
-        p.name,
+        rpv.product_variant_id,
+        pv.name,
         COUNT(rpv.id)
       FROM
         tbl_rfq_product_vendors rpv
       JOIN
-        tbl_product p ON p.id = rpv.product_id
+        tbl_product_variant pv ON pv.id = rpv.product_variant_id
+      JOIN  
+        tbl_product p ON p.id = pv.product_id
       WHERE
         rpv.rfq_id = $1
         AND rpv.user_id = $2
       GROUP BY
-        rpv.product_id, p.name;
+        rpv.product_variant_id, pv.name;
       `;
   
       return await db.query(q, [rfq_id, vendor_id]);
@@ -1765,7 +1769,8 @@ LIMIT $5 OFFSET $4;`,
     try {
       const q = `
         SELECT
-          qi.product_id,
+          qi.product_variant_id,
+          pv.name AS variant_name,
           p.name AS product_name,
           qi.unit_price,
           COUNT(qi.id)
@@ -1774,13 +1779,15 @@ LIMIT $5 OFFSET $4;`,
         JOIN
           tbl_quote_items qi ON q.id = qi.quote_id
         JOIN
-          tbl_product p ON p.id = qi.product_id
+          tbl_product_variant pv ON pv.id = qi.product_variant_id
+        JOIN
+          tbl_product p ON p.id = pv.product_id
         WHERE
           qi.rfq_id = $1
           AND q.created_by = $2
           AND qi.unit_price != 0
         GROUP BY
-          qi.product_id, p.name, qi.unit_price;
+          qi.product_variant_id, p.name, pv.name, qi.unit_price;
     `;
 
     return await db.query(q, [rfq_id, vendor_id])
