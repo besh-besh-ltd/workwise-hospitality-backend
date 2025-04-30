@@ -3507,5 +3507,27 @@ const productController = {
       });
     }
   },
+  // Changes by Agnij May 18, 2025 [Added endpoint to get variant-vendor mappings]
+  getVariantMappings: async (req, res) => {
+    try {
+      const { search_term } = req.query;
+      
+      // Get mappings using the model function
+      const mappings = await productModel.getVariantVendorMappings(search_term || "");
+      
+      console.log(`Controller found ${mappings.length} variant-vendor mappings`);
+      
+      return res.status(200).json({
+        status: 1,
+        data: mappings || []
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to get variant-vendor mappings'
+      });
+    }
+  },
 };
 export default productController;

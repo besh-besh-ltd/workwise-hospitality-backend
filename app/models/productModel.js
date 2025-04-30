@@ -2580,7 +2580,7 @@ getProductTechSpecByID: async (productId) => {
               pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
               pv.created_by, pv.updated_by, pv.is_deleted, p.name
             ORDER BY pv.created_at DESC
-            LIMIT 500`;
+            LIMIT 100000`;
             
           params.push(`%${searchTerm}%`);
         }
@@ -2842,6 +2842,54 @@ getProductTechSpecByID: async (productId) => {
         });
     });
   },
+
+  // Changes by Agnij May 18, 2025 [Added function to get all variant-vendor mappings]
+  getVariantVendorMappings: async (searchTerm) => {
+    return new Promise(function (resolve, reject) {
+      console.log("Getting variant-vendor mappings with search term:", searchTerm);
+      
+      try {
+        // Changes by Agnij May 19, 2025 [Simplified query to directly fetch mappings]
+        // Changes by Agnij May 19, 2025 [Fixed ambiguous id column references]
+        // Changes by Agnij May 19, 2025 [Increased limit and improved vendor name retrieval]
+        const query = `
+          SELECT 
+            m.id as mapping_id,
+            m.product_variant_id as variant_id,
+            m.vendor_id,
+            m.status,
+            m.created_at as mapped_at,
+            v.name as variant_name,
+            p.name as product_name,
+            COALESCE(va.vendor_approve, 'Unknown Vendor') as vendor_name
+          FROM 
+            tbl_product_variant_vendor_mapping m
+        LEFT JOIN
+          tbl_product_variant v ON v.id = m.product_variant_id
+        LEFT JOIN
+          tbl_product p ON p.id = v.product_id
+        LEFT JOIN
+          tbl_vendor_approve va ON va.id = m.vendor_id
+        ORDER BY 
+          m.created_at DESC
+        LIMIT 100000
+      `;
+      
+      db.any(query)
+        .then(function (data) {
+          console.log(`Found ${data.length} variant-vendor mappings (direct query)`);
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error fetching variant-vendor mappings:", err);
+          resolve([]);  // Return empty array on error for better handling
+        });
+      } catch (error) {
+        console.error("Exception in getVariantVendorMappings:", error);
+        resolve([]);  // Return empty array on error for better handling
+      }
+    });
+  }
 
 };
 

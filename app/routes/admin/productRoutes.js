@@ -219,4 +219,10 @@ productRoutes.post(
   productController.mapVariantWithVendor
 );
 
+productRoutes.get(
+  '/variant-mappings',
+  passportSignIn,
+  productController.getVariantMappings
+);
+
 export default productRoutes;
