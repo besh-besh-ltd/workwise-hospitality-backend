@@ -25,6 +25,7 @@ const termsItems = Joi.object({
 const productItems = Joi.object({
   id : Joi.number().optional().allow(null),
   name: Joi.string().optional().allow(null).allow(''),
+  product_name: Joi.string().optional().allow(null).allow(''),
   variant: Joi.number().optional().allow('').allow(null),
   product_id: Joi.number().required(),
   comment: Joi.string().optional().allow(null).allow(''),
