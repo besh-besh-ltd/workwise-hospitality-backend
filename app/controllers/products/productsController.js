@@ -283,6 +283,7 @@ const ProductsController = {
       let vendorApprove = req.query?.vendorApprove;
       if (vendorApprove) {
         filterProduct = await productModel.getApprovedByProduct(vendorApprove);
+        console.log("FILTER PROD --------- ", filterProduct)
       }
       if (req.query?.download == 'true' && req.query?.downloadAll === 'true') {
         offset = 0;
@@ -335,8 +336,8 @@ const ProductsController = {
           prod.availability =
             prod.availability == 1 ? 'Available' : 'Not Available';
           prod.status = prod.status == 1 ? 'Active' : 'Not active';
-          prod.category = prod.product_categories[0]?.category_name || '';
-          prod.specification_Key = prod.product_variants[0]?.variant_name || '';
+          prod.category = prod.product_categories?.[0]?.category_name || '';
+          prod.specification_Key = prod.product_variants?.[0]?.variant_name || '';
           prod.vendor_approve =
             prod.product_approve_by.length > 0
               ? prod.product_approve_by
@@ -344,7 +345,7 @@ const ProductsController = {
                   .join(',')
               : '';
           prod.specification_value =
-            prod.product_variants[0]?.variant_value || '';
+            prod.product_variants?.[0]?.variant_value || '';
           worksheet.addRow(prod); // Add data in worksheet
           if (
             prod.product_categories?.length > 1 ||
@@ -359,7 +360,7 @@ const ProductsController = {
               if (prod.product_categories[index]?.category_name) {
                 newData.category = prod.product_categories[index].category_name;
               }
-              if (prod.product_variants[index]?.variant_name) {
+              if (prod.product_variants?.[index]?.variant_name) {
                 newData.specification_Key =
                   prod.product_variants[index].variant_name;
                 newData.specification_value =
