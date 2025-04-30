@@ -2517,41 +2517,88 @@ getProductTechSpecByID: async (productId) => {
       console.log("Searching all variants with term:", searchTerm);
       
       try {
-        // Query that searches across all variants across all products
-        const query = `
-          SELECT 
-            pv.id, 
-            pv.product_id, 
-            pv.name, 
-            pv.created_at,
-            pv.updated_at,
-            pv.created_by,
-            pv.updated_by,
-            pv.is_deleted,
-            p.name as product_name,
-            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
-          FROM 
-            tbl_product_variant pv
-          LEFT JOIN 
-            tbl_product p ON pv.product_id = p.id
-          LEFT JOIN 
-            tbl_product_categories pc ON p.id = pc.product_id
-          LEFT JOIN 
-            tbl_category c ON pc.category_id = c.id
-          WHERE 
-            (pv.name ILIKE $1 OR p.name ILIKE $1) AND 
-            pv.is_deleted = 0
-          GROUP BY 
-            pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
-            pv.created_by, pv.updated_by, pv.is_deleted, p.name
-          LIMIT 100`;
-            
-        const searchPattern = `%${searchTerm}%`;
+        // Changes by Agnij April 30, 2025 [Fixed variant search to return all variants when no search term is provided]
+        // Changes by Agnij April 30, 2025 [Fixed ambiguous id column reference and increased result limit]
+        let query;
+        let params = [];
         
-        db.any(query, [searchPattern])
+        if (!searchTerm || searchTerm.trim() === "") {
+          // If no search term is provided, return all variants
+          query = `
+            SELECT 
+              pv.id, 
+              pv.product_id, 
+              pv.name, 
+              pv.created_at,
+              pv.updated_at,
+              pv.created_by,
+              pv.updated_by,
+              pv.is_deleted,
+              p.name as product_name,
+              ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+            FROM 
+              tbl_product_variant pv
+            LEFT JOIN 
+              tbl_product p ON pv.product_id = p.id
+            LEFT JOIN 
+              tbl_product_categories pc ON p.id = pc.product_id
+            LEFT JOIN 
+              tbl_category c ON pc.category_id = c.id
+            WHERE 
+              pv.is_deleted = 0
+            GROUP BY 
+              pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
+              pv.created_by, pv.updated_by, pv.is_deleted, p.name
+            ORDER BY pv.created_at DESC
+            LIMIT 100000`;
+        } else {
+          // If search term is provided, use it for filtering
+          query = `
+            SELECT 
+              pv.id, 
+              pv.product_id, 
+              pv.name, 
+              pv.created_at,
+              pv.updated_at,
+              pv.created_by,
+              pv.updated_by,
+              pv.is_deleted,
+              p.name as product_name,
+              ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+            FROM 
+              tbl_product_variant pv
+            LEFT JOIN 
+              tbl_product p ON pv.product_id = p.id
+            LEFT JOIN 
+              tbl_product_categories pc ON p.id = pc.product_id
+            LEFT JOIN 
+              tbl_category c ON pc.category_id = c.id
+            WHERE 
+              (pv.name ILIKE $1 OR p.name ILIKE $1) AND 
+              pv.is_deleted = 0
+            GROUP BY 
+              pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
+              pv.created_by, pv.updated_by, pv.is_deleted, p.name
+            ORDER BY pv.created_at DESC
+            LIMIT 500`;
+            
+          params.push(`%${searchTerm}%`);
+        }
+        
+        db.any(query, params)
           .then(function (data) {
-            console.log(`Found ${data.length} variants matching search term: ${searchTerm}`);
-            resolve(data || []);
+            console.log(`Found ${data.length} variants${searchTerm ? ` matching search term: ${searchTerm}` : ''}`);
+            
+            // Ensure we never return null
+            const result = data || [];
+            
+            // Add variant_name field for frontend compatibility 
+            const formattedResult = result.map(variant => ({
+              ...variant,
+              variant_name: variant.name
+            }));
+            
+            resolve(formattedResult);
           })
           .catch(function (err) {
             console.error("Error in searchProductVariants query:", err);
@@ -2626,6 +2673,7 @@ getProductTechSpecByID: async (productId) => {
   getProductVariantDetails: async (variantId) => {
     return new Promise(function (resolve, reject) {
       // Changes by Agnij April 30, 2025 [Fixed column names to match actual database schema]
+      // Changes by Agnij May 18, 2025 [Fixed ambiguous column reference]
       console.log("Getting variant details for:", variantId);
       
       try {

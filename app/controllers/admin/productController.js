@@ -3489,15 +3489,11 @@ const productController = {
     try {
       const { search_term } = req.query;
       
-      if (!search_term || search_term.length < 2) {
-        return res.status(200).json({
-          status: 1,
-          data: []
-        });
-      }
-      
+      // Changes by Agnij May 18, 2025 [Fixed search variants to return all variants when no search term is provided]
       // Search for variants across all products
-      const variants = await productModel.searchProductVariants(search_term);
+      const variants = await productModel.searchProductVariants(search_term || "");
+      
+      console.log(`Controller found ${variants.length} variants`);
       
       return res.status(200).json({
         status: 1,
