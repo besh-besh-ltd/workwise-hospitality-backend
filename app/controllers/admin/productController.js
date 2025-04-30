@@ -3285,15 +3285,16 @@ const productController = {
       // Get variants for the product
       const variants = await productModel.getProductVariants(product_id);
       
+      // Changes by Agnij April 30, 2025 [Ensuring consistent empty array return instead of null]
       return res.status(200).json({
         status: 1,
-        data: variants
+        data: variants || [] // Return empty array instead of null
       });
     } catch (error) {
       logError(error);
       return res.status(500).json({
-        status: 3,
-        message: Config?.errorText?.value || 'Something went wrong'
+        status: 0,
+        message: 'Failed to fetch product variants'
       });
     }
   },
@@ -3480,6 +3481,33 @@ const productController = {
           reject(error);
         });
     });
+  },
+  // Changes by Agnij April 30, 2025 [Added endpoint to search all product variants]
+  searchVariants: async (req, res) => {
+    try {
+      const { search_term } = req.query;
+      
+      if (!search_term || search_term.length < 2) {
+        return res.status(200).json({
+          status: 1,
+          data: []
+        });
+      }
+      
+      // Search for variants across all products
+      const variants = await productModel.searchProductVariants(search_term);
+      
+      return res.status(200).json({
+        status: 1,
+        data: variants || []
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to search product variants'
+      });
+    }
   },
 };
 export default productController;

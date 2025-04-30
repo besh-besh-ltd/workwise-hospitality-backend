@@ -2453,7 +2453,7 @@ getProductTechSpecByID: async (productId) => {
   
   getProductVariants: async (productId) => {
     return new Promise(function (resolve, reject) {
-      // Changes by Agnij April 30, 2025 [Fixed column names to match actual database schema]
+      // Changes by Agnij April 30, 2025 [Fixed column names and return type to ensure always array]
       console.log("Getting variants for product:", productId);
       
       try {
@@ -2479,43 +2479,78 @@ getProductTechSpecByID: async (productId) => {
           LEFT JOIN 
             tbl_category c ON pc.category_id = c.id
           WHERE 
-            pv.product_id = $1
-            AND pv.is_deleted = 0
+            pv.product_id = $1 AND 
+            pv.is_deleted = 0
           GROUP BY 
             pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
-            pv.created_by, pv.updated_by, pv.is_deleted, p.name
-          ORDER BY 
-            pv.id DESC
-        `;
-        
-        console.log("Executing fixed query for product variants");
+            pv.created_by, pv.updated_by, pv.is_deleted, p.name`;
         
         db.any(query, [productId])
           .then(function (data) {
-            console.log("Query successful, rows returned:", data.length);
-            
-            // Transform the data to include category_info string and map name to variant_name
-            if (data && data.length > 0) {
-              data.forEach(item => {
-                // Handle category names
-                if (item.category_names) {
-                  item.category_info = item.category_names.join(', ');
-                }
-                
-                // Map name to variant_name for frontend compatibility
-                item.variant_name = item.name;
-              });
-            }
-            
-            resolve(data);
+            console.log(`Found ${data.length} variants for product ${productId}`);
+            // Always return an array, even if empty
+            resolve(data || []);
           })
           .catch(function (err) {
-            console.error("Error in getProductVariants:", err);
+            console.error("Error in getProductVariants query:", err);
             reject(new Error(err.message || "Database error in getProductVariants"));
           });
-      } catch (err) {
-        console.error("Exception in getProductVariants:", err);
-        reject(new Error(err.message || "Exception in getProductVariants"));
+      } catch (error) {
+        console.error("Error in getProductVariants:", error);
+        reject(new Error(error.message || "Exception in getProductVariants"));
+      }
+    });
+  },
+  
+  // Changes by Agnij April 30, 2025 [Added search function for variants across all products]
+  searchProductVariants: async (searchTerm) => {
+    return new Promise(function (resolve, reject) {
+      console.log("Searching all variants with term:", searchTerm);
+      
+      try {
+        // Query that searches across all variants across all products
+        const query = `
+          SELECT 
+            pv.id, 
+            pv.product_id, 
+            pv.name, 
+            pv.created_at,
+            pv.updated_at,
+            pv.created_by,
+            pv.updated_by,
+            pv.is_deleted,
+            p.name as product_name,
+            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+          FROM 
+            tbl_product_variant pv
+          LEFT JOIN 
+            tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
+          WHERE 
+            (pv.name ILIKE $1 OR p.name ILIKE $1) AND 
+            pv.is_deleted = 0
+          GROUP BY 
+            pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
+            pv.created_by, pv.updated_by, pv.is_deleted, p.name
+          LIMIT 100`;
+            
+        const searchPattern = `%${searchTerm}%`;
+        
+        db.any(query, [searchPattern])
+          .then(function (data) {
+            console.log(`Found ${data.length} variants matching search term: ${searchTerm}`);
+            resolve(data || []);
+          })
+          .catch(function (err) {
+            console.error("Error in searchProductVariants query:", err);
+            reject(new Error(err.message || "Database error in searchProductVariants"));
+          });
+      } catch (error) {
+        console.error("Error in searchProductVariants:", error);
+        reject(new Error(error.message || "Exception in searchProductVariants"));
       }
     });
   },

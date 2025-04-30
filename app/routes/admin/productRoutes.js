@@ -195,6 +195,12 @@ productRoutes.get(
   productController.getProductVariants
 );
 
+productRoutes.get(
+  '/search-variants',
+  passportSignIn,
+  productController.searchVariants
+);
+
 productRoutes.put(
   '/product-variant/:variant_id',
   passportSignIn,
