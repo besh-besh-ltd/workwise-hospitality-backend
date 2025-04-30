@@ -3227,8 +3227,8 @@ const productController = {
         is_review: 0,
         is_approve: 1,
         created_at: new Date(),
-        created_by: req.userData?.id || null,
-        added_by: req.userData?.id || null
+        created_by: req.user?.id || null,
+        added_by: req.user?.id || null
       };
       
       try {

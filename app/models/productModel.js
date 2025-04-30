@@ -1269,7 +1269,7 @@ const productModel = {
           ) AS product_categories
         FROM tbl_product PD 
         JOIN tbl_users tu ON tu.id = PD.created_by
-        WHERE tu.user_type IN (2, 3) AND PD.is_deleted = 0 
+        WHERE tu.user_type NOT IN (2, 3) AND PD.is_deleted = 0 
           AND PD.is_review = 0 ${dynamicQuery}
         ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
         LIMIT ${limit} OFFSET $1
@@ -1362,7 +1362,7 @@ const productModel = {
       db.any(
         `SELECT COUNT(*) as count FROM tbl_product
          LEFT JOIN tbl_users tu ON tbl_product.created_by = tu.id
-         WHERE tbl_product.status = 1 AND tu.user_type IN (2, 3) ${dynamicQuery}`
+         WHERE tbl_product.status = 1 AND tu.user_type NOT IN (2, 3) ${dynamicQuery}`
       )
         .then(function (data) {
           resolve(data);
