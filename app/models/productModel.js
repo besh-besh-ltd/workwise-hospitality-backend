@@ -2627,18 +2627,36 @@ getProductTechSpecByID: async (productId) => {
   },
   
   // Changes by Agnij April 30, 2025 [Added search function for variants across all products]
-  searchProductVariants: async (searchTerm) => {
+  searchProductVariants: async (searchTerm, start_date, end_date) => {
     return new Promise(function (resolve, reject) {
       console.log("Searching all variants with term:", searchTerm);
+      console.log("Date range:", start_date, "to", end_date);
       
       try {
-        // Changes by Agnij April 30, 2025 [Fixed variant search to return all variants when no search term is provided]
-        // Changes by Agnij April 30, 2025 [Fixed ambiguous id column reference and increased result limit]
-        let query;
+        // Changes by Agnij May 01, 2025 [Added date range filtering]
+        let dateFilter = "";
         let params = [];
+        let paramIndex = 1;
+        
+        // Prepare date filter if dates are provided
+        if (start_date && end_date) {
+          dateFilter = ` AND pv.created_at >= $${paramIndex} AND pv.created_at <= $${paramIndex+1} `;
+          params.push(start_date, end_date);
+          paramIndex += 2;
+        } else if (start_date) {
+          dateFilter = ` AND pv.created_at >= $${paramIndex} `;
+          params.push(start_date);
+          paramIndex += 1;
+        } else if (end_date) {
+          dateFilter = ` AND pv.created_at <= $${paramIndex} `;
+          params.push(end_date);
+          paramIndex += 1;
+        }
+        
+        let query;
         
         if (!searchTerm || searchTerm.trim() === "") {
-          // If no search term is provided, return all variants
+          // If no search term is provided, return all variants with date filter
           query = `
             SELECT 
               pv.id, 
@@ -2649,6 +2667,8 @@ getProductTechSpecByID: async (productId) => {
               pv.created_by,
               pv.updated_by,
               pv.is_deleted,
+              pv.is_approve,
+              pv.reject_reason_id,
               p.name as product_name,
               ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
             FROM 
@@ -2661,13 +2681,14 @@ getProductTechSpecByID: async (productId) => {
               tbl_category c ON pc.category_id = c.id
             WHERE 
               pv.is_deleted = 0
+              ${dateFilter}
             GROUP BY 
               pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
-              pv.created_by, pv.updated_by, pv.is_deleted, p.name
+              pv.created_by, pv.updated_by, pv.is_deleted, pv.is_approve, pv.reject_reason_id, p.name
             ORDER BY pv.created_at DESC
             LIMIT 100000`;
         } else {
-          // If search term is provided, use it for filtering
+          // If search term is provided, use it for filtering along with dates
           query = `
           SELECT 
             pv.id, 
@@ -2678,6 +2699,8 @@ getProductTechSpecByID: async (productId) => {
             pv.created_by,
             pv.updated_by,
             pv.is_deleted,
+            pv.is_approve,
+            pv.reject_reason_id,
             p.name as product_name,
             ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
           FROM 
@@ -2689,11 +2712,12 @@ getProductTechSpecByID: async (productId) => {
           LEFT JOIN 
             tbl_category c ON pc.category_id = c.id
           WHERE 
-            (pv.name ILIKE $1 OR p.name ILIKE $1) AND 
+            (pv.name ILIKE $${paramIndex} OR p.name ILIKE $${paramIndex}) AND 
             pv.is_deleted = 0
+            ${dateFilter}
           GROUP BY 
             pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
-            pv.created_by, pv.updated_by, pv.is_deleted, p.name
+            pv.created_by, pv.updated_by, pv.is_deleted, pv.is_approve, pv.reject_reason_id, p.name
             ORDER BY pv.created_at DESC
             LIMIT 100000`;
             
@@ -2959,11 +2983,41 @@ getProductTechSpecByID: async (productId) => {
   },
 
   // Changes by Agnij May 18, 2025 [Added function to get all variant-vendor mappings]
-  getVariantVendorMappings: async (searchTerm) => {
+  getVariantVendorMappings: async (searchTerm, start_date, end_date) => {
     return new Promise(function (resolve, reject) {
       console.log("Getting variant-vendor mappings with search term:", searchTerm);
+      console.log("Date range:", start_date, "to", end_date);
       
       try {
+        // Changes by Agnij May 01, 2025 [Added date range filtering]
+        let dateFilter = "";
+        let searchFilter = "";
+        let params = [];
+        
+        // Prepare search filter if search term is provided
+        if (searchTerm && searchTerm.trim() !== "") {
+          searchFilter = " AND (v.name ILIKE $1 OR p.name ILIKE $1 OR u.name ILIKE $1 OR u.organization_name ILIKE $1 OR u.email ILIKE $1) ";
+          params.push(`%${searchTerm}%`);
+        }
+        
+        // Prepare date filter if dates are provided
+        if (start_date && end_date) {
+          dateFilter = params.length > 0 ? 
+            ` AND m.created_at >= $${params.length+1} AND m.created_at <= $${params.length+2} ` :
+            ` AND m.created_at >= $1 AND m.created_at <= $2 `;
+          params.push(start_date, end_date);
+        } else if (start_date) {
+          dateFilter = params.length > 0 ? 
+            ` AND m.created_at >= $${params.length+1} ` :
+            ` AND m.created_at >= $1 `;
+          params.push(start_date);
+        } else if (end_date) {
+          dateFilter = params.length > 0 ? 
+            ` AND m.created_at <= $${params.length+1} ` :
+            ` AND m.created_at <= $1 `;
+          params.push(end_date);
+        }
+        
         // Changes by Agnij May 30, 2025 [Fixed query to properly join vendor table]
         // Changes by Agnij May 30, 2025 [Added proper vendor name, email, and organization information]
         const query = `
@@ -2995,14 +3049,16 @@ getProductTechSpecByID: async (productId) => {
             m.status = true
             AND v.is_deleted = 0
             AND p.is_deleted = 0
+            ${searchFilter}
+            ${dateFilter}
           ORDER BY 
             m.created_at DESC
           LIMIT 100000
         `;
       
-      db.any(query)
+      db.any(query, params)
         .then(function (data) {
-          console.log(`Found ${data.length} variant-vendor mappings (direct query)`);
+          console.log(`Found ${data.length} variant-vendor mappings (with filters)`);
           resolve(data);
         })
         .catch(function (err) {

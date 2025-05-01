@@ -3532,11 +3532,11 @@ const productController = {
   // Changes by Agnij April 30, 2025 [Added endpoint to search all product variants]
   searchVariants: async (req, res) => {
     try {
-      const { search_term } = req.query;
+      // Changes by Agnij May 01, 2025 [Added date range filtering]
+      const { search_term, start_date, end_date } = req.query;
       
-      // Changes by Agnij May 18, 2025 [Fixed search variants to return all variants when no search term is provided]
-      // Search for variants across all products
-      const variants = await productModel.searchProductVariants(search_term || "");
+      // Search for variants across all products with optional date filtering
+      const variants = await productModel.searchProductVariants(search_term || "", start_date, end_date);
       
       return res.status(200).json({
         status: 1,
@@ -3553,10 +3553,11 @@ const productController = {
   // Changes by Agnij May 18, 2025 [Added endpoint to get variant-vendor mappings]
   getVariantMappings: async (req, res) => {
     try {
-      const { search_term } = req.query;
+      // Changes by Agnij May 01, 2025 [Added date range filtering]
+      const { search_term, start_date, end_date } = req.query;
       
-      // Get mappings using the model function
-      const mappings = await productModel.getVariantVendorMappings(search_term || "");
+      // Get mappings using the model function with date filtering
+      const mappings = await productModel.getVariantVendorMappings(search_term || "", start_date, end_date);
       
       return res.status(200).json({
         status: 1,
