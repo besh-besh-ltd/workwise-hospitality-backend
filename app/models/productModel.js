@@ -2554,31 +2554,31 @@ getProductTechSpecByID: async (productId) => {
         } else {
           // If search term is provided, use it for filtering
           query = `
-            SELECT 
-              pv.id, 
-              pv.product_id, 
-              pv.name, 
-              pv.created_at,
-              pv.updated_at,
-              pv.created_by,
-              pv.updated_by,
-              pv.is_deleted,
-              p.name as product_name,
-              ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
-            FROM 
-              tbl_product_variant pv
-            LEFT JOIN 
-              tbl_product p ON pv.product_id = p.id
-            LEFT JOIN 
-              tbl_product_categories pc ON p.id = pc.product_id
-            LEFT JOIN 
-              tbl_category c ON pc.category_id = c.id
-            WHERE 
-              (pv.name ILIKE $1 OR p.name ILIKE $1) AND 
-              pv.is_deleted = 0
-            GROUP BY 
-              pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
-              pv.created_by, pv.updated_by, pv.is_deleted, p.name
+          SELECT 
+            pv.id, 
+            pv.product_id, 
+            pv.name, 
+            pv.created_at,
+            pv.updated_at,
+            pv.created_by,
+            pv.updated_by,
+            pv.is_deleted,
+            p.name as product_name,
+            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+          FROM 
+            tbl_product_variant pv
+          LEFT JOIN 
+            tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
+          WHERE 
+            (pv.name ILIKE $1 OR p.name ILIKE $1) AND 
+            pv.is_deleted = 0
+          GROUP BY 
+            pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
+            pv.created_by, pv.updated_by, pv.is_deleted, p.name
             ORDER BY pv.created_at DESC
             LIMIT 100000`;
             
@@ -2849,9 +2849,8 @@ getProductTechSpecByID: async (productId) => {
       console.log("Getting variant-vendor mappings with search term:", searchTerm);
       
       try {
-        // Changes by Agnij May 19, 2025 [Simplified query to directly fetch mappings]
-        // Changes by Agnij May 19, 2025 [Fixed ambiguous id column references]
-        // Changes by Agnij May 19, 2025 [Increased limit and improved vendor name retrieval]
+        // Changes by Agnij May 30, 2025 [Fixed query to properly join vendor table]
+        // Changes by Agnij May 30, 2025 [Added proper vendor name, email, and organization information]
         const query = `
           SELECT 
             m.id as mapping_id,
@@ -2861,19 +2860,30 @@ getProductTechSpecByID: async (productId) => {
             m.created_at as mapped_at,
             v.name as variant_name,
             p.name as product_name,
-            COALESCE(va.vendor_approve, 'Unknown Vendor') as vendor_name
+            u.name as vendor_name,
+            u.email as vendor_email,
+            u.organization_name as vendor_organization,
+            COALESCE(
+              u.organization_name, 
+              u.name, 
+              'Unknown Vendor'
+            ) as vendor_display_name
           FROM 
             tbl_product_variant_vendor_mapping m
-        LEFT JOIN
-          tbl_product_variant v ON v.id = m.product_variant_id
-        LEFT JOIN
-          tbl_product p ON p.id = v.product_id
-        LEFT JOIN
-          tbl_vendor_approve va ON va.id = m.vendor_id
-        ORDER BY 
-          m.created_at DESC
-        LIMIT 100000
-      `;
+          LEFT JOIN
+            tbl_product_variant v ON v.id = m.product_variant_id
+          LEFT JOIN
+            tbl_product p ON p.id = v.product_id
+          LEFT JOIN
+            tbl_users u ON u.id = m.vendor_id
+          WHERE
+            m.status = true
+            AND v.is_deleted = 0
+            AND p.is_deleted = 0
+          ORDER BY 
+            m.created_at DESC
+          LIMIT 100000
+        `;
       
       db.any(query)
         .then(function (data) {

@@ -3390,13 +3390,16 @@ const productController = {
   
   mapVariantWithVendor: async (req, res) => {
     try {
-      // Changes by Agnij 2023-05-30 [Added better error handling]
+      // Changes by Agnij May 30, 2025 [Added better parameter handling]
       console.log('mapVariantWithVendor called with:', JSON.stringify(req.body, null, 2));
-      const { variant_id, vendor_id } = req.body;
+      
+      // Support both naming conventions: variant_id and product_variant_id
+      const variantId = req.body.variant_id || req.body.product_variant_id;
+      const vendorId = req.body.vendor_id;
       
       // Validate input
-      if (!variant_id || !vendor_id) {
-        console.log('Validation failed: missing variant_id or vendor_id');
+      if (!variantId || !vendorId) {
+        console.log('Validation failed: missing variant ID or vendor ID');
         return res.status(400).json({ 
           status: 3, 
           message: 'Variant ID and vendor ID are required' 
@@ -3404,11 +3407,11 @@ const productController = {
       }
       
       // Check if variant exists
-      console.log('Checking if variant exists:', variant_id);
-      const variant = await productModel.getProductVariantDetails(variant_id);
+      console.log('Checking if variant exists:', variantId);
+      const variant = await productModel.getProductVariantDetails(variantId);
       console.log('Variant check result:', variant);
       if (!variant || variant.length === 0) {
-        console.log('Variant not found:', variant_id);
+        console.log('Variant not found:', variantId);
         return res.status(404).json({ 
           status: 3, 
           message: 'Variant not found' 
@@ -3416,11 +3419,11 @@ const productController = {
       }
       
       // Check if vendor exists
-      console.log('Checking if vendor exists:', vendor_id);
-      const vendor = await vendorModel.getVendorDetails(vendor_id);
+      console.log('Checking if vendor exists:', vendorId);
+      const vendor = await vendorModel.getVendorDetails(vendorId);
       console.log('Vendor check result:', vendor);
       if (!vendor || vendor.length === 0) {
-        console.log('Vendor not found:', vendor_id);
+        console.log('Vendor not found:', vendorId);
         return res.status(404).json({ 
           status: 3, 
           message: 'Vendor not found' 
@@ -3429,7 +3432,7 @@ const productController = {
       
       // Check if mapping already exists
       console.log('Checking for existing mapping');
-      const existingMapping = await productModel.checkDuplicateVariantVendorMapping(variant_id, vendor_id);
+      const existingMapping = await productModel.checkDuplicateVariantVendorMapping(variantId, vendorId);
       console.log('Existing mapping result:', existingMapping);
       if (existingMapping && existingMapping.length > 0) {
         console.log('Mapping already exists');
@@ -3442,11 +3445,9 @@ const productController = {
       // Create mapping
       console.log('Creating mapping');
       const mappingObj = {
-        // Changes by Agnij April 30, 2025 [Fixed column name from variant_id to product_variant_id]
-        product_variant_id: variant_id,
-        vendor_id,
+        product_variant_id: variantId,
+        vendor_id: vendorId,
         created_at: new Date(),
-        // Changes by Agnij April 30, 2025 [Fixed status value from integer to boolean]
         status: true
       };
       
@@ -3495,10 +3496,10 @@ const productController = {
       
       console.log(`Controller found ${variants.length} variants`);
       
-      return res.status(200).json({
-        status: 1,
+        return res.status(200).json({
+          status: 1,
         data: variants || []
-      });
+        });
     } catch (error) {
       logError(error);
       return res.status(500).json({
