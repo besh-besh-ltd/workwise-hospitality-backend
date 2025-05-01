@@ -5728,13 +5728,14 @@ rfqProductWiseReport: async (req, res) => {
     const userId = req.user.id;
 
 
-    const rfqData = await rfqModel.rfqProductReport(userId, productName, startDate, endDate);
+    const rfqData = await rfqModel.rfqProductReport(userId, productID, productName, startDate, endDate);
 
     res
       .status(200)
       .json(rfqData)
       .end();
   } catch (error) {
+    console.log(error)
     logError(error);
     res.status(500).json({
         success: false,

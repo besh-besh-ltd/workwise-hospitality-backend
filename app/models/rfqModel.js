@@ -4736,101 +4736,100 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
   });
 },
 
-rfqProductReport: async (userId, productName, startDate, endDate) => {
+rfqProductReport: async (userId, productId, productName, startDate, endDate) => {
   return new Promise(function (resolve, reject) {
       const query = `SELECT 
-    T.id AS rfq_id,
-    T.rfq_no,
-    TP.name AS product_name,
-    TP.description AS product_description,
-    T.comment AS rfq_comment,
-    T.company_name,
-    T.contact_name,
-    T.contact_number,
-    T.bid_end_date,
-    T.location,
-    T.status AS rfq_status,
-    T.timestamp AS rfq_timestamp,
-    JSONB_AGG(DISTINCT JSONB_BUILD_OBJECT(
-        'spec_title', TRPS.title,
-        'spec_value', TRPS.value,
-        'variant', TRPS.variant
-    )) AS product_specs,
-    JSONB_AGG(DISTINCT JSONB_BUILD_OBJECT(
-        'vendor_id', TU.id,
-        'vendor_name', TU.name,
-        'vendor_email', TU.email,
-        'vendor_mobile', TU.mobile,
-        'organization_name', TU.organization_name,
-        'variant', TRPV.variant,
-        'quote_details', COALESCE(
-            (SELECT JSONB_AGG(
-                JSONB_BUILD_OBJECT(
-                    'status', TQ.status,
-                    'quote_id', TQ.id,
-                    'is_regret', TQ.is_regret,
-                    'global_payment_term', TQ.global_payment_term,
-                    'global_comment', TQ.global_comment,
-                    'regret_reason', TQ.regret_reason,
-                    'quote_items', (
-                        SELECT JSONB_AGG(
+        T.id AS rfq_id,
+        T.rfq_no,
+        PV.name AS product_name,
+        TP.description AS product_description,
+        T.comment AS rfq_comment,
+        T.company_name,
+        T.contact_name,
+        T.contact_number,
+        T.bid_end_date,
+        T.location,
+        T.status AS rfq_status,
+        T.timestamp AS rfq_timestamp,
+        JSONB_AGG(DISTINCT JSONB_BUILD_OBJECT(
+            'spec_title', TRPS.title,
+            'spec_value', TRPS.value,
+            'variant', TRPS.variant
+        )) AS product_specs,
+        JSONB_AGG(DISTINCT JSONB_BUILD_OBJECT(
+            'vendor_id', TU.id,
+            'vendor_name', TU.name,
+            'vendor_email', TU.email,
+            'vendor_mobile', TU.mobile,
+            'organization_name', TU.organization_name,
+            'variant', TRPV.variant,
+            'quote_details', COALESCE(
+                (SELECT JSONB_AGG(
+                    JSONB_BUILD_OBJECT(
+                        'status', TQ.status,
+                        'quote_id', TQ.id,
+                        'is_regret', TQ.is_regret,
+                        'global_payment_term', TQ.global_payment_term,
+                        'global_comment', TQ.global_comment,
+                        'regret_reason', TQ.regret_reason,
+                        'quote_items', (
+                            SELECT JSONB_AGG(
+                                JSONB_BUILD_OBJECT(
+                                    'tax', TQI.tax,
+                                    'comment', TQI.comment,
+                                    'quantity', TQI.quantity,
+                                    'unit_price', TQI.unit_price,
+                                    'total_price', TQI.total_price,
+                                    'product_name', TQI.product_name,
+                                    'freight_price', TQI.freight_price,
+                                    'package_price', TQI.package_price,
+                                    'delivery_period', TQI.delivery_period
+                                )
+                            ) FROM tbl_quote_items TQI WHERE TQI.quote_id = TQ.id AND TQI.product_variant_id = TRP.product_variant_id
+                        )
+                    ) FROM tbl_quotes TQ WHERE TQ.rfq_id = T.id AND TQ.created_by = TU.id),
+                JSONB_BUILD_ARRAY(
+                    JSONB_BUILD_OBJECT(
+                        'status', 0,
+                        'quote_id', 0,
+                        'is_regret', 0,
+                        'global_payment_term', '',
+                        'global_comment', '',
+                        'regret_reason', '',
+                        'quote_items', JSONB_BUILD_ARRAY(
                             JSONB_BUILD_OBJECT(
-                                'tax', TQI.tax,
-                                'comment', TQI.comment,
-                                'quantity', TQI.quantity,
-                                'unit_price', TQI.unit_price,
-                                'total_price', TQI.total_price,
-                                'product_name', TQI.product_name,
-                                'freight_price', TQI.freight_price,
-                                'package_price', TQI.package_price,
-                                'delivery_period', TQI.delivery_period
+                                'tax', 0,
+                                'comment', 'quote not present',
+                                'quantity', '0',
+                                'unit_price', 0,
+                                'total_price', 0,
+                                'product_name', '',
+                                'freight_price', 0,
+                                'package_price', 0,
+                                'delivery_period', ''
                             )
-                        ) FROM tbl_quote_items TQI WHERE TQI.quote_id = TQ.id AND TQI.product_variant_id = TRP.product_variant_id
-                    )
-                ) FROM tbl_quotes TQ WHERE TQ.rfq_id = T.id AND TQ.created_by = TU.id),
-            JSONB_BUILD_ARRAY(
-                JSONB_BUILD_OBJECT(
-                    'status', 0,
-                    'quote_id', 0,
-                    'is_regret', 0,
-                    'global_payment_term', '',
-                    'global_comment', '',
-                    'regret_reason', '',
-                    'quote_items', JSONB_BUILD_ARRAY(
-                        JSONB_BUILD_OBJECT(
-                            'tax', 0,
-                            'comment', 'quote not present',
-                            'quantity', '0',
-                            'unit_price', 0,
-                            'total_price', 0,
-                            'product_name', '',
-                            'freight_price', 0,
-                            'package_price', 0,
-                            'delivery_period', ''
                         )
                     )
                 )
             )
-        )
-    )) AS vendors
-FROM tbl_rfq_products TRP
-JOIN tbl_product_variant PV ON TV.id = TRP.product_variant_id
-JOIN tbl_product TP ON TP.id = PV.produt_id
-JOIN tbl_rfq T ON T.id = TRP.rfq_id
-LEFT JOIN tbl_rfq_products_specs TRPS ON TRPS.rfq_id = T.id AND TRPS.product_variant_id = TRP.product_variant_id
-LEFT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = T.id AND TRPV.product_variant_id = TRP.product_variant_id
-LEFT JOIN tbl_users TU ON TU.id = TRPV.user_id  -- Joining tbl_users for vendor details
-WHERE T.created_by = $1
-    AND LOWER(TP.name) = LOWER($2)
-    AND ($3::date IS NULL OR T.timestamp >= $3::date)
-    AND ($4::date IS NULL OR T.timestamp <= $4::date)
-GROUP BY T.id, TP.id
-ORDER BY T.timestamp DESC;
-
+        )) AS vendors
+        FROM tbl_rfq_products TRP
+        JOIN tbl_product_variant PV ON PV.id = TRP.product_variant_id
+        JOIN tbl_product TP ON TP.id = PV.product_id
+        JOIN tbl_rfq T ON T.id = TRP.rfq_id
+        LEFT JOIN tbl_rfq_products_specs TRPS ON TRPS.rfq_id = T.id AND TRPS.product_variant_id = TRP.product_variant_id
+        LEFT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = T.id AND TRPV.product_variant_id = TRP.product_variant_id
+        LEFT JOIN tbl_users TU ON TU.id = TRPV.user_id  -- Joining tbl_users for vendor details
+        WHERE T.created_by = $1
+            AND PV.id = $2
+            AND ($3::date IS NULL OR T.timestamp >= $3::date)
+            AND ($4::date IS NULL OR T.timestamp <= $4::date)
+        GROUP BY T.id, PV.id
+        ORDER BY T.timestamp DESC;
 
 `;
 
-      db.query(query, [userId, productName, startDate, endDate])
+      db.query(query, [userId, productId, startDate, endDate])
       .then(data => resolve(data))
       .catch(err => {
           let error = new Error(err);
@@ -4887,7 +4886,7 @@ getProjectDetailsReport: async (projectId, startDate, endDate) => {
 'products', (
     SELECT json_agg(
         json_build_object(
-            'product_id', prod.product_id,
+            'product_id', prod.product_variant_id,
             'product_name', tp.name,
             'comment', prod.comment,
             'datasheet', prod.datasheet,
