@@ -4959,9 +4959,112 @@ getProjectDetailsReport: async (projectId, startDate, endDate) => {
       .then(data => resolve(data))
       .catch(err => reject(new Error(err)));
   });
-}
+},
 
+// Changes by Agnij July 24, 2024 [Added method to search for variant products]
+searchVariantProducts: async (search_key) => {
+  console.log(`[RFQ Model] searchVariantProducts called with search_key: "${search_key}"`);
+  
+  // SQL query to search for products in the variant mappings table
+  const q = `
+    SELECT 
+      pv.id AS variant_id,
+      pv.name AS variant_name,
+      p.id AS product_id,
+      p.name AS product_name,
+      p.description,
+      p.slug,
+      c.id AS category_id,
+      c.title AS category_name,
+      img.new_image_name AS image_url,
+      pvvm.id AS mapping_id,
+      similarity(pv.name, $1) AS similarity_score,
+      ts_rank_cd(to_tsvector('english', pv.name), plainto_tsquery('english', $1)) AS rank
+    FROM 
+      tbl_product_variant pv
+    JOIN 
+      tbl_product p ON pv.product_id = p.id
+    JOIN 
+      tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
+    JOIN 
+      tbl_product_categories pc ON p.id = pc.product_id
+    JOIN 
+      tbl_category c ON pc.category_id = c.id
+    LEFT JOIN 
+      tbl_product_images img ON p.id = img.product_id AND img.is_primary = 1
+    WHERE 
+      p.status = 1 
+      AND p.is_deleted = 0 
+      AND pv.status = 1
+      AND pvvm.status = 1
+      AND (
+        to_tsvector('english', pv.name) @@ plainto_tsquery('english', $1) 
+        OR similarity(pv.name, $1) > 0.1
+        OR to_tsvector('english', p.name) @@ plainto_tsquery('english', $1)
+        OR similarity(p.name, $1) > 0.1
+      )
+    GROUP BY 
+      pv.id, p.id, c.id, img.new_image_name, pvvm.id
+    ORDER BY 
+      rank DESC, similarity_score DESC
+    LIMIT 50;
+  `;
+  
+  try {
+    console.log(`[RFQ Model] Executing variant products search query for: "${search_key}"`);
+    const { rows } = await db.query(q, [search_key]);
+    console.log(`[RFQ Model] searchVariantProducts found ${rows.length} results`);
+    return rows;
+  } catch (error) {
+    console.error('[RFQ Model] Error in searchVariantProducts:', error.message);
+    console.error(error.stack);
+    // Return empty array instead of throwing error to avoid breaking the API response
+    return [];
+  }
+},
 
+// Changes by Agnij July 24, 2024 [Added method to search for variant vendors]
+searchVariantVendors: async (product_id, variant_id) => {
+  console.log(`[RFQ Model] searchVariantVendors called with product_id: ${product_id}, variant_id: ${variant_id}`);
+  
+  // SQL query to find vendors associated with a product variant
+  const q = `
+    SELECT 
+      u.id AS vendor_id,
+      u.organization_name AS vendor_name,
+      CONCAT(u.organization_name, ' (', u.name, ')') AS vendor_display_name,
+      u.email AS vendor_email,
+      u.city,
+      u.state,
+      pvvm.id AS mapping_id,
+      pvvm.created_at AS mapped_at
+    FROM 
+      tbl_product_variant_vendor_mapping pvvm
+    JOIN 
+      tbl_users u ON pvvm.vendor_id = u.id
+    JOIN 
+      tbl_product_variant pv ON pvvm.product_variant_id = pv.id
+    WHERE 
+      pvvm.status = 1
+      AND u.status = 1
+      AND u.is_deleted = 0
+      AND ${variant_id ? 'pvvm.product_variant_id = $1' : 'pv.product_id = $1'}
+    ORDER BY 
+      u.organization_name ASC;
+  `;
+  
+  try {
+    console.log(`[RFQ Model] Executing variant vendors search query for ${variant_id ? 'variant' : 'product'} ID: ${variant_id || product_id}`);
+    const { rows } = await db.query(q, [variant_id || product_id]);
+    console.log(`[RFQ Model] searchVariantVendors found ${rows.length} results`);
+    return rows;
+  } catch (error) {
+    console.error('[RFQ Model] Error in searchVariantVendors:', error.message);
+    console.error(error.stack);
+    // Return empty array instead of throwing error to avoid breaking the API response
+    return [];
+  }
+},
 
 }
 export default rfqModel;

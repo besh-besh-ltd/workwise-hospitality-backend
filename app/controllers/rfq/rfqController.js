@@ -5826,9 +5826,74 @@ sendReportOnEmail: async (req, res) => {
       error: error.toString()
     });
   }
-}
+},
 
+// Changes by Agnij July 24, 2024 [Added endpoint to search variant products]
+searchVariantProducts: async (req, res, next) => {
+  try {
+    console.log('[RFQ Controller] searchVariantProducts called with:', JSON.stringify(req.body));
+    const search_key = req.body?.search_key ? req.body?.search_key : '';
+    
+    if (!search_key || search_key.trim() === '') {
+      console.log('[RFQ Controller] Empty search key, returning empty results');
+      return res.status(200).json([]).end();
+    }
+    
+    // Use the model to search for variant mappings
+    const variantProductResults = await rfqModel.searchVariantProducts(search_key);
+    console.log(`[RFQ Controller] Found ${variantProductResults?.length || 0} variant products for search: "${search_key}"`);
+    
+    if (!variantProductResults || variantProductResults.length === 0) {
+      return res.status(200).json([]).end();
+    }
+    
+    res.status(200).json(variantProductResults).end();
+  } catch (error) {
+    console.error('[RFQ Controller] Error in searchVariantProducts:', error.message);
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    }).end();
+  }
+},
 
+// Changes by Agnij July 24, 2024 [Added endpoint to search variant vendors]
+searchVariantVendors: async (req, res, next) => {
+  try {
+    console.log('[RFQ Controller] searchVariantVendors called with:', JSON.stringify(req.body));
+    const { product_id, variant_id } = req.body;
+    
+    if (!product_id && !variant_id) {
+      console.log('[RFQ Controller] No product_id or variant_id provided, returning empty results');
+      return res.status(200).json([]).end();
+    }
+    
+    // Log which ID we're using
+    if (variant_id) {
+      console.log(`[RFQ Controller] Searching vendors for variant ID: ${variant_id}`);
+    } else {
+      console.log(`[RFQ Controller] Searching vendors for product ID: ${product_id}`);
+    }
+    
+    // Use the model to search for vendors associated with this variant
+    const variantVendorResults = await rfqModel.searchVariantVendors(product_id, variant_id);
+    console.log(`[RFQ Controller] Found ${variantVendorResults?.length || 0} vendors for ${variant_id ? 'variant' : 'product'} ID: ${variant_id || product_id}`);
+    
+    if (!variantVendorResults || variantVendorResults.length === 0) {
+      return res.status(200).json([]).end();
+    }
+    
+    res.status(200).json(variantVendorResults).end();
+  } catch (error) {
+    console.error('[RFQ Controller] Error in searchVariantVendors:', error.message);
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    }).end();
+  }
+},
 
 };
 export default rfqController;

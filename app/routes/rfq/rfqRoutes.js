@@ -166,6 +166,16 @@ RfqRoutes.post(
 );
 
 RfqRoutes.post(
+  '/search-variant-products',
+  rfqController.searchVariantProducts
+);
+
+RfqRoutes.post(
+  '/search-variant-vendors',
+  rfqController.searchVariantVendors
+);
+
+RfqRoutes.post(
   '/search-product-by-category',
   rfqController.searchProductByCategory
 );

@@ -2769,7 +2769,9 @@ const productController = {
       let { reject_reason, reject_reason_id, status } = req.body;
       const productId = req.params.id;
 
-      // Changes by Agnij May 01, 2025 [Fixed status validation]
+      // Changes by Agnij July 24, 2024 [Fixed approval functionality]
+      console.log("Approving product/variant with ID:", productId, "Status:", status);
+      
       // Validate status is present and valid
       if (status === undefined || status === null) {
         return res.status(400).json({
@@ -2792,6 +2794,7 @@ const productController = {
       const variantCheck = await productModel.getProductVariantDetails(productId);
       
       if (variantCheck && variantCheck.length > 0) {
+        console.log("This is a variant with ID:", productId);
         // This is a variant, handle variant approval
         
         let reasonId = null;
@@ -2821,34 +2824,47 @@ const productController = {
         
         // Update variant status
         const variantObj = {
-          is_approve: status,
+          is_approve: parseInt(status),
           updated_by: req.user.id,
           reject_reason_id: reasonId || null,
           updated_at: new Date()
         };
         
-        // Update the variant in the database
-        await db.one(
-          `UPDATE tbl_product_variant 
-           SET is_approve = $1, 
-               updated_by = $2, 
-               reject_reason_id = $3,
-               updated_at = $4
-           WHERE id = $5 
-           RETURNING id, name`,
-          [
-            variantObj.is_approve,
-            variantObj.updated_by,
-            variantObj.reject_reason_id,
-            variantObj.updated_at,
-            productId
-          ]
-        );
+        console.log("Updating variant with:", variantObj);
         
-        return res.status(200).json({
-          status: 1,
-          message: `Variant successfully ${status === '0' ? 'Disapproved' : 'Approved'}`
-        });
+        // Update the variant in the database using a direct query for more reliability
+        try {
+          await db.one(
+            `UPDATE tbl_product_variant 
+             SET is_approve = $1, 
+                 updated_by = $2, 
+                 reject_reason_id = $3,
+                 updated_at = $4
+             WHERE id = $5 
+             RETURNING id, name`,
+            [
+              variantObj.is_approve,
+              variantObj.updated_by,
+              variantObj.reject_reason_id,
+              variantObj.updated_at,
+              productId
+            ]
+          );
+          
+          console.log("Variant updated successfully");
+          
+          return res.status(200).json({
+            status: 1,
+            message: `Variant successfully ${status === '0' ? 'Disapproved' : 'Approved'}`
+          });
+        } catch (dbError) {
+          console.error("Database error updating variant:", dbError);
+          return res.status(500).json({
+            status: 3,
+            message: 'Error updating variant status',
+            error: dbError.message
+          });
+        }
       }
       
       // If not a variant, continue with the original product approval logic
@@ -3278,6 +3294,7 @@ const productController = {
       }
       
       // Create variant with complete structure matching the example in tbl_product_variant_query_output.txt
+      // Changes by Agnij July 24, 2024 [Set is_approve to 0 by default]
       const variantObj = {
         product_id,
         name: variantNameValue, // Store in name field as per DB structure
@@ -3286,7 +3303,7 @@ const productController = {
         status: 1,
         is_deleted: 0,
         is_review: 0,
-        is_approve: 1,
+        is_approve: 0, // Changed from 1 to 0 as default
         created_at: new Date(),
         created_by: req.user?.id || null,
         added_by: req.user?.id || null

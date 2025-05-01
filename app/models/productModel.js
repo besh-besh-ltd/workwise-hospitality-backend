@@ -760,10 +760,12 @@ const productModel = {
   createProductveriants: async (variantObj) => {
     return new Promise(function (resolve, reject) {
       // Update object keys to match table columns
+      // Changes by Agnij July 24, 2024 [Added is_approve field with default 0]
       const updatedObj = {
         product_id: variantObj.product_id,
         name: variantObj.variant_name || variantObj.name,
         status: 1,
+        is_approve: 0, // Set default to disapproved
         created_at: new Date()
       };
       
@@ -953,13 +955,14 @@ const productModel = {
         // Use variant_name from input if available, otherwise use name
         const variantName = variantObj.variant_name || variantObj.name;
         
+        // Changes by Agnij July 24, 2024 [Set is_approve to 0 by default]
         const fields = {
           product_id: variantObj.product_id,
           name: variantName, // Database column is 'name'
           status: variantObj.status !== undefined ? variantObj.status : 1,
           is_deleted: variantObj.is_deleted !== undefined ? variantObj.is_deleted : 0,
           is_review: variantObj.is_review !== undefined ? variantObj.is_review : 0,
-          is_approve: variantObj.is_approve !== undefined ? variantObj.is_approve : 1,
+          is_approve: variantObj.is_approve !== undefined ? variantObj.is_approve : 0, // Changed default from 1 to 0
           created_at: variantObj.created_at || new Date(),
           updated_at: variantObj.updated_at || new Date(),
           created_by: variantObj.created_by || null,
@@ -1250,119 +1253,36 @@ const productModel = {
     dateTo,
     is_approve
   ) => {
-
-    // mukul 30/apr/20230, implemented changes related to new product flowe ( product variant and variant mapping )
+    // Changes by Agnij July 24, 2024 [Modified to return base products only, not variants]
     return new Promise(function (resolve, reject) {
-      // let dynamicQuery = '';
-      // // Product name search with full-text search and similarity
-      // if (productName && productName !== '') {
-      //   dynamicQuery += `
-      //     AND (
-      //       to_tsvector('english', PD.name) @@ plainto_tsquery('english', '${productName}')
-      //       OR similarity(PD.name, '${productName}') > 0.1
-      //     )`;
-      // }
-      // if (filterProduct?.id_array) {
-      //   dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
-      // }
-  
-      // if (vendorId && vendorId !== '') {
-      //   dynamicQuery += `
-      //     AND EXISTS (
-      //       SELECT 1 FROM tbl_product_variant pv
-      //       JOIN tbl_product_variant_vendor_mapping pvm
-      //       ON pv.id = pvm.product_variant_id
-      //       WHERE pv.product_id = PD.id AND pvm.vendor_id = ${vendorId}
-      //     )`;
-      // }
-      // if (userId && userId !== '') {
-      //   dynamicQuery += ` AND PD.added_by = ${userId}`;
-      // }
-      // if (isFeatured && isFeatured !== '') {
-      //   dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
-      // }
-      // if (categoryId) {
-      //   dynamicQuery += ` AND EXISTS (
-      //     SELECT 1 FROM tbl_product_categories
-      //     WHERE tbl_product_categories.product_id = PD.id 
-      //     AND tbl_product_categories.category_id = ${categoryId}
-      //   )`;
-      // }
-      // if (dateFrom) {
-      //   dynamicQuery += ` AND DATE(PD.created_at) >= '${dateFrom}'`;
-      // }
-      // if (dateTo) {
-      //   dynamicQuery += ` AND DATE(PD.created_at) <= '${dateTo}'`;
-      // }
-      // if (is_approve !== null && is_approve !== undefined) {
-      //   dynamicQuery += ` AND PD.is_approve = ${is_approve}`;
-      // }
-      
-      // let q = `
-      // SELECT 
-      //   PD.*, 
-      //     NULL AS vendor_name,
-      //   ${productName ? `
-      //     similarity(PD.name, '${productName}') AS similarity_score,
-      //     ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank,
-      //   ` : ''}
-      //   ARRAY
-      //   (SELECT json_build_object('category_name', tc.title, 'id', tc.id)
-      //     FROM tbl_product_categories pc
-      //     LEFT JOIN tbl_category tc ON pc.category_id = tc.id
-      //     WHERE PD.id = pc.product_id ORDER BY pc.id
-      //     ) AS product_categories
-      //   FROM tbl_product PD 
-      //   JOIN tbl_users tu ON tu.id = PD.created_by
-      //   WHERE tu.user_type NOT IN (2, 3) AND PD.is_deleted = 0 
-      //     AND PD.is_review = 0 ${dynamicQuery}
-      //   ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
-      //   LIMIT ${limit} OFFSET $1
-      // `;
-
-      // db.any(
-      //   q,
-      //   [offset]
-      // )
-      //   .then(function (data) {
-      //     resolve(data);
-      //   })
-      //   .catch(function (err) {
-      //     let error = new Error(err);
-      //     reject(error);
-      //   });
-
       let dynamicQuery = '';
-
       // Product name search with full-text search and similarity
       if (productName && productName !== '') {
         dynamicQuery += `
           AND (
-            to_tsvector('english', CONCAT(PV.name, ' - ', PD.name)) @@ plainto_tsquery('english', '${productName}')
-            OR similarity(CONCAT(PV.name, ' - ', PD.name), '${productName}') > 0.1
+            to_tsvector('english', PD.name) @@ plainto_tsquery('english', '${productName}')
+            OR similarity(PD.name, '${productName}') > 0.1
           )`;
       }
-
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
       }
-
+  
       if (vendorId && vendorId !== '') {
         dynamicQuery += `
           AND EXISTS (
-            SELECT 1 FROM tbl_product_variant_vendor_mapping pvm
-            WHERE pvm.product_variant_id = PV.id AND pvm.vendor_id = ${vendorId}
+            SELECT 1 FROM tbl_product_variant pv
+            JOIN tbl_product_variant_vendor_mapping pvm
+            ON pv.id = pvm.product_variant_id
+            WHERE pv.product_id = PD.id AND pvm.vendor_id = ${vendorId}
           )`;
       }
-
       if (userId && userId !== '') {
         dynamicQuery += ` AND PD.added_by = ${userId}`;
       }
-
       if (isFeatured && isFeatured !== '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
-
       if (categoryId) {
         dynamicQuery += ` AND EXISTS (
           SELECT 1 FROM tbl_product_categories
@@ -1370,47 +1290,47 @@ const productModel = {
           AND tbl_product_categories.category_id = ${categoryId}
         )`;
       }
-
       if (dateFrom) {
-        dynamicQuery += ` AND DATE(PV.created_at) >= '${dateFrom}'`;
+        dynamicQuery += ` AND DATE(PD.created_at) >= '${dateFrom}'`;
       }
-
       if (dateTo) {
-        dynamicQuery += ` AND DATE(PV.created_at) <= '${dateTo}'`;
+        dynamicQuery += ` AND DATE(PD.created_at) <= '${dateTo}'`;
       }
-
       if (is_approve !== null && is_approve !== undefined) {
         dynamicQuery += ` AND PD.is_approve = ${is_approve}`;
       }
-
+      
       let q = `
       SELECT 
-        PV.*, 
-        row_to_json(PD) AS product_details,
+        PD.*, 
         NULL AS vendor_name,
-        CONCAT(PV.name, ' - ', PD.name) AS unified_name,
         ${productName ? `
-          similarity(CONCAT(PV.name, ' - ', PD.name), '${productName}') AS similarity_score,
-          ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', PD.name)), plainto_tsquery('english', '${productName}')) AS rank,
+          similarity(PD.name, '${productName}') AS similarity_score,
+          ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank,
         ` : ''}
-        ARRAY(
-          SELECT json_build_object('category_name', tc.title, 'id', tc.id)
+        ARRAY
+        (SELECT json_build_object('category_name', tc.title, 'id', tc.id)
           FROM tbl_product_categories pc
           LEFT JOIN tbl_category tc ON pc.category_id = tc.id
           WHERE PD.id = pc.product_id ORDER BY pc.id
-        ) AS product_categories
-      FROM tbl_product_variant PV
-      JOIN tbl_product PD ON PD.id = PV.product_id
+        ) AS product_categories,
+        ARRAY
+        (SELECT json_build_object('id', pv.id, 'name', pv.name, 'product_id', pv.product_id, 'is_approve', pv.is_approve)
+          FROM tbl_product_variant pv
+          WHERE PD.id = pv.product_id
+        ) AS product_variants
+      FROM tbl_product PD 
       JOIN tbl_users tu ON tu.id = PD.created_by
-      WHERE tu.user_type NOT IN (2, 3)
-        AND PD.is_deleted = 0
-        AND PD.is_review = 0
-        ${dynamicQuery}
-      ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PV.created_at DESC`}
+      WHERE tu.user_type NOT IN (2, 3) AND PD.is_deleted = 0 
+        AND PD.is_review = 0 ${dynamicQuery}
+      ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
       LIMIT ${limit} OFFSET $1
       `;
 
-      db.any(q, [offset])
+      db.any(
+        q,
+        [offset]
+      )
         .then(function (data) {
           resolve(data);
         })
@@ -1418,7 +1338,6 @@ const productModel = {
           let error = new Error(err);
           reject(error);
         });
-
     });
   },
   getExportProductList: async (product_id) => {
@@ -2531,13 +2450,14 @@ getProductTechSpecByID: async (productId) => {
         // Use variant_name from input if available, otherwise use name
         const variantName = variantObj.variant_name || variantObj.name;
         
+        // Changes by Agnij July 24, 2024 [Set is_approve to 0 by default]
         const fields = {
           product_id: variantObj.product_id,
           name: variantName, // Database column is 'name'
           status: variantObj.status !== undefined ? variantObj.status : 1,
           is_deleted: variantObj.is_deleted !== undefined ? variantObj.is_deleted : 0,
           is_review: variantObj.is_review !== undefined ? variantObj.is_review : 0,
-          is_approve: variantObj.is_approve !== undefined ? variantObj.is_approve : 1,
+          is_approve: variantObj.is_approve !== undefined ? variantObj.is_approve : 0, // Changed default from 1 to 0
           created_at: variantObj.created_at || new Date(),
           updated_at: variantObj.updated_at || new Date(),
           created_by: variantObj.created_by || null,
