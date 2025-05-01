@@ -797,6 +797,22 @@ const productModel = {
         });
     });
   },
+  deletePreviousApprovedByMapping: async (vendorId, variantId) => {
+    try {
+      let q = `
+      DELETE FROM tbl_vendorapprove_product_mapping vapm
+      WHERE variant_vendor_mapping_id IN (
+        SELECT id FROM tbl_product_variant_vendor_mapping
+        WHERE product_variant_id = $1
+          AND vendor_id = $2
+      );
+      `
+
+      return await db.any(q, [variantId, vendorId])
+    } catch (e) {
+      throw e
+    };
+  },
   createProductCategory: async (categoryObj) => {
     return new Promise(function (resolve, reject) {
       // Construct the dynamic SQL query

@@ -279,6 +279,7 @@ const validateDbBody = {
 
       let { name, categories, approved_id, master_id } = req.body;
       categories = JSON.parse(categories);
+      
       if (approved_id) {
         /*  approved_id = JSON.parse(approved_id);
         for await (const approveId of approved_id) {
@@ -303,14 +304,13 @@ const validateDbBody = {
         errors.categories = 'Please select a category';
       }
 
-      let prodNameExists = await productModel.checkProductExists(
-        name,
+      let prodNameExists = await productModel.checkVariantExistsForVendor(
         req.user.id,
-        req.params?.id || null
+        master_id,
       );
       if (prodNameExists.length > 0) {
         err++;
-        errors.name = 'Product name already exist';
+        errors.name = 'Product is already mapped with vendor';
       }
       if (req.method == 'PUT' && req.findProduct.is_approve != 1) {
         let checkMasterNameExist = await productModel.checkMasterNameExist(
