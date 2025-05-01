@@ -3550,10 +3550,10 @@ const productController = {
   searchVariants: async (req, res) => {
     try {
       // Changes by Agnij May 01, 2025 [Added date range filtering]
-      const { search_term, start_date, end_date } = req.query;
+      const { id, search_term, start_date, end_date } = req.query;
       
       // Search for variants across all products with optional date filtering
-      const variants = await productModel.searchProductVariants(search_term || "", start_date, end_date);
+      const variants = await productModel.searchProductVariants(id, search_term || "", start_date, end_date);
       
       return res.status(200).json({
         status: 1,

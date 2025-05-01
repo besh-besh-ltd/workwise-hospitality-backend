@@ -2547,7 +2547,7 @@ getProductTechSpecByID: async (productId) => {
   },
   
   // Changes by Agnij April 30, 2025 [Added search function for variants across all products]
-  searchProductVariants: async (searchTerm, start_date, end_date) => {
+  searchProductVariants: async (id, searchTerm, start_date, end_date) => {
     return new Promise(function (resolve, reject) {
       console.log("Searching all variants with term:", searchTerm);
       console.log("Date range:", start_date, "to", end_date);
@@ -2601,6 +2601,7 @@ getProductTechSpecByID: async (productId) => {
               tbl_category c ON pc.category_id = c.id
             WHERE 
               pv.is_deleted = 0
+              ${id ? `AND pv.id = ${id}` : ``}
               ${dateFilter}
             GROUP BY 
               pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
@@ -2632,6 +2633,7 @@ getProductTechSpecByID: async (productId) => {
           LEFT JOIN 
             tbl_category c ON pc.category_id = c.id
           WHERE 
+            ${id ? `pv.id = ${id} AND` : ``}
             (pv.name ILIKE $${paramIndex} OR p.name ILIKE $${paramIndex}) AND 
             pv.is_deleted = 0
             ${dateFilter}
