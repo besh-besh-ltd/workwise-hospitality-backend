@@ -16,6 +16,8 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import fs from 'fs';
 import productModel from '../../models/productModel.js';
 import generativeAI from '../../helper/processBOQWithAI.js';
+import { setupReverseAuctionMails } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
+import { setupReverseAuctionWhatsAppNotifications } from '../../helper/sendWhatsAppFunctions/sendWhatsappNotification.js';
 
 
 
@@ -316,7 +318,6 @@ const updateRfqProductIdInTechEvaluation = async (oldProductId, newProductId) =>
       );
     }
 
-    console.log('RFQ Product IDs successfully updated in Tech Evaluation');
   } catch (error) {
     console.error('Error updating RFQ Product IDs:', error.message);
     throw error;
@@ -433,9 +434,6 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
               const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
               return `${product.name} - ${quantitySpec.value || '--'} ${product.unit || ''}`.trim();
             }).join(', ');
-
-            console.log(" rfq contoller 437 spoc console ", mailRecipients?.to, mailRecipients.cc)
-
       sendMail(mailRecipients);
 
       // here we have to implement await Promise.allSettled(promises); for better perfomance
@@ -503,7 +501,6 @@ const sendMailWithRetry = async (mailOptions, maxRetries = 3) => {
   while (retries < maxRetries) {
     try {
       await sendMail(mailOptions);
-      console.log(`Email sent successfully to ${mailOptions.to}`);
       return true;
     } catch (error) {
       retries++;
@@ -544,7 +541,7 @@ const sendMailtoVendors = async (req, rfqNumber) => {
       const vendorInfo = vendorProductMap[vendorId];
       try {
         await sendMailEachVendor(vendorInfo.vendorDetails, req.user, rfqNumber, vendorInfo.products);
-        console.log(`Email sent successfully to vendor ${vendorId}`);
+      
       } catch (error) {
         console.error(`Failed to send email to vendor ${vendorId}:`, error);
         throw error;
@@ -1304,22 +1301,83 @@ const rfqController = {
       const response_email = req.body.response_email?.toLowerCase();
       const is_update = !!rfq_id;
       const user_id = req.user.id;
+      const { products } = req.body;
+      // Step 1: Build map with vendorId as key for accurate lookup
+      const vendorProductMap = new Map();
+
+      products.forEach((product) => {
+        if (product.vendors && Array.isArray(product.vendors)) {
+          product.vendors.forEach((vendor) => {
+            if (vendorProductMap.has(vendor.user_id)) {
+              vendorProductMap.get(vendor.user_id).products.push(product.name);
+            } else {
+              vendorProductMap.set(vendor.user_id, {
+                name: vendor.name,
+                products: [product.name]
+              });
+            }
+          });
+        }
+      });
+
+      // Step 2: Prepare final array with mobile numbers
+      const finalArray = [];
+
+      for (const [vendorId, vendorData] of vendorProductMap.entries()) {
+        const vendorDetails = await rfqModel.getVendorDetailsByUserId(vendorId);
+      
+        finalArray.push({
+          vendor: vendorDetails.name,
+          products: vendorData.products.join(', '),
+          vendorMobile: vendorDetails.mobile || '',
+          vendorEmail: vendorDetails.email || '',
+        });
+      }
+      
+
+      console.log('Final Array:', finalArray);
 
       // Set default auction dates if reverse auction is enabled
       if (reverse_auction == 1) {
-        console.log("Auction dates from request:", { ra_start_date, ra_end_date, bid_end_date });
-        
         // FORCE set auction start date to today if not provided or empty
         if (!ra_start_date || ra_start_date === '') {
-          ra_start_date = new Date().toISOString().split('T')[0];
-          console.log("FORCED default ra_start_date on backend:", ra_start_date);
+          throw new Error('Please provide reverse auction start date');
         }
-        
+
         // FORCE set auction end date to bid_end_date if not provided or empty
         if ((!ra_end_date || ra_end_date === '') && bid_end_date) {
-          ra_end_date = bid_end_date;
-          console.log("FORCED default ra_end_date on backend:", ra_end_date);
+          throw new Error('Please provide reverse auction end date');
         }
+        const timezone = process.env.TIMEZONE || 'Asia/Kolkata';
+
+        const buyer_name = req.user.name || '';
+        const buyer_email = req.user.email || '';
+        const project_name = await rfqModel.getProjectNameById(project_id);
+        // If bo th dates are provided, ensure they are in the correct format call email scheduler
+        setupReverseAuctionMails(
+          finalArray,
+          company_name,
+          reverse_auction,
+          ra_start_date,
+          ra_end_date,
+          bid_end_date,
+          timezone,
+          buyer_name,
+          buyer_email,
+          project_name
+        );
+        setupReverseAuctionWhatsAppNotifications(
+          finalArray,
+          company_name,
+          reverse_auction,
+          ra_start_date,
+          ra_end_date,
+          bid_end_date,
+          timezone,
+          buyer_name,
+          project_name,
+          contact_number,
+        );
       } else {
         // If reverse auction is disabled, set auction dates to null
         ra_start_date = null;
@@ -1347,14 +1405,8 @@ const rfqController = {
           ra_end_date: ra_end_date || null
         };
 
-        console.log("Final RFQ auction data:", {
-          reverse_auction: tbl_rfq_data.reverse_auction,
-          ra_start_date: tbl_rfq_data.ra_start_date,
-          ra_end_date: tbl_rfq_data.ra_end_date
-        });
-
-        if(project_id!=-1){
-          tbl_rfq_data.project_id=project_id;
+        if (project_id != -1) {
+          tbl_rfq_data.project_id = project_id;
         }
 
         const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
@@ -1364,21 +1416,14 @@ const rfqController = {
           rfq_id = response[0].id;
           
           // Verify the saved data
-          const savedRfq = await rfqModel.getRFQDetails(rfq_id);
-          console.log("Saved RFQ auction data from DB:", {
-            id: rfq_id,
-            reverse_auction: savedRfq[0].reverse_auction,
-            ra_start_date: savedRfq[0].ra_start_date,
-            ra_end_date: savedRfq[0].ra_end_date
-          });
-        }  
+        }
       }
 
       await saveRfqDraft(req.user.id, req.body);
 
       const response = await rfqModel.update(
         'tbl_rfq',
-        {is_published: 1},
+        { is_published: 1 },
         rfq_id
       );
 
