@@ -72,14 +72,6 @@ productRoutes.put(
   productController.deleteCategory
 );
 
-// productRoutes.post(
-//   '/create-product',
-//   passportSignIn,
-//   schema_posts.add_product_image,
-//   validateBody(schemas.create_product),
-//   validateDbBody.attributeIdExists,
-//   productController.createProduct
-// );
 productRoutes.post(
   '/admin-product-add',
   passportSignIn,
@@ -100,16 +92,12 @@ productRoutes.post(
   '/bulk-product-create',
   passportSignIn,
   schema_posts.productBulkUpload,
-  // validateBody(schemas.create_product)
-  // validateDbBody.attributeIdExists,
   productController.productBulkUpload
 );
 productRoutes.post(
   '/bulk-only-product-create',
   passportSignIn,
   schema_posts.productBulkUpload,
-  // validateBody(schemas.create_product)
-  // validateDbBody.attributeIdExists,
   productController.onlyProductBulkUpload
 ); 
 productRoutes.get(
