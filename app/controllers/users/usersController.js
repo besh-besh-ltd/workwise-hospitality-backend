@@ -73,10 +73,10 @@ const add_vendor_product = async (productDetails, vendorId) => {
     let errors = {};
     let err = 0;
 
-    let {approvedByIds, product, variant} = productDetails;
+    let { name, categories, approved_id, master_id } = productDetails;
 
-    if (product?.categories?.length > 0) {
-      for await (const categoryId of product?.categories) {
+    if (categories.length > 0) {
+      for await (const categoryId of categories) {
         let categoryExist = await productModel.parentIdExists(categoryId);
         if (categoryExist.length == 0) {
           err++;
@@ -88,12 +88,14 @@ const add_vendor_product = async (productDetails, vendorId) => {
       errors.categories = 'Please select a category';
     }
 
-    let variantNameExists = await productModel.checkVariantExistsForVendor(vendorId, variant.id, product.id)
-    if (variantNameExists.length > 0) {
+    let prodNameExists = await productModel.checkVariantExistsForVendor(
+      vendorId,
+      master_id,
+    );
+    if (prodNameExists.length > 0) {
       err++;
-      errors.name = 'Variant is already mapped for this vendor';
+      errors.name = 'Product is already mapped with vendor';
     }
-    
     // if (is_approve != 1) {
     //   let checkMasterNameExist = await productModel.checkMasterNameExist(
     //     name
@@ -104,8 +106,8 @@ const add_vendor_product = async (productDetails, vendorId) => {
     //   }
     // } else 
 
-    if (product.master_id) {
-      let findProduct = await productModel.check_product(product.master_id);
+    if (master_id) {
+      let findProduct = await productModel.check_product(master_id);
       if (findProduct.length == 0) {
         err++;
         errors.master_id = 'Product not found';
@@ -3168,33 +3170,26 @@ const UsersController = {
           continue;
         }
 
-        // if no error then move further for adding to tbl_product  
+        // if no error then move further to map variant with vendor
         let {
-          name,
-          description,
-          manufacturer,
-          availability,
-          status,
           approved_id,
           approved_name,
           master_id,
-          categories,
-          variations,
         } = productDetails[i];
 
-        // ---------------- approved by ---------------
+        const productResult = await productModel.getProductByVariant(master_id)
+        let productId = productResult?.[0]?.id
+
         if (approved_id) {
-          // Check if it's a string, and parse only if necessary
           if (typeof approved_id === 'string') {
-            approved_id = JSON.parse(approved_id); // Ensure it's parsed from a JSON string
+            approved_id = JSON.parse(approved_id);
           }
-          // Ensure it's an array of numbers
           else if (!Array.isArray(approved_id)) {
-            approved_id = [approved_id]; // If it's a single number, convert it to an array
+            approved_id = [approved_id];
           }
         }
 
-        let vendorApproveId = 0;
+        let vendorApproveId = [];
         if (!approved_id && approved_name) {
           let findVendorApprove = await vendorapproveModel.findVendorApproveByName(approved_name);
           if (findVendorApprove.length === 0) {
@@ -3211,132 +3206,24 @@ const UsersController = {
           vendorApproveId = approved_id;
         }
 
-        // ---------------- products ----------------
-        let productdetails = '';
-        if (master_id) {
-          productdetails = await productModel.check_product(master_id);
+        let mappingObj = {
+          product_variant_id: master_id,
+          vendor_id: vendorId
         }
-        let productObj = {
-          name: name,
-          description: description || null,
-          manufacturer: manufacturer || null,
-          availability: availability || 1,
-          slug: titleToSlug(name),
-          sku: name,
-          created_by: vendorId,
-          vendor: vendorId,
-          status: status || 0,
-          
-          // vendor_approved_by: vendorApproveId || null,
-          is_approve: master_id ? 1 : 0,
-          added_by: req.user.id,
-        };
 
-        let product = await productModel.createProduct(productObj);
-        let productId = product.id;
-        // console.log("productId: ", productId);
-        if (vendorApproveId.length > 0) {
+        let mappingResult = await productModel.createProductVariantVendorMapping(mappingObj)
+
+        if (vendorApproveId.length > 0 && mappingResult) {
           let productApproveArray = [];
           vendorApproveId.forEach((item) => {
             productApproveArray.push({
               product_id: productId,
+              variant_vendor_mapping_id: mappingResult.id,
               vendor_approve_id: item
             });
           });
+
           await productModel.addProductApproveBy(productApproveArray, productId);
-        }
-
-
-        // ---------------- categories ---------------
-        if (categories) {
-          // Check if it's a string, and parse only if necessary
-          if (typeof categories === 'string') {
-            categories = JSON.parse(categories); // Ensure it's parsed from a JSON string
-          }
-          // Ensure it's an array of numbers
-          else if (!Array.isArray(categories)) {
-            categories = [categories]; // If it's a single number, convert it to an array
-          }
-
-          for await (const categoryId of categories) {
-            let categoryObj = {
-              category_id: categoryId,
-              product_id: productId
-            };
-            await productModel.createProductCategory(categoryObj);
-          }
-        }
-
-        // ---------------- variations ----------------
-        if (variations) {
-          // Check if it's a string, and parse only if necessary
-          if (typeof variations === 'string') {
-            variations = JSON.parse(variations); // Ensure it's parsed from a JSON string
-          }
-          // Ensure it's an array of numbers
-          else if (!Array.isArray(variations)) {
-            variations = [variations]; // If it's a single number, convert it to an array
-          }
-
-          for await (const { attribute = "", attributeValue = "" } of variations) {
-            let varientObj = {
-              product_id: productId,
-              variant_name: attribute,
-              variant_value: attributeValue
-            };
-            await productModel.createProductveriants(varientObj);
-          }
-        }
-
-
-        // ---------------- featured image ----------------
-        if (req.files?.featured && req.files?.featured.length > 0) {
-          let featuredImageObj = {
-            product_id: productId,
-            is_featured: 1,
-            original_image_name: req.files.featured[0].originalname,
-            new_image_name: `${Config.download_url}/product_image/${req.files.featured[0].filename}`
-          };
-          await productModel.insertProductImages(featuredImageObj);
-        } else if (master_id && !req.files?.featured) {
-          let featuredImage = await productModel.getProductImages(master_id, 1);
-          if (featuredImage.length > 0) {
-            let featuredImageObj = {
-              product_id: productId,
-              is_featured: 1,
-              original_image_name: featuredImage[0].original_image_name || null,
-              new_image_name: featuredImage[0].new_image_name || null
-            };
-            await productModel.insertProductImages(featuredImageObj);
-          }
-        }
-
-        // ---------------- gallery image ----------------
-        if (req.files?.gallery && req.files?.gallery.length > 0) {
-          for await (const { originalname, filename } of req.files?.gallery) {
-            let featuredImageObj = {
-              product_id: productId,
-              is_featured: 0,
-              original_image_name: originalname,
-              new_image_name: `${Config.download_url}/product_image/${filename}`
-            };
-            await productModel.insertProductImages(featuredImageObj);
-          }
-        } else if (master_id && !req.files?.gallery) {
-          let galleryImage = await productModel.getProductImages(master_id, 0);
-
-          for await (const {
-            original_image_name,
-            new_image_name
-          } of galleryImage) {
-            let featuredImageObj = {
-              product_id: productId,
-              is_featured: 0,
-              original_image_name: original_image_name || null,
-              new_image_name: new_image_name || null
-            };
-            await productModel.insertProductImages(featuredImageObj);
-          }
         }
       }
 

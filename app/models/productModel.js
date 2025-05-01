@@ -621,7 +621,7 @@ const productModel = {
     return new Promise(function (resolve, reject) {
       // Construct the dynamic SQL query
       const { ColumnSet } = pgp().helpers;
-      const cs = new ColumnSet(['product_id', 'vendor_approve_id'], {
+      const cs = new ColumnSet(['product_id', 'variant_vendor_mapping_id', 'vendor_approve_id'], {
         table: 'tbl_vendorapprove_product_mapping'
       });
       const query = pgp().helpers.insert(productApproveArray, cs);
@@ -741,6 +741,21 @@ const productModel = {
           reject(err);
         });
     });
+  },
+  getProductByVariant: async (variantId) => {
+    try {
+      let q = `
+      SELECT P.id 
+      FROM tbl_product_variant PV
+      JOIN tbl_product P ON P.id = PV.product_id
+      WHERE PV.id = $1
+      LIMIT 1;
+      `
+
+      return await db.any(q, [variantId])
+    } catch (e) {
+      throw e;
+    }
   },
   createProductveriants: async (variantObj) => {
     return new Promise(function (resolve, reject) {
@@ -1036,16 +1051,16 @@ const productModel = {
         });
     });
   },
-  checkVariantExistsForVendor: async (vendorId, variantId, productId) => {
+  checkVariantExistsForVendor: async (vendorId, variantId) => {
     try {
       let q = `
       SELECT pvvm.id
       FROM tbl_product_variant_vendor_mapping pvvm
       JOIN tbl_product_variant pv ON pv.id = pvvm.product_variant_id
-      WHERE pvvm.vendor_id = $1 AND pv.id = $2 AND pv.product_id = $3
+      WHERE pvvm.vendor_id = $1 AND pv.id = $2
       `
   
-      return db.any(q, [vendorId, variantId, productId])
+      return db.any(q, [vendorId, variantId])
     } catch (e) {
       throw e;
     }
@@ -1222,34 +1237,116 @@ const productModel = {
 
     // mukul 30/apr/20230, implemented changes related to new product flowe ( product variant and variant mapping )
     return new Promise(function (resolve, reject) {
+      // let dynamicQuery = '';
+      // // Product name search with full-text search and similarity
+      // if (productName && productName !== '') {
+      //   dynamicQuery += `
+      //     AND (
+      //       to_tsvector('english', PD.name) @@ plainto_tsquery('english', '${productName}')
+      //       OR similarity(PD.name, '${productName}') > 0.1
+      //     )`;
+      // }
+      // if (filterProduct?.id_array) {
+      //   dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
+      // }
+  
+      // if (vendorId && vendorId !== '') {
+      //   dynamicQuery += `
+      //     AND EXISTS (
+      //       SELECT 1 FROM tbl_product_variant pv
+      //       JOIN tbl_product_variant_vendor_mapping pvm
+      //       ON pv.id = pvm.product_variant_id
+      //       WHERE pv.product_id = PD.id AND pvm.vendor_id = ${vendorId}
+      //     )`;
+      // }
+      // if (userId && userId !== '') {
+      //   dynamicQuery += ` AND PD.added_by = ${userId}`;
+      // }
+      // if (isFeatured && isFeatured !== '') {
+      //   dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
+      // }
+      // if (categoryId) {
+      //   dynamicQuery += ` AND EXISTS (
+      //     SELECT 1 FROM tbl_product_categories
+      //     WHERE tbl_product_categories.product_id = PD.id 
+      //     AND tbl_product_categories.category_id = ${categoryId}
+      //   )`;
+      // }
+      // if (dateFrom) {
+      //   dynamicQuery += ` AND DATE(PD.created_at) >= '${dateFrom}'`;
+      // }
+      // if (dateTo) {
+      //   dynamicQuery += ` AND DATE(PD.created_at) <= '${dateTo}'`;
+      // }
+      // if (is_approve !== null && is_approve !== undefined) {
+      //   dynamicQuery += ` AND PD.is_approve = ${is_approve}`;
+      // }
+      
+      // let q = `
+      // SELECT 
+      //   PD.*, 
+      //     NULL AS vendor_name,
+      //   ${productName ? `
+      //     similarity(PD.name, '${productName}') AS similarity_score,
+      //     ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank,
+      //   ` : ''}
+      //   ARRAY
+      //   (SELECT json_build_object('category_name', tc.title, 'id', tc.id)
+      //     FROM tbl_product_categories pc
+      //     LEFT JOIN tbl_category tc ON pc.category_id = tc.id
+      //     WHERE PD.id = pc.product_id ORDER BY pc.id
+      //     ) AS product_categories
+      //   FROM tbl_product PD 
+      //   JOIN tbl_users tu ON tu.id = PD.created_by
+      //   WHERE tu.user_type NOT IN (2, 3) AND PD.is_deleted = 0 
+      //     AND PD.is_review = 0 ${dynamicQuery}
+      //   ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
+      //   LIMIT ${limit} OFFSET $1
+      // `;
+
+      // db.any(
+      //   q,
+      //   [offset]
+      // )
+      //   .then(function (data) {
+      //     resolve(data);
+      //   })
+      //   .catch(function (err) {
+      //     let error = new Error(err);
+      //     reject(error);
+      //   });
+
       let dynamicQuery = '';
+
       // Product name search with full-text search and similarity
       if (productName && productName !== '') {
         dynamicQuery += `
           AND (
-            to_tsvector('english', PD.name) @@ plainto_tsquery('english', '${productName}')
-            OR similarity(PD.name, '${productName}') > 0.1
+            to_tsvector('english', CONCAT(PV.name, ' - ', PD.name)) @@ plainto_tsquery('english', '${productName}')
+            OR similarity(CONCAT(PV.name, ' - ', PD.name), '${productName}') > 0.1
           )`;
       }
+
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
       }
-  
+
       if (vendorId && vendorId !== '') {
         dynamicQuery += `
           AND EXISTS (
-            SELECT 1 FROM tbl_product_variant pv
-            JOIN tbl_product_variant_vendor_mapping pvm
-            ON pv.id = pvm.product_variant_id
-            WHERE pv.product_id = PD.id AND pvm.vendor_id = ${vendorId}
+            SELECT 1 FROM tbl_product_variant_vendor_mapping pvm
+            WHERE pvm.product_variant_id = PV.id AND pvm.vendor_id = ${vendorId}
           )`;
       }
+
       if (userId && userId !== '') {
         dynamicQuery += ` AND PD.added_by = ${userId}`;
       }
+
       if (isFeatured && isFeatured !== '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
+
       if (categoryId) {
         dynamicQuery += ` AND EXISTS (
           SELECT 1 FROM tbl_product_categories
@@ -1257,42 +1354,47 @@ const productModel = {
           AND tbl_product_categories.category_id = ${categoryId}
         )`;
       }
+
       if (dateFrom) {
-        dynamicQuery += ` AND DATE(PD.created_at) >= '${dateFrom}'`;
+        dynamicQuery += ` AND DATE(PV.created_at) >= '${dateFrom}'`;
       }
+
       if (dateTo) {
-        dynamicQuery += ` AND DATE(PD.created_at) <= '${dateTo}'`;
+        dynamicQuery += ` AND DATE(PV.created_at) <= '${dateTo}'`;
       }
+
       if (is_approve !== null && is_approve !== undefined) {
         dynamicQuery += ` AND PD.is_approve = ${is_approve}`;
       }
-      
+
       let q = `
       SELECT 
-        PD.*, 
-          NULL AS vendor_name,
+        PV.*, 
+        row_to_json(PD) AS product_details,
+        NULL AS vendor_name,
+        CONCAT(PV.name, ' - ', PD.name) AS unified_name,
         ${productName ? `
-          similarity(PD.name, '${productName}') AS similarity_score,
-          ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank,
+          similarity(CONCAT(PV.name, ' - ', PD.name), '${productName}') AS similarity_score,
+          ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', PD.name)), plainto_tsquery('english', '${productName}')) AS rank,
         ` : ''}
-        ARRAY
-        (SELECT json_build_object('category_name', tc.title, 'id', tc.id)
+        ARRAY(
+          SELECT json_build_object('category_name', tc.title, 'id', tc.id)
           FROM tbl_product_categories pc
           LEFT JOIN tbl_category tc ON pc.category_id = tc.id
           WHERE PD.id = pc.product_id ORDER BY pc.id
-          ) AS product_categories
-        FROM tbl_product PD 
-        JOIN tbl_users tu ON tu.id = PD.created_by
-        WHERE tu.user_type NOT IN (2, 3) AND PD.is_deleted = 0 
-          AND PD.is_review = 0 ${dynamicQuery}
-        ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
-        LIMIT ${limit} OFFSET $1
+        ) AS product_categories
+      FROM tbl_product_variant PV
+      JOIN tbl_product PD ON PD.id = PV.product_id
+      JOIN tbl_users tu ON tu.id = PD.created_by
+      WHERE tu.user_type NOT IN (2, 3)
+        AND PD.is_deleted = 0
+        AND PD.is_review = 0
+        ${dynamicQuery}
+      ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PV.created_at DESC`}
+      LIMIT ${limit} OFFSET $1
       `;
 
-      db.any(
-        q,
-        [offset]
-      )
+      db.any(q, [offset])
         .then(function (data) {
           resolve(data);
         })
@@ -1300,6 +1402,7 @@ const productModel = {
           let error = new Error(err);
           reject(error);
         });
+
     });
   },
   getExportProductList: async (product_id) => {
@@ -2038,7 +2141,7 @@ FROM (
   check_product: async (productId, created_by = null) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT * FROM tbl_product tp JOIN tbl_users tu ON tp.created_by = tu.id WHERE id = $1 AND is_deleted = 0 AND tu.user_type NOT IN (2, 3)`,
+        `SELECT * FROM tbl_product_variant pv WHERE pv.id = $1`,
         [productId]
       )
         .then(function (data) {
@@ -2118,14 +2221,12 @@ WHERE tbl_product.name = $1`,
         dynamicWhere = `AND PD.id IN (SELECT product_id FROM tbl_product_variant)`;
       }
       db.any(
-        `SELECT PD.*,
+        `SELECT PV.*,
+        CONCAT(PV.name, ' - ', PD.name) AS unified_name,
         ARRAY
         (SELECT json_build_object('category_name', tc.title,'id',pc.category_id )
           FROM tbl_product_categories pc
           LEFT JOIN tbl_category tc ON pc.category_id = tc.id   WHERE  PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
-        ARRAY
-          (SELECT json_build_object('id',pv.id,'name',pv.name,'product_id',pv.product_id)
-            FROM tbl_product_variant pv WHERE  PD.id = pv.product_id) AS "product_variants",
             ARRAY
           (SELECT json_build_object('product_image', tbl_product_images.new_image_name,'is_featured',tbl_product_images.is_featured,
           'product_image_url',  CASE
@@ -2133,12 +2234,10 @@ WHERE tbl_product.name = $1`,
           NULL
           ELSE tbl_product_images.new_image_name
           END)
-            FROM tbl_product_images WHERE PD.id = tbl_product_images.product_id ) AS "product_images",
-            ARRAY
-          (SELECT tvpm.vendor_approve_id
-            FROM tbl_vendorapprove_product_mapping tvpm WHERE  PD.id = tvpm.product_id) AS "vendor_approved_by"
-            FROM tbl_product PD 
-            WHERE PD.status = 1 And PD.id = $1 ${dynamicWhere}`,
+            FROM tbl_product_images WHERE PD.id = tbl_product_images.product_id ) AS "product_images"
+            FROM tbl_product_variant PV
+            JOIN tbl_product PD ON PD.id = PV.product_id
+            WHERE PV.status = 1 And PV.id = $1 ${dynamicWhere}`,
         [productId]
       )
         .then(function (data) {

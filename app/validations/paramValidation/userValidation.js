@@ -245,11 +245,29 @@ const schemas = {
     })
   }),
   vendor_review: Joi.object().keys({
-    reviewed_to: Joi.string().required().regex(/^[0-9]*$/, 'Please send proper receiver id'),
-    quality_of_work: Joi.number().min(1).max(5).required().label('Quality of Work'),
-    on_time_delivery: Joi.number().min(1).max(5).required().label('On Time Delivery'),
-    trustworthiness_reliability: Joi.number().min(1).max(5).required().label('Trustworthiness and Reliability'),
-    overall_rating: Joi.number().min(1).max(5).required().label('Overall Rating'),
+    reviewed_to: Joi.string()
+      .required()
+      .regex(/^[0-9]*$/, 'Please send proper receiver id'),
+    quality_of_work: Joi.number()
+      .min(1)
+      .max(5)
+      .required()
+      .label('Quality of Work'),
+    on_time_delivery: Joi.number()
+      .min(1)
+      .max(5)
+      .required()
+      .label('On Time Delivery'),
+    trustworthiness_reliability: Joi.number()
+      .min(1)
+      .max(5)
+      .required()
+      .label('Trustworthiness and Reliability'),
+    overall_rating: Joi.number()
+      .min(1)
+      .max(5)
+      .required()
+      .label('Overall Rating'),
     description: Joi.string().optional().allow(null).allow('')
   }),
   user_login: Joi.object().keys({
@@ -280,8 +298,10 @@ const schemas = {
     location: Joi.object({
       country: Joi.string().optional().allow(null, ''),
       state: Joi.string().optional().allow(null, ''),
-      city: Joi.string().optional().allow(null, ''),
-    }).optional().allow(null),
+      city: Joi.string().optional().allow(null, '')
+    })
+      .optional()
+      .allow(null),
     email: Joi.string().optional().allow(null).allow(''),
     mobile: Joi.string().optional().allow(null).allow(''),
     gstin: Joi.string().optional().allow(null).allow(''),
@@ -439,59 +459,53 @@ const schemas = {
     sub_id: Joi.number().required()
   }),
   buyer_private_vendor: Joi.object().keys({
-    vendorName: Joi.string().required().trim().max(60),  // Required, trimmed, and max length of 60 characters
-    email: Joi.string().required().email().trim().max(50),  // Required, valid email, trimmed, and max length of 50 characters
-    phone: Joi.string().required().trim().max(20),  // Required, trimmed, and max length of 20 characters
-    productList: Joi.string().required().trim().max(300),  // Required, trimmed, and max length of 300 characters,
-    is_private: Joi.number().optional().valid(0, 1),
+    vendorName: Joi.string().required().trim().max(60), // Required, trimmed, and max length of 60 characters
+    email: Joi.string().required().email().trim().max(50), // Required, valid email, trimmed, and max length of 50 characters
+    phone: Joi.string().required().trim().max(20), // Required, trimmed, and max length of 20 characters
+    productList: Joi.string().required().trim().max(300), // Required, trimmed, and max length of 300 characters,
+    is_private: Joi.number().optional().valid(0, 1)
   }),
   buyer_private_vendor_approved: Joi.object().keys({
     vendorName: Joi.string().required().trim().max(60),
     email: Joi.string().required().email().trim().max(50),
     phone: Joi.string().required().trim().max(15),
-    productDetails: Joi.array().items(Joi.object().keys({
-      approvedByIds: Joi.array().items(Joi.object().keys({
-        label: Joi.string(),
-        value: Joi.number(),
-      })),
-      product: Joi.array().items(Joi.object().keys({
-        master_id: Joi.number().required(),
-        name: Joi.string().required(),
-        description: Joi.string().allow('', null),
-        status: Joi.number().optional(),
-        approved_id: Joi.array().items(Joi.number()).optional(),
-        approved_name: Joi.array().items(Joi.string()).optional(),
-        categories: Joi.array().items(Joi.number()).optional()
-      })),
-      variant: Joi.array().items(Joi.object().keys({
-        label: Joi.string(),
-        value: Joi.number(),
-        master_id: Joi.number(),
-      }))
-    })).optional(),
-    is_private: Joi.number().optional().valid(0, 1),
+    productDetails: Joi.array()
+      .items(
+        Joi.object().keys({
+          master_id: Joi.number().required(),
+          name: Joi.string().required(),
+          description: Joi.string().allow('', null),
+          status: Joi.number().optional(),
+          approved_id: Joi.array().items(Joi.number()).optional(),
+          approved_name: Joi.array().items(Joi.string()).optional(),
+          categories: Joi.array().items(Joi.number()).optional()
+        })
+      )
+      .optional(),
+    is_private: Joi.number().optional().valid(0, 1)
   }),
 
   user_spoc: Joi.object().keys({
     spoc_name: Joi.string()
       .required()
-      .allow(null, '')  // Allow null and empty string
+      .allow(null, '') // Allow null and empty string
       .trim(),
-    spoc_role: Joi.string()
-      .optional()
-      .allow(null, ''),  // Allow null and empty string
+    spoc_role: Joi.string().optional().allow(null, ''), // Allow null and empty string
     spoc_email: Joi.string()
       .required()
       .allow(null, '')
       .trim()
-      .email({ tlds: { allow: false } }),  // Email validation only if non-empty
+      .email({ tlds: { allow: false } }), // Email validation only if non-empty
     spoc_mobile: Joi.string()
       .optional()
       .allow(null, '') // Allow null or empty strings
       .trim()
-      .regex(/^\+\d{1,4}-\d{7,14}$/, "Please enter a valid mobile number in the format +91-XXXXXXXXXX")
-      .min(7)  // Minimum 10 digits if non-empty
-      .max(15)  // Maximum 15 digits if non-empty
+      .regex(
+        /^\+\d{1,4}-\d{7,14}$/,
+        'Please enter a valid mobile number in the format +91-XXXXXXXXXX'
+      )
+      .min(7) // Minimum 10 digits if non-empty
+      .max(15) // Maximum 15 digits if non-empty
   })
 };
 
