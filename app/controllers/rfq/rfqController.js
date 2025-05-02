@@ -5724,11 +5724,11 @@ getTechEvaluationResult: async (req, res) => {
 
 rfqProductWiseReport: async (req, res) => {
   try {
-    const { startDate, endDate ,productName, productID} = req.query;
+    const { startDate, endDate ,productName, productId} = req.query;
     const userId = req.user.id;
 
 
-    const rfqData = await rfqModel.rfqProductReport(userId, productID, productName, startDate, endDate);
+    const rfqData = await rfqModel.rfqProductReport(userId, productId, productName, startDate, endDate);
 
     res
       .status(200)
