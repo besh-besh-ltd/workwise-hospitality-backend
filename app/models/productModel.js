@@ -746,6 +746,24 @@ const productModel = {
       throw e;
     }
   },
+  getVariantsByProductId: async (productId) => {
+    try {
+      let q = `
+      SELECT 
+      pv.id,
+      pv.name,
+      pv.created_by,
+      pv.product_id
+
+      FROM tbl_product_variant pv
+      WHERE pv.product_id = $1
+      `
+
+      return await db.any(q, [productId]);
+    } catch (e) {
+      throw e;
+    }
+  },
   createProductveriants: async (variantObj) => {
     return new Promise(function (resolve, reject) {
       // Update object keys to match table columns
@@ -2734,30 +2752,12 @@ getProductTechSpecByID: async (productId) => {
             pv.reject_reason_id,
             trr.reject_reason,
             p.name as product_name,
-            ${searchTerm ? `
-              similarity(pv.name, '${searchTerm}') AS v_similarity_score,
-              similarity(p.name, '${searchTerm}') AS p_similarity_score,
-              ts_rank_cd(to_tsvector('english', pv.name), plainto_tsquery('english', '${searchTerm}')) AS v_rank,
-              ts_rank_cd(to_tsvector('english', p.name), plainto_tsquery('english', '${searchTerm}')) AS p_rank,
-            ` : ''}
-            ARRAY_AGG(DISTINCT jsonb_build_object(
-              'category_name', c.title,
-              'category_id', c.id
-            )) FILTER (WHERE c.id IS NOT NULL) as categories,
-            (
-              SELECT ARRAY_AGG(DISTINCT vendor_id) 
-              FROM tbl_product_variant_vendor_mapping pvvm 
-              WHERE pvvm.product_variant_id = pv.id
-            ) as vendor_ids,
-            (
-              SELECT ARRAY_AGG(DISTINCT u.name)
-              FROM tbl_product_variant_vendor_mapping pvvm 
-              JOIN tbl_users u ON pvvm.vendor_id = u.id
-              WHERE pvvm.product_variant_id = pv.id
-            ) as vendor_names
+            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
           FROM 
             tbl_product_variant pv
-          JOIN 
+          LEFT JOIN tbl_product_variant_vendor_mapping PVM ON PVM.product_variant_id = PV.id
+          LEFT JOIN tbl_users U ON U.id = PVM.vendor_id
+          LEFT JOIN 
             tbl_product p ON pv.product_id = p.id
           LEFT JOIN 
             tbl_product_categories pc ON p.id = pc.product_id

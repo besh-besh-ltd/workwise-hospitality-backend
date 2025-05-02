@@ -3235,15 +3235,23 @@ const productController = {
       let productId = req.params.id;
 
       let productList = await productModel.productDetails(productId);
+      const product = productList?.[0];
+      if(!product) return res.status(404).json({
+        status: 3,
+        message: 'Product Not Found!'
+      })
       let vendorListProductWise = await productModel.vendorListProductWise(
-        productList[0].name
+        product.name
       );
+      let variants = await productModel.getVariantsByProductId(product.id);
+      
       res
         .status(200)
         .json({
           status: 1,
           data: productList[0],
-          vendor_list: vendorListProductWise
+          vendor_list: vendorListProductWise,
+          variants,
         })
         .end();
     } catch (error) {
