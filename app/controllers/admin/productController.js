@@ -3234,6 +3234,7 @@ const productController = {
     try {
       let productId = req.params.id;
 
+      // Changes by Agnij May 02, 2025 [Removed vendor list retrieval]
       let productList = await productModel.productDetails(productId);
       const product = productList?.[0];
       if(!product) return res.status(404).json({
@@ -3410,18 +3411,18 @@ const productController = {
   
   updateProductVariant: async (req, res) => {
     try {
-      // Changes by Agnij April 30, 2025 [Fixed field names to match database schema]
+      // Changes by Agnij July 25, 2025 [Added support for changing parent product and auto-disapproval]
       const { variant_id } = req.params;
-      const { variant_name, name } = req.body;
+      const { variant_name, name, description, product_id, is_approve } = req.body;
       
       // Get the variant name from either variant_name or name field
       const variantNameValue = variant_name || name;
       
       // Validate input
-      if (!variant_id || !variantNameValue) {
+      if (!variant_id) {
         return res.status(400).json({ 
           status: 3, 
-          message: 'Variant ID and name are required' 
+          message: 'Variant ID is required' 
         });
       }
       
@@ -3434,20 +3435,53 @@ const productController = {
         });
       }
       
-      // Update variant
+      // Check if product exists (if changing parent product)
+      if (product_id && product_id !== variant[0].product_id) {
+        const product = await productModel.check_product(product_id);
+        if (!product || product.length === 0) {
+          return res.status(404).json({ 
+            status: 3, 
+            message: 'Parent product not found' 
+          });
+        }
+      }
+      
+      // Build variant object dynamically based on what values were provided
       const variantObj = {
-        name: variantNameValue, // Database field is 'name'
-        updated_at: new Date()
+        updated_at: new Date(),
+        updated_by: req.user?.id
       };
       
-      await productModel.updateProductVariant(variantObj, variant_id);
+      // Only add name if it was provided
+      if (variantNameValue) {
+        variantObj.name = variantNameValue;
+      }
+      
+      // Include description if provided
+      if (description !== undefined) {
+        variantObj.description = description;
+      }
+      
+      // Include product_id if provided
+      if (product_id) {
+        variantObj.product_id = product_id;
+      }
+      
+      // Set is_approve to provided value or 0 by default
+      variantObj.is_approve = is_approve !== undefined ? is_approve : 0;
+      
+      // Update variant
+      const updatedVariant = await productModel.updateProductVariant(variantObj, variant_id);
       
       return res.status(200).json({
         status: 1,
         message: 'Product variant updated successfully',
         data: {
           id: variant_id,
-          variant_name: variantNameValue
+          variant_name: variantNameValue,
+          product_id: product_id || variant[0].product_id,
+          is_approve: variantObj.is_approve,
+          vendor_approved_by: updatedVariant?.vendor_approved_by || null
         }
       });
     } catch (error) {
