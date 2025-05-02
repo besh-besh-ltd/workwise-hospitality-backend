@@ -4824,10 +4824,8 @@ rfqProductReport: async (userId, productId, productName, startDate, endDate) => 
             AND PV.id = $2
             AND ($3::date IS NULL OR T.timestamp >= $3::date)
             AND ($4::date IS NULL OR T.timestamp <= $4::date)
-        GROUP BY T.id, PV.id
-        ORDER BY T.timestamp DESC;
-
-`;
+        GROUP BY T.id, PV.id, TP.description
+        ORDER BY T.timestamp DESC`;
 
       db.query(query, [userId, productId, startDate, endDate])
       .then(data => resolve(data))
