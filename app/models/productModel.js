@@ -2900,7 +2900,7 @@ getProductTechSpecByID: async (productId) => {
   
   getProductVariantDetails: async (variantId) => {
     return new Promise(function (resolve, reject) {
-      // Changes by Agnij August 15, 2024 [Improved error handling and simplified query]
+      // Changes by Agnij May 2, 2025 [Fixed variant details query to include all necessary fields]
       console.log("Getting variant details for:", variantId);
       
       try {
@@ -2910,12 +2910,12 @@ getProductTechSpecByID: async (productId) => {
           return;
         }
         
-        // Simple focused query to ensure we get the critical fields
+        // Enhanced query to get all necessary variant details
         const query = `
           SELECT 
             pv.id, 
             pv.product_id, 
-            pv.name,
+            pv.name as variant_name,
             pv.status,
             pv.is_approve,
             pv.reject_reason_id, 
@@ -2924,43 +2924,148 @@ getProductTechSpecByID: async (productId) => {
             pv.created_by,
             pv.updated_by,
             pv.is_deleted,
-            p.name as product_name
+            p.name as product_name,
+            p.description as product_description,
+            trr.reject_reason,
+            ARRAY_AGG(DISTINCT jsonb_build_object(
+              'category_name', c.title,
+              'category_id', c.id
+            )) FILTER (WHERE c.id IS NOT NULL) as categories
           FROM 
             tbl_product_variant pv
           LEFT JOIN 
             tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_reject_reason trr ON pv.reject_reason_id = trr.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
           WHERE 
-            pv.id = $1
+            pv.id = $1 AND pv.is_deleted = 0
+          GROUP BY 
+            pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
+            pv.reject_reason_id, pv.created_at, pv.updated_at, pv.created_by, 
+            pv.updated_by, pv.is_deleted, p.name, p.description, trr.reject_reason
         `;
         
         console.log("Executing query for variant details");
         
         db.any(query, [variantId])
           .then(function (data) {
-            console.log(`Found ${data.length} variants with ID ${variantId}`);
-            
-            // Map name to variant_name for frontend compatibility
-            if (data && data.length > 0) {
-              data.forEach(item => {
-                item.variant_name = item.name;
-              });
-            }
-            
+            console.log(`Found variant details:`, data);
             resolve(data);
           })
           .catch(function (err) {
             console.error("Error in getProductVariantDetails:", err);
-            // Return empty array instead of rejecting to prevent cascading errors
-            resolve([]);
+            reject(new Error(`Failed to get variant details: ${err.message}`));
           });
       } catch (err) {
         console.error("Exception in getProductVariantDetails:", err);
-        // Return empty array on exception
-        resolve([]);
+        reject(new Error(`Exception in getProductVariantDetails: ${err.message}`));
       }
     });
   },
 
+  // Changes by Agnij May 2, 2025 [Added function to map variant with vendor]
+  mapVariantWithVendor: async (variantId, vendorId) => {
+    return new Promise(function (resolve, reject) {
+      console.log("Mapping variant", variantId, "with vendor", vendorId);
+      
+      try {
+        if (!variantId || !vendorId) {
+          reject(new Error("Missing required parameters for mapping"));
+          return;
+        }
+
+        // First check if mapping already exists
+        db.oneOrNone(
+          `SELECT id FROM tbl_product_variant_vendor_mapping 
+           WHERE product_variant_id = $1 AND vendor_id = $2`,
+          [variantId, vendorId]
+        )
+          .then(function (existingMapping) {
+            if (existingMapping) {
+              reject(new Error("Mapping already exists for this variant and vendor"));
+              return;
+            }
+
+            // If no existing mapping, create new one
+            const query = `
+              INSERT INTO tbl_product_variant_vendor_mapping
+                (product_variant_id, vendor_id, status, created_at)
+              VALUES
+                ($1, $2, true, CURRENT_TIMESTAMP)
+              RETURNING 
+                id as mapping_id,
+                product_variant_id as variant_id,
+                vendor_id,
+                status,
+                created_at as mapped_at
+            `;
+
+            db.one(query, [variantId, vendorId])
+              .then(function (data) {
+                console.log("Successfully created mapping:", data);
+                resolve(data);
+              })
+              .catch(function (err) {
+                console.error("Error creating mapping:", err);
+                reject(new Error(`Failed to create mapping: ${err.message}`));
+              });
+          })
+          .catch(function (err) {
+            console.error("Error checking existing mapping:", err);
+            reject(new Error(`Failed to check existing mapping: ${err.message}`));
+          });
+      } catch (err) {
+        console.error("Exception in mapVariantWithVendor:", err);
+        reject(new Error(`Exception in mapVariantWithVendor: ${err.message}`));
+      }
+    });
+  },
+  
+  // Changes by Agnij May 2, 2025 [Added function to update variant-vendor mapping]
+  updateVariantVendorMapping: async (mappingId, updateData) => {
+    return new Promise(function (resolve, reject) {
+      console.log("Updating mapping:", mappingId, "with data:", updateData);
+      
+      try {
+        if (!mappingId || !updateData) {
+          reject(new Error("Missing required parameters for mapping update"));
+          return;
+        }
+
+        const query = `
+          UPDATE tbl_product_variant_vendor_mapping
+          SET 
+            vendor_id = $1,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = $2
+          RETURNING 
+            id as mapping_id,
+            product_variant_id as variant_id,
+            vendor_id,
+            status,
+            created_at as mapped_at
+        `;
+
+        db.one(query, [updateData.vendor_id, mappingId])
+          .then(function (data) {
+            console.log("Successfully updated mapping:", data);
+            resolve(data);
+          })
+          .catch(function (err) {
+            console.error("Error updating mapping:", err);
+            reject(new Error(`Failed to update mapping: ${err.message}`));
+          });
+      } catch (err) {
+        console.error("Exception in updateVariantVendorMapping:", err);
+        reject(new Error(`Exception in updateVariantVendorMapping: ${err.message}`));
+      }
+    });
+  },
+  
   deleteProductVariants: async (productId) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -3067,79 +3172,85 @@ getProductTechSpecByID: async (productId) => {
   },
 
   // Changes by Agnij May 18, 2025 [Added function to get all variant-vendor mappings]
-  getVariantVendorMappings: async (searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve) => {
+  getVariantVendorMappings: async (id, searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve) => {
     return new Promise(function (resolve, reject) {
       console.log("Getting variant-vendor mappings with parameters:", { 
         searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve 
       });
       
       try {
-        // Changes by Agnij July 25, 2024 [Completely revamped filtering with all parameters]
-        // Build dynamic filter conditions and parameter list
         let conditions = [];
         let params = [];
         let paramIndex = 1;
-        
-        // Search term filter
-        if (searchTerm && searchTerm.trim() !== "") {
-          conditions.push(`(v.name ILIKE $${paramIndex} OR p.name ILIKE $${paramIndex} OR u.name ILIKE $${paramIndex} OR u.organization_name ILIKE $${paramIndex} OR u.email ILIKE $${paramIndex})`);
-          params.push(`%${searchTerm}%`);
+
+        // Base conditions
+        conditions.push('m.status = true');
+        conditions.push('v.is_deleted = 0');
+        conditions.push('p.is_deleted = 0');
+
+        // Handle search term
+        if (searchTerm && searchTerm.trim() !== '') {
+          conditions.push(`(
+            v.name ILIKE $${paramIndex} OR 
+            p.name ILIKE $${paramIndex} OR
+            u.name ILIKE $${paramIndex} OR
+            u.organization_name ILIKE $${paramIndex}
+          )`);
+          params.push(`%${searchTerm.trim()}%`);
           paramIndex++;
         }
-        
-        // Date range filter
-        if (start_date && end_date) {
-          conditions.push(`m.created_at >= $${paramIndex} AND m.created_at <= $${paramIndex+1}`);
-          params.push(start_date, end_date);
-          paramIndex += 2;
-        } else if (start_date) {
+
+        // Handle date range
+        if (start_date && start_date.trim() !== '') {
           conditions.push(`m.created_at >= $${paramIndex}`);
           params.push(start_date);
           paramIndex++;
-        } else if (end_date) {
+        }
+        if (end_date && end_date.trim() !== '') {
           conditions.push(`m.created_at <= $${paramIndex}`);
           params.push(end_date);
           paramIndex++;
         }
-        
-        // Vendor filter
+
+        // Handle vendor filter
         if (vendor_id) {
           conditions.push(`m.vendor_id = $${paramIndex}`);
           params.push(vendor_id);
           paramIndex++;
         }
-        
-        // Category filter
+
+        // Handle category filter
         if (category_id) {
-          conditions.push(`EXISTS (
-            SELECT 1 FROM tbl_product_categories pc
-            WHERE pc.product_id = p.id AND pc.category_id = $${paramIndex}
-          )`);
+          conditions.push(`p.category_id = $${paramIndex}`);
           params.push(category_id);
           paramIndex++;
         }
-        
-        // Added by filter - filtering by product's or variant's created_by instead
+
+        // Handle added by filter
         if (added_by) {
-          conditions.push(`(p.created_by = $${paramIndex} OR v.created_by = $${paramIndex})`);
+          conditions.push(`v.created_by = $${paramIndex}`);
           params.push(added_by);
           paramIndex++;
         }
-        
-        // Approval status filter - filtering by product's or variant's is_approve instead
-        if (is_approve !== undefined && is_approve !== null && is_approve !== "") {
+
+        // Handle approval status
+        if (is_approve !== undefined) {
           conditions.push(`v.is_approve = $${paramIndex}`);
           params.push(is_approve);
           paramIndex++;
         }
+
+        // Handle specific mapping ID
+        if (id) {
+          conditions.push(`m.id = $${paramIndex}`);
+          params.push(id);
+          paramIndex++;
+        }
+
+        const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
         
-        // Always filter out deleted variants/products and ensure mapping is active
-        conditions.push(`m.status = true AND v.is_deleted = 0 AND p.is_deleted = 0`);
-        
-        // Build the final WHERE clause
-        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-        
-        // Build the complete query - removing references to non-existent columns
+        console.log("Executing mapping search query with", params.length, "parameters");
+
         const query = `
           SELECT 
             m.id as mapping_id,
@@ -3178,20 +3289,18 @@ getProductTechSpecByID: async (productId) => {
           LIMIT 1000000
         `;
         
-        console.log(`Executing mapping search query with ${params.length} parameters`);
-        
         db.any(query, params)
           .then(function (data) {
-            console.log(`Query returned ${data.length} variant-vendor mappings`);
+            console.log("Query returned", data.length, "variant-vendor mappings");
             resolve(data);
           })
           .catch(function (err) {
-            console.error("Error in getVariantVendorMappings:", err);
-            resolve([]);  // Return empty array on error
+            console.log("Error in getVariantVendorMappings:", err);
+            reject(err);
           });
-      } catch (error) {
-        console.error("Exception in getVariantVendorMappings:", error);
-        resolve([]);  // Return empty array on error
+      } catch (err) {
+        console.log("Exception in getVariantVendorMappings:", err);
+        reject(err);
       }
     });
   },
