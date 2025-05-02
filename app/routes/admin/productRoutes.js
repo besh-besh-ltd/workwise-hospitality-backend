@@ -189,6 +189,13 @@ productRoutes.get(
   productController.searchVariants
 );
 
+// Changes by Agnij May 02, 2025 [Added safe variant search endpoint without v_rank]
+productRoutes.get(
+  '/search-variants-safe',
+  passportSignIn,
+  productController.searchVariantsSafe
+);
+
 productRoutes.put(
   '/product-variant/:variant_id',
   passportSignIn,

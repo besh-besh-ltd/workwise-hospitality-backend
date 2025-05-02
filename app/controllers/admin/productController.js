@@ -1129,7 +1129,8 @@ const productController = {
               tds_new_file_name: productDetails[0].tds_new_file_name,
               tds_original_file_name: productDetails[0].tds_original_file_name,
               slug: titleToSlug(productDetails[0].name),
-              availability: 0,
+              // Changes by Agnij May 02, 2025 [Removed availability field which doesn't exist in database]
+              // availability: 0,
               sku: productDetails[0].name,
               created_by: vendor_id,
               added_by: req.user.id,
@@ -2679,20 +2680,25 @@ const productController = {
       let productObj = {
         name: name,
         description: description || null,
-        manufacturer: manufacturer || null,
-        availability: availability || 0,
+        // Changes by Agnij May 02, 2025 [Removed manufacturer field which doesn't exist in database]
+        // manufacturer: manufacturer || null,
+        // Changes by Agnij May 02, 2025 [Removed availability field which doesn't exist in database]
+        // availability: availability || 0,
         slug: titleToSlug(name),
         sku: name,
         created_by: vendor || req.user.id,
-        vendor: vendor || null,
+        // Changes by Agnij May 02, 2025 [Removed vendor field which doesn't exist in database]
+        // vendor: vendor || null,
         status: status || 1,
-        is_featured: is_featured || 0,
+        // Changes by Agnij May 02, 2025 [Removed is_featured field which doesn't exist in database]
+        // is_featured: is_featured || 0,
         is_approve: 0,
         added_by: req.user.id,
-        qap_new_file_name: req.files?.['qap[]']?.[0]?.location || null,
-        qap_original_file_name: req.files?.['qap[]']?.[0]?.originalname || null,
-        tds_new_file_name: req.files?.['tds[]']?.[0]?.location || null,
-        tds_original_file_name: req.files?.['tds[]']?.[0]?.originalname || null
+        // Changes by Agnij May 02, 2025 [Removed file fields which don't exist in database]
+        // qap_new_file_name: req.files?.['qap[]']?.[0]?.location || null,
+        // qap_original_file_name: req.files?.['qap[]']?.[0]?.originalname || null,
+        // tds_new_file_name: req.files?.['tds[]']?.[0]?.location || null,
+        // tds_original_file_name: req.files?.['tds[]']?.[0]?.originalname || null
       };
 
       let product = await productModel.createProduct(productObj);
@@ -2712,13 +2718,32 @@ const productController = {
   
       // ---------------- variations ----------------
       for await (const { attribute, attributeValue } of variations) {
-        let variantObj = {
-          product_id: productId,
-          name: attribute,
-          status: 1,
-          created_at: new Date()
-        };
-        await productModel.createProductVariant(variantObj);
+        // Changes by Agnij May 02, 2025 [Added check for empty attribute name]
+        // Skip creating variants with empty names or use a default name
+        if (!attribute || attribute.trim() === '') {
+          // Either skip this variant
+          continue;
+          
+          // Or use product name as default variant name if attribute is empty
+          // let variantObj = {
+          //   product_id: productId,
+          //   name: `Default variant for ${name}`,
+          //   status: 1,
+          //   created_at: new Date()
+          // };
+          // await productModel.createProductVariant(variantObj);
+        } else {
+          let variantObj = {
+            product_id: productId,
+            name: attribute,
+            status: 1,
+            created_at: new Date(),
+            // Changes by Agnij May 02, 2025 [Added created_by to ensure proper attribution]
+            created_by: req.user.id,
+            added_by: req.user.id
+          };
+          await productModel.createProductVariant(variantObj);
+        }
       }
 
       // ---------------- featured image ----------------
@@ -2769,7 +2794,7 @@ const productController = {
       let { reject_reason, reject_reason_id, status } = req.body;
       const productId = req.params.id;
 
-      // Changes by Agnij August 19, 2024 [Added approved_at field updating]
+      // Changes by Agnij May 02, 2025 [Fixed approveProduct to remove vendor_approved_by field]
       console.log("Approving product/variant with ID:", productId, "Status:", status);
       
       // Validate status is present and valid
@@ -2831,51 +2856,17 @@ const productController = {
           updated_at: currentTime
         };
         
-        // Add approved_at field when approving
-        if (status === '1') {
-          variantObj.approved_at = currentTime;
-        }
-        
         console.log("Updating variant with:", variantObj);
         
-        // Update the variant in the database using a direct query for more reliability
-        try {
-          await db.one(
-            `UPDATE tbl_product_variant 
-             SET is_approve = $1, 
-                 updated_by = $2, 
-                 reject_reason_id = $3,
-                 updated_at = $4,
-                 approved_at = $5
-             WHERE id = $6 
-             RETURNING id, name`,
-            [
-              variantObj.is_approve,
-              variantObj.updated_by,
-              variantObj.reject_reason_id,
-              variantObj.updated_at,
-              status === '1' ? variantObj.approved_at : null,
-              productId
-            ]
-          );
-          
-          console.log("Variant updated successfully");
-          
-          return res.status(200).json({
-            status: 1,
-            message: `Variant successfully ${status === '0' ? 'Disapproved' : 'Approved'}`
-          });
-        } catch (dbError) {
-          console.error("Database error updating variant:", dbError);
-          return res.status(500).json({
-            status: 3,
-            message: 'Error updating variant status',
-            error: dbError.message
-          });
-        }
+        await productModel.updateProductVariant(variantObj, productId);
+        
+        return res.status(200).json({
+          status: 1,
+          message: `Variant successfully ${status === '0' ? 'Disapproved' : 'Approved'}`
+        });
       }
       
-      // If not a variant, continue with the original product approval logic
+      // If not a variant, handle as a product approval
       let reasonId = null;
       if (status === '0') {
         if (reject_reason_id) {
@@ -2904,7 +2895,7 @@ const productController = {
       const currentTime = new Date();
       let productObj = {
         is_approve: status,
-        vendor_approved_by: req.user.id,
+        updated_by: req.user.id,
         reject_reason_id: reasonId || null,
         updated_at: currentTime
       };
@@ -2914,143 +2905,153 @@ const productController = {
         productObj.approved_at = currentTime;
       }
 
-      let approveProduct = await productModel.approveProduct(
+      const approveProduct = await productModel.approveProduct(
         productObj,
         productId
       );
-      // clone product for admin
-
-      let productDetails = await productModel.vendorProductDetails(productId);
-
-      let checkMasterNameExist = await productModel.checkMasterNameExist(
-        productDetails[0].name
-      );
-      if (checkMasterNameExist.length == 0 && status == 1) {
-        let productObj = {
-          name: productDetails[0].name,
-          description: productDetails[0].description,
-          qap_new_file_name: productDetails[0].qap_new_file_name,
-          qap_original_file_name: productDetails[0].qap_original_file_name,
-          tds_new_file_name: productDetails[0].tds_new_file_name,
-          tds_original_file_name: productDetails[0].tds_original_file_name,
-          slug: titleToSlug(productDetails[0].name),
-          availability: 0,
-          sku: productDetails[0].name,
-          created_by: 1,
-          updated_by: 1,
-          added_by: 1,
-          is_approve: 1
-        };
-
-        let product = await productModel.createProduct(productObj);
-
-        if (productDetails[0].vendor_approved_by.length > 0) {
-          let productApproveArray = [];
-          productDetails[0].vendor_approved_by.forEach((item) => {
-            productApproveArray.push({
-              product_id: product.id,
-              vendor_approve_id: item
-            });
-          });
-          await productModel.addProductApproveBy(
-            productApproveArray,
-            product.id
-          );
-        }
-
-        // Changes by Agnij May 01, 2025 [Removed debug console logs]
-        // ---------------- categories ---------------
-        for await (const { id } of productDetails[0].product_categories) {
-          let categoryObj = {
-            category_id: id,
-            product_id: product.id
-          };
-
-          await productModel.createProductCategories(categoryObj);
-        }
-
-        for await (const {
-          product_image_url,
-          product_image,
-          is_featured
-        } of productDetails[0].product_images) {
-          let featuredImageObj = {
-            product_id: product.id,
-            is_featured: is_featured,
-            original_image_name: product_image,
-            new_image_name: product_image_url
-          };
-          await productModel.insertProductImages(featuredImageObj);
-        }
-      }
-
-      let userDetail = await vendorModel.userDetailById(
-        approveProduct.created_by
-      );
-      let html_variables = [
-        { name: userDetail[0].name },
-        {
-          message:
-            status == 1
-              ? `Your product ${approveProduct.name} has been approved`
-              : `Your product ${approveProduct.name} has been rejected`
-        }
-      ];
-      let dynamic_html = fs
-        .readFileSync(`${Config.template_path}/dynamic_message_template.txt`)
-        .toString();
-
-      for (let index = 0; index < html_variables.length; index++) {
-        const element = html_variables[index];
-        let dynamic_key = Object.keys(element)[0];
-        let replace_char = html_variables[index][dynamic_key];
-        let replace_var = `[${dynamic_key.toLowerCase()}]`;
-
-        dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
-      }
-
-      //  spoc email
-      const spocList = await vendorModel.getSpocDetails(userDetail[0]?.id)
       
-      let mailRecipients = {
-        from: Config.webmasterMail,
-        subject: `Work Wise | Product Review Status`,
-        html: dynamic_html
-      };
+      // If this product has a vendor, try to send an email notification
+      if (approveProduct && approveProduct.created_by) {
+        try {
+          let userDetail = await vendorModel.userDetailById(
+            approveProduct.created_by
+          );
+          
+          if (userDetail && userDetail.length > 0) {
+            let html_variables = [
+              { name: userDetail[0].name },
+              {
+                message:
+                  status == 1
+                    ? `Your product ${approveProduct.name} has been approved`
+                    : `Your product ${approveProduct.name} has been rejected`
+              }
+            ];
+            
+            let dynamic_html = fs
+              .readFileSync(`${Config.template_path}/dynamic_message_template.txt`)
+              .toString();
 
-      if (spocList && spocList.length > 0) {
-        mailRecipients.to = spocList.map(spoc => spoc.email);
-        mailRecipients.cc = userDetail[0].email;
-      } else {
-        mailRecipients.to = userDetail[0].email;
+            for (let index = 0; index < html_variables.length; index++) {
+              const element = html_variables[index];
+              let dynamic_key = Object.keys(element)[0];
+              let replace_char = html_variables[index][dynamic_key];
+              let replace_var = `[${dynamic_key.toLowerCase()}]`;
+
+              dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
+            }
+
+            // Send the email to the SPOC or vendor
+            const spocList = await vendorModel.getSpocDetails(userDetail[0]?.id);
+            
+            let mailRecipients = {
+              from: Config.webmasterMail,
+              subject: `Work Wise | Product Review Status`,
+              html: dynamic_html
+            };
+
+            if (spocList && spocList.length > 0) {
+              mailRecipients.to = spocList.map(spoc => spoc.email);
+              mailRecipients.cc = userDetail[0].email;
+            } else {
+              mailRecipients.to = userDetail[0].email;
+            }
+
+            sendMail(mailRecipients);
+          }
+        } catch (emailError) {
+          console.error("Error sending notification email:", emailError);
+          // Continue with the response even if email fails
+        }
       }
 
-      sendMail(mailRecipients);
+      // If product is approved, create a master copy for admin if it doesn't exist
+      if (status == 1) {
+        try {
+          let productDetails = await productModel.vendorProductDetails(productId);
+          if (productDetails && productDetails.length > 0) {
+            let checkMasterNameExist = await productModel.checkMasterNameExist(
+              productDetails[0].name
+            );
+            
+            if (checkMasterNameExist.length == 0) {
+              let masterProductObj = {
+                name: productDetails[0].name,
+                description: productDetails[0].description,
+                qap_new_file_name: productDetails[0].qap_new_file_name,
+                qap_original_file_name: productDetails[0].qap_original_file_name,
+                tds_new_file_name: productDetails[0].tds_new_file_name,
+                tds_original_file_name: productDetails[0].tds_original_file_name,
+                slug: titleToSlug(productDetails[0].name),
+                sku: productDetails[0].name,
+                created_by: 1,
+                updated_by: 1,
+                added_by: 1,
+                is_approve: 1
+              };
 
-      // sendMail({
-      //   from: Config.webmasterMail, // sender address
-      //   to: userDetail[0].email, // list of receivers
-      //   subject: `Work wise | Product`, // Subject line
-      //   html: dynamic_html // plain text body
-      // });
+              let masterProduct = await productModel.createProduct(masterProductObj);
 
-      res
-        .status(200)
-        .json({
-          status: 1,
-          message: `Product successfully ${status == 0 ? 'Disapproved' : 'Approved'
-            }`
-        })
-        .end();
+              // Copy vendor approvals if any
+              if (productDetails[0].vendor_approved_by && productDetails[0].vendor_approved_by.length > 0) {
+                let productApproveArray = [];
+                productDetails[0].vendor_approved_by.forEach((item) => {
+                  productApproveArray.push({
+                    product_id: masterProduct.id,
+                    vendor_approve_id: item
+                  });
+                });
+                await productModel.addProductApproveBy(
+                  productApproveArray,
+                  masterProduct.id
+                );
+              }
+
+              // Copy categories
+              if (productDetails[0].product_categories && productDetails[0].product_categories.length > 0) {
+                for (const { id } of productDetails[0].product_categories) {
+                  if (id) {
+                    await productModel.createProductCategories(id, masterProduct.id);
+                  }
+                }
+              }
+
+              // Copy images
+              if (productDetails[0].product_images && productDetails[0].product_images.length > 0) {
+                for (const {
+                  product_image_url,
+                  product_image,
+                  is_featured
+                } of productDetails[0].product_images) {
+                  if (product_image_url) {
+                    let featuredImageObj = {
+                      product_id: masterProduct.id,
+                      is_featured: is_featured,
+                      original_image_name: product_image,
+                      new_image_name: product_image_url
+                    };
+                    await productModel.insertProductImages(featuredImageObj);
+                  }
+                }
+              }
+            }
+          }
+        } catch (masterError) {
+          console.error("Error creating master product:", masterError);
+          // Continue with the response even if master creation fails
+        }
+      }
+
+      return res.status(200).json({
+        status: 1,
+        message: `Product successfully ${status == 0 ? 'Disapproved' : 'Approved'}`
+      });
     } catch (error) {
       logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
+      return res.status(400).json({
+        status: 3,
+        message: error.message || Config.errorText.value
+      });
     }
   },
   adminProductUpdate: async (req, res, next) => {
@@ -3099,15 +3100,18 @@ const productController = {
         slug: titleToSlug(name),
         sku: name,
         updated_by: req.user.id,
-        vendor: vendor || productDetails[0].vendor,
+        // Changes by Agnij May 02, 2025 [Removed vendor field which doesn't exist in database]
+        // vendor: vendor || productDetails[0].vendor,
         status: status || 1,
         // vendor_approved_by: vendorApproveId || null,
-        productId: productId,
-        is_featured: is_featured || 0,
-        qap_new_file_name: req.files?.['qap[]']?.[0]?.location || null,
-        qap_original_file_name: req.files?.['qap[]']?.[0]?.originalname || null,
-        tds_new_file_name: req.files?.['tds[]']?.[0]?.location || null,
-        tds_original_file_name: req.files?.['tds[]']?.[0]?.originalname || productDetails[0].tds_original_file_name || null
+        productId: productId
+        // Changes by Agnij May 02, 2025 [Removed is_featured field which doesn't exist in database]
+        // is_featured: is_featured || 0,
+        // Changes by Agnij May 02, 2025 [Removed file fields which don't exist in database]
+        // qap_new_file_name: req.files?.['qap[]']?.[0]?.location || null,
+        // qap_original_file_name: req.files?.['qap[]']?.[0]?.originalname || null,
+        // tds_new_file_name: req.files?.['tds[]']?.[0]?.location || null,
+        // tds_original_file_name: req.files?.['tds[]']?.[0]?.originalname || productDetails[0].tds_original_file_name || null
       };
   
       await productModel.updateVendorProduct(productObj);
@@ -3124,11 +3128,18 @@ const productController = {
   
       // ---------------- add variations ----------------
       for await (const { attribute, attributeValue } of variations) {
+        // Changes by Agnij May 02, 2025 [Added check for empty variant names during update]
+        if (!attribute || attribute.trim() === '') {
+          continue; // Skip empty variant names
+        }
+        
         let variantObj = {
           product_id: productId,
           name: attribute,
           status: 1,
-          created_at: new Date()
+          created_at: new Date(),
+          created_by: req.user.id,
+          added_by: req.user.id
         };
         await productModel.createProductVariant(variantObj);
       }
@@ -3309,7 +3320,7 @@ const productController = {
       }
       
       // Create variant with complete structure matching the example in tbl_product_variant_query_output.txt
-      // Changes by Agnij July 24, 2024 [Set is_approve to 0 by default]
+      // Changes by Agnij May 01, 2025 [Set is_approve to 0 by default]
       const variantObj = {
         product_id,
         name: variantNameValue, // Store in name field as per DB structure
@@ -3521,6 +3532,7 @@ const productController = {
         });
       }
       
+      // Changes by Agnij May 02, 2025 [Set is_approve to 0 (disapproved) by default for new mappings]
       // Create mapping
       const mappingObj = {
         product_variant_id: variantId,
@@ -3529,7 +3541,11 @@ const productController = {
         status: true
       };
       
+      // Create the mapping
       const result = await productModel.createProductVariantVendorMapping(mappingObj);
+      
+      // Update variant to disapproved state by default
+      await productModel.updateProductVariantApproval(variantId, 0);
       
       return res.status(200).json({
         status: 1,
@@ -3564,7 +3580,7 @@ const productController = {
   // Changes by Agnij April 30, 2025 [Added endpoint to search all product variants]
   searchVariants: async (req, res) => {
     try {
-      // Changes by Agnij July 25, 2024 [Added all filter parameters]
+      // Changes by Agnij May 01, 2025 [Added all filter parameters]
       const { 
         id, 
         search_term, 
@@ -3600,11 +3616,12 @@ const productController = {
       });
     }
   },
-  // Changes by Agnij May 18, 2025 [Added endpoint to get variant-vendor mappings]
-  getVariantMappings: async (req, res) => {
+  
+  // Changes by Agnij May 02, 2025 [Added safe variant search function that avoids v_rank issues]
+  searchVariantsSafe: async (req, res) => {
     try {
-      // Changes by Agnij July 25, 2024 [Added all filter parameters]
       const { 
+        id, 
         search_term, 
         start_date, 
         end_date,
@@ -3614,26 +3631,212 @@ const productController = {
         is_approve
       } = req.query;
       
-      // Get mappings using the model function with all filters
-      const mappings = await productModel.getVariantVendorMappings(
+      // Build SQL conditions
+      let conditions = ['pv.is_deleted = 0'];
+      let params = [];
+      let paramIndex = 1;
+      
+      // Handle ID filter
+      if (id) {
+        conditions.push(`pv.id = $${paramIndex}`);
+        params.push(id);
+        paramIndex++;
+      }
+      
+      // Handle search term using ILIKE for simplicity and safety
+      if (search_term && search_term.trim() !== '') {
+        conditions.push(`(
+          pv.name ILIKE $${paramIndex} 
+          OR p.name ILIKE $${paramIndex}
+        )`);
+        params.push(`%${search_term.trim()}%`);
+        paramIndex++;
+      }
+      
+      // Handle date range
+      if (start_date) {
+        try {
+          const startDate = new Date(start_date);
+          if (!isNaN(startDate.getTime())) {
+            conditions.push(`pv.created_at >= $${paramIndex}`);
+            params.push(startDate);
+            paramIndex++;
+          }
+        } catch (e) {
+          console.error("Invalid start_date:", e);
+        }
+      }
+      
+      if (end_date) {
+        try {
+          const endDate = new Date(end_date);
+          if (!isNaN(endDate.getTime())) {
+            endDate.setDate(endDate.getDate() + 1);
+            conditions.push(`pv.created_at <= $${paramIndex}`);
+            params.push(endDate);
+            paramIndex++;
+          }
+        } catch (e) {
+          console.error("Invalid end_date:", e);
+        }
+      }
+      
+      // Handle vendor filter
+      if (vendor_id && vendor_id !== '') {
+        conditions.push(`EXISTS (
+          SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm
+          WHERE pvvm.product_variant_id = pv.id AND pvvm.vendor_id = $${paramIndex}
+        )`);
+        params.push(vendor_id);
+        paramIndex++;
+      }
+      
+      // Handle category filter
+      if (category_id && category_id !== '') {
+        conditions.push(`EXISTS (
+          SELECT 1 FROM tbl_product_categories pc
+          WHERE pc.product_id = p.id AND pc.category_id = $${paramIndex}
+        )`);
+        params.push(category_id);
+        paramIndex++;
+      }
+      
+      // Handle added_by filter
+      if (added_by && added_by !== '') {
+        conditions.push(`(pv.created_by = $${paramIndex} OR p.created_by = $${paramIndex})`);
+        params.push(added_by);
+        paramIndex++;
+      }
+      
+      // Handle approval status filter
+      if (is_approve !== undefined && is_approve !== null) {
+        conditions.push(`pv.is_approve = $${paramIndex}`);
+        params.push(is_approve);
+        paramIndex++;
+      }
+      
+      // Build query without using similarity or ts_rank
+      const query = `
+        SELECT 
+          pv.id, 
+          pv.product_id, 
+          pv.name as variant_name, 
+          pv.status,
+          pv.is_approve,
+          pv.created_at,
+          pv.updated_at,
+          pv.created_by,
+          pv.updated_by,
+          pv.is_deleted,
+          pv.reject_reason_id,
+          trr.reject_reason,
+          p.name as product_name,
+          ARRAY_AGG(DISTINCT jsonb_build_object(
+            'category_name', c.title,
+            'category_id', c.id
+          )) FILTER (WHERE c.id IS NOT NULL) as categories,
+          (
+            SELECT ARRAY_AGG(DISTINCT vendor_id) 
+            FROM tbl_product_variant_vendor_mapping pvvm 
+            WHERE pvvm.product_variant_id = pv.id
+          ) as vendor_ids,
+          (
+            SELECT ARRAY_AGG(DISTINCT u.name)
+            FROM tbl_product_variant_vendor_mapping pvvm 
+            JOIN tbl_users u ON pvvm.vendor_id = u.id
+            WHERE pvvm.product_variant_id = pv.id
+          ) as vendor_names
+        FROM 
+          tbl_product_variant pv
+        JOIN 
+          tbl_product p ON pv.product_id = p.id
+        LEFT JOIN 
+          tbl_product_categories pc ON p.id = pc.product_id
+        LEFT JOIN 
+          tbl_category c ON pc.category_id = c.id
+        LEFT JOIN
+          tbl_reject_reason trr ON pv.reject_reason_id = trr.id
+        WHERE ${conditions.join(' AND ')}
+        GROUP BY 
+          pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
+          pv.created_at, pv.updated_at, pv.created_by, pv.updated_by, 
+          pv.is_deleted, pv.reject_reason_id, trr.reject_reason, p.name
+        ORDER BY 
+          ${search_term && search_term.trim() !== '' ? 
+            `p.name ASC,` : ''
+          }
+          pv.created_at DESC
+        LIMIT 10000000
+      `;
+      
+      const variants = await db.any(query, params);
+      
+      return res.status(200).json({
+        status: 1,
+        data: variants || []
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to search product variants safely'
+      });
+    }
+  },
+  // Changes by Agnij May 18, 2025 [Added endpoint to get variant-vendor mappings]
+  getVariantMappings: async (req, res) => {
+    try {
+      // Changes by Agnij May 02, 2025 [Added pagination parameters]
+      const { 
+        search_term, 
+        start_date, 
+        end_date,
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve,
+        page = 1,
+        limit = 10
+      } = req.query;
+      
+      // Parse pagination parameters
+      const pageNumber = parseInt(page) || 1;
+      const pageSize = parseInt(limit) || 10;
+      
+      console.log(`Requesting variant mappings page ${pageNumber}, limit ${pageSize}`);
+      
+      // Get mappings using the model function with all filters and pagination
+      const result = await productModel.getVariantVendorMappings(
         search_term || "", 
         start_date, 
         end_date, 
         vendor_id,
         category_id,
         added_by,
-        is_approve
+        is_approve,
+        pageNumber,
+        pageSize
       );
       
+      console.log(`Found ${result.data.length} mappings, pagination:`, result.pagination);
+      
+      // Changes by Agnij May 02, 2025 [Fixed response format to ensure pagination is properly included]
       return res.status(200).json({
         status: 1,
-        data: mappings || []
+        data: result.data || [],
+        pagination: result.pagination || {
+          total: 0,
+          page: pageNumber,
+          limit: pageSize,
+          pages: 1
+        }
       });
     } catch (error) {
       logError(error);
       return res.status(500).json({
         status: 0,
-        message: 'Failed to get variant-vendor mappings'
+        message: 'Failed to get variant-vendor mappings',
+        error: error.message
       });
     }
   },
