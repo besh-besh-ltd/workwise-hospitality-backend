@@ -2284,10 +2284,8 @@ WHERE tbl_product.name = $1`,
         updated_at: productObj.updated_at
       };
       
-      // Add approved_at field only when approving
-      if (productObj.approved_at) {
-        cleanObj.approved_at = productObj.approved_at;
-      }
+      // Changes by Agnij August 15, 2024 [Removed approved_at field which doesn't exist in the database]
+      // Don't add approved_at field as it doesn't exist in the tbl_product table
       
       let query = pgp().helpers.update(cleanObj, null, 'tbl_product') + condition;
 
