@@ -3571,10 +3571,10 @@ const productController = {
   getVariantMappings: async (req, res) => {
     try {
       // Changes by Agnij May 01, 2025 [Added date range filtering]
-      const { search_term, start_date, end_date } = req.query;
+      const {id, search_term, start_date, end_date } = req.query;
       
       // Get mappings using the model function with date filtering
-      const mappings = await productModel.getVariantVendorMappings(search_term || "", start_date, end_date);
+      const mappings = await productModel.getVariantVendorMappings(id, search_term || "", start_date, end_date);
       
       return res.status(200).json({
         status: 1,

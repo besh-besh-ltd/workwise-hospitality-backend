@@ -2905,7 +2905,7 @@ getProductTechSpecByID: async (productId) => {
   },
 
   // Changes by Agnij May 18, 2025 [Added function to get all variant-vendor mappings]
-  getVariantVendorMappings: async (searchTerm, start_date, end_date) => {
+  getVariantVendorMappings: async (id, searchTerm, start_date, end_date) => {
     return new Promise(function (resolve, reject) {
       console.log("Getting variant-vendor mappings with search term:", searchTerm);
       console.log("Date range:", start_date, "to", end_date);
@@ -2969,6 +2969,7 @@ getProductTechSpecByID: async (productId) => {
             tbl_users u ON u.id = m.vendor_id
           WHERE
             m.status = true
+            ${id ? `AND m.id = ${id}` : ``}
             AND v.is_deleted = 0
             AND p.is_deleted = 0
             ${searchFilter}
