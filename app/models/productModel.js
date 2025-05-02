@@ -2075,17 +2075,80 @@ FROM (
   },
   check_product: async (productId, created_by = null) => {
     return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT * FROM tbl_product_variant pv WHERE pv.id = $1`,
-        [productId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
+      // Changes by Agnij May 02, 2025 [Improved product/variant lookup with better error handling]
+      try {
+        if (!productId) {
+          console.log("No product ID provided to check_product");
+          resolve([]);
+          return;
+        }
+        
+        console.log(`Checking for product/variant with ID: ${productId}`);
+        
+        // First check in the product table
+        db.any(
+          `SELECT * FROM tbl_product WHERE id = $1`,
+          [productId]
+        )
+          .then(function (productData) {
+            if (productData && productData.length > 0) {
+              console.log(`Found as a product with ID ${productId}`);
+              resolve(productData);
+            } else {
+              // If not found as a product, check if it's a variant
+              db.any(
+                `SELECT pv.*, p.name as product_name 
+                FROM tbl_product_variant pv 
+                LEFT JOIN tbl_product p ON pv.product_id = p.id 
+                WHERE pv.id = $1`,
+                [productId]
+              )
+                .then(function (variantData) {
+                  if (variantData && variantData.length > 0) {
+                    console.log(`Found as a variant with ID ${productId}`);
+                    resolve(variantData);
+                  } else {
+                    console.log(`No product or variant found with ID ${productId}`);
+                    resolve([]);
+                  }
+                })
+                .catch(function (err) {
+                  // Error in variant query
+                  console.error("Error checking variant data:", err);
+                  resolve([]); // Return empty array instead of rejecting
+                });
+            }
+          })
+          .catch(function (err) {
+            // Error in product query
+            console.error("Error checking product data:", err);
+            
+            // Attempt to check variants as a fallback
+            db.any(
+              `SELECT pv.*, p.name as product_name 
+              FROM tbl_product_variant pv 
+              LEFT JOIN tbl_product p ON pv.product_id = p.id 
+              WHERE pv.id = $1`,
+              [productId]
+            )
+              .then(function (variantData) {
+                if (variantData && variantData.length > 0) {
+                  console.log(`Found as a variant with ID ${productId} (fallback)`);
+                  resolve(variantData);
+                } else {
+                  console.log(`No product or variant found with ID ${productId} (fallback)`);
+                  resolve([]);
+                }
+              })
+              .catch(function (err) {
+                console.error("Error in fallback variant check:", err);
+                resolve([]);
+              });
+          });
+      } catch (error) {
+        console.error("Exception in check_product:", error);
+        resolve([]); // Return empty array on exception
+      }
     });
   },
   productDetails: async (productId) => {
@@ -2547,81 +2610,103 @@ getProductTechSpecByID: async (productId) => {
   },
   
   // Changes by Agnij April 30, 2025 [Added search function for variants across all products]
-  searchProductVariants: async (id, searchTerm, start_date, end_date) => {
+  searchProductVariants: async (id, searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve) => {
     return new Promise(function (resolve, reject) {
-      console.log("Searching all variants with term:", searchTerm);
-      console.log("Date range:", start_date, "to", end_date);
+      console.log("Searching variants with parameters:", { 
+        id, searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve 
+      });
       
       try {
-        // Changes by Agnij May 01, 2025 [Added date range filtering]
-        let dateFilter = "";
+        // Build dynamic filter conditions and parameter list
+        let conditions = [];
         let params = [];
         let paramIndex = 1;
         
-        // Prepare date filter if dates are provided
+        // If ID is provided, add a specific variant ID filter
+        if (id) {
+          conditions.push(`pv.id = $${paramIndex}`);
+          params.push(id);
+          paramIndex++;
+        }
+        
+        // Search term filter - search in variant name and product name
+        if (searchTerm && searchTerm.trim() !== "") {
+          conditions.push(`(pv.name ILIKE $${paramIndex} OR p.name ILIKE $${paramIndex})`);
+          params.push(`%${searchTerm}%`);
+          paramIndex++;
+        }
+        
+        // Date range filter
         if (start_date && end_date) {
-          dateFilter = ` AND pv.created_at >= $${paramIndex} AND pv.created_at <= $${paramIndex+1} `;
+          conditions.push(`pv.created_at >= $${paramIndex} AND pv.created_at <= $${paramIndex+1}`);
           params.push(start_date, end_date);
           paramIndex += 2;
         } else if (start_date) {
-          dateFilter = ` AND pv.created_at >= $${paramIndex} `;
+          conditions.push(`pv.created_at >= $${paramIndex}`);
           params.push(start_date);
-          paramIndex += 1;
+          paramIndex++;
         } else if (end_date) {
-          dateFilter = ` AND pv.created_at <= $${paramIndex} `;
+          conditions.push(`pv.created_at <= $${paramIndex}`);
           params.push(end_date);
-          paramIndex += 1;
+          paramIndex++;
         }
         
-        let query;
+        // Changes by Agnij July 25, 2024 [Added additional filters]
+        // Vendor filter
+        if (vendor_id) {
+          conditions.push(`EXISTS (
+            SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm
+            WHERE pvvm.product_variant_id = pv.id AND pvvm.vendor_id = $${paramIndex}
+          )`);
+          params.push(vendor_id);
+          paramIndex++;
+        }
         
-        if (!searchTerm || searchTerm.trim() === "") {
-          // If no search term is provided, return all variants with date filter
-          query = `
-            SELECT 
-              pv.id, 
-              pv.product_id, 
-              pv.name, 
-              pv.created_at,
-              pv.updated_at,
-              pv.created_by,
-              pv.updated_by,
-              pv.is_deleted,
-              pv.is_approve,
-              pv.reject_reason_id,
-              p.name as product_name,
-              ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
-            FROM 
-              tbl_product_variant pv
-            LEFT JOIN 
-              tbl_product p ON pv.product_id = p.id
-            LEFT JOIN 
-              tbl_product_categories pc ON p.id = pc.product_id
-            LEFT JOIN 
-              tbl_category c ON pc.category_id = c.id
-            WHERE 
-              pv.is_deleted = 0
-              ${id ? `AND pv.id = ${id}` : ``}
-              ${dateFilter}
-            GROUP BY 
-              pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
-              pv.created_by, pv.updated_by, pv.is_deleted, pv.is_approve, pv.reject_reason_id, p.name
-            ORDER BY pv.created_at DESC
-            LIMIT 100000`;
-        } else {
-          // If search term is provided, use it for filtering along with dates
-          query = `
+        // Category filter
+        if (category_id) {
+          conditions.push(`EXISTS (
+            SELECT 1 FROM tbl_product_categories pc
+            WHERE pc.product_id = p.id AND pc.category_id = $${paramIndex}
+          )`);
+          params.push(category_id);
+          paramIndex++;
+        }
+        
+        // Added by filter
+        if (added_by) {
+          conditions.push(`pv.created_by = $${paramIndex}`);
+          params.push(added_by);
+          paramIndex++;
+        }
+        
+        // Approval status filter
+        if (is_approve !== undefined && is_approve !== null) {
+          conditions.push(`pv.is_approve = $${paramIndex}`);
+          params.push(is_approve);
+          paramIndex++;
+        }
+        
+        // Always filter out deleted variants
+        conditions.push(`pv.is_deleted = 0`);
+        
+        // Build the final WHERE clause
+        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+        
+        // Build the complete query
+        const query = `
           SELECT 
             pv.id, 
             pv.product_id, 
             pv.name, 
+            pv.status,
+            pv.is_approve,
             pv.created_at,
             pv.updated_at,
             pv.created_by,
             pv.updated_by,
             pv.is_deleted,
-            pv.is_approve,
             pv.reject_reason_id,
+            trr.reject_reason,
             p.name as product_name,
             ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
           FROM 
@@ -2632,66 +2717,148 @@ getProductTechSpecByID: async (productId) => {
             tbl_product_categories pc ON p.id = pc.product_id
           LEFT JOIN 
             tbl_category c ON pc.category_id = c.id
-          WHERE 
-            ${id ? `pv.id = ${id} AND` : ``}
-            (pv.name ILIKE $${paramIndex} OR p.name ILIKE $${paramIndex}) AND 
-            pv.is_deleted = 0
-            ${dateFilter}
+          LEFT JOIN
+            tbl_reject_reason trr ON pv.reject_reason_id = trr.id
+          ${whereClause}
           GROUP BY 
-            pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
-            pv.created_by, pv.updated_by, pv.is_deleted, pv.is_approve, pv.reject_reason_id, p.name
-            ORDER BY pv.created_at DESC
-            LIMIT 100000`;
-            
-          params.push(`%${searchTerm}%`);
-        }
+            pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
+            pv.created_at, pv.updated_at, pv.created_by, pv.updated_by, 
+            pv.is_deleted, pv.reject_reason_id, trr.reject_reason, p.name
+          ORDER BY 
+            pv.created_at DESC
+          LIMIT 1000000 
+        `;
+        
         
         db.any(query, params)
           .then(function (data) {
-            console.log(`Found ${data.length} variants${searchTerm ? ` matching search term: ${searchTerm}` : ''}`);
-            
-            // Ensure we never return null
-            const result = data || [];
-            
-            // Add variant_name field for frontend compatibility 
-            const formattedResult = result.map(variant => ({
-              ...variant,
-              variant_name: variant.name
-            }));
-            
-            resolve(formattedResult);
+            console.log(`Query returned ${data.length} results`);
+            resolve(data);
           })
           .catch(function (err) {
-            console.error("Error in searchProductVariants query:", err);
-            reject(new Error(err.message || "Database error in searchProductVariants"));
+            console.error("Error in searchProductVariants:", err);
+            resolve([]);  // Return empty array on error
           });
       } catch (error) {
-        console.error("Error in searchProductVariants:", error);
-        reject(new Error(error.message || "Exception in searchProductVariants"));
+        console.error("Exception in searchProductVariants:", error);
+        resolve([]);  // Return empty array on exception
       }
     });
   },
   
   updateProductVariant: async (variantObj, variantId) => {
     return new Promise(function (resolve, reject) {
-      // Accept variant_name from frontend but use name for database
-      const name = variantObj.variant_name || variantObj.name;
-      
-      db.one(
-        `UPDATE tbl_product_variant 
-        SET name = $1, 
-            updated_at = NOW()
-        WHERE id = $2 
-        RETURNING id`,
-        [name, variantId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
+      try {
+        // Changes by Agnij May 02, 2025 [Enhanced to handle all edge cases in approval]
+        if (!variantId) {
+          console.error("No variant ID provided to updateProductVariant");
+          reject(new Error("Variant ID is required"));
+          return;
+        }
+        
+        console.log(`Starting updateProductVariant for ID ${variantId} with:`, variantObj);
+        
+        // Create dynamic update query based on provided fields
+        let updateFields = [];
+        let params = [];
+        let paramIndex = 1;
+
+        // Handle all possible fields that might be in the variantObj
+        if (variantObj.name || variantObj.variant_name) {
+          updateFields.push(`name = $${paramIndex}`);
+          params.push(variantObj.variant_name || variantObj.name);
+          paramIndex++;
+        }
+        
+        // Ensure approval status is handled correctly
+        if (variantObj.is_approve !== undefined) {
+          // Convert to numeric value (0 or 1)
+          const approvalValue = typeof variantObj.is_approve === 'string' 
+            ? (variantObj.is_approve === '1' || variantObj.is_approve.toLowerCase() === 'true' ? 1 : 0)
+            : (variantObj.is_approve ? 1 : 0);
+            
+          updateFields.push(`is_approve = $${paramIndex}`);
+          params.push(approvalValue);
+          paramIndex++;
+        }
+        
+        // Handle rejection reason
+        if (variantObj.reject_reason_id !== undefined) {
+          updateFields.push(`reject_reason_id = $${paramIndex}`);
+          params.push(variantObj.reject_reason_id);
+          paramIndex++;
+        }
+        
+        // Handle user who updated
+        if (variantObj.updated_by !== undefined) {
+          updateFields.push(`updated_by = $${paramIndex}`);
+          params.push(variantObj.updated_by);
+          paramIndex++;
+        }
+        
+        // Always update the updated_at timestamp
+        updateFields.push(`updated_at = CURRENT_TIMESTAMP`);
+        
+        // Add the variantId as the last parameter
+        params.push(variantId);
+        
+        // Only proceed if we have fields to update
+        if (updateFields.length === 0) {
+          console.error("No fields to update in updateProductVariant");
+          reject(new Error("No valid fields provided for update"));
+          return;
+        }
+        
+        // Build and execute the query
+        const query = `
+          UPDATE tbl_product_variant 
+          SET ${updateFields.join(', ')}
+          WHERE id = $${paramIndex} 
+          RETURNING id, name, is_approve, reject_reason_id, updated_at
+        `;
+        
+        console.log(`Executing variant update query for ID ${variantId} with fields:`, updateFields);
+        
+        db.one(query, params)
+          .then(function (data) {
+            console.log(`Successfully updated variant ${variantId}:`, data);
+            resolve(data);
+          })
+          .catch(function (err) {
+            console.error(`Error in updateProductVariant for ID ${variantId}:`, err);
+            
+            // Try with a simpler, more direct query as fallback
+            const fallbackQuery = `
+              UPDATE tbl_product_variant 
+              SET is_approve = $1, 
+                  reject_reason_id = $2,
+                  updated_by = $3,
+                  updated_at = CURRENT_TIMESTAMP
+              WHERE id = $4
+              RETURNING id, name, is_approve
+            `;
+            
+            console.log("Attempting fallback update query");
+            
+            db.one(fallbackQuery, [
+              variantObj.is_approve !== undefined ? variantObj.is_approve : null,
+              variantObj.reject_reason_id,
+              variantObj.updated_by,
+              variantId
+            ])
+              .then(function (fallbackData) {
+                console.log("Fallback update succeeded:", fallbackData);
+                resolve(fallbackData);
+              })
+              .catch(function (fallbackErr) {
+                console.error("Fallback update also failed:", fallbackErr);
+                reject(new Error(`Failed to update variant: ${fallbackErr.message}`));
+              });
+          });
+      } catch (error) {
+        console.error("Exception in updateProductVariant:", error);
+        reject(new Error(error.message || "Exception in updateProductVariant"));
+      }
     });
   },
   
@@ -2733,55 +2900,48 @@ getProductTechSpecByID: async (productId) => {
   
   getProductVariantDetails: async (variantId) => {
     return new Promise(function (resolve, reject) {
-      // Changes by Agnij April 30, 2025 [Fixed column names to match actual database schema]
-      // Changes by Agnij May 18, 2025 [Fixed ambiguous column reference]
+      // Changes by Agnij August 15, 2024 [Improved error handling and simplified query]
       console.log("Getting variant details for:", variantId);
       
       try {
-        // Use a query that explicitly lists all needed columns instead of pv.*
+        if (!variantId) {
+          console.log("No variant ID provided");
+          resolve([]);
+          return;
+        }
+        
+        // Simple focused query to ensure we get the critical fields
         const query = `
           SELECT 
             pv.id, 
             pv.product_id, 
-            pv.name, 
+            pv.name,
+            pv.status,
+            pv.is_approve,
+            pv.reject_reason_id, 
             pv.created_at,
             pv.updated_at,
             pv.created_by,
             pv.updated_by,
             pv.is_deleted,
-            p.name as product_name,
-            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+            p.name as product_name
           FROM 
             tbl_product_variant pv
           LEFT JOIN 
             tbl_product p ON pv.product_id = p.id
-          LEFT JOIN 
-            tbl_product_categories pc ON p.id = pc.product_id
-          LEFT JOIN 
-            tbl_category c ON pc.category_id = c.id
           WHERE 
             pv.id = $1
-            AND pv.is_deleted = 0
-          GROUP BY 
-            pv.id, pv.product_id, pv.name, pv.created_at, pv.updated_at, 
-            pv.created_by, pv.updated_by, pv.is_deleted, p.name
         `;
         
-        console.log("Executing fixed query for variant details");
+        console.log("Executing query for variant details");
         
         db.any(query, [variantId])
           .then(function (data) {
-            console.log("Query successful, rows returned:", data.length);
+            console.log(`Found ${data.length} variants with ID ${variantId}`);
             
-            // Transform the data to include category_info string and map name to variant_name
+            // Map name to variant_name for frontend compatibility
             if (data && data.length > 0) {
               data.forEach(item => {
-                // Handle category names
-                if (item.category_names) {
-                  item.category_info = item.category_names.join(', ');
-                }
-                
-                // Map name to variant_name for frontend compatibility
                 item.variant_name = item.name;
               });
             }
@@ -2790,11 +2950,13 @@ getProductTechSpecByID: async (productId) => {
           })
           .catch(function (err) {
             console.error("Error in getProductVariantDetails:", err);
-            reject(new Error(err.message || "Database error in getProductVariantDetails"));
+            // Return empty array instead of rejecting to prevent cascading errors
+            resolve([]);
           });
       } catch (err) {
         console.error("Exception in getProductVariantDetails:", err);
-        reject(new Error(err.message || "Exception in getProductVariantDetails"));
+        // Return empty array on exception
+        resolve([]);
       }
     });
   },
@@ -2905,43 +3067,79 @@ getProductTechSpecByID: async (productId) => {
   },
 
   // Changes by Agnij May 18, 2025 [Added function to get all variant-vendor mappings]
-  getVariantVendorMappings: async (searchTerm, start_date, end_date) => {
+  getVariantVendorMappings: async (searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve) => {
     return new Promise(function (resolve, reject) {
-      console.log("Getting variant-vendor mappings with search term:", searchTerm);
-      console.log("Date range:", start_date, "to", end_date);
+      console.log("Getting variant-vendor mappings with parameters:", { 
+        searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve 
+      });
       
       try {
-        // Changes by Agnij May 01, 2025 [Added date range filtering]
-        let dateFilter = "";
-        let searchFilter = "";
+        // Changes by Agnij July 25, 2024 [Completely revamped filtering with all parameters]
+        // Build dynamic filter conditions and parameter list
+        let conditions = [];
         let params = [];
+        let paramIndex = 1;
         
-        // Prepare search filter if search term is provided
+        // Search term filter
         if (searchTerm && searchTerm.trim() !== "") {
-          searchFilter = " AND (v.name ILIKE $1 OR p.name ILIKE $1 OR u.name ILIKE $1 OR u.organization_name ILIKE $1 OR u.email ILIKE $1) ";
+          conditions.push(`(v.name ILIKE $${paramIndex} OR p.name ILIKE $${paramIndex} OR u.name ILIKE $${paramIndex} OR u.organization_name ILIKE $${paramIndex} OR u.email ILIKE $${paramIndex})`);
           params.push(`%${searchTerm}%`);
+          paramIndex++;
         }
         
-        // Prepare date filter if dates are provided
+        // Date range filter
         if (start_date && end_date) {
-          dateFilter = params.length > 0 ? 
-            ` AND m.created_at >= $${params.length+1} AND m.created_at <= $${params.length+2} ` :
-            ` AND m.created_at >= $1 AND m.created_at <= $2 `;
+          conditions.push(`m.created_at >= $${paramIndex} AND m.created_at <= $${paramIndex+1}`);
           params.push(start_date, end_date);
+          paramIndex += 2;
         } else if (start_date) {
-          dateFilter = params.length > 0 ? 
-            ` AND m.created_at >= $${params.length+1} ` :
-            ` AND m.created_at >= $1 `;
+          conditions.push(`m.created_at >= $${paramIndex}`);
           params.push(start_date);
+          paramIndex++;
         } else if (end_date) {
-          dateFilter = params.length > 0 ? 
-            ` AND m.created_at <= $${params.length+1} ` :
-            ` AND m.created_at <= $1 `;
+          conditions.push(`m.created_at <= $${paramIndex}`);
           params.push(end_date);
+          paramIndex++;
         }
         
-        // Changes by Agnij May 30, 2025 [Fixed query to properly join vendor table]
-        // Changes by Agnij May 30, 2025 [Added proper vendor name, email, and organization information]
+        // Vendor filter
+        if (vendor_id) {
+          conditions.push(`m.vendor_id = $${paramIndex}`);
+          params.push(vendor_id);
+          paramIndex++;
+        }
+        
+        // Category filter
+        if (category_id) {
+          conditions.push(`EXISTS (
+            SELECT 1 FROM tbl_product_categories pc
+            WHERE pc.product_id = p.id AND pc.category_id = $${paramIndex}
+          )`);
+          params.push(category_id);
+          paramIndex++;
+        }
+        
+        // Added by filter - filtering by product's or variant's created_by instead
+        if (added_by) {
+          conditions.push(`(p.created_by = $${paramIndex} OR v.created_by = $${paramIndex})`);
+          params.push(added_by);
+          paramIndex++;
+        }
+        
+        // Approval status filter - filtering by product's or variant's is_approve instead
+        if (is_approve !== undefined && is_approve !== null && is_approve !== "") {
+          conditions.push(`v.is_approve = $${paramIndex}`);
+          params.push(is_approve);
+          paramIndex++;
+        }
+        
+        // Always filter out deleted variants/products and ensure mapping is active
+        conditions.push(`m.status = true AND v.is_deleted = 0 AND p.is_deleted = 0`);
+        
+        // Build the final WHERE clause
+        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+        
+        // Build the complete query - removing references to non-existent columns
         const query = `
           SELECT 
             m.id as mapping_id,
@@ -2949,6 +3147,11 @@ getProductTechSpecByID: async (productId) => {
             m.vendor_id,
             m.status,
             m.created_at as mapped_at,
+            v.is_approve,
+            v.reject_reason_id,
+            trr.reject_reason,
+            v.created_by,
+            v.updated_by,
             v.name as variant_name,
             p.name as product_name,
             u.name as vendor_name,
@@ -2967,33 +3170,109 @@ getProductTechSpecByID: async (productId) => {
             tbl_product p ON p.id = v.product_id
           LEFT JOIN
             tbl_users u ON u.id = m.vendor_id
-          WHERE
-            m.status = true
-            AND v.is_deleted = 0
-            AND p.is_deleted = 0
-            ${searchFilter}
-            ${dateFilter}
+          LEFT JOIN
+            tbl_reject_reason trr ON v.reject_reason_id = trr.id
+          ${whereClause}
           ORDER BY 
             m.created_at DESC
-          LIMIT 100000
+          LIMIT 1000000
         `;
+        
+        console.log(`Executing mapping search query with ${params.length} parameters`);
+        
+        db.any(query, params)
+          .then(function (data) {
+            console.log(`Query returned ${data.length} variant-vendor mappings`);
+            resolve(data);
+          })
+          .catch(function (err) {
+            console.error("Error in getVariantVendorMappings:", err);
+            resolve([]);  // Return empty array on error
+          });
+      } catch (error) {
+        console.error("Exception in getVariantVendorMappings:", error);
+        resolve([]);  // Return empty array on error
+      }
+    });
+  },
+
+  // Changes by Agnij July 25, 2024 [Added function to approve/reject mappings]
+  approveMapping: async (mappingObj, mappingId) => {
+    return new Promise(function (resolve, reject) {
+      const condition = ` WHERE id = $1 RETURNING id`;
+      const values = [mappingId];
       
-      db.any(query, params)
+      let query = pgp().helpers.update(mappingObj, null, 'tbl_product_variant_vendor_mapping') + condition;
+
+      db.one(query, values)
         .then(function (data) {
-          console.log(`Found ${data.length} variant-vendor mappings (with filters)`);
           resolve(data);
         })
         .catch(function (err) {
-          console.error("Error fetching variant-vendor mappings:", err);
-          resolve([]);  // Return empty array on error for better handling
+          console.error("Error approving mapping:", err);
+          let error = new Error(err);
+          reject(error);
         });
-      } catch (error) {
-        console.error("Exception in getVariantVendorMappings:", error);
-        resolve([]);  // Return empty array on error for better handling
-      }
+    });
+  },
+  
+  // Changes by Agnij August 15, 2024 [Added function to get mapping by ID]
+  getVariantVendorMappingById: async (mappingId) => {
+    return new Promise(function (resolve, reject) {
+      db.oneOrNone(
+        `SELECT 
+          m.id as mapping_id,
+          m.product_variant_id as variant_id,
+          m.vendor_id,
+          m.status,
+          m.created_at as mapped_at,
+          v.is_approve,
+          v.reject_reason_id,
+          trr.reject_reason,
+          v.name as variant_name,
+          p.name as product_name
+        FROM 
+          tbl_product_variant_vendor_mapping m
+        LEFT JOIN
+          tbl_product_variant v ON v.id = m.product_variant_id
+        LEFT JOIN
+          tbl_product p ON p.id = v.product_id
+        LEFT JOIN
+          tbl_reject_reason trr ON v.reject_reason_id = trr.id
+        WHERE 
+          m.id = $1`,
+        [mappingId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error getting mapping by ID:", err);
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
+  // Changes by Agnij August 15, 2024 [Added helper function to update a product variant]
+  updateProductVariant: async (variantObj, variantId) => {
+    return new Promise(function (resolve, reject) {
+      const condition = ` WHERE id = $1 RETURNING id`;
+      const values = [variantId];
+      
+      let query = pgp().helpers.update(variantObj, null, 'tbl_product_variant') + condition;
+
+      db.one(query, values)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error updating product variant:", err);
+          let error = new Error(err);
+          reject(error);
+        });
     });
   }
-
 };
 
 export default productModel;

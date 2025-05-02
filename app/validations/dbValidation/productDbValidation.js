@@ -459,25 +459,61 @@ const validateDbBody = {
       let productId = req.params.id;
       let { status, reject_reason, reject_reason_id } = req.body;
 
-      const productIDExists = await productModel.check_product(productId);
-      if (productIDExists.length == 0) {
+      console.log(`Validating product approval for ID: ${productId}, status: ${status}`);
+      
+      // Validate basic parameters
+      if (status === undefined || status === null) {
         err++;
-        errors.id = 'Product not found';
+        errors.status = 'Status is required';
+        console.log("Missing status parameter");
       }
-      if (status == 1 && productIDExists[0].is_approve == 1) {
+      
+      if (!productId) {
         err++;
-        errors.status = 'Product already approved';
-      } else if (status == 0 && productIDExists[0].is_approve == 0) {
-        err++;
-        errors.status = 'Product already rejected';
+        errors.id = 'Product ID is required';
+        console.log("Missing product ID");
+      } else {
+        // Check if product or variant exists
+        const productIDExists = await productModel.check_product(productId);
+        console.log(`Product search results for ID ${productId}:`, productIDExists?.length || 0);
+        
+        if (!productIDExists || productIDExists.length === 0) {
+          err++;
+          errors.id = 'Product or variant not found';
+          console.log(`Product/variant ID ${productId} not found`);
+        } else {
+          // Changes by Agnij May 02, 2025 [Removed check for already approved/rejected items to allow re-approval/re-rejection]
+          const item = productIDExists[0];
+          console.log(`Found item of type ${item.product_id ? 'variant' : 'product'}`);
+          
+          // We no longer block already approved/rejected items to make the UI more forgiving
+          if (item && item.is_approve !== undefined) {
+            const numericStatus = status === '1' || status === 1 || status === true ? 1 : 0;
+            console.log(`Current approval status: ${item.is_approve}, Requested status: ${numericStatus}`);
+            
+            // Just log but don't block if it's the same status
+            if (numericStatus === 1 && item.is_approve === 1) {
+              console.log("Item is already approved, but allowing re-approval");
+            } else if (numericStatus === 0 && item.is_approve === 0) {
+              console.log("Item is already rejected, but allowing re-rejection");
+            }
+          } else {
+            console.log(`Item has no is_approve property or is undefined`);
+          }
+        }
       }
 
-      if (status == 0 && !reject_reason_id && !reject_reason) {
-        err++;
-        errors.reject_reason_id = 'Reject reason is required';
+      // Check rejection reason if rejecting
+      if (status === '0' || status === 0 || status === false) {
+        if (!reject_reason_id && !reject_reason) {
+          err++;
+          errors.reject_reason_id = 'Reject reason is required';
+          console.log("Missing reject reason for rejection");
+        }
       }
 
       if (err > 0) {
+        console.log("Validation failed with errors:", errors);
         res
           .status(400)
           .json({
@@ -486,9 +522,11 @@ const validateDbBody = {
           })
           .end();
       } else {
+        console.log("Validation passed");
         next();
       }
     } catch (err) {
+      console.error("Error in product_approve_check:", err);
       logError(err);
       res
         .status(400)

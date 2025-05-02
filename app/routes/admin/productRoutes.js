@@ -213,4 +213,11 @@ productRoutes.get(
   productController.getVariantMappings
 );
 
+// Changes by Agnij July 25, 2024 [Added route for mapping approval]
+productRoutes.put(
+  '/mapping-approve/:id',
+  passportSignIn,
+  productController.approveMapping
+);
+
 export default productRoutes;

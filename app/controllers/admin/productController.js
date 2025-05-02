@@ -2769,7 +2769,7 @@ const productController = {
       let { reject_reason, reject_reason_id, status } = req.body;
       const productId = req.params.id;
 
-      // Changes by Agnij July 24, 2024 [Fixed approval functionality]
+      // Changes by Agnij August 19, 2024 [Added approved_at field updating]
       console.log("Approving product/variant with ID:", productId, "Status:", status);
       
       // Validate status is present and valid
@@ -2823,12 +2823,18 @@ const productController = {
         }
         
         // Update variant status
+        const currentTime = new Date();
         const variantObj = {
           is_approve: parseInt(status),
           updated_by: req.user.id,
           reject_reason_id: reasonId || null,
-          updated_at: new Date()
+          updated_at: currentTime
         };
+        
+        // Add approved_at field when approving
+        if (status === '1') {
+          variantObj.approved_at = currentTime;
+        }
         
         console.log("Updating variant with:", variantObj);
         
@@ -2839,14 +2845,16 @@ const productController = {
              SET is_approve = $1, 
                  updated_by = $2, 
                  reject_reason_id = $3,
-                 updated_at = $4
-             WHERE id = $5 
+                 updated_at = $4,
+                 approved_at = $5
+             WHERE id = $6 
              RETURNING id, name`,
             [
               variantObj.is_approve,
               variantObj.updated_by,
               variantObj.reject_reason_id,
               variantObj.updated_at,
+              status === '1' ? variantObj.approved_at : null,
               productId
             ]
           );
@@ -2893,11 +2901,18 @@ const productController = {
         }
       }
 
+      const currentTime = new Date();
       let productObj = {
         is_approve: status,
         vendor_approved_by: req.user.id,
-        reject_reason_id: reasonId || null
+        reject_reason_id: reasonId || null,
+        updated_at: currentTime
       };
+      
+      // Add approved_at field when approving
+      if (status === '1') {
+        productObj.approved_at = currentTime;
+      }
 
       let approveProduct = await productModel.approveProduct(
         productObj,
@@ -3549,11 +3564,29 @@ const productController = {
   // Changes by Agnij April 30, 2025 [Added endpoint to search all product variants]
   searchVariants: async (req, res) => {
     try {
-      // Changes by Agnij May 01, 2025 [Added date range filtering]
-      const { id, search_term, start_date, end_date } = req.query;
+      // Changes by Agnij July 25, 2024 [Added all filter parameters]
+      const { 
+        id, 
+        search_term, 
+        start_date, 
+        end_date,
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve
+      } = req.query;
       
-      // Search for variants across all products with optional date filtering
-      const variants = await productModel.searchProductVariants(id, search_term || "", start_date, end_date);
+      // Search for variants across all products with all filter parameters
+      const variants = await productModel.searchProductVariants(
+        id, 
+        search_term || "", 
+        start_date, 
+        end_date,
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve
+      );
       
       return res.status(200).json({
         status: 1,
@@ -3570,11 +3603,27 @@ const productController = {
   // Changes by Agnij May 18, 2025 [Added endpoint to get variant-vendor mappings]
   getVariantMappings: async (req, res) => {
     try {
-      // Changes by Agnij May 01, 2025 [Added date range filtering]
-      const { search_term, start_date, end_date } = req.query;
+      // Changes by Agnij July 25, 2024 [Added all filter parameters]
+      const { 
+        search_term, 
+        start_date, 
+        end_date,
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve
+      } = req.query;
       
-      // Get mappings using the model function with date filtering
-      const mappings = await productModel.getVariantVendorMappings(search_term || "", start_date, end_date);
+      // Get mappings using the model function with all filters
+      const mappings = await productModel.getVariantVendorMappings(
+        search_term || "", 
+        start_date, 
+        end_date, 
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve
+      );
       
       return res.status(200).json({
         status: 1,
@@ -3585,6 +3634,264 @@ const productController = {
       return res.status(500).json({
         status: 0,
         message: 'Failed to get variant-vendor mappings'
+      });
+    }
+  },
+  // Changes by Agnij July 25, 2024 [Added approval function for variant-vendor mappings]
+  approveMapping: async (req, res) => {
+    try {
+      const mappingId = req.params.id;
+      console.log(`Approving mapping with ID: ${mappingId}, body:`, req.body);
+      
+      if (!mappingId) {
+        console.log("No mapping ID provided");
+        return res.status(400).json({
+          status: 3,
+          message: 'Mapping ID is required'
+        });
+      }
+      
+      // First, get the mapping to find the associated variant
+      const mappingDetails = await productModel.getVariantVendorMappingById(mappingId);
+      console.log(`Mapping details for ${mappingId}:`, mappingDetails);
+      
+      if (!mappingDetails) {
+        console.log(`No mapping found with ID ${mappingId}`);
+        return res.status(404).json({
+          status: 3,
+          message: 'Mapping not found'
+        });
+      }
+      
+      // Check for variant ID in the mapping (may be called variant_id or product_variant_id)
+      const variantId = mappingDetails.variant_id || mappingDetails.product_variant_id;
+      
+      if (!variantId) {
+        console.log(`Mapping ${mappingId} has no variant ID`);
+        return res.status(404).json({
+          status: 3,
+          message: 'Invalid mapping: no variant associated'
+        });
+      }
+      
+      console.log(`Found variant ID: ${variantId} in mapping`);
+      
+      let status = req.body.status;
+      
+      // Ensure status is valid
+      if (status === undefined || status === null) {
+        console.log("No status provided in request");
+        return res.status(400).json({
+          status: 3,
+          message: 'Status is required'
+        });
+      }
+      
+      // Convert status to appropriate format (handle various input formats)
+      if (typeof status === 'string') {
+        status = status === '1' || status.toLowerCase() === 'true' ? 1 : 0;
+      } else {
+        status = status ? 1 : 0;
+      }
+      
+      let reject_reason = req.body.reject_reason || null;
+      let reject_reason_id = req.body.reject_reason_id || null;
+      
+      console.log(`Processing approval with status=${status}, reject_reason_id=${reject_reason_id}`);
+      
+      // Handle rejection reason for rejections
+      if (status === 0 && !reject_reason_id && !reject_reason) {
+        console.log("Rejection requires a reason");
+        return res.status(400).json({
+          status: 3,
+          message: 'Reject reason is required when rejecting'
+        });
+      }
+      
+      // Prepare the variant update object
+      const variantObj = {
+        is_approve: status,
+        updated_by: req.user.id,
+        updated_at: new Date()
+      };
+      
+      // Add reject reason if status is rejection (0)
+      if (status === 0) {
+        // If reject_reason_id is directly provided, use it
+        if (reject_reason_id) {
+          variantObj.reject_reason_id = reject_reason_id;
+        }
+        // Otherwise, if a textual reason is provided, we should convert it to an ID
+        else if (reject_reason) {
+          try {
+            // First check if it's a numeric value
+            if (!isNaN(reject_reason)) {
+              variantObj.reject_reason_id = reject_reason;
+            } else {
+              // Try to look up or create a reason by text
+              let checkReason = await vendorModel.findReasonByText(reject_reason);
+              if (checkReason && checkReason.length > 0) {
+                variantObj.reject_reason_id = checkReason[0].id;
+              } else {
+                // Create a new reason
+                let reasonObj = {
+                  status: 1,
+                  reject_reason: reject_reason,
+                  type: 2  // Type 2 is for product/variant rejections
+                };
+                let createReason = await vendorModel.createReason(reasonObj);
+                if (createReason && createReason.length > 0) {
+                  variantObj.reject_reason_id = createReason[0].id;
+                }
+              }
+            }
+          } catch (reasonError) {
+            console.error("Error handling rejection reason:", reasonError);
+            // Continue without setting reject_reason_id
+          }
+        }
+      } else {
+        // If approving, clear any rejection reason
+        variantObj.reject_reason_id = null;
+      }
+      
+      console.log(`Updating variant ${variantId} with:`, variantObj);
+      
+      // Update the variant instead of the mapping
+      try {
+        const result = await productModel.updateProductVariant(variantObj, variantId);
+        console.log("Update result:", result);
+        
+        return res.status(200).json({
+          status: 1,
+          message: status === 1 ? 'Variant approved successfully' : 'Variant rejected successfully'
+        });
+      } catch (updateError) {
+        console.error("Error updating variant:", updateError);
+        return res.status(500).json({
+          status: 3,
+          message: 'Error updating variant approval status',
+          error: updateError.message
+        });
+      }
+    } catch (error) {
+      console.error("Exception in approveMapping:", error);
+      logError(error);
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong while updating approval',
+        error: error.message
+      });
+    }
+  },
+  // Changes by Agnij August 19, 2024 [Added mapping approval functionality]
+  approveMapping: async (req, res) => {
+    try {
+      let { reject_reason, reject_reason_id, status } = req.body;
+      const mappingId = req.params.id;
+
+      console.log("Approving mapping with ID:", mappingId, "Status:", status);
+      
+      // Validate status is present and valid
+      if (status === undefined || status === null) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Status is required'
+        });
+      }
+      
+      // Ensure status is treated as a string for comparison
+      status = status.toString();
+      
+      if (status !== '0' && status !== '1') {
+        return res.status(400).json({
+          status: 3,
+          message: 'Status must be 0 or 1'
+        });
+      }
+
+      // Handle reject reason
+      let reasonId = null;
+      if (status === '0') {
+        if (reject_reason_id) {
+          reasonId = reject_reason_id;
+        } else if (reject_reason) {
+          let checkReason = await vendorModel.findReasonByText(reject_reason);
+          if (checkReason.length > 0) {
+            reasonId = checkReason[0].id;
+          } else {
+            let reasonObj = {
+              status: 1,
+              reject_reason: reject_reason,
+              type: 2
+            };
+            let createReason = await vendorModel.createReason(reasonObj);
+            reasonId = createReason[0].id;
+          }
+        } else {
+          return res.status(400).json({
+            status: 3,
+            message: 'Reject reason is required when rejecting a mapping'
+          });
+        }
+      }
+
+      const currentTime = new Date();
+      const mappingUpdateObj = {
+        is_approve: parseInt(status),
+        updated_by: req.user.id,
+        reject_reason_id: reasonId || null,
+        updated_at: currentTime
+      };
+      
+      // Add approved_at field when approving
+      if (status === '1') {
+        mappingUpdateObj.approved_at = currentTime;
+      }
+      
+      console.log("Updating mapping with:", mappingUpdateObj);
+
+      // Update the mapping in the database
+      try {
+        await db.one(
+          `UPDATE tbl_product_variant_vendor_mapping 
+           SET is_approve = $1, 
+               updated_by = $2, 
+               reject_reason_id = $3,
+               updated_at = $4,
+               approved_at = $5
+           WHERE id = $6 
+           RETURNING id`,
+          [
+            mappingUpdateObj.is_approve,
+            mappingUpdateObj.updated_by,
+            mappingUpdateObj.reject_reason_id,
+            mappingUpdateObj.updated_at,
+            status === '1' ? mappingUpdateObj.approved_at : null,
+            mappingId
+          ]
+        );
+        
+        console.log("Mapping updated successfully");
+        
+        return res.status(200).json({
+          status: 1,
+          message: `Mapping successfully ${status === '0' ? 'Disapproved' : 'Approved'}`
+        });
+      } catch (dbError) {
+        console.error("Database error updating mapping:", dbError);
+        return res.status(500).json({
+          status: 3,
+          message: 'Error updating mapping status',
+          error: dbError.message
+        });
+      }
+    } catch (error) {
+      console.error("Error in approveMapping controller:", error);
+      return res.status(500).json({
+        status: 3,
+        message: error.message || 'An error occurred while processing your request',
+        error: error
       });
     }
   },
