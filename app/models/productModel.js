@@ -3189,24 +3189,20 @@ getProductTechSpecByID: async (productId) => {
         conditions.push('p.is_deleted = 0');
 
         // Handle search term
-        if (searchTerm && searchTerm.trim() !== '') {
-          conditions.push(`(
-            v.name ILIKE $${paramIndex} OR 
-            p.name ILIKE $${paramIndex} OR
-            u.name ILIKE $${paramIndex} OR
-            u.organization_name ILIKE $${paramIndex}
-          )`);
-          params.push(`%${searchTerm.trim()}%`);
+        if (searchTerm && searchTerm.trim() !== "") {
+          conditions.push(`(v.name ILIKE $${paramIndex} OR p.name ILIKE $${paramIndex})`);
+          params.push(`%${searchTerm}%`);
           paramIndex++;
         }
 
-        // Handle date range
-        if (start_date && start_date.trim() !== '') {
+        // Handle date filters - ensure they're valid dates before adding to query
+        if (start_date && /^\d{4}-\d{2}-\d{2}/.test(start_date)) {
           conditions.push(`m.created_at >= $${paramIndex}`);
           params.push(start_date);
           paramIndex++;
         }
-        if (end_date && end_date.trim() !== '') {
+
+        if (end_date && /^\d{4}-\d{2}-\d{2}/.test(end_date)) {
           conditions.push(`m.created_at <= $${paramIndex}`);
           params.push(end_date);
           paramIndex++;
@@ -3221,36 +3217,29 @@ getProductTechSpecByID: async (productId) => {
 
         // Handle category filter
         if (category_id) {
-          conditions.push(`p.category_id = $${paramIndex}`);
+          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_categories pc WHERE pc.product_id = p.id AND pc.category_id = $${paramIndex})`);
           params.push(category_id);
           paramIndex++;
         }
 
-        // Handle added by filter
+        // Handle added_by filter
         if (added_by) {
           conditions.push(`v.created_by = $${paramIndex}`);
           params.push(added_by);
           paramIndex++;
         }
 
-        // Handle approval status
+        // Handle approval status filter
         if (is_approve !== undefined) {
           conditions.push(`v.is_approve = $${paramIndex}`);
           params.push(is_approve);
           paramIndex++;
         }
 
-        // Handle specific mapping ID
-        if (id) {
-          conditions.push(`m.id = $${paramIndex}`);
-          params.push(id);
-          paramIndex++;
-        }
-
-        const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+        // Build WHERE clause
+        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
         
-        console.log("Executing mapping search query with", params.length, "parameters");
-
+        // Build complete query
         const query = `
           SELECT 
             m.id as mapping_id,
@@ -3288,19 +3277,20 @@ getProductTechSpecByID: async (productId) => {
             m.created_at DESC
           LIMIT 1000000
         `;
-        
-        db.any(query, params)
+
+        console.log(`Executing mapping search query with ${params.length} parameters`);
+        db.query(query, params)
           .then(function (data) {
-            console.log("Query returned", data.length, "variant-vendor mappings");
+            console.log(`Query returned ${data.length} variant-vendor mappings`);
             resolve(data);
           })
           .catch(function (err) {
             console.log("Error in getVariantVendorMappings:", err);
             reject(err);
           });
-      } catch (err) {
-        console.log("Exception in getVariantVendorMappings:", err);
-        reject(err);
+      } catch (error) {
+        console.log("Exception in getVariantVendorMappings:", error);
+        reject(error);
       }
     });
   },
