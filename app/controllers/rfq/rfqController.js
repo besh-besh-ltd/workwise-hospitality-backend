@@ -1273,13 +1273,10 @@ const saveRfqDraft = async (user_id, reqBody) => {
 const rfqController = {
   create: async (req, res, next) => {
     if (!req.user.subscription_plan_id) {
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: 'You need to purchase subscription to create RFQ'
-        })
-        .end();
+      res.status(400).json({
+        status: 3,
+        message: 'You need to purchase subscription to create RFQ'
+      }).end();
       return;
     }
 
@@ -1302,10 +1299,69 @@ const rfqController = {
       const is_update = !!rfq_id;
       const user_id = req.user.id;
       const { products } = req.body;
-      // Step 1: Build map with vendorId as key for accurate lookup
-      const vendorProductMap = new Map();
 
-      products.forEach((product) => {
+
+    if (!rfq_id) {
+      const nextRFQNumber = await getNextRfQNumber();
+
+      const tbl_rfq_data = {
+        comment,
+        company_name,
+        response_email,
+        contact_name,
+        contact_number,
+        bid_end_date,
+        location,
+        is_published: 0,
+        rfq_type,
+        rfq_no: nextRFQNumber,
+        created_by: user_id,
+        updated_by: user_id,
+        reverse_auction,
+        ra_start_date,
+        ra_end_date
+      };
+
+      if (project_id != -1) {
+        tbl_rfq_data.project_id = project_id;
+      }
+
+      const responseInsert = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
+
+      if (responseInsert.length > 0) {
+        req.body.rfq_id = responseInsert[0].id;
+        rfq_id = responseInsert[0].id;
+
+        const savedRfq = await rfqModel.getRFQDetails(rfq_id);
+      }
+    }
+
+    await saveRfqDraft(user_id, req.body);
+
+    const responseUpdate = await rfqModel.update(
+      'tbl_rfq',
+      { is_published: 1 },
+      rfq_id
+    );
+
+    await sendMailtoVendors(req, rfq_id);
+    await sendQuotationMailToBuyer(req, rfq_id);
+
+      const buyerMsgPayload = {
+        mobile: req.user.mobile,
+        rfq_id: rfq_id,
+        rfq_no: responseUpdate[0]?.rfq_no
+      };
+  
+      whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload);
+  
+
+
+
+            // Step 1: Build map with vendorId as key
+            const vendorProductMap = new Map();
+  
+     products.forEach((product) => {
         if (product.vendors && Array.isArray(product.vendors)) {
           product.vendors.forEach((vendor) => {
             if (vendorProductMap.has(vendor.user_id)) {
@@ -1327,17 +1383,14 @@ const rfqController = {
         const vendorDetails = await rfqModel.getVendorDetailsByUserId(vendorId);
       
         finalArray.push({
+          vendor_id: vendorId,
+          rfq_id,
           vendor: vendorDetails.name,
           products: vendorData.products.join(', '),
           vendorMobile: vendorDetails.mobile || '',
           vendorEmail: vendorDetails.email || '',
         });
-      }
-      
-
-      console.log('Final Array:', finalArray);
-
-      // Set default auction dates if reverse auction is enabled
+      } 
       if (reverse_auction == 1) {
         
         // FORCE set auction start date to today if not provided or empty
@@ -1346,16 +1399,16 @@ const rfqController = {
           throw new Error('Please provide reverse auction start date');
         }
 
-        // FORCE set auction end date to bid_end_date if not provided or empty
         if ((!ra_end_date || ra_end_date === '') && bid_end_date) {
           throw new Error('Please provide reverse auction end date');
         }
-        const timezone = process.env.TIMEZONE || 'Asia/Kolkata';
 
+  const timezone = process.env.TIMEZONE || 'Asia/Kolkata';
         const buyer_name = req.user.name || '';
         const buyer_email = req.user.email || '';
-        const project_name = await rfqModel.getProjectNameById(project_id);
-        // If bo th dates are provided, ensure they are in the correct format call email scheduler
+        const project = await rfqModel.getProjectNameById(project_id);
+        const project_name = project[0]?.name || 'Project';
+      
         setupReverseAuctionMails(
           finalArray,
           company_name,
@@ -1368,7 +1421,7 @@ const rfqController = {
           buyer_email,
           project_name
         );
-        setupReverseAuctionWhatsAppNotifications(
+   setupReverseAuctionWhatsAppNotifications(
           finalArray,
           company_name,
           reverse_auction,
@@ -1378,90 +1431,23 @@ const rfqController = {
           timezone,
           buyer_name,
           project_name,
-          contact_number,
+          contact_number
         );
       } else {
-        // If reverse auction is disabled, set auction dates to null
         ra_start_date = null;
         ra_end_date = null;
       }
-
-      if(!rfq_id){
-        const nextRFQNumber = await getNextRfQNumber();
-
-        const tbl_rfq_data = {
-          comment,
-          company_name,
-          response_email,
-          contact_name,
-          contact_number,
-          bid_end_date,
-          location,
-          is_published: 0,
-          rfq_type,
-          rfq_no: nextRFQNumber,
-          created_by: user_id,
-          updated_by: user_id,
-          reverse_auction,
-          ra_start_date: ra_start_date || null,
-          ra_end_date: ra_end_date || null
-        };
-
-
-        if(project_id!=-1){
-          tbl_rfq_data.project_id=project_id;
-        if (project_id != -1) {
-          tbl_rfq_data.project_id = project_id;
-        }
-
-        const response = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
-
-        if (response.length > 0) {
-          req.body.rfq_id = response[0].id;
-          rfq_id = response[0].id;
-          
-          // Verify the saved data
-          const savedRfq = await rfqModel.getRFQDetails(rfq_id);
-        }  
-      }
-
-      await saveRfqDraft(req.user.id, req.body);
-
-      const response = await rfqModel.update(
-        'tbl_rfq',
-        { is_published: 1 },
-        rfq_id
-      );
-
-      // send notification email
-      await sendMailtoVendors(req, rfq_id);
-      await sendQuotationMailToBuyer(req, rfq_id);
-
-      // Send WhatsApp notification
-      const buyerMsgPayload = {
-        mobile: req.user.mobile,
-        rfq_id: rfq_id,
-        rfq_no: response[0]?.rfq_no
-      };
-      whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload);
-
-      res
-        .status(200)
-        .json({
-          status: 1,
-          data: response[0],
-          mail_sent: true
-        })
-        .end();
+  res.status(200).json({
+       status: 1,
+        data: responseUpdate[0],
+        mail_sent: true
+      }).end();
     } catch (error) {
       logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
+      res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      }).end();
     }
   },
 
