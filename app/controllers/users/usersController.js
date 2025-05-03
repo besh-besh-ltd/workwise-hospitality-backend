@@ -3208,7 +3208,10 @@ const UsersController = {
 
         let mappingObj = {
           product_variant_id: master_id,
-          vendor_id: vendorId
+          vendor_id: vendorId,
+          is_approved: false,
+          created_by: req.user.id,
+          updated_by: req.user.id,
         }
 
         let mappingResult = await productModel.createProductVariantVendorMapping(mappingObj)

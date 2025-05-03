@@ -619,8 +619,7 @@ const ProductsController = {
       let mappingObj = {
         product_variant_id: master_id,
         vendor_id: vendorId,
-        is_approved: true,
-        approved_by: req.user.id,
+        is_approved: false,
         created_by: req.user.id,
         updated_by: req.user.id,
         approved_at: (new Date()).toISOString(),

@@ -1267,8 +1267,8 @@ const productModel = {
       if (productName && productName !== '') {
         dynamicQuery += `
           AND (
-            to_tsvector('english', PD.name) @@ plainto_tsquery('english', '${productName}')
-            OR similarity(PD.name, '${productName}') > 0.1
+            to_tsvector('english', CONCAT(PV.name, ' - ', PD.name)) @@ plainto_tsquery('english', '${productName}')
+            OR similarity(CONCAT(PV.name, ' - ', PD.name), '${productName}') > 0.1
           )`;
       }
       if (filterProduct?.id_array) {
@@ -1285,7 +1285,13 @@ const productModel = {
           )`;
       }
       if (userId && userId !== '') {
-        dynamicQuery += ` AND PD.added_by = ${userId}`;
+        dynamicQuery += `
+          AND EXISTS (
+            SELECT 1 FROM tbl_product_variant pv
+            JOIN tbl_product_variant_vendor_mapping pvm
+            ON pv.id = pvm.product_variant_id
+            WHERE pv.product_id = PD.id AND pvm.vendor_id = ${userId}
+          )`;
       }
       if (isFeatured && isFeatured !== '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
@@ -1298,22 +1304,24 @@ const productModel = {
         )`;
       }
       if (dateFrom) {
-        dynamicQuery += ` AND DATE(PD.created_at) >= '${dateFrom}'`;
+        dynamicQuery += ` AND DATE(PV.created_at) >= '${dateFrom}'`;
       }
       if (dateTo) {
-        dynamicQuery += ` AND DATE(PD.created_at) <= '${dateTo}'`;
+        dynamicQuery += ` AND DATE(PV.created_at) <= '${dateTo}'`;
       }
       if (is_approve !== null && is_approve !== undefined) {
-        dynamicQuery += ` AND PD.is_approve = ${is_approve}`;
+        dynamicQuery += ` AND PV.is_approve = ${is_approve}`;
       }
       
       let q = `
       SELECT 
-        PD.*, 
+        PV.*, 
+        PD.name as product_name,
         NULL AS vendor_name,
+        CONCAT(PV.name, ' - ', PD.name) AS unified_name,
         ${productName ? `
-          similarity(PD.name, '${productName}') AS similarity_score,
-          ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank,
+          similarity(CONCAT(PV.name, ' - ', PD.name), '${productName}') AS similarity_score,
+          ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', PD.name)), plainto_tsquery('english', '${productName}')) AS rank,
         ` : ''}
         ARRAY
         (SELECT json_build_object('category_name', tc.title, 'id', tc.id)
@@ -1326,11 +1334,14 @@ const productModel = {
           FROM tbl_product_variant pv
           WHERE PD.id = pv.product_id
         ) AS product_variants
-      FROM tbl_product PD 
+
+      FROM tbl_product_variant PV
+      JOIN tbl_product PD ON PD.id = PV.product_id
       JOIN tbl_users tu ON tu.id = PD.created_by
-      WHERE tu.user_type NOT IN (2, 3) AND PD.is_deleted = 0 
-        AND PD.is_review = 0 ${dynamicQuery}
-      ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
+      WHERE PV.status = 1 
+      ${dynamicQuery}
+
+      ${productName ? `ORDER BY rank DESC, similarity_score DESC, CONCAT(PV.name, ' - ', PD.name) ASC` : `ORDER BY PV.created_at DESC`} 
       LIMIT ${limit} OFFSET $1
       `;
 
@@ -1952,29 +1963,38 @@ FROM (
       if (products && products.length > 0) {
         dynamicQuery += `AND PV.id IN (${products.join(",")})`;
       }
-      db.any(
-        `SELECT PV.*,tva.vendor_approve,trr.reject_reason,
-        ARRAY
-        (SELECT json_build_object('category_name', tc.title,'id',tc.id )
-          FROM tbl_product_categories pc 
-          LEFT JOIN tbl_category tc ON pc.category_id = tc.id
-          WHERE PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
-          ARRAY
-        (SELECT json_build_object('vendor_approve_name', tva.vendor_approve,'id',tva.id )
-          FROM tbl_vendorapprove_product_mapping tvpm 
-        LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
-        WHERE PD.id = tvpm.product_id) AS "product_approve_by"
-          FROM tbl_product_variant PV
-          LEFT JOIN tbl_product PD ON PD.id = PV.product_id
-          LEFT JOIN tbl_product_variant_vendor_mapping pvvm ON PV.id = pvvm.product_variant_id
-          LEFT JOIN tbl_vendorapprove_product_mapping tvpm ON tvpm.variant_vendor_mapping_id = pvvm.id
-          LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
-           LEFT JOIN tbl_reject_reason trr ON PD.reject_reason_id = trr.id
-          WHERE pvvm.vendor_id = $2 AND PD.is_deleted = 0
-          ${dynamicQuery}
-        ORDER BY PV.created_at DESC LIMIT ${limit} OFFSET $1`,
-        [offset, vendorId]
-      )
+      db.any(`
+        SELECT 
+          PV.*,
+      
+          -- Product categories as array
+          ARRAY(
+            SELECT json_build_object('category_name', tc.title, 'id', tc.id)
+            FROM tbl_product_categories pc
+            LEFT JOIN tbl_category tc ON pc.category_id = tc.id
+            WHERE pc.product_id = PD.id
+            ORDER BY pc.id
+          ) AS product_categories,
+      
+          -- Vendor approvals as array
+          ARRAY(
+            SELECT json_build_object('vendor_approve_name', tva.vendor_approve, 'id', tva.id)
+            FROM tbl_vendorapprove_product_mapping tvpm
+            LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
+            WHERE tvpm.variant_vendor_mapping_id = pvvm.id
+          ) AS product_approve_by
+      
+        FROM tbl_product_variant PV
+      
+        JOIN tbl_product PD ON PD.id = PV.product_id
+        JOIN tbl_product_variant_vendor_mapping pvvm ON PV.id = pvvm.product_variant_id
+      
+        WHERE pvvm.vendor_id = $2
+        ${dynamicQuery}
+      
+        ORDER BY pvvm.created_at DESC
+        LIMIT ${limit} OFFSET $1
+      `, [offset, vendorId])      
         .then(function (data) {
           resolve(data);
         })
