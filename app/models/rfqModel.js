@@ -2189,7 +2189,7 @@ WHERE row_num_by_name_category = 1
           ON vum.variant_vendor_mapping_id = pvvm.id
       ` : ``}
 
-      WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND pvvm.is_approved
+      WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
         AND tu.is_deleted = 0 AND tu.status = 1 
         AND LOWER(pv.name) = LOWER('${search_key}')
         AND tu.email IS NOT NULL
@@ -4512,7 +4512,7 @@ getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
                           )
                           FROM tbl_product_variant TV
                           JOIN tbl_product T_P ON TV.product_id = T_P.id
-                          WHERE RFQ_P.product_variant_id = T_P.id
+                          WHERE RFQ_P.product_variant_id = TV.id
                       )
                   )
                   FROM tbl_rfq_products RFQ_P
