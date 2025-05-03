@@ -3465,65 +3465,58 @@ getProductTechSpecByID: async (productId) => {
         // Build complete query with additional fields, sorting and pagination
         const query = `
           SELECT 
-            m.id as mapping_id,
-            m.product_variant_id as variant_id,
+            m.id AS mapping_id,
+            m.product_variant_id AS variant_id,
             m.vendor_id,
             m.status,
-            m.created_at as mapped_at,
+            m.created_at AS mapped_at,
+            v.name AS variant_name,
             v.is_approve,
             v.reject_reason_id,
-            trr.reject_reason,
+            rr.reject_reason,
             v.created_by,
             v.updated_by,
-            v.name as variant_name,
-            p.id as product_id,
-            p.name as product_name,
-            p.created_by as product_created_by,
-            u.id as vendor_user_id,
-            u.name as vendor_name,
-            u.email as vendor_email,
-            u.organization_name as vendor_organization,
-            COALESCE(
-              u.organization_name, 
-              u.name, 
-              'Unknown Vendor'
-            ) as vendor_display_name,
+            p.id AS product_id,
+            p.name AS product_name,
+            p.created_by AS product_created_by,
+            u.id AS vendor_user_id,
+            u.name AS vendor_name,
+            u.email AS vendor_email,
+            u.organization_name AS vendor_organization,
+            COALESCE(u.organization_name, u.name, 'Unknown Vendor') AS vendor_display_name,
             ${searchTerm ? `
               similarity(v.name, '${searchTerm}') AS v_similarity_score,
               similarity(p.name, '${searchTerm}') AS p_similarity_score,
               ts_rank_cd(to_tsvector('english', v.name), plainto_tsquery('english', '${searchTerm}')) AS v_rank,
               ts_rank_cd(to_tsvector('english', p.name), plainto_tsquery('english', '${searchTerm}')) AS p_rank,
             ` : ''}
-            ARRAY_AGG(DISTINCT jsonb_build_object(
-              'category_name', c.title,
-              'category_id', c.id
-            )) FILTER (WHERE c.id IS NOT NULL) as categories
-          FROM 
-            tbl_product_variant_vendor_mapping m
-          JOIN
-            tbl_product_variant v ON v.id = m.product_variant_id
-          JOIN
-            tbl_product p ON p.id = v.product_id
-          LEFT JOIN
-            tbl_users u ON u.id = m.vendor_id
-          LEFT JOIN
-            tbl_reject_reason trr ON v.reject_reason_id = trr.id
-          LEFT JOIN
-            tbl_product_categories pc ON pc.product_id = p.id
-          LEFT JOIN
-            tbl_category c ON c.id = pc.category_id
+            (
+              SELECT json_agg(DISTINCT jsonb_build_object(
+                'category_id', c.id,
+                'category_name', c.title
+              ))
+              FROM tbl_product_categories pc
+              LEFT JOIN tbl_category c ON c.id = pc.category_id
+              WHERE pc.product_id = p.id
+            ) AS categories
+          FROM tbl_product_variant_vendor_mapping m
+          JOIN tbl_product_variant v ON v.id = m.product_variant_id
+          JOIN tbl_product p ON p.id = v.product_id
+          LEFT JOIN tbl_users u ON u.id = m.vendor_id
+          LEFT JOIN tbl_reject_reason rr ON rr.id = v.reject_reason_id
           ${whereClause}
-          GROUP BY 
-            m.id, m.product_variant_id, m.vendor_id, m.status, m.created_at,
-            v.is_approve, v.reject_reason_id, trr.reject_reason, v.created_by, v.updated_by, v.name,
-            p.id, p.name, p.created_by, u.id, u.name, u.email, u.organization_name
-            ${searchTerm ? `, v_similarity_score, p_similarity_score, v_rank, p_rank` : ''}
-          ORDER BY 
+          ORDER BY
             ${searchTerm ? `
-              GREATEST(v_rank, p_rank) DESC,
-              GREATEST(v_similarity_score, p_similarity_score) DESC,
+              GREATEST(
+                ts_rank_cd(to_tsvector('english', v.name), plainto_tsquery('english', '${searchTerm}')),
+                ts_rank_cd(to_tsvector('english', p.name), plainto_tsquery('english', '${searchTerm}'))
+              ) DESC,
+              GREATEST(
+                similarity(v.name, '${searchTerm}'),
+                similarity(p.name, '${searchTerm}')
+              ) DESC,
             ` : ''}
-            m.created_at DESC
+            m.id DESC
           LIMIT $${paramIndex}
           OFFSET $${paramIndex + 1}
         `;

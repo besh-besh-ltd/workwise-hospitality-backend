@@ -3565,7 +3565,10 @@ const productController = {
         product_variant_id: variantId,
         vendor_id: vendorId,
         created_at: new Date(),
-        status: true
+        status: true,
+        is_approved: false,
+        created_by: req.user.id,
+        updated_by: req.user.id,
       };
       
       // Create the mapping
