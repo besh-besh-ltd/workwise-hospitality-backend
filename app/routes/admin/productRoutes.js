@@ -75,7 +75,7 @@ productRoutes.put(
 productRoutes.post(
   '/admin-product-add',
   passportSignIn,
-  schema_posts.add_admin_product,
+  // schema_posts.add_admin_product,
   validateDbBody.add_admin_product,
   productController.adminProductAdd
 );

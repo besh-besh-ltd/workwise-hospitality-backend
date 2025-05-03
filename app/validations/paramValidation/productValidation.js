@@ -353,17 +353,6 @@ const schemas = {
       .required()
       .regex(/^[0|1]$/, 'numeric values only'),
     featured: Joi.array().items(Joi.string().required()),
-    gallery: Joi.array().items(Joi.string().required()),
-    qap: Joi.array().items(Joi.string().required()),
-    tds: Joi.array().items(Joi.string().required()),
-    variations: Joi.array().items(Joi.object({
-      attribute: Joi.string().trim().allow(null).min(1)
-        .messages({
-          'string.min': 'Variant name must not be empty',
-          'string.empty': 'Variant name must not be empty'
-        }),
-      attributeValue: Joi.string().allow('', null)
-    })).min(0),
     /*  Joi.array().items(
       Joi.object({
         attribute: Joi.string().required(),
