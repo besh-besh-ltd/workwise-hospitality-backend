@@ -3650,166 +3650,59 @@ const productController = {
   // Changes by Agnij May 02, 2025 [Added safe variant search function that avoids v_rank issues]
   searchVariantsSafe: async (req, res) => {
     try {
-      const { 
-        id, 
-        search_term, 
-        start_date, 
+      // Changes by Agnij May 03, 2025 [Utilize paginated model function]
+      const {
+        id,
+        search_term,
+        start_date,
+        end_date,
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve,
+        page, // Get page from query
+        limit // Get limit from query
+      } = req.query;
+
+      // Package filters
+      const filters = {
+        id,
+        search_term,
+        start_date,
         end_date,
         vendor_id,
         category_id,
         added_by,
         is_approve
-      } = req.query;
-      
-      // Build SQL conditions
-      let conditions = ['pv.is_deleted = 0'];
-      let params = [];
-      let paramIndex = 1;
-      
-      // Handle ID filter
-      if (id) {
-        conditions.push(`pv.id = $${paramIndex}`);
-        params.push(id);
-        paramIndex++;
-      }
-      
-      // Handle search term using ILIKE for simplicity and safety
-      if (search_term && search_term.trim() !== '') {
-        conditions.push(`(
-          pv.name ILIKE $${paramIndex} 
-          OR p.name ILIKE $${paramIndex}
-        )`);
-        params.push(`%${search_term.trim()}%`);
-        paramIndex++;
-      }
-      
-      // Handle date range
-      if (start_date) {
-        try {
-          const startDate = new Date(start_date);
-          if (!isNaN(startDate.getTime())) {
-            conditions.push(`pv.created_at >= $${paramIndex}`);
-            params.push(startDate);
-            paramIndex++;
-          }
-        } catch (e) {
-          console.error("Invalid start_date:", e);
-        }
-      }
-      
-      if (end_date) {
-        try {
-          const endDate = new Date(end_date);
-          if (!isNaN(endDate.getTime())) {
-            endDate.setDate(endDate.getDate() + 1);
-            conditions.push(`pv.created_at <= $${paramIndex}`);
-            params.push(endDate);
-            paramIndex++;
-          }
-        } catch (e) {
-          console.error("Invalid end_date:", e);
-        }
-      }
-      
-      // Handle vendor filter
-      if (vendor_id && vendor_id !== '') {
-        conditions.push(`EXISTS (
-          SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm
-          WHERE pvvm.product_variant_id = pv.id AND pvvm.vendor_id = $${paramIndex}
-        )`);
-        params.push(vendor_id);
-        paramIndex++;
-      }
-      
-      // Handle category filter
-      if (category_id && category_id !== '') {
-        conditions.push(`EXISTS (
-          SELECT 1 FROM tbl_product_categories pc
-          WHERE pc.product_id = p.id AND pc.category_id = $${paramIndex}
-        )`);
-        params.push(category_id);
-        paramIndex++;
-      }
-      
-      // Handle added_by filter
-      if (added_by && added_by !== '') {
-        conditions.push(`(pv.created_by = $${paramIndex} OR p.created_by = $${paramIndex})`);
-        params.push(added_by);
-        paramIndex++;
-      }
-      
-      // Handle approval status filter
-      if (is_approve !== undefined && is_approve !== null) {
-        conditions.push(`pv.is_approve = $${paramIndex}`);
-        params.push(is_approve);
-        paramIndex++;
-      }
-      
-      // Build query without using similarity or ts_rank
-      const query = `
-        SELECT 
-          pv.id, 
-          pv.product_id, 
-          pv.name as variant_name, 
-          pv.status,
-          pv.is_approve,
-          pv.created_at,
-          pv.updated_at,
-          pv.created_by,
-          pv.updated_by,
-          pv.is_deleted,
-          pv.reject_reason_id,
-          trr.reject_reason,
-          p.name as product_name,
-          ARRAY_AGG(DISTINCT jsonb_build_object(
-            'category_name', c.title,
-            'category_id', c.id
-          )) FILTER (WHERE c.id IS NOT NULL) as categories,
-          (
-            SELECT ARRAY_AGG(DISTINCT vendor_id) 
-            FROM tbl_product_variant_vendor_mapping pvvm 
-            WHERE pvvm.product_variant_id = pv.id
-          ) as vendor_ids,
-          (
-            SELECT ARRAY_AGG(DISTINCT u.name)
-            FROM tbl_product_variant_vendor_mapping pvvm 
-            JOIN tbl_users u ON pvvm.vendor_id = u.id
-            WHERE pvvm.product_variant_id = pv.id
-          ) as vendor_names
-        FROM 
-          tbl_product_variant pv
-        JOIN 
-          tbl_product p ON pv.product_id = p.id
-        LEFT JOIN 
-          tbl_product_categories pc ON p.id = pc.product_id
-        LEFT JOIN 
-          tbl_category c ON pc.category_id = c.id
-        LEFT JOIN
-          tbl_reject_reason trr ON pv.reject_reason_id = trr.id
-        WHERE ${conditions.join(' AND ')}
-        GROUP BY 
-          pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
-          pv.created_at, pv.updated_at, pv.created_by, pv.updated_by, 
-          pv.is_deleted, pv.reject_reason_id, trr.reject_reason, p.name
-        ORDER BY 
-          ${search_term && search_term.trim() !== '' ? 
-            `p.name ASC,` : ''
-          }
-          pv.created_at DESC
-        LIMIT 10000000
-      `;
-      
-      const variants = await db.any(query, params);
-      
-      return res.status(200).json({
+      };
+
+      // Call the new paginated model function
+      const result = await productModel.searchProductVariantsPaginated(
+        filters,
+        page, // Pass page
+        limit // Pass limit
+      );
+
+      // Changes by Agnij May 03, 2025 [Correct response structure to include pagination]
+      // Explicitly build the response object
+      const responsePayload = {
         status: 1,
-        data: variants || []
-      });
+        data: result.data || [], // Ensure data is always an array
+        pagination: result.pagination || { total: 0, page: page, limit: limit, pages: 1 } // Ensure pagination object exists
+      };
+      
+      // Log the final payload just before sending
+      console.log("searchVariantsSafe: Sending response payload:", JSON.stringify(responsePayload));
+      
+      // Send the explicitly constructed payload
+      res.status(200).json(responsePayload).end();
+
     } catch (error) {
       logError(error);
       return res.status(500).json({
         status: 0,
-        message: 'Failed to search product variants safely'
+        message: 'Failed to search product variants',
+        error: error.message
       });
     }
   },

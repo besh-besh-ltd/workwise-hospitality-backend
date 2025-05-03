@@ -3870,7 +3870,180 @@ getProductTechSpecByID: async (productId) => {
         reject(error);
       }
     });
-  }
+  },
+  
+  // Changes by Agnij <current_date> [Implement server-side pagination for variant search]
+  searchProductVariantsPaginated: async (filters, page = 1, limit = 10) => {
+    return new Promise(async function (resolve, reject) {
+      try {
+        const { id, search_term, start_date, end_date, vendor_id, category_id, added_by, is_approve } = filters;
+
+        page = parseInt(page) || 1;
+        limit = parseInt(limit) || 10;
+        if (page < 1) page = 1;
+        if (limit < 1) limit = 10;
+        const offset = (page - 1) * limit;
+
+        let conditions = ['pv.is_deleted = 0'];
+        let params = [];
+        let paramIndex = 1;
+
+        // Handle ID filter
+        if (id) {
+          conditions.push(`pv.id = $${paramIndex}`);
+          params.push(id);
+          paramIndex++;
+        }
+
+        // Handle search term using ILIKE
+        if (search_term && search_term.trim() !== '') {
+          conditions.push(`(pv.name ILIKE $${paramIndex} OR p.name ILIKE $${paramIndex})`);
+          params.push(`%${search_term.trim()}%`);
+          paramIndex++;
+        }
+
+        // Handle date range
+        if (start_date) {
+          try {
+            const startDate = new Date(start_date);
+            if (!isNaN(startDate.getTime())) {
+              conditions.push(`pv.created_at >= $${paramIndex}`);
+              params.push(startDate);
+              paramIndex++;
+            }
+          } catch (e) { console.error("Invalid start_date:", e); }
+        }
+
+        if (end_date) {
+          try {
+            const endDate = new Date(end_date);
+            if (!isNaN(endDate.getTime())) {
+              endDate.setDate(endDate.getDate() + 1); // Include the whole end day
+              conditions.push(`pv.created_at <= $${paramIndex}`);
+              params.push(endDate);
+              paramIndex++;
+            }
+          } catch (e) { console.error("Invalid end_date:", e); }
+        }
+
+        // Handle vendor filter
+        if (vendor_id && vendor_id !== '') {
+          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm WHERE pvvm.product_variant_id = pv.id AND pvvm.vendor_id = $${paramIndex})`);
+          params.push(vendor_id);
+          paramIndex++;
+        }
+
+        // Handle category filter
+        if (category_id && category_id !== '') {
+          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_categories pc WHERE pc.product_id = p.id AND pc.category_id = $${paramIndex})`);
+          params.push(category_id);
+          paramIndex++;
+        }
+        
+        // Handle added by filter
+        if (added_by && added_by !== '') {
+          // Assuming added_by refers to the variant creator
+          conditions.push(`pv.created_by = $${paramIndex}`); 
+          params.push(added_by);
+          paramIndex++;
+        }
+
+        // Handle approval status filter
+        if (is_approve !== undefined && is_approve !== null && is_approve !== '') {
+           // Ensure is_approve is treated as a number/boolean
+           const approvalValue = (is_approve === '1' || is_approve === 1 || is_approve === true) ? 1 : 0;
+           conditions.push(`pv.is_approve = $${paramIndex}`);
+           params.push(approvalValue);
+           paramIndex++;
+        }
+
+        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+        // --- Count Query ---
+        const countQuery = `
+          SELECT COUNT(DISTINCT pv.id) as total_count
+          FROM 
+            tbl_product_variant pv
+          JOIN 
+            tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
+          LEFT JOIN
+            tbl_reject_reason trr ON pv.reject_reason_id = trr.id
+          ${whereClause}
+        `;
+
+        // --- Data Query ---
+        const dataQuery = `
+          SELECT 
+            pv.id, 
+            pv.product_id, 
+            pv.name, 
+            pv.status,
+            pv.is_approve,
+            pv.created_at,
+            pv.updated_at,
+            pv.created_by,
+            pv.updated_by,
+            pv.is_deleted,
+            pv.reject_reason_id,
+            trr.reject_reason,
+            p.name as product_name,
+            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+          FROM 
+            tbl_product_variant pv
+          JOIN 
+            tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
+          LEFT JOIN
+            tbl_reject_reason trr ON pv.reject_reason_id = trr.id
+          ${whereClause}
+          GROUP BY 
+            pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
+            pv.created_at, pv.updated_at, pv.created_by, pv.updated_by, 
+            pv.is_deleted, pv.reject_reason_id, trr.reject_reason, p.name
+          ORDER BY 
+            pv.created_at DESC
+          LIMIT $${paramIndex}
+          OFFSET $${paramIndex + 1}
+        `;
+        
+        // Add limit and offset parameters for data query
+        const dataParams = [...params, limit, offset];
+
+        // Execute count query
+        const countResult = await db.one(countQuery, params);
+        const totalItems = parseInt(countResult.total_count, 10) || 0;
+        const totalPages = Math.ceil(totalItems / limit);
+
+        // Execute data query
+        const data = await db.any(dataQuery, dataParams);
+
+        resolve({
+          data: data || [],
+          pagination: {
+            total: totalItems,
+            page: page,
+            limit: limit,
+            pages: totalPages
+          }
+        });
+
+      } catch (error) {
+        console.error("Error in searchProductVariantsPaginated:", error);
+        // Return empty result on error to avoid breaking frontend
+        resolve({
+          data: [],
+          pagination: { total: 0, page: page, limit: limit, pages: 1 }
+        });
+      }
+    });
+  },
 };
 
 export default productModel;
