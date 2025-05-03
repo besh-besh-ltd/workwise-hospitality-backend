@@ -110,7 +110,7 @@ async function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_
 
             const saturdayBefore = new Date(ra_start_date);
             saturdayBefore.setUTCDate(ra_start_date.getUTCDate() - 2);
-
+            // friday before auction mail
             jobs.push(
                 scheduleWhatsApp(
                     createCronString(fridayBefore, timezone),
@@ -137,7 +137,7 @@ async function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_
                     vendorInfo.name
                 )
             );
-
+           // saturday before auction mail
             jobs.push(
                 scheduleWhatsApp(
                     createCronString(saturdayBefore, timezone),
@@ -160,7 +160,7 @@ async function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_
                     vendor
                 )
             );
-        } else {
+        } else {  //normal one day before auction mail
             jobs.push(
                 scheduleWhatsApp(
                     createCronString(oneDayBefore, timezone),
