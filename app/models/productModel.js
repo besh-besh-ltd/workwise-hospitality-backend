@@ -1075,6 +1075,38 @@ const productModel = {
         });
     });
   },
+  checkVariantExists: async (
+    name,
+    vendorId = null,
+    variantId = null,
+    added_by = null
+  ) => {
+    return new Promise(function (resolve, reject) {
+      let dynamicQuery = '';
+      let joinQuery = '';
+      if (vendorId) {
+        joinQuery += `JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = PV.id `;
+        dynamicQuery += ` AND pvvm.vendor_id = ${vendorId}`;
+      }
+      if (variantId) {
+        dynamicQuery += ` AND PV.id != ${variantId}`;
+      }
+      if (added_by) {
+        joinQuery += `JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = PV.id `;
+        dynamicQuery += ` AND pvvm.created_by = ${added_by}`;
+      }
+      db.any(`SELECT * FROM tbl_product_variant PV WHERE LOWER(name) = $1 ${dynamicQuery}`, [
+        name.toLowerCase() // Convert name to lowercase before passing it
+    ])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   checkVariantExistsForVendor: async (vendorId, variantId) => {
     try {
       let q = `

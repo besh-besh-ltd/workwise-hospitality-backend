@@ -2037,33 +2037,35 @@ WITH RankedProducts AS (
     SELECT 
         p.id AS product_id,
         p.name AS product_name,
+        pv.id AS variant_id,
+        pv.name AS variant_name,
         p.description,
-        p.slug,
+        pv.slug,
         pc.category_name AS category_name,
         pc.category_id AS category_id,
-        CASE WHEN p.tds_new_file_name IS NULL THEN NULL ELSE p.tds_new_file_name END AS pd_tds_file_url,
-        CASE WHEN p.qap_new_file_name IS NULL THEN NULL ELSE p.qap_new_file_name END AS pd_qap_file_url,
         -- Generate a row number for each unique product name within each category,
         -- but also treat same product ID across categories as a single entry
         ROW_NUMBER() OVER (
-            PARTITION BY p.name, pc.category_id 
-            ORDER BY p.id
+            PARTITION BY pv.name, pc.category_id 
+            ORDER BY pv.id
         ) AS row_num_by_name_category,
         ROW_NUMBER() OVER (
-            PARTITION BY p.id
+            PARTITION BY pv.id
             ORDER BY pc.category_id
         ) AS row_num_by_id
-    FROM tbl_product p
+    FROM tbl_product_variant pv
+    JOIN tbl_product p ON p.id = pv.product_id
     INNER JOIN tbl_product_categories pc ON p.id = pc.product_id
     WHERE pc.category_id IN ($1:csv)  -- Dynamically insert the list of category IDs
       AND p.status = 1 
+      AND pv.status = 1
       AND p.is_deleted = 0 
       AND p.is_review = 0 
       AND p.is_approve = 1
-      AND p.created_by NOT IN (1, 111)  -- Exclude specific creators
+      AND pv.is_approve = 1
 )
 SELECT 
-    product_id, product_name, description, category_name, category_id, pd_tds_file_url, pd_qap_file_url, slug
+    product_id, product_name, variant_id, variant_name, description, category_name, category_id, slug
 FROM RankedProducts
 WHERE row_num_by_name_category = 1
   AND row_num_by_id = 1;  -- Ensure unique products both by ID and by name/category combination

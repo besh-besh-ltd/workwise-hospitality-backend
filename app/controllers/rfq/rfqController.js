@@ -4748,8 +4748,7 @@ const rfqController = {
           approved_by_id: ""
         };
 
-        const searchedPro = await productModel.checkProductExists(searchObj.search_key);
-
+        const searchedPro = await productModel.checkVariantExists(searchObj.search_key);
 
         // // break if no product found
         if (!searchedPro || searchedPro.length === 0) {
