@@ -1034,14 +1034,19 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
                 JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
         LEFT JOIN tbl_company tc ON tc.user_id = tu.id AND tc.is_private = 0
-        ${approved_by_id != '' ? `JOIN tbl_vendorapprove_product_mapping vum ON pvt.product_id = vum.product_id` : ``}
+        ${approved_by_id != '' ? `
+          JOIN tbl_vendorapprove_product_mapping vum 
+            ON vum.variant_vendor_mapping_id = pvm.id
+        ` : ``}
           WHERE pvt.status = 1 AND pvt.is_deleted = 0 AND pvt.is_review = 0 AND pvt.is_approve = 1
          AND tu.is_deleted = 0 AND tu.status = 1 AND pvt.name = '${search_key}' AND tc.is_private = 0
         ${state != '' ? `AND tu.state = ${state}` : ``}
         ${city != '' ? `AND tu.city = ${city}` : ``}
         ${country != '' ? `AND tu.country = ${country}` : ``}
         ${category_id != '' ? `AND pvt.product_id IN (SELECT product_id FROM tbl_product_categories WHERE category_id = ${category_id})` : ``}
-        ${approved_by_id != '' ? `AND (vum.vendor_approve_id = ${approved_by_id} OR vum.vendor_approve_id IS NULL)` : ``}
+        ${approved_by_id != '' ? `
+          AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")})
+        ` : ``}
       )
       SELECT COUNT(*) AS total FROM vendor_data;
     `;
@@ -1075,8 +1080,10 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       LEFT JOIN tbl_company tc ON tc.user_id = tu.id
       LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
       LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-      ${approved_by_id != ''
-       ? `JOIN tbl_vendorapprove_product_mapping vum ON pvt.product_id = vum.product_id` : ``}
+      ${approved_by_id != '' ? `
+        JOIN tbl_vendorapprove_product_mapping vum 
+          ON vum.variant_vendor_mapping_id = pvm.id
+      ` : ``}
         WHERE pvt.status = 1 AND pvt.is_deleted = 0 AND pvt.is_review = 0 AND pvt.is_approve = 1  AND tu.is_deleted = 0 AND tu.status = 1 AND pvt.name = '${search_key}' AND tc.is_private = 0
       ${state != '' ? `AND tu.state::int IN (${state.map(s => s.id).join(",")})` : ``}
       ${city != '' ? `AND tu.city::int IN (${city.map(c => c.id).join(",")})` : ``}
@@ -1090,7 +1097,9 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           WHERE TRIM(nb) IN (${vendorType.map(vt => `'${vt.value.toLowerCase().trim()}'`).join(", ")})
         )
       ` : ``}
-${approved_by_id != '' ? `AND (vum.vendor_id IN (${approved_by_id.map(vui => vui.id).join(",")}) OR vum.vendor_id IS NULL)` : ``}
+      ${approved_by_id != '' ? `
+        AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")})
+      ` : ``}
     )
     SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 1;
   `;
@@ -1864,17 +1873,18 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
     // query change by mukul 08-09-2024, added one more filter for created by 1 or 111 to exclude product for them
     let q = `
       SELECT DISTINCT p.id AS product_id,
-                      p.name AS product_name,
+                      P.name AS product_name,
+                      CONCAT(PV.name, ' - ', P.name) AS unified_name,
                       pv.id AS variant_id,
                       pv.name AS variant_name,
                       p.description,
-                      p.slug AS slug,
+                      pv.slug AS slug,
                       c.title AS category_name,
                       c.id AS category_id,
                       c.parent_id AS parent_category_id,
                       img.new_image_name AS image_url,
-                      similarity(p.name, $1) AS similarity_score,
-                      ts_rank_cd(to_tsvector('english', p.name), plainto_tsquery('english', $1)) AS rank
+                      similarity(CONCAT(PV.name, ' - ', P.name), $1) AS similarity_score,
+                      ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', P.name)), plainto_tsquery('english', $1)) AS rank
       FROM tbl_product p
       JOIN tbl_product_categories pc ON p.id = pc.product_id
       JOIN tbl_product_variant pv ON pv.product_id = p.id
@@ -1891,12 +1901,12 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
         AND u.status = 1 
         AND pvvm.id IS NOT NULL
         AND (
-          to_tsvector('english', pv.name) @@ plainto_tsquery('english', $1) 
-          OR similarity(pv.name, $1) > 0.1
+          to_tsvector('english', CONCAT(PV.name, ' - ', P.name)) @@ plainto_tsquery('english', $1) 
+          OR similarity(CONCAT(PV.name, ' - ', P.name), $1) > 0.1
         )
         ${category_id ? `AND c.id = $2` : ``}
         ${approved_by_id ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)` : ``}
-      ORDER BY rank DESC, similarity_score DESC, p.name ASC;`;
+      ORDER BY rank DESC, similarity_score DESC, CONCAT(PV.name, ' - ', P.name) ASC;`;
 
     // Assuming db.query can handle parameterized queries:
     return new Promise(function (resolve, reject) {
@@ -2172,12 +2182,12 @@ WHERE row_num_by_name_category = 1
         WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
       ) rfqv ON rfqv.user_id = tu.id
       
-${approved_by_id != '' ? `
-  JOIN tbl_vendorapprove_product_mapping vum 
-    ON vum.variant_vendor_mapping_id = pvvm.id
-` : ``}
+      ${approved_by_id != '' ? `
+        JOIN tbl_vendorapprove_product_mapping vum 
+          ON vum.variant_vendor_mapping_id = pvvm.id
+      ` : ``}
 
-      WHERE p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pvvm.is_approved
+      WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND pvvm.is_approved
         AND tu.is_deleted = 0 AND tu.status = 1 
         AND LOWER(pv.name) = LOWER('${search_key}')
         AND tu.email IS NOT NULL
@@ -2202,9 +2212,9 @@ ${approved_by_id != '' ? `
           )
         ` : ``}                  
         ${category_id != '' ? `AND c.id = ${category_id}` : ``}
-${approved_by_id != '' ? `
-  AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")})
-` : ``}
+        ${approved_by_id != '' ? `
+          AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")})
+        ` : ``}
 
         AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
         ${myVendorType == 'is_private' ? `AND tc.is_private = 1 AND bvm.vendor_id IS NOT NULL` : ``}
