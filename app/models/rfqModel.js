@@ -2987,20 +2987,33 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     return token; // Return the successfully inserted token
   },
   getVendorRfqToken: async (vendorId, rfqNumber) => {
+    // Ensure both parameters are valid integers
+    const safeVendorId = parseInt(vendorId, 10);
+    const safeRfqNumber = parseInt(rfqNumber, 10);
+    
+    // Validate parameters
+    if (isNaN(safeVendorId) || isNaN(safeRfqNumber)) {
+        console.error('Invalid parameters for getVendorRfqToken:', { vendorId, rfqNumber });
+        return Promise.reject(new Error(`Invalid parameters: vendorId=${vendorId}, rfqNumber=${rfqNumber}`));
+    }
+    
+    console.log('Querying token with:', { vendorId: safeVendorId, rfqNumber: safeRfqNumber });
+    
     return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT token FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id = $1 AND rfq_no = $2;`,
-        [vendorId, rfqNumber]
-      )
+        db.any(
+            `SELECT token FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id = $1 AND rfq_no = $2;`,
+            [safeVendorId, safeRfqNumber]
+        )
         .then(function (data) {
-          resolve(data);
+            console.log('Token data:', data, safeVendorId, safeRfqNumber);
+            resolve(data);
         })
         .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
+            let error = new Error(err);
+            reject(error);
         });
-    })
-  },
+    });
+ },
   updateQuoteItemWithHistory: async (quoteId, product, quoteExists) => {
     return new Promise(async (resolve, reject) => {
       try {
@@ -5034,8 +5047,50 @@ getProjectDetailsReport: async (projectId, startDate, endDate) => {
       .then(data => resolve(data))
       .catch(err => reject(new Error(err)));
   });
-}
+},
+getProjectNameById : async (project_id) =>{
+  return new Promise(function (resolve, reject) {
+    const query = `SELECT name FROM tbl_projects WHERE id = $1`;
+    db.query(query, [project_id])
+      .then(data => resolve(data))
+      .catch(err => reject(new Error(err)));
+  });
+},
+getVendorDetailsByUserId: async (user_id) => {
+  return new Promise((resolve, reject) => {
+    const query = `
+      SELECT 
+        u.name AS vendor_name,
+        u.email AS vendor_email,
+        u.mobile AS vendor_mobile
+      FROM tbl_users u
+      WHERE u.id = $1
+    `;
 
+    db.query(query, [user_id])
+      .then((rows) => {
+        console.log("QUERY RESULT:", rows);
+
+        // Since rows is a direct array
+        if (!rows || rows.length === 0) {
+          console.error("DEBUG: No vendor found for user_id:", user_id);
+          return reject(new Error("Vendor not found"));
+        }
+
+        const vendor = {
+          name: rows[0].vendor_name,
+          email: rows[0].vendor_email,
+          mobile: rows[0].vendor_mobile
+        };
+
+        resolve(vendor);
+      })
+      .catch((err) => {
+        console.error("DB QUERY FAILED:", err);
+        reject(new Error("Database query failed"));
+      });
+  });
+}
 
 
 }
