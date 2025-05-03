@@ -84,7 +84,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
 
         const isRaHoliday = await isHoliday(raDateOnly.toISOString().slice(0, 10));
 
-
+       //If the auction start date is a holiday, we need to check if the one day before is also a holiday
         if (isRaHoliday) {
             if (now < oneDayBefore) {
                 jobs.push(
@@ -98,7 +98,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                         vendor
                     )
                 );
-
+                // If the one day before is also a holiday, we need to send the email to the buyer as well
                 if (buyer_name && project_name) {
                     jobs.push(
                         scheduleEmail(
@@ -112,7 +112,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                         )
                     );
                 }
-            } else {
+            } else {// If the one day before is a holiday, we need to send the email to the buyer as well
                 jobs.push(
                     scheduleEmail(
                         createCronString(ra_start_date, timezone),
@@ -124,7 +124,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                         vendor
                     )
                 );
-
+            // If the one day before is also a holiday, we need to send the email to the buyer as well
                 if (buyer_name && project_name) {
                     jobs.push(
                         scheduleEmail(
@@ -139,7 +139,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                     );
                 }
             }
-        } else {
+        } else {// If the auction start date is not a holiday, we can schedule the emails normally
             jobs.push(
                 scheduleEmail(
                     createCronString(oneDayBefore, timezone),
@@ -151,7 +151,8 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                     vendor
                 )
             );
-
+               //auction start email to vendor
+              // If the one day before is also a holiday, we need to send the email to the buyer as well
             jobs.push(
                 scheduleEmail(
                     createCronString(ra_start_date, timezone),
@@ -163,7 +164,8 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                     vendor
                 )
             );
-
+            // auction start email to buyer
+            // If the one day before is also a holiday, we need to send the email to the buyer as well
             if (buyer_name && project_name) {
                 jobs.push(
                     scheduleEmail(
@@ -179,7 +181,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
             }
         }
 
-        // Mid-auction and end emails always scheduled if applicable
+        // Mid-auction emails always scheduled if applicable for vendor
         jobs.push(
             scheduleEmail(
                 createCronString(midAuction, timezone),
@@ -191,7 +193,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                 vendor
             )
         );
-
+       // End auction email to vendor
         jobs.push(
             scheduleEmail(
                 createCronString(ra_end_date, timezone),
@@ -203,7 +205,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                 vendor
             )
         );
-
+       //Auction End email to buyer
         if (buyer_name) {
             jobs.push(
                 scheduleEmail(
