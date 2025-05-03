@@ -61,7 +61,7 @@ function scheduleEmail(cronTime, callback, emailName, vendor) {
 }
 
 async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_end_date, timezone = 'UTC', buyer_name = '', project_name = '', buyer_email) {
-    const { vendorEmail , vendor, products } = item;
+    const { vendorEmail , vendor, products, rfq_id ,vendor_id } = item;
     const jobs = [];
 
     try {
@@ -91,7 +91,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                     scheduleEmail(
                         createCronString(oneDayBefore, timezone),
                         () => {
-                            oneDayBeforeEmailTemplate(vendorEmail ,vendor, products, company_name, formatDate(ra_start_date));
+                            oneDayBeforeEmailTemplate(vendorEmail ,vendor, products, company_name, formatDate(ra_start_date), rfq_id , vendor_id);
                             console.log(`Sent auction-start (holiday fallback) email to ${vendor}`);
                         },
                         'Auction Start Email (Holiday Fallback)',
@@ -104,7 +104,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                         scheduleEmail(
                             createCronString(oneDayBefore, timezone),
                             () => {
-                                auctionStartEmailTemplateToBuyer(buyer_email , products[0]?.product_name || 'Product', project_name, buyer_name);
+                                auctionStartEmailTemplateToBuyer(buyer_email , products, project_name, buyer_name);
                                 console.log(`Sent auction-start email to Buyer: ${buyer_name} (Holiday Fallback)`);
                             },
                             'Auction Start Email (Buyer - Holiday Fallback)',
@@ -117,7 +117,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                     scheduleEmail(
                         createCronString(ra_start_date, timezone),
                         () => {
-                            auctionStartedEmailTemplate(vendorEmail , vendor, products, company_name, formatDate(ra_start_date));
+                            auctionStartedEmailTemplate(vendorEmail , vendor, products, company_name, formatDate(ra_start_date), rfq_id , vendor_id);
                             console.log(`Sent auction-start email to ${vendor}`);
                         },
                         'Auction Start Email (Holiday - Last Resort)',
@@ -130,7 +130,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                         scheduleEmail(
                             createCronString(ra_start_date, timezone),
                             () => {
-                                auctionStartEmailTemplateToBuyer(buyer_email , products[0]?.product_name || 'Product', project_name, buyer_name);
+                                auctionStartEmailTemplateToBuyer(buyer_email , products, project_name, buyer_name);
                                 console.log(`Sent auction-start email to Buyer: ${buyer_name}`);
                             },
                             'Auction Start Email (Buyer)',
@@ -144,7 +144,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                 scheduleEmail(
                     createCronString(oneDayBefore, timezone),
                     () => {
-                        oneDayBeforeEmailTemplate(vendorEmail , vendor, products, company_name, formatDate(ra_start_date));
+                        oneDayBeforeEmailTemplate(vendorEmail , vendor, products, company_name, formatDate(ra_start_date),rfq_id , vendor_id);
                         console.log(`Sent 1-day-before email to ${vendor}`);
                     },
                     'One-Day-Before Email',
@@ -156,7 +156,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                 scheduleEmail(
                     createCronString(ra_start_date, timezone),
                     () => {
-                        auctionStartedEmailTemplate(vendorEmail , vendor, products, company_name, formatDate(ra_start_date));
+                        auctionStartedEmailTemplate(vendorEmail , vendor, products, company_name, formatDate(ra_start_date),rfq_id , vendor_id);
                         console.log(`Sent auction-start email to ${vendor}`);
                     },
                     'Auction Start Email',
@@ -169,7 +169,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                     scheduleEmail(
                         createCronString(ra_start_date, timezone),
                         () => {
-                            auctionStartEmailTemplateToBuyer(buyer_email , products[0]?.product_name || 'Product', project_name, buyer_name);
+                            auctionStartEmailTemplateToBuyer(buyer_email , products, project_name, buyer_name);
                             console.log(`Sent auction-start email to Buyer: ${buyer_name}`);
                         },
                         'Auction Start Email (Buyer)',
@@ -184,7 +184,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
             scheduleEmail(
                 createCronString(midAuction, timezone),
                 () => {
-                    auctionHalfWayEmailTemplate(vendorEmail , vendor, products, company_name, formatDate(ra_start_date));
+                    auctionHalfWayEmailTemplate(vendorEmail , vendor, products, company_name, formatDate(ra_end_date),rfq_id , vendor_id);
                     console.log(`Sent mid-auction reminder to ${vendor}`);
                 },
                 'Mid-Auction Reminder',
@@ -196,7 +196,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
             scheduleEmail(
                 createCronString(ra_end_date, timezone),
                 () => {
-                    auctionEndEmailTemplate(vendorEmail , vendor, products, company_name, formatDate(ra_end_date));
+                    auctionEndEmailTemplate(vendorEmail , vendor, products, company_name, formatDate(ra_end_date) , rfq_id , vendor_id);
                     console.log(`Sent auction-end email to ${vendor}`);
                 },
                 'Auction End Email',
@@ -209,7 +209,7 @@ async function scheduleEmailsForAuction(item, company_name, ra_start_date, ra_en
                 scheduleEmail(
                     createCronString(ra_end_date, timezone),
                     () => {
-                        auctionEndEmailTemplateToBuyer(buyer_email , buyer_name, products[0]?.product_name || 'Product');
+                        auctionEndEmailTemplateToBuyer(buyer_email , buyer_name, products);
                         console.log(`Sent auction-end email to Buyer: ${buyer_name}`);
                     },
                     'Auction End Email (Buyer)',

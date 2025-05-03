@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import whatsappNotificationFluxChat from '../whatsappNotificationFluxChat.js';
+import rfqModel from '../../models/rfqModel.js';
 
 // Helper functions (same as before)
 function parseDate(dateString, timezone = 'UTC') {
@@ -53,8 +54,39 @@ function scheduleWhatsApp(cronTime, callback, notificationName, vendor) {
     }
 }
 
-function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_end_date, timezone = 'UTC', buyer_name = '', project_name = '', contact_number) {
-    const { vendor, products, workingDays = 'Unknown' , mobile } = item;
+async function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_end_date, timezone = 'UTC', buyer_name = '', project_name = '', contact_number) {
+    // Extract the necessary fields, ensuring we have proper values
+    const { vendor, products, workingDays = 'Unknown', vendorMobile } = item;
+    
+    // Ensure we have valid IDs by parsing them to integers
+    const vendor_id = parseInt(item?.vendor_id, 10);
+    const rfq_id = parseInt(item?.rfq_id, 10);
+    
+    if (isNaN(vendor_id) || isNaN(rfq_id)) {
+        console.error(`Invalid vendor_id (${item?.vendor_id}) or rfq_id (${item?.rfq_id}) for vendor ${vendor}. Cannot schedule notifications.`);
+        return [];
+    }
+    
+    console.log(`Scheduling WhatsApp for vendor_id: ${vendor_id}, rfq_id: ${rfq_id}, vendor: ${vendor}`);
+    
+    // Store these values in a closure-safe object that won't be modified
+    const vendorInfo = {
+        id: vendor_id,
+        rfqId: rfq_id,
+        name: vendor,
+        mobile: vendorMobile,
+        products: products
+    };
+    
+    // Fetch token only once for validation
+    try {
+        const initialToken = await rfqModel.getVendorRfqToken(vendorInfo.id, vendorInfo.rfqId);
+        console.log(`Initial token fetch for ${vendor}:`, initialToken);
+    } catch (err) {
+        console.error(`Failed to get initial token for ${vendor}:`, err.message);
+        // Continue even if initial token fetch fails
+    }
+    
     const jobs = [];
 
     try {
@@ -82,33 +114,44 @@ function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_end_da
             jobs.push(
                 scheduleWhatsApp(
                     createCronString(fridayBefore, timezone),
-                    () => {
-                        const oneDayBeforeNotification = {
-                            mobile,
-                            vendor,
-                            productName,
-                            buyerCompanyName:company_name,
-                            startTime :formatDate(ra_start_date)
+                    async () => {
+                        try {
+                            // Re-fetch token at the time of sending notification
+                            const currentToken = await rfqModel.getVendorRfqToken(vendorInfo.id, vendorInfo.rfqId);
                             
-                        };
-                        whatsappNotificationFluxChat.oneDayBeforeAuctionNotificationToVendor(oneDayBeforeNotification);
-                        console.log(`Sent 1-day-before (Friday fallback) WhatsApp to ${vendor}`);
+                            const oneDayBeforeNotification = {
+                                mobile: vendorInfo.mobile,
+                                vendor: vendorInfo.name,
+                                productName: vendorInfo.products,
+                                buyerCompanyName: company_name,
+                                startTime: formatDate(ra_start_date),
+                                detailsLink: `dashboard/vendor/inquiries-details?id=${vendorInfo.rfqId}&token=${currentToken[0]?.token}`
+                            };
+                            whatsappNotificationFluxChat.oneDayBeforeAuctionNotificationToVendor(oneDayBeforeNotification);
+                            console.log(`Sent 1-day-before (Friday fallback) WhatsApp to ${vendorInfo.name}`);
+                        } catch (error) {
+                            console.error(`Failed to send 1-day-before (Friday) WhatsApp to ${vendorInfo.name}:`, error.message);
+                        }
                     },
                     'One-Day-Before WhatsApp (Friday fallback)',
-                    vendor
+                    vendorInfo.name
                 )
             );
 
             jobs.push(
                 scheduleWhatsApp(
                     createCronString(saturdayBefore, timezone),
-                    () => {
+                    async () => {
+                        // Re-fetch token at the time of sending notification
+                        const currentToken = await rfqModel.getVendorRfqToken(vendor_id, rfq_id);
+                        
                         const oneDayBeforeNotification = {
-                            mobile,
+                            mobile: vendorMobile,
                             vendor,
-                            productName,
-                            buyerCompanyName:company_name,
-                            startTime :formatDate(ra_start_date)
+                            productName: products,
+                            buyerCompanyName: company_name,
+                            startTime: formatDate(ra_start_date),
+                            detailsLink: `dashboard/vendor/inquiries-details?id=${rfq_id}&token=${currentToken[0]?.token}`
                         };
                         whatsappNotificationFluxChat.oneDayBeforeAuctionNotificationToVendor(oneDayBeforeNotification);
                         console.log(`Sent 1-day-before (Saturday fallback) WhatsApp to ${vendor}`);
@@ -121,13 +164,17 @@ function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_end_da
             jobs.push(
                 scheduleWhatsApp(
                     createCronString(oneDayBefore, timezone),
-                    () => {
+                    async () => {
+                        // Re-fetch token at the time of sending notification
+                        const currentToken = await rfqModel.getVendorRfqToken(vendor_id, rfq_id);
+                        
                         const oneDayBeforeNotification = {
-                            mobile,
+                            mobile: vendorMobile,
                             vendor,
-                            productName,
-                            buyerCompanyName:company_name,
-                            startTime :formatDate(ra_start_date)
+                            productName: products,
+                            buyerCompanyName: company_name,
+                            startTime: formatDate(ra_start_date),
+                            detailsLink: `dashboard/vendor/inquiries-details?id=${rfq_id}&token=${currentToken[0]?.token}`
                         };
                         whatsappNotificationFluxChat.oneDayBeforeAuctionNotificationToVendor(oneDayBeforeNotification);
                         console.log(`Sent 1-day-before WhatsApp to ${vendor}`);
@@ -142,13 +189,17 @@ function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_end_da
         jobs.push(
             scheduleWhatsApp(
                 createCronString(ra_start_date, timezone),
-                () => {
+                async () => {
+                    // Re-fetch token at the time of sending notification
+                    const currentToken = await rfqModel.getVendorRfqToken(vendor_id, rfq_id);
+                    
                     const auctionStartNotification = {
-                        mobile,
+                        mobile: vendorMobile,
                         vendor,
-                        productName,
-                        buyerCompanyName:company_name,
-                        endTime :formatDate(ra_end_date)
+                        productName: products,
+                        buyerCompanyName: company_name,
+                        endTime: formatDate(ra_end_date),
+                        detailsLink: `dashboard/vendor/inquiries-details?id=${rfq_id}&token=${currentToken[0]?.token}`
                     };
                     whatsappNotificationFluxChat.auctionLiveNotificationToVendor(auctionStartNotification);
                     
@@ -166,10 +217,11 @@ function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_end_da
                     createCronString(ra_start_date, timezone),
                     () => {
                         const auctionStartBuyerNotification = {
-                            mobile:contact_number,
+                            mobile: contact_number,
                             product_name: products[0]?.product_name || 'Product',
                             project_name,
-                            buyer_name
+                            buyer_name,
+                            startTime: formatDate(ra_start_date),
                         };
                         whatsappNotificationFluxChat.auctionStartedBuyerNotification(auctionStartBuyerNotification);
                         
@@ -185,12 +237,16 @@ function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_end_da
         jobs.push(
             scheduleWhatsApp(
                 createCronString(midAuction, timezone),
-                () => {
+                async () => {
+                    // Re-fetch token at the time of sending notification
+                    const currentToken = await rfqModel.getVendorRfqToken(vendor_id, rfq_id);
+                    
                     const midAuctionReminder = {
-                        mobile,
+                        mobile: vendorMobile,
                         vendor,
-                        productName : products,
-                        buyerCompanyName : company_name
+                        productName: products,
+                        buyerCompanyName: company_name,
+                        detailsLink: `dashboard/vendor/inquiries-details?id=${rfq_id}&token=${currentToken[0]?.token}`
                     };
                     whatsappNotificationFluxChat.halfwayAuctionReminderNotificationToVendor(midAuctionReminder);
                     
@@ -205,20 +261,32 @@ function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_end_da
         jobs.push(
             scheduleWhatsApp(
                 createCronString(ra_end_date, timezone),
-                () => {
-                    const auctionEndNotification = {
-                        mobile,
-                        vendor,
-                        productName : products,
-                        buyerCompanyName : company_name,
-                        endTime : formatDate(ra_end_date)
-                    };
-                    whatsappNotificationFluxChat.auctionEndedVendorNotificationToVendor(auctionEndNotification);
-                    
-                    console.log(`Sent auction-end WhatsApp to ${vendor}`);
+                async () => {
+                    try {
+                        // Log the values being used to fetch the token
+                        console.log(`Getting token for auction-end notification (${vendorInfo.name}) with vendor_id: ${vendorInfo.id}, rfq_id: ${vendorInfo.rfqId}`);
+                        
+                        // Re-fetch token at the time of sending notification
+                        const currentToken = await rfqModel.getVendorRfqToken(vendorInfo.id, vendorInfo.rfqId);
+                        console.log(`Token for auction-end notification (${vendorInfo.name}):`, currentToken);
+                        
+                        const auctionEndNotification = {
+                            mobile: vendorInfo.mobile,
+                            vendor: vendorInfo.name,
+                            productName: vendorInfo.products,
+                            buyerCompanyName: company_name,
+                            endTime: formatDate(ra_end_date),
+                            detailsLink: `dashboard/vendor/inquiries-details?id=${vendorInfo.rfqId}&token=${currentToken[0]?.token}`
+                        };
+                        whatsappNotificationFluxChat.auctionEndedVendorNotificationToVendor(auctionEndNotification);
+                        
+                        console.log(`Sent auction-end WhatsApp to ${vendorInfo.name}`);
+                    } catch (err) {
+                        console.error(`Failed to send auction-end WhatsApp to ${vendorInfo.name}:`, err.message);
+                    }
                 },
                 'Auction End WhatsApp',
-                vendor
+                vendorInfo.name
             )
         );
 
@@ -229,9 +297,9 @@ function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_end_da
                     createCronString(ra_end_date, timezone),
                     () => {
                         const auctionEndBuyerNotification = {
-                            mobile : contact_number,
-                            buyerName : buyer_name,
-                            productName : products[0]?.product_name || 'Product'
+                            mobile: contact_number,
+                            buyer_name,
+                            product_name: products[0]?.product_name || 'Product'
                         };
                         whatsappNotificationFluxChat.auctionEndedBuyerNotification(auctionEndBuyerNotification);
                         
@@ -250,7 +318,7 @@ function scheduleWhatsAppForAuction(item, company_name, ra_start_date, ra_end_da
     }
 }
 
-export function setupReverseAuctionWhatsAppNotifications(finalArray, company_name, reverse_auction, ra_start_date, ra_end_date, bid_end_date, timezone = 'UTC', buyer_name = '', project_name = '') {
+export function setupReverseAuctionWhatsAppNotifications(finalArray, company_name, reverse_auction, ra_start_date, ra_end_date, bid_end_date, timezone = 'UTC', buyer_name = '', project_name = '', contact_number) {
     if (reverse_auction != 1) {
         console.log("Reverse auction disabled - no WhatsApp notifications scheduled");
         return [];
@@ -278,7 +346,8 @@ export function setupReverseAuctionWhatsAppNotifications(finalArray, company_nam
                 endDate, 
                 timezone,
                 buyer_name,
-                project_name
+                project_name,
+                contact_number
             )
         );
     } catch (error) {

@@ -5,6 +5,19 @@ const flux_chat_api = process.env.FLUX_CHAT_API
 const flux_chat_bearer_token =  process.env.FLUX_CHAT_KEY
 
 
+function formattedDate(dateString) {
+  return new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZoneName: 'short'
+  }).format(new Date(dateString));
+}
+
 const formatPhoneNumber = (input) => {
   // Remove all spaces and special characters
   let cleanedInput = input.replace(/[^\d]/g, '');
@@ -496,7 +509,7 @@ oneDayBeforeAuctionNotificationToVendor: async (payload) => {
             parameters: [
               { type: "text", text: payload.productName || "Product" },
               { type: "text", text: payload.buyerCompanyName || "Company" },
-              { type: "text", text: payload.startTime || "Start Time" }
+              { type: "text", text: formattedDate(payload.startTime) || "Start Time" }
             ]
           },
           {
@@ -516,7 +529,6 @@ oneDayBeforeAuctionNotificationToVendor: async (payload) => {
       'Content-Type': 'application/json',
       Authorization: flux_chat_bearer_token
     };
-    console.log("------>", flux_chat_api);
     await axios.post(flux_chat_api, data, { headers })
       .then(response => {
         console.log('1-day before auction reminder sent:', response.data);
@@ -542,7 +554,7 @@ auctionLiveNotificationToVendor: async (payload) => {
           {
             type: "header",
             parameters: [
-              { type: "text", text: payload.vendorName || "Vendor" }
+              { type: "text", text: payload.vendor || "Vendor" }
             ]
           },
           {
@@ -550,7 +562,7 @@ auctionLiveNotificationToVendor: async (payload) => {
             parameters: [
               { type: "text", text: payload.productName || "Product" },
               { type: "text", text: payload.buyerCompanyName || "Company" },
-              { type: "text", text: payload.endTime || "End Time" }
+              { type: "text", text: formattedDate(payload.endTime) || "End Time" }
             ]
           }
         ]
@@ -587,7 +599,7 @@ halfwayAuctionReminderNotificationToVendor: async (payload) => {
           {
             type: "header",
             parameters: [
-              { type: "text", text: payload.vendorName || "Vendor" }
+              { type: "text", text: payload.vendor || "Vendor" }
             ]
           },
           {
@@ -640,7 +652,7 @@ auctionEndedVendorNotificationToVendor: async (payload) => {
           {
             type: "header",
             parameters: [
-              { type: "text", text: payload.vendorName || "Vendor" }
+              { type: "text", text: payload.vendor || "Vendor" }
             ]
           },
           {
@@ -684,15 +696,15 @@ auctionStartedBuyerNotification: async (payload) => {
           {
             type: "header",
             parameters: [
-              { type: "text", text: payload.buyerName || "Buyer" }
+              { type: "text", text: payload.buyer_name || "Buyer" }
             ]
           },
           {
             type: "body",
             parameters: [
-              { type: "text", text: payload.productName || "N/A" },
-              { type: "text", text: payload.projectName || "N/A" },
-              { type: "text", text: payload.startTime || "N/A" }
+              { type: "text", text: payload.product_name || "N/A" },
+              { type: "text", text: payload.project_name || "N/A" },
+              { type: "text", text: formattedDate(payload.startTime) || "N/A" }
             ]
           }
         ]
@@ -731,7 +743,7 @@ auctionEndedBuyerNotification: async (payload) => {
             parameters: [
               {
                 type: "text",
-                text: payload.buyerName || "Buyer"
+                text: payload.buyer_name || "Buyer"
               }
             ]
           },
@@ -740,11 +752,11 @@ auctionEndedBuyerNotification: async (payload) => {
             parameters: [
               {
                 type: "text",
-                text: payload.productName || "N/A"
+                text: payload.product_name || "Product"
               },
               {
                 type: "text",
-                text: payload.buyerName || "Buyer"
+                text: payload.buyer_name || "Buyer"
               }
             ]
           }

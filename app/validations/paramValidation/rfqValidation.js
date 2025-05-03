@@ -172,9 +172,9 @@ export const rfqSchemas = {
       .custom((value, helpers) => {
         const { bid_end_date, ra_start_date } = helpers.state.ancestors[0];
         
-        if (value && new Date(value) <= tomorrow) {
+        if (value && new Date(value) > bid_end_date) {
           return helpers.message(
-            `ra_end_date must be greater than ${tomorrowString}`
+            `Please Select A valid Window for Reverse Auction End Date`
           );
         }
         

@@ -2987,20 +2987,33 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     return token; // Return the successfully inserted token
   },
   getVendorRfqToken: async (vendorId, rfqNumber) => {
+    // Ensure both parameters are valid integers
+    const safeVendorId = parseInt(vendorId, 10);
+    const safeRfqNumber = parseInt(rfqNumber, 10);
+    
+    // Validate parameters
+    if (isNaN(safeVendorId) || isNaN(safeRfqNumber)) {
+        console.error('Invalid parameters for getVendorRfqToken:', { vendorId, rfqNumber });
+        return Promise.reject(new Error(`Invalid parameters: vendorId=${vendorId}, rfqNumber=${rfqNumber}`));
+    }
+    
+    console.log('Querying token with:', { vendorId: safeVendorId, rfqNumber: safeRfqNumber });
+    
     return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT token FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id = $1 AND rfq_no = $2;`,
-        [vendorId, rfqNumber]
-      )
+        db.any(
+            `SELECT token FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id = $1 AND rfq_no = $2;`,
+            [safeVendorId, safeRfqNumber]
+        )
         .then(function (data) {
-          resolve(data);
+            console.log('Token data:', data, safeVendorId, safeRfqNumber);
+            resolve(data);
         })
         .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
+            let error = new Error(err);
+            reject(error);
         });
-    })
-  },
+    });
+ },
   updateQuoteItemWithHistory: async (quoteId, product, quoteExists) => {
     return new Promise(async (resolve, reject) => {
       try {
