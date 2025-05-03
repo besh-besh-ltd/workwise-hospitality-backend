@@ -5829,7 +5829,7 @@ sendReportOnEmail: async (req, res) => {
   }
 },
 
-// Changes by Agnij July 24, 2024 [Added endpoint to search variant products]
+// Changes by Agnij May 01, 2025 [Added endpoint to search variant products]
 searchVariantProducts: async (req, res, next) => {
   try {
     console.log('[RFQ Controller] searchVariantProducts called with:', JSON.stringify(req.body));
@@ -5859,7 +5859,7 @@ searchVariantProducts: async (req, res, next) => {
   }
 },
 
-// Changes by Agnij July 24, 2024 [Added endpoint to search variant vendors]
+// Changes by Agnij May 01, 2025 [Added endpoint to search variant vendors]
 searchVariantVendors: async (req, res, next) => {
   try {
     console.log('[RFQ Controller] searchVariantVendors called with:', JSON.stringify(req.body));

@@ -767,7 +767,7 @@ const productModel = {
   createProductveriants: async (variantObj) => {
     return new Promise(function (resolve, reject) {
       // Update object keys to match table columns
-      // Changes by Agnij July 24, 2024 [Added is_approve field with default 0]
+      // Changes by Agnij May 02, 2025 [Added is_approve field with default 0]
       const updatedObj = {
         product_id: variantObj.product_id,
         name: variantObj.variant_name || variantObj.name,
@@ -962,7 +962,7 @@ const productModel = {
         // Use variant_name from input if available, otherwise use name
         const variantName = variantObj.variant_name || variantObj.name;
         
-        // Changes by Agnij July 24, 2024 [Set is_approve to 0 by default]
+        // Changes by Agnij May 02, 2025 [Set is_approve to 0 by default]
         const fields = {
           product_id: variantObj.product_id,
           name: variantName, // Database column is 'name'
@@ -977,7 +977,6 @@ const productModel = {
           added_by: variantObj.added_by || null
         };
 
-        console.log("Creating product variant with fields:", fields);
         
         // Build column names and value placeholders for the insert query
         const columns = Object.keys(fields).join(', ');
@@ -993,7 +992,6 @@ const productModel = {
         
         db.one(query, values)
           .then(function (data) {
-            console.log("Variant created successfully, id:", data.id);
             resolve({id: data.id});
           })
           .catch(function (err) {
@@ -1115,7 +1113,6 @@ const productModel = {
         })
         .catch(function (err) {
           let error = new Error(err);
-          console.log("......",err);
           reject(error);
         });
     });
@@ -1260,7 +1257,7 @@ const productModel = {
     dateTo,
     is_approve
   ) => {
-    // Changes by Agnij July 24, 2024 [Modified to return base products only, not variants]
+    // Changes by Agnij May 01, 2025 [Modified to return base products only, not variants]
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       // Product name search with full-text search and similarity
@@ -1765,10 +1762,6 @@ FROM (
     });
   },
   getProductDetail: async (item, product_name, cat_id, approve_by) => {
-    console.log('item--', item);
-    console.log('product_name--', product_name);
-    console.log('cat_id--', cat_id);
-    console.log('approve_by--', approve_by);
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (product_name && product_name != '') {
@@ -2105,12 +2098,10 @@ FROM (
       // Changes by Agnij May 02, 2025 [Improved product/variant lookup with better error handling]
       try {
         if (!productId) {
-          console.log("No product ID provided to check_product");
           resolve([]);
           return;
         }
         
-        console.log(`Checking for product/variant with ID: ${productId}`);
         
         // First check in the product table
         db.any(
@@ -2119,7 +2110,6 @@ FROM (
         )
           .then(function (productData) {
             if (productData && productData.length > 0) {
-              console.log(`Found as a product with ID ${productId}`);
               resolve(productData);
             } else {
               // If not found as a product, check if it's a variant
@@ -2132,10 +2122,8 @@ FROM (
               )
                 .then(function (variantData) {
                   if (variantData && variantData.length > 0) {
-                    console.log(`Found as a variant with ID ${productId}`);
                     resolve(variantData);
                   } else {
-                    console.log(`No product or variant found with ID ${productId}`);
                     resolve([]);
                   }
                 })
@@ -2160,15 +2148,12 @@ FROM (
             )
               .then(function (variantData) {
                 if (variantData && variantData.length > 0) {
-                  console.log(`Found as a variant with ID ${productId} (fallback)`);
                   resolve(variantData);
                 } else {
-                  console.log(`No product or variant found with ID ${productId} (fallback)`);
                   resolve([]);
                 }
               })
               .catch(function (err) {
-                console.error("Error in fallback variant check:", err);
                 resolve([]);
               });
           });
@@ -2304,7 +2289,7 @@ WHERE tbl_product.name = $1`,
         updated_at: productObj.updated_at
       };
       
-      // Changes by Agnij August 15, 2024 [Removed approved_at field which doesn't exist in the database]
+      // Changes by Agnij May 02, 2025 [Removed approved_at field which doesn't exist in the database]
       // Don't add approved_at field as it doesn't exist in the tbl_product table
       
       let query = pgp().helpers.update(cleanObj, null, 'tbl_product') + condition;
@@ -2552,7 +2537,7 @@ getProductTechSpecByID: async (productId) => {
         // Use variant_name from input if available, otherwise use name
         const variantName = variantObj.variant_name || variantObj.name;
         
-        // Changes by Agnij July 24, 2024 [Set is_approve to 0 by default]
+        // Changes by Agnij May 02, 2025 [Set is_approve to 0 by default]
         const fields = {
           product_id: variantObj.product_id,
           name: variantName, // Database column is 'name'
@@ -2567,7 +2552,6 @@ getProductTechSpecByID: async (productId) => {
           added_by: variantObj.added_by || null
         };
 
-        console.log("Creating product variant with fields:", fields);
         
         // Build column names and value placeholders for the insert query
         const columns = Object.keys(fields).join(', ');
@@ -2583,7 +2567,6 @@ getProductTechSpecByID: async (productId) => {
         
         db.one(query, values)
           .then(function (data) {
-            console.log("Variant created successfully, id:", data.id);
             resolve({id: data.id});
           })
           .catch(function (err) {
@@ -2600,7 +2583,6 @@ getProductTechSpecByID: async (productId) => {
   getProductVariants: async (productId) => {
     return new Promise(function (resolve, reject) {
       // Changes by Agnij May 02, 2025 [Fixed column names and return type to ensure always array]
-      console.log("Getting variants for product:", productId);
       
       try {
         // Use a query that explicitly lists all needed columns instead of pv.*
@@ -2636,7 +2618,6 @@ getProductTechSpecByID: async (productId) => {
         
         db.any(query, [productId])
           .then(function (data) {
-            console.log(`Found ${data.length} variants for product ${productId}`);
             // Always return an array, even if empty
             resolve(data || []);
           })
@@ -2654,9 +2635,6 @@ getProductTechSpecByID: async (productId) => {
   // Changes by Agnij April 30, 2025 [Added search function for variants across all products]
   searchProductVariants: async (id, searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve) => {
     return new Promise(function (resolve, reject) {
-      console.log("Searching variants with parameters:", { 
-        id, searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve 
-      });
       
       try {
         // Build dynamic filter conditions and parameter list
@@ -2664,7 +2642,7 @@ getProductTechSpecByID: async (productId) => {
         let params = [];
         let paramIndex = 1;
         
-        // Changes by Agnij July 24, 2024 [Fixed filter implementation to match product filters]
+        // Changes by Agnij May 02, 2025 [Fixed filter implementation to match product filters]
         // Base condition to filter out deleted variants
         conditions.push(`pv.is_deleted = 0`);
         
@@ -2716,7 +2694,7 @@ getProductTechSpecByID: async (productId) => {
           }
         }
         
-        // Changes by Agnij July 25, 2024 [Added additional filters]
+        // Changes by Agnij May 02, 2025 [Added additional filters]
         // Vendor filter - improved to properly check any vendor mapping
         if (vendor_id && vendor_id !== '') {
           conditions.push(`EXISTS (
@@ -2801,7 +2779,6 @@ getProductTechSpecByID: async (productId) => {
         
         db.any(query, params)
           .then(function (data) {
-            console.log(`Variant search query returned ${data.length} results`);
             resolve(data);
           })
           .catch(function (err) {
@@ -2820,12 +2797,10 @@ getProductTechSpecByID: async (productId) => {
       try {
         // Changes by Agnij May 02, 2025 [Enhanced to handle all edge cases in approval]
         if (!variantId) {
-          console.error("No variant ID provided to updateProductVariant");
           reject(new Error("Variant ID is required"));
           return;
         }
         
-        console.log(`Starting updateProductVariant for ID ${variantId} with:`, variantObj);
         
         // Create dynamic update query based on provided fields
         let updateFields = [];
@@ -2886,11 +2861,10 @@ getProductTechSpecByID: async (productId) => {
           RETURNING id, name, is_approve, reject_reason_id, updated_at
         `;
         
-        console.log(`Executing variant update query for ID ${variantId} with fields:`, updateFields);
+
         
         db.one(query, params)
           .then(function (data) {
-            console.log(`Successfully updated variant ${variantId}:`, data);
             resolve(data);
           })
           .catch(function (err) {
@@ -2907,7 +2881,6 @@ getProductTechSpecByID: async (productId) => {
               RETURNING id, name, is_approve
             `;
             
-            console.log("Attempting fallback update query");
             
             db.one(fallbackQuery, [
               variantObj.is_approve !== undefined ? variantObj.is_approve : null,
@@ -2916,7 +2889,6 @@ getProductTechSpecByID: async (productId) => {
               variantId
             ])
               .then(function (fallbackData) {
-                console.log("Fallback update succeeded:", fallbackData);
                 resolve(fallbackData);
               })
               .catch(function (fallbackErr) {
@@ -2970,11 +2942,9 @@ getProductTechSpecByID: async (productId) => {
   getProductVariantDetails: async (variantId) => {
     return new Promise(function (resolve, reject) {
       // Changes by Agnij May 2, 2025 [Fixed variant details query to include all necessary fields]
-      console.log("Getting variant details for:", variantId);
       
       try {
         if (!variantId) {
-          console.log("No variant ID provided");
           resolve([]);
           return;
         }
@@ -3018,11 +2988,9 @@ getProductTechSpecByID: async (productId) => {
             pv.updated_by, pv.is_deleted, p.name, p.description, trr.reject_reason
         `;
         
-        console.log("Executing query for variant details");
         
         db.any(query, [variantId])
           .then(function (data) {
-            console.log(`Found variant details:`, data);
             resolve(data);
           })
           .catch(function (err) {
@@ -3039,7 +3007,6 @@ getProductTechSpecByID: async (productId) => {
   // Changes by Agnij May 2, 2025 [Added function to map variant with vendor]
   mapVariantWithVendor: async (variantId, vendorId) => {
     return new Promise(function (resolve, reject) {
-      console.log("Mapping variant", variantId, "with vendor", vendorId);
       
       try {
         if (!variantId || !vendorId) {
@@ -3075,7 +3042,7 @@ getProductTechSpecByID: async (productId) => {
 
             db.one(query, [variantId, vendorId])
               .then(function (data) {
-                console.log("Successfully created mapping:", data);
+
                 resolve(data);
               })
               .catch(function (err) {
@@ -3097,7 +3064,6 @@ getProductTechSpecByID: async (productId) => {
   // Changes by Agnij May 2, 2025 [Added function to update variant-vendor mapping]
   updateVariantVendorMapping: async (mappingId, updateData) => {
     return new Promise(function (resolve, reject) {
-      console.log("Updating mapping:", mappingId, "with data:", updateData);
       
       try {
         if (!mappingId || !updateData) {
@@ -3121,7 +3087,6 @@ getProductTechSpecByID: async (productId) => {
 
         db.one(query, [updateData.vendor_id, mappingId])
           .then(function (data) {
-            console.log("Successfully updated mapping:", data);
             resolve(data);
           })
           .catch(function (err) {
@@ -3155,7 +3120,6 @@ getProductTechSpecByID: async (productId) => {
     return new Promise(function (resolve, reject) {
       // Changes by Agnij April 30, 2025 [Fixed column name to match actual database schema]
       if (!productId || !variantName) {
-        console.log("Missing parameters in checkDuplicateVariantName:", { productId, variantName });
         resolve([]);
         return;
       }
@@ -3169,11 +3133,9 @@ getProductTechSpecByID: async (productId) => {
         AND is_deleted = 0
       `;
       
-      console.log("Checking duplicate variant:", { variantName, productId });
       
       db.any(query, [variantName, productId])
         .then(function (data) {
-          console.log("Duplicate check results:", data);
           resolve(data);
         })
         .catch(function (err) {
@@ -3245,7 +3207,6 @@ getProductTechSpecByID: async (productId) => {
     return new Promise(function (resolve, reject) {
       try {
         // Changes by Agnij May 02, 2025 [Improved error handling for similarity search]
-        console.log(`Getting variant-vendor mappings with search: "${searchTerm}", vendor: ${vendor_id}, page: ${page}, limit: ${limit}`);
 
         // Parse pagination parameters with defaults
         page = parseInt(page) || 1;
@@ -3300,7 +3261,7 @@ getProductTechSpecByID: async (productId) => {
           }
         }
 
-        // Changes by Agnij July 26, 2024 [Fixed vendor filter to properly find records]
+        // Changes by Agnij May 02, 2025 [Fixed vendor filter to properly find records]
         // Handle vendor filter - using correct field and parameter
         if (vendor_id && vendor_id !== '') {
           // The m.vendor_id is the correct field, but ensure it's cast to proper type
@@ -3319,7 +3280,7 @@ getProductTechSpecByID: async (productId) => {
           paramIndex++;
         }
 
-        // Changes by Agnij July 26, 2024 [Fixed added_by filter to check both variant and product creator]
+        // Changes by Agnij May 02, 2025 [Fixed added_by filter to check both variant and product creator]
         // Handle added_by filter to check both the variant creator and product creator
         if (added_by && added_by !== '') {
           conditions.push(`(v.created_by = $${paramIndex} OR p.created_by = $${paramIndex})`);
@@ -3433,7 +3394,6 @@ getProductTechSpecByID: async (productId) => {
         params.push(offset);
         paramIndex++;
 
-        console.log(`Executing mapping search query with ${params.length} parameters`);
         
         // First get the count of total records
         db.one(countQuery, params.slice(0, params.length - 2))
@@ -3443,7 +3403,6 @@ getProductTechSpecByID: async (productId) => {
             // Then get the paginated data
             db.any(query, params)
               .then(function (data) {
-                console.log(`Query returned ${data.length} variant-vendor mappings out of ${totalItems} total`);
                 resolve({
                   data: data,
                   pagination: {
@@ -3497,7 +3456,7 @@ getProductTechSpecByID: async (productId) => {
     });
   },
 
-  // Changes by Agnij July 25, 2024 [Added function to approve/reject mappings]
+  // Changes by Agnij May 02, 2025 [Added function to approve/reject mappings]
   approveMapping: async (mappingObj, mappingId) => {
     return new Promise(function (resolve, reject) {
       const condition = ` WHERE id = $1 RETURNING id`;
@@ -3517,7 +3476,7 @@ getProductTechSpecByID: async (productId) => {
     });
   },
   
-  // Changes by Agnij August 15, 2024 [Added function to get mapping by ID]
+  // Changes by Agnij May 01, 2025 [Added function to get mapping by ID]
   getVariantVendorMappingById: async (mappingId) => {
     return new Promise(function (resolve, reject) {
       db.oneOrNone(
@@ -3555,7 +3514,7 @@ getProductTechSpecByID: async (productId) => {
     });
   },
   
-  // Changes by Agnij August 15, 2024 [Added helper function to update a product variant]
+  // Changes by Agnij May 01, 2025 [Added helper function to update a product variant]
   updateProductVariant: async (variantObj, variantId) => {
     return new Promise(function (resolve, reject) {
       const condition = ` WHERE id = $1 RETURNING id`;

@@ -1819,12 +1819,10 @@ const productController = {
 
         if (productName && productCategory) {
           // when Product Name founds in a row
-          console.log(productName);
           if (prodObj.name != "" && !productError) {
               // means we have to add previous prodObj which do not have error 
               if(prodObj.productId == null ){
                 // means new product
-                console.log("---------------->>>>>. ",prodObj)
                 const product = await productModel.createProduct(prodObj.newProduct);
                 prodObj.productId = product.id;
               }
@@ -1836,7 +1834,6 @@ const productController = {
                     category_name: value.title,
                     category_id: value.id
                   };
-                  console.log(`Mapping the ${value.title} with ${prodObj.name}`)
                   await productModel.createProductCategory(categoryObj);
               }
         
@@ -1879,7 +1876,6 @@ const productController = {
                error: `Product ${productName} already exist`
              }
              errors.push(err);
-             console.log(`Product ${productName} already exist`, index+2);
              prodObj = {
                category: [],
                name: "",
@@ -1906,7 +1902,6 @@ const productController = {
               error: `Category ${productCategory} does not exist`
             }
             errors.push(err);
-            console.log(`Category ${productCategory} does not exist`, index+2);
             prodObj = {
               category: [],
               name: "",
@@ -1930,7 +1925,6 @@ const productController = {
               error: `Category ${productCategory} does not exist`
             }
             errors.push(err);
-            console.log(`Category ${productCategory} does not exist`, index+2);
             prodObj = {
               category: [],
               name: "",
@@ -1942,7 +1936,6 @@ const productController = {
           }
 
         } else if (productCategory && productError) {
-          console.log("We are continuing because We found error in the product",index+2);
           continue;
         } else {
           // case where productCategory having black space 
@@ -1952,7 +1945,6 @@ const productController = {
             error: "Category is Missing"
           }
           errors.push(err);
-          console.log("We found the missed category", index+2);
           prodObj = {
             category: [],
             name: "",
@@ -1967,7 +1959,6 @@ const productController = {
         //means last product name does not have any error, now to be inserted
         if(prodObj.productId == null ){
           // means new product
-          console.log("---------------- ",prodObj);
           const product = await productModel.createProduct(prodObj.newProduct);
           prodObj.productId = product.id;
         }
@@ -1979,7 +1970,6 @@ const productController = {
               category_name: value.title,
               category_id: value.id
             };
-            console.log(`Mapping the ${value.title} with ${prodObj.name}`)
             await productModel.createProductCategory(categoryObj);
         }
       }
@@ -2135,8 +2125,6 @@ const productController = {
           let prodNameExists = await productModel.checkProductExists(
             value['Product name']
           );
-          console.log('prodNameExists--->', prodNameExists);
-          // return false;
           let productObj = '';
           if (prodNameExists && prodNameExists.length == 0) {
             productObj = {
@@ -2795,7 +2783,6 @@ const productController = {
       const productId = req.params.id;
 
       // Changes by Agnij May 02, 2025 [Fixed approveProduct to remove vendor_approved_by field]
-      console.log("Approving product/variant with ID:", productId, "Status:", status);
       
       // Validate status is present and valid
       if (status === undefined || status === null) {
@@ -2819,7 +2806,6 @@ const productController = {
       const variantCheck = await productModel.getProductVariantDetails(productId);
       
       if (variantCheck && variantCheck.length > 0) {
-        console.log("This is a variant with ID:", productId);
         // This is a variant, handle variant approval
         
         let reasonId = null;
@@ -2855,8 +2841,6 @@ const productController = {
           reject_reason_id: reasonId || null,
           updated_at: currentTime
         };
-        
-        console.log("Updating variant with:", variantObj);
         
         await productModel.updateProductVariant(variantObj, productId);
         
@@ -3845,7 +3829,6 @@ const productController = {
       const pageNumber = parseInt(page) || 1;
       const pageSize = parseInt(limit) || 10;
       
-      console.log(`Requesting variant mappings page ${pageNumber}, limit ${pageSize}`);
       
       // Get mappings using the model function with all filters and pagination
       const result = await productModel.getVariantVendorMappings(
@@ -3860,7 +3843,6 @@ const productController = {
         pageSize
       );
       
-      console.log(`Found ${result.data.length} mappings, pagination:`, result.pagination);
       
       // Changes by Agnij May 02, 2025 [Fixed response format to ensure pagination is properly included]
       return res.status(200).json({
@@ -3882,14 +3864,12 @@ const productController = {
       });
     }
   },
-  // Changes by Agnij July 25, 2024 [Added approval function for variant-vendor mappings]
+  // Changes by Agnij May 01, 2025 [Added approval function for variant-vendor mappings]
   approveMapping: async (req, res) => {
     try {
       const mappingId = req.params.id;
-      console.log(`Approving mapping with ID: ${mappingId}, body:`, req.body);
       
       if (!mappingId) {
-        console.log("No mapping ID provided");
         return res.status(400).json({
           status: 3,
           message: 'Mapping ID is required'
@@ -3898,10 +3878,8 @@ const productController = {
       
       // First, get the mapping to find the associated variant
       const mappingDetails = await productModel.getVariantVendorMappingById(mappingId);
-      console.log(`Mapping details for ${mappingId}:`, mappingDetails);
       
       if (!mappingDetails) {
-        console.log(`No mapping found with ID ${mappingId}`);
         return res.status(404).json({
           status: 3,
           message: 'Mapping not found'
@@ -3912,20 +3890,17 @@ const productController = {
       const variantId = mappingDetails.variant_id || mappingDetails.product_variant_id;
       
       if (!variantId) {
-        console.log(`Mapping ${mappingId} has no variant ID`);
         return res.status(404).json({
           status: 3,
           message: 'Invalid mapping: no variant associated'
         });
       }
       
-      console.log(`Found variant ID: ${variantId} in mapping`);
       
       let status = req.body.status;
       
       // Ensure status is valid
       if (status === undefined || status === null) {
-        console.log("No status provided in request");
         return res.status(400).json({
           status: 3,
           message: 'Status is required'
@@ -3942,11 +3917,9 @@ const productController = {
       let reject_reason = req.body.reject_reason || null;
       let reject_reason_id = req.body.reject_reason_id || null;
       
-      console.log(`Processing approval with status=${status}, reject_reason_id=${reject_reason_id}`);
       
       // Handle rejection reason for rejections
       if (status === 0 && !reject_reason_id && !reject_reason) {
-        console.log("Rejection requires a reason");
         return res.status(400).json({
           status: 3,
           message: 'Reject reason is required when rejecting'
@@ -4000,12 +3973,10 @@ const productController = {
         variantObj.reject_reason_id = null;
       }
       
-      console.log(`Updating variant ${variantId} with:`, variantObj);
       
       // Update the variant instead of the mapping
       try {
         const result = await productModel.updateProductVariant(variantObj, variantId);
-        console.log("Update result:", result);
         
         return res.status(200).json({
           status: 1,

@@ -220,7 +220,7 @@ productRoutes.get(
   productController.getVariantMappings
 );
 
-// Changes by Agnij July 25, 2024 [Added route for mapping approval]
+// Changes by Agnij April 30, 2025 [Added route for mapping approval]
 productRoutes.put(
   '/mapping-approve/:id',
   passportSignIn,

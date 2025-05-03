@@ -19,7 +19,6 @@ const rfqModel = {
         })
         .catch(function (err) {
           let error = new Error(err);
-          console.log(err)
           reject(error);
         });
     });
@@ -46,7 +45,6 @@ const rfqModel = {
   },
 
   getVendorsForRfq: async (rfq_id, user_name = '') => {
-    console.log("user_name: ", user_name)
       const query = `
           SELECT DISTINCT TRPV.user_id AS user_id
           FROM tbl_rfq_product_vendors TRPV
@@ -206,12 +204,9 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     return new Promise((resolve, reject) => {
         db.query(query, [rfqProductIds])
             .then((result) => {
-                console.log("Deleted rows from tbl_rfq_product_files with rfq_product_ids:", rfqProductIds);
-                console.log(result);
                 resolve(result.length); // Return count of deleted rows
             })
             .catch((error) => {
-                console.error("Error deleting from tbl_rfq_product_files:", error);
                 reject(error);
             });
     });
@@ -300,7 +295,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
       .join(', ');
-    console.log("set clause = ",setClause);
     const values = Object.values(data);
     const updateQuery = `
       UPDATE ${table_name}
@@ -643,15 +637,12 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     LIMIT 1;`;
 
     return new Promise(function (resolve, reject) {
-      console.log("query: ", q, [id])
       db.query(q,[id])
         .then(function (data) {
-          console.log("query data: ", data);
           resolve(data);
         })
         .catch(function (err) {
           let error = new Error(err);
-          console.log("error query: ", err);
           reject(error);
         });
     });
@@ -1110,7 +1101,6 @@ ${approved_by_id != '' ? `AND (vum.vendor_id IN (${approved_by_id.map(vui => vui
       const totalCount = countResult[0].total;
 
       const dataResult = await db.query(dataQuery);
-      console.log(dataResult);
 
       return {
         total: totalCount,
@@ -1240,7 +1230,6 @@ LIMIT $5 OFFSET $4;`,
         })
         .catch(function (err) {
           let error = new Error(err);
-          console.log(error);
           reject(error);
         });
     });
@@ -1282,7 +1271,6 @@ LIMIT $5 OFFSET $4;`,
       FROM tbl_users TU
       JOIN tbl_company TC ON TU.id = TC.user_id
       WHERE TU.id IN (${placeholders})`;
-    console.log(query);
     return new Promise(function (resolve, reject) {
       db.any(query, vendors)
         .then(function (data) {
@@ -1653,7 +1641,6 @@ LIMIT $5 OFFSET $4;`,
           resolve(data);
         })
         .catch(function (err) {
-          console.log(err)
           let error = new Error(err);
           reject(error);
         });
@@ -2231,7 +2218,6 @@ ${approved_by_id != '' ? `
     ORDER BY is_linked_with_buyer DESC, RANDOM();
 `;
 
-  console.log("QUERY: ", q) 
 
 
     const values = vendor_name ? [vendor_name] : [];
@@ -2643,7 +2629,6 @@ ${approved_by_id != '' ? `
       const result = await db.query(query, values);
       return result;
     } catch (error) {
-      console.log(error)
       throw new Error(error);
     }
   },
@@ -2686,7 +2671,6 @@ ${approved_by_id != '' ? `
       const result = await db.query(query, values);
       return result;
     } catch (error) {
-      console.log(error)
       throw new Error(error);
     }
   },
@@ -3735,7 +3719,6 @@ rfq_project_exist: async (project_id,user_id) => {
           // Get existing file URLs from the database
           db.query(queryGetExistingFiles, [tbl_rfq_product_tech_evaluation_clauses_id])
           .then((existingFilesResult) => {
-            console.log("existing files result = ",existingFilesResult)
             // const existingFiles = existingFilesResult.rows.map(row => row.file_url);
             const existingFiles = [];
             for(let i=0;i<existingFilesResult.length;i++){
@@ -3903,7 +3886,6 @@ rfq_project_exist: async (project_id,user_id) => {
     return new Promise((resolve, reject) => {
       db.query(query, [rfq_id])
         .then((result) => {
-          console.log(result)
           resolve({
             success: true,
             data: result
@@ -4977,7 +4959,7 @@ getProjectDetailsReport: async (projectId, startDate, endDate) => {
   });
 },
 
-// Changes by Agnij July 24, 2024 [Added method to search for variant products]
+// Changes by Agnij April 30, 2025 [Added method to search for variant products]
 searchVariantProducts: async (search_key) => {
   console.log(`[RFQ Model] searchVariantProducts called with search_key: "${search_key}"`);
   
@@ -5039,7 +5021,7 @@ searchVariantProducts: async (search_key) => {
   }
 },
 
-// Changes by Agnij July 24, 2024 [Added method to search for variant vendors]
+// Changes by Agnij May 01, 2025 [Added method to search for variant vendors]
 searchVariantVendors: async (product_id, variant_id) => {
   console.log(`[RFQ Model] searchVariantVendors called with product_id: ${product_id}, variant_id: ${variant_id}`);
   
