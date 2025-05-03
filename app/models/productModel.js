@@ -1387,6 +1387,114 @@ const productModel = {
         });
     });
   },
+  getMasterProductList: async (
+    limit,
+    offset,
+    vendorId,
+    productName,
+    filterProduct,
+    isFeatured,
+    userId,
+    categoryId,
+    dateFrom,
+    dateTo,
+    is_approve
+  ) => {
+    // Changes by Agnij May 01, 2025 [Modified to return base products only, not variants]
+    return new Promise(function (resolve, reject) {
+      let dynamicQuery = '';
+      // Product name search with full-text search and similarity
+      if (productName && productName !== '') {
+        dynamicQuery += `
+          AND (
+            to_tsvector('english', PD.name) @@ plainto_tsquery('english', '${productName}')
+            OR similarity(PD.name, '${productName}') > 0.1
+          )`;
+      }
+      if (filterProduct?.id_array) {
+        dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
+      }
+  
+      if (vendorId && vendorId !== '') {
+        dynamicQuery += `
+          AND EXISTS (
+            SELECT 1 FROM tbl_product_variant pv
+            JOIN tbl_product_variant_vendor_mapping pvm
+            ON pv.id = pvm.product_variant_id
+            WHERE pv.product_id = PD.id AND pvm.vendor_id = ${vendorId}
+          )`;
+      }
+      if (userId && userId !== '') {
+        dynamicQuery += `
+          AND EXISTS (
+            SELECT 1 FROM tbl_product_variant pv
+            JOIN tbl_product_variant_vendor_mapping pvm
+            ON pv.id = pvm.product_variant_id
+            WHERE pv.product_id = PD.id AND pvm.vendor_id = ${userId}
+          )`;
+      }
+      if (isFeatured && isFeatured !== '') {
+        dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
+      }
+      if (categoryId) {
+        dynamicQuery += ` AND EXISTS (
+          SELECT 1 FROM tbl_product_categories
+          WHERE tbl_product_categories.product_id = PD.id 
+          AND tbl_product_categories.category_id = ${categoryId}
+        )`;
+      }
+      if (dateFrom) {
+        dynamicQuery += ` AND DATE(PD.created_at) >= '${dateFrom}'`;
+      }
+      if (dateTo) {
+        dynamicQuery += ` AND DATE(PD.created_at) <= '${dateTo}'`;
+      }
+      if (is_approve !== null && is_approve !== undefined) {
+        dynamicQuery += ` AND PD.is_approve = ${is_approve}`;
+      }
+      
+      let q = `
+      SELECT 
+        PD.*, 
+        NULL AS vendor_name,
+        ${productName ? `
+          similarity(PD.name, '${productName}') AS similarity_score,
+          ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank,
+        ` : ''}
+        ARRAY
+        (SELECT json_build_object('category_name', tc.title, 'id', tc.id)
+          FROM tbl_product_categories pc
+          LEFT JOIN tbl_category tc ON pc.category_id = tc.id
+          WHERE PD.id = pc.product_id ORDER BY pc.id
+        ) AS product_categories,
+        ARRAY
+        (SELECT json_build_object('id', pv.id, 'name', pv.name, 'product_id', pv.product_id, 'is_approve', pv.is_approve)
+          FROM tbl_product_variant pv
+          WHERE PD.id = pv.product_id
+        ) AS product_variants
+
+      FROM tbl_product PD
+      JOIN tbl_users tu ON tu.id = PD.created_by
+      WHERE PD.status = 1 
+      ${dynamicQuery}
+
+      ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
+      LIMIT ${limit} OFFSET $1
+      `;
+
+      db.any(
+        q,
+        [offset]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   getExportProductList: async (product_id) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';

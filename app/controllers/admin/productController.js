@@ -2240,6 +2240,7 @@ const productController = {
     }
   },
   productList: async (req, res, next) => {
+    console.log("PRODUCT CONTROLLER ----------- ")
     try {
       let page = parseInt(req.query.page) || 1;
       let limit = parseInt(req.query.limit) || Config.globalAdminLimit;
@@ -2275,7 +2276,7 @@ const productController = {
       }
 
       // Get filtered products
-      let productList = await productModel.getProductList(
+      let productList = await productModel.getMasterProductList(
         limit,
         offset,
         vendorId,
