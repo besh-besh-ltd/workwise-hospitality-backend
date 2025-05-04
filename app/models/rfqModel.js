@@ -679,12 +679,14 @@ deleteProductFilesByIds: async (rfqProductIds) => {
   getRfqById: async (id, user_id, user_type) => {
     // First, let's directly check the auction dates in the database
     try {
-      const dateCheckQuery = `
-        SELECT id, reverse_auction, ra_start_date, ra_end_date 
-        FROM tbl_rfq 
-        WHERE id = $1
-      `;
-      const dateCheckResult = await db.query(dateCheckQuery, [id]);
+
+      //  unused code written by
+      // const dateCheckQuery = `
+      //   SELECT id, reverse_auction, ra_start_date, ra_end_date 
+      //   FROM tbl_rfq 
+      //   WHERE id = $1
+      // `;
+      // const dateCheckResult = await db.query(dateCheckQuery, [id]);
       
     } catch (error) {
       console.error("Error checking auction dates:", error);
@@ -928,13 +930,9 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                         -- Timing conditions for when lowest quote should be visible
                         AND (
                             -- Show lowest quote if current time is within auction period
-                            (
-                                RFQ.ra_start_date IS NOT NULL 
-                                AND RFQ.ra_end_date IS NOT NULL
-                                AND CURRENT_TIMESTAMP BETWEEN 
-                                    CAST(RFQ.ra_start_date AS TIMESTAMP) 
-                                    AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
-                            )
+                          CURRENT_TIMESTAMP BETWEEN 
+                            CAST(RFQ.ra_start_date AS TIMESTAMP) 
+                            AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
                             OR
                             -- If reverse auction starts after RFQ ends
                             (
@@ -1011,21 +1009,6 @@ ORDER BY RFQ.id DESC
 LIMIT 1;`;
 
 
-    // MODIFIED ON 23TH AUG MUKUL
-    // modified query for veriants
-
-    // MODIFIED ON 28TH MAY RANIT
-    // ${
-    //   user_type != 2
-    //     ? `JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = ${id} AND trpv.user_id = ${user_id} AND trpv.product_id = RFQ_P.product_id`
-    //     : ``
-    // }
-    // WHERE RFQ.id = RFQ_P.rfq_id
-    // ${
-    //   user_type != 2
-    //     ? `AND trpv.rfq_id = ${id} AND trpv.user_id = ${user_id} AND trpv.product_id = RFQ_P.product_id`
-    //     : ``
-    // }
 
     return new Promise(function (resolve, reject) {
       db.query(q,[id])
