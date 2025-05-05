@@ -3663,7 +3663,8 @@ const productController = {
         added_by,
         is_approve,
         page = 1,
-        limit = 10
+        limit = 10,
+        variant_id // Changes by Agnij June 12, 2024 [Added variant_id parameter for filtering]
       } = req.query;
       
       // Parse pagination parameters
@@ -3681,7 +3682,8 @@ const productController = {
         added_by,
         is_approve,
         pageNumber,
-        pageSize
+        pageSize,
+        variant_id // Changes by Agnij June 12, 2024 [Added variant_id parameter]
       );
       
       

@@ -3330,7 +3330,8 @@ getProductTechSpecByID: async (productId) => {
   },
 
   // Changes by Agnij May 18, 2025 [Added function to get all variant-vendor mappings]
-  getVariantVendorMappings: (searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve, page, limit) => {
+  // Changes by Agnij June 12, 2024 [Added variant_id parameter support]
+  getVariantVendorMappings: (searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve, page, limit, variant_id) => {
     return new Promise(function (resolve, reject) {
       try {
         // Changes by Agnij May 02, 2025 [Improved error handling for similarity search]
@@ -3394,6 +3395,14 @@ getProductTechSpecByID: async (productId) => {
           // The m.vendor_id is the correct field, but ensure it's cast to proper type
           conditions.push(`CAST(m.vendor_id AS TEXT) = $${paramIndex}`);
           params.push(vendor_id.toString());
+          paramIndex++;
+        }
+        
+        // Changes by Agnij June 12, 2024 [Added variant filter]
+        // Handle variant filter - filter by specific variant ID
+        if (variant_id && variant_id !== '') {
+          conditions.push(`CAST(m.product_variant_id AS TEXT) = $${paramIndex}`);
+          params.push(variant_id.toString());
           paramIndex++;
         }
 
