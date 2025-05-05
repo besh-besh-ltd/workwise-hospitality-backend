@@ -679,12 +679,14 @@ deleteProductFilesByIds: async (rfqProductIds) => {
   getRfqById: async (id, user_id, user_type) => {
     // First, let's directly check the auction dates in the database
     try {
-      const dateCheckQuery = `
-        SELECT id, reverse_auction, ra_start_date, ra_end_date 
-        FROM tbl_rfq 
-        WHERE id = $1
-      `;
-      const dateCheckResult = await db.query(dateCheckQuery, [id]);
+
+      //  unused code written by
+      // const dateCheckQuery = `
+      //   SELECT id, reverse_auction, ra_start_date, ra_end_date 
+      //   FROM tbl_rfq 
+      //   WHERE id = $1
+      // `;
+      // const dateCheckResult = await db.query(dateCheckQuery, [id]);
       
     } catch (error) {
       console.error("Error checking auction dates:", error);
@@ -874,9 +876,11 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             'No vendor finalized yet'
           ),
             ${
-              user_type == 3
+              // Changes by Agnij 2025-05-05 [Modified to include both user_type 2 and 3]
+              user_type == 2 || user_type == 3
         ? `-- Changes made by Imtiaj 28/09/2024 [Added logic to get the lowest_total from quotes for each unique product with the specified RFQ_id.] 
                 'lowest_quotation', (
+                        ${user_type == 3 ? `
                         -- Check if this product has technical evaluation enabled (has clauses)
                         WITH tech_eval AS (
                             SELECT TE.id AS tech_eval_id
@@ -893,7 +897,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                             JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
                             WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
                             LIMIT 1
-                        )
+                        )` : ``}
                         -- Changes made by Agnij 28/04/2025 [Added logic to handle reverse auction timing conditions and visibility rules for lowest quote prices]
                         SELECT json_build_object(
                             'quote_id', TQI.quote_id,
@@ -905,6 +909,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                         AND TQI.rfq_id = RFQ_P.rfq_id  -- Ensure you're getting quotes for the specific RFQ
                         AND TQI.total_price > 0 
                         AND RFQ.reverse_auction = 1
+                        ${user_type == 3 ? `
                         -- Apply technical evaluation filtering if enabled for this product
                         AND (
                             -- If no technical evaluation exists for this product OR
@@ -924,17 +929,13 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                                     (SELECT COUNT(*) FROM tech_accepted) > 0
                                 )
                             )
-                        )
+                        )` : ``}
                         -- Timing conditions for when lowest quote should be visible
                         AND (
                             -- Show lowest quote if current time is within auction period
-                            (
-                                RFQ.ra_start_date IS NOT NULL 
-                                AND RFQ.ra_end_date IS NOT NULL
-                                AND CURRENT_TIMESTAMP BETWEEN 
-                                    CAST(RFQ.ra_start_date AS TIMESTAMP) 
-                                    AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
-                            )
+                          CURRENT_TIMESTAMP BETWEEN 
+                            CAST(RFQ.ra_start_date AS TIMESTAMP) 
+                            AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
                             OR
                             -- If reverse auction starts after RFQ ends
                             (
@@ -959,6 +960,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                         ORDER BY TQI.total_price ASC  -- Get the lowest total_price
                         LIMIT 1  -- Limit to the lowest price for that product and variant
                     ),
+                    ${user_type == 3 ? `
                     -- Get technical evaluation status for this product/vendor
                     'tech_evaluation_status', (
                         WITH tech_eval AS (
@@ -981,7 +983,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                                 )
                             )
                         )
-                    ),
+                    ),` : ``}
                     `
         : ''
       }
@@ -1011,21 +1013,6 @@ ORDER BY RFQ.id DESC
 LIMIT 1;`;
 
 
-    // MODIFIED ON 23TH AUG MUKUL
-    // modified query for veriants
-
-    // MODIFIED ON 28TH MAY RANIT
-    // ${
-    //   user_type != 2
-    //     ? `JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = ${id} AND trpv.user_id = ${user_id} AND trpv.product_id = RFQ_P.product_id`
-    //     : ``
-    // }
-    // WHERE RFQ.id = RFQ_P.rfq_id
-    // ${
-    //   user_type != 2
-    //     ? `AND trpv.rfq_id = ${id} AND trpv.user_id = ${user_id} AND trpv.product_id = RFQ_P.product_id`
-    //     : ``
-    // }
 
     return new Promise(function (resolve, reject) {
       db.query(q,[id])

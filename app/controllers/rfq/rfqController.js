@@ -2050,21 +2050,6 @@ const rfqController = {
         }
       }
 
-      // else block commented by by mukul jatav
-      // else {
-      // no use of removeSpecsDynamically here, 
-
-      // for await (let i of rfQItem) {
-      //   if (i.products.length > 0) {
-      //     // console.log("mukul ji", i.products)
-      //     // i.product = await removeSpecsDynamically(i.products);
-      //     for await (let j of i.products) {
-      //       console.log("ok ",j.product_specs)
-      //       //  j.specs = await removeSpecsDynamically(j.product_specs);
-      //      }
-      //   }
-      // }
-      // }
 
       res
         .status(200)
@@ -5878,8 +5863,35 @@ sendReportOnEmail: async (req, res) => {
       error: error.toString()
     });
   }
-}
+},
+processBoqAndDownload : async (req, res) => {
+  try {
 
+    const response = await generativeAI.processBoqAndDownload(req.file);
+
+    console.log(response)
+
+    res
+    .status(200)
+    .json({
+      status: 1,
+      data: response,
+      mail_sent: true
+    })
+    .end();
+    
+  } catch (error) {
+    logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          error:error,
+          message: Config.errorText.value
+        })
+        .end();
+  }
+}
 
 
 };
