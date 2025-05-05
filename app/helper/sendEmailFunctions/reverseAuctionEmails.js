@@ -202,7 +202,7 @@ const emailContent = `
 
 //Template for auction has ended mail to buyer
 export const auctionEndEmailTemplateToBuyer = (buyer_email , buyer_name, product_name) => {
-  const emailSubject = `Reverse Auction Concluded for {product_name}`;
+  const emailSubject = `Reverse Auction Concluded for ${product_name}`;
 
   const emailHeader = `<h2>Dear ${buyer_name},</h2>`;
 
