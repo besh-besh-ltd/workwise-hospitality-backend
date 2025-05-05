@@ -2803,55 +2803,7 @@ const productController = {
         });
       }
 
-      // First, check if this is a product variant
-      const variantCheck = await productModel.getProductVariantDetails(productId);
       
-      if (variantCheck && variantCheck.length > 0) {
-        // This is a variant, handle variant approval
-        
-        let reasonId = null;
-        if (status === '0') {
-          if (reject_reason_id) {
-            reasonId = reject_reason_id;
-          } else if (reject_reason) {
-            let checkReason = await vendorModel.findReasonByText(reject_reason);
-            if (checkReason.length > 0) {
-              reasonId = checkReason[0].id;
-            } else {
-              let reasonObj = {
-                status: 1,
-                reject_reason: reject_reason,
-                type: 2
-              };
-              let createReason = await vendorModel.createReason(reasonObj);
-              reasonId = createReason[0].id;
-            }
-          } else {
-            return res.status(400).json({
-              status: 3,
-              message: 'Reject reason is required when rejecting a product'
-            });
-          }
-        }
-        
-        // Update variant status
-        const currentTime = new Date();
-        const variantObj = {
-          is_approve: parseInt(status),
-          updated_by: req.user.id,
-          reject_reason_id: reasonId || null,
-          updated_at: currentTime
-        };
-        
-        await productModel.updateProductVariant(variantObj, productId);
-        
-        return res.status(200).json({
-          status: 1,
-          message: `Variant successfully ${status === '0' ? 'Disapproved' : 'Approved'}`
-        });
-      }
-      
-      // If not a variant, handle as a product approval
       let reasonId = null;
       if (status === '0') {
         if (reject_reason_id) {
@@ -2896,141 +2848,138 @@ const productController = {
       );
       
       // If this product has a vendor, try to send an email notification
-      if (approveProduct && approveProduct.created_by) {
-        try {
-          let userDetail = await vendorModel.userDetailById(
-            approveProduct.created_by
-          );
+      // if (approveProduct && approveProduct.created_by) {
+      //   try {
+      //     let userDetail = await vendorModel.userDetailById(
+      //       approveProduct.created_by
+      //     );
           
-          if (userDetail && userDetail.length > 0) {
-            let html_variables = [
-              { name: userDetail[0].name },
-              {
-                message:
-                  status == 1
-                    ? `Your product ${approveProduct.name} has been approved`
-                    : `Your product ${approveProduct.name} has been rejected`
-              }
-            ];
+      //     if (userDetail && userDetail.length > 0) {
+      //       let html_variables = [
+      //         { name: userDetail[0].name },
+      //         {
+      //           message:
+      //             status == 1
+      //               ? `Your product ${approveProduct.name} has been approved`
+      //               : `Your product ${approveProduct.name} has been rejected`
+      //         }
+      //       ];
             
-            let dynamic_html = fs
-              .readFileSync(`${Config.template_path}/dynamic_message_template.txt`)
-              .toString();
+      //       let dynamic_html = fs
+      //         .readFileSync(`${Config.template_path}/dynamic_message_template.txt`)
+      //         .toString();
 
-            for (let index = 0; index < html_variables.length; index++) {
-              const element = html_variables[index];
-              let dynamic_key = Object.keys(element)[0];
-              let replace_char = html_variables[index][dynamic_key];
-              let replace_var = `[${dynamic_key.toLowerCase()}]`;
+      //       for (let index = 0; index < html_variables.length; index++) {
+      //         const element = html_variables[index];
+      //         let dynamic_key = Object.keys(element)[0];
+      //         let replace_char = html_variables[index][dynamic_key];
+      //         let replace_var = `[${dynamic_key.toLowerCase()}]`;
 
-              dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
-            }
+      //         dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
+      //       }
 
-            // Send the email to the SPOC or vendor
-            const spocList = await vendorModel.getSpocDetails(userDetail[0]?.id);
+      //       // Send the email to the SPOC or vendor
+      //       const spocList = await vendorModel.getSpocDetails(userDetail[0]?.id);
             
-            let mailRecipients = {
-              from: Config.webmasterMail,
-              subject: `Work Wise | Product Review Status`,
-              html: dynamic_html
-            };
+      //       let mailRecipients = {
+      //         from: Config.webmasterMail,
+      //         subject: `Work Wise | Product Review Status`,
+      //         html: dynamic_html
+      //       };
 
-            if (spocList && spocList.length > 0) {
-              mailRecipients.to = spocList.map(spoc => spoc.email);
-              mailRecipients.cc = userDetail[0].email;
-            } else {
-              mailRecipients.to = userDetail[0].email;
-            }
+      //       if (spocList && spocList.length > 0) {
+      //         mailRecipients.to = spocList.map(spoc => spoc.email);
+      //         mailRecipients.cc = userDetail[0].email;
+      //       } else {
+      //         mailRecipients.to = userDetail[0].email;
+      //       }
 
-            sendMail(mailRecipients);
-          }
-        } catch (emailError) {
-          console.error("Error sending notification email:", emailError);
-          // Continue with the response even if email fails
-        }
-      }
-
-      // If product is approved, create a master copy for admin if it doesn't exist
-      if (status == 1) {
-        try {
-          let productDetails = await productModel.vendorProductDetails(productId);
-          if (productDetails && productDetails.length > 0) {
-            let checkMasterNameExist = await productModel.checkMasterNameExist(
-              productDetails[0].name
-            );
-            
-            if (checkMasterNameExist.length == 0) {
-              let masterProductObj = {
-                name: productDetails[0].name,
-                description: productDetails[0].description,
-                qap_new_file_name: productDetails[0].qap_new_file_name,
-                qap_original_file_name: productDetails[0].qap_original_file_name,
-                tds_new_file_name: productDetails[0].tds_new_file_name,
-                tds_original_file_name: productDetails[0].tds_original_file_name,
-                slug: titleToSlug(productDetails[0].name),
-                sku: productDetails[0].name,
-                created_by: 1,
-                updated_by: 1,
-                added_by: 1,
-                is_approve: 1
-              };
-
-              let masterProduct = await productModel.createProduct(masterProductObj);
-
-              // Copy vendor approvals if any
-              if (productDetails[0].vendor_approved_by && productDetails[0].vendor_approved_by.length > 0) {
-                let productApproveArray = [];
-                productDetails[0].vendor_approved_by.forEach((item) => {
-                  productApproveArray.push({
-                    product_id: masterProduct.id,
-                    vendor_approve_id: item
-                  });
-                });
-                await productModel.addProductApproveBy(
-                  productApproveArray,
-                  masterProduct.id
-                );
-              }
-
-              // Copy categories
-              if (productDetails[0].product_categories && productDetails[0].product_categories.length > 0) {
-                for (const { id } of productDetails[0].product_categories) {
-                  if (id) {
-                    await productModel.createProductCategories(id, masterProduct.id);
-                  }
-                }
-              }
-
-              // Copy images
-              if (productDetails[0].product_images && productDetails[0].product_images.length > 0) {
-                for (const {
-                  product_image_url,
-                  product_image,
-                  is_featured
-                } of productDetails[0].product_images) {
-                  if (product_image_url) {
-                    let featuredImageObj = {
-                      product_id: masterProduct.id,
-                      is_featured: is_featured,
-                      original_image_name: product_image,
-                      new_image_name: product_image_url
-                    };
-                    await productModel.insertProductImages(featuredImageObj);
-                  }
-                }
-              }
-            }
-          }
-        } catch (masterError) {
-          console.error("Error creating master product:", masterError);
-          // Continue with the response even if master creation fails
-        }
-      }
+      //       sendMail(mailRecipients);
+      //     }
+      //   } catch (emailError) {
+      //     console.error("Error sending notification email:", emailError);
+      //     // Continue with the response even if email fails
+      //   }
+      // }
 
       return res.status(200).json({
         status: 1,
         message: `Product successfully ${status == 0 ? 'Disapproved' : 'Approved'}`
       });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message || Config.errorText.value
+      });
+    }
+  },
+
+  approveVariant: async (req, res) => {
+    try {
+      let { reject_reason, reject_reason_id, status } = req.body;
+      const productId = req.params.id;
+
+      // Changes by Agnij May 02, 2025 [Fixed approveProduct to remove vendor_approved_by field]
+      
+      // Validate status is present and valid
+      if (status === undefined || status === null) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Status is required'
+        });
+      }
+      
+      // Ensure status is treated as a string for comparison
+      status = status.toString();
+      
+      if (status !== '0' && status !== '1') {
+        return res.status(400).json({
+          status: 3,
+          message: 'Status must be 0 or 1'
+        });
+      }
+
+      let reasonId = null;
+        // if (status === '0') {
+        //   if (reject_reason_id) {
+        //     reasonId = reject_reason_id;
+        //   } else if (reject_reason) {
+        //     let checkReason = await vendorModel.findReasonByText(reject_reason);
+        //     if (checkReason.length > 0) {
+        //       reasonId = checkReason[0].id;
+        //     } else {
+        //       let reasonObj = {
+        //         status: 1,
+        //         reject_reason: reject_reason,
+        //         type: 2
+        //       };
+        //       let createReason = await vendorModel.createReason(reasonObj);
+        //       reasonId = createReason[0].id;
+        //     }
+        //   } else {
+        //     return res.status(400).json({
+        //       status: 3,
+        //       message: 'Reject reason is required when rejecting a product'
+        //     });
+        //   }
+        // }
+        
+        // Update variant status
+        const currentTime = new Date();
+        const variantObj = {
+          is_approve: parseInt(status),
+          updated_by: req.user.id,
+          reject_reason_id: reasonId || null,
+          updated_at: currentTime
+        };
+        
+        await productModel.updateProductVariant(variantObj, productId);
+        
+        return res.status(200).json({
+          status: 1,
+          message: `Variant successfully ${status === '0' ? 'Disapproved' : 'Approved'}`
+        });
     } catch (error) {
       logError(error);
       return res.status(400).json({
@@ -3825,65 +3774,29 @@ const productController = {
       
       // Prepare the variant update object
       const variantObj = {
-        is_approve: status,
+        is_approved: status == "1",
         updated_by: req.user.id,
-        updated_at: new Date()
+        updated_at: new Date(),
+        approved_by: req.user.id,
+        approved_at: status == 1 ? new Date() : null,
       };
-      
-      // Add reject reason if status is rejection (0)
-      if (status === 0) {
-        // If reject_reason_id is directly provided, use it
-        if (reject_reason_id) {
-          variantObj.reject_reason_id = reject_reason_id;
-        }
-        // Otherwise, if a textual reason is provided, we should convert it to an ID
-        else if (reject_reason) {
-          try {
-            // First check if it's a numeric value
-            if (!isNaN(reject_reason)) {
-              variantObj.reject_reason_id = reject_reason;
-            } else {
-              // Try to look up or create a reason by text
-              let checkReason = await vendorModel.findReasonByText(reject_reason);
-              if (checkReason && checkReason.length > 0) {
-                variantObj.reject_reason_id = checkReason[0].id;
-              } else {
-                // Create a new reason
-                let reasonObj = {
-                  status: 1,
-                  reject_reason: reject_reason,
-                  type: 2  // Type 2 is for product/variant rejections
-                };
-                let createReason = await vendorModel.createReason(reasonObj);
-                if (createReason && createReason.length > 0) {
-                  variantObj.reject_reason_id = createReason[0].id;
-                }
-              }
-            }
-          } catch (reasonError) {
-            console.error("Error handling rejection reason:", reasonError);
-            // Continue without setting reject_reason_id
-          }
-        }
-      } else {
-        // If approving, clear any rejection reason
-        variantObj.reject_reason_id = null;
-      }
-      
+
+      console.log("MAPPING OBJ: ", variantObj)
       
       // Update the variant instead of the mapping
+      // Update by Kushal: We want to update the mapping not variant as the mapping is going to be used when showing vendors not variant
       try {
-        const result = await productModel.updateProductVariant(variantObj, variantId);
+        const result = await productModel.updateVariantMappingByData(variantObj, mappingId);
         
         return res.status(200).json({
           status: 1,
-          message: status === 1 ? 'Variant approved successfully' : 'Variant rejected successfully'
+          message: status === 1 ? 'Mapping approved successfully' : 'Mapping disapproved successfully'
         });
       } catch (updateError) {
-        console.error("Error updating variant:", updateError);
+        console.error("Error updating mapping:", updateError);
         return res.status(500).json({
           status: 3,
-          message: 'Error updating variant approval status',
+          message: 'Error updating mapping approval status',
           error: updateError.message
         });
       }

@@ -96,7 +96,7 @@ ProductsRoutes.get(
   passportSignIn,
   acl([1, 2, 3, 4]),
   validateParam(schemas.id),
-  validateDbBody.check_product,
+  // validateDbBody.check_product,
   ProductsController.vendorProductDetails
 );
 

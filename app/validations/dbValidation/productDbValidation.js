@@ -332,7 +332,7 @@ const validateDbBody = {
       }
 
       if (master_id) {
-        let findProduct = await productModel.check_product(master_id);
+        let findProduct = await productModel.checkVariantById(master_id);
         if (findProduct.length == 0) {
           err++;
           errors.master_id = 'Product not found';
@@ -452,6 +452,47 @@ const validateDbBody = {
         .end();
     }
   },
+  checkVariant: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+      let variantId = req.params?.id || req.body?.variant_id;
+
+      let created_by = 0;
+      if (req.user.user_type == 3 || req.user.user_type == 4) {
+        created_by = req.user.id;
+      }
+      let findVariant;
+      if (variantId) {
+        findVariant = await productModel.checkVariantById(variantId);
+        if (findVariant.length == 0) {
+          err++;
+          errors.id = 'Product not found';
+        }
+      }
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+      } else {
+        req.findVariant = findVariant[0];
+        next();
+      }
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   product_approve_check: async (req, res, next) => {
     try {
       let errors = {};
@@ -527,6 +568,84 @@ const validateDbBody = {
       }
     } catch (err) {
       console.error("Error in product_approve_check:", err);
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  variant_approve_check: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+      let variantId = req.params.id;
+      let { status, reject_reason, reject_reason_id } = req.body;
+      
+      // Validate basic parameters
+      if (status === undefined || status === null) {
+        err++;
+        errors.status = 'Status is required';
+      }
+      
+      if (!variantId) {
+        err++;
+        errors.id = 'Product ID is required';
+      } else {
+        // Check if product or variant exists
+        const variantIdExists = await productModel.checkVariantById(variantId);
+        
+        if (!variantIdExists || variantIdExists.length === 0) {
+          err++;
+          errors.id = 'Product or variant not found';
+        } else {
+          // Changes by Agnij May 02, 2025 [Removed check for already approved/rejected items to allow re-approval/re-rejection]
+          const item = variantIdExists[0];
+          console.log(`Found item of type ${item.product_id ? 'variant' : 'product'}`);
+          
+          // We no longer block already approved/rejected items to make the UI more forgiving
+          if (item && item.is_approve !== undefined) {
+            const numericStatus = status === '1' || status === 1 || status === true ? 1 : 0;
+            
+            // Just log but don't block if it's the same status
+            if (numericStatus === 1 && item.is_approve === 1) {
+              console.log("Item is already approved, but allowing re-approval");
+            } else if (numericStatus === 0 && item.is_approve === 0) {
+              console.log("Item is already rejected, but allowing re-rejection");
+            }
+          } else {
+            console.log(`Item has no is_approve property or is undefined`);
+          }
+        }
+      }
+
+      // // Check rejection reason if rejecting
+      // if (status === '0' || status === 0 || status === false) {
+      //   if (!reject_reason_id && !reject_reason) {
+      //     err++;
+      //     errors.reject_reason_id = 'Reject reason is required';
+      //     console.log("Missing reject reason for rejection");
+      //   }
+      // }
+
+      if (err > 0) {
+        console.log("Validation failed with errors:", errors);
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+      } else {
+        console.log("Validation passed");
+        next();
+      }
+    } catch (err) {
+      console.error("Error in variant_approve_check:", err);
       logError(err);
       res
         .status(400)

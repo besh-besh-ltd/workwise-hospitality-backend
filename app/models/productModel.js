@@ -2265,6 +2265,37 @@ FROM (
       }
     });
   },
+  checkVariantById: async (variantId, created_by = null) => {
+    return new Promise(function (resolve, reject) {
+      // Changes by Agnij May 02, 2025 [Improved product/variant lookup with better error handling]
+      try {
+        if (!variantId) {
+          resolve([]);
+          return;
+        }
+        
+        // First check in the product table
+        db.any(
+          `SELECT * FROM tbl_product_variant WHERE id = $1`,
+          [variantId]
+        )
+          .then(function (productData) {
+            if (productData && productData.length > 0) {
+              resolve(productData);
+            } else {
+              resolve([]);
+            }
+          })
+          .catch(function (err) {
+            // Error in product query
+            resolve([]);
+          });
+      } catch (error) {
+        console.error("Exception in checkVariantById:", error);
+        resolve([]); // Return empty array on exception
+      }
+    });
+  },
   productDetails: async (productId) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -2330,7 +2361,7 @@ WHERE tbl_product.name = $1`,
     return new Promise(function (resolve, reject) {
       let dynamicWhere = ``;
       if (vendorId) {
-        dynamicWhere = `AND PD.id IN (SELECT product_id FROM tbl_product_variant)`;
+        dynamicWhere = `AND PVVM.vendor_id = ${vendorId}`;
       }
       db.any(
         `SELECT PV.*,
@@ -2338,18 +2369,12 @@ WHERE tbl_product.name = $1`,
         ARRAY
         (SELECT json_build_object('category_name', tc.title,'id',pc.category_id )
           FROM tbl_product_categories pc
-          LEFT JOIN tbl_category tc ON pc.category_id = tc.id   WHERE  PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
-            ARRAY
-          (SELECT json_build_object('product_image', tbl_product_images.new_image_name,'is_featured',tbl_product_images.is_featured,
-          'product_image_url',  CASE
-          WHEN tbl_product_images.new_image_name IS NULL THEN
-          NULL
-          ELSE tbl_product_images.new_image_name
-          END)
-            FROM tbl_product_images WHERE PD.id = tbl_product_images.product_id ) AS "product_images"
+          LEFT JOIN tbl_category tc ON pc.category_id = tc.id 
+          WHERE  PD.id = pc.product_id ORDER BY pc.id) AS "product_categories"
             FROM tbl_product_variant PV
             JOIN tbl_product PD ON PD.id = PV.product_id
-            WHERE PV.status = 1 And PV.id = $1 ${dynamicWhere}`,
+            LEFT JOIN tbl_product_variant_vendor_mapping PVVM ON PVVM.product_variant_id = PV.id
+            WHERE PV.status = 1 AND PV.id = $1 ${dynamicWhere}`,
         [productId]
       )
         .then(function (data) {
@@ -3391,10 +3416,8 @@ getProductTechSpecByID: async (productId) => {
         }
 
         // Handle approval status filter - proper null/undefined checking
-        if (is_approve !== null && is_approve !== undefined) {
-          conditions.push(`v.is_approve = $${paramIndex}`);
-          params.push(is_approve);
-          paramIndex++;
+        if (is_approve !== null && is_approve !== undefined && is_approve.trim() != '') {
+          conditions.push(`${is_approve == '0' ? 'NOT' : ''} m.is_approved`);
         }
 
         // Build WHERE clause
@@ -3433,7 +3456,7 @@ getProductTechSpecByID: async (productId) => {
             m.status,
             m.created_at AS mapped_at,
             v.name AS variant_name,
-            v.is_approve,
+            m.is_approved AS is_approve,
             v.reject_reason_id,
             rr.reject_reason,
             v.created_by,
@@ -3623,6 +3646,25 @@ getProductTechSpecByID: async (productId) => {
         })
         .catch(function (err) {
           console.error("Error updating product variant:", err);
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  updateVariantMappingByData: async (variantObj, mappingId) => {
+    return new Promise(function (resolve, reject) {
+      const condition = ` WHERE id = $1 RETURNING id`;
+      const values = [mappingId];
+      
+      let query = pgp().helpers.update(variantObj, null, 'tbl_product_variant_vendor_mapping') + condition;
+
+      db.one(query, values)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error updating product variant vendor mapping:", err);
           let error = new Error(err);
           reject(error);
         });
@@ -3926,6 +3968,12 @@ getProductTechSpecByID: async (productId) => {
           SELECT COUNT(DISTINCT pv.id) as total_count
           FROM 
             tbl_product_variant pv
+          JOIN 
+            tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
           ${whereClause}
         `;
 
@@ -3953,6 +4001,7 @@ getProductTechSpecByID: async (productId) => {
             tbl_product_categories pc ON p.id = pc.product_id
           LEFT JOIN 
             tbl_category c ON pc.category_id = c.id
+
           ${whereClause}
           GROUP BY 
             pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,

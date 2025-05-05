@@ -88,6 +88,14 @@ productRoutes.put(
   validateDbBody.product_approve_check,
   productController.approveProduct
 );
+productRoutes.put(
+  '/accept-variant/:id',
+  passportSignIn,
+  validateParam(schemas.id),
+  // validateBody(schemas.product_approval),
+  validateDbBody.variant_approve_check,
+  productController.approveVariant
+);
 productRoutes.post(
   '/bulk-product-create',
   passportSignIn,
