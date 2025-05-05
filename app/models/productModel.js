@@ -2243,7 +2243,6 @@ FROM (
           return;
         }
         
-        
         // First check in the product table
         db.any(
           `SELECT * FROM tbl_product WHERE id = $1`,
@@ -2253,50 +2252,12 @@ FROM (
             if (productData && productData.length > 0) {
               resolve(productData);
             } else {
-              // If not found as a product, check if it's a variant
-              db.any(
-                `SELECT pv.*, p.name as product_name 
-                FROM tbl_product_variant pv 
-                LEFT JOIN tbl_product p ON pv.product_id = p.id 
-                WHERE pv.id = $1`,
-                [productId]
-              )
-                .then(function (variantData) {
-                  if (variantData && variantData.length > 0) {
-                    resolve(variantData);
-                  } else {
-                    resolve([]);
-                  }
-                })
-                .catch(function (err) {
-                  // Error in variant query
-                  console.error("Error checking variant data:", err);
-                  resolve([]); // Return empty array instead of rejecting
-                });
+              resolve([]);
             }
           })
           .catch(function (err) {
             // Error in product query
-            console.error("Error checking product data:", err);
-            
-            // Attempt to check variants as a fallback
-            db.any(
-              `SELECT pv.*, p.name as product_name 
-              FROM tbl_product_variant pv 
-              LEFT JOIN tbl_product p ON pv.product_id = p.id 
-              WHERE pv.id = $1`,
-              [productId]
-            )
-              .then(function (variantData) {
-                if (variantData && variantData.length > 0) {
-                  resolve(variantData);
-                } else {
-                  resolve([]);
-                }
-              })
-              .catch(function (err) {
-                resolve([]);
-              });
+            resolve([]);
           });
       } catch (error) {
         console.error("Exception in check_product:", error);
@@ -3965,14 +3926,6 @@ getProductTechSpecByID: async (productId) => {
           SELECT COUNT(DISTINCT pv.id) as total_count
           FROM 
             tbl_product_variant pv
-          JOIN 
-            tbl_product p ON pv.product_id = p.id
-          LEFT JOIN 
-            tbl_product_categories pc ON p.id = pc.product_id
-          LEFT JOIN 
-            tbl_category c ON pc.category_id = c.id
-          LEFT JOIN
-            tbl_reject_reason trr ON pv.reject_reason_id = trr.id
           ${whereClause}
         `;
 
@@ -3990,7 +3943,6 @@ getProductTechSpecByID: async (productId) => {
             pv.updated_by,
             pv.is_deleted,
             pv.reject_reason_id,
-            trr.reject_reason,
             p.name as product_name,
             ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
           FROM 
@@ -4001,18 +3953,18 @@ getProductTechSpecByID: async (productId) => {
             tbl_product_categories pc ON p.id = pc.product_id
           LEFT JOIN 
             tbl_category c ON pc.category_id = c.id
-          LEFT JOIN
-            tbl_reject_reason trr ON pv.reject_reason_id = trr.id
           ${whereClause}
           GROUP BY 
             pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
             pv.created_at, pv.updated_at, pv.created_by, pv.updated_by, 
-            pv.is_deleted, pv.reject_reason_id, trr.reject_reason, p.name
+            pv.is_deleted, pv.reject_reason_id, p.name
           ORDER BY 
             pv.created_at DESC
           LIMIT $${paramIndex}
           OFFSET $${paramIndex + 1}
         `;
+
+        console.log("QUERY --------- ", dataQuery)
         
         // Add limit and offset parameters for data query
         const dataParams = [...params, limit, offset];
