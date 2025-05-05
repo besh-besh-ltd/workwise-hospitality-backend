@@ -3901,7 +3901,10 @@ getProductTechSpecByID: async (productId) => {
 
         // Handle search term using ILIKE
         if (search_term && search_term.trim() !== '') {
-          conditions.push(`(pv.name ILIKE $${paramIndex} OR p.name ILIKE $${paramIndex})`);
+          conditions.push(`(
+            to_tsvector('english', CONCAT(PV.name, ' - ', P.name)) @@ plainto_tsquery('english', '${search_term}')
+            OR similarity(CONCAT(PV.name, ' - ', P.name), '${search_term}') > 0.1
+          )`);
           params.push(`%${search_term.trim()}%`);
           paramIndex++;
         }
@@ -3992,6 +3995,10 @@ getProductTechSpecByID: async (productId) => {
             pv.is_deleted,
             pv.reject_reason_id,
             p.name as product_name,
+            ${search_term ? `
+              similarity(CONCAT(PV.name, ' - ', P.name), '${search_term}') AS similarity_score,
+              ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', P.name)), plainto_tsquery('english', '${search_term}')) AS rank,
+            ` : ''}
             ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
           FROM 
             tbl_product_variant pv
@@ -4007,8 +4014,8 @@ getProductTechSpecByID: async (productId) => {
             pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
             pv.created_at, pv.updated_at, pv.created_by, pv.updated_by, 
             pv.is_deleted, pv.reject_reason_id, p.name
-          ORDER BY 
-            pv.created_at DESC
+
+          ${search_term ? `ORDER BY rank DESC, similarity_score DESC, PV.name ASC` : `ORDER BY PV.created_at DESC`} 
           LIMIT $${paramIndex}
           OFFSET $${paramIndex + 1}
         `;

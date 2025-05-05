@@ -3347,7 +3347,7 @@ const productController = {
     try {
       // Changes by Agnij July 25, 2025 [Added support for changing parent product and auto-disapproval]
       const { variant_id } = req.params;
-      const { variant_name, name, description, product_id, is_approve } = req.body;
+      const { variant_name, name, product_id, is_approve } = req.body;
       
       // Get the variant name from either variant_name or name field
       const variantNameValue = variant_name || name;
@@ -3389,11 +3389,6 @@ const productController = {
       // Only add name if it was provided
       if (variantNameValue) {
         variantObj.name = variantNameValue;
-      }
-      
-      // Include description if provided
-      if (description !== undefined) {
-        variantObj.description = description;
       }
       
       // Include product_id if provided
