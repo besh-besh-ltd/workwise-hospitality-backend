@@ -153,38 +153,49 @@ export const rfqSchemas = {
       .allow(null)
       .allow('')
       .custom((value, helpers) => {
-        if (value) {
-          const selectedDate = new Date(value);
-          selectedDate.setHours(0, 0, 0, 0); // Set to beginning of day for proper comparison
-          
-          if (selectedDate < todayForComparison) {
+
+        // mukul: 04/may/2025 : Check if reverse_auction is 1 and bid_end_date is present, and ra_start_date is after bid end date only
+        const { reverse_auction, bid_end_date } = helpers.state.ancestors[0];
+  
+        if (value && reverse_auction === 1 && bid_end_date) {
+          const raStart = new Date(value);
+          const bidEnd = new Date(bid_end_date);
+    
+          if (raStart.toDateString() === bidEnd.toDateString() || raStart < bidEnd) {
             return helpers.message(
-              `ra_start_date must be today (${todayString}) or later`
+              'Reverse Auction Start Date must be after the Procurement End Date'
             );
           }
+    
+          const now = new Date();
+          if (raStart < now) {
+            return helpers.message('ra_start_date cannot be in the past');
+          }
         }
+    
         return value;
       }),
+
     ra_end_date: Joi.string()
       .optional()
       .allow(null)
       .allow('')
       .custom((value, helpers) => {
-        const { bid_end_date, ra_start_date } = helpers.state.ancestors[0];
-        
-        if (value && new Date(value) > bid_end_date) {
+        const { ra_start_date } = helpers.state.ancestors[0];
+    
+        // mukul: 04/may/2025 : Check if reverse_auction is 1 and ra_start_date is present, and ra_end_date is after ra_start_date only with 60min gap
+        if (value && ra_start_date) {
+          const raEnd = new Date(value);
+          const raStart = new Date(ra_start_date);
+    
+          const diffInMinutes = (raEnd - raStart) / (1000 * 60); // convert ms to minutes
+    
+          if (diffInMinutes < 60) {
           return helpers.message(
-            `Please Select A valid Window for Reverse Auction End Date`
+          'Reverse Auction End Date & Time must be at least 60 minutes after the Reverse Auction Start Time.'
           );
         }
-        
-        
-        if (value && ra_start_date && new Date(value) <= new Date(ra_start_date)) {
-          return helpers.message(
-            `ra_end_date must be after ra_start_date`
-          );
-        }
-        
+    }
         return value;
       }),
     location: Joi.string().optional().allow('').allow(null),
