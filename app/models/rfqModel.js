@@ -1896,6 +1896,7 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
         AND p.is_deleted = 0 
         AND p.is_review = 0 
         AND p.is_approve = 1 
+        AND pv.is_approve = 1
         AND pvvm.id IS NOT NULL
         AND (
           to_tsvector('english', CONCAT(PV.name, ' - ', P.name)) @@ plainto_tsquery('english', $1) 
