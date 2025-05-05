@@ -3519,7 +3519,7 @@ const productController = {
       const result = await productModel.createProductVariantVendorMapping(mappingObj);
       
       // Update variant to disapproved state by default
-      await productModel.updateProductVariantApproval(variantId, 0);
+      // await productModel.updateProductVariantApproval(variantId, 0);
       
       return res.status(200).json({
         status: 1,
