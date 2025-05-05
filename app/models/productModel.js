@@ -1476,6 +1476,7 @@ const productModel = {
       FROM tbl_product PD
       JOIN tbl_users tu ON tu.id = PD.created_by
       WHERE PD.status = 1 
+      AND PD.created_by IN (1, 111) -- REMOVE WHEN PRODUCT TABLE IS CLEANED
       ${dynamicQuery}
 
       ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 

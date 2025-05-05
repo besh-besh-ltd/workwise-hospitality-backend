@@ -1891,14 +1891,11 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
       JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
       LEFT JOIN tbl_product_images img ON p.id = img.product_id
       JOIN tbl_category c ON pc.category_id = c.id
-      JOIN tbl_users u ON u.id = p.created_by
       ${approved_by_id ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
       WHERE p.status = 1 
         AND p.is_deleted = 0 
         AND p.is_review = 0 
         AND p.is_approve = 1 
-        AND u.is_deleted = 0 
-        AND u.status = 1 
         AND pvvm.id IS NOT NULL
         AND (
           to_tsvector('english', CONCAT(PV.name, ' - ', P.name)) @@ plainto_tsquery('english', $1) 
