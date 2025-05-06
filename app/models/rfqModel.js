@@ -673,12 +673,14 @@ deleteProductFilesByIds: async (rfqProductIds) => {
   getRfqById: async (id, user_id, user_type) => {
     // First, let's directly check the auction dates in the database
     try {
-      const dateCheckQuery = `
-        SELECT id, reverse_auction, ra_start_date, ra_end_date 
-        FROM tbl_rfq 
-        WHERE id = $1
-      `;
-      const dateCheckResult = await db.query(dateCheckQuery, [id]);
+
+      //  unused code written by
+      // const dateCheckQuery = `
+      //   SELECT id, reverse_auction, ra_start_date, ra_end_date 
+      //   FROM tbl_rfq 
+      //   WHERE id = $1
+      // `;
+      // const dateCheckResult = await db.query(dateCheckQuery, [id]);
       
     } catch (error) {
       console.error("Error checking auction dates:", error);
@@ -861,9 +863,11 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             'No vendor finalized yet'
           ),
             ${
-              user_type == 3
+              // Changes by Agnij 2025-05-05 [Modified to include both user_type 2 and 3]
+              user_type == 2 || user_type == 3
         ? `-- Changes made by Imtiaj 28/09/2024 [Added logic to get the lowest_total from quotes for each unique product with the specified RFQ_id.] 
                 'lowest_quotation', (
+                        ${user_type == 3 ? `
                         -- Check if this product has technical evaluation enabled (has clauses)
                         WITH tech_eval AS (
                             SELECT TE.id AS tech_eval_id
@@ -880,7 +884,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                             JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
                             WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
                             LIMIT 1
-                        )
+                        )` : ``}
                         -- Changes made by Agnij 28/04/2025 [Added logic to handle reverse auction timing conditions and visibility rules for lowest quote prices]
                         SELECT json_build_object(
                             'quote_id', TQI.quote_id,
@@ -892,6 +896,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                         AND TQI.rfq_id = RFQ_P.rfq_id  -- Ensure you're getting quotes for the specific RFQ
                         AND TQI.total_price > 0 
                         AND RFQ.reverse_auction = 1
+                        ${user_type == 3 ? `
                         -- Apply technical evaluation filtering if enabled for this product
                         AND (
                             -- If no technical evaluation exists for this product OR
@@ -911,17 +916,13 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                                     (SELECT COUNT(*) FROM tech_accepted) > 0
                                 )
                             )
-                        )
+                        )` : ``}
                         -- Timing conditions for when lowest quote should be visible
                         AND (
                             -- Show lowest quote if current time is within auction period
-                            (
-                                RFQ.ra_start_date IS NOT NULL 
-                                AND RFQ.ra_end_date IS NOT NULL
-                                AND CURRENT_TIMESTAMP BETWEEN 
-                                    CAST(RFQ.ra_start_date AS TIMESTAMP) 
-                                    AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
-                            )
+                          CURRENT_TIMESTAMP BETWEEN 
+                            CAST(RFQ.ra_start_date AS TIMESTAMP) 
+                            AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
                             OR
                             -- If reverse auction starts after RFQ ends
                             (
@@ -946,6 +947,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                         ORDER BY TQI.total_price ASC  -- Get the lowest total_price
                         LIMIT 1  -- Limit to the lowest price for that product and variant
                     ),
+                    ${user_type == 3 ? `
                     -- Get technical evaluation status for this product/vendor
                     'tech_evaluation_status', (
                         WITH tech_eval AS (
@@ -968,7 +970,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                                 )
                             )
                         )
-                    ),
+                    ),` : ``}
                     `
         : ''
       }
@@ -993,10 +995,9 @@ deleteProductFilesByIds: async (rfqProductIds) => {
        
     ) AS "products"
     
-    FROM tbl_rfq RFQ WHERE id=$1
-    ORDER BY RFQ.id DESC
-    LIMIT 1;`
-;
+FROM tbl_rfq RFQ WHERE id=$1
+ORDER BY RFQ.id DESC
+LIMIT 1;`;
 
 
     return new Promise(function (resolve, reject) {
@@ -2905,20 +2906,33 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     return token; // Return the successfully inserted token
   },
   getVendorRfqToken: async (vendorId, rfqNumber) => {
+    // Ensure both parameters are valid integers
+    const safeVendorId = parseInt(vendorId, 10);
+    const safeRfqNumber = parseInt(rfqNumber, 10);
+    
+    // Validate parameters
+    if (isNaN(safeVendorId) || isNaN(safeRfqNumber)) {
+        console.error('Invalid parameters for getVendorRfqToken:', { vendorId, rfqNumber });
+        return Promise.reject(new Error(`Invalid parameters: vendorId=${vendorId}, rfqNumber=${rfqNumber}`));
+    }
+    
+    console.log('Querying token with:', { vendorId: safeVendorId, rfqNumber: safeRfqNumber });
+    
     return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT token FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id = $1 AND rfq_no = $2;`,
-        [vendorId, rfqNumber]
-      )
+        db.any(
+            `SELECT token FROM tbl_vendor_rfq_tokens_non_login WHERE vendor_id = $1 AND rfq_no = $2;`,
+            [safeVendorId, safeRfqNumber]
+        )
         .then(function (data) {
-          resolve(data);
+            console.log('Token data:', data, safeVendorId, safeRfqNumber);
+            resolve(data);
         })
         .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
+            let error = new Error(err);
+            reject(error);
         });
-    })
-  },
+    });
+ },
   updateQuoteItemWithHistory: async (quoteId, product, quoteExists) => {
     return new Promise(async (resolve, reject) => {
       try {
@@ -5029,6 +5043,50 @@ searchVariantProducts: async (search_key) => {
     // Return empty array instead of throwing error to avoid breaking the API response
     return [];
   }
+},
+
+getProjectNameById : async (project_id) =>{
+  return new Promise(function (resolve, reject) {
+    const query = `SELECT name FROM tbl_projects WHERE id = $1`;
+    db.query(query, [project_id])
+      .then(data => resolve(data))
+      .catch(err => reject(new Error(err)));
+  });
+},
+getVendorDetailsByUserId: async (user_id) => {
+  return new Promise((resolve, reject) => {
+    const query = `
+      SELECT 
+        u.name AS vendor_name,
+        u.email AS vendor_email,
+        u.mobile AS vendor_mobile
+      FROM tbl_users u
+      WHERE u.id = $1
+    `;
+
+    db.query(query, [user_id])
+      .then((rows) => {
+        console.log("QUERY RESULT:", rows);
+
+        // Since rows is a direct array
+        if (!rows || rows.length === 0) {
+          console.error("DEBUG: No vendor found for user_id:", user_id);
+          return reject(new Error("Vendor not found"));
+        }
+
+        const vendor = {
+          name: rows[0].vendor_name,
+          email: rows[0].vendor_email,
+          mobile: rows[0].vendor_mobile
+        };
+
+        resolve(vendor);
+      })
+      .catch((err) => {
+        console.error("DB QUERY FAILED:", err);
+        reject(new Error("Database query failed"));
+      });
+  });
 },
 
 // Changes by Agnij May 01, 2025 [Added method to search for variant vendors]
