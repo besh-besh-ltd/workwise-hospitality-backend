@@ -2332,26 +2332,75 @@ const rfqController = {
           const raEndDate = rfqDetails[0].ra_end_date ? new Date(rfqDetails[0].ra_end_date) : null;
           const isReverseAuction = rfqDetails[0].reverse_auction === 1;
 
-          // Check if bidding period is over (not in reverse auction mode)
-          if (bidEndDate && now > bidEndDate && (!isReverseAuction || !raStartDate)) {
+          // Create end of day date for bid end date (to match frontend logic)
+          const bidEndDateEndOfDay = bidEndDate ? new Date(bidEndDate.getFullYear(), bidEndDate.getMonth(), bidEndDate.getDate(), 23, 59, 59, 999) : null;
+
+          // Check if RFQ is closed (highest priority)
+          if (rfqDetails[0].status === 2) {
             return res
               .status(400)
               .json({
                 status: 3,
-                message: 'The bidding period for this RFQ has ended!'
+                message: 'RFQ is Closed'
               })
               .end();
           }
 
-          // If in reverse auction mode, check if we're past the reverse auction end date
-          if (isReverseAuction && raEndDate && now > raEndDate) {
-            return res
-              .status(400)
-              .json({
-                status: 3,
-                message: 'The reverse auction period for this RFQ has ended!'
-              })
-              .end();
+          // Check if reverse auction is active (second priority)
+          const isReverseAuctionActive = isReverseAuction && raStartDate && raEndDate && now >= raStartDate && now <= raEndDate;
+
+          // If reverse auction is active, allow quote submission
+          if (isReverseAuctionActive) {
+            // Continue with quote submission - this is allowed
+          }
+          // Otherwise check other conditions
+          else {
+            // Check if all products are finalized
+            const productsFinalized = await rfqModel.checkAllProductsFinalized(rfq_id, user.id);
+            if (productsFinalized) {
+              return res
+                .status(400)
+                .json({
+                  status: 3,
+                  message: 'All Products are Finalized'
+                })
+                .end();
+            }
+
+            // Check if past bid end date
+            if (bidEndDateEndOfDay && now > bidEndDateEndOfDay) {
+              // Different messages based on reverse auction status
+              let message = 'Bidding Period has Ended';
+
+              if (isReverseAuction) {
+                if (raEndDate && now > raEndDate) {
+                  message = 'Reverse Auction has Ended';
+                } else if (raStartDate && now < raStartDate) {
+                  message = 'Bidding Period Ended (Reverse Auction Pending)';
+                } else if (!raStartDate || !raEndDate) {
+                  message = 'Bidding Period Ended (RA Dates Invalid)';
+                }
+              }
+
+              return res
+                .status(400)
+                .json({
+                  status: 3,
+                  message: message
+                })
+                .end();
+            }
+
+            // Check if RFQ has no bid end date
+            if (!bidEndDate) {
+              return res
+                .status(400)
+                .json({
+                  status: 3,
+                  message: 'RFQ Not Open for Bidding'
+                })
+                .end();
+            }
           }
 
           // Check if technical evaluation is required for any products and if vendor is accepted
@@ -5001,28 +5050,63 @@ const rfqController = {
       const raEndDate = rfqDetails[0].ra_end_date ? new Date(rfqDetails[0].ra_end_date) : null;
       const isReverseAuction = rfqDetails[0].reverse_auction === 1;
 
-      // Check if bidding period is over and we're not in reverse auction mode
-      if (bidEndDate && now > bidEndDate && !isReverseAuction) {
+      // Create end of day date for bid end date (to match frontend logic)
+      const bidEndDateEndOfDay = bidEndDate ? new Date(bidEndDate.getFullYear(), bidEndDate.getMonth(), bidEndDate.getDate(), 23, 59, 59, 999) : null;
+
+      // Check if RFQ is closed (highest priority)
+      if (rfqDetails[0].status === 2) {
         return res.status(400).json({
           status: 3,
-          message: 'The bidding period for this RFQ has ended!'
+          message: 'RFQ is Closed'
         });
       }
 
-      // If in reverse auction mode, check if we're in the valid period
-      if (isReverseAuction) {
-        // If before auction start, update is allowed (normal bidding period)
-        if (raStartDate && now < raStartDate) {
-          // This is fine, within normal bidding period
-        }
-        // If auction started but past end date, updates not allowed
-        else if (raEndDate && now > raEndDate) {
+      // Check if reverse auction is active (second priority)
+      const isReverseAuctionActive = isReverseAuction && raStartDate && raEndDate && now >= raStartDate && now <= raEndDate;
+
+      // If reverse auction is active, allow quote submission
+      if (isReverseAuctionActive) {
+        // Continue with quote submission - this is allowed
+      }
+      // Otherwise check other conditions
+      else {
+        // Check if all products are finalized
+        const productsFinalized = await rfqModel.checkAllProductsFinalized(quoteExists[0].rfq_id, user.id);
+        if (productsFinalized) {
           return res.status(400).json({
             status: 3,
-            message: 'The reverse auction period for this RFQ has ended!'
+            message: 'All Products are Finalized'
           });
         }
-        // Otherwise we're in the auction period, updates are allowed
+
+        // Check if past bid end date
+        if (bidEndDateEndOfDay && now > bidEndDateEndOfDay) {
+          // Different messages based on reverse auction status
+          let message = 'Bidding Period has Ended';
+
+          if (isReverseAuction) {
+            if (raEndDate && now > raEndDate) {
+              message = 'Reverse Auction has Ended';
+            } else if (raStartDate && now < raStartDate) {
+              message = 'Bidding Period Ended (Reverse Auction Pending)';
+            } else if (!raStartDate || !raEndDate) {
+              message = 'Bidding Period Ended (RA Dates Invalid)';
+            }
+          }
+
+          return res.status(400).json({
+            status: 3,
+            message: message
+          });
+        }
+
+        // Check if RFQ has no bid end date
+        if (!bidEndDate) {
+          return res.status(400).json({
+            status: 3,
+            message: 'RFQ Not Open for Bidding'
+          });
+        }
       }
 
       let paymentTermAndCommentChanges = false;
