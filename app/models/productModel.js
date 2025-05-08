@@ -621,7 +621,7 @@ const productModel = {
     return new Promise(function (resolve, reject) {
       // Construct the dynamic SQL query
       const { ColumnSet } = pgp().helpers;
-      const cs = new ColumnSet(['product_id', 'vendor_approve_id'], {
+      const cs = new ColumnSet(['product_id', 'variant_vendor_mapping_id', 'vendor_approve_id'], {
         table: 'tbl_vendorapprove_product_mapping'
       });
       const query = pgp().helpers.insert(productApproveArray, cs);
@@ -699,41 +699,26 @@ const productModel = {
   },
   updateVendorProduct: async (productObj) => {
     return new Promise(function (resolve, reject) {
+      // Changes by Agnij May 02, 2025 [Fixed query to remove columns that don't exist in database]
       db.one(
         `update 
 				tbl_product set 
 				description = ($1),
-				manufacturer = ($2),
-				availability = ($3),
-				slug = ($4),
-				sku = ($5),
-				status = ($6),
-				updated_by = ($7),
-				vendor = ($8),
-        name = ($9),
-        qap_new_file_name = ($11),
-        qap_original_file_name = ($12),
-        tds_new_file_name = ($13),
-        tds_original_file_name = ($14),
-        is_featured = ($15)
-       	where id=($10) 
+				slug = ($2),
+				sku = ($3),
+				status = ($4),
+				updated_by = ($5),
+        name = ($6)
+       	where id=($7) 
         RETURNING id`,
         [
           productObj.description,
-          productObj.manufacturer,
-          productObj.availability,
           productObj.slug,
           productObj.sku,
           productObj.status,
           productObj.updated_by,
-          productObj.vendor,
           productObj.name,
-          productObj.productId,
-          productObj.qap_new_file_name,
-          productObj.qap_original_file_name,
-          productObj.tds_new_file_name,
-          productObj.tds_original_file_name,
-          productObj.is_featured
+          productObj.productId
         ]
       )
         .then(function (data) {
@@ -746,11 +731,54 @@ const productModel = {
         });
     });
   },
+  getProductByVariant: async (variantId) => {
+    try {
+      let q = `
+      SELECT P.id 
+      FROM tbl_product_variant PV
+      JOIN tbl_product P ON P.id = PV.product_id
+      WHERE PV.id = $1
+      LIMIT 1;
+      `
+
+      return await db.any(q, [variantId])
+    } catch (e) {
+      throw e;
+    }
+  },
+  getVariantsByProductId: async (productId) => {
+    try {
+      let q = `
+      SELECT 
+      pv.id,
+      pv.name,
+      pv.created_by,
+      pv.product_id
+
+      FROM tbl_product_variant pv
+      WHERE pv.product_id = $1
+      `
+
+      return await db.any(q, [productId]);
+    } catch (e) {
+      throw e;
+    }
+  },
   createProductveriants: async (variantObj) => {
     return new Promise(function (resolve, reject) {
+      // Update object keys to match table columns
+      // Changes by Agnij May 02, 2025 [Added is_approve field with default 0]
+      const updatedObj = {
+        product_id: variantObj.product_id,
+        name: variantObj.variant_name || variantObj.name,
+        status: 1,
+        is_approve: 0, // Set default to disapproved
+        created_at: new Date()
+      };
+      
       // Construct the dynamic SQL query
       const query =
-        pgp().helpers.insert(variantObj, null, 'tbl_product_variants') +
+        pgp().helpers.insert(updatedObj, null, 'tbl_product_variant') +
         ' RETURNING id';
 
       db.one(query)
@@ -766,7 +794,7 @@ const productModel = {
   deleteProductVariants: async (productId) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `DELETE FROM tbl_product_variants
+        `DELETE FROM tbl_product_variant
         WHERE product_id = $1`,
         [productId]
       )
@@ -777,6 +805,22 @@ const productModel = {
           reject(err);
         });
     });
+  },
+  deletePreviousApprovedByMapping: async (vendorId, variantId) => {
+    try {
+      let q = `
+      DELETE FROM tbl_vendorapprove_product_mapping vapm
+      WHERE variant_vendor_mapping_id IN (
+        SELECT id FROM tbl_product_variant_vendor_mapping
+        WHERE product_variant_id = $1
+          AND vendor_id = $2
+      );
+      `
+
+      return await db.any(q, [variantId, vendorId])
+    } catch (e) {
+      throw e
+    };
   },
   createProductCategory: async (categoryObj) => {
     return new Promise(function (resolve, reject) {
@@ -905,19 +949,59 @@ const productModel = {
   },
   createProductVariant: async (variantObj) => {
     return new Promise(function (resolve, reject) {
-      // Construct the dynamic SQL query
-      const query =
-        pgp().helpers.insert(variantObj, null, 'tbl_variants') +
-        ' RETURNING id';
+      // Changes by Agnij April 30, 2025 [Fixed column names to match actual database schema]
+      try {
+        // Ensure we have all required fields with proper defaults
+        // Accept 'variant_name' from frontend but use 'name' for the database
+        if (!variantObj.product_id || (!variantObj.variant_name && !variantObj.name)) {
+          console.error("Missing required fields for variant creation:", variantObj);
+          return reject(new Error("Missing required fields: product_id and variant name are required"));
+        }
+        
+        // Set up all the fields with appropriate defaults
+        // Use variant_name from input if available, otherwise use name
+        const variantName = variantObj.variant_name || variantObj.name;
+        
+        // Changes by Agnij May 02, 2025 [Set is_approve to 0 by default]
+        const fields = {
+          product_id: variantObj.product_id,
+          name: variantName, // Database column is 'name'
+          status: variantObj.status !== undefined ? variantObj.status : 1,
+          is_deleted: variantObj.is_deleted !== undefined ? variantObj.is_deleted : 0,
+          is_review: variantObj.is_review !== undefined ? variantObj.is_review : 0,
+          is_approve: variantObj.is_approve !== undefined ? variantObj.is_approve : 0, // Changed default from 1 to 0
+          created_at: variantObj.created_at || new Date(),
+          updated_at: variantObj.updated_at || new Date(),
+          created_by: variantObj.created_by || null,
+          updated_by: variantObj.updated_by || null,
+          added_by: variantObj.added_by || null
+        };
 
-      db.one(query)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
+        
+        // Build column names and value placeholders for the insert query
+        const columns = Object.keys(fields).join(', ');
+        const placeholders = Object.keys(fields).map((_, i) => `$${i + 1}`).join(', ');
+        const values = Object.values(fields);
+
+        // Use explicit parameterized query for safety
+        const query = `
+          INSERT INTO tbl_product_variant(${columns}) 
+          VALUES(${placeholders}) 
+          RETURNING id
+        `;
+        
+        db.one(query, values)
+          .then(function (data) {
+            resolve({id: data.id});
+          })
+          .catch(function (err) {
+            console.error("Error creating product variant:", err);
+            reject(new Error(err.message || "Failed to create product variant"));
+          });
+      } catch (err) {
+        console.error("Exception in createProductVariant:", err);
+        reject(new Error(err.message || "Exception in createProductVariant"));
+      }
     });
   },
   getAttributeValue: async (id) => {
@@ -991,6 +1075,52 @@ const productModel = {
         });
     });
   },
+  checkVariantExists: async (
+    name,
+    vendorId = null,
+    variantId = null,
+    added_by = null
+  ) => {
+    return new Promise(function (resolve, reject) {
+      let dynamicQuery = '';
+      let joinQuery = '';
+      if (vendorId) {
+        joinQuery += `JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = PV.id `;
+        dynamicQuery += ` AND pvvm.vendor_id = ${vendorId}`;
+      }
+      if (variantId) {
+        dynamicQuery += ` AND PV.id != ${variantId}`;
+      }
+      if (added_by) {
+        joinQuery += `JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = PV.id `;
+        dynamicQuery += ` AND pvvm.created_by = ${added_by}`;
+      }
+      db.any(`SELECT * FROM tbl_product_variant PV WHERE LOWER(name) = $1 ${dynamicQuery}`, [
+        name.toLowerCase() // Convert name to lowercase before passing it
+    ])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  checkVariantExistsForVendor: async (vendorId, variantId) => {
+    try {
+      let q = `
+      SELECT pvvm.id
+      FROM tbl_product_variant_vendor_mapping pvvm
+      JOIN tbl_product_variant pv ON pv.id = pvvm.product_variant_id
+      WHERE pvvm.vendor_id = $1 AND pv.id = $2
+      `
+  
+      return db.any(q, [vendorId, variantId])
+    } catch (e) {
+      throw e;
+    }
+  },
   productExistForVendor: async (
     name,
     vendorId = null,
@@ -1015,7 +1145,6 @@ const productModel = {
         })
         .catch(function (err) {
           let error = new Error(err);
-          console.log("......",err);
           reject(error);
         });
     });
@@ -1131,7 +1260,11 @@ const productModel = {
   getApprovedByProduct: async (approveId) => {
     return new Promise(function (resolve, reject) {
       db.one(
-        `SELECT STRING_AGG(product_id::TEXT, ',') AS id_array FROM tbl_vendorapprove_product_mapping WHERE vendor_approve_id = $1`,
+        `SELECT STRING_AGG(pv.id::TEXT, ',') AS id_array 
+          FROM tbl_vendorapprove_product_mapping vpm 
+          JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.id = vpm.variant_vendor_mapping_id 
+          JOIN tbl_product_variant pv ON pv.id = pvvm.product_variant_id
+          WHERE vpm.vendor_approve_id = $1`,
         [approveId]
       )
         .then(function (data) {
@@ -1156,6 +1289,118 @@ const productModel = {
     dateTo,
     is_approve
   ) => {
+    // Changes by Agnij May 01, 2025 [Modified to return base products only, not variants]
+    return new Promise(function (resolve, reject) {
+      let dynamicQuery = '';
+      // Product name search with full-text search and similarity
+      if (productName && productName !== '') {
+        dynamicQuery += `
+          AND (
+            to_tsvector('english', CONCAT(PV.name, ' - ', PD.name)) @@ plainto_tsquery('english', '${productName}')
+            OR similarity(CONCAT(PV.name, ' - ', PD.name), '${productName}') > 0.1
+          )`;
+      }
+      if (filterProduct?.id_array) {
+        dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
+      }
+  
+      if (vendorId && vendorId !== '') {
+        dynamicQuery += `
+          AND EXISTS (
+            SELECT 1 FROM tbl_product_variant pv
+            JOIN tbl_product_variant_vendor_mapping pvm
+            ON pv.id = pvm.product_variant_id
+            WHERE pv.product_id = PD.id AND pvm.vendor_id = ${vendorId}
+          )`;
+      }
+      if (userId && userId !== '') {
+        dynamicQuery += `
+          AND EXISTS (
+            SELECT 1 FROM tbl_product_variant pv
+            JOIN tbl_product_variant_vendor_mapping pvm
+            ON pv.id = pvm.product_variant_id
+            WHERE pv.product_id = PD.id AND pvm.vendor_id = ${userId}
+          )`;
+      }
+      if (isFeatured && isFeatured !== '') {
+        dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
+      }
+      if (categoryId) {
+        dynamicQuery += ` AND EXISTS (
+          SELECT 1 FROM tbl_product_categories
+          WHERE tbl_product_categories.product_id = PD.id 
+          AND tbl_product_categories.category_id = ${categoryId}
+        )`;
+      }
+      if (dateFrom) {
+        dynamicQuery += ` AND DATE(PV.created_at) >= '${dateFrom}'`;
+      }
+      if (dateTo) {
+        dynamicQuery += ` AND DATE(PV.created_at) <= '${dateTo}'`;
+      }
+      if (is_approve !== null && is_approve !== undefined) {
+        dynamicQuery += ` AND PV.is_approve = ${is_approve}`;
+      }
+      
+      let q = `
+      SELECT 
+        PV.*, 
+        PD.name as product_name,
+        NULL AS vendor_name,
+        CONCAT(PV.name, ' - ', PD.name) AS unified_name,
+        ${productName ? `
+          similarity(CONCAT(PV.name, ' - ', PD.name), '${productName}') AS similarity_score,
+          ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', PD.name)), plainto_tsquery('english', '${productName}')) AS rank,
+        ` : ''}
+        ARRAY
+        (SELECT json_build_object('category_name', tc.title, 'id', tc.id)
+          FROM tbl_product_categories pc
+          LEFT JOIN tbl_category tc ON pc.category_id = tc.id
+          WHERE PD.id = pc.product_id ORDER BY pc.id
+        ) AS product_categories,
+        ARRAY
+        (SELECT json_build_object('id', pv.id, 'name', pv.name, 'product_id', pv.product_id, 'is_approve', pv.is_approve)
+          FROM tbl_product_variant pv
+          WHERE PD.id = pv.product_id
+        ) AS product_variants
+
+      FROM tbl_product_variant PV
+      JOIN tbl_product PD ON PD.id = PV.product_id
+      JOIN tbl_users tu ON tu.id = PD.created_by
+      WHERE PV.status = 1 
+      ${dynamicQuery}
+
+      ${productName ? `ORDER BY rank DESC, similarity_score DESC, CONCAT(PV.name, ' - ', PD.name) ASC` : `ORDER BY PV.created_at DESC`} 
+      LIMIT ${limit} OFFSET $1
+      `;
+
+      db.any(
+        q,
+        [offset]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  getMasterProductList: async (
+    limit,
+    offset,
+    vendorId,
+    productName,
+    filterProduct,
+    isFeatured,
+    userId,
+    categoryId,
+    dateFrom,
+    dateTo,
+    is_approve
+  ) => {
+    // Changes by Agnij May 01, 2025 [Modified to return base products only, not variants]
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       // Product name search with full-text search and similarity
@@ -1169,13 +1414,26 @@ const productModel = {
       if (filterProduct?.id_array) {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
       }
-      if (vendorId && vendorId != '') {
-        dynamicQuery += ` AND PD.created_by = ${vendorId}`;
+  
+      if (vendorId && vendorId !== '') {
+        dynamicQuery += `
+          AND EXISTS (
+            SELECT 1 FROM tbl_product_variant pv
+            JOIN tbl_product_variant_vendor_mapping pvm
+            ON pv.id = pvm.product_variant_id
+            WHERE pv.product_id = PD.id AND pvm.vendor_id = ${vendorId}
+          )`;
       }
-      if (userId && userId != '') {
-        dynamicQuery += ` AND PD.added_by = ${userId}`;
+      if (userId && userId !== '') {
+        dynamicQuery += `
+          AND EXISTS (
+            SELECT 1 FROM tbl_product_variant pv
+            JOIN tbl_product_variant_vendor_mapping pvm
+            ON pv.id = pvm.product_variant_id
+            WHERE pv.product_id = PD.id AND pvm.vendor_id = ${userId}
+          )`;
       }
-      if (isFeatured && isFeatured != '') {
+      if (isFeatured && isFeatured !== '') {
         dynamicQuery += ` AND PD.is_featured = '${isFeatured}'`;
       }
       if (categoryId) {
@@ -1198,31 +1456,31 @@ const productModel = {
       let q = `
       SELECT 
         PD.*, 
-        USERS.name as vendor_name,
+        NULL AS vendor_name,
         ${productName ? `
           similarity(PD.name, '${productName}') AS similarity_score,
           ts_rank_cd(to_tsvector('english', PD.name), plainto_tsquery('english', '${productName}')) AS rank,
         ` : ''}
         ARRAY
-        (SELECT json_build_object('category_name', tc.title,'id',tc.id )
+        (SELECT json_build_object('category_name', tc.title, 'id', tc.id)
           FROM tbl_product_categories pc
           LEFT JOIN tbl_category tc ON pc.category_id = tc.id
-          WHERE PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
-          ARRAY
-        (SELECT json_build_object('vendor_approve_name', tva.vendor_approve,'id',tva.id )
-          FROM tbl_vendorapprove_product_mapping tvpm 
-        LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
-        WHERE PD.id = tvpm.product_id) AS "product_approve_by",
+          WHERE PD.id = pc.product_id ORDER BY pc.id
+        ) AS product_categories,
         ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"
-            FROM tbl_product PD 
-            LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
-            WHERE USERS.is_deleted = 0 
-            AND PD.is_deleted = 0 
-            AND PD.is_review = 0 ${dynamicQuery}     
-        ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
-        LIMIT ${limit} OFFSET $1
+        (SELECT json_build_object('id', pv.id, 'name', pv.name, 'product_id', pv.product_id, 'is_approve', pv.is_approve)
+          FROM tbl_product_variant pv
+          WHERE PD.id = pv.product_id
+        ) AS product_variants
+
+      FROM tbl_product PD
+      JOIN tbl_users tu ON tu.id = PD.created_by
+      WHERE PD.status = 1 
+      AND PD.created_by IN (1, 111) -- REMOVE WHEN PRODUCT TABLE IS CLEANED
+      ${dynamicQuery}
+
+      ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`} 
+      LIMIT ${limit} OFFSET $1
       `;
 
       db.any(
@@ -1256,8 +1514,8 @@ const productModel = {
         LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
         WHERE PD.id = tvpm.product_id) AS "product_approve_by",
         ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"  
+          (SELECT json_build_object('id',pv.id,'name',pv.name,'product_id',pv.product_id)
+            FROM tbl_product_variant pv WHERE  PD.id = pv.product_id) AS "product_variants"  
           FROM tbl_product PD ${dynamicQuery}
         ORDER BY PD.name ASC`
       )
@@ -1284,10 +1542,10 @@ const productModel = {
         dynamicQuery += ` AND tbl_product.id IN (${filterProduct.id_array})`;
       }
       if (vendorId && vendorId != '') {
-        dynamicQuery += ` AND tbl_product.created_by = ${vendorId}`;
+        dynamicQuery += ` AND tbl_product.id IN (SELECT product_id FROM tbl_product_variant WHERE status = 1)`;
       }
       if (userId && userId != '') {
-        dynamicQuery += ` AND tbl_product.added_by = ${userId}`;
+        dynamicQuery += ` AND tbl_product.status = 1`;
       }
       if (isFeatured && isFeatured != '') {
         dynamicQuery += ` AND tbl_product.is_featured = '${isFeatured}'`;
@@ -1311,10 +1569,8 @@ const productModel = {
       
       db.any(
         `SELECT COUNT(*) as count FROM tbl_product
-         LEFT JOIN tbl_users ON tbl_product.created_by = tbl_users.id 
-         WHERE tbl_users.is_deleted = 0 
-         AND tbl_product.is_deleted = 0 
-         AND tbl_product.is_review = 0 ${dynamicQuery}`
+         LEFT JOIN tbl_users tu ON tbl_product.created_by = tu.id
+         WHERE tbl_product.status = 1 AND tu.user_type NOT IN (2, 3) ${dynamicQuery}`
       )
         .then(function (data) {
           resolve(data);
@@ -1345,7 +1601,7 @@ const productModel = {
         dynamicQuery += ` AND id IN (${filterProduct.id_array})`;
       }
       if (vendorId && vendorId != '') {
-        dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
+        dynamicQuery += ` AND PD.id IN (SELECT product_id FROM tbl_product_variant WHERE status = 1)`;
       }
 
       let q = `
@@ -1367,11 +1623,11 @@ const productModel = {
           LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
           WHERE PD.id = tvpm.product_id) AS "product_approve_by",
           ARRAY
-            (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-              FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"
+            (SELECT json_build_object('id',pv.id,'name',pv.name,'product_id',pv.product_id)
+              FROM tbl_product_variant pv WHERE  PD.id = pv.product_id) AS "product_variants"
               FROM tbl_product PD 
-              LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
-              WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 AND PD.is_review = 1 ${dynamicQuery}     
+              LEFT JOIN tbl_users USERS ON PD.id IN (SELECT product_id FROM tbl_product_variant WHERE status = 1) 
+              WHERE PD.status = 1 ${dynamicQuery}     
           ${productName ? `ORDER BY rank DESC, similarity_score DESC, PD.name ASC` : `ORDER BY PD.created_at DESC`}
           LIMIT ${limit} OFFSET $1
       `;
@@ -1404,12 +1660,12 @@ const productModel = {
         dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
       }
       if (vendorId && vendorId != '') {
-        dynamicQuery += ` AND PD.created_by = '${vendorId}'`;
+        dynamicQuery += ` AND PD.id IN (SELECT product_id FROM tbl_product_variant WHERE status = 1)`;
       }
       db.any(
         `select * from tbl_product PD
-      LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
-      WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 AND PD.is_review = 1 ${dynamicQuery}`
+        LEFT JOIN tbl_users USERS ON PD.id IN (SELECT product_id FROM tbl_product_variant WHERE status = 1)
+        WHERE PD.status = 1 ${dynamicQuery}`
       )
         .then(function (data) {
           resolve(data);
@@ -1647,10 +1903,6 @@ FROM (
     });
   },
   getProductDetail: async (item, product_name, cat_id, approve_by) => {
-    console.log('item--', item);
-    console.log('product_name--', product_name);
-    console.log('cat_id--', cat_id);
-    console.log('approve_by--', approve_by);
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (product_name && product_name != '') {
@@ -1837,36 +2089,46 @@ FROM (
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (productName && productName != '') {
-        dynamicQuery += ` AND PD.name ILIKE '%${productName}%'`;
+        dynamicQuery += ` AND PV.name ILIKE '%${productName}%'`;
       }
       if (filterProduct?.id_array) {
-        dynamicQuery += ` AND PD.id IN (${filterProduct.id_array})`;
+        dynamicQuery += ` AND PV.id IN (${filterProduct.id_array})`;
       }
       if (products && products.length > 0) {
-        dynamicQuery += `AND PD.id IN (${products})`;
+        dynamicQuery += `AND PV.id IN (${products.join(",")})`;
       }
-      db.any(
-        `SELECT PD.*,tva.vendor_approve,trr.reject_reason,
-        ARRAY
-        (SELECT json_build_object('category_name', tc.title,'id',tc.id )
-          FROM tbl_product_categories pc 
-          LEFT JOIN tbl_category tc ON pc.category_id = tc.id
-          WHERE PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
-          ARRAY
-        (SELECT json_build_object('vendor_approve_name', tva.vendor_approve,'id',tva.id )
-          FROM tbl_vendorapprove_product_mapping tvpm 
-        LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
-        WHERE PD.id = tvpm.product_id) AS "product_approve_by",
-        ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"  
-          FROM tbl_product PD 
-          LEFT JOIN tbl_vendor_approve tva ON PD.vendor_approved_by = tva.id
-           LEFT JOIN tbl_reject_reason trr ON PD.reject_reason_id = trr.id
-          WHERE PD.created_by = $2 AND PD.is_deleted = 0  AND PD.is_review = 0 ${dynamicQuery}
-        ORDER BY PD.created_at DESC LIMIT ${limit} OFFSET $1`,
-        [offset, vendorId]
-      )
+      db.any(`
+        SELECT 
+          PV.*,
+      
+          -- Product categories as array
+          ARRAY(
+            SELECT json_build_object('category_name', tc.title, 'id', tc.id)
+            FROM tbl_product_categories pc
+            LEFT JOIN tbl_category tc ON pc.category_id = tc.id
+            WHERE pc.product_id = PD.id
+            ORDER BY pc.id
+          ) AS product_categories,
+      
+          -- Vendor approvals as array
+          ARRAY(
+            SELECT json_build_object('vendor_approve_name', tva.vendor_approve, 'id', tva.id)
+            FROM tbl_vendorapprove_product_mapping tvpm
+            LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
+            WHERE tvpm.variant_vendor_mapping_id = pvvm.id
+          ) AS product_approve_by
+      
+        FROM tbl_product_variant PV
+      
+        JOIN tbl_product PD ON PD.id = PV.product_id
+        JOIN tbl_product_variant_vendor_mapping pvvm ON PV.id = pvvm.product_variant_id
+      
+        WHERE pvvm.vendor_id = $2
+        ${dynamicQuery}
+      
+        ORDER BY pvvm.created_at DESC
+        LIMIT ${limit} OFFSET $1
+      `, [offset, vendorId])      
         .then(function (data) {
           resolve(data);
         })
@@ -1879,14 +2141,17 @@ FROM (
   getVendorProductCount: async (vendorId, productName, filterProduct) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
+      let joinQuery = '';
       if (productName && productName != '') {
         dynamicQuery += ` AND name ILIKE '%${productName}%'`;
       }
       if (filterProduct?.id_array) {
-        dynamicQuery += ` AND vendor_approved_by IN (${filterProduct.id_array})`;
+        // joinQuery += `JOIN tbl_vendorapprove_product_mapping vpm ON vpm.variant_vendor_mapping_id = pvvm.id `;
+        // dynamicQuery += ` AND vpm.vendor_approve_id IN (${filterProduct.id_array})`;
+        dynamicQuery += ` AND pv.id IN (${filterProduct.id_array})`;
       }
       db.one(
-        `SELECT count(id) FROM tbl_product WHERE created_by = $1 AND is_deleted = 0 AND is_review = 0 ${dynamicQuery}`,
+        `SELECT count(*) FROM tbl_product_variant_vendor_mapping pvvm JOIN tbl_product_variant pv ON pv.id = pvvm.product_variant_id ${joinQuery} WHERE pvvm.vendor_id = $1 AND pv.is_deleted = 0 ${dynamicQuery}`,
         [vendorId]
       )
         .then(function (data) {
@@ -1930,11 +2195,11 @@ FROM (
         LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
         WHERE PD.id = tvpm.product_id) AS "product_approve_by",
         ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants"  
+          (SELECT json_build_object('id',pv.id,'name',pv.name,'product_id',pv.product_id)
+            FROM tbl_product_variant pv WHERE  PD.id = pv.product_id) AS "product_variants"  
           FROM tbl_product PD 
-          LEFT JOIN tbl_vendor_approve tva ON PD.vendor_approved_by = tva.id
-          WHERE PD.created_by = $2 AND PD.is_deleted = 0  AND PD.is_review = 1 AND added_by !=1 ${dynamicQuery}
+          LEFT JOIN tbl_vendor_approve tva ON PD.status = 1
+          WHERE PD.status = 1 ${dynamicQuery}
         ORDER BY PD.name ASC LIMIT ${limit} OFFSET $1`,
         [offset, vendorId]
       )
@@ -1957,7 +2222,7 @@ FROM (
         dynamicQuery += ` AND id IN (${filterProduct.id_array})`;
       }
       db.one(
-        `SELECT count(id) FROM tbl_product WHERE created_by = $1 AND is_deleted = 0 AND is_review = 1 ${dynamicQuery}`,
+        `SELECT count(id) FROM tbl_product WHERE status = 1 ${dynamicQuery}`,
         [vendorId]
       )
         .then(function (data) {
@@ -1971,44 +2236,77 @@ FROM (
   },
   check_product: async (productId, created_by = null) => {
     return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      if (created_by) {
-        dynamicQuery = ` AND created_by = '${created_by}'`;
+      // Changes by Agnij May 02, 2025 [Improved product/variant lookup with better error handling]
+      try {
+        if (!productId) {
+          resolve([]);
+          return;
+        }
+        
+        // First check in the product table
+        db.any(
+          `SELECT * FROM tbl_product WHERE id = $1`,
+          [productId]
+        )
+          .then(function (productData) {
+            if (productData && productData.length > 0) {
+              resolve(productData);
+            } else {
+              resolve([]);
+            }
+          })
+          .catch(function (err) {
+            // Error in product query
+            resolve([]);
+          });
+      } catch (error) {
+        console.error("Exception in check_product:", error);
+        resolve([]); // Return empty array on exception
       }
-      db.any(
-        `SELECT * FROM tbl_product WHERE id = $1 AND is_deleted = 0 ${dynamicQuery}`,
-        [productId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
+    });
+  },
+  checkVariantById: async (variantId, created_by = null) => {
+    return new Promise(function (resolve, reject) {
+      // Changes by Agnij May 02, 2025 [Improved product/variant lookup with better error handling]
+      try {
+        if (!variantId) {
+          resolve([]);
+          return;
+        }
+        
+        // First check in the product table
+        db.any(
+          `SELECT * FROM tbl_product_variant WHERE id = $1`,
+          [variantId]
+        )
+          .then(function (productData) {
+            if (productData && productData.length > 0) {
+              resolve(productData);
+            } else {
+              resolve([]);
+            }
+          })
+          .catch(function (err) {
+            // Error in product query
+            resolve([]);
+          });
+      } catch (error) {
+        console.error("Exception in checkVariantById:", error);
+        resolve([]); // Return empty array on exception
+      }
     });
   },
   productDetails: async (productId) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT PD.*,USERS.name as vendor_name,
-        CASE
-        WHEN PD.qap_new_file_name IS NULL THEN
-          NULL
-          ELSE pd.qap_new_file_name
-          END AS qap_new_file_name,
-          CASE
-          WHEN PD.tds_new_file_name IS NULL THEN
-          NULL
-          ELSE pd.tds_new_file_name
-          END AS tds_new_file_name,
         ARRAY
         (SELECT json_build_object('category_name', tc.title,'id',pc.category_id )
           FROM tbl_product_categories pc
           LEFT JOIN tbl_category tc ON pc.category_id = tc.id   WHERE  PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
         ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants",
+          (SELECT json_build_object('id',pv.id,'name',pv.name,'product_id',pv.product_id)
+            FROM tbl_product_variant pv WHERE  PD.id = pv.product_id) AS "product_variants",
             ARRAY
           (SELECT json_build_object('product_image', tbl_product_images.new_image_name,'is_featured',tbl_product_images.is_featured,
           'product_image_url',  CASE
@@ -2021,8 +2319,8 @@ FROM (
           (SELECT tvpm.vendor_approve_id
             FROM tbl_vendorapprove_product_mapping tvpm WHERE  PD.id = tvpm.product_id) AS "vendor_approved_by"
             FROM tbl_product PD 
-            LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
-            WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 And PD.id = $1`,
+            LEFT JOIN tbl_users USERS ON PD.status = 1 
+            WHERE PD.status = 1 And PD.id = $1`,
         [productId]
       )
         .then(function (data) {
@@ -2063,31 +2361,20 @@ WHERE tbl_product.name = $1`,
     return new Promise(function (resolve, reject) {
       let dynamicWhere = ``;
       if (vendorId) {
-        dynamicWhere = `AND PD.created_by = ${vendorId}`;
+        dynamicWhere = `AND PVVM.vendor_id = ${vendorId}`;
       }
       db.any(
-        `SELECT PD.*,USERS.name as vendor_name,
+        `SELECT PV.*,
+        CONCAT(PV.name, ' - ', PD.name) AS unified_name,
         ARRAY
         (SELECT json_build_object('category_name', tc.title,'id',pc.category_id )
           FROM tbl_product_categories pc
-          LEFT JOIN tbl_category tc ON pc.category_id = tc.id   WHERE  PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
-        ARRAY
-          (SELECT json_build_object('variant_name', pv.variant_name,'variant_value',pv.variant_value,'id',pv.id)
-            FROM tbl_product_variants pv WHERE  PD.id = pv.product_id) AS "product_variants",
-            ARRAY
-          (SELECT json_build_object('product_image', tbl_product_images.new_image_name,'is_featured',tbl_product_images.is_featured,
-          'product_image_url',  CASE
-          WHEN tbl_product_images.new_image_name IS NULL THEN
-          NULL
-          ELSE tbl_product_images.new_image_name
-          END)
-            FROM tbl_product_images WHERE PD.id = tbl_product_images.product_id ) AS "product_images",
-            ARRAY
-          (SELECT tvpm.vendor_approve_id
-            FROM tbl_vendorapprove_product_mapping tvpm WHERE  PD.id = tvpm.product_id) AS "vendor_approved_by"
-            FROM tbl_product PD 
-            LEFT JOIN tbl_users USERS ON PD.created_by = USERS.id 
-            WHERE USERS.is_deleted = 0 AND PD.is_deleted = 0 And PD.id = $1 ${dynamicWhere}`,
+          LEFT JOIN tbl_category tc ON pc.category_id = tc.id 
+          WHERE  PD.id = pc.product_id ORDER BY pc.id) AS "product_categories"
+            FROM tbl_product_variant PV
+            JOIN tbl_product PD ON PD.id = PV.product_id
+            LEFT JOIN tbl_product_variant_vendor_mapping PVVM ON PVVM.product_variant_id = PV.id
+            WHERE PV.status = 1 AND PV.id = $1 ${dynamicWhere}`,
         [productId]
       )
         .then(function (data) {
@@ -2118,16 +2405,28 @@ WHERE tbl_product.name = $1`,
   },
   approveProduct: async (productObj, productId) => {
     return new Promise(function (resolve, reject) {
+      // Changes by Agnij May 02, 2025 [Removed vendor_approved_by field which doesn't exist in the database]
       const condition = ` WHERE id = $1 RETURNING id,name,created_by`;
       const values = [productId];
-      let query =
-        pgp().helpers.update(productObj, null, 'tbl_product') + condition;
+      
+      // Create a clean object without any non-existent fields
+      const cleanObj = {
+        is_approve: productObj.is_approve,
+        reject_reason_id: productObj.reject_reason_id,
+        updated_at: productObj.updated_at
+      };
+      
+      // Changes by Agnij May 02, 2025 [Removed approved_at field which doesn't exist in the database]
+      // Don't add approved_at field as it doesn't exist in the tbl_product table
+      
+      let query = pgp().helpers.update(cleanObj, null, 'tbl_product') + condition;
 
       db.one(query, values)
         .then(function (data) {
           resolve(data);
         })
         .catch(function (err) {
+          console.error("Error in approveProduct:", err);
           let error = new Error(err);
           reject(error);
         });
@@ -2236,8 +2535,8 @@ WHERE tbl_product.name = $1`,
               FROM tbl_rfq TR
               JOIN tbl_rfq_products TRP
                   ON TRP.rfq_id = TR.id
-              JOIN tbl_product TP
-                  ON TP.id = TRP.product_id
+              JOIN tbl_product_variant PV ON PV.id = TRP.product_variant_id
+            JOIN tbl_product TP ON TP.id = PV.product_id
               WHERE TR.created_by = $1
                   AND TP.is_deleted = 0 AND TP.is_approve = 1
               GROUP BY 
@@ -2272,7 +2571,7 @@ WHERE tbl_product.name = $1`,
 
     return new Promise(function (resolve, reject) {
         db.oneOrNone(`
-WITH RECURSIVE category_hierarchy AS (
+WITH RECURSIVE temp_category_path AS (
     SELECT id, title, slug, parent_id, status, is_deleted, 1 AS depth
     FROM tbl_category
     WHERE slug = $1
@@ -2280,9 +2579,9 @@ WITH RECURSIVE category_hierarchy AS (
       AND is_deleted = 0 
       AND status = 1
     UNION ALL
-    SELECT c.id, c.title, c.slug, c.parent_id, c.status, c.is_deleted, ch.depth + 1 AS depth
+    SELECT c.id, c.title, c.slug, c.parent_id, c.status, c.is_deleted, tcp.depth + 1 AS depth
     FROM tbl_category c
-    INNER JOIN category_hierarchy ch ON c.parent_id = ch.id
+    INNER JOIN temp_category_path tcp ON c.parent_id = tcp.id
     WHERE c.slug = ANY($2::varchar[])
       AND c.is_deleted = 0
       AND c.status = 1
@@ -2306,7 +2605,7 @@ FROM
 INNER JOIN 
     tbl_product_categories pc ON p.id = pc.product_id
 INNER JOIN 
-    category_hierarchy c ON pc.category_id = c.id
+    temp_category_path c ON pc.category_id = c.id
 LEFT JOIN 
     tbl_product_cms cms ON p.id = cms.product_id
 WHERE 
@@ -2348,8 +2647,1421 @@ getProductTechSpecByID: async (productId) => {
           .end();
       });
   });
-}
+},
 
+  createProductVariant: async (variantObj) => {
+    return new Promise(function (resolve, reject) {
+      // Changes by Agnij April 30, 2025 [Fixed column names to match actual database schema]
+      try {
+        // Ensure we have all required fields with proper defaults
+        // Accept 'variant_name' from frontend but use 'name' for the database
+        if (!variantObj.product_id || (!variantObj.variant_name && !variantObj.name)) {
+          console.error("Missing required fields for variant creation:", variantObj);
+          return reject(new Error("Missing required fields: product_id and variant name are required"));
+        }
+        
+        // Set up all the fields with appropriate defaults
+        // Use variant_name from input if available, otherwise use name
+        const variantName = variantObj.variant_name || variantObj.name;
+        
+        // Changes by Agnij May 02, 2025 [Set is_approve to 0 by default]
+        const fields = {
+          product_id: variantObj.product_id,
+          name: variantName, // Database column is 'name'
+          status: variantObj.status !== undefined ? variantObj.status : 1,
+          is_deleted: variantObj.is_deleted !== undefined ? variantObj.is_deleted : 0,
+          is_review: variantObj.is_review !== undefined ? variantObj.is_review : 0,
+          is_approve: variantObj.is_approve !== undefined ? variantObj.is_approve : 0, // Changed default from 1 to 0
+          created_at: variantObj.created_at || new Date(),
+          updated_at: variantObj.updated_at || new Date(),
+          created_by: variantObj.created_by || null,
+          updated_by: variantObj.updated_by || null,
+          added_by: variantObj.added_by || null
+        };
+
+        
+        // Build column names and value placeholders for the insert query
+        const columns = Object.keys(fields).join(', ');
+        const placeholders = Object.keys(fields).map((_, i) => `$${i + 1}`).join(', ');
+        const values = Object.values(fields);
+
+        // Use explicit parameterized query for safety
+        const query = `
+          INSERT INTO tbl_product_variant(${columns}) 
+          VALUES(${placeholders}) 
+          RETURNING id
+        `;
+        
+        db.one(query, values)
+          .then(function (data) {
+            resolve({id: data.id});
+          })
+          .catch(function (err) {
+            console.error("Error creating product variant:", err);
+            reject(new Error(err.message || "Failed to create product variant"));
+          });
+      } catch (err) {
+        console.error("Exception in createProductVariant:", err);
+        reject(new Error(err.message || "Exception in createProductVariant"));
+      }
+    });
+  },
+  
+  getProductVariants: async (productId) => {
+    return new Promise(function (resolve, reject) {
+      // Changes by Agnij May 02, 2025 [Fixed column names and return type to ensure always array]
+      
+      try {
+        // Use a query that explicitly lists all needed columns instead of pv.*
+        const query = `
+          SELECT 
+            pv.id, 
+            pv.product_id, 
+            pv.name AS variant_name, 
+            pv.status,
+            pv.is_approve,
+            pv.created_at,
+            pv.updated_at,
+            pv.created_by,
+            pv.updated_by,
+            pv.is_deleted,
+            p.name as product_name,
+            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+          FROM 
+            tbl_product_variant pv
+          LEFT JOIN 
+            tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
+          WHERE 
+            pv.product_id = $1 AND 
+            pv.is_deleted = 0
+          GROUP BY 
+            pv.id, pv.product_id, pv.name, pv.status, pv.is_approve, pv.created_at, pv.updated_at, 
+            pv.created_by, pv.updated_by, pv.is_deleted, p.name
+          ORDER BY pv.created_at DESC`;
+        
+        db.any(query, [productId])
+          .then(function (data) {
+            // Always return an array, even if empty
+            resolve(data || []);
+          })
+          .catch(function (err) {
+            console.error("Error in getProductVariants query:", err);
+            reject(new Error(err.message || "Database error in getProductVariants"));
+          });
+      } catch (error) {
+        console.error("Error in getProductVariants:", error);
+        reject(new Error(error.message || "Exception in getProductVariants"));
+      }
+    });
+  },
+  
+  // Changes by Agnij April 30, 2025 [Added search function for variants across all products]
+  searchProductVariants: async (id, searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve) => {
+    return new Promise(function (resolve, reject) {
+      
+      try {
+        // Build dynamic filter conditions and parameter list
+        let conditions = [];
+        let params = [];
+        let paramIndex = 1;
+        
+        // Changes by Agnij May 02, 2025 [Fixed filter implementation to match product filters]
+        // Base condition to filter out deleted variants
+        conditions.push(`pv.is_deleted = 0`);
+        
+        // If ID is provided, add a specific variant ID filter
+        if (id) {
+          conditions.push(`pv.id = $${paramIndex}`);
+          params.push(id);
+          paramIndex++;
+        }
+        
+        // Search term filter - improved with full-text search and similarity
+        if (searchTerm && searchTerm.trim() !== "") {
+          conditions.push(`(
+            to_tsvector('english', pv.name) @@ plainto_tsquery('english', $${paramIndex})
+            OR to_tsvector('english', p.name) @@ plainto_tsquery('english', $${paramIndex})
+            OR similarity(pv.name, $${paramIndex}) > 0.1
+            OR similarity(p.name, $${paramIndex}) > 0.1
+          )`);
+          params.push(searchTerm);
+          paramIndex++;
+        }
+        
+        // Date range filter - with proper parsing and validation
+        if (start_date) {
+          try {
+            const startDate = new Date(start_date);
+            if (!isNaN(startDate.getTime())) {
+              conditions.push(`pv.created_at >= $${paramIndex}`);
+              params.push(startDate);
+              paramIndex++;
+            }
+          } catch (e) {
+            console.error("Invalid start_date format:", e);
+          }
+        }
+        
+        if (end_date) {
+          try {
+            const endDate = new Date(end_date);
+            if (!isNaN(endDate.getTime())) {
+              // Add one day to include the entire end date
+              endDate.setDate(endDate.getDate() + 1);
+              conditions.push(`pv.created_at <= $${paramIndex}`);
+              params.push(endDate);
+              paramIndex++;
+            }
+          } catch (e) {
+            console.error("Invalid end_date format:", e);
+          }
+        }
+        
+        // Changes by Agnij May 02, 2025 [Added additional filters]
+        // Vendor filter - improved to properly check any vendor mapping
+        if (vendor_id && vendor_id !== '') {
+          conditions.push(`EXISTS (
+            SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm
+            WHERE pvvm.product_variant_id = pv.id AND pvvm.vendor_id = $${paramIndex}
+          )`);
+          params.push(vendor_id);
+          paramIndex++;
+        }
+        
+        // Category filter - improved to match all variants of products in the category
+        if (category_id && category_id !== '') {
+          conditions.push(`EXISTS (
+            SELECT 1 FROM tbl_product_categories pc
+            WHERE pc.product_id = p.id AND pc.category_id = $${paramIndex}
+          )`);
+          params.push(category_id);
+          paramIndex++;
+        }
+        
+        // Added by filter - properly check creators
+        if (added_by && added_by !== '') {
+          conditions.push(`(pv.created_by = $${paramIndex} OR p.created_by = $${paramIndex})`);
+          params.push(added_by);
+          paramIndex++;
+        }
+        
+        // Approval status filter - with proper null/undefined checking
+        if (is_approve !== undefined && is_approve !== null) {
+          conditions.push(`pv.is_approve = $${paramIndex}`);
+          params.push(is_approve);
+          paramIndex++;
+        }
+        
+        // Build the final WHERE clause
+        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+        
+        // Build the complete query with improved fields and sorting
+        const query = `
+          SELECT 
+            pv.id, 
+            pv.product_id, 
+            pv.name, 
+            pv.status,
+            pv.is_approve,
+            pv.created_at,
+            pv.updated_at,
+            pv.created_by,
+            pv.updated_by,
+            pv.is_deleted,
+            pv.reject_reason_id,
+            trr.reject_reason,
+            p.name as product_name,
+            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+          FROM 
+            tbl_product_variant pv
+          LEFT JOIN tbl_product_variant_vendor_mapping PVM ON PVM.product_variant_id = PV.id
+          LEFT JOIN tbl_users U ON U.id = PVM.vendor_id
+          LEFT JOIN 
+            tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
+          LEFT JOIN
+            tbl_reject_reason trr ON pv.reject_reason_id = trr.id
+          ${whereClause}
+          GROUP BY 
+            pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
+            pv.created_at, pv.updated_at, pv.created_by, pv.updated_by, 
+            pv.is_deleted, pv.reject_reason_id, trr.reject_reason, p.name
+            ${searchTerm ? `, v_similarity_score, p_similarity_score, v_rank, p_rank` : ''}
+          ORDER BY 
+            ${searchTerm ? `
+              GREATEST(v_rank, p_rank) DESC,
+              GREATEST(v_similarity_score, p_similarity_score) DESC,
+            ` : ''}
+            pv.created_at DESC
+          LIMIT 1000000
+        `;
+        
+        
+        db.any(query, params)
+          .then(function (data) {
+            resolve(data);
+          })
+          .catch(function (err) {
+            console.error("Error in searchProductVariants:", err);
+            resolve([]);  // Return empty array on error to maintain consistent behavior
+          });
+      } catch (error) {
+        console.error("Exception in searchProductVariants:", error);
+        resolve([]);  // Return empty array on exception to maintain consistent behavior
+      }
+    });
+  },
+  
+  updateProductVariant: async (variantObj, variantId) => {
+    return new Promise(function (resolve, reject) {
+      try {
+        // Changes by Agnij May 02, 2025 [Enhanced to handle all edge cases in approval]
+        if (!variantId) {
+          reject(new Error("Variant ID is required"));
+          return;
+        }
+        
+        
+        // Create dynamic update query based on provided fields
+        let updateFields = [];
+        let params = [];
+        let paramIndex = 1;
+
+        // Handle all possible fields that might be in the variantObj
+        if (variantObj.name || variantObj.variant_name) {
+          updateFields.push(`name = $${paramIndex}`);
+          params.push(variantObj.variant_name || variantObj.name);
+          paramIndex++;
+        }
+        
+        // Ensure approval status is handled correctly
+        if (variantObj.is_approve !== undefined) {
+          // Convert to numeric value (0 or 1)
+          const approvalValue = typeof variantObj.is_approve === 'string' 
+            ? (variantObj.is_approve === '1' || variantObj.is_approve.toLowerCase() === 'true' ? 1 : 0)
+            : (variantObj.is_approve ? 1 : 0);
+            
+          updateFields.push(`is_approve = $${paramIndex}`);
+          params.push(approvalValue);
+          paramIndex++;
+        }
+        
+        // Handle rejection reason
+        if (variantObj.reject_reason_id !== undefined) {
+          updateFields.push(`reject_reason_id = $${paramIndex}`);
+          params.push(variantObj.reject_reason_id);
+          paramIndex++;
+        }
+        
+        // Handle user who updated
+        if (variantObj.updated_by !== undefined) {
+          updateFields.push(`updated_by = $${paramIndex}`);
+          params.push(variantObj.updated_by);
+          paramIndex++;
+        }
+        
+        // Always update the updated_at timestamp
+        updateFields.push(`updated_at = CURRENT_TIMESTAMP`);
+        
+        // Add the variantId as the last parameter
+        params.push(variantId);
+        
+        // Only proceed if we have fields to update
+        if (updateFields.length === 0) {
+          console.error("No fields to update in updateProductVariant");
+          reject(new Error("No valid fields provided for update"));
+          return;
+        }
+        
+        // Build and execute the query
+        const query = `
+          UPDATE tbl_product_variant 
+          SET ${updateFields.join(', ')}
+          WHERE id = $${paramIndex} 
+          RETURNING id, name, is_approve, reject_reason_id, updated_at
+        `;
+        
+
+        
+        db.one(query, params)
+          .then(function (data) {
+            resolve(data);
+          })
+          .catch(function (err) {
+            console.error(`Error in updateProductVariant for ID ${variantId}:`, err);
+            
+            // Try with a simpler, more direct query as fallback
+            const fallbackQuery = `
+              UPDATE tbl_product_variant 
+              SET is_approve = $1, 
+                  reject_reason_id = $2,
+                  updated_by = $3,
+                  updated_at = CURRENT_TIMESTAMP
+              WHERE id = $4
+              RETURNING id, name, is_approve
+            `;
+            
+            
+            db.one(fallbackQuery, [
+              variantObj.is_approve !== undefined ? variantObj.is_approve : null,
+              variantObj.reject_reason_id,
+              variantObj.updated_by,
+              variantId
+            ])
+              .then(function (fallbackData) {
+                resolve(fallbackData);
+              })
+              .catch(function (fallbackErr) {
+                console.error("Fallback update also failed:", fallbackErr);
+                reject(new Error(`Failed to update variant: ${fallbackErr.message}`));
+              });
+          });
+      } catch (error) {
+        console.error("Exception in updateProductVariant:", error);
+        reject(new Error(error.message || "Exception in updateProductVariant"));
+      }
+    });
+  },
+  
+  deleteProductVariant: async (variantId) => {
+    return new Promise(function (resolve, reject) {
+      db.one(
+        `DELETE FROM tbl_product_variant 
+        WHERE id = $1 
+        RETURNING id`,
+        [variantId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
+  createProductVariantVendorMapping: async (mappingObj) => {
+    return new Promise(function (resolve, reject) {
+      // Construct the dynamic SQL query
+      const query =
+        pgp().helpers.insert(mappingObj, null, 'tbl_product_variant_vendor_mapping') +
+        ' RETURNING id';
+
+      db.one(query)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
+  getProductVariantDetails: async (variantId) => {
+    return new Promise(function (resolve, reject) {
+      // Changes by Agnij May 2, 2025 [Fixed variant details query to include all necessary fields]
+      
+      try {
+        if (!variantId) {
+          resolve([]);
+          return;
+        }
+        
+        // Enhanced query to get all necessary variant details
+        const query = `
+          SELECT 
+            pv.id, 
+            pv.product_id, 
+            pv.name as variant_name,
+            pv.status,
+            pv.is_approve,
+            pv.reject_reason_id, 
+            pv.created_at,
+            pv.updated_at,
+            pv.created_by,
+            pv.updated_by,
+            pv.is_deleted,
+            p.name as product_name,
+            p.description as product_description,
+            trr.reject_reason,
+            ARRAY_AGG(DISTINCT jsonb_build_object(
+              'category_name', c.title,
+              'category_id', c.id
+            )) FILTER (WHERE c.id IS NOT NULL) as categories
+          FROM 
+            tbl_product_variant pv
+          LEFT JOIN 
+            tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_reject_reason trr ON pv.reject_reason_id = trr.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
+          WHERE 
+            pv.id = $1 AND pv.is_deleted = 0
+          GROUP BY 
+            pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
+            pv.reject_reason_id, pv.created_at, pv.updated_at, pv.created_by, 
+            pv.updated_by, pv.is_deleted, p.name, p.description, trr.reject_reason
+        `;
+        
+        
+        db.any(query, [variantId])
+          .then(function (data) {
+            resolve(data);
+          })
+          .catch(function (err) {
+            console.error("Error in getProductVariantDetails:", err);
+            reject(new Error(`Failed to get variant details: ${err.message}`));
+          });
+      } catch (err) {
+        console.error("Exception in getProductVariantDetails:", err);
+        reject(new Error(`Exception in getProductVariantDetails: ${err.message}`));
+      }
+    });
+  },
+
+  // Changes by Agnij May 2, 2025 [Added function to map variant with vendor]
+  mapVariantWithVendor: async (variantId, vendorId) => {
+    return new Promise(function (resolve, reject) {
+      
+      try {
+        if (!variantId || !vendorId) {
+          reject(new Error("Missing required parameters for mapping"));
+          return;
+        }
+
+        // First check if mapping already exists
+        db.oneOrNone(
+          `SELECT id FROM tbl_product_variant_vendor_mapping 
+           WHERE product_variant_id = $1 AND vendor_id = $2`,
+          [variantId, vendorId]
+        )
+          .then(function (existingMapping) {
+            if (existingMapping) {
+              reject(new Error("Mapping already exists for this variant and vendor"));
+              return;
+            }
+
+            // If no existing mapping, create new one
+            const query = `
+              INSERT INTO tbl_product_variant_vendor_mapping
+                (product_variant_id, vendor_id, status, created_at)
+              VALUES
+                ($1, $2, true, CURRENT_TIMESTAMP)
+              RETURNING 
+                id as mapping_id,
+                product_variant_id as variant_id,
+                vendor_id,
+                status,
+                created_at as mapped_at
+            `;
+
+            db.one(query, [variantId, vendorId])
+              .then(function (data) {
+
+                resolve(data);
+              })
+              .catch(function (err) {
+                console.error("Error creating mapping:", err);
+                reject(new Error(`Failed to create mapping: ${err.message}`));
+              });
+          })
+          .catch(function (err) {
+            console.error("Error checking existing mapping:", err);
+            reject(new Error(`Failed to check existing mapping: ${err.message}`));
+          });
+      } catch (err) {
+        console.error("Exception in mapVariantWithVendor:", err);
+        reject(new Error(`Exception in mapVariantWithVendor: ${err.message}`));
+      }
+    });
+  },
+  
+  // Changes by Agnij May 2, 2025 [Added function to update variant-vendor mapping]
+  updateVariantVendorMapping: async (mappingId, updateData) => {
+    return new Promise(function (resolve, reject) {
+      
+      try {
+        if (!mappingId || !updateData) {
+          reject(new Error("Missing required parameters for mapping update"));
+          return;
+        }
+
+        const query = `
+          UPDATE tbl_product_variant_vendor_mapping
+          SET 
+            vendor_id = $1,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = $2
+          RETURNING 
+            id as mapping_id,
+            product_variant_id as variant_id,
+            vendor_id,
+            status,
+            created_at as mapped_at
+        `;
+
+        db.one(query, [updateData.vendor_id, mappingId])
+          .then(function (data) {
+            resolve(data);
+          })
+          .catch(function (err) {
+            console.error("Error updating mapping:", err);
+            reject(new Error(`Failed to update mapping: ${err.message}`));
+          });
+      } catch (err) {
+        console.error("Exception in updateVariantVendorMapping:", err);
+        reject(new Error(`Exception in updateVariantVendorMapping: ${err.message}`));
+      }
+    });
+  },
+  
+  deleteProductVariants: async (productId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `DELETE FROM tbl_product_variant
+        WHERE product_id = $1`,
+        [productId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          reject(err);
+        });
+    });
+  },
+  
+  checkDuplicateVariantName: async (productId, variantName) => {
+    return new Promise(function (resolve, reject) {
+      // Changes by Agnij April 30, 2025 [Fixed column name to match actual database schema]
+      if (!productId || !variantName) {
+        resolve([]);
+        return;
+      }
+
+      // Simple, focused query to check for duplicate variant names
+      const query = `
+        SELECT id, name 
+        FROM tbl_product_variant 
+        WHERE LOWER(name) = LOWER($1) 
+        AND product_id = $2
+        AND is_deleted = 0
+      `;
+      
+      
+      db.any(query, [variantName, productId])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error in checkDuplicateVariantName:", err);
+          // In case of error, treat as if no duplicates exist to avoid blocking creation
+          // but log the error for debugging
+          resolve([]);
+        });
+    });
+  },
+  
+  // Changes by Agnij 2023-05-30 [Fixed mapping check to handle deleted field]
+  checkDuplicateVariantVendorMapping: async (variantId, vendorId) => {
+    return new Promise(function (resolve, reject) {
+      // First check if the table has a 'deleted' column
+      db.any("SELECT column_name FROM information_schema.columns WHERE table_name = 'tbl_product_variant_vendor_mapping' AND column_name = 'deleted'")
+        .then(function (columns) {
+          let query;
+          if (columns && columns.length > 0) {
+            // Table has 'deleted' column
+            // Changes by Agnij April 30, 2025 [Fixed column name from variant_id to product_variant_id]
+            query = `SELECT * FROM tbl_product_variant_vendor_mapping 
+                    WHERE product_variant_id = $1 AND vendor_id = $2 AND deleted = false`;
+          } else {
+            // Table doesn't have 'deleted' column
+            // Changes by Agnij April 30, 2025 [Fixed column name from variant_id to product_variant_id]
+            query = `SELECT * FROM tbl_product_variant_vendor_mapping 
+                    WHERE product_variant_id = $1 AND vendor_id = $2`;
+          }
+          
+          // Execute the appropriate query
+          db.any(query, [variantId, vendorId])
+            .then(function (data) {
+              resolve(data);
+            })
+            .catch(function (err) {
+              let error = new Error(err);
+              reject(error);
+            });
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
+  getProductCategories: async (productId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT pc.*, c.title as category_title, c.slug as category_slug 
+        FROM tbl_product_categories pc
+        INNER JOIN tbl_category c ON pc.category_id = c.id
+        WHERE pc.product_id = $1`,
+        [productId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  // Changes by Agnij May 18, 2025 [Added function to get all variant-vendor mappings]
+  // Changes by Agnij June 12, 2024 [Added variant_id parameter support]
+  getVariantVendorMappings: (searchTerm, start_date, end_date, vendor_id, category_id, added_by, is_approve, page, limit, variant_id) => {
+    return new Promise(function (resolve, reject) {
+      try {
+        // Changes by Agnij May 02, 2025 [Improved error handling for similarity search]
+
+        // Parse pagination parameters with defaults
+        page = parseInt(page) || 1;
+        limit = parseInt(limit) || 10;
+
+        if (page < 1) page = 1;
+        if (limit < 1) limit = 10;
+        
+        // Build WHERE conditions
+        let conditions = [];
+        let params = [];
+        let paramIndex = 1;
+        
+        // Handle search term without using similarity or ts_rank that could cause errors
+        if (searchTerm && searchTerm.trim() !== "") {
+          // Use ILIKE for case insensitive matching instead of full text search or similarity
+          conditions.push(`(
+            v.name ILIKE $${paramIndex}
+            OR p.name ILIKE $${paramIndex}
+            OR u.name ILIKE $${paramIndex}
+            OR u.email ILIKE $${paramIndex}
+          )`);
+          params.push(`%${searchTerm.trim()}%`);
+          paramIndex++;
+        }
+
+        // Handle date filters
+        if (start_date) {
+          try {
+            const startDate = new Date(start_date);
+            if (!isNaN(startDate.getTime())) {
+              conditions.push(`m.created_at >= $${paramIndex}`);
+              params.push(startDate);
+              paramIndex++;
+            }
+          } catch (e) {
+            console.error("Invalid start_date format:", e);
+          }
+        }
+
+        if (end_date) {
+          try {
+            const endDate = new Date(end_date);
+            if (!isNaN(endDate.getTime())) {
+              endDate.setDate(endDate.getDate() + 1);
+              conditions.push(`m.created_at <= $${paramIndex}`);
+              params.push(endDate);
+              paramIndex++;
+            }
+          } catch (e) {
+            console.error("Invalid end_date format:", e);
+          }
+        }
+
+        // Changes by Agnij May 02, 2025 [Fixed vendor filter to properly find records]
+        // Handle vendor filter - using correct field and parameter
+        if (vendor_id && vendor_id !== '') {
+          // The m.vendor_id is the correct field, but ensure it's cast to proper type
+          conditions.push(`CAST(m.vendor_id AS TEXT) = $${paramIndex}`);
+          params.push(vendor_id.toString());
+          paramIndex++;
+        }
+        
+        // Changes by Agnij June 12, 2024 [Added variant filter]
+        // Handle variant filter - filter by specific variant ID
+        if (variant_id && variant_id !== '') {
+          conditions.push(`CAST(m.product_variant_id AS TEXT) = $${paramIndex}`);
+          params.push(variant_id.toString());
+          paramIndex++;
+        }
+
+        // Handle category filter - improved query to match products in the category
+        if (category_id && category_id !== '') {
+          conditions.push(`EXISTS (
+            SELECT 1 FROM tbl_product_categories pc 
+            WHERE pc.product_id = p.id AND pc.category_id = $${paramIndex}
+          )`);
+          params.push(category_id);
+          paramIndex++;
+        }
+
+        // Changes by Agnij May 02, 2025 [Fixed added_by filter to check both variant and product creator]
+        // Handle added_by filter to check both the variant creator and product creator
+        if (added_by && added_by !== '') {
+          conditions.push(`(v.created_by = $${paramIndex} OR p.created_by = $${paramIndex})`);
+          params.push(added_by);
+          paramIndex++;
+        }
+
+        // Handle approval status filter - proper null/undefined checking
+        if (is_approve !== null && is_approve !== undefined && is_approve.trim() != '') {
+          conditions.push(`${is_approve == '0' ? 'NOT' : ''} m.is_approved`);
+        }
+
+        // Build WHERE clause
+        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+        
+        // Changes by Agnij May 02, 2025 [Added pagination support to the query]
+        // Calculate pagination values
+        const offset = (page - 1) * limit;
+        
+        // First, get the total count of records for pagination
+        const countQuery = `
+          SELECT COUNT(DISTINCT m.id) as total_count
+          FROM 
+            tbl_product_variant_vendor_mapping m
+          JOIN
+            tbl_product_variant v ON v.id = m.product_variant_id
+          JOIN
+            tbl_product p ON p.id = v.product_id
+          LEFT JOIN
+            tbl_users u ON u.id = m.vendor_id
+          LEFT JOIN
+            tbl_reject_reason trr ON v.reject_reason_id = trr.id
+          LEFT JOIN
+            tbl_product_categories pc ON pc.product_id = p.id
+          LEFT JOIN
+            tbl_category c ON c.id = pc.category_id
+          ${whereClause}
+        `;
+        
+        // Build complete query with additional fields, sorting and pagination
+        const query = `
+          SELECT 
+            m.id AS mapping_id,
+            m.product_variant_id AS variant_id,
+            m.vendor_id,
+            m.status,
+            m.created_at AS mapped_at,
+            v.name AS variant_name,
+            m.is_approved AS is_approve,
+            v.reject_reason_id,
+            rr.reject_reason,
+            v.created_by,
+            v.updated_by,
+            p.id AS product_id,
+            p.name AS product_name,
+            p.created_by AS product_created_by,
+            u.id AS vendor_user_id,
+            u.name AS vendor_name,
+            u.email AS vendor_email,
+            u.organization_name AS vendor_organization,
+            COALESCE(u.organization_name, u.name, 'Unknown Vendor') AS vendor_display_name,
+            ${searchTerm ? `
+              similarity(v.name, '${searchTerm}') AS v_similarity_score,
+              similarity(p.name, '${searchTerm}') AS p_similarity_score,
+              ts_rank_cd(to_tsvector('english', v.name), plainto_tsquery('english', '${searchTerm}')) AS v_rank,
+              ts_rank_cd(to_tsvector('english', p.name), plainto_tsquery('english', '${searchTerm}')) AS p_rank,
+            ` : ''}
+            (
+              SELECT json_agg(DISTINCT jsonb_build_object(
+                'category_id', c.id,
+                'category_name', c.title
+              ))
+              FROM tbl_product_categories pc
+              LEFT JOIN tbl_category c ON c.id = pc.category_id
+              WHERE pc.product_id = p.id
+            ) AS categories
+          FROM tbl_product_variant_vendor_mapping m
+          JOIN tbl_product_variant v ON v.id = m.product_variant_id
+          JOIN tbl_product p ON p.id = v.product_id
+          LEFT JOIN tbl_users u ON u.id = m.vendor_id
+          LEFT JOIN tbl_reject_reason rr ON rr.id = v.reject_reason_id
+          ${whereClause}
+          ORDER BY
+            ${searchTerm ? `
+              GREATEST(
+                ts_rank_cd(to_tsvector('english', v.name), plainto_tsquery('english', '${searchTerm}')),
+                ts_rank_cd(to_tsvector('english', p.name), plainto_tsquery('english', '${searchTerm}'))
+              ) DESC,
+              GREATEST(
+                similarity(v.name, '${searchTerm}'),
+                similarity(p.name, '${searchTerm}')
+              ) DESC,
+            ` : ''}
+            m.id DESC
+          LIMIT $${paramIndex}
+          OFFSET $${paramIndex + 1}
+        `;
+        
+        // Add pagination parameters
+        params.push(limit);
+        paramIndex++;
+        params.push(offset);
+        paramIndex++;
+
+        
+        // First get the count of total records
+        db.one(countQuery, params.slice(0, params.length - 2))
+          .then(countResult => {
+            const totalItems = parseInt(countResult.total_count);
+            
+            // Then get the paginated data
+            db.any(query, params)
+              .then(function (data) {
+                resolve({
+                  data: data,
+                  pagination: {
+                    total: totalItems,
+                    page: page,
+                    limit: limit,
+                    pages: Math.ceil(totalItems / limit)
+                  }
+                });
+              })
+              .catch(function (err) {
+                console.error("Error in getVariantVendorMappings data query:", err);
+                // Resolve with empty array instead of rejecting to maintain consistent behavior
+                resolve({
+                  data: [],
+                  pagination: {
+                    total: 0,
+                    page: page,
+                    limit: limit,
+                    pages: 0
+                  }
+                });
+              });
+          })
+          .catch(function (err) {
+            console.error("Error in getVariantVendorMappings count query:", err);
+            // Resolve with empty array instead of rejecting to maintain consistent behavior
+            resolve({
+              data: [],
+              pagination: {
+                total: 0,
+                page: page,
+                limit: limit,
+                pages: 0
+              }
+            });
+          });
+      } catch (error) {
+        console.error("Exception in getVariantVendorMappings:", error);
+        // Resolve with empty array to maintain consistent behavior with other search functions
+        resolve({
+          data: [],
+          pagination: {
+            total: 0,
+            page: page,
+            limit: limit,
+            pages: 0
+          }
+        });
+      }
+    });
+  },
+
+  // Changes by Agnij May 02, 2025 [Added function to approve/reject mappings]
+  approveMapping: async (mappingObj, mappingId) => {
+    return new Promise(function (resolve, reject) {
+      const condition = ` WHERE id = $1 RETURNING id`;
+      const values = [mappingId];
+      
+      let query = pgp().helpers.update(mappingObj, null, 'tbl_product_variant_vendor_mapping') + condition;
+
+      db.one(query, values)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error approving mapping:", err);
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
+  // Changes by Agnij May 01, 2025 [Added function to get mapping by ID]
+  getVariantVendorMappingById: async (mappingId) => {
+    return new Promise(function (resolve, reject) {
+      db.oneOrNone(
+        `SELECT 
+          m.id as mapping_id,
+          m.product_variant_id as variant_id,
+          m.vendor_id,
+          m.status,
+          m.created_at as mapped_at,
+          v.is_approve,
+          v.reject_reason_id,
+          trr.reject_reason,
+          v.name as variant_name,
+          p.name as product_name
+        FROM 
+          tbl_product_variant_vendor_mapping m
+        LEFT JOIN
+          tbl_product_variant v ON v.id = m.product_variant_id
+        LEFT JOIN
+          tbl_product p ON p.id = v.product_id
+        LEFT JOIN
+          tbl_reject_reason trr ON v.reject_reason_id = trr.id
+        WHERE 
+          m.id = $1`,
+        [mappingId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error getting mapping by ID:", err);
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
+  // Changes by Agnij May 01, 2025 [Added helper function to update a product variant]
+  updateProductVariant: async (variantObj, variantId) => {
+    return new Promise(function (resolve, reject) {
+      const condition = ` WHERE id = $1 RETURNING id`;
+      const values = [variantId];
+      
+      let query = pgp().helpers.update(variantObj, null, 'tbl_product_variant') + condition;
+
+      db.one(query, values)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error updating product variant:", err);
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  updateVariantMappingByData: async (variantObj, mappingId) => {
+    return new Promise(function (resolve, reject) {
+      const condition = ` WHERE id = $1 RETURNING id`;
+      const values = [mappingId];
+      
+      let query = pgp().helpers.update(variantObj, null, 'tbl_product_variant_vendor_mapping') + condition;
+
+      db.one(query, values)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error updating product variant vendor mapping:", err);
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  
+  // Changes by Agnij May 02, 2025 [Added function to update variant approval status]
+  updateProductVariantApproval: async (variantId, isApproved, rejectReasonId = null) => {
+    return new Promise(function (resolve, reject) {
+      // Create update object with approval status
+      const updateObj = {
+        is_approve: isApproved,
+        updated_at: new Date()
+      };
+      
+      // Add reject reason if provided and the status is rejected
+      if (isApproved === 0 && rejectReasonId) {
+        updateObj.reject_reason_id = rejectReasonId;
+      }
+      
+      // If approving, clear any reject reason
+      if (isApproved === 1) {
+        updateObj.reject_reason_id = null;
+      }
+      
+      // Build and execute query
+      const query = pgp().helpers.update(updateObj, null, 'tbl_product_variant') + ` WHERE id = $1 RETURNING id`;
+      
+      db.one(query, [variantId])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error updating variant approval:", err);
+          reject(err);
+        });
+    });
+  },
+  // Changes by Agnij May 02, 2025 [Fixed v_rank column reference error]
+  searchProductVariants: (id, searchTerm = "", startDate = null, endDate = null, vendorId = null, categoryId = null, addedBy = null, isApprove = null) => {
+    return new Promise(function (resolve, reject) {
+      try {
+        const conditions = ['pv.is_deleted = 0'];
+        const params = [];
+        let paramIndex = 1;
+
+        // Handle ID search
+        if (id) {
+          conditions.push(`pv.id = $${paramIndex}`);
+          params.push(id);
+          paramIndex++;
+        }
+
+        // Handle search term
+        if (searchTerm && searchTerm.trim() !== '') {
+          const searchTermParam = searchTerm.trim();
+          
+          // Add search conditions but don't reference calculated columns
+          conditions.push(`(
+            to_tsvector('english', pv.name) @@ plainto_tsquery('english', $${paramIndex})
+            OR to_tsvector('english', p.name) @@ plainto_tsquery('english', $${paramIndex})
+            OR similarity(pv.name, $${paramIndex}) > 0.1
+            OR similarity(p.name, $${paramIndex}) > 0.1
+          )`);
+          params.push(searchTermParam);
+          paramIndex++;
+        }
+
+        // Handle date range
+        if (startDate) {
+          try {
+            const startDateObj = new Date(startDate);
+            if (!isNaN(startDateObj.getTime())) {
+              conditions.push(`m.created_at >= $${paramIndex}`);
+              params.push(startDateObj);
+              paramIndex++;
+            }
+          } catch (e) {
+            console.error("Invalid start_date format:", e);
+          }
+        }
+
+        if (endDate) {
+          try {
+            const endDateObj = new Date(endDate);
+            if (!isNaN(endDateObj.getTime())) {
+              endDateObj.setDate(endDateObj.getDate() + 1);
+              conditions.push(`m.created_at <= $${paramIndex}`);
+              params.push(endDateObj);
+              paramIndex++;
+            }
+          } catch (e) {
+            console.error("Invalid end_date format:", e);
+          }
+        }
+
+        // Handle vendor filter
+        if (vendorId && vendorId !== '') {
+          conditions.push(`CAST(m.vendor_id AS TEXT) = $${paramIndex}`);
+          params.push(vendorId.toString());
+          paramIndex++;
+        }
+
+        // Handle category filter
+        if (categoryId && categoryId !== '') {
+          conditions.push(`EXISTS (
+            SELECT 1 FROM tbl_product_categories pc 
+            WHERE pc.product_id = p.id AND pc.category_id = $${paramIndex}
+          )`);
+          params.push(categoryId);
+          paramIndex++;
+        }
+
+        // Handle added_by filter
+        if (addedBy && addedBy !== '') {
+          conditions.push(`(pv.added_by = $${paramIndex} OR p.added_by = $${paramIndex})`);
+          params.push(addedBy);
+          paramIndex++;
+        }
+
+        // Handle approval status filter
+        if (isApprove !== null && isApprove !== undefined) {
+          conditions.push(`pv.is_approve = $${paramIndex}`);
+          params.push(isApprove);
+          paramIndex++;
+        }
+
+        // Construct the full SQL query, avoiding alias references in GROUP BY
+        const query = `
+          SELECT 
+            pv.id, 
+            pv.product_id, 
+            pv.name, 
+            pv.status,
+            pv.is_approve,
+            pv.created_at,
+            pv.updated_at,
+            pv.created_by,
+            pv.updated_by,
+            pv.is_deleted,
+            pv.reject_reason_id,
+            trr.reject_reason,
+            p.name as product_name,
+            CASE WHEN $${paramIndex} <> '' THEN
+              similarity(pv.name, $${paramIndex})
+            ELSE 0 END AS v_similarity_score,
+            CASE WHEN $${paramIndex} <> '' THEN
+              similarity(p.name, $${paramIndex}) 
+            ELSE 0 END AS p_similarity_score,
+            ARRAY_AGG(DISTINCT jsonb_build_object(
+              'category_name', c.title,
+              'category_id', c.id
+            )) FILTER (WHERE c.id IS NOT NULL) as categories,
+            (
+              SELECT ARRAY_AGG(DISTINCT vendor_id) 
+              FROM tbl_product_variant_vendor_mapping pvvm 
+              WHERE pvvm.product_variant_id = pv.id
+            ) as vendor_ids,
+            (
+              SELECT ARRAY_AGG(DISTINCT u.name)
+              FROM tbl_product_variant_vendor_mapping pvvm 
+              JOIN tbl_users u ON pvvm.vendor_id = u.id
+              WHERE pvvm.product_variant_id = pv.id
+            ) as vendor_names
+          FROM 
+            tbl_product_variant pv
+          JOIN 
+            tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
+          LEFT JOIN
+            tbl_reject_reason trr ON pv.reject_reason_id = trr.id
+          LEFT JOIN
+            tbl_product_variant_vendor_mapping m ON pv.id = m.product_variant_id
+          WHERE ${conditions.join(' AND ')}
+          GROUP BY 
+            pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
+            pv.created_at, pv.updated_at, pv.created_by, pv.updated_by, 
+            pv.is_deleted, pv.reject_reason_id, trr.reject_reason, p.name
+          ORDER BY 
+            ${searchTerm && searchTerm.trim() !== '' ? 
+              `GREATEST(
+                CASE WHEN $${paramIndex} <> '' THEN similarity(pv.name, $${paramIndex}) ELSE 0 END,
+                CASE WHEN $${paramIndex} <> '' THEN similarity(p.name, $${paramIndex}) ELSE 0 END
+              ) DESC,` : 
+              ''
+            }
+            pv.created_at DESC
+          LIMIT 1000000
+        `;
+        
+        // Add search term as the last parameter for similarity calculation
+        params.push(searchTerm || '');
+
+        db.any(query, params)
+          .then(function (data) {
+            resolve(data);
+          })
+          .catch(function (err) {
+            console.error("Error in searchProductVariants:", err);
+            reject(err);
+          });
+      } catch (error) {
+        console.error("Error in searchProductVariants try/catch:", error);
+        reject(error);
+      }
+    });
+  },
+  
+  // Changes by Agnij <current_date> [Implement server-side pagination for variant search]
+  searchProductVariantsPaginated: async (filters, page = 1, limit = 10) => {
+    return new Promise(async function (resolve, reject) {
+      try {
+        const { id, search_term, start_date, end_date, vendor_id, category_id, added_by, is_approve } = filters;
+
+        page = parseInt(page) || 1;
+        limit = parseInt(limit) || 10;
+        if (page < 1) page = 1;
+        if (limit < 1) limit = 10;
+        const offset = (page - 1) * limit;
+
+        let conditions = ['pv.is_deleted = 0'];
+        let params = [];
+        let paramIndex = 1;
+
+        // Handle ID filter
+        if (id) {
+          conditions.push(`pv.id = $${paramIndex}`);
+          params.push(id);
+          paramIndex++;
+        }
+
+        // Handle search term using ILIKE
+        if (search_term && search_term.trim() !== '') {
+          conditions.push(`(
+            to_tsvector('english', CONCAT(PV.name, ' - ', P.name)) @@ plainto_tsquery('english', '${search_term}')
+            OR similarity(CONCAT(PV.name, ' - ', P.name), '${search_term}') > 0.1
+          )`);
+          params.push(`%${search_term.trim()}%`);
+          paramIndex++;
+        }
+
+        // Handle date range
+        if (start_date) {
+          try {
+            const startDate = new Date(start_date);
+            if (!isNaN(startDate.getTime())) {
+              conditions.push(`pv.created_at >= $${paramIndex}`);
+              params.push(startDate);
+              paramIndex++;
+            }
+          } catch (e) { console.error("Invalid start_date:", e); }
+        }
+
+        if (end_date) {
+          try {
+            const endDate = new Date(end_date);
+            if (!isNaN(endDate.getTime())) {
+              endDate.setDate(endDate.getDate() + 1); // Include the whole end day
+              conditions.push(`pv.created_at <= $${paramIndex}`);
+              params.push(endDate);
+              paramIndex++;
+            }
+          } catch (e) { console.error("Invalid end_date:", e); }
+        }
+
+        // Handle vendor filter
+        if (vendor_id && vendor_id !== '') {
+          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm WHERE pvvm.product_variant_id = pv.id AND pvvm.vendor_id = $${paramIndex})`);
+          params.push(vendor_id);
+          paramIndex++;
+        }
+
+        // Handle category filter
+        if (category_id && category_id !== '') {
+          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_categories pc WHERE pc.product_id = p.id AND pc.category_id = $${paramIndex})`);
+          params.push(category_id);
+          paramIndex++;
+        }
+        
+        // Handle added by filter
+        if (added_by && added_by !== '') {
+          // Assuming added_by refers to the variant creator
+          conditions.push(`pv.created_by = $${paramIndex}`); 
+          params.push(added_by);
+          paramIndex++;
+        }
+
+        // Handle approval status filter
+        if (is_approve !== undefined && is_approve !== null && is_approve !== '') {
+           // Ensure is_approve is treated as a number/boolean
+           const approvalValue = (is_approve === '1' || is_approve === 1 || is_approve === true) ? 1 : 0;
+           conditions.push(`pv.is_approve = $${paramIndex}`);
+           params.push(approvalValue);
+           paramIndex++;
+        }
+
+        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+        // --- Count Query ---
+        const countQuery = `
+          SELECT COUNT(DISTINCT pv.id) as total_count
+          FROM 
+            tbl_product_variant pv
+          JOIN 
+            tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
+          ${whereClause}
+        `;
+
+        // --- Data Query ---
+        const dataQuery = `
+          SELECT 
+            pv.id, 
+            pv.product_id, 
+            pv.name, 
+            pv.status,
+            pv.is_approve,
+            pv.created_at,
+            pv.updated_at,
+            pv.created_by,
+            pv.updated_by,
+            pv.is_deleted,
+            pv.reject_reason_id,
+            p.name as product_name,
+            ${search_term ? `
+              similarity(CONCAT(PV.name, ' - ', P.name), '${search_term}') AS similarity_score,
+              ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', P.name)), plainto_tsquery('english', '${search_term}')) AS rank,
+            ` : ''}
+            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+          FROM 
+            tbl_product_variant pv
+          JOIN 
+            tbl_product p ON pv.product_id = p.id
+          LEFT JOIN 
+            tbl_product_categories pc ON p.id = pc.product_id
+          LEFT JOIN 
+            tbl_category c ON pc.category_id = c.id
+
+          ${whereClause}
+          GROUP BY 
+            pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
+            pv.created_at, pv.updated_at, pv.created_by, pv.updated_by, 
+            pv.is_deleted, pv.reject_reason_id, p.name
+
+          ${search_term ? `ORDER BY rank DESC, similarity_score DESC, PV.name ASC` : `ORDER BY PV.created_at DESC`} 
+          LIMIT $${paramIndex}
+          OFFSET $${paramIndex + 1}
+        `;
+
+        console.log("QUERY --------- ", dataQuery)
+        
+        // Add limit and offset parameters for data query
+        const dataParams = [...params, limit, offset];
+
+        // Execute count query
+        const countResult = await db.one(countQuery, params);
+        const totalItems = parseInt(countResult.total_count, 10) || 0;
+        const totalPages = Math.ceil(totalItems / limit);
+
+        // Execute data query
+        const data = await db.any(dataQuery, dataParams);
+
+        resolve({
+          data: data || [],
+          pagination: {
+            total: totalItems,
+            page: page,
+            limit: limit,
+            pages: totalPages
+          }
+        });
+
+      } catch (error) {
+        console.error("Error in searchProductVariantsPaginated:", error);
+        // Return empty result on error to avoid breaking frontend
+        resolve({
+          data: [],
+          pagination: { total: 0, page: page, limit: limit, pages: 1 }
+        });
+      }
+    });
+  },
 };
 
 export default productModel;
