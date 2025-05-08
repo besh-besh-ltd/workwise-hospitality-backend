@@ -209,7 +209,7 @@ const insertProduct = async (
 ) => {
   try {
     let tbl_rfq_products_data = {
-      product_id,
+      product_variant_id: product_id,
       variant,
       comment,
       datasheet,
@@ -222,18 +222,18 @@ const insertProduct = async (
     
     let spec_array = spec?.map((item) => {
       item.rfq_id = created_rfq_id;
-      item.product_id = product_id;
+      item.product_variant_id = product_id;
       item.variant = variant;
       return item;
     });
-    const spec_keys = ['title', 'value', 'rfq_id', 'product_id', 'variant'];
+    const spec_keys = ['title', 'value', 'rfq_id', 'product_variant_id', 'variant'];
 
-    const vendor_keys = ['user_id', 'rfq_id', 'product_id', 'variant'];
+    const vendor_keys = ['user_id', 'rfq_id', 'product_variant_id', 'variant'];
     var vendor_array = [];
     if (vendors.length > 0) {
       vendor_array = vendors.map((item) => {
         item.rfq_id = created_rfq_id;
-        item.product_id = product_id;
+        item.product_variant_id = product_id;
         item.variant = variant;
         return item;
       });
@@ -852,7 +852,7 @@ const containerContent = `
            This is a friendly reminder from <strong>${org_name}</strong> regarding the RFQ quotation. Ensure your quote is submitted on time to secure this opportunity.
          </p>
          <p>
-           Please submit quote for the following products:
+           Please submit quote for the following product variant(s):
          </p>
          <p>
            ${remainingProducts.map(product => (
@@ -1561,6 +1561,7 @@ const rfqController = {
             data: rfqItem.length > 0 ? rfqItem[0] : rfqItem
         });
     } catch (error) {
+        console.log(error)
         logError("Error fetching RFQ creation data:", error);
         res.status(500).json({
             status: 3,
@@ -1625,15 +1626,15 @@ const rfqController = {
 
         // Add products to the RFQ
         const product = req.body;
-        if (!product || !product.product_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
+        if (!product || !product.variant_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
           return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
         }
 
-        const variant = await rfqModel.getNextVariant(rfq_id, product.product_id);
+        const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
 
         const productData = {
             rfq_id,
-            product_id: product.product_id,
+            product_variant_id: product.variant_id,
             variant: variant,
             comment: "",
             datasheet: "",
@@ -1649,7 +1650,7 @@ const rfqController = {
 
             const vendorData = {
                 rfq_id,
-                product_id: product.product_id,
+                product_variant_id: product.variant_id,
                 user_id: vendor.vendor_id,
                 variant: variant
             };
@@ -1665,6 +1666,7 @@ const rfqController = {
         });
 
     } catch (error) {
+      console.log(error)
         logError("Error while creating or updating RFQ with products:", error);    
         res.status(500).json({
             status: 3,
@@ -2403,7 +2405,7 @@ const rfqController = {
                   quote_items_data.push({
                     rfq_id,
                     rfq_no,
-                    product_id,
+                    product_variant_id: product_id,
                     product_name,
                     unit_price,
                     package_price,
@@ -2419,7 +2421,7 @@ const rfqController = {
                   quote_items_data.push({
                     rfq_id,
                     rfq_no,
-                    product_id,
+                    product_variant_id: product_id,
                     product_name,
                     unit_price:0,
                     package_price,
@@ -2435,7 +2437,7 @@ const rfqController = {
                   quote_items_data.push({
                     rfq_id,
                     rfq_no,
-                    product_id,
+                    product_variant_id: product_id,
                     product_name,
                     unit_price:0,
                     package_price,
@@ -2464,7 +2466,7 @@ const rfqController = {
                 'rfq_id',
                 'rfq_no',
                 'quote_id',
-                'product_id',
+                'product_variant_id',
                 'product_name',
                 'unit_price',
                 'package_price',
@@ -2532,7 +2534,7 @@ const rfqController = {
               'rfq_id',
               'rfq_no',
               'quote_id',
-              'product_id',
+              'product_variant_id',
               'product_name',
               'unit_price',
               'package_price',
@@ -3023,7 +3025,7 @@ const rfqController = {
   
   finalize: async (req, res, next) => {
     const { organization_name, name } = req.user;
-    const { product_id, vendor_id, rfq_id, rfq_no, quote_id, variant } = req.body;
+    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, variant } = req.body;
 
     try {
       const vendor_details = await userModel.user_profile_detail(vendor_id);
@@ -3034,13 +3036,13 @@ const rfqController = {
       let winning_vendor_name = null;
 
       if (vendor_details.length > 0) {
-        winning_vendor_organization = vendor_details[0].organization_name;
+        winning_vendor_organization = vendor_details[0]?.organization_name ?? vendor_details[0]?.company_name;
         winning_vendor_email = vendor_details[0].email;
         winning_vendor_name = vendor_details[0].name;
       }
       if (rfQItem.length > 0 && rfQItem[0].products.length > 0) {
         winning_product = rfQItem[0].products.filter(
-          (p) => p.product_id == product_id && p.variant == variant
+          (p) => p.product_id == product_variant_id && p.variant == variant
         );
       }
 
@@ -3055,8 +3057,9 @@ const rfqController = {
 
         let alreadyExists = await rfqModel.checkIfExists(
           'tbl_quote_finalization',
-          `rfq_id=${rfq_id} AND product_id=${product_id} AND variant=${variant} AND created_by=${req.user.id} LIMIT 1`
+          `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} AND created_by=${req.user.id} LIMIT 1`
         );
+
         if (alreadyExists.length > 0) {
           res
             .status(409)
@@ -3069,7 +3072,7 @@ const rfqController = {
           const tbl_quote_finalization_data = {
             rfq_id,
             rfq_no,
-            product_id,
+            product_variant_id,
             vendor_id,
             quote_id,
             created_by: req.user.id,
@@ -3109,7 +3112,7 @@ const rfqController = {
           .status(400)
           .json({
             status: 3,
-            message: Config.errorText.value
+            message: "Required fields are not present for vendors, aborting finalization."
           })
           .end();
       }
@@ -4781,14 +4784,13 @@ const rfqController = {
           approved_by_id: ""
         };
 
-        const searchedPro = await productModel.checkProductExists(searchObj.search_key);
-
+        const searchedPro = await productModel.checkVariantExists(searchObj.search_key);
 
         // // break if no product found
         if (!searchedPro || searchedPro.length === 0) {
           validationErrors.push({
             // row: jsonData.indexOf(value) + 1,
-            errors: { product: productName + " - No product name found " }
+            errors: { product: productName + " - No variant name found " }
           });
           continue; // Skip this product
         }
@@ -4827,7 +4829,7 @@ const rfqController = {
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             // row: jsonData.indexOf(value) + 1,
-            errors: { vendor: productName + " - `No vendor found for product " }
+            errors: { vendor: productName + " - `No vendor found for variant " }
           });
           continue; // Skip this product
         }
@@ -4845,8 +4847,6 @@ const rfqController = {
 
         // Iterate over the existing products array to find the same product name and increment the variant
         products.forEach((product) => {
-          console.log("PRODUCT: ", product)
-          console.log("SEARCH KEY: ", search_key)
           if (product.name === search_key.name && product.product_id === search_key.id) {
             variant = Math.max(variant, product.variant) + 1;
           }
@@ -4855,8 +4855,6 @@ const rfqController = {
         // create product object and push in products array
         const product = {
           product_id:  search_key?.id,
-          predefined_tds_file: search_key.pd_tds_file_url,
-          predefined_qap_file: search_key.pd_qap_file_url,
           name: search_key.name,
           variant: variant,
           spec: spec,
@@ -5761,17 +5759,18 @@ getTechEvaluationResult: async (req, res) => {
 
 rfqProductWiseReport: async (req, res) => {
   try {
-    const { startDate, endDate ,productName, productID} = req.query;
+    const { startDate, endDate ,productName, productId} = req.query;
     const userId = req.user.id;
 
 
-    const rfqData = await rfqModel.rfqProductReport(userId, productName, startDate, endDate);
+    const rfqData = await rfqModel.rfqProductReport(userId, productId, productName, startDate, endDate);
 
     res
       .status(200)
       .json(rfqData)
       .end();
   } catch (error) {
+    console.log(error)
     logError(error);
     res.status(500).json({
         success: false,
@@ -5864,6 +5863,37 @@ sendReportOnEmail: async (req, res) => {
     });
   }
 },
+
+// Changes by Agnij May 01, 2025 [Added endpoint to search variant products]
+searchVariantProducts: async (req, res, next) => {
+  try {
+    console.log('[RFQ Controller] searchVariantProducts called with:', JSON.stringify(req.body));
+    const search_key = req.body?.search_key ? req.body?.search_key : '';
+    
+    if (!search_key || search_key.trim() === '') {
+      console.log('[RFQ Controller] Empty search key, returning empty results');
+      return res.status(200).json([]).end();
+    }
+    
+    // Use the model to search for variant mappings
+    const variantProductResults = await rfqModel.searchVariantProducts(search_key);
+    console.log(`[RFQ Controller] Found ${variantProductResults?.length || 0} variant products for search: "${search_key}"`);
+    
+    if (!variantProductResults || variantProductResults.length === 0) {
+      return res.status(200).json([]).end();
+    }
+    
+    res.status(200).json(variantProductResults).end();
+  } catch (error) {
+    console.error('[RFQ Controller] Error in searchVariantProducts:', error.message);
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    }).end();
+  }
+},
+
 processBoqAndDownload : async (req, res) => {
   try {
 
@@ -5891,8 +5921,44 @@ processBoqAndDownload : async (req, res) => {
         })
         .end();
   }
-}
+},
 
+// Changes by Agnij May 01, 2025 [Added endpoint to search variant vendors]
+searchVariantVendors: async (req, res, next) => {
+  try {
+    console.log('[RFQ Controller] searchVariantVendors called with:', JSON.stringify(req.body));
+    const { product_id, variant_id } = req.body;
+    
+    if (!product_id && !variant_id) {
+      console.log('[RFQ Controller] No product_id or variant_id provided, returning empty results');
+      return res.status(200).json([]).end();
+    }
+    
+    // Log which ID we're using
+    if (variant_id) {
+      console.log(`[RFQ Controller] Searching vendors for variant ID: ${variant_id}`);
+    } else {
+      console.log(`[RFQ Controller] Searching vendors for product ID: ${product_id}`);
+    }
+    
+    // Use the model to search for vendors associated with this variant
+    const variantVendorResults = await rfqModel.searchVariantVendors(product_id, variant_id);
+    console.log(`[RFQ Controller] Found ${variantVendorResults?.length || 0} vendors for ${variant_id ? 'variant' : 'product'} ID: ${variant_id || product_id}`);
+    
+    if (!variantVendorResults || variantVendorResults.length === 0) {
+      return res.status(200).json([]).end();
+    }
+    
+    res.status(200).json(variantVendorResults).end();
+  } catch (error) {
+    console.error('[RFQ Controller] Error in searchVariantVendors:', error.message);
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    }).end();
+  }
+},
 
 };
 export default rfqController;

@@ -605,11 +605,10 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
   },
   createReason: async (reasonObj) => {
     return new Promise(function (resolve, reject) {
-      const query =
-        pgp().helpers.insert(reasonObj, null, 'tbl_reject_reason') +
-        ' RETURNING id';
-
-      db.any(query)
+      db.any(
+        'INSERT INTO tbl_reject_reason(reject_reason, status, type) VALUES($1, $2, $3) RETURNING id',
+        [reasonObj.reject_reason, reasonObj.status, reasonObj.type]
+      )
         .then(function (data) {
           resolve(data);
         })
@@ -826,8 +825,9 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
           FROM tbl_rfq_product_vendors TRPV
           JOIN tbl_rfq TR
               ON TR.id = TRPV.rfq_id
-          JOIN tbl_product TP
-              ON TP.id = TRPV.product_id
+          JOIN tbl_product_variant TPV
+              ON TPV.id = TRPV.product_variant_id
+          JOIN tbl_product TP ON TP.id = TPV.product_id
           JOIN tbl_product_categories TPC
               ON TPC.product_id = TP.id
           JOIN tbl_category TC
@@ -916,6 +916,22 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
          WHERE is_deleted = 0 
          AND user_type IN (1, 5, 6)
          ORDER BY name ASC`
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  findReasonByText: async (reasonText) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        'SELECT * FROM tbl_reject_reason WHERE reject_reason = $1',
+        [reasonText]
       )
         .then(function (data) {
           resolve(data);
