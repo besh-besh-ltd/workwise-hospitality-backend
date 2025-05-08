@@ -16,8 +16,7 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import fs from 'fs';
 import productModel from '../../models/productModel.js';
 import generativeAI from '../../helper/processBOQWithAI.js';
-import { setupReverseAuctionMails } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import { setupReverseAuctionWhatsAppNotifications } from '../../helper/sendWhatsAppFunctions/sendWhatsappNotification.js';
+
 
 
 
