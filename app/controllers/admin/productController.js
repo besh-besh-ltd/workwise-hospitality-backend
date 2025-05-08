@@ -2239,111 +2239,56 @@ const productController = {
         .end();
     }
   },
-  productList: async (req, res, next) => {
-    console.log("PRODUCT CONTROLLER ----------- ")
+  productListImproved: async (req, res) => {
     try {
-      let page = parseInt(req.query.page) || 1;
-      let limit = parseInt(req.query.limit) || Config.globalAdminLimit;
-      let offset = (page - 1) * limit;
-
-      let productName = req.query?.productName;
-      let vendorApprove = req.query?.vendorApprove;
-      let vendorId = req.query?.vendorId;
-      let isFeatured = req.query?.isFeatured;
-      let categoryId = req.query?.categoryId;
-      let addedBy = req.query?.addedBy;
-      let onlyAddedByAdmin = req.query?.onlyAddedByAdmin === 'true';
-      let dateFrom = req.query?.dateFrom;
-      let dateTo = req.query?.dateTo;
-      let is_approve = req.query?.is_approve !== undefined ? parseInt(req.query.is_approve) : null;
-      let filterProduct = {};
-
-      // Track which filters are active
-      const activeFilters = {
-        productName: !!productName,
-        vendorApprove: !!vendorApprove,
-        vendorId: !!vendorId,
-        isFeatured: !!isFeatured,
-        categoryId: !!categoryId,
-        onlyAddedByAdmin: onlyAddedByAdmin,
-        dateFrom: !!dateFrom,
-        dateTo: !!dateTo,
-        is_approve: is_approve !== null
-      };
-
-      if (vendorApprove) {
-        filterProduct = await productModel.getApprovedByProduct(vendorApprove);
-      }
-
-      // Get filtered products
-      let productList = await productModel.getMasterProductList(
-        limit,
-        offset,
-        vendorId,
+      const {
         productName,
-        filterProduct,
+        vendorApprove,
+        vendorId,
         isFeatured,
-        addedBy,  // Use the addedBy parameter instead of req.user.id
         categoryId,
+        addedBy,
         dateFrom,
         dateTo,
-        is_approve
-      );
-
-      // Get total counts with all active filters
-      let filteredCount = await productModel.getProductCount(
-        vendorId,
-        productName,
-        filterProduct,
-        isFeatured,
-        addedBy,  // Use the addedBy parameter for consistent filtering
-        categoryId,
-        dateFrom,
-        dateTo,
-        is_approve
-      );
-
-      // Get unfiltered total counts for comparison
-      let unfilteredCount = await productModel.getProductCount(
-        null, null, null, null, null, null, null, null, null
-      );
-
-      const total_count = parseInt(unfilteredCount[0].count);
-      const filtered_total = parseInt(filteredCount[0].count);
-
-      // Calculate approve/disapprove counts for filtered results
-      const approve_count = productList.filter(item => item.is_approve === 1).length;
-      const disapprove_count = filtered_total - approve_count;
-
-      // Calculate approve/disapprove counts for unfiltered results
-      const total_approve = await productModel.getProductCount(
-        null, null, null, null, null, null, null, null, 1
-      );
-      const total_disapprove = await productModel.getProductCount(
-        null, null, null, null, null, null, null, null, 0
-      );
-
-      res.status(200).json({
-        status: 1,
-        data: productList,
-        total_count: total_count,  // Total count without filters
-        approve_count: parseInt(total_approve[0].count),  // Total approved without filters
-        disapprove_count: parseInt(total_disapprove[0].count),  // Total disapproved without filters
-        is_filtered: Object.values(activeFilters).some(f => f),
-        filtered_count: filtered_total,  // Count with filters applied
-        filtered_approve_count: approve_count,  // Approved count with filters
-        filtered_disapprove_count: disapprove_count,  // Disapproved count with filters
+        is_approve,
         page,
         limit,
-        total_pages: Math.ceil(filtered_total / limit)
-      }).end();
+      } = req.query;
+
+      const filters = {
+        productName,
+        vendorApprove,
+        vendorId,
+        isFeatured,
+        categoryId,
+        addedBy,
+        dateFrom,
+        dateTo,
+        is_approve,
+      };
+
+      const result = await productModel.getMasterProductsPaginated(
+        filters,
+        page,
+        limit
+      );
+
+      const responsePayload = {
+        status: 1,
+        // data: result.data || [],
+        // pagination: result.pagination || { total: 0, page: page, limit: limit, pages: 1 } // Ensure pagination object exists
+        ...result
+      };
+      
+      res.status(200).json(responsePayload).end();
 
     } catch (error) {
       logError(error);
-      res.status(400).json({
-        status: 3,
-        message: Config.errorText.value
-      }).end();
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to search product',
+        error: error.message
+      });
     }
   },
   adminProductListReview: async (req, res, next) => {
