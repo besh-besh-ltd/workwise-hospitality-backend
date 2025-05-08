@@ -2413,7 +2413,7 @@ const rfqController = {
               // Get RFQ product ID from the database
               const rfqProductResult = await rfqModel.checkIfExists(
                 'tbl_rfq_products',
-                `rfq_id=${rfq_id} AND product_id=${product.product_id} AND variant='${product.variant}'`
+                `rfq_id=${rfq_id} AND product_variant_id=${product.product_id} AND variant='${product.variant}'`
               );
 
               if (rfqProductResult && rfqProductResult.length > 0) {

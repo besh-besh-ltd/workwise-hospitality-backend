@@ -359,14 +359,14 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                   WHEN EXISTS (
                     SELECT 1 FROM tbl_quote_finalization TQF
                     WHERE TQF.rfq_id = RP.rfq_id
-                    AND TQF.product_id = RP.product_id
+                    AND TQF.product_variant_id = RP.product_variant_id
                     AND TQF.variant = RP.variant
                   ) THEN 1
                   ELSE 0
                 END) AS finalized_products
       FROM tbl_rfq_products RP
       JOIN tbl_rfq_product_vendors RPV ON RP.rfq_id = RPV.rfq_id
-                                      AND RP.product_id = RPV.product_id
+                                      AND RP.product_variant_id = RPV.product_variant_id
                                       AND RP.variant = RPV.variant
       WHERE RP.rfq_id = $1 AND RPV.user_id = $2
     `;
