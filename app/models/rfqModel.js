@@ -923,7 +923,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                             WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
                             LIMIT 1
                         )` : ``}
-                        -- Changes by Agnij 2024-06-14 [Fixed lowest quotation selection to always pick the lowest price]
+                        -- Changes by Agnij 2025-05-08 [Fixed lowest quotation selection to always pick the lowest price]
                         SELECT json_build_object(
                             'quote_id', TQI.quote_id,
                             'total_price', TQI.total_price
