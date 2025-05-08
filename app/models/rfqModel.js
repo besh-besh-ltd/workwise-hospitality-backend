@@ -923,16 +923,23 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                             WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
                             LIMIT 1
                         )` : ``}
-                        -- Changes made by Agnij 28/04/2025 [Added logic to handle reverse auction timing conditions and visibility rules for lowest quote prices]
+                        -- Changes by Agnij 2024-06-14 [Fixed lowest quotation selection to always pick the lowest price]
                         SELECT json_build_object(
                             'quote_id', TQI.quote_id,
                             'total_price', TQI.total_price
                         )
-                        FROM tbl_quote_items TQI
-                        WHERE TQI.product_variant_id = RFQ_P.product_variant_id
-                        AND TQI.variant = RFQ_P.variant
-                        AND TQI.rfq_id = RFQ_P.rfq_id  -- Ensure you're getting quotes for the specific RFQ
-                        AND TQI.total_price > 0
+                        FROM (
+                            SELECT 
+                                quote_id,
+                                total_price,
+                                ROW_NUMBER() OVER (PARTITION BY product_variant_id, variant ORDER BY total_price ASC) AS rn
+                            FROM tbl_quote_items
+                            WHERE product_variant_id = RFQ_P.product_variant_id
+                            AND variant = RFQ_P.variant
+                            AND rfq_id = RFQ_P.rfq_id
+                            AND total_price > 0
+                        ) TQI
+                        WHERE TQI.rn = 1  -- Get only the lowest price for each product/variant
                         AND RFQ.reverse_auction = 1
                         ${user_type == 3 ? `
                         -- Apply technical evaluation filtering if enabled for this product
