@@ -1931,9 +1931,9 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
                       img.new_image_name AS image_url,
                       similarity(CONCAT(PV.name, ' - ', P.name), $1) AS similarity_score,
                       ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', P.name)), plainto_tsquery('english', $1)) AS rank
-      FROM tbl_product p
+      FROM tbl_product_variant pv 
+      JOIN tbl_product p ON pv.product_id = p.id
       JOIN tbl_product_categories pc ON p.id = pc.product_id
-      JOIN tbl_product_variant pv ON pv.product_id = p.id
       JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
       LEFT JOIN tbl_product_images img ON p.id = img.product_id
       JOIN tbl_category c ON pc.category_id = c.id
