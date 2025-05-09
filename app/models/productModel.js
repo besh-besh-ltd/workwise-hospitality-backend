@@ -2436,19 +2436,15 @@ FROM (
   productDetails: async (productId) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT PD.*,USERS.name as vendor_name,
+        `SELECT PD.*,
         ARRAY
         (SELECT json_build_object('category_name', tc.title,'id',pc.category_id )
           FROM tbl_product_categories pc
           LEFT JOIN tbl_category tc ON pc.category_id = tc.id   WHERE  PD.id = pc.product_id ORDER BY pc.id) AS "product_categories",
         ARRAY
           (SELECT json_build_object('id',pv.id,'name',pv.name,'product_id',pv.product_id)
-            FROM tbl_product_variant pv WHERE  PD.id = pv.product_id) AS "product_variants",
-            ARRAY
-          (SELECT tvpm.vendor_approve_id
-            FROM tbl_vendorapprove_product_mapping tvpm WHERE  PD.id = tvpm.product_id) AS "vendor_approved_by"
+            FROM tbl_product_variant pv WHERE  PD.id = pv.product_id) AS "product_variants"
             FROM tbl_product PD 
-            LEFT JOIN tbl_users USERS ON PD.status = 1 
             WHERE PD.status = 1 And PD.id = $1`,
         [productId]
       )

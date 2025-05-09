@@ -3120,18 +3120,12 @@ const productController = {
         status: 3,
         message: 'Product Not Found!'
       })
-      let vendorListProductWise = await productModel.vendorListProductWise(
-        product.name
-      );
-      let variants = await productModel.getVariantsByProductId(product.id);
       
       res
         .status(200)
         .json({
           status: 1,
           data: productList[0],
-          vendor_list: vendorListProductWise,
-          variants,
         })
         .end();
     } catch (error) {
