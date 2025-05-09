@@ -1540,7 +1540,7 @@ const productModel = {
                 reject_reason_id,
                 admin_added_product
             FROM tbl_product P
-            WHERE is_deleted = 0
+            ${whereClause}
             ${productName ? `ORDER BY rank DESC, similarity_score DESC, P.name ASC` : `ORDER BY P.created_at DESC`} 
             LIMIT $${paramIndex}
                 OFFSET $${paramIndex + 1}
