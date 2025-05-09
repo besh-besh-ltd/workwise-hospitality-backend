@@ -3406,6 +3406,7 @@ const productController = {
       // Support both naming conventions: variant_id and product_variant_id
       const variantId = req.body.variant_id || req.body.product_variant_id;
       const vendorId = req.body.vendor_id;
+      let vendorApproveId = req.body.approved_by ?? [];
       
       // Validate input
       if (!variantId || !vendorId) {
@@ -3441,6 +3442,9 @@ const productController = {
           message: 'Variant is already mapped with this vendor' 
         });
       }
+
+      const productResult = await productModel.getProductByVariant(variantId)
+      let productId = productResult?.[0]?.id
       
       // Changes by Agnij May 02, 2025 [Set is_approve to 0 (disapproved) by default for new mappings]
       // Create mapping
@@ -3455,7 +3459,22 @@ const productController = {
       };
       
       // Create the mapping
-      const result = await productModel.createProductVariantVendorMapping(mappingObj);
+      const mappingResult = await productModel.createProductVariantVendorMapping(mappingObj);
+
+      console.log("MAPPING RES: ", mappingResult, "\nVENDOR APPROVE ID: ", vendorApproveId);
+
+      if (vendorApproveId.length > 0 && mappingResult) {
+        let productApproveArray = [];
+        vendorApproveId.forEach((item) => {
+          productApproveArray.push({
+            product_id: productId,
+            variant_vendor_mapping_id: mappingResult.id,
+            vendor_approve_id: item
+          });
+        });
+
+        await productModel.addProductApproveBy(productApproveArray, productId);
+      }
       
       // Update variant to disapproved state by default
       // await productModel.updateProductVariantApproval(variantId, 0);
