@@ -19,6 +19,80 @@ const consoleLogData = (...args) => {
   }
 };
 
+const buildProductFilters = ({
+  vendorId,
+  productName,
+  filterProduct,
+  isFeatured,
+  userId,
+  categoryId,
+  dateFrom,
+  dateTo,
+  is_approve
+}) => {
+  let conditions = [`PD.created_by IN (1, 111)`]; // hardcoded fallback
+
+  if (productName) {
+    conditions.push(`
+      (
+        to_tsvector('english', PD.name) @@ plainto_tsquery('english', $/productName/)
+        OR similarity(PD.name, $/productName/) > 0.1
+      )
+    `);
+  }
+
+  if (filterProduct?.id_array?.length) {
+    conditions.push(`PD.id IN (${filterProduct.id_array.join(',')})`);
+  }
+
+  if (vendorId) {
+    conditions.push(`
+      EXISTS (
+        SELECT 1 FROM tbl_product_variant pv
+        JOIN tbl_product_variant_vendor_mapping pvm ON pv.id = pvm.product_variant_id
+        WHERE pv.product_id = PD.id AND pvm.vendor_id = $/vendorId/
+      )
+    `);
+  }
+
+  if (userId) {
+    conditions.push(`
+      EXISTS (
+        SELECT 1 FROM tbl_product_variant pv
+        JOIN tbl_product_variant_vendor_mapping pvm ON pv.id = pvm.product_variant_id
+        WHERE pv.product_id = PD.id AND pvm.vendor_id = $/userId/
+      )
+    `);
+  }
+
+  if (isFeatured) {
+    conditions.push(`PD.is_featured = $/isFeatured/`);
+  }
+
+  if (categoryId) {
+    conditions.push(`
+      EXISTS (
+        SELECT 1 FROM tbl_product_categories pc
+        WHERE pc.product_id = PD.id AND pc.category_id = $/categoryId/
+      )
+    `);
+  }
+
+  if (dateFrom) {
+    conditions.push(`PD.created_at::date >= $/dateFrom/`);
+  }
+
+  if (dateTo) {
+    conditions.push(`PD.created_at::date <= $/dateTo/`);
+  }
+
+  if (is_approve !== null && is_approve !== undefined) {
+    conditions.push(`PD.is_approve = $/is_approve/`);
+  }
+
+  return conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+};
+
 const calcTime = () => {
   // create Date object for current location
   let d = new Date();
@@ -318,5 +392,6 @@ export {
   arraysHaveSameData,
   getFileNameFromUrl,
   getDateRange,
-  deleteFileFromS3
+  deleteFileFromS3,
+  buildProductFilters,
 };
