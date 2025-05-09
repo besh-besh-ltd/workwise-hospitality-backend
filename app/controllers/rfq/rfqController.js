@@ -2407,13 +2407,16 @@ const rfqController = {
           // Check if technical evaluation is required for any products and if vendor is accepted
           if (isReverseAuction && products && products.length > 0) {
             // For each product, check if it has technical evaluation and if the vendor is accepted
+            // Changes by Agnij 2024-06-14 [Enhanced validation to check all products]
+            let rejectedProducts = [];
+            
             for (const product of products) {
               if (!product.product_id) continue;
 
               // Get RFQ product ID from the database
               const rfqProductResult = await rfqModel.checkIfExists(
                 'tbl_rfq_products',
-                `rfq_id=${rfq_id} AND product_id=${product.product_id} AND variant='${product.variant}'`
+                `rfq_id=${rfq_id} AND product_variant_id=${product.product_id} AND variant='${product.variant}'`
               );
 
               if (rfqProductResult && rfqProductResult.length > 0) {
@@ -2422,19 +2425,24 @@ const rfqController = {
                 // Check if this product has technical evaluation
                 const techEvalResult = await rfqModel.getTechEvaluationResult(rfqProductId, user.id);
 
-                // If product has technical evaluation but vendor is not accepted, reject the quote
+                // If product has technical evaluation but vendor is not accepted, add to rejected list
                 if (techEvalResult && techEvalResult.data &&
                     techEvalResult.data.has_tech_eval === true &&
                     techEvalResult.data.status !== 1) {
-                  return res
-                    .status(400)
-                    .json({
-                      status: 3,
-                      message: 'You cannot submit a quote for products that have not passed technical evaluation.'
-                    })
-                    .end();
+                  rejectedProducts.push(product.product_id);
                 }
               }
+            }
+            
+            // If any products were rejected, return error
+            if (rejectedProducts.length > 0) {
+              return res
+                .status(400)
+                .json({
+                  status: 3,
+                  message: `You cannot submit a quote for products that have not passed technical evaluation. ${rejectedProducts.length} product(s) not technically accepted.`
+                })
+                .end();
             }
           }
 

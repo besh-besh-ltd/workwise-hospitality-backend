@@ -359,14 +359,14 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                   WHEN EXISTS (
                     SELECT 1 FROM tbl_quote_finalization TQF
                     WHERE TQF.rfq_id = RP.rfq_id
-                    AND TQF.product_id = RP.product_id
+                    AND TQF.product_variant_id = RP.product_variant_id
                     AND TQF.variant = RP.variant
                   ) THEN 1
                   ELSE 0
                 END) AS finalized_products
       FROM tbl_rfq_products RP
       JOIN tbl_rfq_product_vendors RPV ON RP.rfq_id = RPV.rfq_id
-                                      AND RP.product_id = RPV.product_id
+                                      AND RP.product_variant_id = RPV.product_variant_id
                                       AND RP.variant = RPV.variant
       WHERE RP.rfq_id = $1 AND RPV.user_id = $2
     `;
@@ -923,16 +923,23 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                             WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
                             LIMIT 1
                         )` : ``}
-                        -- Changes made by Agnij 28/04/2025 [Added logic to handle reverse auction timing conditions and visibility rules for lowest quote prices]
+                        -- Changes by Agnij 2025-05-08 [Fixed lowest quotation selection to always pick the lowest price]
                         SELECT json_build_object(
                             'quote_id', TQI.quote_id,
                             'total_price', TQI.total_price
                         )
-                        FROM tbl_quote_items TQI
-                        WHERE TQI.product_variant_id = RFQ_P.product_variant_id
-                        AND TQI.variant = RFQ_P.variant
-                        AND TQI.rfq_id = RFQ_P.rfq_id  -- Ensure you're getting quotes for the specific RFQ
-                        AND TQI.total_price > 0
+                        FROM (
+                            SELECT 
+                                quote_id,
+                                total_price,
+                                ROW_NUMBER() OVER (PARTITION BY product_variant_id, variant ORDER BY total_price ASC) AS rn
+                            FROM tbl_quote_items
+                            WHERE product_variant_id = RFQ_P.product_variant_id
+                            AND variant = RFQ_P.variant
+                            AND rfq_id = RFQ_P.rfq_id
+                            AND total_price > 0
+                        ) TQI
+                        WHERE TQI.rn = 1  -- Get only the lowest price for each product/variant
                         AND RFQ.reverse_auction = 1
                         ${user_type == 3 ? `
                         -- Apply technical evaluation filtering if enabled for this product
@@ -1924,9 +1931,9 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
                       img.new_image_name AS image_url,
                       similarity(CONCAT(PV.name, ' - ', P.name), $1) AS similarity_score,
                       ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', P.name)), plainto_tsquery('english', $1)) AS rank
-      FROM tbl_product p
+      FROM tbl_product_variant pv 
+      JOIN tbl_product p ON pv.product_id = p.id
       JOIN tbl_product_categories pc ON p.id = pc.product_id
-      JOIN tbl_product_variant pv ON pv.product_id = p.id
       JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
       LEFT JOIN tbl_product_images img ON p.id = img.product_id
       JOIN tbl_category c ON pc.category_id = c.id
