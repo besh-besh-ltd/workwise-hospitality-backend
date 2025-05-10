@@ -341,7 +341,8 @@ const schemas = {
     availability: Joi.string().optional().allow('', null),
     categories: Joi.array().items(Joi.number()).min(1).required(),
     is_featured: Joi.string()
-      .required()
+      .optional()
+      .allow('', null)
       .regex(/^[0|1]$/, 'numeric values only'),
     /* Joi.array().items(
       // Joi.object({
@@ -352,13 +353,6 @@ const schemas = {
       .required()
       .regex(/^[0|1]$/, 'numeric values only'),
     featured: Joi.array().items(Joi.string().required()),
-    gallery: Joi.array().items(Joi.string().required()),
-    qap: Joi.array().items(Joi.string().required()),
-    tds: Joi.array().items(Joi.string().required()),
-    variations: Joi.array().items(Joi.object({
-      attribute: Joi.string().allow('', null),
-      attributeValue: Joi.string().allow('', null)
-    })).min(1),
     /*  Joi.array().items(
       Joi.object({
         attribute: Joi.string().required(),

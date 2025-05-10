@@ -66,7 +66,7 @@ ProductsRoutes.post(
   '/vendor-product-add',
   passportSignIn,
   acl([3, 4]),
-  schema_posts.add_vendor_product,
+  // schema_posts.add_vendor_product,
   validateDbBody.add_vendor_product,
   ProductsController.vendorProductAdd
 );
@@ -76,7 +76,7 @@ ProductsRoutes.put(
   acl([3, 4]),
   validateParam(schemas.id),
   validateDbBody.check_product,
-  schema_posts.add_vendor_product,
+  // schema_posts.add_vendor_product,
   validateDbBody.add_vendor_product,
   ProductsController.vendorProductUpdate
 );
@@ -96,7 +96,7 @@ ProductsRoutes.get(
   passportSignIn,
   acl([1, 2, 3, 4]),
   validateParam(schemas.id),
-  validateDbBody.check_product,
+  // validateDbBody.check_product,
   ProductsController.vendorProductDetails
 );
 
