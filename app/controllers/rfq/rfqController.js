@@ -9,6 +9,7 @@ import userModel from '../../models/userModel.js';
 import { sendNotification } from '../../services/notificationService.js';
 import excelJS from 'exceljs';
 import xlsx from 'xlsx';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import vendorModel from '../../models/vendorModel.js';
 import projectModel from '../../models/projectModel.js';
 import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
@@ -20,6 +21,14 @@ import { setupReverseAuctionMails } from '../../helper/sendEmailFunctions/raEmai
 import { setupReverseAuctionWhatsAppNotifications } from '../../helper/sendWhatsAppFunctions/sendWhatsappNotification.js';
 
 
+const s3Client = new S3Client({ region: 'ap-south-1' });
+async function readableStreamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
 
 
 const getNextRfQNumber = async () => {
@@ -5510,7 +5519,18 @@ addClauseUsingFile : async (req, res) => {
 
     // converting the excel into json object
     let file = req.file;
-    const workbook = xlsx.readFile(file.path);
+    const command = new GetObjectCommand({
+      Bucket: file.bucket,
+      Key: file.key,
+    });
+  
+    const response = await s3Client.send(command);
+    const stream = response.Body;
+  
+    // Convert stream to buffer
+    const buffer = await readableStreamToBuffer(stream);
+  
+    const workbook = xlsx.read(buffer, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     let jsonData = xlsx.utils.sheet_to_json(sheet);
