@@ -1106,8 +1106,9 @@ const ProductsController = {
   vendorProductDetails: async (req, res, next) => {
     try {
       let productId = req.params.id;
+      let vendorId = req.user.id
 
-      let productList = await productModel.vendorProductDetails(productId);
+      let productList = await productModel.vendorProductDetails(productId, vendorId);
       res
         .status(200)
         .json({
