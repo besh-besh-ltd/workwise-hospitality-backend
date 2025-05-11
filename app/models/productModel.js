@@ -2488,18 +2488,27 @@ WHERE tbl_product.name = $1`,
       if (vendorId) {
         dynamicWhere = `AND PVVM.vendor_id = ${vendorId}`;
       }
+
+      let q = `SELECT PV.*,
+          CONCAT(PV.name, ' - ', PD.name) AS unified_name,
+          ARRAY
+          (SELECT vpm.vendor_approve_id FROM tbl_vendorapprove_product_mapping vpm WHERE vpm.variant_vendor_mapping_id = PVVM.id) as vendor_approved_by,
+          ARRAY
+          (SELECT json_build_object('category_name', tc.title,'id',pc.category_id )
+            FROM tbl_product_categories pc
+            LEFT JOIN tbl_category tc ON pc.category_id = tc.id 
+            WHERE  PD.id = pc.product_id ORDER BY pc.id) AS "product_categories"
+
+        FROM tbl_product_variant_vendor_mapping PVVM
+        JOIN tbl_product_variant PV ON PVVM.product_variant_id = PV.id
+        JOIN tbl_product PD ON PD.id = PV.product_id
+
+        WHERE PV.status = 1 AND PV.id = $1 ${dynamicWhere}`
+
+      console.log(q)
+
       db.any(
-        `SELECT PV.*,
-        CONCAT(PV.name, ' - ', PD.name) AS unified_name,
-        ARRAY
-        (SELECT json_build_object('category_name', tc.title,'id',pc.category_id )
-          FROM tbl_product_categories pc
-          LEFT JOIN tbl_category tc ON pc.category_id = tc.id 
-          WHERE  PD.id = pc.product_id ORDER BY pc.id) AS "product_categories"
-            FROM tbl_product_variant PV
-            JOIN tbl_product PD ON PD.id = PV.product_id
-            LEFT JOIN tbl_product_variant_vendor_mapping PVVM ON PVVM.product_variant_id = PV.id
-            WHERE PV.status = 1 AND PV.id = $1 ${dynamicWhere}`,
+        q,
         [productId]
       )
         .then(function (data) {

@@ -1503,18 +1503,22 @@ const rfqController = {
       // get vendor details along with spoc
       const updatedData = await rfqModel.updateWithTimestamp('tbl_rfq', data, rfq_id);
 
-      await sendRfqUpdatedMailToVendors(vendorData, rfq_id, rfq_no, buyerName, data);
+      const buyerName = updatedData?.[0]?.company_name ?? "-"
+      const rfqNo = updatedData?.[0]?.rfq_no ?? "000000"
+
+      await sendRfqUpdatedMailToVendors(vendorData, rfq_id, rfqNo, buyerName, data);
 
       res.status(200).json({
         status: 1,
         data: updatedData || {},
         vendors: vendorData,
-        rfqDetails:rfqDetails,
+        rfqDetails:updatedData,
         message: 'RFQ updated successfully'
       });
 
     } catch (error) {
       logError(error);
+      console.log("ERROR --------- ", error)
       res
         .status(400)
         .json({
