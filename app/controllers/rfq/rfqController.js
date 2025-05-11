@@ -407,7 +407,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
       </a>
 
       <p style="margin-top:20px" >
-               Submit your quote promptly to access this opportunity with [Buyer Name] and stand out as a preferred vendor.
+               Submit your quote promptly to access this opportunity with ${organization_name} and stand out as a preferred vendor.
       </p>
 
         </div>`;
