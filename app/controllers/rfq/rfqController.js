@@ -18,6 +18,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI from '../../helper/processBOQWithAI.js';
 import { setupReverseAuctionMails } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import { setupReverseAuctionWhatsAppNotifications } from '../../helper/sendWhatsAppFunctions/sendWhatsappNotification.js';
+import extractClausesWithAI from '../../helper/extractClausesWithAI.js';
 
 
 
@@ -5380,53 +5381,74 @@ listQueries: async (req, res) => {
 
 addClauseUsingFile : async (req, res) => {
   try {
-
-    // converting the excel into json object
+    // Changes by Agnij May 11, 2025 [Fixed AI-based clause extraction and addClause parameters]
+    // Get file and RFQ details from request
     let file = req.file;
-    const workbook = xlsx.readFile(file.path);
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    let jsonData = xlsx.utils.sheet_to_json(sheet);
- 
-    // if there is no Clauses in the excel file.
-    if(jsonData.length < 1){
-      return res.status(200).json({
+    const { rfq_id, rfq_product_id } = req.body;
+    
+    if (!file) {
+      return res.status(400).json({
         status: 0,
-        message: "List of Clauses is empty",
+        message: "No file provided",
       });
     }
 
-    const { rfq_id,rfq_product_id, } = req.body;
-    let errors=[];
-    for await(const[index,value] of jsonData.entries()){
-      const clause_text = (value['List of Clauses'] || "").trim();
-
-      if(clause_text==''){
-        errors.push({
-          Row:index,
-          error:"Either not find the column or Clause is empty"
-        })
-      }else{
-        const result = await rfqModel.addClause(rfq_id, rfq_product_id, clause_text,[]);
-        if(!result.status){
-          errors.push({
-            Row:index,
-            error:result.message
-          })
-        }
-      }
-
+    if (!rfq_id || !rfq_product_id) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid input. Ensure RFQ_ID and RFQ_PRODUCT_ID are provided",
+      });
     }
 
-    res.status(200).json({status:errors?.length>0 ? 0 : 1, message : "Clause added Successfully", errors:errors}).end();
+    // Use AI to extract clauses from the uploaded file
+    const result = await extractClausesWithAI.extractClauses(file);
+    
+    if (!result.status) {
+      return res.json({
+        status: 0,
+        message: result.message || "Failed to extract clauses",
+        errors: [{ Row: 0, error: result.error || "AI processing error" }]
+      });
+    }
 
+    // Return early if no clauses were extracted
+    if (!result.clauses || result.clauses.length === 0) {
+      return res.json({
+        status: 0,
+        message: "No clauses were found in the document",
+        errors: [{ Row: 0, error: "No clauses detected in the document" }]
+      });
+    }
+
+    // Save the extracted clauses to the database
+    const clauses = result.clauses;
+    const promises = clauses.map(async (clause, index) => {
+      try {
+        // Call the rfqModel.addClause with the correct parameter order
+        await rfqModel.addClause(rfq_id, rfq_product_id, clause, file.location ? [file.location] : []);
+        return null; // Successful operation
+      } catch (error) {
+        return { Row: index, error: error.message }; // Return error for this clause
+      }
+    });
+
+    // Wait for all clauses to be saved
+    const errors = (await Promise.all(promises)).filter(Boolean);
+
+    // Return success response with any errors that occurred during saving
+    return res.json({
+      status: 1,
+      message: `${clauses.length - errors.length} clauses added successfully${errors.length > 0 ? ` (${errors.length} failed)` : ''}`,
+      errors: errors.length > 0 ? errors : [],
+      clauses: clauses // Return the extracted clauses to be displayed on frontend
+    });
+    
   } catch (error) {
-    // console.log("controller error")
-    console.error("Error in addClause:", error);
-    res.status(500).json({
-      success: false,
-      message: "Error in adding clauses to technical evaluation.",
-      error: error.message,
+    const errMsg = error?.response?.data?.error?.message || error.message;
+    return res.status(500).json({
+      status: 0,
+      message: "Error adding clauses",
+      errors: [{ Row: 0, error: errMsg }]
     });
   }
 },

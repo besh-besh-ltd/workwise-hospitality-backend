@@ -1310,7 +1310,7 @@ WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 1
 AND (RFQ.project_id = $1 OR $1 IS NULL) 
 AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
 AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
-AND (RFQ.rfq_no::text LIKE '%$6%' OR $6 IS NULL) -- Filter by rfq_no if provided
+AND (RFQ.rfq_no::text LIKE CONCAT('%', $6, '%') OR $6 IS NULL) -- Filter by rfq_no if provided 
 ORDER BY RFQ.timestamp ${sort}
 LIMIT $5 OFFSET $4;`,
         [project_id,rfq_type,reverse_auction,offset,limit,rfq_no]
@@ -1333,7 +1333,7 @@ LIMIT $5 OFFSET $4;`,
         AND (RFQ.project_id = $1 OR $1 IS NULL) 
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
-        AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL); -- Filter by rfq_no if provided 
+        AND (RFQ.rfq_no::text LIKE CONCAT('%', $4, '%') OR $4 IS NULL); -- Filter by rfq_no if provided 
         `,[project_id,rfq_type,reverse_auction,rfq_no])
         .then(function (data) {
           resolve(data[0].count);

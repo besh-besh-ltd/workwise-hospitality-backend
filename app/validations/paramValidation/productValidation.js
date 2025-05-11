@@ -69,14 +69,15 @@ let store_magic_search_file = multerS3({
 //   }
 // });
 
-let store_add_clause_file = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.add_clause_file);
-  },
-  filename: function (req, file, callback) {
-    var extention = path.extname(file.originalname);
-    var new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+let store_add_clause_file = multerS3({
+  s3: s3Client,
+  bucket: process.env.AWS_S3_BUCKET,
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    const fullPath = `clause_files/${fileName}`;
+    cb(null, fullPath);
   }
 });
 
@@ -913,16 +914,16 @@ const schema_posts = {
       let upload = multer({
         storage: store_add_clause_file,
         limits: {
-          fileSize: 2000000 // Compliant: 8MB
+          fileSize: 10000000 // Increased to 10MB to handle PDF files
         },
         fileFilter: (req, file, cb) => {
           let ext = path.extname(file.originalname).toLowerCase();
 
-          if ('.xlsx') {
+          if (ext === '.xlsx' || ext === '.xls' || ext === '.csv' || ext === '.pdf') {
             cb(null, true);
           } else {
             cb(null, false);
-            return cb('Only .xlsx format allowed!', null);
+            return cb('Only .xlsx, .xls, .csv, or .pdf files are allowed', null);
           }
         }
       }).single('file');
