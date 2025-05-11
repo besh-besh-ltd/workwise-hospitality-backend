@@ -3236,7 +3236,7 @@ const UsersController = {
 
           await userModel.mapBuyerToVendor(req.user.id, userEmailExists[0].id);
           // console.log(companyExists)
-          if (companyExists[0].is_private == 0) {
+          if (companyExists?.[0].is_private == 0) {
             res
               .status(200)
               .json({
