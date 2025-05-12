@@ -1421,9 +1421,10 @@ LIMIT 1;`;
                 LIMIT 1
             ) AS "last_purchase_rate",
             ARRAY(
-                SELECT json_build_object('name', TP.name,'description', TP.description) 
-                FROM tbl_product TP 
-                WHERE TP.id = TRP.product_variant_id 
+                SELECT json_build_object('name', PV.name,'description', TP.description) 
+                FROM tbl_product_variant PV
+                JOIN tbl_product TP ON TP.id = PV.product_id
+                WHERE PV.id = TRP.product_variant_id 
             ) AS "product_details",
             ARRAY(
                 SELECT json_build_object(
@@ -2115,7 +2116,7 @@ WITH RankedProducts AS (
       AND pv.is_approve = 1
 )
 SELECT 
-    product_id, product_name, variant_id, variant_name, description, category_name, category_id, slug
+    product_id, product_name, variant_id, description, category_name, category_id, slug
 FROM RankedProducts
 WHERE row_num_by_name_category = 1
   AND row_num_by_id = 1;  -- Ensure unique products both by ID and by name/category combination
@@ -4896,8 +4897,8 @@ rfqProductReport: async (userId, productId, productName, startDate, endDate) => 
 
     WHERE T.created_by = $1
         AND PV.id = $2
-        AND ($3::date IS NULL OR T.timestamp >= $3::date)
-        AND ($4::date IS NULL OR T.timestamp <= $4::date)
+        AND ($3::date IS NULL OR T.timestamp::date >= $3::date)
+        AND ($4::date IS NULL OR T.timestamp::date <= $4::date)
 
     GROUP BY T.id, PV.name, TP.description
     ORDER BY T.timestamp DESC;
