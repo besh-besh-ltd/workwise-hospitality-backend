@@ -69,16 +69,31 @@ let store_magic_search_file = multerS3({
 //   }
 // });
 
-let store_add_clause_file = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.add_clause_file);
-  },
-  filename: function (req, file, callback) {
-    var extention = path.extname(file.originalname);
-    var new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+let store_add_clause_file = multerS3({
+  s3: s3Client,
+  bucket: process.env.AWS_S3_BUCKET, // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();  
+      const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    const fullPath = `add_clause_file/${fileName}`; // Exact path you want
+    cb(null, fullPath);
   }
 });
+
+
+
+// let store_add_clause_file = multer.diskStorage({
+//   destination: function (req, file, callback) {
+//     callback(null, Config.upload.add_clause_file);
+//   },
+//   filename: function (req, file, callback) {
+//     var extention = path.extname(file.originalname);
+//     var new_file_name = +new Date() + '-' + uuidv4() + extention;
+//     callback(null, new_file_name);
+//   }
+// });
 
 var validatingImage = (schema) => {
   return (req, res, next) => {

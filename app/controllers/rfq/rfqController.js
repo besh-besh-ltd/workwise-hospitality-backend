@@ -5429,7 +5429,17 @@ addClauseUsingFile : async (req, res) => {
 
     // converting the excel into json object
     let file = req.file;
-    const workbook = xlsx.readFile(file.path);
+
+    // Step 1: Get file from S3
+    const params = {
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key: file.key // This is the correct S3 path
+    };
+
+    const s3File = await s3.getObject(params).promise();
+
+
+    const workbook = xlsx.read(s3File.Body, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     let jsonData = xlsx.utils.sheet_to_json(sheet);
