@@ -2220,16 +2220,19 @@ FROM (
     offset,
     vendorId,
     productName,
-    filterProduct,
+    vendorApprove,
     products
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
+      let joinQuery = '';
+
       if (productName && productName != '') {
         dynamicQuery += ` AND PV.name ILIKE '%${productName}%'`;
       }
-      if (filterProduct?.id_array) {
-        dynamicQuery += ` AND PV.id IN (${filterProduct.id_array})`;
+      if (vendorApprove) {
+        joinQuery += `JOIN tbl_vendorapprove_product_mapping VPM ON VPM.variant_vendor_mapping_id = pvvm.id `
+        dynamicQuery += ` AND VPM.vendor_approve_id = ${vendorApprove}`;
       }
       if (products && products.length > 0) {
         dynamicQuery += `AND PV.id IN (${products.join(",")})`;
@@ -2237,28 +2240,19 @@ FROM (
       db.any(`
         SELECT 
           PV.*,
-      
-          -- Product categories as array
           ARRAY(
             SELECT json_build_object('category_name', tc.title, 'id', tc.id)
             FROM tbl_product_categories pc
             LEFT JOIN tbl_category tc ON pc.category_id = tc.id
             WHERE pc.product_id = PD.id
             ORDER BY pc.id
-          ) AS product_categories,
-      
-          -- Vendor approvals as array
-          ARRAY(
-            SELECT json_build_object('vendor_approve_name', tva.vendor_approve, 'id', tva.id)
-            FROM tbl_vendorapprove_product_mapping tvpm
-            LEFT JOIN tbl_vendor_approve tva ON tvpm.vendor_approve_id = tva.id
-            WHERE tvpm.variant_vendor_mapping_id = pvvm.id
-          ) AS product_approve_by
+          ) AS product_categories
       
         FROM tbl_product_variant PV
       
         JOIN tbl_product PD ON PD.id = PV.product_id
         JOIN tbl_product_variant_vendor_mapping pvvm ON PV.id = pvvm.product_variant_id
+        ${joinQuery}
       
         WHERE pvvm.vendor_id = $2
         ${dynamicQuery}
@@ -2275,20 +2269,25 @@ FROM (
         });
     });
   },
-  getVendorProductCount: async (vendorId, productName, filterProduct) => {
+  getVendorProductCount: async (vendorId, productName, vendorApprove) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       let joinQuery = '';
       if (productName && productName != '') {
         dynamicQuery += ` AND name ILIKE '%${productName}%'`;
       }
-      if (filterProduct?.id_array) {
-        // joinQuery += `JOIN tbl_vendorapprove_product_mapping vpm ON vpm.variant_vendor_mapping_id = pvvm.id `;
-        // dynamicQuery += ` AND vpm.vendor_approve_id IN (${filterProduct.id_array})`;
-        dynamicQuery += ` AND pv.id IN (${filterProduct.id_array})`;
+      if (vendorApprove) {
+        joinQuery += `JOIN tbl_vendorapprove_product_mapping VPM ON VPM.variant_vendor_mapping_id = pvvm.id `
+        dynamicQuery += ` AND VPM.vendor_approve_id = ${vendorApprove}`;
       }
       db.one(
-        `SELECT count(*) FROM tbl_product_variant_vendor_mapping pvvm JOIN tbl_product_variant pv ON pv.id = pvvm.product_variant_id ${joinQuery} WHERE pvvm.vendor_id = $1 AND pv.is_deleted = 0 ${dynamicQuery}`,
+        `SELECT count(*) 
+        FROM tbl_product_variant_vendor_mapping pvvm 
+        JOIN tbl_product_variant pv ON pv.id = pvvm.product_variant_id 
+        ${joinQuery} 
+        WHERE pvvm.vendor_id = $1 
+        AND pv.is_deleted = 0 
+        ${dynamicQuery}`,
         [vendorId]
       )
         .then(function (data) {

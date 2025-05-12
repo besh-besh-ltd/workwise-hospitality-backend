@@ -279,12 +279,7 @@ const ProductsController = {
         offset = 0;
       }
       let productName = req.query?.productName;
-      let filterProduct = {};
       let vendorApprove = req.query?.vendorApprove;
-      if (vendorApprove) {
-        filterProduct = await productModel.getApprovedByProduct(vendorApprove);
-        console.log("FILTER PROD --------- ", filterProduct)
-      }
       if (req.query?.download == 'true' && req.query?.downloadAll === 'true') {
         offset = 0;
         limit = 'ALL';
@@ -298,13 +293,13 @@ const ProductsController = {
         offset,
         vendorId,
         productName,
-        filterProduct,
+        vendorApprove,
         products
       );
       let productCount = await productModel.getVendorProductCount(
         vendorId,
         productName,
-        filterProduct
+        vendorApprove
       );
 
       if (req.query.download == 'true') {
