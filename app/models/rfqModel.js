@@ -2087,9 +2087,9 @@ SELECT id, title FROM category_tree;
 WITH RankedProducts AS (
     SELECT
         p.id AS product_id,
-        pv.name AS product_name,
+        p.name AS product_name,
         pv.id AS variant_id,
-        -- pv.name AS variant_name,
+        pv.name AS variant_name,
         p.description,
         pv.slug,
         pc.category_name AS category_name,
@@ -2116,7 +2116,7 @@ WITH RankedProducts AS (
       AND pv.is_approve = 1
 )
 SELECT 
-    product_id, product_name, variant_id, description, category_name, category_id, slug
+    product_id, product_name, variant_id, variant_name, description, category_name, category_id, slug
 FROM RankedProducts
 WHERE row_num_by_name_category = 1
   AND row_num_by_id = 1;  -- Ensure unique products both by ID and by name/category combination
