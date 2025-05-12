@@ -2950,25 +2950,6 @@ const productController = {
       } = req.body;
   
       const productId = req.params.id;
-      const productDetails = await productModel.check_product(productId);
-  
-      // ---------------- vendor approval ----------------
-      let vendorApproveId = [];
-      if (!approved_id && approved_name) {
-        let findVendorApprove = await vendorapproveModel.findVendorApproveByName(approved_name);
-        if (findVendorApprove.length === 0) {
-          let vendorApproveObj = {
-            vendor_approve: approved_name,
-            status: 1
-          };
-          let createVendorApprove = await vendorapproveModel.createVendorApprove(vendorApproveObj);
-          vendorApproveId = [createVendorApprove.id];
-        } else {
-          vendorApproveId = [findVendorApprove[0].id];
-        }
-      } else if (approved_id) {
-        vendorApproveId = approved_id.split(',').map((id) => parseInt(id.trim()));
-      }
   
       // ---------------- update product ----------------
       let productObj = {
@@ -2982,8 +2963,8 @@ const productController = {
         // Changes by Agnij May 02, 2025 [Removed vendor field which doesn't exist in database]
         // vendor: vendor || productDetails[0].vendor,
         status: status || 1,
+        is_approve: 0,
         // vendor_approved_by: vendorApproveId || null,
-        productId: productId
         // Changes by Agnij May 02, 2025 [Removed is_featured field which doesn't exist in database]
         // is_featured: is_featured || 0,
         // Changes by Agnij May 02, 2025 [Removed file fields which don't exist in database]
@@ -2992,104 +2973,16 @@ const productController = {
         // tds_new_file_name: req.files?.['tds[]']?.[0]?.location || null,
         // tds_original_file_name: req.files?.['tds[]']?.[0]?.originalname || productDetails[0].tds_original_file_name || null
       };
-  
-      await productModel.updateVendorProduct(productObj);
+
+      await productModel.updateProduct(productObj, productId);
   
       // ---------------- remove old data ----------------
-      await productModel.deleteProductVariants(productId);
       await productModel.deleteProductCategory(productId);
-      await productModel.deleteProductApproveBy(productId);
   
       // ---------------- add categories ----------------
       for (const categoryId of categories) {
         await productModel.createProductCategories(categoryId, productId);
       }
-  
-      // ---------------- add variations ----------------
-      for await (const { attribute, attributeValue } of variations) {
-        // Changes by Agnij May 02, 2025 [Added check for empty variant names during update]
-        if (!attribute || attribute.trim() === '') {
-          continue; // Skip empty variant names
-        }
-        
-        let variantObj = {
-          product_id: productId,
-          name: attribute,
-          status: 1,
-          created_at: new Date(),
-          created_by: req.user.id,
-          added_by: req.user.id
-        };
-        await productModel.createProductVariant(variantObj);
-      }
-  
-      // ---------------- add approval ----------------
-      if (vendorApproveId.length > 0) {
-        let productApproveArray = vendorApproveId.map((id) => ({
-          product_id: productId,
-          vendor_approve_id: id
-        }));
-        await productModel.addProductApproveBy(productApproveArray, productId);
-      }
-  
-      // ---------------- featured image ----------------
-      if (req.files?.['featured[]']?.length > 0) {
-        let featuredImage = await productModel.getProductImages(productId, 1);
-        if (featuredImage.length > 0) {
-          await productModel.deleteProductImages(productId, 1, featuredImage[0].id);
-        }
-  
-        const file = req.files['featured[]'][0];
-        let featuredImageObj = {
-          product_id: productId,
-          is_featured: 1,
-          original_image_name: file.originalname,
-          new_image_name: file.location
-        };
-        await productModel.insertProductImages(featuredImageObj);
-      }
-  
-      // ---------------- gallery images ----------------
-      if (req.files?.['gallery[]']?.length > 0) {
-        let galleryImage = await productModel.getProductImages(productId, 0);
-        if (galleryImage.length > 0) {
-          for await (const { id } of galleryImage) {
-            await productModel.deleteProductImages(productId, 0, id);
-          }
-        }
-  
-        for await (const file of req.files['gallery[]']) {
-          let imageObj = {
-            product_id: productId,
-            is_featured: 0,
-            original_image_name: file.originalname,
-            new_image_name: file.location
-          };
-          await productModel.insertProductImages(imageObj);
-        }
-      }
-
-      // ---------------- Delete qap and tds file  ----------------
-      /* if (req.files?.qap?.length > 0) {
-        fs.unlink(
-          `${Config.upload.product_image}/${productDetails[0].qap_new_file_name}`,
-          (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          }
-        );
-      } */
-      /* if (req.files?.tds?.length > 0) {
-        fs.unlink(
-          `${Config.upload.product_image}/${productDetails[0].tds_new_file_name}`,
-          (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          }
-        );
-      } */
 
       res
         .status(200)

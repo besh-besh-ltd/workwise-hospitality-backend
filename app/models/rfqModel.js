@@ -2086,9 +2086,9 @@ SELECT id, title FROM category_tree;
 WITH RankedProducts AS (
     SELECT
         p.id AS product_id,
-        p.name AS product_name,
+        pv.name AS product_name,
         pv.id AS variant_id,
-        pv.name AS variant_name,
+        -- pv.name AS variant_name,
         p.description,
         pv.slug,
         pc.category_name AS category_name,
