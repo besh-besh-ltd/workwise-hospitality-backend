@@ -179,9 +179,11 @@ async function processWithAI(buffer, productName) {
       `;
     }
 
-    // Call the Gemini API
+    // Changes by Agnij May 12, 2025 [Fixed JSON extraction from Gemini API response]
     const result = await model.generateContent(prompt);
-    const text = result.text();
+    const text = result.response ? result.response.text() : 
+                (typeof result.text === 'function' ? result.text() : 
+                (result.text || JSON.stringify(result)));
     
     // Extract JSON from the response
     const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || 
