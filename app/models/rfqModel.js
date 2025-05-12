@@ -4897,8 +4897,8 @@ rfqProductReport: async (userId, productId, productName, startDate, endDate) => 
 
     WHERE T.created_by = $1
         AND PV.id = $2
-        AND ($3::date IS NULL OR T.timestamp >= $3::date)
-        AND ($4::date IS NULL OR T.timestamp <= $4::date)
+        AND ($3::date IS NULL OR T.timestamp::date >= $3::date)
+        AND ($4::date IS NULL OR T.timestamp::date <= $4::date)
 
     GROUP BY T.id, PV.name, TP.description
     ORDER BY T.timestamp DESC;
