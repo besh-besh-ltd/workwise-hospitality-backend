@@ -359,14 +359,14 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                   WHEN EXISTS (
                     SELECT 1 FROM tbl_quote_finalization TQF
                     WHERE TQF.rfq_id = RP.rfq_id
-                    AND TQF.product_id = RP.product_id
+                    AND TQF.product_variant_id = RP.product_variant_id
                     AND TQF.variant = RP.variant
                   ) THEN 1
                   ELSE 0
                 END) AS finalized_products
       FROM tbl_rfq_products RP
       JOIN tbl_rfq_product_vendors RPV ON RP.rfq_id = RPV.rfq_id
-                                      AND RP.product_id = RPV.product_id
+                                      AND RP.product_variant_id = RPV.product_variant_id
                                       AND RP.variant = RPV.variant
       WHERE RP.rfq_id = $1 AND RPV.user_id = $2
     `;
@@ -923,16 +923,23 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                             WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
                             LIMIT 1
                         )` : ``}
-                        -- Changes made by Agnij 28/04/2025 [Added logic to handle reverse auction timing conditions and visibility rules for lowest quote prices]
+                        -- Changes by Agnij 2025-05-08 [Fixed lowest quotation selection to always pick the lowest price]
                         SELECT json_build_object(
                             'quote_id', TQI.quote_id,
                             'total_price', TQI.total_price
                         )
-                        FROM tbl_quote_items TQI
-                        WHERE TQI.product_variant_id = RFQ_P.product_variant_id
-                        AND TQI.variant = RFQ_P.variant
-                        AND TQI.rfq_id = RFQ_P.rfq_id  -- Ensure you're getting quotes for the specific RFQ
-                        AND TQI.total_price > 0
+                        FROM (
+                            SELECT 
+                                quote_id,
+                                total_price,
+                                ROW_NUMBER() OVER (PARTITION BY product_variant_id, variant ORDER BY total_price ASC) AS rn
+                            FROM tbl_quote_items
+                            WHERE product_variant_id = RFQ_P.product_variant_id
+                            AND variant = RFQ_P.variant
+                            AND rfq_id = RFQ_P.rfq_id
+                            AND total_price > 0
+                        ) TQI
+                        WHERE TQI.rn = 1  -- Get only the lowest price for each product/variant
                         AND RFQ.reverse_auction = 1
                         ${user_type == 3 ? `
                         -- Apply technical evaluation filtering if enabled for this product
@@ -1176,103 +1183,109 @@ LIMIT 1;`;
   },
   getAllBuyerRfq: async (limit, offset, user_id, project_id,sort,reverse_auction,rfq_type,rfq_no) => {
     return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT
-    RFQ.*,
-    P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
-    (SELECT COUNT(*)
-     FROM tbl_query_messages TQM
-     WHERE TQM.receiver_id = ${user_id}
-     AND TQM.rfq_id = RFQ.id
-     AND TQM.is_seen = false
-    ) AS "unseen_query_count",
-    ARRAY(
-        SELECT json_build_object('id', TQ.id)
-        FROM tbl_quotes TQ
-        WHERE TQ.rfq_id = RFQ.id
-    ) AS "quotes",
-    ARRAY(
-      SELECT json_build_object(
-        'total_vendors', COUNT(DISTINCT TRPV.user_id),
-        'quote_received',
-        (
-          SELECT COUNT(*) FROM (
-            SELECT
-              trpv.user_id
-            FROM
-              tbl_rfq_product_vendors trpv
-            LEFT JOIN tbl_quote_items qi
-              ON trpv.product_variant_id = qi.product_variant_id AND trpv.rfq_id = qi.rfq_id AND qi.quote_id IN (
-                SELECT tq.id FROM tbl_quotes tq WHERE tq.rfq_id = trpv.rfq_id AND tq.created_by = trpv.user_id
-              ) AND qi.unit_price != 0
-            WHERE
-              trpv.rfq_id = rfq.id
-            GROUP BY
-              trpv.user_id
-            HAVING
-              COUNT(DISTINCT trpv.product_variant_id) = COUNT(DISTINCT qi.product_variant_id)
-          ) AS fully_quoted_vendors
-        )
-      )
-      FROM tbl_rfq_product_vendors trpv
-      WHERE trpv.rfq_id = rfq.id
-      GROUP BY trpv.rfq_id
-    ) AS "vendors",
-    ARRAY(
-        SELECT json_build_object(
-            'id', RFQ_P.id, 
-            'product_id', RFQ_P.product_variant_id,
-            'product_specs', (
-                SELECT json_agg(json_build_object(
-                    'title', RFQ_P_SPEC.title, 
-                    'value', RFQ_P_SPEC.value, 
-                    'id', RFQ_P_SPEC.id, 
-                    'product_id', RFQ_P_SPEC.product_variant_id, 
-                    'rfq_id', RFQ_P_SPEC.rfq_id))
-                FROM tbl_rfq_products_specs RFQ_P_SPEC
-                WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id 
-                  AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
-                  AND RFQ_P.variant = RFQ_P_SPEC.variant
-            ),
-            'product_details', (
-                SELECT json_agg(json_build_object(
-                    'id', T_P.id,
-                    'name', T_P.name))
-                FROM tbl_product_variant T_P
-                WHERE RFQ_P.product_variant_id = T_P.id
-            ),
-            'vendor_details', (
-                SELECT json_agg(json_build_object(
-                    'id', RFQ_P_V.id,
-                    'user_id', RFQ_P_V.user_id,
-                    'user_details', (
-                        SELECT json_build_object(
-                            'user_id', U.id,
-                            'name', U.name,
-                            'email', U.email)
-                        FROM tbl_users U
-                        WHERE RFQ_P_V.user_id = U.id
-                    )))
-                FROM tbl_rfq_product_vendors RFQ_P_V
-                WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
-                  AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
-                  AND RFQ_P.variant = RFQ_P_V.variant
+      let q = `
+        SELECT
+          RFQ.*,
+          P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
+          (SELECT COUNT(*)
+          FROM tbl_query_messages TQM
+          WHERE TQM.receiver_id = ${user_id}
+          AND TQM.rfq_id = RFQ.id
+          AND TQM.is_seen = false
+          ) AS "unseen_query_count",
+          ARRAY(
+              SELECT json_build_object('id', TQ.id)
+              FROM tbl_quotes TQ
+              WHERE TQ.rfq_id = RFQ.id
+          ) AS "quotes",
+          ARRAY(
+            SELECT json_build_object(
+              'total_vendors', COUNT(DISTINCT TRPV.user_id),
+              'quote_received',
+              (
+                SELECT COUNT(*) FROM (
+                  SELECT
+                    trpv.user_id
+                  FROM
+                    tbl_rfq_product_vendors trpv
+                  LEFT JOIN tbl_quotes tq
+                    ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
+                  LEFT JOIN tbl_quote_items qi
+                    ON trpv.product_variant_id = qi.product_variant_id 
+                    AND trpv.rfq_id = qi.rfq_id 
+                    AND qi.quote_id = tq.id
+                    AND qi.unit_price != 0
+                  WHERE
+                    trpv.rfq_id = rfq.id
+                  GROUP BY
+                    trpv.user_id
+                  HAVING
+                    BOOL_OR(tq.is_regret = 1)
+                    OR COUNT(DISTINCT trpv.product_variant_id) = COUNT(DISTINCT qi.product_variant_id)
+                ) AS fully_quoted_vendors
+              )
             )
-        )
-        FROM tbl_rfq_products RFQ_P
-        WHERE RFQ.id = RFQ_P.rfq_id
-    ) AS "products"
-FROM tbl_rfq RFQ
-LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
-WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 1
-AND (RFQ.project_id = $1 OR $1 IS NULL)
-AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
-AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
-AND (RFQ.rfq_no::text LIKE '%$6%' OR $6 IS NULL) -- Filter by rfq_no if provided
-ORDER BY RFQ.timestamp ${sort}
-LIMIT $5 OFFSET $4;`,
-        [project_id,rfq_type,reverse_auction,offset,limit,rfq_no]
-      )
+            FROM tbl_rfq_product_vendors trpv
+            WHERE trpv.rfq_id = rfq.id
+            GROUP BY trpv.rfq_id
+          ) AS "vendors",
+          ARRAY(
+              SELECT json_build_object(
+                  'id', RFQ_P.id, 
+                  'product_id', RFQ_P.product_variant_id,
+                  'product_specs', (
+                      SELECT json_agg(json_build_object(
+                          'title', RFQ_P_SPEC.title, 
+                          'value', RFQ_P_SPEC.value, 
+                          'id', RFQ_P_SPEC.id, 
+                          'product_id', RFQ_P_SPEC.product_variant_id, 
+                          'rfq_id', RFQ_P_SPEC.rfq_id))
+                      FROM tbl_rfq_products_specs RFQ_P_SPEC
+                      WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id 
+                        AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
+                        AND RFQ_P.variant = RFQ_P_SPEC.variant
+                  ),
+                  'product_details', (
+                      SELECT json_agg(json_build_object(
+                          'id', T_P.id,
+                          'name', T_P.name))
+                      FROM tbl_product_variant T_P
+                      WHERE RFQ_P.product_variant_id = T_P.id
+                  ),
+                  'vendor_details', (
+                      SELECT json_agg(json_build_object(
+                          'id', RFQ_P_V.id,
+                          'user_id', RFQ_P_V.user_id,
+                          'user_details', (
+                              SELECT json_build_object(
+                                  'user_id', U.id,
+                                  'name', U.name,
+                                  'email', U.email)
+                              FROM tbl_users U
+                              WHERE RFQ_P_V.user_id = U.id
+                          )))
+                      FROM tbl_rfq_product_vendors RFQ_P_V
+                      WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
+                        AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
+                        AND RFQ_P.variant = RFQ_P_V.variant
+                  )
+              )
+              FROM tbl_rfq_products RFQ_P
+              WHERE RFQ.id = RFQ_P.rfq_id
+          ) AS "products"
+      FROM tbl_rfq RFQ
+      LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
+      WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 1
+      AND (RFQ.project_id = $1 OR $1 IS NULL)
+      AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
+      AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
+      AND (RFQ.rfq_no::text LIKE '%$6%' OR $6 IS NULL) -- Filter by rfq_no if provided
+      ORDER BY RFQ.timestamp ${sort ?? ""}
+      LIMIT $5 OFFSET $4;`;
+
+      console.log(q)
+
+      db.any(q, [project_id,rfq_type,reverse_auction,offset,limit,rfq_no])
         .then(function (data) {
           resolve(data);
         })
@@ -1408,9 +1421,10 @@ LIMIT $5 OFFSET $4;`,
                 LIMIT 1
             ) AS "last_purchase_rate",
             ARRAY(
-                SELECT json_build_object('name', TP.name,'description', TP.description) 
-                FROM tbl_product TP 
-                WHERE TP.id = TRP.product_variant_id 
+                SELECT json_build_object('name', PV.name,'description', TP.description) 
+                FROM tbl_product_variant PV
+                JOIN tbl_product TP ON TP.id = PV.product_id
+                WHERE PV.id = TRP.product_variant_id 
             ) AS "product_details",
             ARRAY(
                 SELECT json_build_object(
@@ -1924,9 +1938,9 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
                       img.new_image_name AS image_url,
                       similarity(CONCAT(PV.name, ' - ', P.name), $1) AS similarity_score,
                       ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', P.name)), plainto_tsquery('english', $1)) AS rank
-      FROM tbl_product p
+      FROM tbl_product_variant pv 
+      JOIN tbl_product p ON pv.product_id = p.id
       JOIN tbl_product_categories pc ON p.id = pc.product_id
-      JOIN tbl_product_variant pv ON pv.product_id = p.id
       JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
       LEFT JOIN tbl_product_images img ON p.id = img.product_id
       JOIN tbl_category c ON pc.category_id = c.id
@@ -2073,9 +2087,9 @@ SELECT id, title FROM category_tree;
 WITH RankedProducts AS (
     SELECT
         p.id AS product_id,
-        p.name AS product_name,
+        pv.name AS product_name,
         pv.id AS variant_id,
-        pv.name AS variant_name,
+        -- pv.name AS variant_name,
         p.description,
         pv.slug,
         pc.category_name AS category_name,
@@ -2102,7 +2116,7 @@ WITH RankedProducts AS (
       AND pv.is_approve = 1
 )
 SELECT 
-    product_id, product_name, variant_id, variant_name, description, category_name, category_id, slug
+    product_id, product_name, variant_id, description, category_name, category_id, slug
 FROM RankedProducts
 WHERE row_num_by_name_category = 1
   AND row_num_by_id = 1;  -- Ensure unique products both by ID and by name/category combination
@@ -2173,16 +2187,16 @@ WHERE row_num_by_name_category = 1
       SELECT DISTINCT ON (tu.id)
         tu.id,
         tu.name AS vendor_name,
+        ${vendor_name ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $1) AS similarity_score,' : ''}
         tu.email,
         tu.mobile,
-        tu.organization_name AS company_name,
+        COALESCE(tc.company_name, tu.organization_name) AS company_name,
         tu.address,
         tc.profile AS about,
         tc.is_private,
         tc.website,
         tc.turnover,
         tc.nature_of_business,
-        tc.company_name,
         lc.city_name,
         ls.state_name,
         lcn.country_name,
@@ -2228,14 +2242,15 @@ WHERE row_num_by_name_category = 1
 
       WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
         AND tu.is_deleted = 0 AND tu.status = 1 
-        AND LOWER(pv.name) = LOWER('${search_key}')
+        -- AND LOWER(pv.name) = LOWER('${search_key}')
+        AND pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER('${search_key}'))
         AND tu.email IS NOT NULL
 
         ${vendor_name != '' ? `
           AND (
-            to_tsvector('english', tc.company_name) @@ plainto_tsquery('english', $1)
-            OR (char_length($1) = 1 AND similarity(tc.company_name, $1) > 0)
-            OR (char_length($1) > 1 AND similarity(tc.company_name, $1) > 0.1)
+            to_tsvector('english', COALESCE(tc.company_name, tu.organization_name)) @@ plainto_tsquery('english', $1)
+            OR (char_length($1) = 1 AND similarity(COALESCE(tc.company_name, tu.organization_name), $1) > 0)
+            OR (char_length($1) > 1 AND similarity(COALESCE(tc.company_name, tu.organization_name), $1) > 0.1)
           )
         ` : ''}
 
@@ -2264,7 +2279,7 @@ WHERE row_num_by_name_category = 1
         ${prevWorkedWith === 'rfq_sent' ? `AND rfqv.user_id IS NOT NULL` : ``}
 
     ) AS distinct_vendors
-    ORDER BY is_linked_with_buyer DESC, RANDOM();
+    ORDER BY ${vendor_name ? 'similarity_score DESC, is_linked_with_buyer DESC' : 'is_linked_with_buyer DESC, RANDOM()'};
 `;
 
 
@@ -4882,8 +4897,8 @@ rfqProductReport: async (userId, productId, productName, startDate, endDate) => 
 
     WHERE T.created_by = $1
         AND PV.id = $2
-        AND ($3::date IS NULL OR T.timestamp >= $3::date)
-        AND ($4::date IS NULL OR T.timestamp <= $4::date)
+        AND ($3::date IS NULL OR T.timestamp::date >= $3::date)
+        AND ($4::date IS NULL OR T.timestamp::date <= $4::date)
 
     GROUP BY T.id, PV.name, TP.description
     ORDER BY T.timestamp DESC;

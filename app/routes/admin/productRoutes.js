@@ -117,7 +117,7 @@ productRoutes.get(
 productRoutes.get(
   '/product-list',
   passportSignIn,
-  productController.productList
+  productController.productListImproved
 );
 productRoutes.get(
   '/admin-product-list-review',

@@ -9,6 +9,7 @@ import userModel from '../../models/userModel.js';
 import { sendNotification } from '../../services/notificationService.js';
 import excelJS from 'exceljs';
 import xlsx from 'xlsx';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import vendorModel from '../../models/vendorModel.js';
 import projectModel from '../../models/projectModel.js';
 import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
@@ -19,6 +20,14 @@ import generativeAI from '../../helper/processBOQWithAI.js';
 
 
 
+const s3Client = new S3Client({ region: 'ap-south-1' });
+async function readableStreamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
 
 
 const getNextRfQNumber = async () => {
@@ -406,7 +415,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
       </a>
 
       <p style="margin-top:20px" >
-               Submit your quote promptly to access this opportunity with [Buyer Name] and stand out as a preferred vendor.
+               Submit your quote promptly to access this opportunity with ${organization_name} and stand out as a preferred vendor.
       </p>
 
         </div>`;
@@ -878,7 +887,7 @@ const containerContent = `
 
 
     let mailRecipients = {
-      from:  `${vendorName} ${Config.masterEmail}`,
+      from:  `${org_name} ${Config.masterEmail}`,
       subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
       html: dynamicHTML
     };
@@ -1434,18 +1443,22 @@ const rfqController = {
       // get vendor details along with spoc
       const updatedData = await rfqModel.updateWithTimestamp('tbl_rfq', data, rfq_id);
 
-      await sendRfqUpdatedMailToVendors(vendorData, rfq_id, rfq_no, buyerName, data);
+      const buyerName = updatedData?.[0]?.company_name ?? "-"
+      const rfqNo = updatedData?.[0]?.rfq_no ?? "000000"
+
+      await sendRfqUpdatedMailToVendors(vendorData, rfq_id, rfqNo, buyerName, data);
 
       res.status(200).json({
         status: 1,
         data: updatedData || {},
         vendors: vendorData,
-        rfqDetails:rfqDetails,
+        rfqDetails:updatedData,
         message: 'RFQ updated successfully'
       });
 
     } catch (error) {
       logError(error);
+      console.log("ERROR --------- ", error)
       res
         .status(400)
         .json({
@@ -2338,13 +2351,16 @@ const rfqController = {
           // Check if technical evaluation is required for any products and if vendor is accepted
           if (isReverseAuction && products && products.length > 0) {
             // For each product, check if it has technical evaluation and if the vendor is accepted
+            // Changes by Agnij 2024-06-14 [Enhanced validation to check all products]
+            let rejectedProducts = [];
+            
             for (const product of products) {
               if (!product.product_id) continue;
 
               // Get RFQ product ID from the database
               const rfqProductResult = await rfqModel.checkIfExists(
                 'tbl_rfq_products',
-                `rfq_id=${rfq_id} AND product_id=${product.product_id} AND variant='${product.variant}'`
+                `rfq_id=${rfq_id} AND product_variant_id=${product.product_id} AND variant='${product.variant}'`
               );
 
               if (rfqProductResult && rfqProductResult.length > 0) {
@@ -2353,19 +2369,24 @@ const rfqController = {
                 // Check if this product has technical evaluation
                 const techEvalResult = await rfqModel.getTechEvaluationResult(rfqProductId, user.id);
 
-                // If product has technical evaluation but vendor is not accepted, reject the quote
+                // If product has technical evaluation but vendor is not accepted, add to rejected list
                 if (techEvalResult && techEvalResult.data &&
                     techEvalResult.data.has_tech_eval === true &&
                     techEvalResult.data.status !== 1) {
-                  return res
-                    .status(400)
-                    .json({
-                      status: 3,
-                      message: 'You cannot submit a quote for products that have not passed technical evaluation.'
-                    })
-                    .end();
+                  rejectedProducts.push(product.product_id);
                 }
               }
+            }
+            
+            // If any products were rejected, return error
+            if (rejectedProducts.length > 0) {
+              return res
+                .status(400)
+                .json({
+                  status: 3,
+                  message: `You cannot submit a quote for products that have not passed technical evaluation. ${rejectedProducts.length} product(s) not technically accepted.`
+                })
+                .end();
             }
           }
 
@@ -5430,16 +5451,18 @@ addClauseUsingFile : async (req, res) => {
     // converting the excel into json object
     let file = req.file;
 
-    // Step 1: Get file from S3
-    const params = {
-      Bucket: process.env.AWS_S3_BUCKET,
-      Key: file.key // This is the correct S3 path
-    };
-
-    const s3File = await s3.getObject(params).promise();
-
-
-    const workbook = xlsx.read(s3File.Body, { type: 'buffer' });
+    const command = new GetObjectCommand({
+      Bucket: file.bucket,
+      Key: file.key,
+    });
+  
+    const response = await s3Client.send(command);
+    const stream = response.Body;
+  
+    // Convert stream to buffer
+    const buffer = await readableStreamToBuffer(stream);
+  
+    const workbook = xlsx.read(buffer, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     let jsonData = xlsx.utils.sheet_to_json(sheet);

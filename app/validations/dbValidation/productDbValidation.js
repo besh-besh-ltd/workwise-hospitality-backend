@@ -277,8 +277,7 @@ const validateDbBody = {
       let errors = {};
       let err = 0;
 
-      let { name, categories, approved_id, master_id } = req.body;
-      categories = JSON.parse(categories);
+      let { name, approved_id, master_id } = req.body;
       
       if (approved_id) {
         /*  approved_id = JSON.parse(approved_id);
@@ -290,18 +289,6 @@ const validateDbBody = {
             errors.approved_id = 'Approved by not found';
           }
         } */
-      }
-      if (categories.length > 0) {
-        for await (const categoryId of categories) {
-          let categoryExist = await productModel.parentIdExists(categoryId);
-          if (categoryExist.length == 0) {
-            err++;
-            errors.categories = 'Category not found';
-          }
-        }
-      } else {
-        err++;
-        errors.categories = 'Please select a category';
       }
 
       let prodNameExists = await productModel.checkVariantExistsForVendor(

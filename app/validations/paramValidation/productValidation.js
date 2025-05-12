@@ -69,6 +69,7 @@ let store_magic_search_file = multerS3({
 //   }
 // });
 
+
 let store_add_clause_file = multerS3({
   s3: s3Client,
   bucket: process.env.AWS_S3_BUCKET, // Directly specified bucket name
