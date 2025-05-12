@@ -78,17 +78,6 @@ const generalModel = {
         reject(error);
       })
     })
-  },
-  getHolidays: async (date) => {
-    return new Promise((resolve, reject) => {
-      db.oneOrNone(`SELECT 1 FROM tbl_holidays WHERE date = $1`, [date])
-        .then((data) => {
-          resolve(data !== null); // true if date exists, false otherwise
-        })
-        .catch((err) => {
-          reject(new Error(err));
-        });
-    });
   }
   
 };

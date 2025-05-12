@@ -17,8 +17,7 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import fs from 'fs';
 import productModel from '../../models/productModel.js';
 import generativeAI from '../../helper/processBOQWithAI.js';
-import { setupReverseAuctionMails } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import { setupReverseAuctionWhatsAppNotifications } from '../../helper/sendWhatsAppFunctions/sendWhatsappNotification.js';
+
 
 
 const s3Client = new S3Client({ region: 'ap-south-1' });
@@ -1363,43 +1362,6 @@ const rfqController = {
       };
 
       whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload);
-
-
-
-
-            // Step 1: Build map with vendorId as key
-            const vendorProductMap = new Map();
-
-     products.forEach((product) => {
-        if (product.vendors && Array.isArray(product.vendors)) {
-          product.vendors.forEach((vendor) => {
-            if (vendorProductMap.has(vendor.user_id)) {
-              vendorProductMap.get(vendor.user_id).products.push(product.name);
-            } else {
-              vendorProductMap.set(vendor.user_id, {
-                name: vendor.name,
-                products: [product.name]
-              });
-            }
-          });
-        }
-      });
-
-      // Step 2: Prepare final array with mobile numbers
-      const finalArray = [];
-
-      for (const [vendorId, vendorData] of vendorProductMap.entries()) {
-        const vendorDetails = await rfqModel.getVendorDetailsByUserId(vendorId);
-
-        finalArray.push({
-          vendor_id: vendorId,
-          rfq_id,
-          vendor: vendorDetails.name,
-          products: vendorData.products.join(', '),
-          vendorMobile: vendorDetails.mobile || '',
-          vendorEmail: vendorDetails.email || '',
-        });
-      }
       if (reverse_auction == 1) {
 
         // FORCE set auction start date to today if not provided or empty
@@ -1411,37 +1373,6 @@ const rfqController = {
         if ((!ra_end_date || ra_end_date === '') && bid_end_date) {
           throw new Error('Please provide reverse auction end date');
         }
-
-  const timezone = process.env.TIMEZONE || 'Asia/Kolkata';
-        const buyer_name = req.user.name || '';
-        const buyer_email = req.user.email || '';
-        const project = await rfqModel.getProjectNameById(project_id);
-        const project_name = project[0]?.name || 'Project';
-
-        setupReverseAuctionMails(
-          finalArray,
-          company_name,
-          reverse_auction,
-          ra_start_date,
-          ra_end_date,
-          bid_end_date,
-          timezone,
-          buyer_name,
-          buyer_email,
-          project_name
-        );
-   setupReverseAuctionWhatsAppNotifications(
-          finalArray,
-          company_name,
-          reverse_auction,
-          ra_start_date,
-          ra_end_date,
-          bid_end_date,
-          timezone,
-          buyer_name,
-          project_name,
-          contact_number
-        );
       } else {
         ra_start_date = null;
         ra_end_date = null;
@@ -5519,6 +5450,7 @@ addClauseUsingFile : async (req, res) => {
 
     // converting the excel into json object
     let file = req.file;
+
     const command = new GetObjectCommand({
       Bucket: file.bucket,
       Key: file.key,

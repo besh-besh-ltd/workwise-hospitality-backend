@@ -5097,50 +5097,6 @@ searchVariantProducts: async (search_key) => {
   }
 },
 
-getProjectNameById : async (project_id) =>{
-  return new Promise(function (resolve, reject) {
-    const query = `SELECT name FROM tbl_projects WHERE id = $1`;
-    db.query(query, [project_id])
-      .then(data => resolve(data))
-      .catch(err => reject(new Error(err)));
-  });
-},
-getVendorDetailsByUserId: async (user_id) => {
-  return new Promise((resolve, reject) => {
-    const query = `
-      SELECT
-        u.name AS vendor_name,
-        u.email AS vendor_email,
-        u.mobile AS vendor_mobile
-      FROM tbl_users u
-      WHERE u.id = $1
-    `;
-
-    db.query(query, [user_id])
-      .then((rows) => {
-        console.log("QUERY RESULT:", rows);
-
-        // Since rows is a direct array
-        if (!rows || rows.length === 0) {
-          console.error("DEBUG: No vendor found for user_id:", user_id);
-          return reject(new Error("Vendor not found"));
-        }
-
-        const vendor = {
-          name: rows[0].vendor_name,
-          email: rows[0].vendor_email,
-          mobile: rows[0].vendor_mobile
-        };
-
-        resolve(vendor);
-      })
-      .catch((err) => {
-        console.error("DB QUERY FAILED:", err);
-        reject(new Error("Database query failed"));
-      });
-  });
-},
-
 // Changes by Agnij May 01, 2025 [Added method to search for variant vendors]
 searchVariantVendors: async (product_id, variant_id) => {
   console.log(`[RFQ Model] searchVariantVendors called with product_id: ${product_id}, variant_id: ${variant_id}`);
