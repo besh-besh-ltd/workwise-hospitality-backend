@@ -74,7 +74,7 @@ const generativeAI = {
               Extract ALL of the following information related to "${productName}" from the document:
               1. Technical evaluation clauses and requirements
               2. Technical specifications (including ALL dimensions, materials, performance parameters)
-              3. Technical Data Sheet (TDS) information
+              3. Technical Data Sheet (TDS) or Instrument Data Sheet (IDS) information
               4. Compliance criteria and standards (ISO, ASTM, etc.)
               5. Inspection protocols and quality control requirements
               6. Testing methodologies and parameters
@@ -115,7 +115,7 @@ const generativeAI = {
               Extract ALL of the following information from the document:
               1. Legal contract clauses and technical requirements
               2. Technical specifications (dimensions, materials, performance parameters)
-              3. Technical Data Sheet (TDS) information
+              3. Technical Data Sheet (TDS) or Instrument Data Sheet (IDS) information
               4. Contractual terms and conditions
               5. Compliance criteria and standards
               6. Testing requirements and acceptance criteria

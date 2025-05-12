@@ -5429,28 +5429,46 @@ addClauseUsingFile : async (req, res) => {
       });
     }
 
-    // Save the extracted clauses to the database
+    // Changes by Agnij June 22, 2026 [Added batch processing for large clause sets]
+    // Save the extracted clauses to the database in batches to avoid timeouts
     const clauses = result.clauses;
-    const promises = clauses.map(async (clause, index) => {
-      try {
-        // Call the rfqModel.addClause with the correct parameter order
-        await rfqModel.addClause(rfq_id, rfq_product_id, clause, file.location ? [file.location] : []);
-        return null; // Successful operation
-      } catch (error) {
-        return { Row: index, error: error.message }; // Return error for this clause
+    const BATCH_SIZE = 10; // Process 10 clauses at a time
+    const allErrors = [];
+    let successCount = 0;
+    
+    // Process clauses in batches
+    for (let i = 0; i < clauses.length; i += BATCH_SIZE) {
+      const batch = clauses.slice(i, i + BATCH_SIZE);
+      
+      // Process each batch with Promise.all
+      const batchPromises = batch.map(async (clause, index) => {
+        try {
+          // Call the rfqModel.addClause with the correct parameter order
+          await rfqModel.addClause(rfq_id, rfq_product_id, clause, file.location ? [file.location] : []);
+          successCount++;
+          return null; // Successful operation
+        } catch (error) {
+          return { Row: i + index, error: error.message }; // Return error for this clause
+        }
+      });
+      
+      // Wait for current batch to complete before moving to next
+      const batchErrors = (await Promise.all(batchPromises)).filter(Boolean);
+      allErrors.push(...batchErrors);
+      
+      // Add a small delay between batches to prevent database overload
+      if (i + BATCH_SIZE < clauses.length) {
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
-    });
-
-    // Wait for all clauses to be saved
-    const errors = (await Promise.all(promises)).filter(Boolean);
+    }
 
     // Return success response with any errors that occurred during saving
     return res.json({
       status: 1,
-      message: productName
-        ? `${clauses.length - errors.length} clauses/specifications added successfully for '${productName}'${errors.length > 0 ? ` (${errors.length} failed)` : ''}`
-        : `${clauses.length - errors.length} clauses added successfully${errors.length > 0 ? ` (${errors.length} failed)` : ''}`,
-      errors: errors.length > 0 ? errors : [],
+      message: productName 
+        ? `${successCount} of ${clauses.length} clauses/specifications added successfully for '${productName}'${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`
+        : `${successCount} of ${clauses.length} clauses added successfully${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`,
+      errors: allErrors.length > 0 ? allErrors : [],
       clauses: clauses // Return the extracted clauses to be displayed on frontend
     });
     
