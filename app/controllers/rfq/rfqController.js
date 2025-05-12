@@ -5381,7 +5381,7 @@ listQueries: async (req, res) => {
 
 addClauseUsingFile : async (req, res) => {
   try {
-    // Changes by Agnij May 11, 2025 [Fixed AI-based clause extraction and addClause parameters]
+    // Changes by Agnij June 22, 2026 [Enhanced AI extraction to be product-specific]
     // Get file and RFQ details from request
     let file = req.file;
     const { rfq_id, rfq_product_id } = req.body;
@@ -5400,8 +5400,11 @@ addClauseUsingFile : async (req, res) => {
       });
     }
 
-    // Use AI to extract clauses from the uploaded file
-    const result = await extractClausesWithAI.extractClauses(file);
+    // Get the product name for targeted extraction
+    const productName = await rfqModel.getProductNameById(rfq_product_id);
+    
+    // Use AI to extract clauses from the uploaded file, passing the product name
+    const result = await extractClausesWithAI.extractClauses(file, productName);
     
     if (!result.status) {
       return res.json({
@@ -5415,8 +5418,15 @@ addClauseUsingFile : async (req, res) => {
     if (!result.clauses || result.clauses.length === 0) {
       return res.json({
         status: 0,
-        message: "No clauses were found in the document",
-        errors: [{ Row: 0, error: "No clauses detected in the document" }]
+        message: productName 
+          ? `No clauses or specifications were found for product '${productName}'`
+          : "No clauses were found in the document",
+        errors: [{ 
+          Row: 0, 
+          error: productName 
+            ? `No relevant information detected for product '${productName}'` 
+            : "No clauses detected in the document" 
+        }]
       });
     }
 
@@ -5438,7 +5448,9 @@ addClauseUsingFile : async (req, res) => {
     // Return success response with any errors that occurred during saving
     return res.json({
       status: 1,
-      message: `${clauses.length - errors.length} clauses added successfully${errors.length > 0 ? ` (${errors.length} failed)` : ''}`,
+      message: productName
+        ? `${clauses.length - errors.length} clauses/specifications added successfully for '${productName}'${errors.length > 0 ? ` (${errors.length} failed)` : ''}`
+        : `${clauses.length - errors.length} clauses added successfully${errors.length > 0 ? ` (${errors.length} failed)` : ''}`,
       errors: errors.length > 0 ? errors : [],
       clauses: clauses // Return the extracted clauses to be displayed on frontend
     });

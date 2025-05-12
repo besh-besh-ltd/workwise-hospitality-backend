@@ -5077,8 +5077,33 @@ getVendorDetailsByUserId: async (user_id) => {
         reject(new Error("Database query failed"));
       });
   });
-}
+},
 
+  getProductNameById: async (rfq_product_id) => {
+    // Changes by Agnij June 22, 2026 [Added function to get product name by rfq_product_id]
+    return new Promise((resolve, reject) => {
+      const query = `
+        SELECT TP.name
+        FROM tbl_rfq_products RP
+        JOIN tbl_product TP ON TP.id = RP.product_id
+        WHERE RP.id = $1
+        LIMIT 1;
+      `;
+      
+      db.query(query, [rfq_product_id])
+        .then(result => {
+          if (result && result.length > 0) {
+            resolve(result[0].name);
+          } else {
+            resolve(null);
+          }
+        })
+        .catch(error => {
+          console.error("Error getting product name:", error);
+          reject(error);
+        });
+    });
+  },
 
 }
 export default rfqModel;

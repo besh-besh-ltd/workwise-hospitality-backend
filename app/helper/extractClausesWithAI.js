@@ -12,7 +12,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 // Changes by Agnij May 11, 2025 [Updated AI extraction for clauses]
 const extractClausesWithAI = {
   // Extract clauses from uploaded file using AI
-  extractClauses: async (file) => {
+  extractClauses: async (file, productName = null) => {
     try {
       // Handle file from S3 or local upload
       let buffer;
@@ -45,7 +45,7 @@ const extractClausesWithAI = {
       
       if (fileExt === '.pdf') {
         // Process PDF file with AI
-        return await processWithAI(buffer);
+        return await processWithAI(buffer, productName);
       } else if (['.xlsx', '.xls', '.csv'].includes(fileExt)) {
         // Process Excel file
         const workbook = xlsx.read(buffer, { type: "buffer" });
@@ -54,7 +54,7 @@ const extractClausesWithAI = {
         const jsonData = xlsx.utils.sheet_to_json(sheet);
         
         // Extract clauses from Excel data
-        return extractClausesFromExcel(jsonData);
+        return extractClausesFromExcel(jsonData, productName);
       } else {
         throw new Error('Unsupported file format. Please upload PDF, Excel, or CSV files.');
       }
@@ -91,7 +91,7 @@ function cleanPdfText(text) {
 }
 
 // Process file with AI using the exp_ai integration
-async function processWithAI(buffer) {
+async function processWithAI(buffer, productName) {
   try {
     // Parse the PDF
     const pdfText = await parsePdf(buffer);
@@ -106,45 +106,82 @@ async function processWithAI(buffer) {
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-    // Changes by Agnij May 11, 2025 [Improved AI prompt for clauses only]
-    // Create the prompt for clause extraction - focusing specifically on clauses only
-    const prompt = `
-      You are an AI trained to extract ONLY contract clauses from documents. 
-      Your task is to identify and extract ONLY the clauses, not technical specifications or other content.
-      
-      Focus EXCLUSIVELY on:
-      1. Legal contract clauses
-      2. Contractual terms and conditions
-      3. Obligations and requirements stated as clauses
-      
-      DO NOT include:
-      1. Technical specifications (like dimensions, materials)
-      2. Product descriptions
-      3. General notes that aren't contractual in nature
-      4. Headers, footers, or metadata
-      
-      Return the data in a JSON format with the following structure:
-      { 
-        "clauses": [
-          { "text": "clause text" }
-        ]
-      }
-      
-      Make sure to:
-      1. Extract complete clauses with proper context
-      2. Maintain the original wording
-      3. Separate distinct clauses (don't combine different requirements)
-      4. Remove duplicate clauses
-      5. Ignore technical specifications and product details
-      
-      Here is the document content:
-      ${cleanedText}
-    `;
+    // Changes by Agnij June 22, 2026 [Enhanced AI prompt to filter by product name]
+    // Create the prompt for clause extraction - focusing specifically on clauses for the given product
+    let prompt;
+    
+    if (productName) {
+      prompt = `
+        You are an AI trained to extract relevant information from technical documents for a specific product.
+        
+        TARGET PRODUCT: "${productName}"
+        
+        Your task is to extract ONLY information related to "${productName}" from the document, including:
+        1. Technical evaluation clauses
+        2. Technical specifications and requirements
+        3. Compliance criteria
+        4. Inspection details
+        5. Testing requirements
+        6. Other contractual obligations related to this specific product
+        
+        IMPORTANT INSTRUCTIONS:
+        - Focus ONLY on information related to "${productName}"
+        - If the document contains information about multiple products, ONLY extract information for "${productName}"
+        - Intelligently determine which sections or clauses refer to "${productName}" even if not explicitly labeled
+        - Ignore information about other products
+        - Use context clues to identify relevant information when the product name isn't explicitly mentioned
+        - Maintain the original wording and technical accuracy
+        
+        Return the data in a JSON format with the following structure:
+        { 
+          "clauses": [
+            { "text": "clause or specification text for ${productName}" }
+          ]
+        }
+        
+        Here is the document content:
+        ${cleanedText}
+      `;
+    } else {
+      // Fallback to the general prompt when no product name is provided
+      prompt = `
+        You are an AI trained to extract ONLY contract clauses from documents. 
+        Your task is to identify and extract ONLY the clauses, not technical specifications or other content.
+        
+        Focus EXCLUSIVELY on:
+        1. Legal contract clauses
+        2. Contractual terms and conditions
+        3. Obligations and requirements stated as clauses
+        4. Technical specifications (like dimensions, materials)
+        5. Product descriptions
+        6. General notes that aren't contractual in nature for the product
+        
+        DO NOT include:
+        1. Headers, footers, or metadata
+        2. Other details not relevant to the product
+        
+        Return the data in a JSON format with the following structure:
+        { 
+          "clauses": [
+            { "text": "clause text" }
+          ]
+        }
+        
+        Make sure to:
+        1. Extract complete clauses with proper context
+        2. Maintain the original wording
+        3. Separate distinct clauses (don't combine different requirements)
+        4. Remove duplicate clauses
+        5. Ignore technical specifications and product details
+        
+        Here is the document content:
+        ${cleanedText}
+      `;
+    }
 
     // Call the Gemini API
     const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
+    const text = result.text();
     
     // Extract JSON from the response
     const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || 
@@ -160,7 +197,9 @@ async function processWithAI(buffer) {
         // Return the clauses
         return {
           status: 1,
-          message: 'Clauses extracted successfully',
+          message: productName 
+            ? `Clauses and specifications extracted successfully for ${productName}`
+            : 'Clauses extracted successfully',
           clauses: extractedData.clauses.map(clause => clause.text)
         };
       } catch (error) {
@@ -185,7 +224,9 @@ async function processWithAI(buffer) {
       
       return {
         status: 1,
-        message: 'Clauses extracted from text response',
+        message: productName 
+          ? `Clauses extracted from text response for ${productName}`
+          : 'Clauses extracted from text response',
         clauses: potentialClauses
       };
     }
@@ -204,7 +245,7 @@ async function processWithAI(buffer) {
 }
 
 // Extract clauses from Excel data
-function extractClausesFromExcel(jsonData) {
+function extractClausesFromExcel(jsonData, productName) {
   try {
     if (!jsonData || jsonData.length === 0) {
       return {
@@ -223,17 +264,58 @@ function extractClausesFromExcel(jsonData) {
       key.toLowerCase().includes('text')
     ) || Object.keys(firstRow)[0]; // Default to first column if no suitable column found
 
-    // Extract clauses from the identified column
-    const clauses = jsonData
-      .map(row => {
-        const clauseText = row[clauseColumn];
-        return clauseText && typeof clauseText === 'string' ? clauseText.trim() : null;
-      })
-      .filter(Boolean); // Remove null or empty values
+    // Changes by Agnij June 22, 2026 [Added product name filtering for Excel files]
+    let clauses;
+    
+    if (productName) {
+      // If product name is provided, filter entries that match the product
+      const productColumn = Object.keys(firstRow).find(key => 
+        key.toLowerCase().includes('product') || 
+        key.toLowerCase().includes('item') || 
+        key.toLowerCase().includes('name')
+      );
+      
+      if (productColumn) {
+        // If there's a product column, filter by product name
+        clauses = jsonData
+          .filter(row => {
+            const rowProductName = row[productColumn];
+            return rowProductName && 
+                  typeof rowProductName === 'string' && 
+                  rowProductName.toLowerCase().includes(productName.toLowerCase());
+          })
+          .map(row => {
+            const clauseText = row[clauseColumn];
+            return clauseText && typeof clauseText === 'string' ? clauseText.trim() : null;
+          })
+          .filter(Boolean); // Remove null or empty values
+      } else {
+        // If no product column, use all entries but look for product name in text
+        clauses = jsonData
+          .map(row => {
+            const clauseText = row[clauseColumn];
+            return clauseText && 
+                   typeof clauseText === 'string' && 
+                   clauseText.toLowerCase().includes(productName.toLowerCase()) ? 
+                   clauseText.trim() : null;
+          })
+          .filter(Boolean); // Remove null or empty values
+      }
+    } else {
+      // Without product name, extract all clauses
+      clauses = jsonData
+        .map(row => {
+          const clauseText = row[clauseColumn];
+          return clauseText && typeof clauseText === 'string' ? clauseText.trim() : null;
+        })
+        .filter(Boolean); // Remove null or empty values
+    }
 
     return {
       status: 1,
-      message: 'Clauses extracted successfully',
+      message: productName 
+        ? `Clauses extracted successfully for ${productName}`
+        : 'Clauses extracted successfully',
       clauses: clauses
     };
   } catch (error) {
