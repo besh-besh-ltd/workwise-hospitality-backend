@@ -8,12 +8,314 @@ import pkg from 'nodemailer/lib/xoauth2/index.js';
 const { Readable } = pkg;
 import fs from 'fs';
 import FormData from 'form-data';
-
+import path from 'path';
+import pdfParser from './pdfParser.js';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const generativeAI = {
+  extractClauses: async (file, productName = null) => {
+    try {
+      // Handle file from S3 or local upload
+      let buffer;
+      if (file.location) {
+        // File is in S3
+        const s3Url = new URL(file.location);
+        const bucket = s3Url.hostname.split('.')[0];
+        const key = decodeURIComponent(s3Url.pathname).slice(1); // remove leading '/'
+        const command = new GetObjectCommand({
+          Bucket: bucket,
+          Key: key,
+        });
+        const result = await s3Client.send(command);
+        const webStream = Readable.toWeb(result.Body);
+        const response = new Response(webStream);
+        const arrayBuffer = await response.arrayBuffer();
+        buffer = Buffer.from(arrayBuffer);
+      } else if (file.path) {
+        // File is locally uploaded
+        buffer = fs.readFileSync(file.path);
+      } else if (file.buffer) {
+        // File is already a buffer
+        buffer = file.buffer;
+      } else {
+        throw new Error('Invalid file format or location');
+      }
+
+      // Determine file type and process accordingly
+      const fileExt = path.extname(file.originalname || file.filename).toLowerCase();
+      
+      if (fileExt === '.pdf') {
+        // Changes by Agnij June 22, 2026 [Integrated parsePdf and processClausesWithAI inside extractClauses]
+        // Parse and process PDF file with AI
+        try {
+          // Parse the PDF using the integrated parsePdf functionality
+          const pdfText = await pdfParser.extractText(buffer);
+          const cleanedText = pdfParser.cleanText(pdfText);
+
+          // Initialize the Google Generative AI client
+          const apiKey = process.env.GOOGLE_AI_API_KEY;
+          if (!apiKey) {
+            throw new Error('Google AI API Key is not configured');
+          }
+
+          const genAI = new GoogleGenerativeAI(apiKey);
+          const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+          // Create the prompt for clause extraction - focusing specifically on clauses for the given product
+          let prompt;
+          
+          if (productName) {
+            // Changes by Agnij June 22, 2026 [Enhanced prompt for better technical data extraction]
+            prompt = `
+              You are an AI trained to extract comprehensive technical information from documents for a specific product.
+              
+              TARGET PRODUCT: "${productName}"
+              
+              Extract ALL of the following information related to "${productName}" from the document:
+              1. Technical evaluation clauses and requirements
+              2. Technical specifications (including ALL dimensions, materials, performance parameters)
+              3. Technical Data Sheet (TDS) information
+              4. Compliance criteria and standards (ISO, ASTM, etc.)
+              5. Inspection protocols and quality control requirements
+              6. Testing methodologies and parameters
+              7. Installation procedures and requirements
+              8. Maintenance guidelines
+              9. Safety requirements and warnings
+              10. Operational parameters
+              11. Warranty conditions and exclusions
+              12. Other contractual obligations related to this specific product
+              
+              CRITICALLY IMPORTANT INSTRUCTIONS:
+              - Maintain the EXACT hierarchical structure and formatting of technical specifications
+              - Preserve ALL numbered or bulleted lists exactly as they appear
+              - Keep ALL tables, measurements and numerical values with their units intact
+              - Include ALL conditional statements (if/then logic) in technical requirements
+              - Capture specifications even if "${productName}" is not explicitly mentioned but context makes it clear
+              - DO NOT rephrase or summarize specifications - use the EXACT ORIGINAL text
+              - Capture specifications even if they span across different pages/sections
+              - Pay special attention to footnotes and references related to specifications
+              - Preserve cross-references between sections
+              - Identify text that applies to ALL products vs. "${productName}" specifically
+              
+              Return the data in a JSON format with the following structure:
+              { 
+                "clauses": [
+                  { "text": "complete original clause or specification text" }
+                ]
+              }
+              
+              Here is the document content:
+              ${cleanedText}
+            `;
+          } else {
+            // Enhanced general prompt for when no product name is provided
+            prompt = `
+              You are an AI trained to extract comprehensive technical and contractual information from documents.
+              
+              Extract ALL of the following information from the document:
+              1. Legal contract clauses and technical requirements
+              2. Technical specifications (dimensions, materials, performance parameters)
+              3. Technical Data Sheet (TDS) information
+              4. Contractual terms and conditions
+              5. Compliance criteria and standards
+              6. Testing requirements and acceptance criteria
+              7. Installation, operation, and maintenance specifications
+              8. Warranty and liability clauses
+              9. Safety requirements and warnings
+              
+              CRITICALLY IMPORTANT INSTRUCTIONS:
+              - Maintain the EXACT hierarchical structure of all content
+              - Preserve ALL numbered or bulleted lists exactly as they appear
+              - Keep ALL tables, measurements and numerical values with their units intact
+              - Include ALL conditional statements and logical relationships
+              - DO NOT rephrase or summarize - use the EXACT ORIGINAL text
+              - Preserve section headings and their relationships to content
+              - Keep the relationships between specifications and their products/components clear
+              - Maintain all cross-references between clauses
+              
+              Return the data in a JSON format with the following structure:
+              { 
+                "clauses": [
+                  { "text": "complete original clause or specification text" }
+                ]
+              }
+              
+              Here is the document content:
+              ${cleanedText}
+            `;
+          }
+
+          // Call the Gemini AI
+          const result = await model.generateContent(prompt);
+          
+          // Properly extract text from the response object
+          const text = result.response ? result.response.text() : 
+                      (typeof result.text === 'function' ? result.text() : 
+                      (result.text || JSON.stringify(result)));
+          
+          // Extract JSON from the response
+          const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || 
+                          text.match(/```\n([\s\S]*?)\n```/) || 
+                          text.match(/{[\s\S]*?}/);
+                          
+          if (jsonMatch) {
+            try {
+              // Parse the extracted JSON
+              const jsonStr = jsonMatch[1] || jsonMatch[0];
+              const extractedData = JSON.parse(jsonStr);
+              
+              // Return the clauses
+              return {
+                status: 1,
+                message: productName 
+                  ? `Comprehensive technical data extracted successfully for ${productName}`
+                  : 'Technical data and clauses extracted successfully',
+                clauses: extractedData.clauses.map(clause => clause.text)
+              };
+            } catch (error) {
+              console.error('Error parsing JSON from Gemini response:', error.message);
+              return { 
+                status: 0, 
+                message: 'Failed to parse structured data', 
+                error: error.message,
+                clauses: [] 
+              };
+            }
+          } else {
+            // If no JSON found, try to extract clause-like text manually
+            const lines = text.split('\n').filter(line => line.trim().length > 0);
+            const potentialClauses = lines.filter(line => 
+              line.length > 20 && 
+              !line.includes('```') &&
+              !line.startsWith('Here') &&
+              !line.startsWith('I will')
+            );
+            
+            return {
+              status: 1,
+              message: productName 
+                ? `Technical data extracted from text response for ${productName}`
+                : 'Technical data extracted from text response',
+              clauses: potentialClauses
+            };
+          }
+        } catch (error) {
+          // Handle both Error objects and plain objects from parsePdf
+          const errorMessage = error.message || error.toString();
+          console.error('Error processing PDF with AI:', errorMessage);
+          
+          return { 
+            status: 0, 
+            message: 'Error processing file with AI', 
+            error: errorMessage,
+            clauses: [] 
+          };
+        }
+      } else if (['.xlsx', '.xls', '.csv'].includes(fileExt)) {
+        // Process Excel file
+        const workbook = xlsx.read(buffer, { type: "buffer" });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const jsonData = xlsx.utils.sheet_to_json(sheet);
+        
+        // Changes by Agnij June 22, 2026 [Integrated Excel processing directly into extractClauses]
+        // Extract clauses from Excel data
+        try {
+          if (!jsonData || jsonData.length === 0) {
+            return {
+              status: 0,
+              message: 'No clauses found in the file',
+              clauses: []
+            };
+          }
+
+          // First, determine which column contains the clauses
+          const firstRow = jsonData[0];
+          const clauseColumn = Object.keys(firstRow).find(key => 
+            key.toLowerCase().includes('clause') || 
+            key.toLowerCase().includes('list') || 
+            key.toLowerCase().includes('text')
+          ) || Object.keys(firstRow)[0]; // Default to first column if no suitable column found
+
+          // If product name is provided, filter entries that match the product
+          let clauses;
+          
+          if (productName) {
+            // If product name is provided, filter entries that match the product
+            const productColumn = Object.keys(firstRow).find(key => 
+              key.toLowerCase().includes('product') || 
+              key.toLowerCase().includes('item') || 
+              key.toLowerCase().includes('name')
+            );
+            
+            if (productColumn) {
+              // If there's a product column, filter by product name
+              clauses = jsonData
+                .filter(row => {
+                  const rowProductName = row[productColumn];
+                  return rowProductName && 
+                        typeof rowProductName === 'string' && 
+                        rowProductName.toLowerCase().includes(productName.toLowerCase());
+                })
+                .map(row => {
+                  const clauseText = row[clauseColumn];
+                  return clauseText && typeof clauseText === 'string' ? clauseText.trim() : null;
+                })
+                .filter(Boolean); // Remove null or empty values
+            } else {
+              // If no product column, use all entries but look for product name in text
+              clauses = jsonData
+                .map(row => {
+                  const clauseText = row[clauseColumn];
+                  return clauseText && 
+                         typeof clauseText === 'string' && 
+                         clauseText.toLowerCase().includes(productName.toLowerCase()) ? 
+                         clauseText.trim() : null;
+                })
+                .filter(Boolean); // Remove null or empty values
+            }
+          } else {
+            // Without product name, extract all clauses
+            clauses = jsonData
+              .map(row => {
+                const clauseText = row[clauseColumn];
+                return clauseText && typeof clauseText === 'string' ? clauseText.trim() : null;
+              })
+              .filter(Boolean); // Remove null or empty values
+          }
+
+          return {
+            status: 1,
+            message: productName 
+              ? `Clauses extracted successfully for ${productName}`
+              : 'Clauses extracted successfully',
+            clauses: clauses
+          };
+        } catch (error) {
+          logError(error);
+          return { 
+            status: 0, 
+            message: 'Error processing Excel file', 
+            error: error.message,
+            clauses: [] 
+          };
+        }
+      } else {
+        throw new Error('Unsupported file format. Please upload PDF, Excel, or CSV files.');
+      }
+    } catch (error) {
+      logError(error);
+      return { 
+        status: 0, 
+        message: 'Error processing file with AI', 
+        error: error.message,
+        clauses: [] 
+      };
+    }
+  },
+
   processBOQWithAI: async (file) => {
     try {
-
       const s3Url = new URL(file);
       const bucket = s3Url.hostname.split('.')[0];
       const key = decodeURIComponent(s3Url.pathname).slice(1); // remove leading '/'
@@ -23,13 +325,11 @@ const generativeAI = {
       });
       const result = await s3Client.send(command);
       const webStream = Readable.toWeb(result.Body);
-      // const buffer = await streamToBuffer(result.Body);
       const ressult2 = new Response(webStream);
       const arrayBuffer = await ressult2.arrayBuffer();   // temporary fix for web stream to array buffer
       const buffer = Buffer.from(arrayBuffer);
       const workbook = xlsx.read(buffer, { type: "buffer" });
 
-      // console.log('workbook', workbook);
       const sheetName = workbook.SheetNames[0]; // Assuming data is in the first sheet
       const sheet = workbook.Sheets[sheetName];
       const boqData = xlsx.utils.sheet_to_csv(sheet);
@@ -103,7 +403,6 @@ const generativeAI = {
         !response.data.candidates ||
         response.data.candidates.length === 0
       ) {
-        // throw new Error({ error: 'Error processing BOQ with AI' });
         return { error: 'Error processing BOQ with AI' };
       }
 

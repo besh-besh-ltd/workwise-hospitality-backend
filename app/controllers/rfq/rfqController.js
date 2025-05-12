@@ -18,7 +18,6 @@ import productModel from '../../models/productModel.js';
 import generativeAI from '../../helper/processBOQWithAI.js';
 import { setupReverseAuctionMails } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import { setupReverseAuctionWhatsAppNotifications } from '../../helper/sendWhatsAppFunctions/sendWhatsappNotification.js';
-import extractClausesWithAI from '../../helper/extractClausesWithAI.js';
 
 
 
@@ -5381,7 +5380,7 @@ listQueries: async (req, res) => {
 
 addClauseUsingFile : async (req, res) => {
   try {
-    // Changes by Agnij June 22, 2026 [Enhanced AI extraction to be product-specific]
+    // Changes by Agnij June 22, 2026 [Updated to use consolidated generativeAI module]
     // Get file and RFQ details from request
     let file = req.file;
     const { rfq_id, rfq_product_id } = req.body;
@@ -5404,7 +5403,7 @@ addClauseUsingFile : async (req, res) => {
     const productName = await rfqModel.getProductNameById(rfq_product_id);
     
     // Use AI to extract clauses from the uploaded file, passing the product name
-    const result = await extractClausesWithAI.extractClauses(file, productName);
+    const result = await generativeAI.extractClauses(file, productName);
     
     if (!result.status) {
       return res.json({
