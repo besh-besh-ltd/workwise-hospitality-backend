@@ -888,7 +888,7 @@ const containerContent = `
 
 
     let mailRecipients = {
-      from:  `${vendorName} ${Config.masterEmail}`,
+      from:  `${org_name} ${Config.masterEmail}`,
       subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
       html: dynamicHTML
     };
