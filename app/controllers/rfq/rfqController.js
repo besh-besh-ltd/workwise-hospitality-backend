@@ -5380,7 +5380,7 @@ listQueries: async (req, res) => {
 
 addClauseUsingFile : async (req, res) => {
   try {
-    // Changes by Agnij June 22, 2026 [Updated to use consolidated generativeAI module]
+    // Changes by Agnij October 18, 2023 [Updated to use consolidated generativeAI module]
     // Get file and RFQ details from request
     let file = req.file;
     const { rfq_id, rfq_product_id } = req.body;
@@ -5402,41 +5402,41 @@ addClauseUsingFile : async (req, res) => {
     // Get the product name for targeted extraction
     const productName = await rfqModel.getProductNameById(rfq_product_id);
     
-    // Use AI to extract clauses from the uploaded file, passing the product name
+    // Use AI to extract information from the uploaded file, passing the product name
     const result = await generativeAI.extractClauses(file, productName);
     
     if (!result.status) {
       return res.json({
         status: 0,
-        message: result.message || "Failed to extract clauses",
+        message: result.message || "Failed to extract information",
         errors: [{ Row: 0, error: result.error || "AI processing error" }]
       });
     }
 
-    // Return early if no clauses were extracted
+    // Return early if no information was extracted
     if (!result.clauses || result.clauses.length === 0) {
       return res.json({
         status: 0,
         message: productName 
-          ? `No clauses or specifications were found for product '${productName}'`
-          : "No clauses were found in the document",
+          ? `No information was found for product '${productName}'`
+          : "No information was found in the document",
         errors: [{ 
           Row: 0, 
           error: productName 
             ? `No relevant information detected for product '${productName}'` 
-            : "No clauses detected in the document" 
+            : "No information detected in the document" 
         }]
       });
     }
 
-    // Changes by Agnij June 22, 2026 [Added batch processing for large clause sets]
-    // Save the extracted clauses to the database in batches to avoid timeouts
+    // Changes by Agnij October 18, 2023 [Updated message to use broader terms like "information"]
+    // Save the extracted information to the database in batches to avoid timeouts
     const clauses = result.clauses;
-    const BATCH_SIZE = 10; // Process 10 clauses at a time
+    const BATCH_SIZE = 10; // Process 10 items at a time
     const allErrors = [];
     let successCount = 0;
     
-    // Process clauses in batches
+    // Process information in batches
     for (let i = 0; i < clauses.length; i += BATCH_SIZE) {
       const batch = clauses.slice(i, i + BATCH_SIZE);
       
@@ -5448,7 +5448,7 @@ addClauseUsingFile : async (req, res) => {
           successCount++;
           return null; // Successful operation
         } catch (error) {
-          return { Row: i + index, error: error.message }; // Return error for this clause
+          return { Row: i + index, error: error.message }; // Return error for this item
         }
       });
       
@@ -5466,17 +5466,17 @@ addClauseUsingFile : async (req, res) => {
     return res.json({
       status: 1,
       message: productName 
-        ? `${successCount} of ${clauses.length} clauses/specifications added successfully for '${productName}'${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`
-        : `${successCount} of ${clauses.length} clauses added successfully${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`,
+        ? `${successCount} of ${clauses.length} items added successfully for '${productName}'${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`
+        : `${successCount} of ${clauses.length} items added successfully${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`,
       errors: allErrors.length > 0 ? allErrors : [],
-      clauses: clauses // Return the extracted clauses to be displayed on frontend
+      clauses: clauses // Return the extracted information to be displayed on frontend
     });
     
   } catch (error) {
     const errMsg = error?.response?.data?.error?.message || error.message;
     return res.status(500).json({
       status: 0,
-      message: "Error adding clauses",
+      message: "Error adding information",
       errors: [{ Row: 0, error: errMsg }]
     });
   }

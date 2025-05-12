@@ -914,16 +914,16 @@ const schema_posts = {
       let upload = multer({
         storage: store_add_clause_file,
         limits: {
-          fileSize: 10000000 // Increased to 10MB to handle PDF files
+          fileSize: 10000000 // 10MB for PDF files
         },
         fileFilter: (req, file, cb) => {
           let ext = path.extname(file.originalname).toLowerCase();
 
-          if (ext === '.xlsx' || ext === '.xls' || ext === '.csv' || ext === '.pdf') {
+          if (ext === '.pdf') {
             cb(null, true);
           } else {
             cb(null, false);
-            return cb('Only .xlsx, .xls, .csv, or .pdf files are allowed', null);
+            return cb('Only PDF files are allowed', null);
           }
         }
       }).single('file');

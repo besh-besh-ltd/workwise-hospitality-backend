@@ -1,5 +1,4 @@
 import axios from 'axios';
-import xlsx from 'xlsx';
 import productModel from '../models/productModel.js';
 import { logError } from './common.js';
 import s3Client from '../config/s3config.js';
@@ -45,8 +44,7 @@ const generativeAI = {
       const fileExt = path.extname(file.originalname || file.filename).toLowerCase();
       
       if (fileExt === '.pdf') {
-        // Changes by Agnij June 22, 2026 [Integrated parsePdf and processClausesWithAI inside extractClauses]
-        // Parse and process PDF file with AI
+        // Changes by Agnij October 18, 2023 [Enhanced PDF processing to extract more comprehensive information]
         try {
           // Parse the PDF using the integrated parsePdf functionality
           const pdfText = await pdfParser.extractText(buffer);
@@ -61,39 +59,62 @@ const generativeAI = {
           const genAI = new GoogleGenerativeAI(apiKey);
           const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-          // Create the prompt for clause extraction - focusing specifically on clauses for the given product
+          // Create the prompt for comprehensive data extraction
           let prompt;
           
           if (productName) {
-            // Changes by Agnij June 22, 2026 [Enhanced prompt for better technical data extraction]
+            // Changes by Agnij October 18, 2023 [Enhanced prompt for comprehensive data extraction]
             prompt = `
-              You are an AI trained to extract comprehensive technical information from documents for a specific product.
+              You are an AI trained to extract comprehensive information from documents for a specific product.
               
               TARGET PRODUCT: "${productName}"
               
               Extract ALL of the following information related to "${productName}" from the document:
-              1. Technical evaluation clauses and requirements
-              2. Technical specifications (including ALL dimensions, materials, performance parameters)
-              3. Technical Data Sheet (TDS) or Instrument Data Sheet (IDS) information
-              4. Compliance criteria and standards (ISO, ASTM, etc.)
-              5. Inspection protocols and quality control requirements
-              6. Testing methodologies and parameters
-              7. Installation procedures and requirements
-              8. Maintenance guidelines
-              9. Safety requirements and warnings
-              10. Operational parameters
-              11. Warranty conditions and exclusions
-              12. Other contractual obligations related to this specific product
+              
+              1. TECHNICAL INFORMATION:
+                - Technical specifications (dimensions, materials, performance parameters)
+                - Engineering requirements and constraints
+                - Operational parameters and restrictions
+                - Installation requirements and procedures
+              
+              2. COMPLIANCE AND STANDARDS:
+                - Industry standards and certifications required
+                - Regulatory compliance requirements
+                - Testing protocols and acceptance criteria
+                - Quality assurance requirements
+              
+              3. COMMERCIAL AND CONTRACT TERMS:
+                - Delivery terms and conditions
+                - Warranty provisions
+                - Liability clauses
+                - Payment and pricing details
+              
+              4. GENERAL NOTES AND CONDITIONS:
+                - Important notes about the product
+                - Special handling requirements
+                - Environmental constraints or considerations
+                - Any other general information or warnings
+              
+              5. INSPECTION AND TESTING:
+                - Inspection procedures
+                - Test requirements
+                - Quality control measures
+                - Acceptance tests and criteria
+              
+              6. OTHER RELEVANT INFORMATION:
+                - Any other clauses or information that might be important
+                - Special requirements or exceptions
+                - Notes about product supply or usage
               
               CRITICALLY IMPORTANT INSTRUCTIONS:
-              - Maintain the EXACT hierarchical structure and formatting of technical specifications
+              - Maintain the EXACT hierarchical structure and formatting of all information
               - Preserve ALL numbered or bulleted lists exactly as they appear
               - Keep ALL tables, measurements and numerical values with their units intact
-              - Include ALL conditional statements (if/then logic) in technical requirements
-              - Capture specifications even if "${productName}" is not explicitly mentioned but context makes it clear
-              - DO NOT rephrase or summarize specifications - use the EXACT ORIGINAL text
-              - Capture specifications even if they span across different pages/sections
-              - Pay special attention to footnotes and references related to specifications
+              - Include ALL conditional statements and logical relationships
+              - Capture information even if "${productName}" is not explicitly mentioned but context makes it clear
+              - DO NOT rephrase, interpret, or summarize - use the EXACT ORIGINAL text
+              - Capture information even if it spans across different pages/sections
+              - Pay special attention to footnotes, references, and fine print
               - Preserve cross-references between sections
               - Identify text that applies to ALL products vs. "${productName}" specifically
               
@@ -110,28 +131,54 @@ const generativeAI = {
           } else {
             // Enhanced general prompt for when no product name is provided
             prompt = `
-              You are an AI trained to extract comprehensive technical and contractual information from documents.
+              You are an AI trained to extract comprehensive information from documents.
               
-              Extract ALL of the following information from the document:
-              1. Legal contract clauses and technical requirements
-              2. Technical specifications (dimensions, materials, performance parameters)
-              3. Technical Data Sheet (TDS) or Instrument Data Sheet (IDS) information
-              4. Contractual terms and conditions
-              5. Compliance criteria and standards
-              6. Testing requirements and acceptance criteria
-              7. Installation, operation, and maintenance specifications
-              8. Warranty and liability clauses
-              9. Safety requirements and warnings
+              Extract ALL of the following information categories from the document:
+              
+              1. TECHNICAL INFORMATION:
+                - Technical specifications and requirements
+                - Engineering parameters and constraints
+                - Operational requirements and limitations
+                - Installation specifications and procedures
+              
+              2. COMPLIANCE AND STANDARDS:
+                - Industry standards and certifications
+                - Regulatory compliance requirements
+                - Testing protocols and acceptance criteria
+                - Quality assurance requirements
+              
+              3. COMMERCIAL AND CONTRACT TERMS:
+                - Delivery terms and conditions
+                - Warranty provisions and limitations
+                - Liability clauses and exceptions
+                - Payment terms and pricing details
+              
+              4. GENERAL NOTES AND CONDITIONS:
+                - Important notes about products or services
+                - Special handling or storage requirements
+                - Environmental constraints or considerations
+                - Any other general information or warnings
+              
+              5. INSPECTION AND TESTING:
+                - Inspection procedures and requirements
+                - Test methods and parameters
+                - Quality control measures and criteria
+                - Acceptance tests and verification procedures
+              
+              6. OTHER RELEVANT INFORMATION:
+                - Any other clauses or information that might be important
+                - Special requirements or exceptions
+                - Notes about product supply, usage, or implementation
               
               CRITICALLY IMPORTANT INSTRUCTIONS:
-              - Maintain the EXACT hierarchical structure of all content
+              - Maintain the EXACT hierarchical structure and formatting
               - Preserve ALL numbered or bulleted lists exactly as they appear
               - Keep ALL tables, measurements and numerical values with their units intact
               - Include ALL conditional statements and logical relationships
-              - DO NOT rephrase or summarize - use the EXACT ORIGINAL text
+              - DO NOT rephrase, interpret, or summarize - use the EXACT ORIGINAL text
               - Preserve section headings and their relationships to content
-              - Keep the relationships between specifications and their products/components clear
-              - Maintain all cross-references between clauses
+              - Maintain all cross-references between sections
+              - Capture all footnotes, references, and fine print
               
               Return the data in a JSON format with the following structure:
               { 
@@ -168,8 +215,8 @@ const generativeAI = {
               return {
                 status: 1,
                 message: productName 
-                  ? `Comprehensive technical data extracted successfully for ${productName}`
-                  : 'Technical data and clauses extracted successfully',
+                  ? `Comprehensive information extracted successfully for ${productName}`
+                  : 'Comprehensive information extracted successfully',
                 clauses: extractedData.clauses.map(clause => clause.text)
               };
             } catch (error) {
@@ -194,8 +241,8 @@ const generativeAI = {
             return {
               status: 1,
               message: productName 
-                ? `Technical data extracted from text response for ${productName}`
-                : 'Technical data extracted from text response',
+                ? `Information extracted from text response for ${productName}`
+                : 'Information extracted from text response',
               clauses: potentialClauses
             };
           }
@@ -211,97 +258,9 @@ const generativeAI = {
             clauses: [] 
           };
         }
-      } else if (['.xlsx', '.xls', '.csv'].includes(fileExt)) {
-        // Process Excel file
-        const workbook = xlsx.read(buffer, { type: "buffer" });
-        const sheetName = workbook.SheetNames[0];
-        const sheet = workbook.Sheets[sheetName];
-        const jsonData = xlsx.utils.sheet_to_json(sheet);
-        
-        // Changes by Agnij June 22, 2026 [Integrated Excel processing directly into extractClauses]
-        // Extract clauses from Excel data
-        try {
-          if (!jsonData || jsonData.length === 0) {
-            return {
-              status: 0,
-              message: 'No clauses found in the file',
-              clauses: []
-            };
-          }
-
-          // First, determine which column contains the clauses
-          const firstRow = jsonData[0];
-          const clauseColumn = Object.keys(firstRow).find(key => 
-            key.toLowerCase().includes('clause') || 
-            key.toLowerCase().includes('list') || 
-            key.toLowerCase().includes('text')
-          ) || Object.keys(firstRow)[0]; // Default to first column if no suitable column found
-
-          // If product name is provided, filter entries that match the product
-          let clauses;
-          
-          if (productName) {
-            // If product name is provided, filter entries that match the product
-            const productColumn = Object.keys(firstRow).find(key => 
-              key.toLowerCase().includes('product') || 
-              key.toLowerCase().includes('item') || 
-              key.toLowerCase().includes('name')
-            );
-            
-            if (productColumn) {
-              // If there's a product column, filter by product name
-              clauses = jsonData
-                .filter(row => {
-                  const rowProductName = row[productColumn];
-                  return rowProductName && 
-                        typeof rowProductName === 'string' && 
-                        rowProductName.toLowerCase().includes(productName.toLowerCase());
-                })
-                .map(row => {
-                  const clauseText = row[clauseColumn];
-                  return clauseText && typeof clauseText === 'string' ? clauseText.trim() : null;
-                })
-                .filter(Boolean); // Remove null or empty values
-            } else {
-              // If no product column, use all entries but look for product name in text
-              clauses = jsonData
-                .map(row => {
-                  const clauseText = row[clauseColumn];
-                  return clauseText && 
-                         typeof clauseText === 'string' && 
-                         clauseText.toLowerCase().includes(productName.toLowerCase()) ? 
-                         clauseText.trim() : null;
-                })
-                .filter(Boolean); // Remove null or empty values
-            }
-          } else {
-            // Without product name, extract all clauses
-            clauses = jsonData
-              .map(row => {
-                const clauseText = row[clauseColumn];
-                return clauseText && typeof clauseText === 'string' ? clauseText.trim() : null;
-              })
-              .filter(Boolean); // Remove null or empty values
-          }
-
-          return {
-            status: 1,
-            message: productName 
-              ? `Clauses extracted successfully for ${productName}`
-              : 'Clauses extracted successfully',
-            clauses: clauses
-          };
-        } catch (error) {
-          logError(error);
-          return { 
-            status: 0, 
-            message: 'Error processing Excel file', 
-            error: error.message,
-            clauses: [] 
-          };
-        }
       } else {
-        throw new Error('Unsupported file format. Please upload PDF, Excel, or CSV files.');
+        // Changes by Agnij October 18, 2023 [Removed Excel file handling as per requirements]
+        throw new Error('Unsupported file format. Please upload PDF files only.');
       }
     } catch (error) {
       logError(error);
