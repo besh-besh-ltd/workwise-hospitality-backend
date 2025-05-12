@@ -1421,9 +1421,10 @@ LIMIT 1;`;
                 LIMIT 1
             ) AS "last_purchase_rate",
             ARRAY(
-                SELECT json_build_object('name', TP.name,'description', TP.description) 
-                FROM tbl_product TP 
-                WHERE TP.id = TRP.product_variant_id 
+                SELECT json_build_object('name', PV.name,'description', TP.description) 
+                FROM tbl_product_variant PV
+                JOIN tbl_product TP ON TP.id = PV.product_id
+                WHERE PV.id = TRP.product_variant_id 
             ) AS "product_details",
             ARRAY(
                 SELECT json_build_object(
