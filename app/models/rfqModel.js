@@ -5080,7 +5080,6 @@ getVendorDetailsByUserId: async (user_id) => {
 },
 
   getProductNameById: async (rfq_product_id) => {
-    // Changes by Agnij June 22, 2026 [Added function to get product name by rfq_product_id]
     return new Promise((resolve, reject) => {
       const query = `
         SELECT TP.name

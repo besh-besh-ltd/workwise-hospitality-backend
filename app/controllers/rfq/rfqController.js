@@ -5380,7 +5380,6 @@ listQueries: async (req, res) => {
 
 addClauseUsingFile : async (req, res) => {
   try {
-    // Changes by Agnij October 18, 2023 [Updated to use consolidated generativeAI module]
     // Get file and RFQ details from request
     let file = req.file;
     const { rfq_id, rfq_product_id } = req.body;
@@ -5429,7 +5428,6 @@ addClauseUsingFile : async (req, res) => {
       });
     }
 
-    // Changes by Agnij October 18, 2023 [Updated message to use broader terms like "information"]
     // Save the extracted information to the database in batches to avoid timeouts
     const clauses = result.clauses;
     const BATCH_SIZE = 10; // Process 10 items at a time

@@ -44,7 +44,6 @@ const generativeAI = {
       const fileExt = path.extname(file.originalname || file.filename).toLowerCase();
       
       if (fileExt === '.pdf') {
-        // Changes by Agnij October 18, 2023 [Enhanced PDF processing to extract more comprehensive information]
         try {
           // Parse the PDF using the integrated parsePdf functionality
           const pdfText = await pdfParser.extractText(buffer);
@@ -63,7 +62,6 @@ const generativeAI = {
           let prompt;
           
           if (productName) {
-            // Changes by Agnij October 18, 2023 [Enhanced prompt for comprehensive data extraction]
             prompt = `
               You are an AI trained to extract comprehensive information from documents for a specific product.
               
@@ -259,7 +257,6 @@ const generativeAI = {
           };
         }
       } else {
-        // Changes by Agnij October 18, 2023 [Removed Excel file handling as per requirements]
         throw new Error('Unsupported file format. Please upload PDF files only.');
       }
     } catch (error) {
