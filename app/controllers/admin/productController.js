@@ -24,6 +24,7 @@ import userModel from '../../models/userModel.js';
 import path from 'path';
 import subscriptionModel from '../../models/subscriptionModel.js';
 import moment from 'moment';
+import db from '../../config/dbConn.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -1128,7 +1129,8 @@ const productController = {
               tds_new_file_name: productDetails[0].tds_new_file_name,
               tds_original_file_name: productDetails[0].tds_original_file_name,
               slug: titleToSlug(productDetails[0].name),
-              availability: 0,
+              // Changes by Agnij May 02, 2025 [Removed availability field which doesn't exist in database]
+              // availability: 0,
               sku: productDetails[0].name,
               created_by: vendor_id,
               added_by: req.user.id,
@@ -1817,12 +1819,10 @@ const productController = {
 
         if (productName && productCategory) {
           // when Product Name founds in a row
-          console.log(productName);
           if (prodObj.name != "" && !productError) {
               // means we have to add previous prodObj which do not have error 
               if(prodObj.productId == null ){
                 // means new product
-                console.log("---------------->>>>>. ",prodObj)
                 const product = await productModel.createProduct(prodObj.newProduct);
                 prodObj.productId = product.id;
               }
@@ -1834,7 +1834,6 @@ const productController = {
                     category_name: value.title,
                     category_id: value.id
                   };
-                  console.log(`Mapping the ${value.title} with ${prodObj.name}`)
                   await productModel.createProductCategory(categoryObj);
               }
         
@@ -1877,7 +1876,6 @@ const productController = {
                error: `Product ${productName} already exist`
              }
              errors.push(err);
-             console.log(`Product ${productName} already exist`, index+2);
              prodObj = {
                category: [],
                name: "",
@@ -1904,7 +1902,6 @@ const productController = {
               error: `Category ${productCategory} does not exist`
             }
             errors.push(err);
-            console.log(`Category ${productCategory} does not exist`, index+2);
             prodObj = {
               category: [],
               name: "",
@@ -1928,7 +1925,6 @@ const productController = {
               error: `Category ${productCategory} does not exist`
             }
             errors.push(err);
-            console.log(`Category ${productCategory} does not exist`, index+2);
             prodObj = {
               category: [],
               name: "",
@@ -1940,7 +1936,6 @@ const productController = {
           }
 
         } else if (productCategory && productError) {
-          console.log("We are continuing because We found error in the product",index+2);
           continue;
         } else {
           // case where productCategory having black space 
@@ -1950,7 +1945,6 @@ const productController = {
             error: "Category is Missing"
           }
           errors.push(err);
-          console.log("We found the missed category", index+2);
           prodObj = {
             category: [],
             name: "",
@@ -1965,7 +1959,6 @@ const productController = {
         //means last product name does not have any error, now to be inserted
         if(prodObj.productId == null ){
           // means new product
-          console.log("---------------- ",prodObj);
           const product = await productModel.createProduct(prodObj.newProduct);
           prodObj.productId = product.id;
         }
@@ -1977,7 +1970,6 @@ const productController = {
               category_name: value.title,
               category_id: value.id
             };
-            console.log(`Mapping the ${value.title} with ${prodObj.name}`)
             await productModel.createProductCategory(categoryObj);
         }
       }
@@ -2133,8 +2125,6 @@ const productController = {
           let prodNameExists = await productModel.checkProductExists(
             value['Product name']
           );
-          console.log('prodNameExists--->', prodNameExists);
-          // return false;
           let productObj = '';
           if (prodNameExists && prodNameExists.length == 0) {
             productObj = {
@@ -2249,110 +2239,56 @@ const productController = {
         .end();
     }
   },
-  productList: async (req, res, next) => {
+  productListImproved: async (req, res) => {
     try {
-      let page = parseInt(req.query.page) || 1;
-      let limit = parseInt(req.query.limit) || Config.globalAdminLimit;
-      let offset = (page - 1) * limit;
-
-      let productName = req.query?.productName;
-      let vendorApprove = req.query?.vendorApprove;
-      let vendorId = req.query?.vendorId;
-      let isFeatured = req.query?.isFeatured;
-      let categoryId = req.query?.categoryId;
-      let addedBy = req.query?.addedBy;
-      let onlyAddedByAdmin = req.query?.onlyAddedByAdmin === 'true';
-      let dateFrom = req.query?.dateFrom;
-      let dateTo = req.query?.dateTo;
-      let is_approve = req.query?.is_approve !== undefined ? parseInt(req.query.is_approve) : null;
-      let filterProduct = {};
-
-      // Track which filters are active
-      const activeFilters = {
-        productName: !!productName,
-        vendorApprove: !!vendorApprove,
-        vendorId: !!vendorId,
-        isFeatured: !!isFeatured,
-        categoryId: !!categoryId,
-        onlyAddedByAdmin: onlyAddedByAdmin,
-        dateFrom: !!dateFrom,
-        dateTo: !!dateTo,
-        is_approve: is_approve !== null
-      };
-
-      if (vendorApprove) {
-        filterProduct = await productModel.getApprovedByProduct(vendorApprove);
-      }
-
-      // Get filtered products
-      let productList = await productModel.getProductList(
-        limit,
-        offset,
-        vendorId,
+      const {
         productName,
-        filterProduct,
+        vendorApprove,
+        vendorId,
         isFeatured,
-        addedBy,  // Use the addedBy parameter instead of req.user.id
         categoryId,
+        addedBy,
         dateFrom,
         dateTo,
-        is_approve
-      );
-
-      // Get total counts with all active filters
-      let filteredCount = await productModel.getProductCount(
-        vendorId,
-        productName,
-        filterProduct,
-        isFeatured,
-        addedBy,  // Use the addedBy parameter for consistent filtering
-        categoryId,
-        dateFrom,
-        dateTo,
-        is_approve
-      );
-
-      // Get unfiltered total counts for comparison
-      let unfilteredCount = await productModel.getProductCount(
-        null, null, null, null, null, null, null, null, null
-      );
-
-      const total_count = parseInt(unfilteredCount[0].count);
-      const filtered_total = parseInt(filteredCount[0].count);
-
-      // Calculate approve/disapprove counts for filtered results
-      const approve_count = productList.filter(item => item.is_approve === 1).length;
-      const disapprove_count = filtered_total - approve_count;
-
-      // Calculate approve/disapprove counts for unfiltered results
-      const total_approve = await productModel.getProductCount(
-        null, null, null, null, null, null, null, null, 1
-      );
-      const total_disapprove = await productModel.getProductCount(
-        null, null, null, null, null, null, null, null, 0
-      );
-
-      res.status(200).json({
-        status: 1,
-        data: productList,
-        total_count: total_count,  // Total count without filters
-        approve_count: parseInt(total_approve[0].count),  // Total approved without filters
-        disapprove_count: parseInt(total_disapprove[0].count),  // Total disapproved without filters
-        is_filtered: Object.values(activeFilters).some(f => f),
-        filtered_count: filtered_total,  // Count with filters applied
-        filtered_approve_count: approve_count,  // Approved count with filters
-        filtered_disapprove_count: disapprove_count,  // Disapproved count with filters
+        is_approve,
         page,
         limit,
-        total_pages: Math.ceil(filtered_total / limit)
-      }).end();
+      } = req.query;
+
+      const filters = {
+        productName,
+        vendorApprove,
+        vendorId,
+        isFeatured,
+        categoryId,
+        addedBy,
+        dateFrom,
+        dateTo,
+        is_approve,
+      };
+
+      const result = await productModel.getMasterProductsPaginated(
+        filters,
+        page,
+        limit
+      );
+
+      const responsePayload = {
+        status: 1,
+        // data: result.data || [],
+        // pagination: result.pagination || { total: 0, page: page, limit: limit, pages: 1 } // Ensure pagination object exists
+        ...result
+      };
+      
+      res.status(200).json(responsePayload).end();
 
     } catch (error) {
       logError(error);
-      res.status(400).json({
-        status: 3,
-        message: Config.errorText.value
-      }).end();
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to search product',
+        error: error.message
+      });
     }
   },
   adminProductListReview: async (req, res, next) => {
@@ -2678,20 +2614,25 @@ const productController = {
       let productObj = {
         name: name,
         description: description || null,
-        manufacturer: manufacturer || null,
-        availability: availability || 0,
+        // Changes by Agnij May 02, 2025 [Removed manufacturer field which doesn't exist in database]
+        // manufacturer: manufacturer || null,
+        // Changes by Agnij May 02, 2025 [Removed availability field which doesn't exist in database]
+        // availability: availability || 0,
         slug: titleToSlug(name),
         sku: name,
         created_by: vendor || req.user.id,
-        vendor: vendor || null,
+        // Changes by Agnij May 02, 2025 [Removed vendor field which doesn't exist in database]
+        // vendor: vendor || null,
         status: status || 1,
-        is_featured: is_featured || 0,
+        // Changes by Agnij May 02, 2025 [Removed is_featured field which doesn't exist in database]
+        // is_featured: is_featured || 0,
         is_approve: 0,
         added_by: req.user.id,
-        qap_new_file_name: req.files?.['qap[]']?.[0]?.location || null,
-        qap_original_file_name: req.files?.['qap[]']?.[0]?.originalname || null,
-        tds_new_file_name: req.files?.['tds[]']?.[0]?.location || null,
-        tds_original_file_name: req.files?.['tds[]']?.[0]?.originalname || null
+        // Changes by Agnij May 02, 2025 [Removed file fields which don't exist in database]
+        // qap_new_file_name: req.files?.['qap[]']?.[0]?.location || null,
+        // qap_original_file_name: req.files?.['qap[]']?.[0]?.originalname || null,
+        // tds_new_file_name: req.files?.['tds[]']?.[0]?.location || null,
+        // tds_original_file_name: req.files?.['tds[]']?.[0]?.originalname || null
       };
 
       let product = await productModel.createProduct(productObj);
@@ -2711,12 +2652,32 @@ const productController = {
   
       // ---------------- variations ----------------
       for await (const { attribute, attributeValue } of variations) {
-        let varientObj = {
-          product_id: productId,
-          variant_name: attribute,
-          variant_value: attributeValue
-        };
-        await productModel.createProductveriants(varientObj);
+        // Changes by Agnij May 02, 2025 [Added check for empty attribute name]
+        // Skip creating variants with empty names or use a default name
+        if (!attribute || attribute.trim() === '') {
+          // Either skip this variant
+          continue;
+          
+          // Or use product name as default variant name if attribute is empty
+          // let variantObj = {
+          //   product_id: productId,
+          //   name: `Default variant for ${name}`,
+          //   status: 1,
+          //   created_at: new Date()
+          // };
+          // await productModel.createProductVariant(variantObj);
+        } else {
+          let variantObj = {
+            product_id: productId,
+            name: attribute,
+            status: 1,
+            created_at: new Date(),
+            // Changes by Agnij May 02, 2025 [Added created_by to ensure proper attribution]
+            created_by: req.user.id,
+            added_by: req.user.id
+          };
+          await productModel.createProductVariant(variantObj);
+        }
       }
 
       // ---------------- featured image ----------------
@@ -2752,40 +2713,6 @@ const productController = {
         })
         .end();
     } catch (err) {
-      /* if (req.files?.featured && req.files?.featured.length > 0) {
-         fs.unlink(req.files.featured[0].path, (unlinkError) => {
-          if (unlinkError) {
-            console.error('Error deleting file:', unlinkError);
-          }
-        });
-      }
-      if (req.files?.gallery && req.files?.gallery.length > 0) {
-        req.files.gallery.forEach((file) => {
-          fs.unlink(file.path, (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          });
-        });
-      }
-      if (req.files?.qap && req.files?.qap.length > 0) {
-        req.files.qap.forEach((file) => {
-          fs.unlink(file.path, (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          });
-        });
-      }
-      if (req.files?.tds && req.files?.tds.length > 0) {
-        req.files.tds.forEach((file) => {
-          fs.unlink(file.path, (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          });
-        });
-      } */
       logError(err);
       res
         .status(400)
@@ -2796,177 +2723,214 @@ const productController = {
         .end();
     }
   },
-  approveProduct: async (req, res, next) => {
+  approveProduct: async (req, res) => {
     try {
-      let productId = req.params.id;
-      let { status, reject_reason, reject_reason_id } = req.body;
-      let reasonId = '';
-      if (reject_reason_id && status == 0) {
-        reasonId = reject_reason_id;
-      } else if (!reject_reason_id && status == 0) {
-        let checkRejectReason = await vendorModel.checkRejectReason(
-          reject_reason
-        );
-        if (checkRejectReason.length > 0) {
-          reasonId = checkRejectReason[0].id;
+      let { reject_reason, reject_reason_id, status } = req.body;
+      const productId = req.params.id;
+
+      // Changes by Agnij May 02, 2025 [Fixed approveProduct to remove vendor_approved_by field]
+      
+      // Validate status is present and valid
+      if (status === undefined || status === null) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Status is required'
+        });
+      }
+      
+      // Ensure status is treated as a string for comparison
+      status = status.toString();
+      
+      if (status !== '0' && status !== '1') {
+        return res.status(400).json({
+          status: 3,
+          message: 'Status must be 0 or 1'
+        });
+      }
+
+      
+      let reasonId = null;
+      if (status === '0') {
+        if (reject_reason_id) {
+          reasonId = reject_reason_id;
+        } else if (reject_reason) {
+          let checkReason = await vendorModel.findReasonByText(reject_reason);
+          if (checkReason.length > 0) {
+            reasonId = checkReason[0].id;
+          } else {
+            let reasonObj = {
+              status: 1,
+              reject_reason: reject_reason,
+              type: 2
+            };
+            let createReason = await vendorModel.createReason(reasonObj);
+            reasonId = createReason[0].id;
+          }
         } else {
-          let reasonObj = {
-            status: 1,
-            reject_reason: reject_reason,
-            type: 2
-          };
-          let createReason = await vendorModel.createReason(reasonObj);
-          reasonId = createReason[0].id;
+          return res.status(400).json({
+            status: 3,
+            message: 'Reject reason is required when rejecting a product'
+          });
         }
       }
 
+      const currentTime = new Date();
       let productObj = {
         is_approve: status,
-        vendor_approved_by: req.user.id,
-        reject_reason_id: reasonId || null
+        updated_by: req.user.id,
+        reject_reason_id: reasonId || null,
+        updated_at: currentTime
       };
+      
+      // Add approved_at field when approving
+      if (status === '1') {
+        productObj.approved_at = currentTime;
+      }
 
-      let approveProduct = await productModel.approveProduct(
+      const approveProduct = await productModel.approveProduct(
         productObj,
         productId
       );
-      // clone product for admin
-
-      let productDetails = await productModel.vendorProductDetails(productId);
-
-      let checkMasterNameExist = await productModel.checkMasterNameExist(
-        productDetails[0].name
-      );
-      if (checkMasterNameExist.length == 0 && status == 1) {
-        let productObj = {
-          name: productDetails[0].name,
-          description: productDetails[0].description,
-          qap_new_file_name: productDetails[0].qap_new_file_name,
-          qap_original_file_name: productDetails[0].qap_original_file_name,
-          tds_new_file_name: productDetails[0].tds_new_file_name,
-          tds_original_file_name: productDetails[0].tds_original_file_name,
-          slug: titleToSlug(productDetails[0].name),
-          availability: 0,
-          sku: productDetails[0].name,
-          created_by: 1,
-          updated_by: 1,
-          added_by: 1,
-          is_approve: 1
-        };
-
-        let product = await productModel.createProduct(productObj);
-
-        if (productDetails[0].vendor_approved_by.length > 0) {
-          let productApproveArray = [];
-          productDetails[0].vendor_approved_by.forEach((item) => {
-            productApproveArray.push({
-              product_id: product.id,
-              vendor_approve_id: item
-            });
-          });
-          await productModel.addProductApproveBy(
-            productApproveArray,
-            product.id
-          );
-        }
-
-        // ---------------- categories ---------------
-        // console.log(categories);
-        for await (const { id } of productDetails[0].product_categories) {
-          let categoryObj = {
-            category_id: id,
-            product_id: product.id
-          };
-          // console.log(categoryObj);
-
-          await productModel.createProductCategories(categoryObj);
-        }
-
-        for await (const {
-          product_image_url,
-          product_image,
-          is_featured
-        } of productDetails[0].product_images) {
-          let featuredImageObj = {
-            product_id: product.id,
-            is_featured: is_featured,
-            original_image_name: product_image,
-            new_image_name: product_image_url
-          };
-          await productModel.insertProductImages(featuredImageObj);
-        }
-      }
-
-      let userDetail = await vendorModel.userDetailById(
-        approveProduct.created_by
-      );
-      let html_variables = [
-        { name: userDetail[0].name },
-        {
-          message:
-            status == 1
-              ? `Your product ${approveProduct.name} has been approved`
-              : `Your product ${approveProduct.name} has been rejected`
-        }
-      ];
-      let dynamic_html = fs
-        .readFileSync(`${Config.template_path}/dynamic_message_template.txt`)
-        .toString();
-
-      for (let index = 0; index < html_variables.length; index++) {
-        const element = html_variables[index];
-        let dynamic_key = Object.keys(element)[0];
-        let replace_char = html_variables[index][dynamic_key];
-        let replace_var = `[${dynamic_key.toLowerCase()}]`;
-
-        dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
-      }
-
-      //  spoc email
-      const spocList = await vendorModel.getSpocDetails(userDetail[0]?.id)
-
-      // console.log(" product contoller 249 spoc console ", userDetail[0].id, spocList)
-
       
-      let mailRecipients = {
-        from: Config.webmasterMail,
-        subject: `Work Wise | Product Review Status`,
-        html: dynamic_html
-      };
+      // If this product has a vendor, try to send an email notification
+      // if (approveProduct && approveProduct.created_by) {
+      //   try {
+      //     let userDetail = await vendorModel.userDetailById(
+      //       approveProduct.created_by
+      //     );
+          
+      //     if (userDetail && userDetail.length > 0) {
+      //       let html_variables = [
+      //         { name: userDetail[0].name },
+      //         {
+      //           message:
+      //             status == 1
+      //               ? `Your product ${approveProduct.name} has been approved`
+      //               : `Your product ${approveProduct.name} has been rejected`
+      //         }
+      //       ];
+            
+      //       let dynamic_html = fs
+      //         .readFileSync(`${Config.template_path}/dynamic_message_template.txt`)
+      //         .toString();
 
-      if (spocList && spocList.length > 0) {
-        mailRecipients.to = spocList.map(spoc => spoc.email);
-        mailRecipients.cc = userDetail[0].email;
-      } else {
-        mailRecipients.to = userDetail[0].email;
-      }
+      //       for (let index = 0; index < html_variables.length; index++) {
+      //         const element = html_variables[index];
+      //         let dynamic_key = Object.keys(element)[0];
+      //         let replace_char = html_variables[index][dynamic_key];
+      //         let replace_var = `[${dynamic_key.toLowerCase()}]`;
 
-      sendMail(mailRecipients);
+      //         dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
+      //       }
 
-      // sendMail({
-      //   from: Config.webmasterMail, // sender address
-      //   to: userDetail[0].email, // list of receivers
-      //   subject: `Work wise | Product`, // Subject line
-      //   html: dynamic_html // plain text body
-      // });
+      //       // Send the email to the SPOC or vendor
+      //       const spocList = await vendorModel.getSpocDetails(userDetail[0]?.id);
+            
+      //       let mailRecipients = {
+      //         from: Config.webmasterMail,
+      //         subject: `Work Wise | Product Review Status`,
+      //         html: dynamic_html
+      //       };
 
-      res
-        .status(200)
-        .json({
-          status: 1,
-          message: `Product successfully ${status == 0 ? 'Disapproved' : 'Approved'
-            }`
-        })
-        .end();
+      //       if (spocList && spocList.length > 0) {
+      //         mailRecipients.to = spocList.map(spoc => spoc.email);
+      //         mailRecipients.cc = userDetail[0].email;
+      //       } else {
+      //         mailRecipients.to = userDetail[0].email;
+      //       }
+
+      //       sendMail(mailRecipients);
+      //     }
+      //   } catch (emailError) {
+      //     console.error("Error sending notification email:", emailError);
+      //     // Continue with the response even if email fails
+      //   }
+      // }
+
+      return res.status(200).json({
+        status: 1,
+        message: `Product successfully ${status == 0 ? 'Disapproved' : 'Approved'}`
+      });
     } catch (error) {
       logError(error);
-      res
-        .status(400)
-        .json({
+      return res.status(400).json({
+        status: 3,
+        message: error.message || Config.errorText.value
+      });
+    }
+  },
+
+  approveVariant: async (req, res) => {
+    try {
+      let { reject_reason, reject_reason_id, status } = req.body;
+      const productId = req.params.id;
+
+      // Changes by Agnij May 02, 2025 [Fixed approveProduct to remove vendor_approved_by field]
+      
+      // Validate status is present and valid
+      if (status === undefined || status === null) {
+        return res.status(400).json({
           status: 3,
-          message: Config.errorText.value
-        })
-        .end();
+          message: 'Status is required'
+        });
+      }
+      
+      // Ensure status is treated as a string for comparison
+      status = status.toString();
+      
+      if (status !== '0' && status !== '1') {
+        return res.status(400).json({
+          status: 3,
+          message: 'Status must be 0 or 1'
+        });
+      }
+
+      let reasonId = null;
+        // if (status === '0') {
+        //   if (reject_reason_id) {
+        //     reasonId = reject_reason_id;
+        //   } else if (reject_reason) {
+        //     let checkReason = await vendorModel.findReasonByText(reject_reason);
+        //     if (checkReason.length > 0) {
+        //       reasonId = checkReason[0].id;
+        //     } else {
+        //       let reasonObj = {
+        //         status: 1,
+        //         reject_reason: reject_reason,
+        //         type: 2
+        //       };
+        //       let createReason = await vendorModel.createReason(reasonObj);
+        //       reasonId = createReason[0].id;
+        //     }
+        //   } else {
+        //     return res.status(400).json({
+        //       status: 3,
+        //       message: 'Reject reason is required when rejecting a product'
+        //     });
+        //   }
+        // }
+        
+        // Update variant status
+        const currentTime = new Date();
+        const variantObj = {
+          is_approve: parseInt(status),
+          updated_by: req.user.id,
+          reject_reason_id: reasonId || null,
+          updated_at: currentTime
+        };
+        
+        await productModel.updateProductVariant(variantObj, productId);
+        
+        return res.status(200).json({
+          status: 1,
+          message: `Variant successfully ${status === '0' ? 'Disapproved' : 'Approved'}`
+        });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message || Config.errorText.value
+      });
     }
   },
   adminProductUpdate: async (req, res, next) => {
@@ -2986,25 +2950,6 @@ const productController = {
       } = req.body;
   
       const productId = req.params.id;
-      const productDetails = await productModel.check_product(productId);
-  
-      // ---------------- vendor approval ----------------
-      let vendorApproveId = [];
-      if (!approved_id && approved_name) {
-        let findVendorApprove = await vendorapproveModel.findVendorApproveByName(approved_name);
-        if (findVendorApprove.length === 0) {
-          let vendorApproveObj = {
-            vendor_approve: approved_name,
-            status: 1
-          };
-          let createVendorApprove = await vendorapproveModel.createVendorApprove(vendorApproveObj);
-          vendorApproveId = [createVendorApprove.id];
-        } else {
-          vendorApproveId = [findVendorApprove[0].id];
-        }
-      } else if (approved_id) {
-        vendorApproveId = approved_id.split(',').map((id) => parseInt(id.trim()));
-      }
   
       // ---------------- update product ----------------
       let productObj = {
@@ -3015,106 +2960,29 @@ const productController = {
         slug: titleToSlug(name),
         sku: name,
         updated_by: req.user.id,
-        vendor: vendor || productDetails[0].vendor,
+        // Changes by Agnij May 02, 2025 [Removed vendor field which doesn't exist in database]
+        // vendor: vendor || productDetails[0].vendor,
         status: status || 1,
+        is_approve: 0,
         // vendor_approved_by: vendorApproveId || null,
-        productId: productId,
-        is_featured: is_featured || 0,
-        qap_new_file_name: req.files?.['qap[]']?.[0]?.location || null,
-        qap_original_file_name: req.files?.['qap[]']?.[0]?.originalname || null,
-        tds_new_file_name: req.files?.['tds[]']?.[0]?.location || null,
-        tds_original_file_name: req.files?.['tds[]']?.[0]?.originalname || productDetails[0].tds_original_file_name || null
+        // Changes by Agnij May 02, 2025 [Removed is_featured field which doesn't exist in database]
+        // is_featured: is_featured || 0,
+        // Changes by Agnij May 02, 2025 [Removed file fields which don't exist in database]
+        // qap_new_file_name: req.files?.['qap[]']?.[0]?.location || null,
+        // qap_original_file_name: req.files?.['qap[]']?.[0]?.originalname || null,
+        // tds_new_file_name: req.files?.['tds[]']?.[0]?.location || null,
+        // tds_original_file_name: req.files?.['tds[]']?.[0]?.originalname || productDetails[0].tds_original_file_name || null
       };
-  
-      await productModel.updateVendorProduct(productObj);
+
+      await productModel.updateProduct(productObj, productId);
   
       // ---------------- remove old data ----------------
-      await productModel.deleteProductVariants(productId);
       await productModel.deleteProductCategory(productId);
-      await productModel.deleteProductApproveBy(productId);
   
       // ---------------- add categories ----------------
       for (const categoryId of categories) {
         await productModel.createProductCategories(categoryId, productId);
       }
-  
-      // ---------------- add variations ----------------
-      for await (const { attribute, attributeValue } of variations) {
-        let variantObj = {
-          product_id: productId,
-          variant_name: attribute,
-          variant_value: attributeValue
-        };
-        await productModel.createProductveriants(variantObj);
-      }
-  
-      // ---------------- add approval ----------------
-      if (vendorApproveId.length > 0) {
-        let productApproveArray = vendorApproveId.map((id) => ({
-          product_id: productId,
-          vendor_approve_id: id
-        }));
-        await productModel.addProductApproveBy(productApproveArray, productId);
-      }
-  
-      // ---------------- featured image ----------------
-      if (req.files?.['featured[]']?.length > 0) {
-        let featuredImage = await productModel.getProductImages(productId, 1);
-        if (featuredImage.length > 0) {
-          await productModel.deleteProductImages(productId, 1, featuredImage[0].id);
-        }
-  
-        const file = req.files['featured[]'][0];
-        let featuredImageObj = {
-          product_id: productId,
-          is_featured: 1,
-          original_image_name: file.originalname,
-          new_image_name: file.location
-        };
-        await productModel.insertProductImages(featuredImageObj);
-      }
-  
-      // ---------------- gallery images ----------------
-      if (req.files?.['gallery[]']?.length > 0) {
-        let galleryImage = await productModel.getProductImages(productId, 0);
-        if (galleryImage.length > 0) {
-          for await (const { id } of galleryImage) {
-            await productModel.deleteProductImages(productId, 0, id);
-          }
-        }
-  
-        for await (const file of req.files['gallery[]']) {
-          let imageObj = {
-            product_id: productId,
-            is_featured: 0,
-            original_image_name: file.originalname,
-            new_image_name: file.location
-          };
-          await productModel.insertProductImages(imageObj);
-        }
-      }
-
-      // ---------------- Delete qap and tds file  ----------------
-      /* if (req.files?.qap?.length > 0) {
-        fs.unlink(
-          `${Config.upload.product_image}/${productDetails[0].qap_new_file_name}`,
-          (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          }
-        );
-      } */
-      /* if (req.files?.tds?.length > 0) {
-        fs.unlink(
-          `${Config.upload.product_image}/${productDetails[0].tds_new_file_name}`,
-          (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          }
-        );
-      } */
 
       res
         .status(200)
@@ -3124,22 +2992,6 @@ const productController = {
         })
         .end();
     } catch (err) {
-      /* if (req.files?.featured && req.files?.featured.length > 0) {
-        fs.unlink(req.files.featured[0].path, (unlinkError) => {
-          if (unlinkError) {
-            console.error('Error deleting file:', unlinkError);
-          }
-        });
-      }
-      if (req.files?.gallery && req.files?.gallery.length > 0) {
-        req.files.gallery.forEach((file) => {
-          fs.unlink(file.path, (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          });
-        });
-      } */
       logError(err);
       res
         .status(400)
@@ -3154,16 +3006,19 @@ const productController = {
     try {
       let productId = req.params.id;
 
+      // Changes by Agnij May 02, 2025 [Removed vendor list retrieval]
       let productList = await productModel.productDetails(productId);
-      let vendorListProductWise = await productModel.vendorListProductWise(
-        productList[0].name
-      );
+      const product = productList?.[0];
+      if(!product) return res.status(404).json({
+        status: 3,
+        message: 'Product Not Found!'
+      })
+      
       res
         .status(200)
         .json({
           status: 1,
           data: productList[0],
-          vendor_list: vendorListProductWise
         })
         .end();
     } catch (error) {
@@ -3203,6 +3058,605 @@ const productController = {
         })
         .end();
     }
-  }
+  },
+  // New functions for product variant management
+  addProductVariant: async (req, res) => {
+    try {
+      // Changes by Agnij May 01, 2025 [Removed debug console logs]
+      
+      // Get input parameters, supporting both name and variant_name
+      const { product_id, variant_name, name } = req.body;
+      const variantNameValue = variant_name || name;
+      
+      // Validate input
+      if (!product_id || !variantNameValue) {
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Product ID and variant name are required' 
+        });
+      }
+      
+      // Check if product exists
+      const product = await productModel.check_product(product_id);
+      if (!product || product.length === 0) {
+        return res.status(404).json({ 
+          status: 3, 
+          message: 'Product not found' 
+        });
+      }
+      
+      // Check if variant name already exists for this product
+      const existingVariant = await productModel.checkDuplicateVariantName(product_id, variantNameValue);
+      if (existingVariant && existingVariant.length > 0) {
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Variant name already exists for this product' 
+        });
+      }
+      
+      // Create variant with complete structure matching the example in tbl_product_variant_query_output.txt
+      // Changes by Agnij May 01, 2025 [Set is_approve to 0 by default]
+      const variantObj = {
+        product_id,
+        name: variantNameValue, // Store in name field as per DB structure
+        slug: variantNameValue.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+        sku: variantNameValue, // Use variant name as sku
+        status: 1,
+        is_deleted: 0,
+        is_review: 0,
+        is_approve: 0, // Changed from 1 to 0 as default
+        created_at: new Date(),
+        created_by: req.user?.id || null,
+        added_by: req.user?.id || null
+      };
+      
+      try {
+        const result = await productModel.createProductVariant(variantObj);
+        
+        if (!result || !result.id) {
+          return res.status(500).json({
+            status: 3,
+            message: 'Failed to create product variant: No ID returned from database',
+          });
+        }
+        
+        return res.status(201).json({
+          status: 1,
+          message: 'Product variant added successfully',
+          data: { 
+            id: result.id,
+            product_id: product_id,
+            variant_name: variantNameValue
+          }
+        });
+      } catch (createError) {
+        return res.status(500).json({
+          status: 3,
+          message: 'Error creating variant',
+          error: createError.message
+        });
+      }
+      
+    } catch (error) {
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong',
+        error: error.message
+      });
+    }
+  },
+  
+  getProductVariants: async (req, res) => {
+    try {
+      const { product_id } = req.params;
+      
+      // Validate input
+      if (!product_id) {
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Product ID is required' 
+        });
+      }
+      
+      // Get variants for the product
+      const variants = await productModel.getProductVariants(product_id);
+      
+      // Changes by Agnij April 30, 2025 [Ensuring consistent empty array return instead of null]
+      return res.status(200).json({
+        status: 1,
+        data: variants || [] // Return empty array instead of null
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to fetch product variants'
+      });
+    }
+  },
+  
+  updateProductVariant: async (req, res) => {
+    try {
+      // Changes by Agnij July 25, 2025 [Added support for changing parent product and auto-disapproval]
+      const { variant_id } = req.params;
+      const { variant_name, name, product_id, is_approve } = req.body;
+      
+      // Get the variant name from either variant_name or name field
+      const variantNameValue = variant_name || name;
+      
+      // Validate input
+      if (!variant_id) {
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Variant ID is required' 
+        });
+      }
+      
+      // Check if variant exists
+      const variant = await productModel.getProductVariantDetails(variant_id);
+      if (!variant || variant.length === 0) {
+        return res.status(404).json({ 
+          status: 3, 
+          message: 'Variant not found' 
+        });
+      }
+      
+      // Check if product exists (if changing parent product)
+      if (product_id && product_id !== variant[0].product_id) {
+        const product = await productModel.check_product(product_id);
+        if (!product || product.length === 0) {
+          return res.status(404).json({ 
+            status: 3, 
+            message: 'Parent product not found' 
+          });
+        }
+      }
+      
+      // Build variant object dynamically based on what values were provided
+      const variantObj = {
+        updated_at: new Date(),
+        updated_by: req.user?.id
+      };
+      
+      // Only add name if it was provided
+      if (variantNameValue) {
+        variantObj.name = variantNameValue;
+      }
+      
+      // Include product_id if provided
+      if (product_id) {
+        variantObj.product_id = product_id;
+      }
+      
+      // Set is_approve to provided value or 0 by default
+      variantObj.is_approve = is_approve !== undefined ? is_approve : 0;
+      
+      // Update variant
+      const updatedVariant = await productModel.updateProductVariant(variantObj, variant_id);
+      
+      return res.status(200).json({
+        status: 1,
+        message: 'Product variant updated successfully',
+        data: {
+          id: variant_id,
+          variant_name: variantNameValue,
+          product_id: product_id || variant[0].product_id,
+          is_approve: variantObj.is_approve,
+          vendor_approved_by: updatedVariant?.vendor_approved_by || null
+        }
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong'
+      });
+    }
+  },
+  
+  deleteProductVariant: async (req, res) => {
+    try {
+      // Changes by Agnij April 30, 2025 [Fixed parameter name to match route]
+      const { variant_id } = req.params;
+      
+      // Validate input
+      if (!variant_id) {
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Variant ID is required' 
+        });
+      }
+      
+      // Check if variant exists
+      const variant = await productModel.getProductVariantDetails(variant_id);
+      if (!variant || variant.length === 0) {
+        return res.status(404).json({ 
+          status: 3, 
+          message: 'Variant not found' 
+        });
+      }
+      
+      // Delete variant
+      await productModel.deleteProductVariant(variant_id);
+      
+      return res.status(200).json({
+        status: 1,
+        message: 'Product variant deleted successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong'
+      });
+    }
+  },
+  
+  mapVariantWithVendor: async (req, res) => {
+    try {
+      // Changes by Agnij May 01, 2025 [Removed debug console logs]
+      
+      // Support both naming conventions: variant_id and product_variant_id
+      const variantId = req.body.variant_id || req.body.product_variant_id;
+      const vendorId = req.body.vendor_id;
+      let vendorApproveId = req.body.approved_by ?? [];
+      
+      // Validate input
+      if (!variantId || !vendorId) {
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Variant ID and vendor ID are required' 
+        });
+      }
+      
+      // Check if variant exists
+      const variant = await productModel.getProductVariantDetails(variantId);
+      if (!variant || variant.length === 0) {
+        return res.status(404).json({ 
+          status: 3, 
+          message: 'Variant not found' 
+        });
+      }
+      
+      // Check if vendor exists
+      const vendor = await vendorModel.getVendorDetails(vendorId);
+      if (!vendor || vendor.length === 0) {
+        return res.status(404).json({ 
+          status: 3, 
+          message: 'Vendor not found' 
+        });
+      }
+      
+      // Check if mapping already exists
+      const existingMapping = await productModel.checkDuplicateVariantVendorMapping(variantId, vendorId);
+      if (existingMapping && existingMapping.length > 0) {
+        return res.status(400).json({ 
+          status: 3, 
+          message: 'Variant is already mapped with this vendor' 
+        });
+      }
+
+      const productResult = await productModel.getProductByVariant(variantId)
+      let productId = productResult?.[0]?.id
+      
+      // Changes by Agnij May 02, 2025 [Set is_approve to 0 (disapproved) by default for new mappings]
+      // Create mapping
+      const mappingObj = {
+        product_variant_id: variantId,
+        vendor_id: vendorId,
+        created_at: new Date(),
+        status: true,
+        is_approved: false,
+        created_by: req.user.id,
+        updated_by: req.user.id,
+      };
+      
+      // Create the mapping
+      const mappingResult = await productModel.createProductVariantVendorMapping(mappingObj);
+
+      console.log("MAPPING RES: ", mappingResult, "\nVENDOR APPROVE ID: ", vendorApproveId);
+
+      if (vendorApproveId.length > 0 && mappingResult) {
+        let productApproveArray = [];
+        vendorApproveId.forEach((item) => {
+          productApproveArray.push({
+            product_id: productId,
+            variant_vendor_mapping_id: mappingResult.id,
+            vendor_approve_id: item
+          });
+        });
+
+        await productModel.addProductApproveBy(productApproveArray, productId);
+      }
+      
+      // Update variant to disapproved state by default
+      // await productModel.updateProductVariantApproval(variantId, 0);
+      
+      return res.status(200).json({
+        status: 1,
+        message: 'Variant mapped with vendor successfully'
+      });
+      
+    } catch (error) {
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong',
+        error: error.message
+      });
+    }
+  },
+  createProductVariant: async (variantObj) => {
+    return new Promise(function (resolve, reject) {
+      // Construct the dynamic SQL query
+      const query =
+        pgp().helpers.insert(variantObj, null, 'tbl_product_variant') +
+        ' RETURNING id';
+
+      db.one(query)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  // Changes by Agnij April 30, 2025 [Added endpoint to search all product variants]
+  searchVariants: async (req, res) => {
+    try {
+      // Changes by Agnij May 01, 2025 [Added all filter parameters]
+      const { 
+        id, 
+        search_term, 
+        start_date, 
+        end_date,
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve
+      } = req.query;
+      
+      // Search for variants across all products with all filter parameters
+      const variants = await productModel.searchProductVariants(
+        id, 
+        search_term || "", 
+        start_date, 
+        end_date,
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve
+      );
+      
+      return res.status(200).json({
+        status: 1,
+        data: variants || []
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to search product variants'
+      });
+    }
+  },
+  
+  // Changes by Agnij May 02, 2025 [Added safe variant search function that avoids v_rank issues]
+  searchVariantsSafe: async (req, res) => {
+    try {
+      // Changes by Agnij May 03, 2025 [Utilize paginated model function]
+      const {
+        id,
+        search_term,
+        start_date,
+        end_date,
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve,
+        page, // Get page from query
+        limit // Get limit from query
+      } = req.query;
+
+      // Package filters
+      const filters = {
+        id,
+        search_term,
+        start_date,
+        end_date,
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve
+      };
+
+      // Call the new paginated model function
+      const result = await productModel.searchProductVariantsPaginated(
+        filters,
+        page, // Pass page
+        limit // Pass limit
+      );
+
+      // Changes by Agnij May 03, 2025 [Correct response structure to include pagination]
+      // Explicitly build the response object
+      const responsePayload = {
+        status: 1,
+        data: result.data || [], // Ensure data is always an array
+        pagination: result.pagination || { total: 0, page: page, limit: limit, pages: 1 } // Ensure pagination object exists
+      };
+      
+      // Log the final payload just before sending
+      console.log("searchVariantsSafe: Sending response payload:", JSON.stringify(responsePayload));
+      
+      // Send the explicitly constructed payload
+      res.status(200).json(responsePayload).end();
+
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to search product variants',
+        error: error.message
+      });
+    }
+  },
+  // Changes by Agnij May 18, 2025 [Added endpoint to get variant-vendor mappings]
+  getVariantMappings: async (req, res) => {
+    try {
+      // Changes by Agnij May 02, 2025 [Added pagination parameters]
+      const { 
+        search_term, 
+        start_date, 
+        end_date,
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve,
+        page = 1,
+        limit = 10,
+        variant_id // Changes by Agnij June 12, 2024 [Added variant_id parameter for filtering]
+      } = req.query;
+      
+      // Parse pagination parameters
+      const pageNumber = parseInt(page) || 1;
+      const pageSize = parseInt(limit) || 10;
+      
+      
+      // Get mappings using the model function with all filters and pagination
+      const result = await productModel.getVariantVendorMappings(
+        search_term || "", 
+        start_date, 
+        end_date, 
+        vendor_id,
+        category_id,
+        added_by,
+        is_approve,
+        pageNumber,
+        pageSize,
+        variant_id // Changes by Agnij June 12, 2024 [Added variant_id parameter]
+      );
+      
+      
+      // Changes by Agnij May 02, 2025 [Fixed response format to ensure pagination is properly included]
+      return res.status(200).json({
+        status: 1,
+        data: result.data || [],
+        pagination: result.pagination || {
+          total: 0,
+          page: pageNumber,
+          limit: pageSize,
+          pages: 1
+        }
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to get variant-vendor mappings',
+        error: error.message
+      });
+    }
+  },
+  // Changes by Agnij May 01, 2025 [Added approval function for variant-vendor mappings]
+  approveMapping: async (req, res) => {
+    try {
+      const mappingId = req.params.id;
+      
+      if (!mappingId) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Mapping ID is required'
+        });
+      }
+      
+      // First, get the mapping to find the associated variant
+      const mappingDetails = await productModel.getVariantVendorMappingById(mappingId);
+      
+      if (!mappingDetails) {
+        return res.status(404).json({
+          status: 3,
+          message: 'Mapping not found'
+        });
+      }
+      
+      // Check for variant ID in the mapping (may be called variant_id or product_variant_id)
+      const variantId = mappingDetails.variant_id || mappingDetails.product_variant_id;
+      
+      if (!variantId) {
+        return res.status(404).json({
+          status: 3,
+          message: 'Invalid mapping: no variant associated'
+        });
+      }
+      
+      
+      let status = req.body.status;
+      
+      // Ensure status is valid
+      if (status === undefined || status === null) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Status is required'
+        });
+      }
+      
+      // Convert status to appropriate format (handle various input formats)
+      if (typeof status === 'string') {
+        status = status === '1' || status.toLowerCase() === 'true' ? 1 : 0;
+      } else {
+        status = status ? 1 : 0;
+      }
+      
+      let reject_reason = req.body.reject_reason || null;
+      let reject_reason_id = req.body.reject_reason_id || null;
+      
+      
+      // Handle rejection reason for rejections
+      if (status === 0 && !reject_reason_id && !reject_reason) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Reject reason is required when rejecting'
+        });
+      }
+      
+      // Prepare the variant update object
+      const variantObj = {
+        is_approved: status == "1",
+        updated_by: req.user.id,
+        updated_at: new Date(),
+        approved_by: req.user.id,
+        approved_at: status == 1 ? new Date() : null,
+      };
+
+      console.log("MAPPING OBJ: ", variantObj)
+      
+      // Update the variant instead of the mapping
+      // Update by Kushal: We want to update the mapping not variant as the mapping is going to be used when showing vendors not variant
+      try {
+        const result = await productModel.updateVariantMappingByData(variantObj, mappingId);
+        
+        return res.status(200).json({
+          status: 1,
+          message: status === 1 ? 'Mapping approved successfully' : 'Mapping disapproved successfully'
+        });
+      } catch (updateError) {
+        console.error("Error updating mapping:", updateError);
+        return res.status(500).json({
+          status: 3,
+          message: 'Error updating mapping approval status',
+          error: updateError.message
+        });
+      }
+    } catch (error) {
+      console.error("Exception in approveMapping:", error);
+      logError(error);
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong while updating approval',
+        error: error.message
+      });
+    }
+  },
 };
 export default productController;

@@ -69,16 +69,32 @@ let store_magic_search_file = multerS3({
 //   }
 // });
 
-let store_add_clause_file = multer.diskStorage({
-  destination: function (req, file, callback) {
-    callback(null, Config.upload.add_clause_file);
-  },
-  filename: function (req, file, callback) {
-    var extention = path.extname(file.originalname);
-    var new_file_name = +new Date() + '-' + uuidv4() + extention;
-    callback(null, new_file_name);
+
+let store_add_clause_file = multerS3({
+  s3: s3Client,
+  bucket: process.env.AWS_S3_BUCKET, // Directly specified bucket name
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    // 1. Extract file extension
+    const ext = path.extname(file.originalname).toLowerCase();  
+      const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    const fullPath = `add_clause_file/${fileName}`; // Exact path you want
+    cb(null, fullPath);
   }
 });
+
+
+
+// let store_add_clause_file = multer.diskStorage({
+//   destination: function (req, file, callback) {
+//     callback(null, Config.upload.add_clause_file);
+//   },
+//   filename: function (req, file, callback) {
+//     var extention = path.extname(file.originalname);
+//     var new_file_name = +new Date() + '-' + uuidv4() + extention;
+//     callback(null, new_file_name);
+//   }
+// });
 
 var validatingImage = (schema) => {
   return (req, res, next) => {
@@ -341,7 +357,8 @@ const schemas = {
     availability: Joi.string().optional().allow('', null),
     categories: Joi.array().items(Joi.number()).min(1).required(),
     is_featured: Joi.string()
-      .required()
+      .optional()
+      .allow('', null)
       .regex(/^[0|1]$/, 'numeric values only'),
     /* Joi.array().items(
       // Joi.object({
@@ -352,13 +369,6 @@ const schemas = {
       .required()
       .regex(/^[0|1]$/, 'numeric values only'),
     featured: Joi.array().items(Joi.string().required()),
-    gallery: Joi.array().items(Joi.string().required()),
-    qap: Joi.array().items(Joi.string().required()),
-    tds: Joi.array().items(Joi.string().required()),
-    variations: Joi.array().items(Joi.object({
-      attribute: Joi.string().allow('', null),
-      attributeValue: Joi.string().allow('', null)
-    })).min(1),
     /*  Joi.array().items(
       Joi.object({
         attribute: Joi.string().required(),

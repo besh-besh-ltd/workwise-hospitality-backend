@@ -72,18 +72,10 @@ productRoutes.put(
   productController.deleteCategory
 );
 
-// productRoutes.post(
-//   '/create-product',
-//   passportSignIn,
-//   schema_posts.add_product_image,
-//   validateBody(schemas.create_product),
-//   validateDbBody.attributeIdExists,
-//   productController.createProduct
-// );
 productRoutes.post(
   '/admin-product-add',
   passportSignIn,
-  schema_posts.add_admin_product,
+  // schema_posts.add_admin_product,
   validateDbBody.add_admin_product,
   productController.adminProductAdd
 );
@@ -96,20 +88,24 @@ productRoutes.put(
   validateDbBody.product_approve_check,
   productController.approveProduct
 );
+productRoutes.put(
+  '/accept-variant/:id',
+  passportSignIn,
+  validateParam(schemas.id),
+  // validateBody(schemas.product_approval),
+  validateDbBody.variant_approve_check,
+  productController.approveVariant
+);
 productRoutes.post(
   '/bulk-product-create',
   passportSignIn,
   schema_posts.productBulkUpload,
-  // validateBody(schemas.create_product)
-  // validateDbBody.attributeIdExists,
   productController.productBulkUpload
 );
 productRoutes.post(
   '/bulk-only-product-create',
   passportSignIn,
   schema_posts.productBulkUpload,
-  // validateBody(schemas.create_product)
-  // validateDbBody.attributeIdExists,
   productController.onlyProductBulkUpload
 ); 
 productRoutes.get(
@@ -121,7 +117,7 @@ productRoutes.get(
 productRoutes.get(
   '/product-list',
   passportSignIn,
-  productController.productList
+  productController.productListImproved
 );
 productRoutes.get(
   '/admin-product-list-review',
@@ -180,6 +176,63 @@ productRoutes.post(
   validateBody(schemas.vendor_product_map),
   validateDbBody.check_product,
   productController.mapVendorWithProduct
+);
+
+// Product Variant Routes
+productRoutes.post(
+  '/product-variant',
+  passportSignIn,
+  productController.addProductVariant
+);
+
+productRoutes.get(
+  '/product-variant/:product_id',
+  passportSignIn,
+  productController.getProductVariants
+);
+
+productRoutes.get(
+  '/search-variants',
+  passportSignIn,
+  productController.searchVariants
+);
+
+// Changes by Agnij May 02, 2025 [Added safe variant search endpoint without v_rank]
+productRoutes.get(
+  '/search-variants-safe',
+  passportSignIn,
+  productController.searchVariantsSafe
+);
+
+productRoutes.put(
+  '/product-variant/:variant_id',
+  passportSignIn,
+  productController.updateProductVariant
+);
+
+productRoutes.delete(
+  '/product-variant/:variant_id',
+  passportSignIn,
+  productController.deleteProductVariant
+);
+
+productRoutes.post(
+  '/map-variant-with-vendor',
+  passportSignIn,
+  productController.mapVariantWithVendor
+);
+
+productRoutes.get(
+  '/variant-mappings',
+  passportSignIn,
+  productController.getVariantMappings
+);
+
+// Changes by Agnij April 30, 2025 [Added route for mapping approval]
+productRoutes.put(
+  '/mapping-approve/:id',
+  passportSignIn,
+  productController.approveMapping
 );
 
 export default productRoutes;
