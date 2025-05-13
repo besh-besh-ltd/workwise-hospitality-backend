@@ -99,6 +99,14 @@ ProductsRoutes.get(
   // validateDbBody.check_product,
   ProductsController.vendorProductDetails
 );
+ProductsRoutes.get(
+  '/product-details/:id',
+  passportSignIn,
+  acl([1, 2, 3, 4]),
+  validateParam(schemas.id),
+  // validateDbBody.check_product,
+  ProductsController.productDetails
+);
 
 ProductsRoutes.delete(
   '/vendor-product-delete/:id',
