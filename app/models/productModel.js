@@ -1404,7 +1404,7 @@ const productModel = {
         if (limit < 1) limit = 10;
         const offset = (page - 1) * limit;
 
-        let conditions = ['p.created_by IN (SELECT id FROM tbl_users tu WHERE tu.user_type NOT IN (2, 3))', 'p.is_deleted = 0'];
+        let conditions = ['p.is_deleted = 0'];
         let params = [];
         let paramIndex = 1;
 
@@ -1537,8 +1537,7 @@ const productModel = {
                 is_review,
                 added_by,
                 is_approve,
-                reject_reason_id,
-                admin_added_product
+                reject_reason_id
             FROM tbl_product P
             ${whereClause}
             ${productName ? `ORDER BY rank DESC, similarity_score DESC, P.name ASC` : `ORDER BY P.created_at DESC`} 
