@@ -228,6 +228,12 @@ productRoutes.get(
   productController.getVariantMappings
 );
 
+productRoutes.get(
+  '/variant-mappings/:id',
+  passportSignIn,
+  productController.getVariantMappingById
+);
+
 // Changes by Agnij April 30, 2025 [Added route for mapping approval]
 productRoutes.put(
   '/mapping-approve/:id',

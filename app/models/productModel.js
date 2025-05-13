@@ -2518,6 +2518,27 @@ WHERE tbl_product.name = $1`,
         });
     });
   },
+  productDetails: async (productId) => {
+    return new Promise(function (resolve, reject) {
+      let dynamicWhere = ``;
+
+      let q = `SELECT PV.*
+        FROM tbl_product_variant PV
+        WHERE PV.status = 1 AND PV.id = $1 ${dynamicWhere}`
+
+      db.any(
+        q,
+        [productId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   deleteProduct: async (productObj, productId) => {
     return new Promise(function (resolve, reject) {
       const condition = ` WHERE id = $1 RETURNING id`;
@@ -3742,7 +3763,7 @@ getProductTechSpecByID: async (productId) => {
         `SELECT 
           m.id as mapping_id,
           m.product_variant_id as variant_id,
-          m.vendor_id,
+          JSON_BUILD_OBJECT('id', TU.id, 'name', TU.name, 'email', TU.email) AS vendor_details,
           m.status,
           m.created_at as mapped_at,
           v.is_approve,
@@ -3752,6 +3773,8 @@ getProductTechSpecByID: async (productId) => {
           p.name as product_name
         FROM 
           tbl_product_variant_vendor_mapping m
+        LEFT JOIN 
+          tbl_users TU on TU.id = m.vendor_id
         LEFT JOIN
           tbl_product_variant v ON v.id = m.product_variant_id
         LEFT JOIN
