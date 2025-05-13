@@ -4914,6 +4914,40 @@ rfqProductReport: async (userId, productId, productName, startDate, endDate) => 
 },
 
 // project report including all rfq quote etc
+getProductNameById: async (rfq_product_id) => {
+  return new Promise(function (resolve, reject) {
+    console.log(`[rfqModel.js] getProductNameById: Fetching product name for RFQ product ID: ${rfq_product_id}`);
+    const query = `
+      SELECT 
+        PV.name AS variant_name,
+        P.name AS product_name
+      FROM tbl_rfq_products RP
+      LEFT JOIN tbl_product_variant PV ON RP.product_variant_id = PV.id
+      LEFT JOIN tbl_product P ON PV.product_id = P.id
+      WHERE RP.id = $1
+      LIMIT 1;
+    `;
+    
+    db.oneOrNone(query, [rfq_product_id])
+      .then(function (result) {
+        if (!result) {
+          console.log(`[rfqModel.js] getProductNameById: No product found for RFQ product ID: ${rfq_product_id}`);
+          resolve(null);
+          return;
+        }
+        
+        // Prefer the variant name if available, otherwise use product name
+        const productName = result.variant_name || result.product_name || null;
+        console.log(`[rfqModel.js] getProductNameById: Found product name: "${productName}" for RFQ product ID: ${rfq_product_id}`);
+        resolve(productName);
+      })
+      .catch(function (err) {
+        console.error(`[rfqModel.js] getProductNameById: Error fetching product name for RFQ product ID: ${rfq_product_id}`, err);
+        reject(new Error(`Error fetching product name: ${err.message}`));
+      });
+  });
+},
+
 getProjectDetailsReport: async (projectId, startDate, endDate) => {
   return new Promise(function (resolve, reject) {
      const query = `SELECT

@@ -13,61 +13,70 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const generativeAI = {
   extractClauses: async (file, productName = null) => {
+    console.log(`[processBOQWithAI.js] Entering extractClauses. ProductName: ${productName}, File: ${file ? file.originalname || file.filename : 'No file info'}`);
     try {
-      // Handle file from S3 or local upload
       let buffer;
       if (file.location) {
-        // File is in S3
+        console.log(`[processBOQWithAI.js] extractClauses: File is in S3. Location: ${file.location}`);
         const s3Url = new URL(file.location);
         const bucket = s3Url.hostname.split('.')[0];
-        const key = decodeURIComponent(s3Url.pathname).slice(1); // remove leading '/'
-        const command = new GetObjectCommand({
-          Bucket: bucket,
-          Key: key,
-        });
+        const key = decodeURIComponent(s3Url.pathname).slice(1);
+        const command = new GetObjectCommand({ Bucket: bucket, Key: key });
         const result = await s3Client.send(command);
         const webStream = Readable.toWeb(result.Body);
         const response = new Response(webStream);
         const arrayBuffer = await response.arrayBuffer();
         buffer = Buffer.from(arrayBuffer);
+        console.log('[processBOQWithAI.js] extractClauses: Buffer created from S3 file.');
       } else if (file.path) {
-        // File is locally uploaded
+        console.log(`[processBOQWithAI.js] extractClauses: File is locally uploaded. Path: ${file.path}`);
         buffer = fs.readFileSync(file.path);
+        console.log('[processBOQWithAI.js] extractClauses: Buffer created from local file.');
       } else if (file.buffer) {
-        // File is already a buffer
+        console.log('[processBOQWithAI.js] extractClauses: File is already a buffer.');
         buffer = file.buffer;
       } else {
+        console.error('[processBOQWithAI.js] extractClauses: Invalid file format or location.');
         throw new Error('Invalid file format or location');
       }
 
-      // Determine file type and process accordingly
       const fileExt = path.extname(file.originalname || file.filename).toLowerCase();
+      console.log(`[processBOQWithAI.js] extractClauses: File extension: ${fileExt}`);
       
       if (fileExt === '.pdf') {
         try {
-          // Parse the PDF using the integrated parsePdf functionality
+          console.log('[processBOQWithAI.js] extractClauses: Starting PDF processing.');
           const pdfText = await pdfParser.extractText(buffer);
           const cleanedText = pdfParser.cleanText(pdfText);
+          console.log(`[processBOQWithAI.js] extractClauses: PDF text extracted and cleaned. Cleaned text length: ${cleanedText.length}`);
 
-          // Initialize the Google Generative AI client
           const apiKey = process.env.GOOGLE_AI_API_KEY;
           if (!apiKey) {
+            console.error('[processBOQWithAI.js] extractClauses: Google AI API Key is not configured.');
             throw new Error('Google AI API Key is not configured');
           }
 
           const genAI = new GoogleGenerativeAI(apiKey);
-          const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+          const modelName = 'gemini-1.5-flash-latest'; // Reverted for stability
+          console.log(`[processBOQWithAI.js] extractClauses: Initializing Google Generative AI with model: ${modelName}`);
+          const model = genAI.getGenerativeModel({ model: modelName });
 
-          // Create the prompt for comprehensive data extraction
           let prompt;
-          
           if (productName) {
+            console.log(`[processBOQWithAI.js] extractClauses: Generating prompt for ProductName: ${productName}`);
             prompt = `
               You are an AI trained to extract comprehensive information from documents for a specific product.
               
               TARGET PRODUCT: "${productName}"
               
-              Extract ALL of the following information related to "${productName}" from the document:
+              **IMPORTANT FIRST STEP:** Before extracting any information, first assess if the overall document content is contextually relevant to the TARGET PRODUCT: "${productName}". 
+              - Contextual relevance means the document is primarily about the product or a very closely related concept. 
+              - For example, if the TARGET PRODUCT is 'flow meter', a document about 'flow gauge' or 'flow transmitter' IS contextually relevant.
+              - However, if the TARGET PRODUCT is 'flow meter', a document primarily about 'flanges', 'pipes', or 'valves' IS NOT contextually relevant.
+              
+              **IF THE DOCUMENT IS NOT CONTEXTUALLY RELEVANT TO THE TARGET PRODUCT, YOU MUST RETURN AN EMPTY "clauses" array in the JSON output like this: { "clauses": [] }. Do not proceed with extraction.**
+              
+              **IF AND ONLY IF the document IS contextually relevant**, proceed to extract ALL of the following information related to "${productName}" from the document:
               
               1. TECHNICAL INFORMATION:
                 - Technical specifications (dimensions, materials, performance parameters)
@@ -104,22 +113,23 @@ const generativeAI = {
                 - Special requirements or exceptions
                 - Notes about product supply or usage
               
-              CRITICALLY IMPORTANT INSTRUCTIONS:
+              CRITICALLY IMPORTANT INSTRUCTIONS (Apply ONLY if the document is relevant):
               - Maintain the EXACT hierarchical structure and formatting of all information
               - Preserve ALL numbered or bulleted lists exactly as they appear
               - Keep ALL tables, measurements and numerical values with their units intact
               - Include ALL conditional statements and logical relationships
-              - Capture information even if "${productName}" is not explicitly mentioned but context makes it clear
+              - Capture information even if "${productName}" is not explicitly mentioned but context makes it clear it relates to the target product.
               - DO NOT rephrase, interpret, or summarize - use the EXACT ORIGINAL text
               - Capture information even if it spans across different pages/sections
               - Pay special attention to footnotes, references, and fine print
               - Preserve cross-references between sections
-              - Identify text that applies to ALL products vs. "${productName}" specifically
+              - Identify text that applies generally vs. specifically to "${productName}"
               
               Return the data in a JSON format with the following structure:
               { 
                 "clauses": [
-                  { "text": "complete original clause or specification text" }
+                  { "text": "complete original clause or specification text" } 
+                  // This array should be empty if the document was determined to be not contextually relevant in the first step.
                 ]
               }
               
@@ -127,7 +137,7 @@ const generativeAI = {
               ${cleanedText}
             `;
           } else {
-            // Enhanced general prompt for when no product name is provided
+            console.log('[processBOQWithAI.js] extractClauses: Generating general prompt (no productName).');
             prompt = `
               You are an AI trained to extract comprehensive information from documents.
               
@@ -190,83 +200,61 @@ const generativeAI = {
             `;
           }
 
-          // Call the Gemini AI
-          const result = await model.generateContent(prompt);
+          console.log('[processBOQWithAI.js] extractClauses: Calling Generative AI model...');
+          const resultFromAI = await model.generateContent(prompt);
           
-          // Properly extract text from the response object
-          const text = result.response ? result.response.text() : 
-                      (typeof result.text === 'function' ? result.text() : 
-                      (result.text || JSON.stringify(result)));
-          
-          // Extract JSON from the response
-          const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || 
-                          text.match(/```\n([\s\S]*?)\n```/) || 
-                          text.match(/{[\s\S]*?}/);
+          const textFromAI = resultFromAI.response ? resultFromAI.response.text() : 
+                             (typeof resultFromAI.text === 'function' ? resultFromAI.text() : 
+                             (resultFromAI.text || JSON.stringify(resultFromAI)));
+          console.log('[processBOQWithAI.js] extractClauses: Received response from AI.'); // Avoid logging full textFromAI if too large
+          // console.log(`[processBOQWithAI.js] extractClauses: AI Response Text (raw):\n${textFromAI.substring(0, 500)}...`);
+
+          const jsonMatch = textFromAI.match(/```json\n([\s\S]*?)\n```/) || 
+                          textFromAI.match(/```\n([\s\S]*?)\n```/) || 
+                          textFromAI.match(/{[\s\S]*?}/);
                           
           if (jsonMatch) {
+            console.log('[processBOQWithAI.js] extractClauses: JSON block found in AI response.');
             try {
-              // Parse the extracted JSON
               const jsonStr = jsonMatch[1] || jsonMatch[0];
               const extractedData = JSON.parse(jsonStr);
-              
-              // Return the clauses
+              console.log('[processBOQWithAI.js] extractClauses: Successfully parsed JSON from AI response.');
               return {
                 status: 1,
                 message: productName 
                   ? `Comprehensive information extracted successfully for ${productName}`
                   : 'Comprehensive information extracted successfully',
-                clauses: extractedData.clauses.map(clause => clause.text)
+                clauses: extractedData.clauses ? extractedData.clauses.map(clause => clause.text) : [] // Ensure clauses array exists
               };
-            } catch (error) {
-              console.error('Error parsing JSON from Gemini response:', error.message);
-              return { 
-                status: 0, 
-                message: 'Failed to parse structured data', 
-                error: error.message,
-                clauses: [] 
-              };
+            } catch (parseError) {
+              console.error('[processBOQWithAI.js] extractClauses: Error parsing JSON from Gemini response:', parseError.message, 'Raw JSON string attempt:', jsonMatch[1] || jsonMatch[0]);
+              return { status: 0, message: 'Failed to parse structured data from AI', error: parseError.message, clauses: [] };
             }
           } else {
-            // If no JSON found, try to extract clause-like text manually
-            const lines = text.split('\n').filter(line => line.trim().length > 0);
-            const potentialClauses = lines.filter(line => 
-              line.length > 20 && 
-              !line.includes('```') &&
-              !line.startsWith('Here') &&
-              !line.startsWith('I will')
-            );
-            
+            console.warn('[processBOQWithAI.js] extractClauses: No JSON block found in AI response. Attempting manual line extraction.', `First 500 chars of AI response: ${textFromAI.substring(0,500)}`);
+            const lines = textFromAI.split('\n').filter(line => line.trim().length > 0);
+            const potentialClauses = lines.filter(line => line.length > 20 && !line.includes('```') && !line.startsWith('Here') && !line.startsWith('I will'));
             return {
               status: 1,
               message: productName 
-                ? `Information extracted from text response for ${productName}`
-                : 'Information extracted from text response',
+                ? `Information extracted (fallback) for ${productName}`
+                : 'Information extracted (fallback)',
               clauses: potentialClauses
             };
           }
-        } catch (error) {
-          // Handle both Error objects and plain objects from parsePdf
-          const errorMessage = error.message || error.toString();
-          console.error('Error processing PDF with AI:', errorMessage);
-          
-          return { 
-            status: 0, 
-            message: 'Error processing file with AI', 
-            error: errorMessage,
-            clauses: [] 
-          };
+        } catch (pdfProcessingError) {
+          console.error('[processBOQWithAI.js] extractClauses: Error processing PDF with AI:', pdfProcessingError);
+          const errorMessage = pdfProcessingError.message || pdfProcessingError.toString();
+          return { status: 0, message: 'Error processing PDF with AI', error: errorMessage, clauses: [] };
         }
       } else {
+        console.warn(`[processBOQWithAI.js] extractClauses: Unsupported file format: ${fileExt}`);
         throw new Error('Unsupported file format. Please upload PDF files only.');
       }
-    } catch (error) {
-      logError(error);
-      return { 
-        status: 0, 
-        message: 'Error processing file with AI', 
-        error: error.message,
-        clauses: [] 
-      };
+    } catch (mainError) {
+      console.error('[processBOQWithAI.js] extractClauses: Unhandled error in main try-catch:', mainError);
+      logError(mainError);
+      return { status: 0, message: 'Error processing file with AI', error: mainError.message, clauses: [] };
     }
   },
 

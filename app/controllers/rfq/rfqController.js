@@ -5446,48 +5446,38 @@ listQueries: async (req, res) => {
 
 
 addClauseUsingFile : async (req, res) => {
+  // Changes by Agnij October 18, 2023 [Added extensive logging]
+  console.log('[rfqController.js] Entering addClauseUsingFile. Body:', req.body, 'File:', req.file ? { originalname: req.file.originalname, size: req.file.size } : 'No file');
   try {
-    // Get file and RFQ details from request
     let file = req.file;
-
-    const command = new GetObjectCommand({
-      Bucket: file.bucket,
-      Key: file.key,
-    });
-  
-    const response = await s3Client.send(command);
-    const stream = response.Body;
-  
-    // Convert stream to buffer
-    const buffer = await readableStreamToBuffer(stream);
-  
-    const workbook = xlsx.read(buffer, { type: 'buffer' });
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    let jsonData = xlsx.utils.sheet_to_json(sheet);
-
-    // if there is no Clauses in the excel file.
-    if(jsonData.length < 1){
-      return res.status(200).json({
+    const { rfq_id, rfq_product_id } = req.body;
+    
+    if (!file) {
+      console.error('[rfqController.js] addClauseUsingFile: No file provided.');
+      return res.status(400).json({
         status: 0,
         message: "No file provided",
       });
     }
 
     if (!rfq_id || !rfq_product_id) {
+      console.error('[rfqController.js] addClauseUsingFile: Missing rfq_id or rfq_product_id. RFQ_ID:', rfq_id, 'RFQ_PRODUCT_ID:', rfq_product_id);
       return res.status(400).json({
         status: 0,
         message: "Invalid input. Ensure RFQ_ID and RFQ_PRODUCT_ID are provided",
       });
     }
 
-    // Get the product name for targeted extraction
+    console.log(`[rfqController.js] addClauseUsingFile: Fetching product name for rfq_product_id: ${rfq_product_id}`);
     const productName = await rfqModel.getProductNameById(rfq_product_id);
+    console.log(`[rfqController.js] addClauseUsingFile: Product name is '${productName}'`);
     
-    // Use AI to extract information from the uploaded file, passing the product name
+    console.log('[rfqController.js] addClauseUsingFile: Calling generativeAI.extractClauses...');
     const result = await generativeAI.extractClauses(file, productName);
+    console.log('[rfqController.js] addClauseUsingFile: generativeAI.extractClauses result:', JSON.stringify(result, null, 2));
     
     if (!result.status) {
+      console.error('[rfqController.js] addClauseUsingFile: extractClauses failed. Message:', result.message, 'Error:', result.error);
       return res.json({
         status: 0,
         message: result.message || "Failed to extract information",
@@ -5495,8 +5485,8 @@ addClauseUsingFile : async (req, res) => {
       });
     }
 
-    // Return early if no information was extracted
     if (!result.clauses || result.clauses.length === 0) {
+      console.log('[rfqController.js] addClauseUsingFile: No clauses extracted.');
       return res.json({
         status: 0,
         message: productName 
@@ -5511,51 +5501,49 @@ addClauseUsingFile : async (req, res) => {
       });
     }
 
-    // Save the extracted information to the database in batches to avoid timeouts
     const clauses = result.clauses;
-    const BATCH_SIZE = 10; // Process 10 items at a time
+    const BATCH_SIZE = 10;
     const allErrors = [];
     let successCount = 0;
+    console.log(`[rfqController.js] addClauseUsingFile: Starting to save ${clauses.length} clauses in batches of ${BATCH_SIZE}.`);
     
-    // Process information in batches
     for (let i = 0; i < clauses.length; i += BATCH_SIZE) {
       const batch = clauses.slice(i, i + BATCH_SIZE);
-      
-      // Process each batch with Promise.all
+      console.log(`[rfqController.js] addClauseUsingFile: Processing batch ${i / BATCH_SIZE + 1}`);
       const batchPromises = batch.map(async (clause, index) => {
         try {
-          // Call the rfqModel.addClause with the correct parameter order
-          await rfqModel.addClause(rfq_id, rfq_product_id, clause, file.location ? [file.location] : []);
+          await rfqModel.addClause(rfq_id, rfq_product_id, clause, []);
           successCount++;
-          return null; // Successful operation
+          return null;
         } catch (error) {
-          return { Row: i + index, error: error.message }; // Return error for this item
+          console.error(`[rfqController.js] addClauseUsingFile: Error saving clause in batch. Index: ${i + index}, Clause: ${clause.substring(0,100)}... Error:`, error);
+          return { Row: i + index, error: error.message };
         }
       });
       
-      // Wait for current batch to complete before moving to next
       const batchErrors = (await Promise.all(batchPromises)).filter(Boolean);
       allErrors.push(...batchErrors);
       
-      // Add a small delay between batches to prevent database overload
       if (i + BATCH_SIZE < clauses.length) {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
+    console.log('[rfqController.js] addClauseUsingFile: Finished saving clauses. Successes:', successCount, 'Failures:', allErrors.length);
 
-    // Return success response with any errors that occurred during saving
     return res.json({
       status: 1,
       message: productName 
         ? `${successCount} of ${clauses.length} items added successfully for '${productName}'${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`
         : `${successCount} of ${clauses.length} items added successfully${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`,
       errors: allErrors.length > 0 ? allErrors : [],
-      clauses: clauses // Return the extracted information to be displayed on frontend
+      clauses: clauses
     });
     
   } catch (error) {
+    // Changes by Agnij October 18, 2023 [Added extensive logging]
+    console.error('[rfqController.js] addClauseUsingFile: Unhandled error in controller:', error);
     const errMsg = error?.response?.data?.error?.message || error.message;
-    return res.status(500).json({
+    res.status(500).json({
       status: 0,
       message: "Error adding information",
       errors: [{ Row: 0, error: errMsg }]
@@ -6092,6 +6080,38 @@ searchVariantVendors: async (req, res, next) => {
       message: Config.errorText.value
     }).end();
   }
+},
+
+getClausesByRfqProductId: async (req,res) =>{
+    // Changes by Agnij October 18, 2023 [Added extensive logging]
+    console.log('[rfqController.js] Entering getClausesByRfqProductId. Body:', req.body);
+    try{
+        const {rfq_id, rfq_product_id, vendor_id} = req.body;
+
+        if (!rfq_product_id) {
+            console.error('[rfqController.js] getClausesByRfqProductId: Missing rfq_product_id.');
+            return res.status(400).json({
+                status: 0,
+                message: "Invalid input. Ensure RFQ_PRODUCT_ID is provided.",
+            });
+        }
+
+        console.log(`[rfqController.js] getClausesByRfqProductId: Calling rfqModel.getClausesByRfqProductId with rfq_id: ${rfq_id}, rfq_product_id: ${rfq_product_id}, vendor_id: ${vendor_id}`);
+        const result = await rfqModel.getClausesByRfqProductId(rfq_id, rfq_product_id, vendor_id);
+        console.log('[rfqController.js] getClausesByRfqProductId: rfqModel.getClausesByRfqProductId result received.'); // Avoid logging full result if too large
+
+        res.status(200).json(result).end();
+
+    }catch(error){
+        // Changes by Agnij October 18, 2023 [Added extensive logging]
+        console.error('[rfqController.js] getClausesByRfqProductId: Unhandled error in controller:', error);
+        logError(error);
+        res.status(500).json({
+            success: false,
+            message: 'Error in fetching clauses by rfq product id',
+            error: error.message
+        });
+    }
 },
 
 };
