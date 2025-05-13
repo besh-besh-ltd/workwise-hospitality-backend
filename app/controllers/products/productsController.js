@@ -1126,9 +1126,8 @@ const ProductsController = {
     try {
       let productId = req.params.id;
 
-      console.log("PRODUCT ID: ", productId)
+
       let productList = await productModel.productDetails(productId);
-      console.log("PRODUCT LIST : ", productList)
       res
         .status(200)
         .json({
