@@ -3614,7 +3614,7 @@ const productController = {
 
         // changes by mukul - send email to vendor
         let userDetail = await vendorModel.userDetailById(
-            mappingDetails.vendor_id
+            mappingDetails.vendor_details.id
           );
           
             let html_variables = [
