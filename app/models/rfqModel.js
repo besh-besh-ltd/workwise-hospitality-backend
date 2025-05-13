@@ -4653,6 +4653,7 @@ getClausesOfProduct: async (rfq_product_id, vendor_id) => {
       const vendorResponse = vendorResponseResult.length > 0 ? 1 : 0;
 
       // Step 3: Fetch clauses and associated files
+      // Changes by Agnij May 13, 2025 [Fixed clause display limitation]
       const fetchClausesQuery = `
         SELECT
           c.id AS clause_id,
@@ -4665,7 +4666,8 @@ getClausesOfProduct: async (rfq_product_id, vendor_id) => {
         ON
           c.id = f.tbl_rfq_product_tech_evaluation_clauses_id
         WHERE
-          c.tbl_rfq_product_tech_evaluation_id = $1;
+          c.tbl_rfq_product_tech_evaluation_id = $1
+        ORDER BY c.id;
       `;
       const clausesResult = await db.query(fetchClausesQuery, [tbl_rfq_product_tech_evaluation_id]);
 

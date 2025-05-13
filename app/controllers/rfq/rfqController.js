@@ -6096,9 +6096,10 @@ getClausesByRfqProductId: async (req,res) =>{
             });
         }
 
-        console.log(`[rfqController.js] getClausesByRfqProductId: Calling rfqModel.getClausesByRfqProductId with rfq_id: ${rfq_id}, rfq_product_id: ${rfq_product_id}, vendor_id: ${vendor_id}`);
-        const result = await rfqModel.getClausesByRfqProductId(rfq_id, rfq_product_id, vendor_id);
-        console.log('[rfqController.js] getClausesByRfqProductId: rfqModel.getClausesByRfqProductId result received.'); // Avoid logging full result if too large
+        // Changes by Agnij May 13, 2025 [Fixed clause display limitation]
+        console.log(`[rfqController.js] getClausesByRfqProductId: Calling rfqModel.getClausesOfProduct with rfq_product_id: ${rfq_product_id}, vendor_id: ${vendor_id}`);
+        const result = await rfqModel.getClausesOfProduct(rfq_product_id, vendor_id);
+        console.log('[rfqController.js] getClausesByRfqProductId: rfqModel.getClausesOfProduct result received with', result.data?.length || 0, 'clauses');
 
         res.status(200).json(result).end();
 

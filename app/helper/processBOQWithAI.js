@@ -13,11 +13,9 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const generativeAI = {
   extractClauses: async (file, productName = null) => {
-    console.log(`[processBOQWithAI.js] Entering extractClauses. ProductName: ${productName}, File: ${file ? file.originalname || file.filename : 'No file info'}`);
     try {
       let buffer;
       if (file.location) {
-        console.log(`[processBOQWithAI.js] extractClauses: File is in S3. Location: ${file.location}`);
         const s3Url = new URL(file.location);
         const bucket = s3Url.hostname.split('.')[0];
         const key = decodeURIComponent(s3Url.pathname).slice(1);
@@ -27,13 +25,9 @@ const generativeAI = {
         const response = new Response(webStream);
         const arrayBuffer = await response.arrayBuffer();
         buffer = Buffer.from(arrayBuffer);
-        console.log('[processBOQWithAI.js] extractClauses: Buffer created from S3 file.');
       } else if (file.path) {
-        console.log(`[processBOQWithAI.js] extractClauses: File is locally uploaded. Path: ${file.path}`);
         buffer = fs.readFileSync(file.path);
-        console.log('[processBOQWithAI.js] extractClauses: Buffer created from local file.');
       } else if (file.buffer) {
-        console.log('[processBOQWithAI.js] extractClauses: File is already a buffer.');
         buffer = file.buffer;
       } else {
         console.error('[processBOQWithAI.js] extractClauses: Invalid file format or location.');
@@ -41,14 +35,11 @@ const generativeAI = {
       }
 
       const fileExt = path.extname(file.originalname || file.filename).toLowerCase();
-      console.log(`[processBOQWithAI.js] extractClauses: File extension: ${fileExt}`);
       
       if (fileExt === '.pdf') {
         try {
-          console.log('[processBOQWithAI.js] extractClauses: Starting PDF processing.');
           const pdfText = await pdfParser.extractText(buffer);
           const cleanedText = pdfParser.cleanText(pdfText);
-          console.log(`[processBOQWithAI.js] extractClauses: PDF text extracted and cleaned. Cleaned text length: ${cleanedText.length}`);
 
           const apiKey = process.env.GOOGLE_AI_API_KEY;
           if (!apiKey) {
@@ -58,12 +49,10 @@ const generativeAI = {
 
           const genAI = new GoogleGenerativeAI(apiKey);
           const modelName = 'gemini-1.5-flash-latest'; // Reverted for stability
-          console.log(`[processBOQWithAI.js] extractClauses: Initializing Google Generative AI with model: ${modelName}`);
           const model = genAI.getGenerativeModel({ model: modelName });
 
           let prompt;
           if (productName) {
-            console.log(`[processBOQWithAI.js] extractClauses: Generating prompt for ProductName: ${productName}`);
             prompt = `
               You are an AI expert trained to extract detailed technical specifications, clauses, and regulatory information from technical datasheets for a specific product.
               
@@ -93,7 +82,6 @@ const generativeAI = {
               FOR TABLES AND DATASHEETS:
               - Extract information ROW-WISE, treating each row as a complete unit of information
               - GROUP related rows under their subheadings when available in the document
-              - Preserve ALL row numbers, headers, labels and title structure intact
               - Maintain special characters, symbols, and formatting from technical tables
               - Keep ALL unit indicators (°C, ℃, mm, etc.) in their original format and position
               
@@ -104,15 +92,13 @@ const generativeAI = {
               - Extract ALL operating parameters, performance data, and ratings exactly as shown
               
               FOR NOTES AND LEGAL CLAUSES:
-              - Extract ALL numbered notes, requirements, and footnotes completely
               - Preserve ALL inspection requirements, compliance statements, and certification needs
               - Maintain ALL warranty information, liability statements, and conditions
               - Capture ALL special instructions, warnings, and cautions with their exact wording
               
               FOR FORMATTING:
-              - Preserve indentation to show the hierarchical relationship between elements
+              - Preserve indentation if needed to show the hierarchical relationship between elements
               - Maintain precise spacing between elements to preserve visual structure
-              - Keep ALL special formatting, such as bullet points and numbered lists
               - Preserve ALL abbreviations, symbols, and technical notations exactly as shown
               
               **DATA STRUCTURE INSTRUCTIONS:**
@@ -154,7 +140,6 @@ const generativeAI = {
               ${cleanedText}
             `;
           } else {
-            console.log('[processBOQWithAI.js] extractClauses: Generating general prompt (no productName).');
             prompt = `
               You are an AI expert in extracting technical specifications, clauses, and regulatory information from technical datasheets and engineering documents.
               
@@ -194,7 +179,6 @@ const generativeAI = {
               FOR FORMATTING:
               - Preserve indentation to show the hierarchical relationship between elements
               - Maintain precise spacing between elements to preserve visual structure
-              - Keep ALL special formatting, such as bullet points and numbered lists
               - Preserve ALL abbreviations, symbols, and technical notations exactly as shown
               
               **DATA STRUCTURE INSTRUCTIONS:**
@@ -236,25 +220,20 @@ const generativeAI = {
             `;
           }
 
-          console.log('[processBOQWithAI.js] extractClauses: Calling Generative AI model...');
           const resultFromAI = await model.generateContent(prompt);
           
           const textFromAI = resultFromAI.response ? resultFromAI.response.text() : 
                              (typeof resultFromAI.text === 'function' ? resultFromAI.text() : 
                              (resultFromAI.text || JSON.stringify(resultFromAI)));
-          console.log('[processBOQWithAI.js] extractClauses: Received response from AI.'); // Avoid logging full textFromAI if too large
-          // console.log(`[processBOQWithAI.js] extractClauses: AI Response Text (raw):\n${textFromAI.substring(0, 500)}...`);
 
           const jsonMatch = textFromAI.match(/```json\n([\s\S]*?)\n```/) || 
                           textFromAI.match(/```\n([\s\S]*?)\n```/) || 
                           textFromAI.match(/{[\s\S]*?}/);
                           
           if (jsonMatch) {
-            console.log('[processBOQWithAI.js] extractClauses: JSON block found in AI response.');
             try {
               const jsonStr = jsonMatch[1] || jsonMatch[0];
               const extractedData = JSON.parse(jsonStr);
-              console.log('[processBOQWithAI.js] extractClauses: Successfully parsed JSON from AI response.');
               
               // Process each category for response
               const processedResponse = {
@@ -287,8 +266,6 @@ const generativeAI = {
                 ]
               };
               
-              console.log('[processBOQWithAI.js] extractClauses: Processed structured data with ' + 
-                          processedResponse.clauses.length + ' total items.');
               return processedResponse;
             } catch (parseError) {
               console.error('[processBOQWithAI.js] extractClauses: Error parsing JSON from Gemini response:', parseError.message, 'Raw JSON string attempt:', jsonMatch[1] || jsonMatch[0]);
@@ -444,7 +421,6 @@ const generativeAI = {
 
   processBoqAndDownload: async (file) => {
     try {
-      console.log("file ", file);
   
       if (!file || !file.location) {
         return { error: 'File is required' };
@@ -475,7 +451,6 @@ const generativeAI = {
         }
       );
   
-      console.log("Processed BOQ response:", response.data);
       return response.data;
   
     } catch (error) {
