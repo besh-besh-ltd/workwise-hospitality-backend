@@ -1126,6 +1126,7 @@ const ProductsController = {
     try {
       let productId = req.params.id;
 
+
       let productList = await productModel.productDetails(productId);
       res
         .status(200)

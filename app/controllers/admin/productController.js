@@ -2792,60 +2792,9 @@ const productController = {
         productId
       );
       
-      // If this product has a vendor, try to send an email notification
-      // if (approveProduct && approveProduct.created_by) {
-      //   try {
-      //     let userDetail = await vendorModel.userDetailById(
-      //       approveProduct.created_by
-      //     );
-          
-      //     if (userDetail && userDetail.length > 0) {
-      //       let html_variables = [
-      //         { name: userDetail[0].name },
-      //         {
-      //           message:
-      //             status == 1
-      //               ? `Your product ${approveProduct.name} has been approved`
-      //               : `Your product ${approveProduct.name} has been rejected`
-      //         }
-      //       ];
-            
-      //       let dynamic_html = fs
-      //         .readFileSync(`${Config.template_path}/dynamic_message_template.txt`)
-      //         .toString();
 
-      //       for (let index = 0; index < html_variables.length; index++) {
-      //         const element = html_variables[index];
-      //         let dynamic_key = Object.keys(element)[0];
-      //         let replace_char = html_variables[index][dynamic_key];
-      //         let replace_var = `[${dynamic_key.toLowerCase()}]`;
 
-      //         dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
-      //       }
 
-      //       // Send the email to the SPOC or vendor
-      //       const spocList = await vendorModel.getSpocDetails(userDetail[0]?.id);
-            
-      //       let mailRecipients = {
-      //         from: Config.webmasterMail,
-      //         subject: `Work Wise | Product Review Status`,
-      //         html: dynamic_html
-      //       };
-
-      //       if (spocList && spocList.length > 0) {
-      //         mailRecipients.to = spocList.map(spoc => spoc.email);
-      //         mailRecipients.cc = userDetail[0].email;
-      //       } else {
-      //         mailRecipients.to = userDetail[0].email;
-      //       }
-
-      //       sendMail(mailRecipients);
-      //     }
-      //   } catch (emailError) {
-      //     console.error("Error sending notification email:", emailError);
-      //     // Continue with the response even if email fails
-      //   }
-      // }
 
       return res.status(200).json({
         status: 1,
@@ -3657,13 +3606,58 @@ const productController = {
         approved_at: status == 1 ? new Date() : null,
       };
 
-      console.log("MAPPING OBJ: ", variantObj)
       
       // Update the variant instead of the mapping
       // Update by Kushal: We want to update the mapping not variant as the mapping is going to be used when showing vendors not variant
       try {
         const result = await productModel.updateVariantMappingByData(variantObj, mappingId);
-        
+
+        // changes by mukul - send email to vendor
+        let userDetail = await vendorModel.userDetailById(
+            mappingDetails.vendor_id
+          );
+          
+            let html_variables = [
+              { name: userDetail[0].name },
+              {
+                message:
+                  status == 1
+                    ? `Your product ${mappingDetails.variant_name} has been approved`
+                    : `Your product ${mappingDetails.variant_name} has been rejected`
+              }
+            ];
+            
+            let dynamic_html = fs
+              .readFileSync(`${Config.template_path}/dynamic_message_template.txt`)
+              .toString();
+
+            for (let index = 0; index < html_variables.length; index++) {
+              const element = html_variables[index];
+              let dynamic_key = Object.keys(element)[0];
+              let replace_char = html_variables[index][dynamic_key];
+              let replace_var = `[${dynamic_key.toLowerCase()}]`;
+
+              dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
+            }
+
+            // Send the email to the SPOC or vendor
+            const spocList = await vendorModel.getSpocDetails(userDetail[0]?.id);
+            
+            let mailRecipients = {
+              from: Config.webmasterMail,
+              subject: `Work Wise | Product Review Status`,
+              html: dynamic_html
+            };
+
+            if (spocList && spocList.length > 0) {
+              mailRecipients.to = spocList.map(spoc => spoc.email);
+              mailRecipients.cc = userDetail[0].email;
+            } else {
+              mailRecipients.to = userDetail[0].email;
+            }
+
+            sendMail(mailRecipients);
+
         return res.status(200).json({
           status: 1,
           message: status === 1 ? 'Mapping approved successfully' : 'Mapping disapproved successfully'
