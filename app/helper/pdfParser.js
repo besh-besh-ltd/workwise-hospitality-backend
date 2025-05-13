@@ -1,12 +1,13 @@
-// Changes by Agnij May 11, 2025 [Fixed CommonJS import]
+// Changes by Agnij 2024-05-14 [Enhanced PDF parser with more robust extraction]
 import pkg from 'pdfjs-dist';
 const { getDocument } = pkg;
 import { logError } from './common.js';
 import fs from 'fs';
 import path from 'path';
+// Changes by Agnij 2024-05-14 [Fix module import error]
+// Removed TypeScript type import that doesn't exist as JS module
 
 // Set up worker source path for Node environment
-// Changes by Agnij May 11, 2025 [Improved pdfjs worker configuration]
 const pdfjsWorkerPath = path.join(process.cwd(), 'node_modules', 'pdfjs-dist', 'build', 'pdf.worker.js');
 let pdfjsWorkerSource = null;
 
@@ -19,15 +20,15 @@ try {
   console.warn('Could not find PDF.js worker file:', error.message);
 }
 
-// Changes by Agnij May 11, 2025 [Safe error logging]
+// Safe error logging
 const safeLogError = (message) => {
   console.error('PDF Parser Error:', message);
 };
 
-// Changes by Agnij October 18, 2023 [Enhanced PDF parser to maintain formatting and table structures]
+// Changes by Agnij May 14, 2024 [Enhanced PDF parser with better grouping of related clauses]
 const pdfParser = {
   /**
-   * Parse a PDF buffer and extract text content with preserved formatting
+   * Parse a PDF buffer and extract text content with preserved formatting and better clause grouping
    * @param {Buffer} buffer - PDF file as buffer
    * @returns {Promise<string>} - Extracted text from PDF
    */
@@ -71,12 +72,14 @@ const pdfParser = {
       ]);
 
       let fullText = '';
+      let structuredSections = [];
       const numPages = pdfDocument.numPages;
       
-      // Process each page, preserving structure and tables
+      // First pass: collect all text items with positioning information
+      let allTextItems = [];
+      
       for (let pageNum = 1; pageNum <= numPages; pageNum++) {
         try {
-          console.log(`Processing PDF page ${pageNum} of ${numPages}`);
           const page = await pdfDocument.getPage(pageNum);
           const content = await page.getTextContent({
             normalizeWhitespace: false,
@@ -87,187 +90,274 @@ const pdfParser = {
           const viewport = page.getViewport({ scale: 1.0 });
           const pageHeight = viewport.height;
           
-          // Sort items by vertical position (top to bottom)
-          const textItems = content.items;
+          // Add page number and mapping to text items
+          const pageItems = content.items.map(item => ({
+            ...item,
+            pageNum,
+            pageHeight,
+            // Calculate normalized positions for consistent cross-page analysis
+            normalizedY: pageHeight - item.transform[5], // Y from top
+            normalizedX: item.transform[4], // X from left
+            // Calculate font size based on transform matrix
+            fontSize: Math.sqrt(item.transform[2] * item.transform[2] + item.transform[3] * item.transform[3])
+          }));
           
-          // Group items by lines based on y-position (with tolerance)
-          const lineThreshold = 3; // pixels of tolerance for same line
-          const lines = [];
-          let currentLine = [];
-          
-          // First text item
-          if (textItems.length > 0) {
-            currentLine.push(textItems[0]);
-          }
-          
-          // Process remaining items
-          for (let i = 1; i < textItems.length; i++) {
-            const item = textItems[i];
-            const prevItem = textItems[i - 1];
-            
-            // Check if items are on the same line
-            const isSameLine = Math.abs(item.transform[5] - prevItem.transform[5]) < lineThreshold;
-            
-            if (isSameLine) {
-              // Same line - add to current line
-              currentLine.push(item);
-            } else {
-              // Different line - save current line and start a new one
-              lines.push([...currentLine]);
-              currentLine = [item];
-            }
-          }
-          
-          // Add last line if not empty
-          if (currentLine.length > 0) {
-            lines.push(currentLine);
-          }
-          
-          // Process lines - sort items in each line by x-position (left to right)
-          const processedLines = lines.map(line => {
-            // Sort items in line by horizontal position
-            return line.sort((a, b) => a.transform[4] - b.transform[4]);
-          });
-          
-          // Convert to text, preserving advanced structure
-          let pageText = '';
-          let lastY = -1;
-          let lastLineStartX = -1;
-          let tableDetected = false;
-          let tableColumnPositions = [];
-          
-          // Detect potential tables by analyzing column patterns across lines
-          const detectTableColumns = (processedLines) => {
-            // Collect x-positions of items across multiple lines
-            const xPositions = [];
-            
-            // Sample from the first 15 lines or all lines if fewer
-            const sampleSize = Math.min(15, processedLines.length);
-            for (let i = 0; i < sampleSize; i++) {
-              const line = processedLines[i];
-              if (line.length > 2) { // Only consider lines with multiple elements
-                line.forEach(item => {
-                  xPositions.push(Math.round(item.transform[4] / 5) * 5); // Round to nearest 5 for clustering
-                });
-              }
-            }
-            
-            // Count occurrences of x-positions
-            const xPositionCounts = {};
-            xPositions.forEach(x => {
-              xPositionCounts[x] = (xPositionCounts[x] || 0) + 1;
-            });
-            
-            // Find x-positions that appear frequently (potential column starts)
-            const columnThreshold = Math.max(3, Math.floor(sampleSize / 4));
-            const potentialColumns = Object.entries(xPositionCounts)
-              .filter(([_, count]) => count >= columnThreshold)
-              .map(([x, _]) => parseInt(x))
-              .sort((a, b) => a - b);
-              
-            return potentialColumns;
-          };
-          
-          // Try to detect tables in this page
-          tableColumnPositions = detectTableColumns(processedLines);
-          tableDetected = tableColumnPositions.length > 2; // At least 3 columns to consider it a table
-          
-          // Process each line with enhanced table structure preservation
-          for (const line of processedLines) {
-            // Calculate line spacing
-            if (lastY !== -1) {
-              const currentY = line[0].transform[5];
-              const yDiff = lastY - currentY;
-              
-              // Handle vertical spacing - better paragraph and section detection
-              if (yDiff > 15) {
-                // Larger gap = new section
-                pageText += '\n\n';
-              } else if (yDiff > 8) {
-                // Medium gap = paragraph break
-                pageText += '\n';
-              }
-            }
-            
-            // Handle indentation and table structure
-            const lineStartX = line[0]?.transform[4] || 0;
-            let lineIndent = '';
-            
-            // Add indentation to preserve document structure
-            if (lastLineStartX !== -1 && Math.abs(lineStartX - lastLineStartX) > 10) {
-              const indentDiff = Math.floor((lineStartX - lastLineStartX) / 4);
-              if (indentDiff > 0 && indentDiff < 10) {
-                // Positive indent = subordinate content
-                lineIndent = ' '.repeat(indentDiff * 2);
-              }
-            }
-            
-            // Different handling for table vs regular text
-            let lineText = '';
-            
-            if (tableDetected && line.length > 1) {
-              // Enhanced table formatting
-              let lastPos = 0;
-              let columnText = [];
-              
-              for (const item of line) {
-                const itemX = item.transform[4];
-                
-                // Find which column this item belongs to
-                const columnIndex = tableColumnPositions.findIndex(pos => 
-                  Math.abs(itemX - pos) < 15);
-                
-                if (columnIndex >= 0) {
-                  // This item aligns with a detected column
-                  while (columnText.length < columnIndex) {
-                    columnText.push(''); // Fill in missing columns
-                  }
-                  columnText[columnIndex] = item.str;
-                } else {
-                  // Not aligned with a column, just add in sequence
-                  columnText.push(item.str);
-                }
-                
-                lastPos = itemX + (item.width || 0);
-              }
-              
-              // Construct line with proper spacing for table
-              lineText = columnText.join('   ');
-            } else {
-              // Process items in the line (non-table or undetected table)
-              lineText = line.map((item, idx) => {
-                // Check for horizontal spacing to preserve alignment
-                if (idx > 0) {
-                  const prevItem = line[idx - 1];
-                  const xGap = item.transform[4] - (prevItem.transform[4] + (prevItem.width || 0));
-                  
-                  if (xGap > 10) {
-                    // Calculate spaces to maintain relative positioning
-                    // More granular space calculation based on gap size
-                    const spaces = Math.ceil(xGap / 3);
-                    return ' '.repeat(Math.min(spaces, 25)) + item.str;
-                  }
-                }
-                return item.str;
-              }).join('');
-            }
-            
-            pageText += lineIndent + lineText + '\n';
-            
-            // Update tracking variables
-            if (line.length > 0) {
-              lastY = line[0].transform[5];
-              lastLineStartX = lineStartX;
-            }
-          }
-          
-          fullText += pageText + '\n';
-          
+          allTextItems = allTextItems.concat(pageItems);
         } catch (pageError) {
-          console.warn(`Error extracting text from page ${pageNum}:`, pageError.message);
-          // Continue with other pages even if one fails
+          console.warn(`Error processing page ${pageNum}:`, pageError.message);
         }
       }
+      
+      // Sort all items by page and top-to-bottom position
+      allTextItems.sort((a, b) => {
+        if (a.pageNum !== b.pageNum) return a.pageNum - b.pageNum;
+        return a.normalizedY - b.normalizedY;
+      });
+      
+      // Second pass: identify headings, sections, and group related items
+      const detectHeadings = () => {
+        // Calculate average font size
+        const fontSizes = allTextItems.map(item => item.fontSize).filter(Boolean);
+        const avgFontSize = fontSizes.reduce((sum, size) => sum + size, 0) / fontSizes.length;
+        
+        // Identify potential headings (larger font, centered, or all caps)
+        return allTextItems.map((item, idx) => {
+          const isLargerFont = item.fontSize > avgFontSize * 1.2;
+          const isPossiblyAllCaps = item.str === item.str.toUpperCase() && item.str.length > 3;
+          const isIndented = item.normalizedX < 50; // Left-aligned/indented items
+          const nextItem = idx < allTextItems.length - 1 ? allTextItems[idx + 1] : null;
+          
+          // Check if next item starts significantly below (section gap)
+          const hasGapAfter = nextItem && 
+            nextItem.pageNum === item.pageNum && 
+            (nextItem.normalizedY - item.normalizedY) > avgFontSize * 1.5;
+          
+          // Common section heading patterns
+          const headingPatterns = [
+            /^(section|chapter)\s+\d+/i,
+            /^\d+\.\s+[A-Z]/,
+            /^[IVX]+\.\s+/,
+            /^[A-Z][A-Z\s]+:$/,
+            /^(IMPORTANT NOTE|NOTE|WARNING|CAUTION)S?:/i,
+            /^(Technical\s+Specification|General\s+Requirements|Standards|Notes)/i,
+            /^(VTA|TBA)$/i,
+            /^(VTA|TBA)\s*[-:]/i,
+            /^Flow\s+\(/i,
+            /^(Specification|Requirements|Dimensions|Material|Parameters)/i,
+          ];
+          
+          const matchesPattern = headingPatterns.some(pattern => pattern.test(item.str));
+          
+          // Check for specific abbreviations that should be grouped
+          const commonAbbreviations = ['VTA', 'TBA', 'VAT', 'PO', 'QC', 'QA'];
+          const isCommonAbbreviation = commonAbbreviations.some(abbr => 
+            item.str.includes(abbr) || item.str === abbr);
+          
+          return {
+            ...item,
+            isHeading: isLargerFont || (isPossiblyAllCaps && hasGapAfter) || matchesPattern,
+            headingLevel: isLargerFont ? 1 : (isPossiblyAllCaps ? 2 : (matchesPattern ? 2 : 0)),
+            isListItem: item.str.match(/^[\d•\-*][\.\s]/),
+            isNotesItem: item.str.match(/^(Note|N\.B\.|NB)[\s\d:\.]/i) || item.str.match(/^([•\*]\s)/),
+            isCommonAbbreviation
+          };
+        });
+      };
+      
+      const enrichedItems = detectHeadings();
+      
+      // Group items into structured sections
+      const groupIntoSections = (items) => {
+        const sections = [];
+        let currentSection = { heading: null, items: [], level: 0 };
+        let currentSubsection = null;
+        
+        items.forEach((item, idx) => {
+          if (item.isHeading && (!currentSection.heading || item.headingLevel <= currentSection.level)) {
+            // Start a new main section
+            if (currentSection.items.length > 0) {
+              sections.push(currentSection);
+            }
+            currentSection = { 
+              heading: item.str,
+              items: [],
+              level: item.headingLevel,
+              pageNum: item.pageNum,
+              fontAttributes: {
+                size: item.fontSize,
+                isAllCaps: item.str === item.str.toUpperCase() && item.str.length > 3
+              }
+            };
+            currentSubsection = null;
+          } else if (item.isHeading && currentSection.heading && item.headingLevel > currentSection.level) {
+            // Start a new subsection
+            currentSubsection = {
+              heading: item.str,
+              items: [],
+              level: item.headingLevel,
+              pageNum: item.pageNum
+            };
+            currentSection.subsections = currentSection.subsections || [];
+            currentSection.subsections.push(currentSubsection);
+          } else if (item.isListItem || item.isNotesItem) {
+            // Add to current subsection or section as a list item
+            if (currentSubsection) {
+              currentSubsection.items.push(item);
+            } else {
+              currentSection.items.push(item);
+            }
+          } else if (item.isCommonAbbreviation && idx < items.length - 1) {
+            // For abbreviations like VTA/TBA, group with the next item if it's close
+            const nextItem = items[idx + 1];
+            if (nextItem && Math.abs(nextItem.normalizedY - item.normalizedY) < item.fontSize * 2) {
+              // Create a special paired item
+              const combinedItem = {
+                ...item,
+                str: `${item.str}: ${nextItem.str}`,
+                isPaired: true,
+                originalItems: [item, nextItem]
+              };
+              
+              if (currentSubsection) {
+                currentSubsection.items.push(combinedItem);
+              } else {
+                currentSection.items.push(combinedItem);
+              }
+              
+              // Skip the next item since we've included it in the pair
+              items[idx + 1].isProcessed = true;
+            } else {
+              // Add as a normal item
+              if (currentSubsection) {
+                currentSubsection.items.push(item);
+              } else {
+                currentSection.items.push(item);
+              }
+            }
+          } else if (!item.isProcessed) {
+            // Add to current subsection or section
+            if (currentSubsection) {
+              currentSubsection.items.push(item);
+            } else {
+              currentSection.items.push(item);
+            }
+          }
+        });
+        
+        // Add the last section
+        if (currentSection.items.length > 0 || (currentSection.subsections && currentSection.subsections.length > 0)) {
+          sections.push(currentSection);
+        }
+        
+        return sections;
+      };
+      
+      const sections = groupIntoSections(enrichedItems);
+      
+      // Detect and process tables
+      const processTablesInSections = (sections) => {
+        return sections.map(section => {
+          // Check for potential table patterns in consecutive items
+          const hasTableItems = section.items.some((item, idx, items) => {
+            if (idx < items.length - 3) {
+              // Check for aligned items that might form table columns
+              const xPositions = new Set([
+                item.normalizedX,
+                items[idx + 1].normalizedX,
+                items[idx + 2].normalizedX
+              ]);
+              
+              return xPositions.size >= 2; // At least two distinct column positions
+            }
+            return false;
+          });
+          
+          if (hasTableItems) {
+            // Group items by row position
+            const rowGroups = {};
+            section.items.forEach(item => {
+              // Round Y position to group items in the same row
+              const rowKey = Math.round(item.normalizedY / 5) * 5;
+              rowGroups[rowKey] = rowGroups[rowKey] || [];
+              rowGroups[rowKey].push(item);
+            });
+            
+            // Sort rows by Y position
+            const sortedRows = Object.keys(rowGroups)
+              .sort((a, b) => parseInt(a) - parseInt(b))
+              .map(key => {
+                const row = rowGroups[key];
+                // Sort items in the row by X position
+                return row.sort((a, b) => a.normalizedX - b.normalizedX);
+              });
+            
+            // Convert to structured table
+            section.isTable = true;
+            section.tableRows = sortedRows.map(row => 
+              row.map(item => item.str)
+            );
+            
+            // Create a text representation of the table
+            section.tableText = sortedRows.map(row => 
+              row.map(item => item.str).join('   ')
+            ).join('\n');
+          }
+          
+          // Process subsections recursively
+          if (section.subsections && section.subsections.length > 0) {
+            section.subsections = processTablesInSections(section.subsections);
+          }
+          
+          return section;
+        });
+      };
+      
+      const sectionsWithTables = processTablesInSections(sections);
+      
+      // Generate formatted text
+      const formatSectionsToText = (sections, level = 0) => {
+        let text = '';
+        const indent = '  '.repeat(level);
+        
+        sections.forEach(section => {
+          // Add section heading
+          if (section.heading) {
+            text += `${indent}${section.heading}\n`;
+          }
+          
+          // Add section content
+          if (section.isTable && section.tableText) {
+            text += `${indent}${section.tableText}\n\n`;
+          } else {
+            // Add regular items
+            section.items.forEach(item => {
+              if (item.isPaired) {
+                text += `${indent}${item.str}\n`;
+              } else {
+                text += `${indent}${item.str}\n`;
+              }
+            });
+            
+            // Add a newline after non-empty sections
+            if (section.items.length > 0) {
+              text += '\n';
+            }
+          }
+          
+          // Add subsections
+          if (section.subsections && section.subsections.length > 0) {
+            text += formatSectionsToText(section.subsections, level + 1);
+          }
+        });
+        
+        return text;
+      };
+      
+      fullText = formatSectionsToText(sectionsWithTables);
+      structuredSections = sectionsWithTables;
+      
+      // Store the structured sections for retrieval by other methods
+      this._lastStructuredSections = structuredSections;
       
       return fullText || "No text content extracted";
       
@@ -323,6 +413,14 @@ const pdfParser = {
       cleaned = cleaned.replace(/(\d) \. (\d)/g, '$1.$2'); // Fix decimal numbers
       cleaned = cleaned.replace(/(\d) \, (\d)/g, '$1,$2'); // Fix thousand separators
       
+      // Fix abbreviations and ensure they're properly formatted
+      cleaned = cleaned.replace(/\bVTA\b(?!\s*[:-])/g, 'VTA:'); // Add colon if missing
+      cleaned = cleaned.replace(/\bTBA\b(?!\s*[:-])/g, 'TBA:'); // Add colon if missing
+      
+      // Preserve relationships between flow values
+      cleaned = cleaned.replace(/(\d+)\s*-\s*(\d+)/g, '$1-$2'); // Keep ranges together
+      cleaned = cleaned.replace(/(\d+)\s*\/\s*(\d+)\s*\/\s*(\d+)/g, '$1 / $2 / $3'); // Format flow values
+      
       // Fix degree symbols and other common technical notation
       cleaned = cleaned.replace(/° C/g, '°C');  
       cleaned = cleaned.replace(/° F/g, '°F');
@@ -349,6 +447,13 @@ const pdfParser = {
       // Fix tables with dashed line separators
       cleaned = cleaned.replace(/^[-]{10,}$/gm, '');
       
+      // Group related items like VTA/TBA with their descriptions
+      cleaned = cleaned.replace(/\b(VTA|TBA)\s*[:.-]?\s*([A-Z0-9])/g, '$1: $2');
+      
+      // Ensure flow values are properly formatted
+      cleaned = cleaned.replace(/Flow\s+\(min\s*\/\s*nor\s*\/\s*max\)\s+(\d+)-(\d+\.\d+)/g, 
+                              'Flow (min / nor / max)  $1 / $1 / $2');
+      
       // Remove duplicate lines that often appear in PDF extraction
       const lines = cleaned.split('\n');
       const uniqueLines = [];
@@ -365,6 +470,14 @@ const pdfParser = {
       // Return original text as fallback
       return text || '';
     }
+  },
+  
+  /**
+   * Get the last extracted structured sections
+   * @returns {Array} - Structured sections with headings and content
+   */
+  getStructuredSections: function() {
+    return this._lastStructuredSections || [];
   }
 };
 

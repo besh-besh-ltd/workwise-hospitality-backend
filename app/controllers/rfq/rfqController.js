@@ -5447,7 +5447,6 @@ listQueries: async (req, res) => {
 
 addClauseUsingFile : async (req, res) => {
   // Changes by Agnij October 18, 2023 [Added extensive logging]
-  console.log('[rfqController.js] Entering addClauseUsingFile. Body:', req.body, 'File:', req.file ? { originalname: req.file.originalname, size: req.file.size } : 'No file');
   try {
     let file = req.file;
     const { rfq_id, rfq_product_id } = req.body;
@@ -5468,13 +5467,8 @@ addClauseUsingFile : async (req, res) => {
       });
     }
 
-    console.log(`[rfqController.js] addClauseUsingFile: Fetching product name for rfq_product_id: ${rfq_product_id}`);
     const productName = await rfqModel.getProductNameById(rfq_product_id);
-    console.log(`[rfqController.js] addClauseUsingFile: Product name is '${productName}'`);
-    
-    console.log('[rfqController.js] addClauseUsingFile: Calling generativeAI.extractClauses...');
     const result = await generativeAI.extractClauses(file, productName);
-    console.log('[rfqController.js] addClauseUsingFile: generativeAI.extractClauses result:', JSON.stringify(result, null, 2));
     
     if (!result.status) {
       // Changes by Agnij 2024-05-14 [Graceful user message for no relevant info]
@@ -5490,7 +5484,6 @@ addClauseUsingFile : async (req, res) => {
     }
 
     if (!result.clauses || result.clauses.length === 0) {
-      console.log('[rfqController.js] addClauseUsingFile: No clauses extracted.');
       return res.json({
         status: 0,
         message: productName 
@@ -5505,36 +5498,38 @@ addClauseUsingFile : async (req, res) => {
       });
     }
 
-    // Changes by Agnij May 13, 2025 [Fix: properly save all clauses]
+    // Changes by Agnij 2025-05-13 [Fix clause processing and better error handling]
     // Get clauses from result - ensuring we use the flattened array which contains all clauses
     const clauses = result.clauses;
-    console.log(`[rfqController.js] addClauseUsingFile: Received ${clauses?.length || 0} clauses from extraction`);
     
     // Increased batch size for better performance while still avoiding timeouts
     const BATCH_SIZE = 20;
     const allErrors = [];
     let successCount = 0;
-    console.log(`[rfqController.js] addClauseUsingFile: Starting to save ${clauses.length} clauses in batches of ${BATCH_SIZE}.`);
     
     // Process all clauses in batches
     for (let i = 0; i < clauses.length; i += BATCH_SIZE) {
       const batch = clauses.slice(i, i + BATCH_SIZE);
-      console.log(`[rfqController.js] addClauseUsingFile: Processing batch ${Math.floor(i / BATCH_SIZE) + 1} of ${Math.ceil(clauses.length / BATCH_SIZE)} (items ${i+1}-${Math.min(i+BATCH_SIZE, clauses.length)})`);
       
       // Process each clause in the current batch
       const batchPromises = batch.map(async (clause, index) => {
         try {
-          if (!clause || typeof clause !== 'string' || clause.trim() === '') {
+          const clauseText = typeof clause === 'string' 
+            ? clause.trim() 
+            : (clause && typeof clause === 'object' 
+               ? JSON.stringify(clause) 
+               : '');
+              
+          if (!clauseText || clauseText.length < 3) {
             console.warn(`[rfqController.js] addClauseUsingFile: Empty or invalid clause at index ${i + index}, skipping`);
             return { Row: i + index, error: "Empty or invalid clause" };
           }
           
           // Save the clause to the database
-          await rfqModel.addClause(rfq_id, rfq_product_id, clause, []);
+          await rfqModel.addClause(rfq_id, rfq_product_id, clauseText, []);
           successCount++;
           return null;
         } catch (error) {
-          console.error(`[rfqController.js] addClauseUsingFile: Error saving clause in batch. Index: ${i + index}, Clause: ${clause?.substring?.(0,100) || 'INVALID'}... Error:`, error);
           return { Row: i + index, error: error.message };
         }
       });
@@ -5545,11 +5540,9 @@ addClauseUsingFile : async (req, res) => {
       
       // Add a small delay between batches to avoid overwhelming the database
       if (i + BATCH_SIZE < clauses.length) {
-        console.log(`[rfqController.js] addClauseUsingFile: Waiting before processing next batch...`);
         await new Promise(resolve => setTimeout(resolve, 200));
       }
     }
-    console.log('[rfqController.js] addClauseUsingFile: Finished saving clauses. Successes:', successCount, 'Failures:', allErrors.length);
 
     return res.json({
       status: 1,
@@ -5557,6 +5550,7 @@ addClauseUsingFile : async (req, res) => {
         ? `${successCount} of ${clauses.length} items added successfully for '${productName}'${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`
         : `${successCount} of ${clauses.length} items added successfully${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`,
       errors: allErrors.length > 0 ? allErrors : [],
+      structuredData: result.structuredData || {},  // Include structured data for frontend display
       clauses: clauses
     });
     
