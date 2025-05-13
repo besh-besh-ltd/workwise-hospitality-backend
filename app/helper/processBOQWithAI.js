@@ -222,10 +222,13 @@ const generativeAI = {
 
           const resultFromAI = await model.generateContent(prompt);
           
-          const textFromAI = resultFromAI.response ? resultFromAI.response.text() : 
+                        // Changes by Agnij May 13, 2025 [Improved extraction of AI response]
+              const textFromAI = resultFromAI.response ? resultFromAI.response.text() : 
                              (typeof resultFromAI.text === 'function' ? resultFromAI.text() : 
                              (resultFromAI.text || JSON.stringify(resultFromAI)));
 
+          console.log('[processBOQWithAI.js] extractClauses: Received response from AI, parsing JSON...');
+          
           const jsonMatch = textFromAI.match(/```json\n([\s\S]*?)\n```/) || 
                           textFromAI.match(/```\n([\s\S]*?)\n```/) || 
                           textFromAI.match(/{[\s\S]*?}/);
@@ -233,7 +236,16 @@ const generativeAI = {
           if (jsonMatch) {
             try {
               const jsonStr = jsonMatch[1] || jsonMatch[0];
+              console.log('[processBOQWithAI.js] extractClauses: Found JSON data, parsing...');
               const extractedData = JSON.parse(jsonStr);
+              
+              // Count items in each category for logging
+              const techSpecCount = extractedData.technicalSpecifications?.length || 0;
+              const clausesCount = extractedData.clauses?.length || 0;
+              const standardsCount = extractedData.standards?.length || 0;
+              const notesCount = extractedData.notes?.length || 0;
+              
+              console.log(`[processBOQWithAI.js] extractClauses: Parsed ${techSpecCount} tech specs, ${clausesCount} clauses, ${standardsCount} standards, ${notesCount} notes`);
               
               // Process each category for response
               const processedResponse = {
@@ -266,30 +278,50 @@ const generativeAI = {
                 ]
               };
               
+              // Log the total number of flattened clauses
+              console.log(`[processBOQWithAI.js] extractClauses: Total flattened clauses count: ${processedResponse.clauses.length}`);
+              
               return processedResponse;
             } catch (parseError) {
               console.error('[processBOQWithAI.js] extractClauses: Error parsing JSON from Gemini response:', parseError.message, 'Raw JSON string attempt:', jsonMatch[1] || jsonMatch[0]);
               return { status: 0, message: 'Failed to parse structured data from AI', error: parseError.message, clauses: [] };
             }
           } else {
+            // Changes by Agnij May 13, 2025 [Improved fallback extraction]
             console.warn('[processBOQWithAI.js] extractClauses: No JSON block found in AI response. Attempting manual line extraction.', `First 500 chars of AI response: ${textFromAI.substring(0,500)}`);
+            
+            // Better line extraction that preserves more structure
             const lines = textFromAI.split('\n').filter(line => line.trim().length > 0);
-            const potentialClauses = lines.filter(line => line.length > 20 && !line.includes('```') && !line.startsWith('Here') && !line.startsWith('I will'));
+            
+            // More comprehensive filtering for potential clauses
+            const potentialClauses = lines.filter(line => {
+              return line.length > 20 && 
+                     !line.includes('```') && 
+                     !line.startsWith('Here') && 
+                     !line.startsWith('I will') &&
+                     !line.startsWith('As an AI') &&
+                     !line.startsWith('Based on');
+            });
+            
+            console.log(`[processBOQWithAI.js] extractClauses: Fallback mode - extracted ${potentialClauses.length} potential clauses from ${lines.length} lines`);
             
             // Create a consistent structure even in fallback mode
-            return {
+            const fallbackResponse = {
               status: 1,
               message: productName 
                 ? `Information extracted (fallback) for ${productName}`
                 : 'Information extracted (fallback)',
               structuredData: {
                 technicalSpecifications: [],
-                clauses: [{ text: 'Extracted in fallback mode (unstructured)' }],
+                clauses: potentialClauses.map((text, idx) => ({ id: `F${idx+1}`, text })), // Add IDs to fallback clauses
                 standards: [],
                 notes: []
               },
               clauses: potentialClauses
             };
+            
+            console.log(`[processBOQWithAI.js] extractClauses: Total fallback clauses count: ${fallbackResponse.clauses.length}`);
+            return fallbackResponse;
           }
         } catch (pdfProcessingError) {
           console.error('[processBOQWithAI.js] extractClauses: Error processing PDF with AI:', pdfProcessingError);

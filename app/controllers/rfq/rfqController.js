@@ -5501,31 +5501,48 @@ addClauseUsingFile : async (req, res) => {
       });
     }
 
+    // Changes by Agnij May 13, 2025 [Fix: properly save all clauses]
+    // Get clauses from result - ensuring we use the flattened array which contains all clauses
     const clauses = result.clauses;
-    const BATCH_SIZE = 10;
+    console.log(`[rfqController.js] addClauseUsingFile: Received ${clauses?.length || 0} clauses from extraction`);
+    
+    // Increased batch size for better performance while still avoiding timeouts
+    const BATCH_SIZE = 20;
     const allErrors = [];
     let successCount = 0;
     console.log(`[rfqController.js] addClauseUsingFile: Starting to save ${clauses.length} clauses in batches of ${BATCH_SIZE}.`);
     
+    // Process all clauses in batches
     for (let i = 0; i < clauses.length; i += BATCH_SIZE) {
       const batch = clauses.slice(i, i + BATCH_SIZE);
-      console.log(`[rfqController.js] addClauseUsingFile: Processing batch ${i / BATCH_SIZE + 1}`);
+      console.log(`[rfqController.js] addClauseUsingFile: Processing batch ${Math.floor(i / BATCH_SIZE) + 1} of ${Math.ceil(clauses.length / BATCH_SIZE)} (items ${i+1}-${Math.min(i+BATCH_SIZE, clauses.length)})`);
+      
+      // Process each clause in the current batch
       const batchPromises = batch.map(async (clause, index) => {
         try {
+          if (!clause || typeof clause !== 'string' || clause.trim() === '') {
+            console.warn(`[rfqController.js] addClauseUsingFile: Empty or invalid clause at index ${i + index}, skipping`);
+            return { Row: i + index, error: "Empty or invalid clause" };
+          }
+          
+          // Save the clause to the database
           await rfqModel.addClause(rfq_id, rfq_product_id, clause, []);
           successCount++;
           return null;
         } catch (error) {
-          console.error(`[rfqController.js] addClauseUsingFile: Error saving clause in batch. Index: ${i + index}, Clause: ${clause.substring(0,100)}... Error:`, error);
+          console.error(`[rfqController.js] addClauseUsingFile: Error saving clause in batch. Index: ${i + index}, Clause: ${clause?.substring?.(0,100) || 'INVALID'}... Error:`, error);
           return { Row: i + index, error: error.message };
         }
       });
       
+      // Wait for all clauses in this batch to be processed
       const batchErrors = (await Promise.all(batchPromises)).filter(Boolean);
       allErrors.push(...batchErrors);
       
+      // Add a small delay between batches to avoid overwhelming the database
       if (i + BATCH_SIZE < clauses.length) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+        console.log(`[rfqController.js] addClauseUsingFile: Waiting before processing next batch...`);
+        await new Promise(resolve => setTimeout(resolve, 200));
       }
     }
     console.log('[rfqController.js] addClauseUsingFile: Finished saving clauses. Successes:', successCount, 'Failures:', allErrors.length);
