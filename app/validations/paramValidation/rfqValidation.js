@@ -25,6 +25,7 @@ const termsItems = Joi.object({
 const productItems = Joi.object({
   id : Joi.number().optional().allow(null),
   name: Joi.string().optional().allow(null).allow(''),
+  product_name: Joi.string().optional().allow(null).allow(''),
   variant: Joi.number().optional().allow('').allow(null),
   product_id: Joi.number().required(),
   comment: Joi.string().optional().allow(null).allow(''),
@@ -233,7 +234,7 @@ export const rfqSchemas = {
   finalize: Joi.object().keys({
     rfq_id: Joi.number().required(),
     rfq_no: Joi.number().required(),
-    product_id: Joi.number().required(),
+    product_variant_id: Joi.number().required(),
     vendor_id: Joi.number().required(),
     quote_id: Joi.number().required(),
     variant: Joi.number().required()

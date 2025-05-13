@@ -93,9 +93,9 @@ const buyerController = {
     try {
       let buyerId = req.params.id;
       let page, limit, offset;
-      if (req.body.page && req.body.page > 0) {
-        page = req.body.page;
-        limit = req.body.limit || Config.globalAdminLimit;
+      if (req.query.page && req.query.page > 0) {
+        page = req.query.page;
+        limit = req.query.limit || Config.globalAdminLimit;
         offset = (page - 1) * limit;
       } else {
         limit = Config.globalAdminLimit;
@@ -682,70 +682,5 @@ const buyerController = {
     }
   } */
 };
-
-const add_vendor_product= async (productDetails,vendorId) => {
-  try {
-    let errors = {};
-    let err = 0;
-
-    let { name, categories, approved_id, master_id } = productDetails;
-
-    if (categories.length > 0) {
-      for await (const categoryId of categories) {
-        let categoryExist = await productModel.parentIdExists(categoryId);
-        if (categoryExist.length == 0) {
-          err++;
-          errors.categories = 'Category not found';
-        }
-      }
-    } else {
-      err++;
-      errors.categories = 'Please select a category';
-    }
-
-    let prodNameExists = await productModel.checkProductExists(
-      name,
-      vendorId,
-    );
-    if (prodNameExists.length > 0) {
-      err++;
-      errors.name = 'Product name already exist';
-    }
-    // if (is_approve != 1) {
-    //   let checkMasterNameExist = await productModel.checkMasterNameExist(
-    //     name
-    //   );
-    //   if (checkMasterNameExist.length > 0) {
-    //     err++;
-    //     errors.name = 'This product is available in master product';
-    //   }
-    // } else 
-    if (!master_id) {
-      let checkMasterNameExist = await productModel.checkMasterNameExist(
-        name
-      );
-      if (checkMasterNameExist.length > 0) {
-        err++;
-        errors.name = 'This product is available in master product';
-      }
-    }
-
-    if (master_id) {
-      let findProduct = await productModel.check_product(master_id);
-      if (findProduct.length == 0) {
-        err++;
-        errors.master_id = 'Product not found';
-      }
-    }
-
-    if (err > 0) {
-      return errors
-    }
-
-  } catch (err) {
-    logError(err);
-    return err;
-  }
-}
 
 export default buyerController;

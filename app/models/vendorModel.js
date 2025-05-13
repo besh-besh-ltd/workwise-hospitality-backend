@@ -605,11 +605,10 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
   },
   createReason: async (reasonObj) => {
     return new Promise(function (resolve, reject) {
-      const query =
-        pgp().helpers.insert(reasonObj, null, 'tbl_reject_reason') +
-        ' RETURNING id';
-
-      db.any(query)
+      db.any(
+        'INSERT INTO tbl_reject_reason(reject_reason, status, type) VALUES($1, $2, $3) RETURNING id',
+        [reasonObj.reject_reason, reasonObj.status, reasonObj.type]
+      )
         .then(function (data) {
           resolve(data);
         })
@@ -641,65 +640,17 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
    */
   getVendorDropdownList: async (search = null, isApproved = null) => {
     return new Promise(function (resolve, reject) {
-      let dynamicQuery = '';
-      let orderClause = 'ORDER BY name ASC';
-      
-      if (search) {
-        const escapedSearch = vendorModel._escapeSqlString(search);
-        
-        dynamicQuery = `
-          AND (
-            to_tsvector('english', name) @@ plainto_tsquery('english', '${escapedSearch}')
-            OR similarity(name, '${escapedSearch}') > 0.1
-            OR to_tsvector('english', organization_name) @@ plainto_tsquery('english', '${escapedSearch}')
-            OR similarity(organization_name, '${escapedSearch}') > 0.1
-            OR to_tsvector('english', email) @@ plainto_tsquery('english', '${escapedSearch}')
-            OR similarity(email, '${escapedSearch}') > 0.1
-          )`;
-          
-        orderClause = `
-          ORDER BY 
-            CASE
-              WHEN LOWER(name) = LOWER('${escapedSearch}') THEN 10
-              WHEN LOWER(organization_name) = LOWER('${escapedSearch}') THEN 10
-              WHEN LOWER(email) = LOWER('${escapedSearch}') THEN 10
-              ELSE 0
-            END DESC,
-            CASE
-              WHEN LOWER(name) ILIKE LOWER('${escapedSearch}%') THEN 8
-              WHEN LOWER(organization_name) ILIKE LOWER('${escapedSearch}%') THEN 8
-              WHEN LOWER(email) ILIKE LOWER('${escapedSearch}%') THEN 8
-              ELSE 0
-            END DESC,
-            CASE
-              WHEN LOWER(name) ILIKE LOWER('%${escapedSearch}%') THEN 6
-              WHEN LOWER(organization_name) ILIKE LOWER('%${escapedSearch}%') THEN 6
-              WHEN LOWER(email) ILIKE LOWER('%${escapedSearch}%') THEN 6
-              ELSE 0
-            END DESC,
-            GREATEST(
-              COALESCE(ts_rank_cd(to_tsvector('english', name), plainto_tsquery('english', '${escapedSearch}')), 0),
-              COALESCE(ts_rank_cd(to_tsvector('english', organization_name), plainto_tsquery('english', '${escapedSearch}')), 0),
-              COALESCE(ts_rank_cd(to_tsvector('english', email), plainto_tsquery('english', '${escapedSearch}')), 0)
-            ) DESC,
-            GREATEST(
-              COALESCE(similarity(name, '${escapedSearch}'), 0),
-              COALESCE(similarity(organization_name, '${escapedSearch}'), 0), 
-              COALESCE(similarity(email, '${escapedSearch}'), 0)
-            ) DESC,
-            name ASC`;
-      }
       
       const escapedSearch = search ? vendorModel._escapeSqlString(search) : '';
       
       db.any(
         `SELECT 
-          tbl_users.id,
-          tbl_users.name,
-          tbl_users.mobile, 
-          tbl_users.email,
-          tbl_users.organization_name,
-          tbl_users.user_type
+          tu.id,
+          tu.name,
+          tu.mobile, 
+          tu.email,
+          COALESCE(tc.company_name, tu.organization_name) AS organization_name,
+          tu.user_type
           ${search ? `,
           CASE
             WHEN LOWER(name) = LOWER('${escapedSearch}') THEN 10
@@ -723,9 +674,10 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
             COALESCE(similarity(organization_name, '${escapedSearch}'), 0),
             COALESCE(similarity(email, '${escapedSearch}'), 0)
           ) AS similarity_score` : ''}
-         FROM tbl_users 
-         WHERE is_deleted = 0 AND user_type = 3 OR user_type = 4 ${isApproved != null ? isApproved == 'true' ? 'AND status = 1' : 'AND status = 0' : ''}
-        ORDER BY created_at`
+         FROM tbl_users tu
+         LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+         WHERE tc.id IS NOT NULL AND tu.is_deleted = 0 AND tu.user_type = 3 OR tu.user_type = 4 ${isApproved != null ? isApproved == 'true' ? 'AND tu.status = 1' : 'AND tu.status = 0' : ''}
+        ORDER BY tu.created_at`
       )
         .then(function (data) {
           resolve(data);
@@ -826,8 +778,9 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
           FROM tbl_rfq_product_vendors TRPV
           JOIN tbl_rfq TR
               ON TR.id = TRPV.rfq_id
-          JOIN tbl_product TP
-              ON TP.id = TRPV.product_id
+          JOIN tbl_product_variant TPV
+              ON TPV.id = TRPV.product_variant_id
+          JOIN tbl_product TP ON TP.id = TPV.product_id
           JOIN tbl_product_categories TPC
               ON TPC.product_id = TP.id
           JOIN tbl_category TC
@@ -916,6 +869,22 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
          WHERE is_deleted = 0 
          AND user_type IN (1, 5, 6)
          ORDER BY name ASC`
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  findReasonByText: async (reasonText) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        'SELECT * FROM tbl_reject_reason WHERE reject_reason = $1',
+        [reasonText]
       )
         .then(function (data) {
           resolve(data);

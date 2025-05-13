@@ -277,8 +277,8 @@ const validateDbBody = {
       let errors = {};
       let err = 0;
 
-      let { name, categories, approved_id, master_id } = req.body;
-      categories = JSON.parse(categories);
+      let { name, approved_id, master_id } = req.body;
+      
       if (approved_id) {
         /*  approved_id = JSON.parse(approved_id);
         for await (const approveId of approved_id) {
@@ -290,27 +290,14 @@ const validateDbBody = {
           }
         } */
       }
-      if (categories.length > 0) {
-        for await (const categoryId of categories) {
-          let categoryExist = await productModel.parentIdExists(categoryId);
-          if (categoryExist.length == 0) {
-            err++;
-            errors.categories = 'Category not found';
-          }
-        }
-      } else {
-        err++;
-        errors.categories = 'Please select a category';
-      }
 
-      let prodNameExists = await productModel.checkProductExists(
-        name,
+      let prodNameExists = await productModel.checkVariantExistsForVendor(
         req.user.id,
-        req.params?.id || null
+        master_id,
       );
       if (prodNameExists.length > 0) {
         err++;
-        errors.name = 'Product name already exist';
+        errors.name = 'Product is already mapped with vendor';
       }
       if (req.method == 'PUT' && req.findProduct.is_approve != 1) {
         let checkMasterNameExist = await productModel.checkMasterNameExist(
@@ -332,7 +319,7 @@ const validateDbBody = {
       }
 
       if (master_id) {
-        let findProduct = await productModel.check_product(master_id);
+        let findProduct = await productModel.checkVariantById(master_id);
         if (findProduct.length == 0) {
           err++;
           errors.master_id = 'Product not found';
@@ -452,31 +439,24 @@ const validateDbBody = {
         .end();
     }
   },
-  product_approve_check: async (req, res, next) => {
+  checkVariant: async (req, res, next) => {
     try {
       let errors = {};
       let err = 0;
-      let productId = req.params.id;
-      let { status, reject_reason, reject_reason_id } = req.body;
+      let variantId = req.params?.id || req.body?.variant_id;
 
-      const productIDExists = await productModel.check_product(productId);
-      if (productIDExists.length == 0) {
-        err++;
-        errors.id = 'Product not found';
+      let created_by = 0;
+      if (req.user.user_type == 3 || req.user.user_type == 4) {
+        created_by = req.user.id;
       }
-      if (status == 1 && productIDExists[0].is_approve == 1) {
-        err++;
-        errors.status = 'Product already approved';
-      } else if (status == 0 && productIDExists[0].is_approve == 0) {
-        err++;
-        errors.status = 'Product already rejected';
+      let findVariant;
+      if (variantId) {
+        findVariant = await productModel.checkVariantById(variantId);
+        if (findVariant.length == 0) {
+          err++;
+          errors.id = 'Product not found';
+        }
       }
-
-      if (status == 0 && !reject_reason_id && !reject_reason) {
-        err++;
-        errors.reject_reason_id = 'Reject reason is required';
-      }
-
       if (err > 0) {
         res
           .status(400)
@@ -486,9 +466,173 @@ const validateDbBody = {
           })
           .end();
       } else {
+        req.findVariant = findVariant[0];
         next();
       }
     } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  product_approve_check: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+      let productId = req.params.id;
+      let { status, reject_reason, reject_reason_id } = req.body;
+
+      console.log(`Validating product approval for ID: ${productId}, status: ${status}`);
+      
+      // Validate basic parameters
+      if (status === undefined || status === null) {
+        err++;
+        errors.status = 'Status is required';
+        console.log("Missing status parameter");
+      }
+      
+      if (!productId) {
+        err++;
+        errors.id = 'Product ID is required';
+        console.log("Missing product ID");
+      } else {
+        // Check if product or variant exists
+        const productIDExists = await productModel.check_product(productId);
+        console.log(`Product search results for ID ${productId}:`, productIDExists?.length || 0);
+        
+        if (!productIDExists || productIDExists.length === 0) {
+          err++;
+          errors.id = 'Product or variant not found';
+          console.log(`Product/variant ID ${productId} not found`);
+        } else {
+          // Changes by Agnij May 02, 2025 [Removed check for already approved/rejected items to allow re-approval/re-rejection]
+          const item = productIDExists[0];
+          console.log(`Found item of type ${item.product_id ? 'variant' : 'product'}`);
+          
+          // We no longer block already approved/rejected items to make the UI more forgiving
+          if (item && item.is_approve !== undefined) {
+            const numericStatus = status === '1' || status === 1 || status === true ? 1 : 0;
+            console.log(`Current approval status: ${item.is_approve}, Requested status: ${numericStatus}`);
+            
+            // Just log but don't block if it's the same status
+            if (numericStatus === 1 && item.is_approve === 1) {
+              console.log("Item is already approved, but allowing re-approval");
+            } else if (numericStatus === 0 && item.is_approve === 0) {
+              console.log("Item is already rejected, but allowing re-rejection");
+            }
+          } else {
+            console.log(`Item has no is_approve property or is undefined`);
+          }
+        }
+      }
+
+      // Check rejection reason if rejecting
+      if (status === '0' || status === 0 || status === false) {
+        if (!reject_reason_id && !reject_reason) {
+          err++;
+          errors.reject_reason_id = 'Reject reason is required';
+          console.log("Missing reject reason for rejection");
+        }
+      }
+
+      if (err > 0) {
+        console.log("Validation failed with errors:", errors);
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+      } else {
+        console.log("Validation passed");
+        next();
+      }
+    } catch (err) {
+      console.error("Error in product_approve_check:", err);
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  variant_approve_check: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+      let variantId = req.params.id;
+      let { status, reject_reason, reject_reason_id } = req.body;
+      
+      // Validate basic parameters
+      if (status === undefined || status === null) {
+        err++;
+        errors.status = 'Status is required';
+      }
+      
+      if (!variantId) {
+        err++;
+        errors.id = 'Product ID is required';
+      } else {
+        // Check if product or variant exists
+        const variantIdExists = await productModel.checkVariantById(variantId);
+        
+        if (!variantIdExists || variantIdExists.length === 0) {
+          err++;
+          errors.id = 'Product or variant not found';
+        } else {
+          // Changes by Agnij May 02, 2025 [Removed check for already approved/rejected items to allow re-approval/re-rejection]
+          const item = variantIdExists[0];
+          console.log(`Found item of type ${item.product_id ? 'variant' : 'product'}`);
+          
+          // We no longer block already approved/rejected items to make the UI more forgiving
+          if (item && item.is_approve !== undefined) {
+            const numericStatus = status === '1' || status === 1 || status === true ? 1 : 0;
+            
+            // Just log but don't block if it's the same status
+            if (numericStatus === 1 && item.is_approve === 1) {
+              console.log("Item is already approved, but allowing re-approval");
+            } else if (numericStatus === 0 && item.is_approve === 0) {
+              console.log("Item is already rejected, but allowing re-rejection");
+            }
+          } else {
+            console.log(`Item has no is_approve property or is undefined`);
+          }
+        }
+      }
+
+      // // Check rejection reason if rejecting
+      // if (status === '0' || status === 0 || status === false) {
+      //   if (!reject_reason_id && !reject_reason) {
+      //     err++;
+      //     errors.reject_reason_id = 'Reject reason is required';
+      //     console.log("Missing reject reason for rejection");
+      //   }
+      // }
+
+      if (err > 0) {
+        console.log("Validation failed with errors:", errors);
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+      } else {
+        console.log("Validation passed");
+        next();
+      }
+    } catch (err) {
+      console.error("Error in variant_approve_check:", err);
       logError(err);
       res
         .status(400)
@@ -504,6 +648,7 @@ const validateDbBody = {
       let errors = {};
       let err = 0;
       let { name, categories, approved_id, vendor } = req.body;
+      console.log("MESSY ------- ", categories)
       // categories = JSON.parse(categories);
       /* if (vendor) {
         let checkVendor = await userModel.findActiveVendor(vendor);
