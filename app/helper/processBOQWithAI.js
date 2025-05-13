@@ -65,7 +65,7 @@ const generativeAI = {
           if (productName) {
             console.log(`[processBOQWithAI.js] extractClauses: Generating prompt for ProductName: ${productName}`);
             prompt = `
-              You are an AI trained to extract comprehensive information from documents for a specific product.
+              You are an AI expert trained to extract detailed technical specifications, clauses, and regulatory information from technical datasheets for a specific product.
               
               TARGET PRODUCT: "${productName}"
               
@@ -76,62 +76,79 @@ const generativeAI = {
               
               **IF THE DOCUMENT IS NOT CONTEXTUALLY RELEVANT TO THE TARGET PRODUCT, YOU MUST RETURN AN EMPTY "clauses" array in the JSON output like this: { "clauses": [] }. Do not proceed with extraction.**
               
-              **IF AND ONLY IF the document IS contextually relevant**, proceed to extract ALL of the following information related to "${productName}" from the document:
+              **IF AND ONLY IF the document IS contextually relevant**, your task is to extract ALL information in its ORIGINAL STRUCTURE:
               
-              1. TECHNICAL INFORMATION:
-                - Technical specifications (dimensions, materials, performance parameters)
-                - Engineering requirements and constraints
-                - Operational parameters and restrictions
-                - Installation requirements and procedures
+              1. Extract the COMPLETE tables, forms, sections and maintain their EXACT structure and organization
+              2. Preserve ALL information exactly as it appears in the document
+              3. Capture ALL technical parameters, specifications, notes, and clauses verbatim
               
-              2. COMPLIANCE AND STANDARDS:
-                - Industry standards and certifications required
-                - Regulatory compliance requirements
-                - Testing protocols and acceptance criteria
-                - Quality assurance requirements
+              **CRITICAL EXTRACTION INSTRUCTIONS:**
               
-              3. COMMERCIAL AND CONTRACT TERMS:
-                - Delivery terms and conditions
-                - Warranty provisions
-                - Liability clauses
-                - Payment and pricing details
+              FOR DOCUMENT STRUCTURE:
+              - Maintain the EXACT hierarchical organization of the document
+              - Preserve the relationship between sections, subsections and their content
+
+              - Maintain the document's logical flow and order of information
               
-              4. GENERAL NOTES AND CONDITIONS:
-                - Important notes about the product
-                - Special handling requirements
-                - Environmental constraints or considerations
-                - Any other general information or warnings
+              FOR TABLES AND DATASHEETS:
+              - Extract information ROW-WISE, treating each row as a complete unit of information
+              - GROUP related rows under their subheadings when available in the document
+              - Preserve ALL row numbers, headers, labels and title structure intact
+              - Maintain special characters, symbols, and formatting from technical tables
+              - Keep ALL unit indicators (°C, ℃, mm, etc.) in their original format and position
               
-              5. INSPECTION AND TESTING:
-                - Inspection procedures
-                - Test requirements
-                - Quality control measures
-                - Acceptance tests and criteria
+              FOR TECHNICAL SPECIFICATIONS:
+              - Capture ALL numerical values with their exact units precisely as they appear
+              - Preserve ranges, tolerances, min/max values, and their relationships
+              - Maintain ALL dimensions, materials specifications, and their formatting
+              - Extract ALL operating parameters, performance data, and ratings exactly as shown
               
-              6. OTHER RELEVANT INFORMATION:
-                - Any other clauses or information that might be important
-                - Special requirements or exceptions
-                - Notes about product supply or usage
+              FOR NOTES AND LEGAL CLAUSES:
+              - Extract ALL numbered notes, requirements, and footnotes completely
+              - Preserve ALL inspection requirements, compliance statements, and certification needs
+              - Maintain ALL warranty information, liability statements, and conditions
+              - Capture ALL special instructions, warnings, and cautions with their exact wording
               
-              CRITICALLY IMPORTANT INSTRUCTIONS (Apply ONLY if the document is relevant):
-              - Maintain the EXACT hierarchical structure and formatting of all information
-              - Preserve ALL numbered or bulleted lists exactly as they appear
-              - Keep ALL tables, measurements and numerical values with their units intact
-              - Include ALL conditional statements and logical relationships
-              - Capture information even if "${productName}" is not explicitly mentioned but context makes it clear it relates to the target product.
-              - DO NOT rephrase, interpret, or summarize - use the EXACT ORIGINAL text
-              - Capture information even if it spans across different pages/sections
-              - Pay special attention to footnotes, references, and fine print
-              - Preserve cross-references between sections
-              - Identify text that applies generally vs. specifically to "${productName}"
+              FOR FORMATTING:
+              - Preserve indentation to show the hierarchical relationship between elements
+              - Maintain precise spacing between elements to preserve visual structure
+              - Keep ALL special formatting, such as bullet points and numbered lists
+              - Preserve ALL abbreviations, symbols, and technical notations exactly as shown
               
-              Return the data in a JSON format with the following structure:
+              **DATA STRUCTURE INSTRUCTIONS:**
+              - Extract ENTIRE significant sections or tables as complete units
+              - Process each table ROW-BY-ROW, maintaining row relationships
+              - Group rows under their respective subheadings when present
+              - For each major section/table, create a separate clause entry
+              - Include section headers/titles with their content to maintain context
+              - Keep rows belonging to the same table together in their logical sequence
+              - NEVER SPLIT tables or logical sections across multiple clauses
+              
+              Return the data in a structured JSON format with the following categories:
               { 
+                "technicalSpecifications": [
+                  { "parameter": "parameter name", "value": "parameter value", "unit": "unit of measurement (if applicable)" }
+                ],
                 "clauses": [
-                  { "text": "complete original clause or specification text" } 
-                  // This array should be empty if the document was determined to be not contextually relevant in the first step.
+                  { "id": "clause number/id (if available)", "text": "clause text" }
+                ],
+                "standards": [
+                  { "name": "standard name", "description": "brief description (if available)" }
+                ],
+                "notes": [
+                  "important note 1",
+                  "important note 2"
                 ]
               }
+              
+              IMPORTANT CLASSIFICATION INSTRUCTIONS:
+              - Put measurement data, parameters, ratings, and material specs in "technicalSpecifications" 
+              - Put numbered clauses, contractual information, and requirements in "clauses"
+              - Put industry standards, certifications, and codes in "standards"
+              - Put general notes, warnings, and procedural information in "notes"
+              - If you're uncertain where an item belongs, put it in the most appropriate category
+              - This array should be empty for any category with no relevant data
+              - If the document is not contextually relevant, ALL arrays should be empty
               
               Here is the document content:
               ${cleanedText}
@@ -139,61 +156,80 @@ const generativeAI = {
           } else {
             console.log('[processBOQWithAI.js] extractClauses: Generating general prompt (no productName).');
             prompt = `
-              You are an AI trained to extract comprehensive information from documents.
+              You are an AI expert in extracting technical specifications, clauses, and regulatory information from technical datasheets and engineering documents.
               
-              Extract ALL of the following information categories from the document:
+              Your task is to extract ALL information with PERFECT PRESERVATION of the ORIGINAL DOCUMENT STRUCTURE:
               
-              1. TECHNICAL INFORMATION:
-                - Technical specifications and requirements
-                - Engineering parameters and constraints
-                - Operational requirements and limitations
-                - Installation specifications and procedures
+              1. Extract the COMPLETE tables, forms, sections maintaining their EXACT format and organization
+              2. Preserve PRECISE layout including columns, rows, section titles, spacing, and indentation
+              3. Capture ALL technical parameters, specifications, notes, and clauses VERBATIM
               
-              2. COMPLIANCE AND STANDARDS:
-                - Industry standards and certifications
-                - Regulatory compliance requirements
-                - Testing protocols and acceptance criteria
-                - Quality assurance requirements
+              **CRITICAL EXTRACTION INSTRUCTIONS:**
               
-              3. COMMERCIAL AND CONTRACT TERMS:
-                - Delivery terms and conditions
-                - Warranty provisions and limitations
-                - Liability clauses and exceptions
-                - Payment terms and pricing details
+              FOR DOCUMENT STRUCTURE:
+              - Maintain the EXACT hierarchical organization of the document
+              - Preserve the relationship between sections, subsections and their content
+              - Keep document title, page numbers, and section identifiers in their original positions
+              - Maintain the document's logical flow and order of information
               
-              4. GENERAL NOTES AND CONDITIONS:
-                - Important notes about products or services
-                - Special handling or storage requirements
-                - Environmental constraints or considerations
-                - Any other general information or warnings
+              FOR TABLES AND DATASHEETS:
+              - Extract information ROW-WISE, treating each row as a complete unit of information
+              - GROUP related rows under their subheadings when available in the document
+              - Preserve ALL row numbers, headers, labels and title structure intact
+              - Maintain special characters, symbols, and formatting from technical tables
+              - Keep ALL unit indicators (°C, ℃, mm, etc.) in their original format and position
               
-              5. INSPECTION AND TESTING:
-                - Inspection procedures and requirements
-                - Test methods and parameters
-                - Quality control measures and criteria
-                - Acceptance tests and verification procedures
+              FOR TECHNICAL SPECIFICATIONS:
+              - Capture ALL numerical values with their exact units precisely as they appear
+              - Preserve ranges, tolerances, min/max values, and their relationships
+              - Maintain ALL dimensions, materials specifications, and their formatting
+              - Extract ALL operating parameters, performance data, and ratings exactly as shown
               
-              6. OTHER RELEVANT INFORMATION:
-                - Any other clauses or information that might be important
-                - Special requirements or exceptions
-                - Notes about product supply, usage, or implementation
+              FOR NOTES AND LEGAL CLAUSES:
+              - Extract ALL numbered notes, requirements, and footnotes completely
+              - Preserve ALL inspection requirements, compliance statements, and certification needs
+              - Maintain ALL warranty information, liability statements, and conditions
+              - Capture ALL special instructions, warnings, and cautions with their exact wording
               
-              CRITICALLY IMPORTANT INSTRUCTIONS:
-              - Maintain the EXACT hierarchical structure and formatting
-              - Preserve ALL numbered or bulleted lists exactly as they appear
-              - Keep ALL tables, measurements and numerical values with their units intact
-              - Include ALL conditional statements and logical relationships
-              - DO NOT rephrase, interpret, or summarize - use the EXACT ORIGINAL text
-              - Preserve section headings and their relationships to content
-              - Maintain all cross-references between sections
-              - Capture all footnotes, references, and fine print
+              FOR FORMATTING:
+              - Preserve indentation to show the hierarchical relationship between elements
+              - Maintain precise spacing between elements to preserve visual structure
+              - Keep ALL special formatting, such as bullet points and numbered lists
+              - Preserve ALL abbreviations, symbols, and technical notations exactly as shown
               
-              Return the data in a JSON format with the following structure:
+              **DATA STRUCTURE INSTRUCTIONS:**
+              - Extract ENTIRE significant sections or tables as complete units
+              - Process each table ROW-BY-ROW, maintaining row relationships
+              - Group rows under their respective subheadings when present
+              - For each major section/table, create a separate clause entry
+              - Include section headers/titles with their content to maintain context
+              - Keep rows belonging to the same table together in their logical sequence
+              - NEVER SPLIT tables or logical sections across multiple clauses
+              
+                            Return the data in a structured JSON format with the following categories:
               { 
+                "technicalSpecifications": [
+                  { "parameter": "parameter name", "value": "parameter value", "unit": "unit of measurement (if applicable)" }
+                ],
                 "clauses": [
-                  { "text": "complete original clause or specification text" }
+                  { "id": "clause number/id (if available)", "text": "clause text" }
+                ],
+                "standards": [
+                  { "name": "standard name", "description": "brief description (if available)" }
+                ],
+                "notes": [
+                  "important note 1",
+                  "important note 2"
                 ]
               }
+              
+              IMPORTANT CLASSIFICATION INSTRUCTIONS:
+              - Put measurement data, parameters, ratings, and material specs in "technicalSpecifications" 
+              - Put numbered clauses, contractual information, and requirements in "clauses"
+              - Put industry standards, certifications, and codes in "standards"
+              - Put general notes, warnings, and procedural information in "notes"
+              - If you're uncertain where an item belongs, put it in the most appropriate category
+              - This array should be empty for any category with no relevant data
               
               Here is the document content:
               ${cleanedText}
@@ -219,13 +255,41 @@ const generativeAI = {
               const jsonStr = jsonMatch[1] || jsonMatch[0];
               const extractedData = JSON.parse(jsonStr);
               console.log('[processBOQWithAI.js] extractClauses: Successfully parsed JSON from AI response.');
-              return {
+              
+              // Process each category for response
+              const processedResponse = {
                 status: 1,
                 message: productName 
                   ? `Comprehensive information extracted successfully for ${productName}`
                   : 'Comprehensive information extracted successfully',
-                clauses: extractedData.clauses ? extractedData.clauses.map(clause => clause.text) : [] // Ensure clauses array exists
+                structuredData: {
+                  technicalSpecifications: extractedData.technicalSpecifications || [],
+                  clauses: extractedData.clauses || [],
+                  standards: extractedData.standards || [],
+                  notes: extractedData.notes || []
+                },
+                // Legacy format support - flatten all text content for backward compatibility
+                clauses: [
+                  // Technical specifications as text
+                  ...(extractedData.technicalSpecifications || []).map(spec => 
+                    `${spec.parameter}: ${spec.value}${spec.unit ? ' ' + spec.unit : ''}`
+                  ),
+                  // Clauses as text
+                  ...(extractedData.clauses || []).map(clause => 
+                    clause.id ? `${clause.id}: ${clause.text}` : clause.text
+                  ),
+                  // Standards as text
+                  ...(extractedData.standards || []).map(std => 
+                    std.description ? `${std.name}: ${std.description}` : std.name
+                  ),
+                  // Notes as is
+                  ...(extractedData.notes || [])
+                ]
               };
+              
+              console.log('[processBOQWithAI.js] extractClauses: Processed structured data with ' + 
+                          processedResponse.clauses.length + ' total items.');
+              return processedResponse;
             } catch (parseError) {
               console.error('[processBOQWithAI.js] extractClauses: Error parsing JSON from Gemini response:', parseError.message, 'Raw JSON string attempt:', jsonMatch[1] || jsonMatch[0]);
               return { status: 0, message: 'Failed to parse structured data from AI', error: parseError.message, clauses: [] };
@@ -234,11 +298,19 @@ const generativeAI = {
             console.warn('[processBOQWithAI.js] extractClauses: No JSON block found in AI response. Attempting manual line extraction.', `First 500 chars of AI response: ${textFromAI.substring(0,500)}`);
             const lines = textFromAI.split('\n').filter(line => line.trim().length > 0);
             const potentialClauses = lines.filter(line => line.length > 20 && !line.includes('```') && !line.startsWith('Here') && !line.startsWith('I will'));
+            
+            // Create a consistent structure even in fallback mode
             return {
               status: 1,
               message: productName 
                 ? `Information extracted (fallback) for ${productName}`
                 : 'Information extracted (fallback)',
+              structuredData: {
+                technicalSpecifications: [],
+                clauses: [{ text: 'Extracted in fallback mode (unstructured)' }],
+                standards: [],
+                notes: []
+              },
               clauses: potentialClauses
             };
           }
