@@ -2518,6 +2518,27 @@ WHERE tbl_product.name = $1`,
         });
     });
   },
+  productDetails: async (productId) => {
+    return new Promise(function (resolve, reject) {
+      let dynamicWhere = ``;
+
+      let q = `SELECT PV.*
+        FROM tbl_product_variant PV
+        WHERE PV.status = 1 AND PV.id = $1 ${dynamicWhere}`
+
+      db.any(
+        q,
+        [productId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   deleteProduct: async (productObj, productId) => {
     return new Promise(function (resolve, reject) {
       const condition = ` WHERE id = $1 RETURNING id`;
