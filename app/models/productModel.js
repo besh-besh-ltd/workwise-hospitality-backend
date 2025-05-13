@@ -3743,7 +3743,7 @@ getProductTechSpecByID: async (productId) => {
         `SELECT 
           m.id as mapping_id,
           m.product_variant_id as variant_id,
-          m.vendor_id,
+          JSON_BUILD_OBJECT('id', TU.id, 'name', TU.name, 'email', TU.email) AS vendor_details,
           m.status,
           m.created_at as mapped_at,
           v.is_approve,
@@ -3753,6 +3753,8 @@ getProductTechSpecByID: async (productId) => {
           p.name as product_name
         FROM 
           tbl_product_variant_vendor_mapping m
+        LEFT JOIN 
+          tbl_users TU on TU.id = m.vendor_id
         LEFT JOIN
           tbl_product_variant v ON v.id = m.product_variant_id
         LEFT JOIN

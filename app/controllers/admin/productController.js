@@ -3558,6 +3558,34 @@ const productController = {
       });
     }
   },
+  getVariantMappingById: async (req, res) => {
+    try {
+      // Changes by Agnij May 02, 2025 [Added pagination parameters]
+      const { 
+        id
+      } = req.params;
+      
+      
+      // Get mappings using the model function with all filters and pagination
+      const result = await productModel.getVariantVendorMappingById(
+        id
+      );
+      
+      
+      // Changes by Agnij May 02, 2025 [Fixed response format to ensure pagination is properly included]
+      return res.status(200).json({
+        status: 1,
+        data: result || [],
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to get variant-vendor mappings',
+        error: error.message
+      });
+    }
+  },
   // Changes by Agnij May 01, 2025 [Added approval function for variant-vendor mappings]
   approveMapping: async (req, res) => {
     try {
