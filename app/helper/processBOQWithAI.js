@@ -51,6 +51,11 @@ const generativeAI = {
           const modelName = 'gemini-1.5-flash-latest'; // Reverted for stability
           const model = genAI.getGenerativeModel({ model: modelName });
 
+          // Changes by Agnij 2024-05-14 [Strict product matching: inject product list into AI prompt]
+          // Fetch all approved product names for strict AI matching
+          const approvedProducts = await productModel.approvedProductList();
+          const approvedProductNames = approvedProducts.map(p => p.name);
+
           let prompt;
           if (productName) {
             prompt = `
@@ -58,14 +63,18 @@ const generativeAI = {
               
               TARGET PRODUCT: "${productName}"
               
-              **IMPORTANT FIRST STEP:** Before extracting any information, first assess if the overall document content is contextually relevant to the TARGET PRODUCT: "${productName}". 
-              - Contextual relevance means the document is primarily about the product or a very closely related concept. 
+              APPROVED PRODUCT LIST (for strict matching):
+              ${JSON.stringify(approvedProductNames)}
+              
+              **IMPORTANT FIRST STEP:** Before extracting any information, you MUST check if the document is contextually relevant to the TARGET PRODUCT: "${productName}" AND if the product described in the document matches (even with fuzzy logic, abbreviations, or pluralization) ANY product in the APPROVED PRODUCT LIST above.
+              - Contextual relevance means the document is primarily about the product or a very closely related concept.
               - For example, if the TARGET PRODUCT is 'flow meter', a document about 'flow gauge' or 'flow transmitter' IS contextually relevant.
               - However, if the TARGET PRODUCT is 'flow meter', a document primarily about 'flanges', 'pipes', or 'valves' IS NOT contextually relevant.
+              - You must use the APPROVED PRODUCT LIST to decide if the product matches. If there is no match (even with fuzzy/abbreviation/pluralization logic), DO NOT EXTRACT.
               
-              **IF THE DOCUMENT IS NOT CONTEXTUALLY RELEVANT TO THE TARGET PRODUCT, YOU MUST RETURN AN EMPTY "clauses" array in the JSON output like this: { "clauses": [] }. Do not proceed with extraction.**
+              **IF THE DOCUMENT IS NOT CONTEXTUALLY RELEVANT OR DOES NOT MATCH ANY PRODUCT IN THE APPROVED PRODUCT LIST, YOU MUST RETURN AN EMPTY "clauses" array in the JSON output like this: { "clauses": [] }. Do not proceed with extraction.**
               
-              **IF AND ONLY IF the document IS contextually relevant**, your task is to extract ALL information in its ORIGINAL STRUCTURE:
+              **IF AND ONLY IF the document IS contextually relevant AND matches a product in the APPROVED PRODUCT LIST**, your task is to extract ALL information in its ORIGINAL STRUCTURE:
               
               1. Extract the COMPLETE tables, forms, sections and maintain their EXACT structure and organization
               2. Preserve ALL information exactly as it appears in the document
@@ -134,7 +143,7 @@ const generativeAI = {
               - Put general notes, warnings, and procedural information in "notes"
               - If you're uncertain where an item belongs, put it in the most appropriate category
               - This array should be empty for any category with no relevant data
-              - If the document is not contextually relevant, ALL arrays should be empty
+              - If the document is not contextually relevant or does not match any product in the APPROVED PRODUCT LIST, ALL arrays should be empty
               
               Here is the document content:
               ${cleanedText}
@@ -221,11 +230,25 @@ const generativeAI = {
           }
 
           const resultFromAI = await model.generateContent(prompt);
-          
-                        // Changes by Agnij May 13, 2025 [Improved extraction of AI response]
-              const textFromAI = resultFromAI.response ? resultFromAI.response.text() : 
-                             (typeof resultFromAI.text === 'function' ? resultFromAI.text() : 
-                             (resultFromAI.text || JSON.stringify(resultFromAI)));
+          // After AI extraction, check if the original PDF text contains a strong match for the productName
+          const normalizedProduct = (productName || '').toLowerCase().replace(/s$/, '');
+          const normalizedText = cleanedText.toLowerCase();
+          // Simple plural/variant match: check for productName, productName+'s', and productName without trailing s
+          const productRegex = new RegExp(`\\b${normalizedProduct}(s)?\\b`, 'i');
+          if (!productRegex.test(normalizedText)) {
+            console.warn(`[processBOQWithAI.js] Post-AI filter: No strong match for product '${productName}' in document. Returning empty result.`);
+            return {
+              status: 0,
+              message: `No relevant information detected for product '${productName}' (post-AI filter)`,
+              clauses: [],
+              structuredData: { technicalSpecifications: [], clauses: [], standards: [], notes: [] }
+            };
+          }
+
+          // Changes by Agnij May 13, 2025 [Improved extraction of AI response]
+          const textFromAI = resultFromAI.response ? resultFromAI.response.text() : 
+                         (typeof resultFromAI.text === 'function' ? resultFromAI.text() : 
+                         (resultFromAI.text || JSON.stringify(resultFromAI)));
 
           console.log('[processBOQWithAI.js] extractClauses: Received response from AI, parsing JSON...');
           

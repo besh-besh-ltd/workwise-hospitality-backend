@@ -5477,11 +5477,15 @@ addClauseUsingFile : async (req, res) => {
     console.log('[rfqController.js] addClauseUsingFile: generativeAI.extractClauses result:', JSON.stringify(result, null, 2));
     
     if (!result.status) {
-      console.error('[rfqController.js] addClauseUsingFile: extractClauses failed. Message:', result.message, 'Error:', result.error);
+      // Changes by Agnij 2024-05-14 [Graceful user message for no relevant info]
+      let userMessage = result.message || "Failed to extract information";
+      if (userMessage.match(/no relevant information detected|no information detected/i)) {
+        userMessage = "No relevant information for this product was found in the uploaded document. Please ensure the document is for the selected product.";
+      }
       return res.json({
         status: 0,
-        message: result.message || "Failed to extract information",
-        errors: [{ Row: 0, error: result.error || "AI processing error" }]
+        message: userMessage,
+        errors: [{ Row: 0, error: userMessage }]
       });
     }
 
