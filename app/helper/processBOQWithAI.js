@@ -296,8 +296,8 @@ const generativeAI = {
             // More comprehensive filtering for potential clauses
             const potentialClauses = lines.filter(line => {
               return line.length > 20 && 
-                     !line.includes('```') && 
-                     !line.startsWith('Here') && 
+              !line.includes('```') &&
+              !line.startsWith('Here') &&
                      !line.startsWith('I will') &&
                      !line.startsWith('As an AI') &&
                      !line.startsWith('Based on');

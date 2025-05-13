@@ -227,7 +227,7 @@ const insertProduct = async (
       datasheet_file:"",// this field we have to remove from database
       qap
     };
-
+    
     let spec_array = spec?.map((item) => {
       item.rfq_id = created_rfq_id;
       item.product_variant_id = product_id;
@@ -456,7 +456,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
         token: token,
         productDetails: productDescriptions // Joining all product details into a single string for message
       };
-
+      
       await whatsappNotificationFluxChat.vendorReceivesRFQNotification(payloadForWhatsApp);
       }
       });
@@ -549,7 +549,7 @@ const sendMailtoVendors = async (req, rfqNumber) => {
       const vendorInfo = vendorProductMap[vendorId];
       try {
         await sendMailEachVendor(vendorInfo.vendorDetails, req.user, rfqNumber, vendorInfo.products);
-
+      
       } catch (error) {
         console.error(`Failed to send email to vendor ${vendorId}:`, error);
         throw error;
@@ -580,11 +580,11 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
     const containerContent = `<div>
       <p style="font-size: 15px; padding-bottom: 3px;">
       Your RFQ has been successfully shared with vendors. </p>
-
+      
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
        Click here to view
-      </a>
+      </a>      
     </div>`;
 
     const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
@@ -611,7 +611,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
 };
 
 const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_no) => {
-
+  
   const token = await rfqModel.getVendorRfqToken(user.id, rfq_id);
   const spocList = await vendorModel.getSpocDetails(user.id)
 
@@ -627,11 +627,11 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
                    </p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0]?.token || ""}"
-         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif;
-         text-align: center; padding: 10px 24px; display: block; border-radius: 9999px;
+         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; 
+         text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
          width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
         Track RFQ Status
-      </a>
+      </a>      
 
     </div>`;
 
@@ -660,7 +660,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
   const message = `Thank you for submitting your updated quotation for #${rfq_no}`
 
 
-  // Send notification message to vendor
+  // Send notification message to vendor 
     // here we have to implement await Promise.allSettled(promises); for better perfomance
     spocList.map(async (spoc) => {
       if (spoc.mobile) {
@@ -671,11 +671,11 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
         message:message,
         name:vendorName
       }
-
+    
       await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
     }
     })
-
+  
     // send message to vendor
     const whatsappPayload ={
       mobile:user.mobile,
@@ -683,16 +683,16 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
       rfq_id:rfq_id,
       message:message,
       name:vendorName
-    }
+    }  
     await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
-
-
+  
+  
 
 };
 
 
 const sendRevisedQuotationEmailToBuyer = async (buyerDetails, quoteItemChanges, user, rfq_id, rfq_no) => {
-
+  
 
   // Extract vendor details from user object
   const vendorName = user.organization_name || user?.name;
@@ -705,10 +705,10 @@ const productList = [...new Set(
 )];
 
 // Format the product list
-const formattedProducts = productList.length > 0
-  ? productList.slice(0, 2).join(', ') + (productList.length > 2 ? ', and more' : '')
+const formattedProducts = productList.length > 0 
+  ? productList.slice(0, 2).join(', ') + (productList.length > 2 ? ', and more' : '') 
   : '[Product 1], [Product 2], and more';
-
+  
 
   // Email content
   const headerContent = `<h2>Hello ${buyerDetails[0]?.organization_name || ''},</h2>`;
@@ -723,11 +723,11 @@ const formattedProducts = productList.length > 0
       <p><strong>Products:</strong> ${formattedProducts}</p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}"
-         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif;
-         text-align: center; padding: 10px 24px; display: block; border-radius: 9999px;
+         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; 
+         text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
          width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
          Compare Quote
-      </a>
+      </a>      
 
       <p style="margin-top:20px;">
         Stay updated with Workwise for more opportunities.
@@ -768,29 +768,29 @@ const sendQuoteNotificationToVendor = async (req) => {
   const {rfq_id, rfq_no} = req.body
   const { name, email, id, organization_name, mobile } = req.user;
   const token = await rfqModel.getVendorRfqToken(id, rfq_id);
-  const BuyerDetails = await rfqModel.getRFQCreatedBy(rfq_id)
-
+  const BuyerDetails = await rfqModel.getRFQCreatedBy(rfq_id) 
+  
   const headerContent = `<h2>Hello ${organization_name || name},</h2>`;
 
-  const containerContent = `
+  const containerContent = ` 
   <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
     <p>
       ${req.body.is_regret && req.body.is_regret == 1
         ? 'Your regret concern has been sent to the buyer.'
         : `<div>
-            <p>Thank you for submitting your quotation for <strong>#${rfq_no}</strong>.
+            <p>Thank you for submitting your quotation for <strong>#${rfq_no}</strong>. 
                We've shared it with <strong>${BuyerDetails[0]?.organization_name || ''}</strong>, who will review it and get back to you soon.</p>
-              <p><strong>Next Steps:</strong> Keep an eye out for any buyer queries or updates,
+              <p><strong>Next Steps:</strong> Keep an eye out for any buyer queries or updates, 
                and be ready to discuss terms to secure the order.</p>
 
-            <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}"
+            <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}" 
                style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                View RFQ Status
             </a>
           </div>`}
     </p>
   </div>`;
-
+  
     const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
   const spocList = await vendorModel.getSpocDetails(id)
@@ -828,7 +828,7 @@ const sendQuoteNotificationToVendor = async (req) => {
       message:message,
       name:organization_name || name
     }
-
+  
     await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
   }
   })
@@ -840,7 +840,7 @@ const sendQuoteNotificationToVendor = async (req) => {
     rfq_id:rfq_id,
     message:message,
     name:organization_name || name
-  }
+  }  
   await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
 
 };
@@ -854,7 +854,7 @@ const sendReminderRFQMAIL = async (vendoritem, remainingProducts, org_name,rfq_i
 
     const headerContent = `<h2>Hello ${vendorName},</h2>`;
 
-const containerContent = `
+const containerContent = ` 
        <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
          <p>
            This is a friendly reminder from <strong>${org_name}</strong> regarding the RFQ quotation. Ensure your quote is submitted on time to secure this opportunity.
@@ -867,25 +867,25 @@ const containerContent = `
             `<strong>${product.name}</strong><br>`
            ))}
          </p>
-
+       
          <p> <strong> Deadline: </strong> ${rfqBasicDetails?.bid_end_date || 'N/A'} </p>
-
+       
          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}"
             style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Submit Your Quote Now
          </a>
-
+       
          <p style="margin-top:20px; font-weight:bold; text-align:center">   Don't miss out on this opportunity!
          </p>
        </div>`;
 
   // console.log(containerContent)
-
+  
   const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
     const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
 
-
+    
     let mailRecipients = {
       from:  `${org_name} ${Config.masterEmail}`,
       subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
@@ -909,11 +909,11 @@ const containerContent = `
           buyerName: org_name,
           name: vendorName
         };
-
+    
         await whatsappNotificationFluxChat.sendQuoteReminderNotificationToVendor(whatsappPayloadSPOC);
       }
     });
-
+    
     const whatsappPayloadForVendor= {
       mobile:user_details[0].mobile,
       token:token[0].token,
@@ -974,7 +974,7 @@ const sendQuoteNotificationEmail = async (req) => {
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
             style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Review the Quotation
-        </a>
+        </a>      
 
         <p style="margin-top:20px; text-align:center; ">
           We're here to help you get the best deal.
@@ -997,7 +997,7 @@ const sendQuoteNotificationEmail = async (req) => {
       sendMail(mailRecipients);
 
       console.log(`Quotation update email sent to buyer: ${buyer.email}`);
-    }
+    } 
   }
 
 
@@ -1006,12 +1006,12 @@ const sendQuoteNotificationEmail = async (req) => {
     try {
       for (const vendor of vendorData) {
         const { vendor_name, vendor_email, spocs = [], token } = vendor;
-
+  
         // Skip if no main email and no spocs
         const validSpocEmails = spocs
         .map(spoc => spoc?.email)
         .filter(email => typeof email === 'string' && email.includes('@'));
-
+        
         const headerContent = `<h2>Hello ${vendor_name},</h2>`;
         const containerContent = `
           <p style="font-size: 15px;">
@@ -1022,15 +1022,15 @@ const sendQuoteNotificationEmail = async (req) => {
             View RFQ
           </a>
         `;
-
+  
         const html = generateEmailTemplate(headerContent, containerContent);
-
+  
         const mail = {
           from:  `${buyer_name} ${Config.masterEmail}`,
           subject: `RFQ #${rfq_no} Details has beed updated by ${buyer_name}`,
           html
         };
-
+  
 
         if (validSpocEmails.length > 0) {
           mail.to = validSpocEmails;
@@ -1048,7 +1048,7 @@ const sendQuoteNotificationEmail = async (req) => {
       throw err;
     }
   };
-
+  
 
 
 const sendWinningNotificaion = async (
@@ -1064,15 +1064,15 @@ const sendWinningNotificaion = async (
 
     const headerContent = `<h2>Hello ${winning_vendor_name || 'Mukul Vendor'},</h2>`;
 
-const containerContent = `
+const containerContent = ` 
 <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
   <p>
-    <strong>${rfQItem[0]?.company_name}</strong> has made a selection for
+    <strong>${rfQItem[0]?.company_name}</strong> has made a selection for 
     <strong>#${rfQItem[0]?.rfq_no} </strong>. We appreciate your participation and encourage you to stay active on Workwise for future opportunities.
   </p>
 
 
-  <h4> Product Details </h4>
+  <h4> Product Details </h4> 
   <ul>
   <li> <strong> Product Name </strong> ${winning_product[0]?.product_details[0]?.name}  </li>
   <li> <strong> Size </strong> ${winning_product[0]?.product_specs[0]?.value}  </li>
@@ -1202,8 +1202,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
       term_and_condition_files
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
-
-
+  
+  
   const rfqData = {
       comment,
       company_name,
@@ -1227,8 +1227,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
   await rfqModel.update('tbl_rfq', rfqData, rfq_id);
   await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id);
-
-
+  
+  
   // Only delete product-related records, preserve terms
   await Promise.all([
       rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }),
@@ -1245,10 +1245,10 @@ const saveRfqDraft = async (user_id, reqBody) => {
   if (terms && terms.length > 0) {
       // First delete existing terms
       await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id });
-
+      
       // Then insert new terms
-      const rfqTerms = terms.map(term => ({
-          rfq_id,
+      const rfqTerms = terms.map(term => ({ 
+          rfq_id, 
           terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
       }));
       await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
@@ -1269,7 +1269,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
         const insertResult = await insertProduct(product, rfq_id);
         const oldProductId = product.id;
         const newProductId = insertResult.product_info.id;
-
+  
         await updateRfqProductIdInTechEvaluation(oldProductId, newProductId);
       })
     );
@@ -1360,10 +1360,10 @@ const rfqController = {
         rfq_id: rfq_id,
         rfq_no: responseUpdate[0]?.rfq_no
       };
-
+  
       whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload);
       if (reverse_auction == 1) {
-
+        
         // FORCE set auction start date to today if not provided or empty
         if (!ra_start_date || ra_start_date === '') {
           ra_start_date = new Date().toISOString().split('T')[0];
@@ -1408,7 +1408,7 @@ const rfqController = {
 
       const data = req.body;
 
-      const rfq_id = data.rfq_id;
+      const rfq_id = data.rfq_id;   
       delete data.rfq_id; // Remove rfq_id from update fields
 
       // Explicitly handle potential empty strings from frontend, converting them to null
@@ -1432,7 +1432,7 @@ const rfqController = {
       } else {
         delete data.project_id; // Avoid updating with undefined/null
       }
-
+  
       // get rfq vendors list
       let vendors = await rfqModel.gerRFQVendors(rfq_id);
       let vendorIdList  = vendors.map(vendor => vendor.user_id);
@@ -1442,7 +1442,7 @@ const rfqController = {
 
       // get vendor details along with spoc
       const updatedData = await rfqModel.updateWithTimestamp('tbl_rfq', data, rfq_id);
-
+      
       const buyerName = updatedData?.[0]?.company_name ?? "-"
       const rfqNo = updatedData?.[0]?.rfq_no ?? "000000"
 
@@ -1455,7 +1455,7 @@ const rfqController = {
         rfqDetails:updatedData,
         message: 'RFQ updated successfully'
       });
-
+      
     } catch (error) {
       logError(error);
       console.log("ERROR --------- ", error)
@@ -1471,7 +1471,7 @@ const rfqController = {
 
   saveDraft: async (req, res) => {
     try {
-
+  
       const response = await saveRfqDraft(req.user.id, req.body);
 
       res.status(200).json({
@@ -1485,7 +1485,7 @@ const rfqController = {
         message: 'An error occurred while saving the draft'
       });
     }
-  },
+  },  
 
   getRFQDraftData: async (req, res) => {
     try {
@@ -1610,7 +1610,7 @@ const rfqController = {
         });
 
     } catch (error) {
-        logError("Error while creating or updating RFQ with products:", error);
+        logError("Error while creating or updating RFQ with products:", error);    
         res.status(500).json({
             status: 3,
             message: "An error occurred while processing your request"
@@ -1650,7 +1650,7 @@ const rfqController = {
         return res.status(500).json({ status: 3, message: "Internal server error." });
     }
   },
-
+ 
   getRfqDetailsById: async (req, res) => {
     try {
       const { rfq_id } = req.body;
@@ -1791,7 +1791,7 @@ const rfqController = {
 
     try {
       const { startDate, endDate } = getDateRange(chartFilter);
-      const rfq_data = await rfqModel.getRfqChartData(user_id, chartFilter, startDate, endDate, project_id);
+      const rfq_data = await rfqModel.getRfqChartData(user_id, chartFilter, startDate, endDate, project_id);        
 
       res
         .status(200)
@@ -1934,14 +1934,14 @@ const rfqController = {
 
       // Fix for auction dates - Enhanced logging and data transformation
       if (rfQItem && rfQItem.length > 0) {
-
+        
         // Ensure auction dates are properly formatted strings, not null/undefined
         if (rfQItem[0].reverse_auction === 1) {
           // If reverse auction is enabled but dates are empty, set default values
           if (!rfQItem[0].ra_start_date || rfQItem[0].ra_start_date === '' || rfQItem[0].ra_start_date === 'null') {
             rfQItem[0].ra_start_date = new Date().toISOString().split('T')[0];
           }
-
+          
           if (!rfQItem[0].ra_end_date || rfQItem[0].ra_end_date === '' || rfQItem[0].ra_end_date === 'null') {
             if (rfQItem[0].bid_end_date) {
               rfQItem[0].ra_end_date = rfQItem[0].bid_end_date;
@@ -1952,7 +1952,7 @@ const rfqController = {
               rfQItem[0].ra_end_date = endDate.toISOString().split('T')[0];
             }
           }
-
+          
           // Update the database with these defaults if they were missing
           if (rfQItem[0].ra_start_date && rfQItem[0].ra_end_date) {
             try {
@@ -1969,7 +1969,7 @@ const rfqController = {
           rfQItem[0].ra_start_date = '';
           rfQItem[0].ra_end_date = '';
         }
-
+        
       }
 
       if (req.user.user_type != 2) {
@@ -2270,13 +2270,13 @@ const rfqController = {
               })
               .end();
           }
-
+          
           const now = new Date();
           const bidEndDate = rfqDetails[0].bid_end_date ? new Date(rfqDetails[0].bid_end_date) : null;
           const raStartDate = rfqDetails[0].ra_start_date ? new Date(rfqDetails[0].ra_start_date) : null;
           const raEndDate = rfqDetails[0].ra_end_date ? new Date(rfqDetails[0].ra_end_date) : null;
           const isReverseAuction = rfqDetails[0].reverse_auction === 1;
-
+          
           // Create end of day date for bid end date (to match frontend logic)
           const bidEndDateEndOfDay = bidEndDate ? new Date(bidEndDate.getFullYear(), bidEndDate.getMonth(), bidEndDate.getDate(), 23, 59, 59, 999) : null;
 
@@ -2290,7 +2290,7 @@ const rfqController = {
               })
               .end();
           }
-
+          
           // Check if reverse auction is active (second priority)
           const isReverseAuctionActive = isReverseAuction && raStartDate && raEndDate && now >= raStartDate && now <= raEndDate;
 
@@ -2303,13 +2303,13 @@ const rfqController = {
             // Check if all products are finalized
             const productsFinalized = await rfqModel.checkAllProductsFinalized(rfq_id, user.id);
             if (productsFinalized) {
-              return res
-                .status(400)
-                .json({
-                  status: 3,
+            return res
+              .status(400)
+              .json({
+                status: 3,
                   message: 'All Products are Finalized'
-                })
-                .end();
+              })
+              .end();
             }
 
             // Check if past bid end date
@@ -2612,7 +2612,7 @@ const rfqController = {
             const projectID = rfqDetails[0]?.project_id
             const projectDetails = await projectModel.getProjectTableDataById(projectID, buyerDetails[0]?.id)
 
-
+            
             const payload = {
               mobile:buyerDetails[0]?.mobile,
               rfqNumber:rfq_no,
@@ -2621,7 +2621,7 @@ const rfqController = {
               vendorName:req?.user?.name,
               buyerName:buyerDetails[0]?.name
             }
-
+     
             await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(payload);
 
 
@@ -2674,7 +2674,7 @@ const rfqController = {
   },
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const {TA_Vendors} =req.query
+    const {TA_Vendors} =req.query 
     const { id } = req.user;
 
     try {
@@ -2733,17 +2733,17 @@ const rfqController = {
   },
   downloadQuoteResultsProductWise: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const {TA_Vendors} = req.query
+    const {TA_Vendors} = req.query 
 
     const { id } = req.user;
 
     try {
       let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, TA_Vendors);
-
+      
       rfQItem.forEach(product => {
         const vendorMap = new Map();
         product.all_vendors.forEach(vendor => vendorMap.set(vendor.id, vendor));
-
+    
         const updatedQuotations = product.all_vendors.map(vendor => {
             const existingQuote = product.quotations.find(q => q.created_by === vendor.id);
             if (existingQuote) {
@@ -2763,12 +2763,12 @@ const rfqController = {
                 };
             }
         });
-
+    
         product.quotations = updatedQuotations;
     });
-
-
-
+    
+      
+      
       // rfQItem = processQuotCompare(rfQItem);
 
       // let rfqDATA = [];
@@ -2850,7 +2850,7 @@ const rfqController = {
   closeRFQ: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { id , organization_name , name} = req.user;
-
+  
 
     try {
 
@@ -2890,7 +2890,7 @@ const rfqController = {
         };
         sendMail(buyerMailRecipients);
 
-
+        
 
          // Send email to all vendors and their SPOCs
          console.log("vendorList ", vendorList)
@@ -2904,7 +2904,7 @@ const rfqController = {
          The RFQ for <strong>${rfQItem[0]?.rfq_no}</strong> has been marked as closed by the buyer.<br>
          Thank you for your participation, and we look forward to more opportunities to work with you.<br>
          <br>
-
+         
          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}"
             style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Explore New RFQs
@@ -2913,13 +2913,13 @@ const rfqController = {
          <p>
           Tip: Regularly check for new RFQs to stay ahead and grow your business through Workwise.
          </p>
-
+ 
          </div>`
 
          const dynamicHTMLVendor = generateEmailTemplate(headerContentVendor, vendorContainerContent);
 
           const spocList = vendor.spocs;
-
+        
             let mailRecipients ={
               from: `${organization_name} ${Config.masterEmail}`,
               subject: `RFQ Marked as Closed for #${rfQItem[0]?.rfq_no}`,
@@ -2934,8 +2934,8 @@ const rfqController = {
             }
 
              sendMail(mailRecipients);
-          }
-
+          }       
+        
 
 
       res
@@ -2963,8 +2963,8 @@ const rfqController = {
     try {
 
       // const date = new Date('2024-11-28').toISOString().slice(0, 10);  // Format, YYYY-MM-DD
-      const date = new Date().toISOString().slice(0, 10);
-
+      const date = new Date().toISOString().slice(0, 10); 
+  
       const lastActivity = await rfqModel.getRFQActivity(rfq_id, id, date);
 
       if ( lastActivity?.length > 2) {
@@ -2999,13 +2999,13 @@ const rfqController = {
           vendors.map(async (vendor) => {
             const vendorProducts = await rfqModel.getVendorProductsCount(rfq_id, vendor.user_id);
             const vendorProductsQuoted = await rfqModel.getVendorProductsQuoted(rfq_id, vendor.user_id);
-
+      
             const requiredCount = vendorProducts.length;
             const quotedCount = vendorProductsQuoted.length;
-
+      
             const isUnmatched =
               !createdByIds.has(vendor.user_id) || requiredCount !== quotedCount;
-
+      
             return isUnmatched ? {
               vendor,
               remainingProducts: vendorProducts.filter(product => !vendorProductsQuoted.some(_product => _product.product_id == product.product_id))
@@ -3013,7 +3013,7 @@ const rfqController = {
           })
         )
       ).filter(Boolean);
-
+      
       vendors = unmatchedVendors;
       let org_name = organization_name ? organization_name : name;
 
@@ -3055,8 +3055,8 @@ const rfqController = {
         })
         .end();
     }
-  },
-
+  },  
+  
   finalize: async (req, res, next) => {
     const { organization_name, name } = req.user;
     const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, variant } = req.body;
@@ -3086,8 +3086,8 @@ const rfqController = {
         winning_vendor_email
       ) {
         // changes by Mukul Jatav 30-08-2024
-        // removed  AND quote_id=${quote_id} condition from query,
-        // return 09 Conflict status code if vendor already exist for same product + variant,
+        // removed  AND quote_id=${quote_id} condition from query, 
+        // return 09 Conflict status code if vendor already exist for same product + variant, 
 
         let alreadyExists = await rfqModel.checkIfExists(
           'tbl_quote_finalization',
@@ -3226,7 +3226,7 @@ const rfqController = {
       const category_id = req.body?.category_id ? req.body?.category_id : '';
 
       const subCategoryList = await rfqModel.getSubcategories(category_id)
-
+   
       if(!subCategoryList || subCategoryList?.length==0){
         return res
         .status(404)
@@ -3288,7 +3288,7 @@ const rfqController = {
     prevWorkedWith = req.body?.prevWorkedWith ? req.body?.prevWorkedWith : '';
     myVendorType = req.body?.myVendorType ? req.body?.myVendorType : '';
     let vendor_name = req.body.vendor_name;
-
+    
     // If user is not logged in
     if (!req.is_verified) {
       try {
@@ -4796,7 +4796,7 @@ const rfqController = {
       const validationErrors = [];
 
 
-      // run loop on excel data
+      // run loop on excel data 
       for await (const value of boqDataJson?.productList) {
 
         // trim all inputs
@@ -4856,7 +4856,7 @@ const rfqController = {
             "",
             "",
             "",
-          );
+          );  
         }
 
         // if no vendor found for the product, push error in validation array
@@ -4928,7 +4928,7 @@ const rfqController = {
         term_and_condition_files:[],
       };
 
-
+     
       // Delete the uploaded file to save space
       // fs.unlinkSync(file.path);
 
@@ -4987,18 +4987,18 @@ const rfqController = {
       // Get RFQ details to check dates
       const rfqDetails = await rfqModel.getRFQDetails(quoteExists[0].rfq_id);
       if (!rfqDetails || rfqDetails.length === 0) {
-        return res.status(404).json({
+        return res.status(404).json({ 
           status: 0,
-          message: 'RFQ not found!'
+          message: 'RFQ not found!' 
         });
       }
-
+      
       const now = new Date();
       const bidEndDate = rfqDetails[0].bid_end_date ? new Date(rfqDetails[0].bid_end_date) : null;
       const raStartDate = rfqDetails[0].ra_start_date ? new Date(rfqDetails[0].ra_start_date) : null;
       const raEndDate = rfqDetails[0].ra_end_date ? new Date(rfqDetails[0].ra_end_date) : null;
       const isReverseAuction = rfqDetails[0].reverse_auction === 1;
-
+      
       // Create end of day date for bid end date (to match frontend logic)
       const bidEndDateEndOfDay = bidEndDate ? new Date(bidEndDate.getFullYear(), bidEndDate.getMonth(), bidEndDate.getDate(), 23, 59, 59, 999) : null;
 
@@ -5033,7 +5033,7 @@ const rfqController = {
           // Different messages based on reverse auction status
           let message = 'Bidding Period has Ended';
 
-          if (isReverseAuction) {
+      if (isReverseAuction) {
             if (raEndDate && now > raEndDate) {
               message = 'Reverse Auction has Ended';
             } else if (raStartDate && now < raStartDate) {
@@ -5137,7 +5137,7 @@ const rfqController = {
       }
 
       if(status){
-        const buyerDetails =  await rfqModel.getRFQCreatedBy(rfq_id)
+        const buyerDetails =  await rfqModel.getRFQCreatedBy(rfq_id) 
         await sendRevisedQuotationEmailToVendor(buyerDetails, user, rfq_id, rfq_no)
         await sendRevisedQuotationEmailToBuyer(buyerDetails, quoteItemChanges, user, rfq_id, rfq_no)
       }
@@ -5266,18 +5266,18 @@ sendQueryMessage: async (req, res) => {
                    `${senderDetails?.organization_name || senderDetails?.name} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`:
                     `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
                 </div>
-
+                              
                <h4> Query </h4>
                 <blockquote style='border-left:3px solid #203367; font-size:16px; margin:10px 0; margin-top:-10px; padding-left:15px; padding:10px; border-radius:10px; background-color:#eef3f6; color:#333333; margin-bottom:30px;'>
                   ${message_text}
                 </blockquote>
-
+              
                 <a href=${process.env.FRONT_END_WEBSITE}/dashboard/${sender_type == 2 ? "buyer" : "vendor"}/query?rfq_id=${rfq_id}&role=${sender_type == 2 ? "buyer" : "vendor"}
                   style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                   Respond to Query
                 </a>
-
-                <p style="font-size:16px; text-align:center;">
+              
+                <p style="font-size:16px; text-align:center;">  
                   ${sender_type == 2 ?
                     "Your quick response can help avoid delays!" :
                     "Thank you for helping ensure a smooth, transparent process."
@@ -5295,16 +5295,16 @@ sendQueryMessage: async (req, res) => {
       subject: emailSubject,
       html: dynamicHTML
     };
-
+    
     if (spocList && spocList.length > 0) {
       mailRecipients.to = spocList.map(spoc => spoc.email);
       mailRecipients.cc = receiverDetails.email;
     } else {
       mailRecipients.to = receiverDetails.email;
     }
-
+    
     sendMail(mailRecipients);
-
+    
     const notificationData = {
       type: 'New Message',
       title: 'New RFQ Message Received',
@@ -5317,7 +5317,7 @@ sendQueryMessage: async (req, res) => {
     };
     const ss = JSON.parse(receiverDetails.endpoint);
     sendNotification(receiver_id, '', notificationData, payload, ss);
-
+    
     }
 
     res
@@ -5664,7 +5664,7 @@ addTechComment: async (req, res) => {
   try{
     const { clause_id, sender_id, receiver_id, text, file_url } = req.body;
 
-    // Save tech comment
+    // Save tech comment 
     const response = await rfqModel.addTechComment(clause_id, sender_id, receiver_id, text, file_url);
     res
       .status(200)
@@ -5814,7 +5814,7 @@ getVendorResponses: async (req, res) => {
 getTechEvaluationRFQDetails: async (req, res) => {
   try {
 
-    const user_id = req.user.id;
+    const user_id = req.user.id;    
 
     let {rfq_no, project_id} = req.body;
 
@@ -6048,7 +6048,7 @@ processBoqAndDownload : async (req, res) => {
       mail_sent: true
     })
     .end();
-
+    
   } catch (error) {
     logError(error);
       res
