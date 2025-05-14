@@ -2350,8 +2350,6 @@ const rfqController = {
 
           // Check if technical evaluation is required for any products and if vendor is accepted
           if (isReverseAuction && products && products.length > 0) {
-            // For each product, check if it has technical evaluation and if the vendor is accepted
-            // Changes by Agnij 2024-06-14 [Enhanced validation to check all products]
             let rejectedProducts = [];
             
             for (const product of products) {

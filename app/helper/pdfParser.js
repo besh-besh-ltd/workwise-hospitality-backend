@@ -1,10 +1,10 @@
-// Changes by Agnij 2024-05-14 [Enhanced PDF parser with more robust extraction]
+// Changes by Agnij 2025-05-14 [Enhanced PDF parser with more robust extraction]
 import pkg from 'pdfjs-dist';
 const { getDocument } = pkg;
 import { logError } from './common.js';
 import fs from 'fs';
 import path from 'path';
-// Changes by Agnij 2024-05-14 [Fix module import error]
+// Changes by Agnij 2025-05-14 [Fix module import error]
 // Removed TypeScript type import that doesn't exist as JS module
 
 // Set up worker source path for Node environment
@@ -25,7 +25,7 @@ const safeLogError = (message) => {
   console.error('PDF Parser Error:', message);
 };
 
-// Changes by Agnij May 14, 2024 [Enhanced PDF parser with better grouping of related clauses]
+// Changes by Agnij May 14, 2025 [Enhanced PDF parser with better grouping of related clauses]
 const pdfParser = {
   /**
    * Parse a PDF buffer and extract text content with preserved formatting and better clause grouping
@@ -464,7 +464,7 @@ const pdfParser = {
       }
       cleaned = uniqueLines.join('\n');
       
-      // Changes by Agnij 2024-05-14 [Robust value range normalization for all parameters]
+      // Changes by Agnij 2025-05-14 [Robust value range normalization for all parameters]
       // Normalize all value ranges (e.g., 964-1060.4, 10-20, 5.5-7.8) into min/normal/max format
       cleaned = cleaned.replace(/(\b\w+\b)[^\S\r\n]*[:=]?[^\S\r\n]*([\d\.]+)\s*-\s*([\d\.]+)/g, (match, param, minOrNor, max) => {
         // If minOrNor and max are both numbers, format as min / nor / max

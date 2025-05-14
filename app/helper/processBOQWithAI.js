@@ -156,11 +156,8 @@ const generativeAI = {
               const jsonStr = jsonMatch[1] || jsonMatch[0];
               const extractedData = JSON.parse(jsonStr);
               
-              // Changes by Agnij 2024-05-14 [Refactor AI clause extraction for maintainability]
-              // Simplified clause flattening logic, removed groupClauses, titleCase, and structuredClauses generation.
               let flattenedClauses = [];
               const aiData = extractedData;
-
               // Technical Specifications
               (aiData.technicalSpecifications || []).forEach(item => {
                 if (typeof item === 'string') flattenedClauses.push(item);
@@ -236,8 +233,6 @@ const generativeAI = {
               return {
                 status: 1,
                 message: `Comprehensive information extracted successfully for ${productName}`,
-                // Changes by Agnij 2024-05-14 [Refactor AI clause extraction for maintainability]
-                // Simplified structuredData to return only AI's direct output
                 structuredData: { ...extractedData },
                 clauses: flattenedClauses
               };
