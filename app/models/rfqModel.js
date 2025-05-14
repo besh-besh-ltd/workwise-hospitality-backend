@@ -3598,19 +3598,72 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
 
-  // addTechnicalEveluation: async(RFQ_ID, Tbl_rfq_product_ID) =>{
-  //   console.log("rfqid idd",RFQ_ID, Tbl_rfq_product_ID)
-  //   const query ='INSERT INTO Tbl_rfq_product_tech_evaluation (RFQ_ID, Tbl_rfq_product_ID) VALUES ($1, $2) RETURNING *';;
-  //   return new Promise((resolve, reject) => {
-  //     db.query(query, [RFQ_ID, Tbl_rfq_product_ID])
-  //       .then(result => {
-  //         resolve(result);
-  //       })
-  //       .catch(error => {
-  //         reject(new Error(error));
-  //       });
-  //   });
-  // },
+  // Changes by Agnij 2025-05-14 [Add bulk clause insertion]
+  addManyClauses: async (rfq_id, rfq_product_id, clauses) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        // Validate RFQ and Product existence
+        const validateRfqQuery = 'SELECT id FROM tbl_rfq WHERE id = $1';
+        const validateProductQuery = 'SELECT id FROM tbl_rfq_products WHERE id = $1';
+        
+        const [rfqExists, productExists] = await Promise.all([
+          db.oneOrNone(validateRfqQuery, [rfq_id]),
+          db.oneOrNone(validateProductQuery, [rfq_product_id])
+        ]);
+
+        if (!rfqExists) {
+          return resolve({ status: 0, message: `RFQ with ID ${rfq_id} does not exist.` });
+        }
+        if (!productExists) {
+          return resolve({ status: 0, message: `RFQ Product with ID ${rfq_product_id} does not exist.` });
+        }
+
+        // Get or create tech evaluation record
+        const techEvalQuery = `
+          INSERT INTO tbl_rfq_product_tech_evaluation (rfq_id, tbl_rfq_product_id, timestamp)
+          VALUES ($1, $2, NOW())
+          ON CONFLICT (rfq_id, tbl_rfq_product_id) DO UPDATE 
+          SET timestamp = NOW()
+          RETURNING id`;
+        
+        const techEval = await db.one(techEvalQuery, [rfq_id, rfq_product_id]);
+        const techEvalId = techEval.id;
+
+        // Prepare bulk clause insertion
+        const clauseValues = clauses.map(clause => ({
+          tbl_rfq_product_tech_evaluation_id: techEvalId,
+          clause_text: clause,
+          timestamp: new Date()
+        }));
+
+        // Use pgp.helpers.insert for efficient bulk insertion
+        const cs = new pgp.helpers.ColumnSet([
+          'tbl_rfq_product_tech_evaluation_id',
+          'clause_text',
+          'timestamp'
+        ], { table: 'tbl_rfq_product_tech_evaluation_clauses' });
+
+        const insertQuery = pgp.helpers.insert(clauseValues, cs) + ' RETURNING id';
+        
+        const insertedClauses = await db.many(insertQuery);
+
+        resolve({
+          status: 1,
+          message: 'Clauses added successfully',
+          inserted: insertedClauses.length,
+          total: clauses.length
+        });
+
+      } catch (error) {
+        console.error('Error in addManyClauses:', error);
+        resolve({
+          status: 0,
+          message: 'Error adding clauses',
+          error: error.message
+        });
+      }
+    });
+  },
 
   addClause: async (rfq_id, rfq_product_id, clause_text, file_url) => {
     // console.log("values in add clause model", rfq_id, rfq_product_id, clause_text, file_url);
