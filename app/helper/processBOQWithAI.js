@@ -8,8 +8,34 @@ const { Readable } = pkg;
 import fs from 'fs';
 import FormData from 'form-data';
 import path from 'path';
-import pdfParser from './pdfParser.js';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+const PDFParser = (await import('pdf2json')).PDFParser || (await import('pdf2json')).default;
+
+
+function extractTextFromPDF(buffer) {
+  return new Promise((resolve, reject) => {
+    const pdfParser = new PDFParser();
+
+    pdfParser.on("pdfParser_dataError", err => reject(err.parserError));
+    pdfParser.on("pdfParser_dataReady", pdfData => {
+      const pages = pdfData?.Pages || pdfData?.formImage?.Pages;
+      if (!pages) return reject(new Error("Unable to extract PDF pages"));
+
+      let text = '';
+      pages.forEach(page => {
+        page.Texts.forEach(t => {
+          const line = t.R.map(r => decodeURIComponent(r.T)).join('');
+          text += line + ' ';
+        });
+        text += '\n';
+      });
+
+      resolve(text.trim());
+    });
+
+    pdfParser.parseBuffer(buffer);
+  });
+}
+
 
 const generativeAI = {
   extractClauses: async (file, productName = null) => {
@@ -21,10 +47,7 @@ const generativeAI = {
         const key = decodeURIComponent(s3Url.pathname).slice(1);
         const command = new GetObjectCommand({ Bucket: bucket, Key: key });
         const result = await s3Client.send(command);
-        const webStream = Readable.toWeb(result.Body);
-        const response = new Response(webStream);
-        const arrayBuffer = await response.arrayBuffer();
-        buffer = Buffer.from(arrayBuffer);
+        buffer = Buffer.from(await result.Body.transformToByteArray());
       } else if (file.path) {
         buffer = fs.readFileSync(file.path);
       } else if (file.buffer) {
@@ -34,220 +57,78 @@ const generativeAI = {
       }
 
       const fileExt = path.extname(file.originalname || file.filename).toLowerCase();
-      
-      if (fileExt === '.pdf') {
-        try {
-          const pdfText = await pdfParser.extractText(buffer);
-          const cleanedText = pdfParser.cleanText(pdfText);
+      if (fileExt !== '.pdf') throw new Error('Only PDF files are supported');
 
-          const apiKey = process.env.GOOGLE_AI_API_KEY;
-          if (!apiKey) {
-            throw new Error('Google AI API Key is not configured');
-          }
-          const genAI = new GoogleGenerativeAI(apiKey);
-          const modelName = 'gemini-1.5-flash'; // Reverted for stability
-          const model = genAI.getGenerativeModel({ model: modelName });
-
-          let prompt = `
-You are a specialized engineering AI expert tasked with extracting comprehensive technical and commercial information from engineering documents.
-              
-              TARGET PRODUCT: "${productName}"
-              
-            # DOCUMENT ANALYSIS TASK:
-            Extract ALL technical specifications, commercial terms, quality standards, inspection requirements, notes, and conditions from the document.
-            Focus specifically on information related to "${productName}" and similar products.
-            
-            # EXTRACTION GUIDELINES:
-            1. PRESERVE ORIGINAL SENTENCES: Maintain the original sentence structure and phrasing. 
-                Do not split natural sentences into parameter/value pairs if they're already written as complete statements.
-            2. COMPREHENSIVE EXTRACTION: Extract ALL information - nothing should be missed.
-            3. STRUCTURED OUTPUT: Group information into appropriate categories.
-            4. MAINTAIN RELATIONSHIPS: Preserve relationships between parameters and values.
-            5. TABLE EXTRACTION: Reconstruct tables where applicable.
-            6. UNITS: Always include measurement units where available.
-            
-            # EXTRACTION CATEGORIES:
-            - technicalSpecifications: All technical parameters, specifications, dimensions, materials, etc.
-                For complete sentence specifications (e.g., "Mounting brackets shall be carbon steel"), keep these as full sentences in a "text" field.
-            - commercialRequirements: Pricing, payment terms, delivery requirements, etc.
-            - standards: Applicable codes, standards, certifications, compliances
-            - inspectionRequirements: Testing, inspection, quality control requirements
-            - notes: Important notes, warnings, exclusions, clarifications
-            - tables: Any tabular data in the document
-            - attachments: References to required attachments or documents
-            
-            # OUTPUT FORMAT:
-            Return a JSON object with this structure:
-            {
-              "technicalSpecifications": [
-                {"parameter": "param name", "value": "param value", "unit": "unit if any"},
-                {"text": "complete sentence specification like 'Mounting brackets shall be carbon steel'"}
-              ],
-              "commercialRequirements": [{"parameter": "param name", "value": "param value"}],
-              "standards": [{"standard": "standard name", "description": "description if any"}],
-              "inspectionRequirements": [{"requirement": "requirement name", "description": "description if any"}],
-              "notes": [{"note": "note text"}],
-              "tables": [{"title": "table title", "headers": ["col1", "col2"], "rows": [["val1", "val2"], ["val3", "val4"]]}],
-              "attachments": [{"name": "attachment name", "description": "description if any"}]
-            }
-            
-            # STRICT RULE:
-            ONLY respond with valid JSON in the exact format specified above, enclosed in triple backticks.
-            Do not include any explanations or other text outside the JSON.
-            
-            Document text:
-              ${cleanedText}`;
-
-          try {
-            const result = await model.generateContent(prompt);
-            
-            const resultFromAI = result.response;
-            
-            // Changes by Agnij May 13, 2025 [Improved extraction of AI response]
-            const textFromAI = resultFromAI.response ? resultFromAI.response.text() : 
-                           (typeof resultFromAI.text === 'function' ? resultFromAI.text() : 
-                           (resultFromAI.text || JSON.stringify(resultFromAI)));
-            
-            
-            const jsonMatch = textFromAI.match(/```json\n([\s\S]*?)\n```/) || 
-                            textFromAI.match(/```\n([\s\S]*?)\n```/) || 
-                            textFromAI.match(/{[\s\S]*?}/);
-                            
-            if (jsonMatch) {
-              try {
-                const jsonStr = jsonMatch[1] || jsonMatch[0];
-                const extractedData = JSON.parse(jsonStr);
-                
-                let flattenedClauses = [];
-                const aiData = extractedData;
-                // Technical Specifications
-                (aiData.technicalSpecifications || []).forEach(item => {
-                  if (typeof item === 'string') flattenedClauses.push(item);
-                  else if (item && item.text) flattenedClauses.push(item.text);
-                  else if (item && item.parameter && item.value) flattenedClauses.push(`${item.parameter}: ${item.value}${item.unit ? ' ' + item.unit : ''}`);
-                  else if (item && item.parameter) flattenedClauses.push(`${item.parameter}: ${item.value || 'N/A'}${item.unit ? ' ' + item.unit : ''}`);
-                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-                });
-
-                // Commercial Requirements
-                (aiData.commercialRequirements || []).forEach(item => {
-                  if (typeof item === 'string') flattenedClauses.push(item);
-                  else if (item && item.parameter && item.value) flattenedClauses.push(`${item.parameter}: ${item.value}`);
-                  else if (item && item.parameter) flattenedClauses.push(`${item.parameter}: ${item.value || 'N/A'}`);
-                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-                });
-
-                // Standards
-                (aiData.standards || []).forEach(item => {
-                  if (typeof item === 'string') flattenedClauses.push(item);
-                  else if (item && item.standard) flattenedClauses.push(`${item.standard}${item.description ? ' - ' + item.description : ''}`);
-                  else if (item && item.name) flattenedClauses.push(`${item.name}${item.description ? ' - ' + item.description : ''}`);
-                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-                });
-
-                // Inspection Requirements
-                (aiData.inspectionRequirements || []).forEach(item => {
-                  if (typeof item === 'string') flattenedClauses.push(item);
-                  else if (item && item.requirement) flattenedClauses.push(`${item.requirement}${item.description ? ' - ' + item.description : ''}`);
-                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-                });
-
-                // Notes
-                (aiData.notes || []).forEach(item => {
-                  if (typeof item === 'string') flattenedClauses.push(item);
-                  else if (item && item.note) flattenedClauses.push(item.note);
-                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-                });
-
-                // Tables
-                (aiData.tables || []).forEach((table, index) => {
-                  if (table && typeof table === 'object') {
-                    let tableText = table.title ? `${table.title}\n\n` : `Table ${index + 1}\n`;
-                    if (table.headers && Array.isArray(table.headers) && table.headers.length > 0) {
-                      tableText += table.headers.join(' | ') + '\n';
-                      tableText += table.headers.map(() => '---').join(' | ') + '\n';
-                    }
-                    if (table.rows && Array.isArray(table.rows)) {
-                      table.rows.forEach(row => {
-                        if (Array.isArray(row)) tableText += row.join(' | ') + '\n';
-                      });
-                    }
-                    // Add tableText to flattenedClauses only if it contains more than just the initial title
-                    const initialTitleOnly = table.title ? `${table.title}\n\n` : `Table ${index + 1}\n`;
-                    if (tableText.trim() !== initialTitleOnly.trim() && tableText.trim() !== '') {
-                        flattenedClauses.push(tableText.trim());
-                    }
-                  } else if (typeof table === 'string') {
-                    flattenedClauses.push(table);
-                  }
-                });
-
-                // Attachments
-                (aiData.attachments || []).forEach(item => {
-                  if (typeof item === 'string') flattenedClauses.push(item);
-                  else if (item && item.name) flattenedClauses.push(`Attachment: ${item.name}${item.description ? ' - ' + item.description : ''}`);
-                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-                });
-                
-                // Remove empty or whitespace-only strings and ensure uniqueness
-                flattenedClauses = [...new Set(flattenedClauses.map(c => c.trim()).filter(c => c !== ""))];
-                
-                return {
-                  status: 1,
-                  message: `Comprehensive information extracted successfully for ${productName}`,
-                  structuredData: { ...extractedData },
-                  clauses: flattenedClauses
-                };
-              } catch (parseError) {
-                return { status: 0, message: 'Failed to parse structured data from AI', error: parseError.message, clauses: [] };
-              }
-            } else {
-
-              // Better line extraction that preserves more structure
-              const lines = textFromAI.split('\n').filter(line => line.trim().length > 0);
-              
-              // More comprehensive filtering for potential clauses
-              const potentialClauses = lines.filter(line => {
-                return line.length > 20 && 
-                !line.includes('```') &&
-                !line.startsWith('Here') &&
-                       !line.startsWith('I will') &&
-                       !line.startsWith('As an AI') &&
-                       !line.startsWith('Based on');
-              });
-              
-              
-              // Create a consistent structure even in fallback mode
-              const fallbackResponse = {
-                status: 1,
-                message: productName 
-                  ? `Information extracted (fallback) for ${productName}`
-                  : 'Information extracted (fallback)',
-                structuredData: {
-                  technicalSpecifications: [],
-                  clauses: potentialClauses.map((text, idx) => ({ id: `F${idx+1}`, text })), // Add IDs to fallback clauses
-                  standards: [],
-                  notes: []
-                },
-                clauses: potentialClauses
-              };
-              
-              return fallbackResponse;
-            }
-          } catch (aiProcessingError) {
-            const errorMessage = aiProcessingError.message || aiProcessingError.toString();
-            return { status: 0, message: 'Error processing AI response', error: errorMessage, clauses: [] };
-          }
-        } catch (pdfProcessingError) {
-          const errorMessage = pdfProcessingError.message || pdfProcessingError.toString();
-          return { status: 0, message: 'Error processing PDF with AI', error: errorMessage, clauses: [] };
-        }
-      } else {
-        throw new Error('Unsupported file format. Please upload PDF files only.');
+      // ✅ extract text using pdf2json
+      const pdfText = await extractTextFromPDF(buffer);
+      if (!pdfText || pdfText.trim().length < 50) {
+        return { status: 0, message: 'Extracted text is too short or empty.' };
       }
-    } catch (mainError) {
-      logError(mainError);
-      return { status: 0, message: 'Error processing file with AI', error: mainError.message, clauses: [] };
+
+      const apiKey = process.env.GOOGLE_AI_API_KEY;
+      if (!apiKey) throw new Error('Google AI API Key is not configured');
+
+      const prompt = `
+You are a specialized engineering AI expert tasked with extracting comprehensive technical and commercial information from engineering documents.
+
+TARGET PRODUCT: "${productName}"
+
+# DOCUMENT ANALYSIS TASK:
+xtract ALL technical specifications, commercial terms, quality standards, inspection requirements, notes, and conditions from the document.
+Focus specifically on information related to "${productName}" and similar products.
+
+# OUTPUT FORMAT:
+\`\`\`json
+{
+  "technicalSpecifications": [{"parameter": "param", "value": "value", "unit": "unit"}, {"text": "sentence"}],
+  "commercialRequirements": [{"parameter": "name", "value": "value"}],
+  "standards": [{"standard": "name", "description": "desc"}],
+  "inspectionRequirements": [{"requirement": "req", "description": "desc"}],
+  "notes": [{"note": "text"}],
+  "tables": [{"title": "title", "headers": ["h1", "h2"], "rows": [["v1","v2"]]}],
+  "attachments": [{"name": "doc name", "description": "desc"}]
+}
+\`\`\`
+
+ONLY return the JSON inside triple backticks. No extra commentary.
+
+Document text:
+${pdfText}
+`;
+
+      const response = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+        {
+          contents: [{ parts: [{ text: prompt }] }]
+        },
+        {
+          headers: { 'Content-Type': 'application/json' }
+        }
+      );
+
+      const textFromAI = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (!textFromAI) throw new Error('Empty response from Gemini API');
+
+      const jsonMatch = textFromAI.match(/```json\n([\s\S]*?)\n```/) ||
+                        textFromAI.match(/```\n([\s\S]*?)\n```/) ||
+                        textFromAI.match(/{[\s\S]*?}/);
+
+      if (!jsonMatch) {
+        return { status: 0, message: 'Structured JSON not found in AI response', raw: textFromAI };
+      }
+
+      const structured = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+
+      return {
+        status: 1,
+        message: `Information extracted successfully for ${productName}`,
+        structuredData: structured,
+        clauses: Object.values(structured).flat()
+      };
+    } catch (err) {
+      logError(err);
+      return { status: 0, message: err.message, clauses: [] };
     }
   },
 

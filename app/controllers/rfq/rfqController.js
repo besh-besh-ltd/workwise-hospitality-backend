@@ -5457,6 +5457,19 @@ addClauseUsingFile : async (req, res) => {
     // Use new product/variant name function
     const productName = await rfqModel.getProductOrVariantNameByRfqProductId(rfq_product_id);
     const result = await generativeAI.extractClauses(file, productName);
+
+  const techEvaluationClauses = result?.structuredData?.technicalSpecifications.map(item => {
+    if (item?.text) return item.text;
+    if (item?.parameter && item?.value) return `${item.parameter}: ${item.value}${item.unit ? ' ' + item.unit : ''}`;
+    if (item?.parameter) return `${item.parameter}: ${item.value || ''}${item.unit ? ' ' + item.unit : ''}`;
+    return JSON.stringify(item);
+  }).filter(Boolean);
+  
+      console.log("  techEvaluationClauses", techEvaluationClauses)
+  
+  
+      console.log(" result mukul", result?.structuredData?.technicalSpecifications)
+
     if (!result.status) {
       let userMessage = result.message || "Failed to extract information";
       if (userMessage.match(/no relevant information detected|no information detected/i)) {
@@ -5474,12 +5487,12 @@ addClauseUsingFile : async (req, res) => {
       });
     }
     // Bulk insert all clauses at once
-    const insertResult = await rfqModel.addManyClauses(rfq_id, rfq_product_id, result.clauses);
+const insertResult = await rfqModel.addManyClauses(rfq_id, rfq_product_id, techEvaluationClauses);
     return res.json({
       status: insertResult.status,
       message: insertResult.status ? `${insertResult.inserted} of ${result.clauses.length} items added successfully for '${productName}'` : insertResult.message,
       errors: insertResult.status ? [] : [{ Row: 0, error: insertResult.error }],
-      clauses: result.clauses
+      clauses: result
     });
   } catch (error) {
     res.status(500).json({ status: 0, message: "Error adding information", errors: [{ Row: 0, error: error?.message }] });
