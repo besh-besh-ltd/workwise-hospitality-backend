@@ -1,6 +1,6 @@
 // Changes by Agnij 2025-05-14 [Enhanced PDF parser with more robust extraction]
-import * as pdfjsLib from 'pdfjs-dist';
-import { getDocument } from 'pdfjs-dist';
+import pkg from 'pdfjs-dist';
+const { getDocument } = pkg;
 import { logError } from './common.js';
 import fs from 'fs';
 import path from 'path';
@@ -44,10 +44,10 @@ const pdfParser = {
       // Configure worker - use in-memory worker if needed
       if (pdfjsWorkerSource) {
         console.log('[PDFParser] Using worker from:', pdfjsWorkerSource);
-        pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerSource;
+        pkg.GlobalWorkerOptions.workerSrc = pdfjsWorkerSource;
       } else {
         console.log('[PDFParser] Worker not found, using main thread');
-        pdfjsLib.GlobalWorkerOptions.disableWorker = true;
+        pkg.GlobalWorkerOptions.disableWorker = true;
       }
       
       // Convert Buffer to Uint8Array - required by pdf.js
