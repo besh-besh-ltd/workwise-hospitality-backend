@@ -464,6 +464,24 @@ const pdfParser = {
       }
       cleaned = uniqueLines.join('\n');
       
+      // Changes by Agnij 2024-05-14 [Robust value range normalization for all parameters]
+      // Normalize all value ranges (e.g., 964-1060.4, 10-20, 5.5-7.8) into min/normal/max format
+      cleaned = cleaned.replace(/(\b\w+\b)[^\S\r\n]*[:=]?[^\S\r\n]*([\d\.]+)\s*-\s*([\d\.]+)/g, (match, param, minOrNor, max) => {
+        // If minOrNor and max are both numbers, format as min / nor / max
+        const minNum = parseFloat(minOrNor);
+        const maxNum = parseFloat(max);
+        if (!isNaN(minNum) && !isNaN(maxNum)) {
+          // If the parameter name contains min/nor/max, don't reformat
+          if (/min|nor|max/i.test(param)) return match;
+          // Use min = half of normal if min < max, else just repeat min
+          const minVal = minNum < maxNum ? (minNum / 2).toFixed(2) : minNum.toFixed(2);
+          const norVal = minNum.toFixed(2);
+          const maxVal = maxNum.toFixed(2);
+          return `${param}: ${minVal} / ${norVal} / ${maxVal}`;
+        }
+        return match;
+      });
+      
       return cleaned.trimEnd();
     } catch (error) {
       safeLogError('Error cleaning PDF text: ' + error.message);

@@ -13,9 +13,11 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const generativeAI = {
   extractClauses: async (file, productName = null) => {
+    console.log(`[processBOQWithAI.js] extractClauses: Processing file ${file.originalname || file.filename || 'unknown_file'} for product: ${productName}`);
     try {
       let buffer;
       if (file.location) {
+        console.log(`[processBOQWithAI.js] extractClauses: Reading file from S3 location: ${file.location}`);
         const s3Url = new URL(file.location);
         const bucket = s3Url.hostname.split('.')[0];
         const key = decodeURIComponent(s3Url.pathname).slice(1);
@@ -26,24 +28,31 @@ const generativeAI = {
         const arrayBuffer = await response.arrayBuffer();
         buffer = Buffer.from(arrayBuffer);
       } else if (file.path) {
+        console.log(`[processBOQWithAI.js] extractClauses: Reading file from local path: ${file.path}`);
         buffer = fs.readFileSync(file.path);
       } else if (file.buffer) {
+        console.log(`[processBOQWithAI.js] extractClauses: Using provided file buffer.`);
         buffer = file.buffer;
       } else {
-        console.error('[processBOQWithAI.js] extractClauses: Invalid file format or location.');
+        console.error('[processBOQWithAI.js] extractClauses: Invalid file object. No location, path, or buffer provided.');
         throw new Error('Invalid file format or location');
       }
 
       const fileExt = path.extname(file.originalname || file.filename).toLowerCase();
+      console.log(`[processBOQWithAI.js] extractClauses: Determined file extension: ${fileExt}`);
       
       if (fileExt === '.pdf') {
         try {
+          console.log('[processBOQWithAI.js] extractClauses: Attempting to extract text with pdfParser.extractText.');
           const pdfText = await pdfParser.extractText(buffer);
+          console.log(`[processBOQWithAI.js] extractClauses: pdfParser.extractText completed. Extracted text length: ${pdfText?.length || 0}`);
+          
+          console.log('[processBOQWithAI.js] extractClauses: Attempting to clean text with pdfParser.cleanText.');
           const cleanedText = pdfParser.cleanText(pdfText);
+          console.log(`[processBOQWithAI.js] extractClauses: pdfParser.cleanText completed. Cleaned text length: ${cleanedText?.length || 0}`);
 
           const apiKey = process.env.GOOGLE_AI_API_KEY;
           if (!apiKey) {
-            console.error('[processBOQWithAI.js] extractClauses: Google AI API Key is not configured.');
             throw new Error('Google AI API Key is not configured');
           }
 
@@ -57,138 +66,57 @@ const generativeAI = {
           const approvedProductNames = approvedProducts.map(p => p.name);
 
           let prompt;
-          if (productName) {
-            // Changes by Agnij 2024-05-14 [Enhanced AI prompt for comprehensive extraction]
+          // Changes by Agnij 2025-05-14 [Enhanced AI prompt for comprehensive extraction]
             prompt = `
-              You are a specialized engineering AI expert tasked with extracting comprehensive technical and commercial information from engineering documents.
+            You are a specialized engineering AI expert tasked with extracting comprehensive technical and commercial information from engineering documents.
               
               TARGET PRODUCT: "${productName}"
               
-              # DOCUMENT ANALYSIS TASK:
-              Extract ALL technical specifications, commercial terms, quality standards, inspection requirements, notes, and conditions from the document.
-              Focus specifically on information related to "${productName}" and similar products.
-              
-              # EXTRACTION GUIDELINES:
-              1. PRESERVE ORIGINAL SENTENCES: Maintain the original sentence structure and phrasing. 
-                 Do not split natural sentences into parameter/value pairs if they're already written as complete statements.
-              2. COMPREHENSIVE EXTRACTION: Extract ALL information - nothing should be missed.
-              3. STRUCTURED OUTPUT: Group information into appropriate categories.
-              4. MAINTAIN RELATIONSHIPS: Preserve relationships between parameters and values.
-              5. TABLE EXTRACTION: Reconstruct tables where applicable.
-              6. UNITS: Always include measurement units where available.
-              
-              # EXTRACTION CATEGORIES:
-              - technicalSpecifications: All technical parameters, specifications, dimensions, materials, etc.
-                 For complete sentence specifications (e.g., "Mounting brackets shall be carbon steel"), keep these as full sentences in a "text" field.
-              - commercialRequirements: Pricing, payment terms, delivery requirements, etc.
-              - standards: Applicable codes, standards, certifications, compliances
-              - inspectionRequirements: Testing, inspection, quality control requirements
-              - notes: Important notes, warnings, exclusions, clarifications
-              - tables: Any tabular data in the document
-              - attachments: References to required attachments or documents
-              
-              # OUTPUT FORMAT:
-              Return a JSON object with this structure:
-              {
-                "technicalSpecifications": [
-                  {"parameter": "param name", "value": "param value", "unit": "unit if any"},
-                  {"text": "complete sentence specification like 'Mounting brackets shall be carbon steel'"}
-                ],
-                "commercialRequirements": [{"parameter": "param name", "value": "param value"}],
-                "standards": [{"standard": "standard name", "description": "description if any"}],
-                "inspectionRequirements": [{"requirement": "requirement name", "description": "description if any"}],
-                "notes": [{"note": "note text"}],
-                "tables": [{"title": "table title", "headers": ["col1", "col2"], "rows": [["val1", "val2"], ["val3", "val4"]]}],
-                "attachments": [{"name": "attachment name", "description": "description if any"}]
-              }
-              
-              # STRICT RULE:
-              ONLY respond with valid JSON in the exact format specified above, enclosed in triple backticks.
-              Do not include any explanations or other text outside the JSON.
-              
-              Document text:
+            # DOCUMENT ANALYSIS TASK:
+            Extract ALL technical specifications, commercial terms, quality standards, inspection requirements, notes, and conditions from the document.
+            Focus specifically on information related to "${productName}" and similar products.
+            
+            # EXTRACTION GUIDELINES:
+            1. PRESERVE ORIGINAL SENTENCES: Maintain the original sentence structure and phrasing. 
+                Do not split natural sentences into parameter/value pairs if they're already written as complete statements.
+            2. COMPREHENSIVE EXTRACTION: Extract ALL information - nothing should be missed.
+            3. STRUCTURED OUTPUT: Group information into appropriate categories.
+            4. MAINTAIN RELATIONSHIPS: Preserve relationships between parameters and values.
+            5. TABLE EXTRACTION: Reconstruct tables where applicable.
+            6. UNITS: Always include measurement units where available.
+            
+            # EXTRACTION CATEGORIES:
+            - technicalSpecifications: All technical parameters, specifications, dimensions, materials, etc.
+                For complete sentence specifications (e.g., "Mounting brackets shall be carbon steel"), keep these as full sentences in a "text" field.
+            - commercialRequirements: Pricing, payment terms, delivery requirements, etc.
+            - standards: Applicable codes, standards, certifications, compliances
+            - inspectionRequirements: Testing, inspection, quality control requirements
+            - notes: Important notes, warnings, exclusions, clarifications
+            - tables: Any tabular data in the document
+            - attachments: References to required attachments or documents
+            
+            # OUTPUT FORMAT:
+            Return a JSON object with this structure:
+            {
+              "technicalSpecifications": [
+                {"parameter": "param name", "value": "param value", "unit": "unit if any"},
+                {"text": "complete sentence specification like 'Mounting brackets shall be carbon steel'"}
+              ],
+              "commercialRequirements": [{"parameter": "param name", "value": "param value"}],
+              "standards": [{"standard": "standard name", "description": "description if any"}],
+              "inspectionRequirements": [{"requirement": "requirement name", "description": "description if any"}],
+              "notes": [{"note": "note text"}],
+              "tables": [{"title": "table title", "headers": ["col1", "col2"], "rows": [["val1", "val2"], ["val3", "val4"]]}],
+              "attachments": [{"name": "attachment name", "description": "description if any"}]
+            }
+            
+            # STRICT RULE:
+            ONLY respond with valid JSON in the exact format specified above, enclosed in triple backticks.
+            Do not include any explanations or other text outside the JSON.
+            
+            Document text:
               ${cleanedText}
             `;
-          } else {
-            prompt = `
-              You are an AI expert in extracting technical specifications, clauses, and regulatory information from technical datasheets and engineering documents.
-              
-              Your task is to extract ALL information with PERFECT PRESERVATION of the ORIGINAL DOCUMENT STRUCTURE:
-              
-              1. Extract the COMPLETE tables, forms, sections maintaining their EXACT format and organization
-              2. Preserve PRECISE layout including columns, rows, section titles, spacing, and indentation
-              3. Capture ALL technical parameters, specifications, notes, and clauses VERBATIM
-              
-              **CRITICAL EXTRACTION INSTRUCTIONS:**
-              
-              FOR DOCUMENT STRUCTURE:
-              - Maintain the EXACT hierarchical organization of the document
-              - Preserve the relationship between sections, subsections and their content
-              - Keep document title, page numbers, and section identifiers in their original positions
-              - Maintain the document's logical flow and order of information
-              
-              FOR TABLES AND DATASHEETS:
-              - Extract information ROW-WISE, treating each row as a complete unit of information
-              - GROUP related rows under their subheadings when available in the document
-              - Preserve ALL row numbers, headers, labels and title structure intact
-              - Maintain special characters, symbols, and formatting from technical tables
-              - Keep ALL unit indicators (°C, ℃, mm, etc.) in their original format and position
-              
-              FOR TECHNICAL SPECIFICATIONS:
-              - Capture ALL numerical values with their exact units precisely as they appear
-              - Preserve ranges, tolerances, min/max values, and their relationships
-              - Maintain ALL dimensions, materials specifications, and their formatting
-              - Extract ALL operating parameters, performance data, and ratings exactly as shown
-              
-              FOR NOTES AND LEGAL CLAUSES:
-              - Extract ALL numbered notes, requirements, and footnotes completely
-              - Preserve ALL inspection requirements, compliance statements, and certification needs
-              - Maintain ALL warranty information, liability statements, and conditions
-              - Capture ALL special instructions, warnings, and cautions with their exact wording
-              
-              FOR FORMATTING:
-              - Preserve indentation to show the hierarchical relationship between elements
-              - Maintain precise spacing between elements to preserve visual structure
-              - Preserve ALL abbreviations, symbols, and technical notations exactly as shown
-              
-              **DATA STRUCTURE INSTRUCTIONS:**
-              - Extract ENTIRE significant sections or tables as complete units
-              - Process each table ROW-BY-ROW, maintaining row relationships
-              - Group rows under their respective subheadings when present
-              - For each major section/table, create a separate clause entry
-              - Include section headers/titles with their content to maintain context
-              - Keep rows belonging to the same table together in their logical sequence
-              - NEVER SPLIT tables or logical sections across multiple clauses
-              
-                            Return the data in a structured JSON format with the following categories:
-              { 
-                "technicalSpecifications": [
-                  { "parameter": "parameter name", "value": "parameter value", "unit": "unit of measurement (if applicable)" }
-                ],
-                "clauses": [
-                  { "id": "clause number/id (if available)", "text": "clause text" }
-                ],
-                "standards": [
-                  { "name": "standard name", "description": "brief description (if available)" }
-                ],
-                "notes": [
-                  "important note 1",
-                  "important note 2"
-                ]
-              }
-              
-              IMPORTANT CLASSIFICATION INSTRUCTIONS:
-              - Put measurement data, parameters, ratings, and material specs in "technicalSpecifications" 
-              - Put numbered clauses, contractual information, and requirements in "clauses"
-              - Put industry standards, certifications, and codes in "standards"
-              - Put general notes, warnings, and procedural information in "notes"
-              - If you're uncertain where an item belongs, put it in the most appropriate category
-              - This array should be empty for any category with no relevant data
-              
-              Here is the document content:
-              ${cleanedText}
-            `;
-          }
 
           const resultFromAI = await model.generateContent(prompt);
           const normalizedProduct = (productName || '').toLowerCase().trim();
@@ -220,7 +148,6 @@ const generativeAI = {
                 return true;
               }
             }
-            
             return false;
           };
           
@@ -239,7 +166,7 @@ const generativeAI = {
           const textFromAI = resultFromAI.response ? resultFromAI.response.text() : 
                          (typeof resultFromAI.text === 'function' ? resultFromAI.text() : 
                          (resultFromAI.text || JSON.stringify(resultFromAI)));
-
+          
           
           const jsonMatch = textFromAI.match(/```json\n([\s\S]*?)\n```/) || 
                           textFromAI.match(/```\n([\s\S]*?)\n```/) || 
@@ -250,304 +177,96 @@ const generativeAI = {
               const jsonStr = jsonMatch[1] || jsonMatch[0];
               const extractedData = JSON.parse(jsonStr);
               
-              // Changes by Agnij 2024-05-14 [Enhanced processing to better group related clauses]
-              // Log all categories that were extracted
-              const techSpecs = extractedData.technicalSpecifications || [];
-              const clauses = extractedData.clauses || extractedData.commercialRequirements || [];
-              const standards = extractedData.standards || [];
-              const notes = extractedData.notes || [];
-              const tables = extractedData.tables || [];
-              const inspectionReqs = extractedData.inspectionRequirements || [];
-              const attachments = extractedData.attachments || [];
-              
-              // Use the structured sections from the pdfParser if available
-              const structuredSections = pdfParser._lastStructuredSections || [];
+              // Changes by Agnij 2024-05-14 [Refactor AI clause extraction for maintainability]
+              // Simplified clause flattening logic, removed groupClauses, titleCase, and structuredClauses generation.
+              let flattenedClauses = [];
+              const aiData = extractedData;
 
-              // Changes by Agnij 2024-05-14 [Improved clause grouping based on content relationships]
-              // Group related clauses together for better organization and display
-              const groupClauses = (items, sectionName) => {
-                const groupedItems = [];
-                let currentGroup = null;
-                
-                // Group patterns - detect related items that should be grouped together
-                const groupPatterns = {
-                  'flow': /flow|rate|capacity/i,
-                  'pressure': /pressure|psi|bar|kpa/i,
-                  'temperature': /temperature|temp|°c|°f/i,
-                  'material': /material|alloy|steel|metal/i,
-                  'dimension': /dimension|size|diameter|width|height/i,
-                  'electrical': /voltage|current|electrical|power/i,
-                  'certification': /certification|standard|iso|astm|api/i,
-                  'inspection': /inspection|test|quality|qc|qa/i,
-                  'notes': /note|nb|remark/i,
-                  'commercial': /commercial|price|cost|warranty|payment/i,
-                  'abbreviation': /vta|tba|to be advised|vendor to advise/i
-                };
-                
-                items.forEach(item => {
-                  // Skip empty or invalid items
-                  if (!item || (typeof item === 'object' && !Object.keys(item).length)) {
-                    return;
-                  }
-                  
-                  const itemText = typeof item === 'string' ? 
-                    item : (item.clauseDescription || item.text || item.value || item.parameter || 
-                           (item.parameter && item.value ? `${item.parameter}: ${item.value}` : JSON.stringify(item)));
-                  
-                  // Determine which group this item belongs to
-                  let groupKey = null;
-                  for (const [key, pattern] of Object.entries(groupPatterns)) {
-                    if (pattern.test(itemText.toLowerCase())) {
-                      groupKey = key;
-                      break;
-                    }
-                  }
-                  
-                  // Special case for paired abbreviations: VTA/TBA
-                  if (itemText.match(/^(VTA|TBA)[\s:.-]/i) || itemText.match(/\b(VENDOR TO ADVISE|TO BE ADVISED)\b/i)) {
-                    groupKey = 'abbreviation';
-                  }
-                  
-                  // Create a new group or add to existing group
-                  if (!groupKey) {
-                    // Individual item with no specific group
-                    groupedItems.push({
-                      title: null,
-                      items: [item]
-                    });
-                  } else if (!currentGroup || currentGroup.key !== groupKey) {
-                    // Start a new group
-                    currentGroup = {
-                      key: groupKey,
-                      title: sectionName || titleCase(groupKey),
-                      items: [item]
-                    };
-                    groupedItems.push(currentGroup);
-                  } else {
-                    // Add to current group
-                    currentGroup.items.push(item);
-                  }
-                });
-                
-                return groupedItems;
-              };
-              
-              // Helper to create title case
-              const titleCase = (str) => {
-                return str.replace(/\w\S*/g, (txt) => {
-                  return txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase();
-                });
-              };
-              
-              // Process and group different data types
-              const groupedTechSpecs = groupClauses(techSpecs, 'Technical Specifications');
-              const groupedStandards = groupClauses(standards, 'Standards & Certifications');
-              const groupedNotes = groupClauses(notes, 'Notes & Remarks');
-              const groupedInspection = groupClauses(inspectionReqs, 'Inspection Requirements');
-              
-              // Create more structured clause format
-              let structuredClauses = [];
-              
-              // Process technical specifications with proper units
-              if (groupedTechSpecs.length > 0) {
-                groupedTechSpecs.forEach(group => {
-                  const groupItems = group.items.map(spec => {
-                    if (typeof spec === 'string') {
-                      return spec;
-                    }
-                    
-                    if (spec.text) {
-                      // For complete sentences, use them directly
-                      return spec.text;
-                    }
-                    
-                    let clauseText = '';
-                    if (spec.parameter) {
-                      clauseText = `${spec.parameter}: ${spec.value || ''}`;
-                      if (spec.unit) clauseText += ` ${spec.unit}`;
-                    } else {
-                      clauseText = JSON.stringify(spec);
-                    }
-                    return clauseText;
-                  });
-                  
-                  structuredClauses.push({
-                    clauseTitle: group.title,
-                    clauseDescription: groupItems.join('\n')
-                  });
-                });
-              }
-              
-              // Process standards with descriptions
-              if (groupedStandards.length > 0) {
-                groupedStandards.forEach(group => {
-                  const standardItems = group.items.map(std => {
-                    if (typeof std === 'string') {
-                      return std;
-                    }
-                    
-                    return `${std.standard || std.name || ''} ${std.description ? '- ' + std.description : ''}`;
-                  });
-                  
-                  structuredClauses.push({
-                    clauseTitle: group.title,
-                    clauseDescription: standardItems.join('\n')
-                  });
-                });
-              }
-              
-              // Process notes with proper formatting
-              if (groupedNotes.length > 0) {
-                groupedNotes.forEach(group => {
-                  const noteItems = group.items.map((note, idx) => {
-                    if (typeof note === 'string') {
-                      return `Note ${idx + 1}: ${note}`;
-                    }
-                    
-                    return `Note ${idx + 1}: ${note.note || JSON.stringify(note)}`;
-                  });
-                  
-                  structuredClauses.push({
-                    clauseTitle: group.title,
-                    clauseDescription: noteItems.join('\n')
-                  });
-                });
-              }
-              
-              // Process inspection requirements
-              if (groupedInspection.length > 0) {
-                groupedInspection.forEach(group => {
-                  const inspectionItems = group.items.map(req => {
-                    if (typeof req === 'string') {
-                      return req;
-                    }
-                    
-                    return `${req.requirement || ''} ${req.description ? '- ' + req.description : ''}`;
-                  });
-                  
-                  structuredClauses.push({
-                    clauseTitle: group.title,
-                    clauseDescription: inspectionItems.join('\n')
-                  });
-                });
-              }
-              
-              // Process tables with proper formatting
-              if (tables.length > 0) {
-                tables.forEach((table, index) => {
-                  let tableText = '';
-                  
-                  // Add title if available
-                  if (table.title) {
-                    tableText += `${table.title}\n\n`;
-                  }
-                  
-                  // Add headers
+              // Technical Specifications
+              (aiData.technicalSpecifications || []).forEach(item => {
+                if (typeof item === 'string') flattenedClauses.push(item);
+                else if (item && item.text) flattenedClauses.push(item.text);
+                else if (item && item.parameter && item.value) flattenedClauses.push(`${item.parameter}: ${item.value}${item.unit ? ' ' + item.unit : ''}`);
+                else if (item && item.parameter) flattenedClauses.push(`${item.parameter}: ${item.value || 'N/A'}${item.unit ? ' ' + item.unit : ''}`);
+                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+              });
+
+              // Commercial Requirements
+              (aiData.commercialRequirements || []).forEach(item => {
+                if (typeof item === 'string') flattenedClauses.push(item);
+                else if (item && item.parameter && item.value) flattenedClauses.push(`${item.parameter}: ${item.value}`);
+                else if (item && item.parameter) flattenedClauses.push(`${item.parameter}: ${item.value || 'N/A'}`);
+                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+              });
+
+              // Standards
+              (aiData.standards || []).forEach(item => {
+                if (typeof item === 'string') flattenedClauses.push(item);
+                else if (item && item.standard) flattenedClauses.push(`${item.standard}${item.description ? ' - ' + item.description : ''}`);
+                else if (item && item.name) flattenedClauses.push(`${item.name}${item.description ? ' - ' + item.description : ''}`);
+                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+              });
+
+              // Inspection Requirements
+              (aiData.inspectionRequirements || []).forEach(item => {
+                if (typeof item === 'string') flattenedClauses.push(item);
+                else if (item && item.requirement) flattenedClauses.push(`${item.requirement}${item.description ? ' - ' + item.description : ''}`);
+                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+              });
+
+              // Notes
+              (aiData.notes || []).forEach(item => {
+                if (typeof item === 'string') flattenedClauses.push(item);
+                else if (item && item.note) flattenedClauses.push(item.note);
+                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+              });
+
+              // Tables
+              (aiData.tables || []).forEach((table, index) => {
+                if (table && typeof table === 'object') {
+                  let tableText = table.title ? `${table.title}\n\n` : `Table ${index + 1}\n`;
                   if (table.headers && Array.isArray(table.headers) && table.headers.length > 0) {
                     tableText += table.headers.join(' | ') + '\n';
                     tableText += table.headers.map(() => '---').join(' | ') + '\n';
                   }
-                  
-                  // Add rows
                   if (table.rows && Array.isArray(table.rows)) {
                     table.rows.forEach(row => {
-                      if (Array.isArray(row)) {
-                        tableText += row.join(' | ') + '\n';
-                      }
+                      if (Array.isArray(row)) tableText += row.join(' | ') + '\n';
                     });
                   }
-                  
-                  structuredClauses.push({
-                    clauseTitle: `Table ${index + 1}`,
-                    clauseDescription: tableText
-                  });
-                });
-              }
-              
-              // Changes by Agnij 2024-05-14 [Special handling for flow data]
-              // Ensure flow values are properly formatted from ranges to min/normal/max format
-              const processFlowValues = (clauses) => {
-                return clauses.map(clause => {
-                  if (typeof clause === 'string') {
-                    // Check if this is a flow range in the form "Flow (min / nor / max) 964-1060.4"
-                    const flowRangeMatch = clause.match(/Flow\s*\(\s*min\s*\/\s*nor\s*\/\s*max\s*\)\s*(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)/i);
-                    if (flowRangeMatch) {
-                      const min = parseFloat(flowRangeMatch[1]) / 2; // Half of normal is min
-                      const nor = parseFloat(flowRangeMatch[1]);
-                      const max = parseFloat(flowRangeMatch[2]);
-                      return `Flow (min / nor / max) ${min} / ${nor} / ${max}`;
-                    }
-                    return clause;
-                  } else if (clause.clauseTitle && clause.clauseDescription) {
-                    // Process flow descriptions within the clause
-                    if (clause.clauseTitle.match(/flow|rate|capacity/i)) {
-                      const flowRangeMatch = clause.clauseDescription.match(/(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)/);
-                      if (flowRangeMatch) {
-                        const min = parseFloat(flowRangeMatch[1]) / 2; // Calculate min as half of normal
-                        const nor = parseFloat(flowRangeMatch[1]);
-                        const max = parseFloat(flowRangeMatch[2]);
-                        clause.clauseDescription = clause.clauseDescription.replace(
-                          flowRangeMatch[0],
-                          `${min} / ${nor} / ${max}`
-                        );
-                      }
-                    }
-                    return clause;
+                  // Add tableText to flattenedClauses only if it contains more than just the initial title
+                  const initialTitleOnly = table.title ? `${table.title}\n\n` : `Table ${index + 1}\n`;
+                  if (tableText.trim() !== initialTitleOnly.trim() && tableText.trim() !== '') {
+                      flattenedClauses.push(tableText.trim());
                   }
-                  return clause;
-                });
-              };
-              
-              // Process flow values in structured clauses
-              structuredClauses = processFlowValues(structuredClauses);
-              
-              // Merge with normal clauses list for backward compatibility
-              let flattenedClauses = [];
-              
-              // Add structured clauses
-              structuredClauses.forEach(clause => {
-                if (typeof clause === 'string') {
-                  flattenedClauses.push(clause);
-                } else {
-                  if (clause.clauseTitle) {
-                    flattenedClauses.push(clause.clauseTitle);
-                  }
-                  if (clause.clauseDescription) {
-                    flattenedClauses.push(clause.clauseDescription);
-                  }
+                } else if (typeof table === 'string') {
+                  flattenedClauses.push(table);
                 }
               });
+
+              // Attachments
+              (aiData.attachments || []).forEach(item => {
+                if (typeof item === 'string') flattenedClauses.push(item);
+                else if (item && item.name) flattenedClauses.push(`Attachment: ${item.name}${item.description ? ' - ' + item.description : ''}`);
+                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+              });
               
-              // Add any clauses that weren't processed
-              if (clauses.length > 0) {
-                clauses.forEach(clause => {
-                  const clauseText = typeof clause === 'string' ? 
-                    clause : (clause.text || clause.value || JSON.stringify(clause));
-                  
-                  if (!flattenedClauses.includes(clauseText)) {
-                    flattenedClauses.push(clauseText);
-                  }
-                });
-              }
-                
+              // Remove empty or whitespace-only strings and ensure uniqueness
+              flattenedClauses = [...new Set(flattenedClauses.map(c => c.trim()).filter(c => c !== ""))];
                 
               return {
                 status: 1,
                 message: `Comprehensive information extracted successfully for ${productName}`,
-                structuredData: {
-                  ...extractedData,
-                  groupedClauses: structuredClauses
-                },
+                // Changes by Agnij 2024-05-14 [Refactor AI clause extraction for maintainability]
+                // Simplified structuredData to return only AI's direct output
+                structuredData: { ...extractedData },
                 clauses: flattenedClauses
               };
             } catch (parseError) {
-              console.error('[processBOQWithAI.js] extractClauses: Error parsing JSON from Gemini response:', parseError.message, 'Raw JSON string attempt:', jsonMatch[1] || jsonMatch[0]);
               return { status: 0, message: 'Failed to parse structured data from AI', error: parseError.message, clauses: [] };
             }
           } else {
-            // Changes by Agnij May 13, 2025 [Improved fallback extraction]
-            console.warn('[processBOQWithAI.js] extractClauses: No JSON block found in AI response. Attempting manual line extraction.', `First 500 chars of AI response: ${textFromAI.substring(0,500)}`);
-            
+
             // Better line extraction that preserves more structure
             const lines = textFromAI.split('\n').filter(line => line.trim().length > 0);
             
@@ -580,16 +299,16 @@ const generativeAI = {
             return fallbackResponse;
           }
         } catch (pdfProcessingError) {
-          console.error('[processBOQWithAI.js] extractClauses: Error processing PDF with AI:', pdfProcessingError);
+          console.error('[processBOQWithAI.js] extractClauses: Error during PDF processing (before AI call):\n', pdfProcessingError);
           const errorMessage = pdfProcessingError.message || pdfProcessingError.toString();
           return { status: 0, message: 'Error processing PDF with AI', error: errorMessage, clauses: [] };
         }
       } else {
-        console.warn(`[processBOQWithAI.js] extractClauses: Unsupported file format: ${fileExt}`);
+        console.warn(`[processBOQWithAI.js] extractClauses: Unsupported file format: ${fileExt}. Product: ${productName}`);
         throw new Error('Unsupported file format. Please upload PDF files only.');
       }
     } catch (mainError) {
-      console.error('[processBOQWithAI.js] extractClauses: Unhandled error in main try-catch:', mainError);
+      console.error(`[processBOQWithAI.js] extractClauses: Main error in extractClauses for product ${productName}:\n`, mainError);
       logError(mainError);
       return { status: 0, message: 'Error processing file with AI', error: mainError.message, clauses: [] };
     }

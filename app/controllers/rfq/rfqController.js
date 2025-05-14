@@ -5446,123 +5446,45 @@ listQueries: async (req, res) => {
 
 
 addClauseUsingFile : async (req, res) => {
-  // Changes by Agnij October 18, 2023 [Added extensive logging]
+  // Changes by Agnij 2025-05-14 [Refactor: use bulk insert, clean up logs, new product name function]
   try {
     let file = req.file;
     const { rfq_id, rfq_product_id } = req.body;
-    
     if (!file) {
-      console.error('[rfqController.js] addClauseUsingFile: No file provided.');
-      return res.status(400).json({
-        status: 0,
-        message: "No file provided",
-      });
+      return res.status(400).json({ status: 0, message: "No file provided" });
     }
-
     if (!rfq_id || !rfq_product_id) {
-      console.error('[rfqController.js] addClauseUsingFile: Missing rfq_id or rfq_product_id. RFQ_ID:', rfq_id, 'RFQ_PRODUCT_ID:', rfq_product_id);
-      return res.status(400).json({
-        status: 0,
-        message: "Invalid input. Ensure RFQ_ID and RFQ_PRODUCT_ID are provided",
-      });
+      return res.status(400).json({ status: 0, message: "Invalid input. Ensure RFQ_ID and RFQ_PRODUCT_ID are provided" });
     }
-
-    const productName = await rfqModel.getProductNameById(rfq_product_id);
+    // Use new product/variant name function
+    const productName = await rfqModel.getProductOrVariantNameByRfqProductId(rfq_product_id);
     const result = await generativeAI.extractClauses(file, productName);
-    
     if (!result.status) {
-      // Changes by Agnij 2024-05-14 [Graceful user message for no relevant info]
       let userMessage = result.message || "Failed to extract information";
       if (userMessage.match(/no relevant information detected|no information detected/i)) {
         userMessage = "No relevant information for this product was found in the uploaded document. Please ensure the document is for the selected product.";
       }
-      return res.json({
-        status: 0,
-        message: userMessage,
-        errors: [{ Row: 0, error: userMessage }]
-      });
+      return res.json({ status: 0, message: userMessage, errors: [{ Row: 0, error: userMessage }] });
     }
-
     if (!result.clauses || result.clauses.length === 0) {
       return res.json({
         status: 0,
         message: productName 
           ? `No information was found for product '${productName}'`
           : "No information was found in the document",
-        errors: [{ 
-          Row: 0, 
-          error: productName 
-            ? `No relevant information detected for product '${productName}'` 
-            : "No information detected in the document" 
-        }]
+        errors: [{ Row: 0, error: productName ? `No relevant information detected for product '${productName}'` : "No information detected in the document" }]
       });
     }
-
-    // Changes by Agnij 2025-05-13 [Fix clause processing and better error handling]
-    // Get clauses from result - ensuring we use the flattened array which contains all clauses
-    const clauses = result.clauses;
-    
-    // Increased batch size for better performance while still avoiding timeouts
-    const BATCH_SIZE = 20;
-    const allErrors = [];
-    let successCount = 0;
-    
-    // Process all clauses in batches
-    for (let i = 0; i < clauses.length; i += BATCH_SIZE) {
-      const batch = clauses.slice(i, i + BATCH_SIZE);
-      
-      // Process each clause in the current batch
-      const batchPromises = batch.map(async (clause, index) => {
-        try {
-          const clauseText = typeof clause === 'string' 
-            ? clause.trim() 
-            : (clause && typeof clause === 'object' 
-               ? JSON.stringify(clause) 
-               : '');
-              
-          if (!clauseText || clauseText.length < 3) {
-            console.warn(`[rfqController.js] addClauseUsingFile: Empty or invalid clause at index ${i + index}, skipping`);
-            return { Row: i + index, error: "Empty or invalid clause" };
-          }
-          
-          // Save the clause to the database
-          await rfqModel.addClause(rfq_id, rfq_product_id, clauseText, []);
-          successCount++;
-          return null;
-        } catch (error) {
-          return { Row: i + index, error: error.message };
-        }
-      });
-      
-      // Wait for all clauses in this batch to be processed
-      const batchErrors = (await Promise.all(batchPromises)).filter(Boolean);
-      allErrors.push(...batchErrors);
-      
-      // Add a small delay between batches to avoid overwhelming the database
-      if (i + BATCH_SIZE < clauses.length) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-      }
-    }
-
+    // Bulk insert all clauses at once
+    const insertResult = await rfqModel.addManyClauses(rfq_id, rfq_product_id, result.clauses);
     return res.json({
-      status: 1,
-      message: productName 
-        ? `${successCount} of ${clauses.length} items added successfully for '${productName}'${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`
-        : `${successCount} of ${clauses.length} items added successfully${allErrors.length > 0 ? ` (${allErrors.length} failed)` : ''}`,
-      errors: allErrors.length > 0 ? allErrors : [],
-      structuredData: result.structuredData || {},  // Include structured data for frontend display
-      clauses: clauses
+      status: insertResult.status,
+      message: insertResult.status ? `${insertResult.inserted} of ${result.clauses.length} items added successfully for '${productName}'` : insertResult.message,
+      errors: insertResult.status ? [] : [{ Row: 0, error: insertResult.error }],
+      clauses: result.clauses
     });
-    
   } catch (error) {
-    // Changes by Agnij October 18, 2023 [Added extensive logging]
-    console.error('[rfqController.js] addClauseUsingFile: Unhandled error in controller:', error);
-    const errMsg = error?.response?.data?.error?.message || error.message;
-    res.status(500).json({
-      status: 0,
-      message: "Error adding information",
-      errors: [{ Row: 0, error: errMsg }]
-    });
+    res.status(500).json({ status: 0, message: "Error adding information", errors: [{ Row: 0, error: error?.message }] });
   }
 },
 
@@ -5921,7 +5843,6 @@ projectWiseReport: async (req, res) => {
   try {
     const { projectId, startDate, endDate } = req.query;
     const userId = req.user.id;
-    console.log("Start Date, End Date, ProjectId:", startDate, endDate, projectId);
 
 
     const rfqDetails = await rfqModel.getProjectDetailsReport(projectId, startDate, endDate);
@@ -6004,17 +5925,14 @@ sendReportOnEmail: async (req, res) => {
 // Changes by Agnij May 01, 2025 [Added endpoint to search variant products]
 searchVariantProducts: async (req, res, next) => {
   try {
-    console.log('[RFQ Controller] searchVariantProducts called with:', JSON.stringify(req.body));
     const search_key = req.body?.search_key ? req.body?.search_key : '';
     
     if (!search_key || search_key.trim() === '') {
-      console.log('[RFQ Controller] Empty search key, returning empty results');
       return res.status(200).json([]).end();
     }
     
     // Use the model to search for variant mappings
     const variantProductResults = await rfqModel.searchVariantProducts(search_key);
-    console.log(`[RFQ Controller] Found ${variantProductResults?.length || 0} variant products for search: "${search_key}"`);
     
     if (!variantProductResults || variantProductResults.length === 0) {
       return res.status(200).json([]).end();
@@ -6022,7 +5940,6 @@ searchVariantProducts: async (req, res, next) => {
     
     res.status(200).json(variantProductResults).end();
   } catch (error) {
-    console.error('[RFQ Controller] Error in searchVariantProducts:', error.message);
     logError(error);
     res.status(400).json({
       status: 3,
@@ -6035,8 +5952,6 @@ processBoqAndDownload : async (req, res) => {
   try {
 
     const response = await generativeAI.processBoqAndDownload(req.file);
-
-    console.log(response)
 
     res
     .status(200)
@@ -6063,24 +5978,14 @@ processBoqAndDownload : async (req, res) => {
 // Changes by Agnij May 01, 2025 [Added endpoint to search variant vendors]
 searchVariantVendors: async (req, res, next) => {
   try {
-    console.log('[RFQ Controller] searchVariantVendors called with:', JSON.stringify(req.body));
     const { product_id, variant_id } = req.body;
     
     if (!product_id && !variant_id) {
-      console.log('[RFQ Controller] No product_id or variant_id provided, returning empty results');
       return res.status(200).json([]).end();
-    }
-    
-    // Log which ID we're using
-    if (variant_id) {
-      console.log(`[RFQ Controller] Searching vendors for variant ID: ${variant_id}`);
-    } else {
-      console.log(`[RFQ Controller] Searching vendors for product ID: ${product_id}`);
     }
     
     // Use the model to search for vendors associated with this variant
     const variantVendorResults = await rfqModel.searchVariantVendors(product_id, variant_id);
-    console.log(`[RFQ Controller] Found ${variantVendorResults?.length || 0} vendors for ${variant_id ? 'variant' : 'product'} ID: ${variant_id || product_id}`);
     
     if (!variantVendorResults || variantVendorResults.length === 0) {
       return res.status(200).json([]).end();
@@ -6088,7 +5993,6 @@ searchVariantVendors: async (req, res, next) => {
     
     res.status(200).json(variantVendorResults).end();
   } catch (error) {
-    console.error('[RFQ Controller] Error in searchVariantVendors:', error.message);
     logError(error);
     res.status(400).json({
       status: 3,
@@ -6098,29 +6002,21 @@ searchVariantVendors: async (req, res, next) => {
 },
 
 getClausesByRfqProductId: async (req,res) =>{
-    // Changes by Agnij October 18, 2023 [Added extensive logging]
-    console.log('[rfqController.js] Entering getClausesByRfqProductId. Body:', req.body);
     try{
         const {rfq_id, rfq_product_id, vendor_id} = req.body;
 
         if (!rfq_product_id) {
-            console.error('[rfqController.js] getClausesByRfqProductId: Missing rfq_product_id.');
             return res.status(400).json({
                 status: 0,
                 message: "Invalid input. Ensure RFQ_PRODUCT_ID is provided.",
             });
         }
-
         // Changes by Agnij May 13, 2025 [Fixed clause display limitation]
-        console.log(`[rfqController.js] getClausesByRfqProductId: Calling rfqModel.getClausesOfProduct with rfq_product_id: ${rfq_product_id}, vendor_id: ${vendor_id}`);
         const result = await rfqModel.getClausesOfProduct(rfq_product_id, vendor_id);
-        console.log('[rfqController.js] getClausesByRfqProductId: rfqModel.getClausesOfProduct result received with', result.data?.length || 0, 'clauses');
 
         res.status(200).json(result).end();
 
     }catch(error){
-        // Changes by Agnij October 18, 2023 [Added extensive logging]
-        console.error('[rfqController.js] getClausesByRfqProductId: Unhandled error in controller:', error);
         logError(error);
         res.status(500).json({
             success: false,

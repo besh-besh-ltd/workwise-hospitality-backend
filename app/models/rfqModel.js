@@ -4474,7 +4474,6 @@ rfq_project_exist: async (project_id,user_id) => {
                 });
             })
             .catch((error) => {
-                console.error("Error fetching vendor responses:", error);
                 reject({
                     status: 0,
                     message: "Error in fetching vendor responses.",
@@ -4529,7 +4528,6 @@ getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
       }
 
       // filters for the query as rfq_no and project_id3
-      console.log(typeof rfq_no, typeof project_id);
       let filtersQuery='';
       if (rfq_no) {
         filtersQuery = `AND RFQ.rfq_no::text LIKE '%$3%'`;
@@ -4539,7 +4537,6 @@ getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
           filtersQuery += ` AND RFQ.project_id = $4`;
       }
 
-    console.log(rfq_no,project_id);
       // Step 3: Fetch RFQ products and RFQ Details
       const fetchDetailsQuery = `
         SELECT RFQ.*,
@@ -4703,7 +4700,6 @@ getClausesOfProduct: async (rfq_product_id, vendor_id) => {
         data: response,
       });
     } catch (error) {
-      console.error("Error in getClauses API:", error);
       reject({
         success: false,
         message: "Error fetching clauses and files.",
@@ -4786,7 +4782,6 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
               });
           })
           .catch((error) => {
-              console.error("Error in fetchTechClearedVendors:", error);
               reject({
                   status: 0,
                   message: "Error in fetching cleared vendor details.",
@@ -4797,7 +4792,6 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
 },
 
 rfqProductReport: async (userId, productId, productName, startDate, endDate) => {
-  console.log([userId, productId, startDate, endDate]);
   return new Promise(function (resolve, reject) {
       const query = `
       SELECT 
@@ -4916,9 +4910,8 @@ rfqProductReport: async (userId, productId, productName, startDate, endDate) => 
 },
 
 // project report including all rfq quote etc
-getProductNameById: async (rfq_product_id) => {
+getProductOrVariantNameByRfqProductId: async (rfq_product_id) => {
   return new Promise(function (resolve, reject) {
-    console.log(`[rfqModel.js] getProductNameById: Fetching product name for RFQ product ID: ${rfq_product_id}`);
     const query = `
       SELECT 
         PV.name AS variant_name,
@@ -4933,18 +4926,15 @@ getProductNameById: async (rfq_product_id) => {
     db.oneOrNone(query, [rfq_product_id])
       .then(function (result) {
         if (!result) {
-          console.log(`[rfqModel.js] getProductNameById: No product found for RFQ product ID: ${rfq_product_id}`);
           resolve(null);
           return;
         }
         
         // Prefer the variant name if available, otherwise use product name
         const productName = result.variant_name || result.product_name || null;
-        console.log(`[rfqModel.js] getProductNameById: Found product name: "${productName}" for RFQ product ID: ${rfq_product_id}`);
         resolve(productName);
       })
       .catch(function (err) {
-        console.error(`[rfqModel.js] getProductNameById: Error fetching product name for RFQ product ID: ${rfq_product_id}`, err);
         reject(new Error(`Error fetching product name: ${err.message}`));
       });
   });
@@ -5073,7 +5063,6 @@ getProjectDetailsReport: async (projectId, startDate, endDate) => {
 
 // Changes by Agnij April 30, 2025 [Added method to search for variant products]
 searchVariantProducts: async (search_key) => {
-  console.log(`[RFQ Model] searchVariantProducts called with search_key: "${search_key}"`);
   
   // SQL query to search for products in the variant mappings table
   const q = `
@@ -5121,12 +5110,9 @@ searchVariantProducts: async (search_key) => {
   `;
   
   try {
-    console.log(`[RFQ Model] Executing variant products search query for: "${search_key}"`);
     const { rows } = await db.query(q, [search_key]);
-    console.log(`[RFQ Model] searchVariantProducts found ${rows.length} results`);
     return rows;
   } catch (error) {
-    console.error('[RFQ Model] Error in searchVariantProducts:', error.message);
     console.error(error.stack);
     // Return empty array instead of throwing error to avoid breaking the API response
     return [];
