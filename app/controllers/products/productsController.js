@@ -1122,6 +1122,30 @@ const ProductsController = {
         .end();
     }
   },
+  productDetails: async (req, res, next) => {
+    try {
+      let productId = req.params.id;
+
+
+      let productList = await productModel.productDetails(productId);
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: productList[0]
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   vendorProductDelete: async (req, res, next) => {
     try {
       let productId = req.params.id;
