@@ -46,13 +46,8 @@ const generativeAI = {
           }
 
           const genAI = new GoogleGenerativeAI(apiKey);
-          const modelName = 'gemini-1.5-flash-latest'; // Reverted for stability
+          const modelName = 'gemini-1.5-pro-latest'; // Reverted for stability
           const model = genAI.getGenerativeModel({ model: modelName });
-
-          // Changes by Agnij 2024-05-14 [Strict product matching: inject product list into AI prompt]
-          // Fetch all approved product names for strict AI matching
-          const approvedProducts = await productModel.approvedProductList();
-          const approvedProductNames = approvedProducts.map(p => p.name);
 
           let prompt;
           // Changes by Agnij 2025-05-14 [Enhanced AI prompt for comprehensive extraction]
@@ -117,13 +112,11 @@ const generativeAI = {
             if (!productName || normalizedProduct.length < 2) {
               return true; // Default to true when no product name provided
             }
-            
             // Count exact matches of the product name (must be at least 2)
             const exactMatches = (normalizedText.match(new RegExp(`\\b${normalizedProduct}\\b`, 'gi')) || []).length;
             if (exactMatches >= 2) {
               return true;
             }
-            
             // Additional check for product names with spaces or special characters
             // Split the product name and check if ALL significant terms appear multiple times
             const productTerms = normalizedProduct.split(/\s+/).filter(term => term.length > 3);
@@ -132,16 +125,13 @@ const generativeAI = {
                 const termMatches = (normalizedText.match(new RegExp(`\\b${term}\\b`, 'gi')) || []).length;
                 return termMatches >= 2;
               });
-              
               if (allTermsPresent) {
                 return true;
               }
             }
             return false;
           };
-          
           const isProductMatch = performProductMatch();
-          
           if (!isProductMatch) {
             return {
               status: 0,
