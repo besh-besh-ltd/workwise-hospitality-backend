@@ -26,6 +26,8 @@ const safeLogError = (message) => {
 };
 
 // Changes by Agnij May 14, 2025 [Enhanced PDF parser with better grouping of related clauses]
+let _lastStructuredSections = [];
+
 const pdfParser = {
   /**
    * Parse a PDF buffer and extract text content with preserved formatting and better clause grouping
@@ -42,12 +44,15 @@ const pdfParser = {
       // Set up the pdfjsLib - no need to import again, use pkg
       const pdfjsLib = pkg;
       
+      // Changes by Agnij 2025-07-26 [Add better error handling and logging]
+      console.log('[PDFParser] Starting PDF extraction...');
+      
       // Configure worker - use in-memory worker if needed
       if (pdfjsWorkerSource) {
-        // Use the pre-loaded worker path
+        console.log('[PDFParser] Using worker from:', pdfjsWorkerSource);
         pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerSource;
       } else {
-        // Disable worker to use main thread instead
+        console.log('[PDFParser] Worker not found, using main thread');
         pdfjsLib.GlobalWorkerOptions.disableWorker = true;
       }
       
@@ -60,6 +65,8 @@ const pdfParser = {
         disableFontFace: true,
       });
       
+      console.log('[PDFParser] Created PDF loading task');
+      
       // Set a timeout to avoid hanging
       const timeoutPromise = new Promise((_, reject) => {
         setTimeout(() => reject(new Error('PDF processing timed out after 30 seconds')), 30000);
@@ -71,6 +78,9 @@ const pdfParser = {
         timeoutPromise
       ]);
 
+      console.log('[PDFParser] Successfully loaded PDF document');
+      console.log(`[PDFParser] Number of pages: ${pdfDocument.numPages}`);
+
       let fullText = '';
       let structuredSections = [];
       const numPages = pdfDocument.numPages;
@@ -80,11 +90,19 @@ const pdfParser = {
       
       for (let pageNum = 1; pageNum <= numPages; pageNum++) {
         try {
+          console.log(`[PDFParser] Processing page ${pageNum}/${numPages}`);
           const page = await pdfDocument.getPage(pageNum);
           const content = await page.getTextContent({
             normalizeWhitespace: false,
             disableCombineTextItems: false
           });
+          
+          if (!content || !content.items || content.items.length === 0) {
+            console.warn(`[PDFParser] No text content found on page ${pageNum}`);
+            continue;
+          }
+
+          console.log(`[PDFParser] Found ${content.items.length} text items on page ${pageNum}`);
           
           // Get page viewport for positioning
           const viewport = page.getViewport({ scale: 1.0 });
@@ -104,9 +122,18 @@ const pdfParser = {
           
           allTextItems = allTextItems.concat(pageItems);
         } catch (pageError) {
-          console.warn(`Error processing page ${pageNum}:`, pageError.message);
+          console.error(`[PDFParser] Error processing page ${pageNum}:`, pageError.message);
+          // Continue with next page instead of failing completely
+          continue;
         }
       }
+
+      if (allTextItems.length === 0) {
+        console.warn('[PDFParser] No text content found in entire document');
+        return "No text content found in document";
+      }
+
+      console.log(`[PDFParser] Total text items found: ${allTextItems.length}`);
       
       // Sort all items by page and top-to-bottom position
       allTextItems.sort((a, b) => {
@@ -354,10 +381,9 @@ const pdfParser = {
       };
       
       fullText = formatSectionsToText(sectionsWithTables);
-      structuredSections = sectionsWithTables;
       
-      // Store the structured sections for retrieval by other methods
-      this._lastStructuredSections = structuredSections;
+      // Store the structured sections in closure variable instead of this
+      _lastStructuredSections = sectionsWithTables;
       
       return fullText || "No text content extracted";
       
@@ -494,8 +520,8 @@ const pdfParser = {
    * Get the last extracted structured sections
    * @returns {Array} - Structured sections with headings and content
    */
-  getStructuredSections: function() {
-    return this._lastStructuredSections || [];
+  getStructuredSections: () => {
+    return _lastStructuredSections;
   }
 };
 

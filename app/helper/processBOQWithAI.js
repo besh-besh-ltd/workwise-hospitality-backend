@@ -44,15 +44,12 @@ const generativeAI = {
           if (!apiKey) {
             throw new Error('Google AI API Key is not configured');
           }
-
           const genAI = new GoogleGenerativeAI(apiKey);
           const modelName = 'gemini-1.5-flash'; // Reverted for stability
           const model = genAI.getGenerativeModel({ model: modelName });
 
-          let prompt;
-          // Changes by Agnij 2025-05-14 [Enhanced AI prompt for comprehensive extraction]
-            prompt = `
-            You are a specialized engineering AI expert tasked with extracting comprehensive technical and commercial information from engineering documents.
+          let prompt = `
+You are a specialized engineering AI expert tasked with extracting comprehensive technical and commercial information from engineering documents.
               
               TARGET PRODUCT: "${productName}"
               
@@ -99,178 +96,147 @@ const generativeAI = {
             Do not include any explanations or other text outside the JSON.
             
             Document text:
-              ${cleanedText}
-            `;
+              ${cleanedText}`;
 
-          const resultFromAI = await model.generateContent(prompt);
-          const normalizedProduct = (productName || '').toLowerCase().trim();
-          const normalizedText = cleanedText.toLowerCase();
-          
-          // Perform extremely strict product matching
-          const performProductMatch = () => {
-            // Skip matching if no product name provided
-            if (!productName || normalizedProduct.length < 2) {
-              return true; // Default to true when no product name provided
-            }
-            // Count exact matches of the product name (must be at least 2)
-            const exactMatches = (normalizedText.match(new RegExp(`\\b${normalizedProduct}\\b`, 'gi')) || []).length;
-            if (exactMatches >= 2) {
-              return true;
-            }
-            // Additional check for product names with spaces or special characters
-            // Split the product name and check if ALL significant terms appear multiple times
-            const productTerms = normalizedProduct.split(/\s+/).filter(term => term.length > 3);
-            if (productTerms.length >= 2) {
-              const allTermsPresent = productTerms.every(term => {
-                const termMatches = (normalizedText.match(new RegExp(`\\b${term}\\b`, 'gi')) || []).length;
-                return termMatches >= 2;
-              });
-              if (allTermsPresent) {
-                return true;
-              }
-            }
-            return false;
-          };
-          const isProductMatch = performProductMatch();
-          if (!isProductMatch) {
-            return {
-              status: 0,
-              message: `No relevant information detected for ${productName}`,
-              structuredData: null,
-              clauses: []
-            };
-          }
-
-          // Changes by Agnij May 13, 2025 [Improved extraction of AI response]
-          const textFromAI = resultFromAI.response ? resultFromAI.response.text() : 
-                         (typeof resultFromAI.text === 'function' ? resultFromAI.text() : 
-                         (resultFromAI.text || JSON.stringify(resultFromAI)));
-          
-          
-          const jsonMatch = textFromAI.match(/```json\n([\s\S]*?)\n```/) || 
-                          textFromAI.match(/```\n([\s\S]*?)\n```/) || 
-                          textFromAI.match(/{[\s\S]*?}/);
-                          
-          if (jsonMatch) {
-            try {
-              const jsonStr = jsonMatch[1] || jsonMatch[0];
-              const extractedData = JSON.parse(jsonStr);
-              
-              let flattenedClauses = [];
-              const aiData = extractedData;
-              // Technical Specifications
-              (aiData.technicalSpecifications || []).forEach(item => {
-                if (typeof item === 'string') flattenedClauses.push(item);
-                else if (item && item.text) flattenedClauses.push(item.text);
-                else if (item && item.parameter && item.value) flattenedClauses.push(`${item.parameter}: ${item.value}${item.unit ? ' ' + item.unit : ''}`);
-                else if (item && item.parameter) flattenedClauses.push(`${item.parameter}: ${item.value || 'N/A'}${item.unit ? ' ' + item.unit : ''}`);
-                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-              });
-
-              // Commercial Requirements
-              (aiData.commercialRequirements || []).forEach(item => {
-                if (typeof item === 'string') flattenedClauses.push(item);
-                else if (item && item.parameter && item.value) flattenedClauses.push(`${item.parameter}: ${item.value}`);
-                else if (item && item.parameter) flattenedClauses.push(`${item.parameter}: ${item.value || 'N/A'}`);
-                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-              });
-
-              // Standards
-              (aiData.standards || []).forEach(item => {
-                if (typeof item === 'string') flattenedClauses.push(item);
-                else if (item && item.standard) flattenedClauses.push(`${item.standard}${item.description ? ' - ' + item.description : ''}`);
-                else if (item && item.name) flattenedClauses.push(`${item.name}${item.description ? ' - ' + item.description : ''}`);
-                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-              });
-
-              // Inspection Requirements
-              (aiData.inspectionRequirements || []).forEach(item => {
-                if (typeof item === 'string') flattenedClauses.push(item);
-                else if (item && item.requirement) flattenedClauses.push(`${item.requirement}${item.description ? ' - ' + item.description : ''}`);
-                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-              });
-
-              // Notes
-              (aiData.notes || []).forEach(item => {
-                if (typeof item === 'string') flattenedClauses.push(item);
-                else if (item && item.note) flattenedClauses.push(item.note);
-                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-              });
-
-              // Tables
-              (aiData.tables || []).forEach((table, index) => {
-                if (table && typeof table === 'object') {
-                  let tableText = table.title ? `${table.title}\n\n` : `Table ${index + 1}\n`;
-                  if (table.headers && Array.isArray(table.headers) && table.headers.length > 0) {
-                    tableText += table.headers.join(' | ') + '\n';
-                    tableText += table.headers.map(() => '---').join(' | ') + '\n';
-                  }
-                  if (table.rows && Array.isArray(table.rows)) {
-                    table.rows.forEach(row => {
-                      if (Array.isArray(row)) tableText += row.join(' | ') + '\n';
-                    });
-                  }
-                  // Add tableText to flattenedClauses only if it contains more than just the initial title
-                  const initialTitleOnly = table.title ? `${table.title}\n\n` : `Table ${index + 1}\n`;
-                  if (tableText.trim() !== initialTitleOnly.trim() && tableText.trim() !== '') {
-                      flattenedClauses.push(tableText.trim());
-                  }
-                } else if (typeof table === 'string') {
-                  flattenedClauses.push(table);
-                }
-              });
-
-              // Attachments
-              (aiData.attachments || []).forEach(item => {
-                if (typeof item === 'string') flattenedClauses.push(item);
-                else if (item && item.name) flattenedClauses.push(`Attachment: ${item.name}${item.description ? ' - ' + item.description : ''}`);
-                else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
-              });
-              
-              // Remove empty or whitespace-only strings and ensure uniqueness
-              flattenedClauses = [...new Set(flattenedClauses.map(c => c.trim()).filter(c => c !== ""))];
+          try {
+            const result = await model.generateContent(prompt);
+            
+            const resultFromAI = result.response;
+            
+            // Changes by Agnij May 13, 2025 [Improved extraction of AI response]
+            const textFromAI = resultFromAI.response ? resultFromAI.response.text() : 
+                           (typeof resultFromAI.text === 'function' ? resultFromAI.text() : 
+                           (resultFromAI.text || JSON.stringify(resultFromAI)));
+            
+            
+            const jsonMatch = textFromAI.match(/```json\n([\s\S]*?)\n```/) || 
+                            textFromAI.match(/```\n([\s\S]*?)\n```/) || 
+                            textFromAI.match(/{[\s\S]*?}/);
+                            
+            if (jsonMatch) {
+              try {
+                const jsonStr = jsonMatch[1] || jsonMatch[0];
+                const extractedData = JSON.parse(jsonStr);
                 
-              return {
-                status: 1,
-                message: `Comprehensive information extracted successfully for ${productName}`,
-                structuredData: { ...extractedData },
-                clauses: flattenedClauses
-              };
-            } catch (parseError) {
-              return { status: 0, message: 'Failed to parse structured data from AI', error: parseError.message, clauses: [] };
-            }
-          } else {
+                let flattenedClauses = [];
+                const aiData = extractedData;
+                // Technical Specifications
+                (aiData.technicalSpecifications || []).forEach(item => {
+                  if (typeof item === 'string') flattenedClauses.push(item);
+                  else if (item && item.text) flattenedClauses.push(item.text);
+                  else if (item && item.parameter && item.value) flattenedClauses.push(`${item.parameter}: ${item.value}${item.unit ? ' ' + item.unit : ''}`);
+                  else if (item && item.parameter) flattenedClauses.push(`${item.parameter}: ${item.value || 'N/A'}${item.unit ? ' ' + item.unit : ''}`);
+                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+                });
 
-            // Better line extraction that preserves more structure
-            const lines = textFromAI.split('\n').filter(line => line.trim().length > 0);
-            
-            // More comprehensive filtering for potential clauses
-            const potentialClauses = lines.filter(line => {
-              return line.length > 20 && 
-              !line.includes('```') &&
-              !line.startsWith('Here') &&
-                     !line.startsWith('I will') &&
-                     !line.startsWith('As an AI') &&
-                     !line.startsWith('Based on');
-            });
-            
-            
-            // Create a consistent structure even in fallback mode
-            const fallbackResponse = {
-              status: 1,
-              message: productName 
-                ? `Information extracted (fallback) for ${productName}`
-                : 'Information extracted (fallback)',
-              structuredData: {
-                technicalSpecifications: [],
-                clauses: potentialClauses.map((text, idx) => ({ id: `F${idx+1}`, text })), // Add IDs to fallback clauses
-                standards: [],
-                notes: []
-              },
-              clauses: potentialClauses
-            };
-            
-            return fallbackResponse;
+                // Commercial Requirements
+                (aiData.commercialRequirements || []).forEach(item => {
+                  if (typeof item === 'string') flattenedClauses.push(item);
+                  else if (item && item.parameter && item.value) flattenedClauses.push(`${item.parameter}: ${item.value}`);
+                  else if (item && item.parameter) flattenedClauses.push(`${item.parameter}: ${item.value || 'N/A'}`);
+                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+                });
+
+                // Standards
+                (aiData.standards || []).forEach(item => {
+                  if (typeof item === 'string') flattenedClauses.push(item);
+                  else if (item && item.standard) flattenedClauses.push(`${item.standard}${item.description ? ' - ' + item.description : ''}`);
+                  else if (item && item.name) flattenedClauses.push(`${item.name}${item.description ? ' - ' + item.description : ''}`);
+                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+                });
+
+                // Inspection Requirements
+                (aiData.inspectionRequirements || []).forEach(item => {
+                  if (typeof item === 'string') flattenedClauses.push(item);
+                  else if (item && item.requirement) flattenedClauses.push(`${item.requirement}${item.description ? ' - ' + item.description : ''}`);
+                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+                });
+
+                // Notes
+                (aiData.notes || []).forEach(item => {
+                  if (typeof item === 'string') flattenedClauses.push(item);
+                  else if (item && item.note) flattenedClauses.push(item.note);
+                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+                });
+
+                // Tables
+                (aiData.tables || []).forEach((table, index) => {
+                  if (table && typeof table === 'object') {
+                    let tableText = table.title ? `${table.title}\n\n` : `Table ${index + 1}\n`;
+                    if (table.headers && Array.isArray(table.headers) && table.headers.length > 0) {
+                      tableText += table.headers.join(' | ') + '\n';
+                      tableText += table.headers.map(() => '---').join(' | ') + '\n';
+                    }
+                    if (table.rows && Array.isArray(table.rows)) {
+                      table.rows.forEach(row => {
+                        if (Array.isArray(row)) tableText += row.join(' | ') + '\n';
+                      });
+                    }
+                    // Add tableText to flattenedClauses only if it contains more than just the initial title
+                    const initialTitleOnly = table.title ? `${table.title}\n\n` : `Table ${index + 1}\n`;
+                    if (tableText.trim() !== initialTitleOnly.trim() && tableText.trim() !== '') {
+                        flattenedClauses.push(tableText.trim());
+                    }
+                  } else if (typeof table === 'string') {
+                    flattenedClauses.push(table);
+                  }
+                });
+
+                // Attachments
+                (aiData.attachments || []).forEach(item => {
+                  if (typeof item === 'string') flattenedClauses.push(item);
+                  else if (item && item.name) flattenedClauses.push(`Attachment: ${item.name}${item.description ? ' - ' + item.description : ''}`);
+                  else if (item && typeof item === 'object' && Object.keys(item).length > 0) flattenedClauses.push(JSON.stringify(item));
+                });
+                
+                // Remove empty or whitespace-only strings and ensure uniqueness
+                flattenedClauses = [...new Set(flattenedClauses.map(c => c.trim()).filter(c => c !== ""))];
+                
+                return {
+                  status: 1,
+                  message: `Comprehensive information extracted successfully for ${productName}`,
+                  structuredData: { ...extractedData },
+                  clauses: flattenedClauses
+                };
+              } catch (parseError) {
+                return { status: 0, message: 'Failed to parse structured data from AI', error: parseError.message, clauses: [] };
+              }
+            } else {
+
+              // Better line extraction that preserves more structure
+              const lines = textFromAI.split('\n').filter(line => line.trim().length > 0);
+              
+              // More comprehensive filtering for potential clauses
+              const potentialClauses = lines.filter(line => {
+                return line.length > 20 && 
+                !line.includes('```') &&
+                !line.startsWith('Here') &&
+                       !line.startsWith('I will') &&
+                       !line.startsWith('As an AI') &&
+                       !line.startsWith('Based on');
+              });
+              
+              
+              // Create a consistent structure even in fallback mode
+              const fallbackResponse = {
+                status: 1,
+                message: productName 
+                  ? `Information extracted (fallback) for ${productName}`
+                  : 'Information extracted (fallback)',
+                structuredData: {
+                  technicalSpecifications: [],
+                  clauses: potentialClauses.map((text, idx) => ({ id: `F${idx+1}`, text })), // Add IDs to fallback clauses
+                  standards: [],
+                  notes: []
+                },
+                clauses: potentialClauses
+              };
+              
+              return fallbackResponse;
+            }
+          } catch (aiProcessingError) {
+            const errorMessage = aiProcessingError.message || aiProcessingError.toString();
+            return { status: 0, message: 'Error processing AI response', error: errorMessage, clauses: [] };
           }
         } catch (pdfProcessingError) {
           const errorMessage = pdfProcessingError.message || pdfProcessingError.toString();
