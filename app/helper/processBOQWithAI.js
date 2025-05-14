@@ -13,11 +13,9 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 const generativeAI = {
   extractClauses: async (file, productName = null) => {
-    console.log(`[processBOQWithAI.js] extractClauses: Processing file ${file.originalname || file.filename || 'unknown_file'} for product: ${productName}`);
     try {
       let buffer;
       if (file.location) {
-        console.log(`[processBOQWithAI.js] extractClauses: Reading file from S3 location: ${file.location}`);
         const s3Url = new URL(file.location);
         const bucket = s3Url.hostname.split('.')[0];
         const key = decodeURIComponent(s3Url.pathname).slice(1);
@@ -28,28 +26,19 @@ const generativeAI = {
         const arrayBuffer = await response.arrayBuffer();
         buffer = Buffer.from(arrayBuffer);
       } else if (file.path) {
-        console.log(`[processBOQWithAI.js] extractClauses: Reading file from local path: ${file.path}`);
         buffer = fs.readFileSync(file.path);
       } else if (file.buffer) {
-        console.log(`[processBOQWithAI.js] extractClauses: Using provided file buffer.`);
         buffer = file.buffer;
       } else {
-        console.error('[processBOQWithAI.js] extractClauses: Invalid file object. No location, path, or buffer provided.');
         throw new Error('Invalid file format or location');
       }
 
       const fileExt = path.extname(file.originalname || file.filename).toLowerCase();
-      console.log(`[processBOQWithAI.js] extractClauses: Determined file extension: ${fileExt}`);
       
       if (fileExt === '.pdf') {
         try {
-          console.log('[processBOQWithAI.js] extractClauses: Attempting to extract text with pdfParser.extractText.');
           const pdfText = await pdfParser.extractText(buffer);
-          console.log(`[processBOQWithAI.js] extractClauses: pdfParser.extractText completed. Extracted text length: ${pdfText?.length || 0}`);
-          
-          console.log('[processBOQWithAI.js] extractClauses: Attempting to clean text with pdfParser.cleanText.');
           const cleanedText = pdfParser.cleanText(pdfText);
-          console.log(`[processBOQWithAI.js] extractClauses: pdfParser.cleanText completed. Cleaned text length: ${cleanedText?.length || 0}`);
 
           const apiKey = process.env.GOOGLE_AI_API_KEY;
           if (!apiKey) {
@@ -299,16 +288,13 @@ const generativeAI = {
             return fallbackResponse;
           }
         } catch (pdfProcessingError) {
-          console.error('[processBOQWithAI.js] extractClauses: Error during PDF processing (before AI call):\n', pdfProcessingError);
           const errorMessage = pdfProcessingError.message || pdfProcessingError.toString();
           return { status: 0, message: 'Error processing PDF with AI', error: errorMessage, clauses: [] };
         }
       } else {
-        console.warn(`[processBOQWithAI.js] extractClauses: Unsupported file format: ${fileExt}. Product: ${productName}`);
         throw new Error('Unsupported file format. Please upload PDF files only.');
       }
     } catch (mainError) {
-      console.error(`[processBOQWithAI.js] extractClauses: Main error in extractClauses for product ${productName}:\n`, mainError);
       logError(mainError);
       return { status: 0, message: 'Error processing file with AI', error: mainError.message, clauses: [] };
     }
