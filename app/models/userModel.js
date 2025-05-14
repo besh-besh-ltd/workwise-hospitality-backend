@@ -648,6 +648,8 @@ user_book_demo: async (mobile) => {
       // query changes by Mukul Jatav 13-09-2024, 
       //  Remove product_images and added product_list with approved vendor list for each product in /vendor-profile/id API
 
+      // query changes by Mukul Jatav 13-09-2024, added product_list with approved vendor list for each product in /vendor-profile/id API, this model returning product list but it's variant not changing product_name to variant_name or product_list to variant_list as this is quick fix for now
+
       // Base query with common fields
       let baseQuery = `
       SELECT tbl_users.id as user_id,
@@ -687,13 +689,8 @@ user_book_demo: async (mobile) => {
              ) AS "brochure",
             ARRAY(
            SELECT json_build_object(
-               'product_name', P.name, 
-               'product_description', P.description, 
-               'product_id', P.id,
-               'product_images', json_agg(json_build_object(
-                    'new_product_image', PI.new_image_name,
-                    'original_product_image', PI.original_image_name
-                )) FILTER (WHERE PI.product_id IS NOT NULL),
+               'product_name', V.name,
+               'product_id', V.id,
                'approved_by', ARRAY(
                    SELECT json_build_object(
                        'vendor_approve_id', VA.id,
@@ -702,14 +699,12 @@ user_book_demo: async (mobile) => {
                    )
                    FROM tbl_vendorapprove_product_mapping VM
                    LEFT JOIN tbl_vendor_approve VA ON VA.id = VM.vendor_approve_id
-                   WHERE VM.product_id = P.id
+                   WHERE VM.variant_vendor_mapping_id = M.id
                )
            )
-           FROM tbl_product P
-           LEFT JOIN tbl_product_images PI ON P.id = PI.product_id
-           WHERE P.created_by = tbl_users.id
-              AND P.is_deleted = 0 AND P.is_approve = 1
-           GROUP BY P.id
+           FROM tbl_product_variant_vendor_mapping M
+           JOIN tbl_product_variant V ON V.id = M.product_variant_id
+           WHERE M.vendor_id = tbl_users.id
        ) AS "product_list",
              CASE
                  WHEN tbl_users.new_profile_image IS NULL THEN
@@ -759,84 +754,6 @@ user_book_demo: async (mobile) => {
     });
   },
 
-
-  /*   vendorinfo: async (user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.one(
-        `SELECT tbl_users.id as user_id,tbl_users.name as vendor_name,
-        tbl_users.new_profile_image as profile_image,
-        tbl_users.address,
-        tbl_users.dob,
-        tbl_users.nationality,
-        tbl_users.status,
-        tbl_company.id as company_id,
-        tbl_company.gstin,
-        tbl_company.cin,
-        tbl_company.website,
-        tbl_company.nature_of_business,
-        tbl_company.type_of_business,
-        tbl_company.turnover,
-        tbl_company.no_of_employess,
-        tbl_company.import_export_code,
-        tbl_company.certifications,
-        tbl_company.mobile,
-        tbl_company.email,
-        tbl_company.company_name,
-        tbl_company.profile,
-        tbl_company.location,
-        ARRAY
-        (SELECT json_build_object('vendor_approve', tbl_vendor_approve.vendor_approve,'vendor_approve', tbl_vendor_approve.vendor_approve,'id',tbl_vendor_approve.id, 'vendor_approve_url',  CASE
-        WHEN tbl_vendor_approve.vendor_logo IS NULL THEN
-        NULL
-        ELSE concat('${Config.base_url}/vendor_approve/',tbl_vendor_approve.vendor_logo)
-        END)
-          FROM tbl_vendorapprove_user_mapping VM left join tbl_vendor_approve on tbl_vendor_approve.id = VM.vendor_approve_id  WHERE  tbl_users.id = VM.user_id) AS "vendor_approve",
-        ARRAY
-          (SELECT json_build_object('brochure',tbl_files.file_name,'brochure_url', tbl_files.file_path )
-            FROM tbl_files  WHERE  tbl_files.user_id = tbl_users.id) AS "brochure",
-        ARRAY
-          (SELECT json_build_object('reviewed_by',tbl_vendor_reviews.reviewed_by,'review_date',tbl_vendor_reviews.review_date,'rating',tbl_vendor_reviews.rating,'description',tbl_vendor_reviews.description)
-            FROM tbl_vendor_reviews  WHERE  tbl_vendor_reviews.reviewed_to = tbl_users.id) AS "reviews",
-        ARRAY
-          (SELECT json_build_object('product_image', tbl_product_images.new_image_name,'product_image_url',  CASE
-          WHEN tbl_product_images.new_image_name IS NULL THEN
-          NULL
-          ELSE concat('${Config.base_url}/product_image/',tbl_product_images.new_image_name)
-          END)
-            FROM tbl_product P left join tbl_product_images on P.id = tbl_product_images.product_id  WHERE  P.vendor = tbl_users.id) AS "product_images",
-        CASE
-        WHEN tbl_users.new_profile_image IS NULL THEN
-        NULL
-        ELSE concat('${Config.base_url}/user_image/',tbl_users.new_profile_image)
-        END AS profile_image_url
-        from tbl_users 
-        left join tbl_company on tbl_users.id = tbl_company.user_id 
-         where tbl_users.id = $1`,
-        [user_id]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  }, */
-  /*   update_change_password_status: async (user_id, password) => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `update 
-        Users set 
-        password = '${password}'
-          where id = '${user_id}'`,
-        function (error, results, fields) {
-          if (error) throw error;
-          resolve(results);
-        }
-      );
-    });
-  }, */
   update_change_password_status: async (user_id, password) => {
     return new Promise(function (resolve, reject) {
       db.any(
