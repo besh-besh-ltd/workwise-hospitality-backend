@@ -3598,19 +3598,125 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
 
-  // addTechnicalEveluation: async(RFQ_ID, Tbl_rfq_product_ID) =>{
-  //   console.log("rfqid idd",RFQ_ID, Tbl_rfq_product_ID)
-  //   const query ='INSERT INTO Tbl_rfq_product_tech_evaluation (RFQ_ID, Tbl_rfq_product_ID) VALUES ($1, $2) RETURNING *';;
-  //   return new Promise((resolve, reject) => {
-  //     db.query(query, [RFQ_ID, Tbl_rfq_product_ID])
-  //       .then(result => {
-  //         resolve(result);
-  //       })
-  //       .catch(error => {
-  //         reject(new Error(error));
-  //       });
-  //   });
-  // },
+  // Changes by Agnij 2025-05-14 [Add bulk clause insertion]
+  addManyClauses: async (rfq_id, rfq_product_id, clauses) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        // Validate RFQ and Product existence
+        const validateRfqQuery = 'SELECT id FROM tbl_rfq WHERE id = $1';
+        const validateProductQuery = 'SELECT id FROM tbl_rfq_products WHERE id = $1';
+        
+        const [rfqExists, productExists] = await Promise.all([
+          db.oneOrNone(validateRfqQuery, [rfq_id]),
+          db.oneOrNone(validateProductQuery, [rfq_product_id])
+        ]);
+
+        if (!rfqExists) {
+          return resolve({ status: 0, message: `RFQ with ID ${rfq_id} does not exist.` });
+        }
+        if (!productExists) {
+          return resolve({ status: 0, message: `RFQ Product with ID ${rfq_product_id} does not exist.` });
+        }
+
+        // Changes by Agnij 2025-05-14 [Fix ON CONFLICT issue with tech evaluation record]
+        // First check if tech evaluation record exists
+        const checkTechEvalQuery = `
+          SELECT id FROM tbl_rfq_product_tech_evaluation 
+          WHERE rfq_id = $1 AND tbl_rfq_product_id = $2`;
+        
+        let techEval = await db.oneOrNone(checkTechEvalQuery, [rfq_id, rfq_product_id]);
+        
+        // If it doesn't exist, create it
+        if (!techEval) {
+          const insertTechEvalQuery = `
+            INSERT INTO tbl_rfq_product_tech_evaluation (rfq_id, tbl_rfq_product_id, timestamp)
+            VALUES ($1, $2, NOW())
+            RETURNING id`;
+            
+          techEval = await db.one(insertTechEvalQuery, [rfq_id, rfq_product_id]);
+        } else {
+          // If it exists, update the timestamp
+          await db.none(`
+            UPDATE tbl_rfq_product_tech_evaluation 
+            SET timestamp = NOW() 
+            WHERE id = $1`, [techEval.id]);
+        }
+        const techEvalId = techEval.id;
+
+        // Changes by Agnij 2025-05-14 [Improve bulk clause insertion with chunking and better error handling]
+        console.log(`Preparing to insert ${clauses.length} clauses for tech evaluation ID ${techEvalId}`);
+        
+        // Filter invalid clauses and prepare values
+        const validClauses = clauses.filter(clause => 
+          typeof clause === 'string' && clause.trim().length > 0
+        );
+        
+        if (validClauses.length === 0) {
+          return resolve({
+            status: 0,
+            message: 'No valid clauses provided for insertion'
+          });
+        }
+        
+        console.log(`Found ${validClauses.length} valid clauses for insertion`);
+        
+        // Prepare values for insertion
+        const clauseValues = validClauses.map(clause => ({
+          tbl_rfq_product_tech_evaluation_id: techEvalId,
+          clause_text: clause.substring(0, 2000), // Limit length to avoid DB errors
+          timestamp: new Date()
+        }));
+        
+        // Insert in smaller chunks to avoid potential DB issues with very large inserts
+        const CHUNK_SIZE = 50;
+        let insertedCount = 0;
+        
+        // Process in chunks
+        for (let i = 0; i < clauseValues.length; i += CHUNK_SIZE) {
+          const chunk = clauseValues.slice(i, i + CHUNK_SIZE);
+          
+          try {
+            // Use pgp.helpers.insert for efficient bulk insertion
+            const cs = new pgp.helpers.ColumnSet([
+              'tbl_rfq_product_tech_evaluation_id',
+              'clause_text',
+              'timestamp'
+            ], { table: 'tbl_rfq_product_tech_evaluation_clauses' });
+            
+            const insertQuery = pgp.helpers.insert(chunk, cs) + ' RETURNING id';
+            const insertedChunk = await db.many(insertQuery);
+            insertedCount += insertedChunk.length;
+            
+            console.log(`Inserted chunk ${i/CHUNK_SIZE + 1} with ${insertedChunk.length} clauses`);
+          } catch (chunkError) {
+            console.error(`Error inserting clause chunk ${i/CHUNK_SIZE + 1}:`, chunkError);
+            // Continue with next chunk instead of failing completely
+          }
+        }
+        
+        // Successfully inserted clauses
+        console.log(`Successfully inserted ${insertedCount} of ${validClauses.length} clauses`);
+
+        // Changes by Agnij 2025-05-14 [Improve response with detailed counts]
+        resolve({
+          status: insertedCount > 0 ? 1 : 0,
+          message: insertedCount > 0 
+            ? `Successfully added ${insertedCount} clauses` 
+            : 'Failed to insert any clauses',
+          inserted: insertedCount,
+          total: validClauses.length
+        });
+
+      } catch (error) {
+        console.error('Error in addManyClauses:', error);
+        resolve({
+          status: 0,
+          message: 'Error adding clauses',
+          error: error.message
+        });
+      }
+    });
+  },
 
   addClause: async (rfq_id, rfq_product_id, clause_text, file_url) => {
     // console.log("values in add clause model", rfq_id, rfq_product_id, clause_text, file_url);
@@ -4474,7 +4580,6 @@ rfq_project_exist: async (project_id,user_id) => {
                 });
             })
             .catch((error) => {
-                console.error("Error fetching vendor responses:", error);
                 reject({
                     status: 0,
                     message: "Error in fetching vendor responses.",
@@ -4529,7 +4634,6 @@ getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
       }
 
       // filters for the query as rfq_no and project_id3
-      console.log(typeof rfq_no, typeof project_id);
       let filtersQuery='';
       if (rfq_no) {
         filtersQuery = `AND RFQ.rfq_no::text LIKE '%$3%'`;
@@ -4539,7 +4643,6 @@ getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
           filtersQuery += ` AND RFQ.project_id = $4`;
       }
 
-    console.log(rfq_no,project_id);
       // Step 3: Fetch RFQ products and RFQ Details
       const fetchDetailsQuery = `
         SELECT RFQ.*,
@@ -4653,6 +4756,7 @@ getClausesOfProduct: async (rfq_product_id, vendor_id) => {
       const vendorResponse = vendorResponseResult.length > 0 ? 1 : 0;
 
       // Step 3: Fetch clauses and associated files
+      // Changes by Agnij May 13, 2025 [Fixed clause display limitation]
       const fetchClausesQuery = `
         SELECT
           c.id AS clause_id,
@@ -4665,7 +4769,8 @@ getClausesOfProduct: async (rfq_product_id, vendor_id) => {
         ON
           c.id = f.tbl_rfq_product_tech_evaluation_clauses_id
         WHERE
-          c.tbl_rfq_product_tech_evaluation_id = $1;
+          c.tbl_rfq_product_tech_evaluation_id = $1
+        ORDER BY c.id;
       `;
       const clausesResult = await db.query(fetchClausesQuery, [tbl_rfq_product_tech_evaluation_id]);
 
@@ -4701,7 +4806,6 @@ getClausesOfProduct: async (rfq_product_id, vendor_id) => {
         data: response,
       });
     } catch (error) {
-      console.error("Error in getClauses API:", error);
       reject({
         success: false,
         message: "Error fetching clauses and files.",
@@ -4784,7 +4888,6 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
               });
           })
           .catch((error) => {
-              console.error("Error in fetchTechClearedVendors:", error);
               reject({
                   status: 0,
                   message: "Error in fetching cleared vendor details.",
@@ -4795,7 +4898,6 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
 },
 
 rfqProductReport: async (userId, productId, productName, startDate, endDate) => {
-  console.log([userId, productId, startDate, endDate]);
   return new Promise(function (resolve, reject) {
       const query = `
       SELECT 
@@ -4914,6 +5016,36 @@ rfqProductReport: async (userId, productId, productName, startDate, endDate) => 
 },
 
 // project report including all rfq quote etc
+getProductOrVariantNameByRfqProductId: async (rfq_product_id) => {
+  return new Promise(function (resolve, reject) {
+    const query = `
+      SELECT 
+        PV.name AS variant_name,
+        P.name AS product_name
+      FROM tbl_rfq_products RP
+      LEFT JOIN tbl_product_variant PV ON RP.product_variant_id = PV.id
+      LEFT JOIN tbl_product P ON PV.product_id = P.id
+      WHERE RP.id = $1
+      LIMIT 1;
+    `;
+    
+    db.oneOrNone(query, [rfq_product_id])
+      .then(function (result) {
+        if (!result) {
+          resolve(null);
+          return;
+        }
+        
+        // Prefer the variant name if available, otherwise use product name
+        const productName = result.variant_name || result.product_name || null;
+        resolve(productName);
+      })
+      .catch(function (err) {
+        reject(new Error(`Error fetching product name: ${err.message}`));
+      });
+  });
+},
+
 getProjectDetailsReport: async (projectId, startDate, endDate) => {
   return new Promise(function (resolve, reject) {
      const query = `SELECT
@@ -5037,7 +5169,6 @@ getProjectDetailsReport: async (projectId, startDate, endDate) => {
 
 // Changes by Agnij April 30, 2025 [Added method to search for variant products]
 searchVariantProducts: async (search_key) => {
-  console.log(`[RFQ Model] searchVariantProducts called with search_key: "${search_key}"`);
   
   // SQL query to search for products in the variant mappings table
   const q = `
@@ -5085,12 +5216,9 @@ searchVariantProducts: async (search_key) => {
   `;
   
   try {
-    console.log(`[RFQ Model] Executing variant products search query for: "${search_key}"`);
     const { rows } = await db.query(q, [search_key]);
-    console.log(`[RFQ Model] searchVariantProducts found ${rows.length} results`);
     return rows;
   } catch (error) {
-    console.error('[RFQ Model] Error in searchVariantProducts:', error.message);
     console.error(error.stack);
     // Return empty array instead of throwing error to avoid breaking the API response
     return [];

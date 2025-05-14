@@ -276,7 +276,6 @@ RfqRoutes.post(
 
 
 
-// to add clause using file.
 RfqRoutes.post('/add-clause-using-file',
   passportSignIn,
   schema_posts.clauseFileUpload,
