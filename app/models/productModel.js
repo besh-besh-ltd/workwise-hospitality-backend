@@ -3761,35 +3761,40 @@ getProductTechSpecByID: async (productId) => {
     return new Promise(function (resolve, reject) {
       db.oneOrNone(
         `SELECT 
-          m.id as mapping_id,
-          m.product_variant_id as variant_id,
-          JSON_BUILD_OBJECT('id', TU.id, 'name', TU.name, 'email', TU.email) AS vendor_details,
-          m.status,
-          m.created_at as mapped_at,
-          v.is_approve,
-          v.reject_reason_id,
-          trr.reject_reason,
-          v.name as variant_name,
-          p.name as product_name
-        FROM 
-          tbl_product_variant_vendor_mapping m
+           m.id AS mapping_id,
+           m.product_variant_id AS variant_id,
+           ARRAY(select vpm.vendor_approve_id from tbl_vendorapprove_product_mapping vpm where vpm.variant_vendor_mapping_id = m.id) as approved_ids,
+           JSON_BUILD_OBJECT(
+          'id', TU.id,
+          'name', TU.name,
+          'email', TU.email
+         ) AS vendor_details,
+         m.status,
+         m.created_at AS mapped_at,
+         v.is_approve,
+         v.reject_reason_id,
+         trr.reject_reason,
+         v.name AS variant_name,
+         p.name AS product_name
+         FROM 
+         tbl_product_variant_vendor_mapping m
         LEFT JOIN 
-          tbl_users TU on TU.id = m.vendor_id
+         tbl_users TU ON TU.id = m.vendor_id
         LEFT JOIN
           tbl_product_variant v ON v.id = m.product_variant_id
         LEFT JOIN
-          tbl_product p ON p.id = v.product_id
+         tbl_product p ON p.id = v.product_id
         LEFT JOIN
-          tbl_reject_reason trr ON v.reject_reason_id = trr.id
+         tbl_reject_reason trr ON v.reject_reason_id = trr.id
         WHERE 
-          m.id = $1`,
+         m.id = $1;`,
         [mappingId]
       )
         .then(function (data) {
           resolve(data);
         })
         .catch(function (err) {
-          console.error("Error getting mapping by ID:", err);
+          console.error('Error getting mapping by ID:', err);
           let error = new Error(err);
           reject(error);
         });
