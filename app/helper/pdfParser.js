@@ -1,6 +1,6 @@
 // Changes by Agnij 2025-05-14 [Enhanced PDF parser with more robust extraction]
-import pkg from 'pdfjs-dist';
-const { getDocument } = pkg;
+import * as pdfjsLib from 'pdfjs-dist';
+import { getDocument } from 'pdfjs-dist';
 import { logError } from './common.js';
 import fs from 'fs';
 import path from 'path';
@@ -41,12 +41,6 @@ const pdfParser = {
     }
 
     try {
-      // Set up the pdfjsLib - no need to import again, use pkg
-      const pdfjsLib = pkg;
-      
-      // Changes by Agnij 2025-07-26 [Add better error handling and logging]
-      console.log('[PDFParser] Starting PDF extraction...');
-      
       // Configure worker - use in-memory worker if needed
       if (pdfjsWorkerSource) {
         console.log('[PDFParser] Using worker from:', pdfjsWorkerSource);
