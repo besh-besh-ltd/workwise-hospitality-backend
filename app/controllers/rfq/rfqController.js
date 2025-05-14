@@ -5454,70 +5454,48 @@ addClauseUsingFile : async (req, res) => {
     if (!rfq_id || !rfq_product_id) {
       return res.status(400).json({ status: 0, message: "Invalid input. Ensure RFQ_ID and RFQ_PRODUCT_ID are provided" });
     }
-    
     // Use new product/variant name function
     const productName = await rfqModel.getProductOrVariantNameByRfqProductId(rfq_product_id);
-    
-    // Changes by Agnij 2025-05-14 [Improved error messages for product matching failures]
-    if (!productName) {
-      console.error(`Product name could not be retrieved for rfq_product_id: ${rfq_product_id}`);
-      return res.json({ 
-        status: 0, 
-        message: "Could not determine product name. Please select a valid product.", 
-        errors: [{ 
-          Row: 0, 
-          error: "Product name not found in the database. Please verify the selected product." 
-        }] 
-      });
-    }
-    
-    console.log(`Attempting to extract clauses for product: "${productName}", rfq_product_id: ${rfq_product_id}`);
     const result = await generativeAI.extractClauses(file, productName);
-    
+
+  const techEvaluationClauses = result?.structuredData?.technicalSpecifications.map(item => {
+    if (item?.text) return item.text;
+    if (item?.parameter && item?.value) return `${item.parameter}: ${item.value}${item.unit ? ' ' + item.unit : ''}`;
+    if (item?.parameter) return `${item.parameter}: ${item.value || ''}${item.unit ? ' ' + item.unit : ''}`;
+    return JSON.stringify(item);
+  }).filter(Boolean);
+  
+      console.log("  techEvaluationClauses", techEvaluationClauses)
+  
+  
+      console.log(" result mukul", result?.structuredData?.technicalSpecifications)
+
     if (!result.status) {
       let userMessage = result.message || "Failed to extract information";
-      
       if (userMessage.match(/no relevant information detected|no information detected/i)) {
-        userMessage = `No relevant information for "${productName}" was found in the uploaded document. Please ensure the document contains specifications for this product.`;
+        userMessage = "No relevant information for this product was found in the uploaded document. Please ensure the document is for the selected product.";
       }
-      
-      console.log(`Clause extraction failed: ${userMessage}`);
-      return res.json({ 
-        status: 0, 
-        message: userMessage, 
-        errors: [{ Row: 0, error: userMessage }] 
-      });
+      return res.json({ status: 0, message: userMessage, errors: [{ Row: 0, error: userMessage }] });
     }
-    
     if (!result.clauses || result.clauses.length === 0) {
-      const noInfoMessage = `No information could be extracted for '${productName}'. Please check if the document contains relevant specifications.`;
-      console.log(noInfoMessage);
       return res.json({
         status: 0,
-        message: noInfoMessage,
-        errors: [{ Row: 0, error: noInfoMessage }]
+        message: productName 
+          ? `No information was found for product '${productName}'`
+          : "No information was found in the document",
+        errors: [{ Row: 0, error: productName ? `No relevant information detected for product '${productName}'` : "No information detected in the document" }]
       });
     }
-    
     // Bulk insert all clauses at once
-    const insertResult = await rfqModel.addManyClauses(rfq_id, rfq_product_id, result.clauses);
-    
-    console.log(`Clause insertion result for '${productName}': status=${insertResult.status}, inserted=${insertResult.inserted || 0}`);
+const insertResult = await rfqModel.addManyClauses(rfq_id, rfq_product_id, techEvaluationClauses);
     return res.json({
       status: insertResult.status,
-      message: insertResult.status ? 
-        `${insertResult.inserted} of ${result.clauses.length} specifications successfully extracted for '${productName}'` : 
-        insertResult.message,
+      message: insertResult.status ? `${insertResult.inserted} of ${result.clauses.length} items added successfully for '${productName}'` : insertResult.message,
       errors: insertResult.status ? [] : [{ Row: 0, error: insertResult.error }],
-      clauses: result.clauses
+      clauses: result
     });
   } catch (error) {
-    console.error(`Error in addClauseUsingFile: ${error.message}`, error);
-    res.status(500).json({ 
-      status: 0, 
-      message: "Error processing document", 
-      errors: [{ Row: 0, error: error?.message || "Unknown error occurred while processing the document" }] 
-    });
+    res.status(500).json({ status: 0, message: "Error adding information", errors: [{ Row: 0, error: error?.message }] });
   }
 },
 
