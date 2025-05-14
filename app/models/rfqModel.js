@@ -3618,40 +3618,93 @@ rfq_project_exist: async (project_id,user_id) => {
           return resolve({ status: 0, message: `RFQ Product with ID ${rfq_product_id} does not exist.` });
         }
 
-        // Get or create tech evaluation record
-        const techEvalQuery = `
-          INSERT INTO tbl_rfq_product_tech_evaluation (rfq_id, tbl_rfq_product_id, timestamp)
-          VALUES ($1, $2, NOW())
-          ON CONFLICT (rfq_id, tbl_rfq_product_id) DO UPDATE 
-          SET timestamp = NOW()
-          RETURNING id`;
+        // Changes by Agnij 2025-05-14 [Fix ON CONFLICT issue with tech evaluation record]
+        // First check if tech evaluation record exists
+        const checkTechEvalQuery = `
+          SELECT id FROM tbl_rfq_product_tech_evaluation 
+          WHERE rfq_id = $1 AND tbl_rfq_product_id = $2`;
         
-        const techEval = await db.one(techEvalQuery, [rfq_id, rfq_product_id]);
+        let techEval = await db.oneOrNone(checkTechEvalQuery, [rfq_id, rfq_product_id]);
+        
+        // If it doesn't exist, create it
+        if (!techEval) {
+          const insertTechEvalQuery = `
+            INSERT INTO tbl_rfq_product_tech_evaluation (rfq_id, tbl_rfq_product_id, timestamp)
+            VALUES ($1, $2, NOW())
+            RETURNING id`;
+            
+          techEval = await db.one(insertTechEvalQuery, [rfq_id, rfq_product_id]);
+        } else {
+          // If it exists, update the timestamp
+          await db.none(`
+            UPDATE tbl_rfq_product_tech_evaluation 
+            SET timestamp = NOW() 
+            WHERE id = $1`, [techEval.id]);
+        }
         const techEvalId = techEval.id;
 
-        // Prepare bulk clause insertion
-        const clauseValues = clauses.map(clause => ({
+        // Changes by Agnij 2025-05-14 [Improve bulk clause insertion with chunking and better error handling]
+        console.log(`Preparing to insert ${clauses.length} clauses for tech evaluation ID ${techEvalId}`);
+        
+        // Filter invalid clauses and prepare values
+        const validClauses = clauses.filter(clause => 
+          typeof clause === 'string' && clause.trim().length > 0
+        );
+        
+        if (validClauses.length === 0) {
+          return resolve({
+            status: 0,
+            message: 'No valid clauses provided for insertion'
+          });
+        }
+        
+        console.log(`Found ${validClauses.length} valid clauses for insertion`);
+        
+        // Prepare values for insertion
+        const clauseValues = validClauses.map(clause => ({
           tbl_rfq_product_tech_evaluation_id: techEvalId,
-          clause_text: clause,
+          clause_text: clause.substring(0, 2000), // Limit length to avoid DB errors
           timestamp: new Date()
         }));
-
-        // Use pgp.helpers.insert for efficient bulk insertion
-        const cs = new pgp.helpers.ColumnSet([
-          'tbl_rfq_product_tech_evaluation_id',
-          'clause_text',
-          'timestamp'
-        ], { table: 'tbl_rfq_product_tech_evaluation_clauses' });
-
-        const insertQuery = pgp.helpers.insert(clauseValues, cs) + ' RETURNING id';
         
-        const insertedClauses = await db.many(insertQuery);
+        // Insert in smaller chunks to avoid potential DB issues with very large inserts
+        const CHUNK_SIZE = 50;
+        let insertedCount = 0;
+        
+        // Process in chunks
+        for (let i = 0; i < clauseValues.length; i += CHUNK_SIZE) {
+          const chunk = clauseValues.slice(i, i + CHUNK_SIZE);
+          
+          try {
+            // Use pgp.helpers.insert for efficient bulk insertion
+            const cs = new pgp.helpers.ColumnSet([
+              'tbl_rfq_product_tech_evaluation_id',
+              'clause_text',
+              'timestamp'
+            ], { table: 'tbl_rfq_product_tech_evaluation_clauses' });
+            
+            const insertQuery = pgp.helpers.insert(chunk, cs) + ' RETURNING id';
+            const insertedChunk = await db.many(insertQuery);
+            insertedCount += insertedChunk.length;
+            
+            console.log(`Inserted chunk ${i/CHUNK_SIZE + 1} with ${insertedChunk.length} clauses`);
+          } catch (chunkError) {
+            console.error(`Error inserting clause chunk ${i/CHUNK_SIZE + 1}:`, chunkError);
+            // Continue with next chunk instead of failing completely
+          }
+        }
+        
+        // Successfully inserted clauses
+        console.log(`Successfully inserted ${insertedCount} of ${validClauses.length} clauses`);
 
+        // Changes by Agnij 2025-05-14 [Improve response with detailed counts]
         resolve({
-          status: 1,
-          message: 'Clauses added successfully',
-          inserted: insertedClauses.length,
-          total: clauses.length
+          status: insertedCount > 0 ? 1 : 0,
+          message: insertedCount > 0 
+            ? `Successfully added ${insertedCount} clauses` 
+            : 'Failed to insert any clauses',
+          inserted: insertedCount,
+          total: validClauses.length
         });
 
       } catch (error) {

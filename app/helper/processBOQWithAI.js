@@ -46,7 +46,7 @@ const generativeAI = {
           }
 
           const genAI = new GoogleGenerativeAI(apiKey);
-          const modelName = 'gemini-1.5-pro-latest'; // Reverted for stability
+          const modelName = 'gemini-1.5-flash'; // Reverted for stability
           const model = genAI.getGenerativeModel({ model: modelName });
 
           let prompt;
