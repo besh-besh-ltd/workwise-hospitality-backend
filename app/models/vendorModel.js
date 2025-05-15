@@ -650,34 +650,35 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
           tu.mobile, 
           tu.email,
           COALESCE(tc.company_name, tu.organization_name) AS organization_name,
-          tu.user_type
-          ${search ? `,
-          CASE
-            WHEN LOWER(name) = LOWER('${escapedSearch}') THEN 10
-            WHEN LOWER(organization_name) = LOWER('${escapedSearch}') THEN 10 
-            WHEN LOWER(email) = LOWER('${escapedSearch}') THEN 10
-            WHEN LOWER(name) ILIKE LOWER('${escapedSearch}%') THEN 8
-            WHEN LOWER(organization_name) ILIKE LOWER('${escapedSearch}%') THEN 8
-            WHEN LOWER(email) ILIKE LOWER('${escapedSearch}%') THEN 8
-            WHEN LOWER(name) ILIKE LOWER('%${escapedSearch}%') THEN 6
-            WHEN LOWER(organization_name) ILIKE LOWER('%${escapedSearch}%') THEN 6
-            WHEN LOWER(email) ILIKE LOWER('%${escapedSearch}%') THEN 6
+          tu.user_type,
+          ${escapedSearch ? "ts_rank_cd(to_tsvector('english', tc.company_name), plainto_tsquery('english', $1)) AS rank," : ''}
+          ${escapedSearch ? 'word_similarity(lower(tc.company_name), lower($1)) as similarity_score,' : ''}
+          ${escapedSearch ? `CASE
+              WHEN lower(tc.company_name) LIKE lower($1) || '%' THEN 1
+              ELSE 0
+          END AS starts_with_input,` : ''}
+          ${escapedSearch ? `CASE
+            WHEN lower(tc.company_name) ~* ('(^|\\s)' || lower($1) || '(\\s|$)') THEN 1
             ELSE 0
-          END AS exact_match_score,
-          GREATEST(
-            COALESCE(ts_rank_cd(to_tsvector('english', name), plainto_tsquery('english', '${escapedSearch}')), 0),
-            COALESCE(ts_rank_cd(to_tsvector('english', organization_name), plainto_tsquery('english', '${escapedSearch}')), 0),
-            COALESCE(ts_rank_cd(to_tsvector('english', email), plainto_tsquery('english', '${escapedSearch}')), 0)
-          ) AS rank,
-          GREATEST(
-            COALESCE(similarity(name, '${escapedSearch}'), 0),
-            COALESCE(similarity(organization_name, '${escapedSearch}'), 0),
-            COALESCE(similarity(email, '${escapedSearch}'), 0)
-          ) AS similarity_score` : ''}
+          END AS exact_word_match,` : ''}
+          ${escapedSearch ? `CASE
+            WHEN position(lower($1) in lower(tc.company_name)) > 0 THEN 1
+            ELSE 0
+          END AS partial_word_match` : ''}
          FROM tbl_users tu
          LEFT JOIN tbl_company tc ON tc.user_id = tu.id
-         WHERE tc.id IS NOT NULL AND tu.is_deleted = 0 AND tu.user_type = 3 OR tu.user_type = 4 ${isApproved != null ? isApproved == 'true' ? 'AND tu.status = 1' : 'AND tu.status = 0' : ''}
-        ORDER BY tu.created_at`
+         WHERE tc.id IS NOT NULL AND tu.is_deleted = 0 AND (tu.user_type = 3 OR tu.user_type = 4) 
+         ${search ? ` AND (
+          to_tsvector('english', tc.company_name) @@ plainto_tsquery('english', $1)
+          OR (char_length($1) = 1 AND similarity(tc.company_name, $1) > 0)
+          OR (char_length($1) > 1 AND similarity(tc.company_name, $1) > 0.1)
+      ) ` : ''}
+        ${isApproved != null ? isApproved == 'true' ? 'AND tu.status = 1' : 'AND tu.status = 0' : ''}
+        ORDER BY 
+        ${search ? 
+          `rank DESC, starts_with_input DESC, exact_word_match DESC, partial_word_match DESC, similarity_score DESC, tu.created_at` : 
+          `tu.created_at`
+        }`, [escapedSearch]
       )
         .then(function (data) {
           resolve(data);

@@ -5465,10 +5465,6 @@ addClauseUsingFile : async (req, res) => {
     return JSON.stringify(item);
   }).filter(Boolean);
   
-      console.log("  techEvaluationClauses", techEvaluationClauses)
-  
-  
-      console.log(" result mukul", result?.structuredData?.technicalSpecifications)
 
     if (!result.status) {
       let userMessage = result.message || "Failed to extract information";
