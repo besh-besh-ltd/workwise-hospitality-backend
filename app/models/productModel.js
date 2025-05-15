@@ -617,7 +617,7 @@ const productModel = {
         });
     });
   },
-  addProductApproveBy: async (productApproveArray, productId) => {
+  addProductApproveBy: async (productApproveArray, productId = 0) => {
     return new Promise(function (resolve, reject) {
       // Construct the dynamic SQL query
       const { ColumnSet } = pgp().helpers;
@@ -653,49 +653,7 @@ const productModel = {
         });
     });
 
-    /* return new Promise(function (resolve, reject) {
-      db.one(
-        `update 
-				tbl_product set 
-				description = ($1),
-				manufacturer = ($2),
-				availability = ($3),
-				slug = ($4),
-				sku = ($5),
-				vendor_approved_by = ($6),
-				status = ($7),
-				created_by = ($8),
-				vendor = ($9),
-        is_review = ($11),
-        is_approve = ($12),
-        brochure_file=($13)
-       	where id=($10) 
-        RETURNING id`,
-        [
-          productObj.description,
-          productObj.manufacturer,
-          productObj.availability,
-          productObj.slug,
-          productObj.sku,
-          productObj.vendor_approved_by,
-          productObj.status,
-          productObj.created_by,
-          productObj.vendor,
-          productObj.product_id,
-          productObj.is_review || 0,
-          productObj.is_approve,
-          productObj.brochure_file
-        ]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          // var errorText = common.getErrorText(err);
-          // var error = new Error(errorText);
-          reject(err);
-        });
-    }); */
+   
   },
   updateVendorProduct: async (productObj) => {
     return new Promise(function (resolve, reject) {
@@ -3738,6 +3696,8 @@ getProductTechSpecByID: async (productId) => {
 
   // Changes by Agnij May 02, 2025 [Added function to approve/reject mappings]
   approveMapping: async (mappingObj, mappingId) => {
+
+    console.log("Mapping Object:", mappingObj);
     return new Promise(function (resolve, reject) {
       const condition = ` WHERE id = $1 RETURNING id`;
       const values = [mappingId];
@@ -4222,6 +4182,21 @@ getProductTechSpecByID: async (productId) => {
       }
     });
   },
+  deleteApprovedByVariantMapping : async (mappingId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `DELETE FROM tbl_vendorapprove_product_mapping
+        WHERE variant_vendor_mapping_id = $1`,
+        [mappingId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          reject(err);
+        });
+    });
+  }
 };
 
 export default productModel;

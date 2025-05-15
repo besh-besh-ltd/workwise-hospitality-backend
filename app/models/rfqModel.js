@@ -416,6 +416,23 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     });
   },
 
+  //Helper function to get records by ID
+ getById: async (table_name, primary_key) => {
+  const query = `SELECT * FROM ${table_name} WHERE id = $1`;
+  const values = [primary_key];
+
+  return new Promise((resolve, reject) => {
+    db.query(query, values)
+      .then((data) => {
+        resolve(data);
+      })
+      .catch((err) => {
+        reject(new Error(err));
+      });
+  });
+},
+
+
   getAllTerms: async () => {
     return new Promise(function (resolve, reject) {
       db.query(`SELECT * FROM tbl_rfq_terms`)

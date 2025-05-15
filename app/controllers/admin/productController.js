@@ -25,6 +25,7 @@ import path from 'path';
 import subscriptionModel from '../../models/subscriptionModel.js';
 import moment from 'moment';
 import db from '../../config/dbConn.js';
+import rfqModel from '../../models/rfqModel.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -3680,5 +3681,90 @@ const productController = {
       });
     }
   },
+  approvedByVariantMapping: async (req, res) => {
+    try {
+      let { mapping_id, approved_id } = req.body;
+      if (!mapping_id || !approved_id) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Mapping ID and approved ID are required'
+        });
+      }
+
+      // Check if mapping exists
+      const mapping = await productModel.getVariantVendorMappingById(
+        mapping_id
+      );
+      if (!mapping ) {
+        return res.status(404).json({
+          status: 3,
+          message: 'Mapping not found'
+        });
+      }
+      // Check if approved ID exists
+      // Dynamically build placeholders: $1, $2, ...
+      const tbl = 'tbl_vendor_approve';
+      const missingIds = [];
+      approved_id = approved_id.map(Number); // ensures [2, 8] are numbers
+
+
+      for (let id of approved_id) {
+        const result = await rfqModel.getById(tbl, id);
+        console.log("RESULT: ", result);
+        // Check if the result is null or undefined
+        if (!result) {
+          missingIds.push(id);
+        }
+      }
+
+      if (missingIds.length > 0) {
+        return res.status(404).json({
+          status: 3,
+          message: `Approved IDs not found: ${missingIds.join(', ')}`
+        });
+      }
+
+
+
+      // const approvedObj = {
+      //   product_id: 0, // Nowhere its used hence hardcoded to 0
+      //   variant_vendor_mapping_id: mapping_id,
+      //   vendor_approve_id: approved_id
+      // };
+       //Delete the records first
+      await productModel.deleteApprovedByVariantMapping(mapping_id);
+
+      // Then insert the new records
+      for (let id of approved_id) {
+        const approvedObj = {
+          product_id: 0,
+          variant_vendor_mapping_id: mapping_id,
+          vendor_approve_id: id
+        };
+
+        await productModel.addProductApproveBy(approvedObj);
+      }
+
+     
+     
+      res
+        .status(200)
+        .json({
+          status: 1,
+          message: 'Product Updated successfully'
+        })
+        .end();
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+   
+  }
 };
 export default productController;

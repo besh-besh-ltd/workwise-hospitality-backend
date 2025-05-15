@@ -730,22 +730,6 @@ const ProductsController = {
         })
         .end();
     } catch (err) {
-      /* if (req.files?.featured && req.files?.featured.length > 0) {
-        fs.unlink(req.files.featured[0].path, (unlinkError) => {
-          if (unlinkError) {
-            console.error('Error deleting file:', unlinkError);
-          }
-        });
-      }
-      if (req.files?.gallery && req.files?.gallery.length > 0) {
-        req.files.gallery.forEach((file) => {
-          fs.unlink(file.path, (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          });
-        });
-      } */
       logError(err);
       res
         .status(400)
