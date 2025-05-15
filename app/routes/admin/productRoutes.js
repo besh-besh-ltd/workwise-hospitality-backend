@@ -21,6 +21,10 @@ productRoutes.post(
   productController.createCategory
 );
 productRoutes.get(
+  '/parent-category-list',
+  productController.parentCategoryList
+);
+productRoutes.get(
   '/category-list',
   productController.categoryList
 );
@@ -113,7 +117,11 @@ productRoutes.get(
   passportSignIn,
   productController.productCount
 );
-
+productRoutes.get(
+  '/get-product-by-id/:id',
+  passportSignIn,
+  productController.getProductById
+);
 productRoutes.get(
   '/product-list',
   passportSignIn,
