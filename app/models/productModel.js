@@ -3721,33 +3721,80 @@ getProductTechSpecByID: async (productId) => {
     return new Promise(function (resolve, reject) {
       db.oneOrNone(
         `SELECT 
-           m.id AS mapping_id,
-           m.product_variant_id AS variant_id,
-           ARRAY(select vpm.vendor_approve_id from tbl_vendorapprove_product_mapping vpm where vpm.variant_vendor_mapping_id = m.id) as approved_ids,
-           JSON_BUILD_OBJECT(
-          'id', TU.id,
-          'name', TU.name,
-          'email', TU.email
-         ) AS vendor_details,
-         m.status,
-         m.created_at AS mapped_at,
-         v.is_approve,
-         v.reject_reason_id,
-         trr.reject_reason,
-         v.name AS variant_name,
-         p.name AS product_name
-         FROM 
-         tbl_product_variant_vendor_mapping m
-        LEFT JOIN 
-         tbl_users TU ON TU.id = m.vendor_id
-        LEFT JOIN
-          tbl_product_variant v ON v.id = m.product_variant_id
-        LEFT JOIN
-         tbl_product p ON p.id = v.product_id
-        LEFT JOIN
-         tbl_reject_reason trr ON v.reject_reason_id = trr.id
-        WHERE 
-         m.id = $1;`,
+  m.id AS mapping_id,
+  m.product_variant_id AS variant_id,
+ 
+  created_by_user_m.name AS mapping_created_by_name,
+  m.created_at AS mapping_created_at,
+ 
+  updated_by_user_m.name AS mapping_updated_by_name,
+  m.updated_at AS mapping_updated_at,
+
+  approved_by_user_m.name AS mapping_approved_by_name,
+  m.approved_at AS mapping_approved_at,
+
+  ARRAY(
+    SELECT vpm.vendor_approve_id 
+    FROM tbl_vendorapprove_product_mapping vpm 
+    WHERE vpm.variant_vendor_mapping_id = m.id
+  ) AS approved_ids,
+
+  TU.name AS vendor_name,
+  TU.email AS vendor_email,
+
+  m.status,
+  m.created_at AS mapped_at,
+
+  v.is_approve,
+  v.reject_reason_id,
+  trr.reject_reason,
+  v.name AS variant_name,
+ 
+  created_by_user_v.name AS variant_created_by_name,
+  v.created_at AS variant_created_at,
+ 
+  updated_by_user_v.name AS variant_updated_by_name,
+  v.updated_at AS variant_updated_at,
+
+  approved_by_user_v.name AS variant_approved_by_name,
+  v.approved_at AS variant_approved_at,
+
+  p.name AS product_name,
+ 
+  created_by_user_p.name AS product_created_by_name,
+  p.created_at AS product_created_at,
+  
+  updated_by_user_p.name AS product_updated_by_name,
+  p.updated_at AS product_updated_at,
+
+  approved_by_user_p.name AS product_approved_by_name,
+  p.approved_at AS product_approved_at
+
+FROM tbl_product_variant_vendor_mapping m
+
+LEFT JOIN tbl_users TU ON TU.id = m.vendor_id
+LEFT JOIN tbl_product_variant v ON v.id = m.product_variant_id
+LEFT JOIN tbl_product p ON p.id = v.product_id
+LEFT JOIN tbl_reject_reason trr ON v.reject_reason_id = trr.id
+
+-- JOINs for mapping-related users
+LEFT JOIN tbl_users created_by_user_m ON created_by_user_m.id = m.created_by
+LEFT JOIN tbl_users updated_by_user_m ON updated_by_user_m.id = m.updated_by
+LEFT JOIN tbl_users approved_by_user_m ON approved_by_user_m.id = m.approved_by
+
+-- JOINs for variant-related users
+LEFT JOIN tbl_users created_by_user_v ON created_by_user_v.id = v.created_by
+LEFT JOIN tbl_users updated_by_user_v ON updated_by_user_v.id = v.updated_by
+LEFT JOIN tbl_users approved_by_user_v ON approved_by_user_v.id = v.approved_by
+
+-- JOINs for product-related users
+LEFT JOIN tbl_users created_by_user_p ON created_by_user_p.id = p.created_by
+LEFT JOIN tbl_users updated_by_user_p ON updated_by_user_p.id = p.updated_by
+LEFT JOIN tbl_users approved_by_user_p ON approved_by_user_p.id = p.vendor_approved_by
+
+WHERE m.id = $1;
+
+`,
         [mappingId]
       )
         .then(function (data) {
