@@ -135,7 +135,21 @@ const productModel = {
         });
     });
   },
-
+  getParentCategoryList: async () => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `select TC.*
+          from tbl_category TC where TC.is_deleted !='1' AND (TC.parent_id = 0 OR TC.parent_id IS NULL) order by title asc`,
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   getCategoryList: async (limit, offset) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -252,7 +266,21 @@ const productModel = {
   },
   getProductById: async (product_id) => {
     try {
-      return await db.any(`SELECT * FROM tbl_product WHERE id = $1 & created_by=1`, [product_id]);
+      return await db.any(`
+        SELECT P.*,
+          C.name AS created_by,
+          U.name AS updated_by,
+          A.name AS vendor_approved_by,
+          ARRAY (SELECT JSON_BUILD_OBJECT('id', C.id, 'category_name', C.title) 
+          FROM tbl_product_categories PC 
+          JOIN tbl_category C ON PC.category_id = C.id 
+          WHERE PC.product_id = P.id) AS product_categories 
+        FROM tbl_product P 
+        LEFT JOIN tbl_users C ON P.created_by = C.id
+        LEFT JOIN tbl_users U ON P.updated_by = U.id
+        LEFT JOIN tbl_users A ON P.vendor_approved_by = A.id
+        WHERE P.id = $1
+        `, [product_id]);
     } catch (error) {
       throw new Error(error); // Rethrow the error so the caller can handle it
     }
@@ -1519,26 +1547,31 @@ const productModel = {
         const dataQuery = `
           WITH paginated_products AS (
             SELECT
-                id,
-                name,
+                P.id,
+                P.name,
                 ${productName ? `
                   similarity(P.name, '${productName}') AS similarity_score,
                   ts_rank_cd(to_tsvector('english', P.name), plainto_tsquery('english', '${productName}')) AS rank,
                 ` : ''}
-                description,
-                slug,
-                sku,
-                created_at,
-                updated_at,
-                created_by,
-                updated_by,
-                status,
-                is_deleted,
-                is_review,
-                added_by,
-                is_approve,
-                reject_reason_id
+                P.description,
+                P.slug,
+                P.sku,
+                P.created_at,
+                P.updated_at,
+                P.approved_at,
+                C.name AS created_by,
+                U.name AS updated_by,
+                A.name AS approved_by,
+                P.status,
+                P.is_deleted,
+                P.is_review,
+                P.added_by,
+                P.is_approve,
+                (SELECT COUNT(*) FROM tbl_product_variant PV WHERE PV.product_id = P.id)::int AS variant_count
             FROM tbl_product P
+            LEFT JOIN tbl_users C ON C.id = P.created_by
+            LEFT JOIN tbl_users U ON U.id = P.updated_by
+            LEFT JOIN tbl_users A ON A.id = P.vendor_approved_by
             ${whereClause}
             ${productName ? `ORDER BY rank DESC, similarity_score DESC, P.name ASC` : `ORDER BY P.created_at DESC`} 
             LIMIT $${paramIndex}
@@ -2562,17 +2595,10 @@ WHERE tbl_product.name = $1`,
       const condition = ` WHERE id = $1 RETURNING id,name,created_by`;
       const values = [productId];
       
-      // Create a clean object without any non-existent fields
-      const cleanObj = {
-        is_approve: productObj.is_approve,
-        reject_reason_id: productObj.reject_reason_id,
-        updated_at: productObj.updated_at
-      };
-      
       // Changes by Agnij May 02, 2025 [Removed approved_at field which doesn't exist in the database]
       // Don't add approved_at field as it doesn't exist in the tbl_product table
       
-      let query = pgp().helpers.update(cleanObj, null, 'tbl_product') + condition;
+      let query = pgp().helpers.update(productObj, null, 'tbl_product') + condition;
 
       db.one(query, values)
         .then(function (data) {
@@ -3572,7 +3598,7 @@ getProductTechSpecByID: async (productId) => {
         // Changes by Agnij May 02, 2025 [Fixed added_by filter to check both variant and product creator]
         // Handle added_by filter to check both the variant creator and product creator
         if (added_by && added_by !== '') {
-          conditions.push(`(v.created_by = $${paramIndex} OR p.created_by = $${paramIndex})`);
+          conditions.push(`(m.created_by = $${paramIndex})`);
           params.push(added_by);
           paramIndex++;
         }
@@ -3617,12 +3643,15 @@ getProductTechSpecByID: async (productId) => {
             m.vendor_id,
             m.status,
             m.created_at AS mapped_at,
+            m.updated_at,
+            m.approved_at,
             v.name AS variant_name,
             m.is_approved AS is_approve,
             v.reject_reason_id,
             rr.reject_reason,
-            v.created_by,
-            v.updated_by,
+            TC.name AS created_by,
+            TU.name AS updated_by,
+            TA.name AS approved_by,
             p.id AS product_id,
             p.name AS product_name,
             p.created_by AS product_created_by,
@@ -3649,6 +3678,9 @@ getProductTechSpecByID: async (productId) => {
           FROM tbl_product_variant_vendor_mapping m
           JOIN tbl_product_variant v ON v.id = m.product_variant_id
           JOIN tbl_product p ON p.id = v.product_id
+          LEFT JOIN tbl_users TC ON m.created_by = TC.id
+          LEFT JOIN tbl_users TU ON m.updated_by = TU.id
+          LEFT JOIN tbl_users TA ON m.approved_by = TA.id
           LEFT JOIN tbl_users u ON u.id = m.vendor_id
           LEFT JOIN tbl_reject_reason rr ON rr.id = v.reject_reason_id
           ${whereClause}
@@ -4154,11 +4186,29 @@ getProductTechSpecByID: async (productId) => {
             pv.is_approve,
             pv.created_at,
             pv.updated_at,
-            pv.created_by,
-            pv.updated_by,
+            pv.approved_at,
+            TC.name AS created_by,
+            TU.name AS updated_by,
+            TA.name AS approved_by,
             pv.is_deleted,
             pv.reject_reason_id,
             p.name as product_name,
+            ${filters.id ? `
+              JSON_BUILD_OBJECT(
+                'approved', (
+                  SELECT COUNT(*) 
+                  FROM tbl_product_variant_vendor_mapping PVVM 
+                  WHERE PVVM.product_variant_id = PV.id 
+                  AND PVVM.is_approved
+                ),
+                'disapproved', (
+                  SELECT COUNT(*) 
+                  FROM tbl_product_variant_vendor_mapping PVVM 
+                  WHERE PVVM.product_variant_id = PV.id 
+                  AND NOT PVVM.is_approved
+                )
+              ) AS vendor_count,
+            ` : ``}            
             ${search_term ? `
               similarity(CONCAT(PV.name, ' - ', P.name), '${search_term}') AS similarity_score,
               ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', P.name)), plainto_tsquery('english', '${search_term}')) AS rank,
@@ -4168,6 +4218,9 @@ getProductTechSpecByID: async (productId) => {
             tbl_product_variant pv
           JOIN 
             tbl_product p ON pv.product_id = p.id
+          LEFT JOIN tbl_users TC ON pv.created_by = TC.id
+          LEFT JOIN tbl_users TU ON pv.updated_by = TU.id
+          LEFT JOIN tbl_users TA ON pv.approved_by = TA.id
           LEFT JOIN 
             tbl_product_categories pc ON p.id = pc.product_id
           LEFT JOIN 
@@ -4177,7 +4230,7 @@ getProductTechSpecByID: async (productId) => {
           GROUP BY 
             pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
             pv.created_at, pv.updated_at, pv.created_by, pv.updated_by, 
-            pv.is_deleted, pv.reject_reason_id, p.name
+            pv.is_deleted, pv.reject_reason_id, p.name, TC.name, TU.name, TA.name
 
           ${search_term ? `ORDER BY rank DESC, similarity_score DESC, PV.name ASC` : `ORDER BY PV.created_at DESC`} 
           LIMIT $${paramIndex}
