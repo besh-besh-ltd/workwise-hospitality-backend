@@ -3754,7 +3754,7 @@ const productController = {
 
 
       for (let id of approved_id) {
-        const result = await rfqModel.getById(tbl, id);
+        const result = await rfqModel.checkIfExists(tbl, id);
         console.log("RESULT: ", result);
         // Check if the result is null or undefined
         if (!result) {

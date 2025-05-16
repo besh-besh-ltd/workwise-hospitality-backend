@@ -416,22 +416,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     });
   },
 
-  //Helper function to get records by ID
- getById: async (table_name, primary_key) => {
-  const query = `SELECT * FROM ${table_name} WHERE id = $1`;
-  const values = [primary_key];
-
-  return new Promise((resolve, reject) => {
-    db.query(query, values)
-      .then((data) => {
-        resolve(data);
-      })
-      .catch((err) => {
-        reject(new Error(err));
-      });
-  });
-},
-
 
   getAllTerms: async () => {
     return new Promise(function (resolve, reject) {
@@ -1360,19 +1344,16 @@ LIMIT 1;`;
         });
     });
   },
-  checkIfExists: async (table_name, parameter) => {
-    const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
-    return new Promise(function (resolve, reject) {
-      db.any(query,[table_name,parameter])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
+  checkIfExists: async (table_name, column_name, value) => {
+  // Optional: whitelist validation
+  const query = `SELECT * FROM ${table_name} WHERE ${column_name} = $1`;
+
+  return new Promise((resolve, reject) => {
+    db.any(query, [value])
+      .then((data) => resolve(data))
+      .catch((err) => reject(new Error(err)));
+  });
+},
   getQuotesByRfqById: async (id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.query(
