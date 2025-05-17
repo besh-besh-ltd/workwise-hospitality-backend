@@ -4281,21 +4281,6 @@ WHERE m.id = $1;
         });
       }
     });
-  },
-  deleteApprovedByVariantMapping : async (mappingId) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `DELETE FROM tbl_vendorapprove_product_mapping
-        WHERE variant_vendor_mapping_id = $1`,
-        [mappingId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          reject(err);
-        });
-    });
   }
 };
 
