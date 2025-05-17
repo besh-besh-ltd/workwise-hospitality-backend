@@ -148,8 +148,8 @@ const vendorController = {
         user_type: '3',
         password: generatePassword(password),
         status: '0',
-        new_profile_image: req.files.image?.[0]?.location || null,
-        original_profile_image: req.files.image?.[0]?.location || null,
+        new_profile_image: req.files.logo?.[0]?.location || null,
+        original_profile_image: req.files.logo?.[0]?.location || null,
         created_by: createdBy,
         organization_name: organization_name || null
       };
