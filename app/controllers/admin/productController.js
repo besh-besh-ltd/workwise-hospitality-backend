@@ -26,6 +26,7 @@ import subscriptionModel from '../../models/subscriptionModel.js';
 import moment from 'moment';
 import db from '../../config/dbConn.js';
 import rfqModel from '../../models/rfqModel.js';
+import generalModel from '../../models/generalModel.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -3754,8 +3755,8 @@ const productController = {
 
 
       for (let id of approved_id) {
-        const result = await rfqModel.checkIfExists(tbl, id);
-        console.log("RESULT: ", result);
+        const result = await rfqModel.checkIfExists(tbl, `id = ${id}`);
+        // console.log("RESULT: ", result);
         // Check if the result is null or undefined
         if (!result) {
           missingIds.push(id);
@@ -3777,7 +3778,7 @@ const productController = {
       //   vendor_approve_id: approved_id
       // };
        //Delete the records first
-      await productModel.deleteApprovedByVariantMapping(mapping_id);
+      await generalModel.deleteFromTable("tbl_vendorapprove_product_mapping","variant_vendor_mapping_id", mapping_id);
 
       // Then insert the new records
       for (let id of approved_id) {
