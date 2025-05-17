@@ -8,6 +8,8 @@ const { Readable } = pkg;
 import fs from 'fs';
 import FormData from 'form-data';
 import path from 'path';
+import * as xlsx from 'xlsx'; // ✅ Added this line to fix the error
+
 const PDFParser = (await import('pdf2json')).PDFParser || (await import('pdf2json')).default;
 
 
