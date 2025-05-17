@@ -242,6 +242,28 @@ const productController = {
         .end();
     }
   },
+  parentCategoryList: async (req, res, next) => {
+    try {  
+      // If no parent_id, fetch main category list
+      let categoryList = await productModel.getParentCategoryList();
+  
+      res.status(200)
+        .json({
+          status: 1,
+          data: categoryList,
+        })
+        .end();
+  
+    } catch (error) {
+      logError(error);
+      res.status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   categoryList: async (req, res, next) => {
     try {
       let page, limit, offset;
@@ -2239,6 +2261,30 @@ const productController = {
         .end();
     }
   },
+  getProductById: async (req, res) => {
+    try {
+      const {
+        id
+      } = req.params;
+
+      const result = await productModel.getProductById(id);
+
+      const responsePayload = {
+        status: 1,
+        data: result[0],
+      };
+      
+      res.status(200).json(responsePayload).end();
+
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to search product',
+        error: error.message
+      });
+    }
+  },
   productListImproved: async (req, res) => {
     try {
       const {
@@ -2582,8 +2628,6 @@ const productController = {
       let {
         name,
         description,
-        manufacturer,
-        availability,
         categories,
         status,
         variations,
@@ -2628,6 +2672,7 @@ const productController = {
         // is_featured: is_featured || 0,
         is_approve: 0,
         added_by: req.user.id,
+        updated_by: req.user.id,
         // Changes by Agnij May 02, 2025 [Removed file fields which don't exist in database]
         // qap_new_file_name: req.files?.['qap[]']?.[0]?.location || null,
         // qap_original_file_name: req.files?.['qap[]']?.[0]?.originalname || null,
@@ -2727,6 +2772,7 @@ const productController = {
     try {
       let { reject_reason, reject_reason_id, status } = req.body;
       const productId = req.params.id;
+      const userId = req.user.id;
 
       // Changes by Agnij May 02, 2025 [Fixed approveProduct to remove vendor_approved_by field]
       
@@ -2777,10 +2823,14 @@ const productController = {
       const currentTime = new Date();
       let productObj = {
         is_approve: status,
-        updated_by: req.user.id,
+        vendor_approved_by: userId,
+        updated_by: userId,
         reject_reason_id: reasonId || null,
-        updated_at: currentTime
+        updated_at: currentTime,
+        approved_at: currentTime
       };
+
+      console.log(productObj)
       
       // Add approved_at field when approving
       if (status === '1') {
@@ -2791,10 +2841,6 @@ const productController = {
         productObj,
         productId
       );
-      
-
-
-
 
       return res.status(200).json({
         status: 1,
@@ -2863,9 +2909,11 @@ const productController = {
         const currentTime = new Date();
         const variantObj = {
           is_approve: parseInt(status),
+          approved_by: req.user.id,
           updated_by: req.user.id,
           reject_reason_id: reasonId || null,
-          updated_at: currentTime
+          updated_at: currentTime,
+          approved_at: currentTime,
         };
         
         await productModel.updateProductVariant(variantObj, productId);
@@ -2891,11 +2939,6 @@ const productController = {
         availability,
         categories,
         status,
-        variations,
-        approved_id,
-        approved_name,
-        vendor,
-        is_featured
       } = req.body;
   
       const productId = req.params.id;
@@ -2909,6 +2952,7 @@ const productController = {
         slug: titleToSlug(name),
         sku: name,
         updated_by: req.user.id,
+        updated_at: new Date(),
         // Changes by Agnij May 02, 2025 [Removed vendor field which doesn't exist in database]
         // vendor: vendor || productDetails[0].vendor,
         status: status || 1,
@@ -2956,7 +3000,7 @@ const productController = {
       let productId = req.params.id;
 
       // Changes by Agnij May 02, 2025 [Removed vendor list retrieval]
-      let productList = await productModel.productDetails(productId);
+      let productList = await productModel.getProductById(productId);
       const product = productList?.[0];
       if(!product) return res.status(404).json({
         status: 3,
@@ -3294,6 +3338,7 @@ const productController = {
         product_variant_id: variantId,
         vendor_id: vendorId,
         created_at: new Date(),
+        updated_at: new Date(),
         status: true,
         is_approved: false,
         created_by: req.user.id,
@@ -3603,7 +3648,7 @@ const productController = {
         updated_by: req.user.id,
         updated_at: new Date(),
         approved_by: req.user.id,
-        approved_at: status == 1 ? new Date() : null,
+        approved_at: new Date(),
       };
 
       
