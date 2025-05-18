@@ -179,7 +179,7 @@ ${pdfText}
 // }
 
        // download the file from ai server
-        const downloadResponse = await axios.get(response?.download_url);
+        const downloadResponse = await axios.get(response?.data?.download_url);
 
 
       return downloadResponse?.data || [] ;
@@ -212,7 +212,7 @@ ${pdfText}
   
       // Step 3: Make API call to process-boq
       const response = await axios.post(
-        'https://test.letsworkwise.com//boq_to_structured_boq',
+        'https://test.letsworkwise.com/boq_to_structured_boq',
         formData,
         {
           headers: {
