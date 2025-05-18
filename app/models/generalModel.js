@@ -78,8 +78,33 @@ const generalModel = {
         reject(error);
       })
     })
-  }
-  
-};
+  },
+deleteFromTable : async (tableName, columnName, value) => {    //general function to delete a record from any table
+  return new Promise((resolve, reject) => {
+    // Validate inputs
+    if (!tableName || !columnName) {
+      return reject(new Error('Invalid table or column name'));
+    }
+    if (value === undefined || value === null) {
+      return reject(new Error('Value to delete is required'));
+    }
+
+    const query = `DELETE FROM ${tableName} WHERE ${columnName} = $1`;
+
+    db.result(query, [value])
+      .then(result => {
+        if (result.rowCount > 0) {
+          resolve({ message: 'Delete successful', rowCount: result.rowCount });
+        } else {
+          resolve({ message: 'No rows deleted', rowCount: result.rowCount });
+        }
+      })
+      .catch(err => {
+        console.error('Error executing query', err);
+        reject(new Error('Database error'));
+      });
+  });
+},
+}
 
 export default generalModel;
