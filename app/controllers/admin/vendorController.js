@@ -148,8 +148,8 @@ const vendorController = {
         user_type: '3',
         password: generatePassword(password),
         status: '0',
-        new_profile_image: req.files.image?.[0]?.location || null,
-        original_profile_image: req.files.image?.[0]?.location || null,
+        new_profile_image: req.files.logo?.[0]?.location || null,
+        original_profile_image: req.files.logo?.[0]?.location || null,
         created_by: createdBy,
         organization_name: organization_name || null
       };
@@ -508,7 +508,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         mobile: mobile || vendorDetails[0].mobile,
         website: website || vendorDetails[0].website,
         postal_code: postal_code || vendorDetails[0].postal_code,
-        new_profile_image: req.files.image?.[0]?.location,
+        new_profile_image: req.files.logo?.[0]?.location,
         original_profile_image: vendorDetails[0].original_profile_image,
         updated_by: updatedBy,
         organization_name:

@@ -244,7 +244,6 @@ const schema_posts = {
           }
         }
       }).fields([
-        { name: 'image', maxCount: 1 },
         { name: 'logo', maxCount: 1 },
         { name: 'ptr_track', maxCount: 1 },
         { name: 'certifications', maxCount: 1 },
