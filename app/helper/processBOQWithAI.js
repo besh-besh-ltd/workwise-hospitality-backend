@@ -8,6 +8,8 @@ const { Readable } = pkg;
 import fs from 'fs';
 import FormData from 'form-data';
 import path from 'path';
+import * as xlsx from 'xlsx'; // ✅ Added this line to fix the error
+
 const PDFParser = (await import('pdf2json')).PDFParser || (await import('pdf2json')).default;
 
 
@@ -132,8 +134,10 @@ ${pdfText}
     }
   },
 
+  // mukul 18-05-2025, removed gemini and implemented AI
   processBOQWithAI: async (file) => {
     try {
+
       const s3Url = new URL(file);
       const bucket = s3Url.hostname.split('.')[0];
       const key = decodeURIComponent(s3Url.pathname).slice(1); // remove leading '/'
@@ -144,100 +148,41 @@ ${pdfText}
       const result = await s3Client.send(command);
       const webStream = Readable.toWeb(result.Body);
       const ressult2 = new Response(webStream);
-      const arrayBuffer = await ressult2.arrayBuffer();   // temporary fix for web stream to array buffer
+      const arrayBuffer = await ressult2.arrayBuffer(); 
       const buffer = Buffer.from(arrayBuffer);
-      const workbook = xlsx.read(buffer, { type: "buffer" });
 
-      const sheetName = workbook.SheetNames[0]; // Assuming data is in the first sheet
-      const sheet = workbook.Sheets[sheetName];
-      const boqData = xlsx.utils.sheet_to_csv(sheet);
+      const formData = new FormData();
+     formData.append("file", buffer, {
+      filename: key.split('/').pop(),
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
 
-      // get all terms list
-      const uniqueProductList2 = await productModel.getAllProduct(true);
-      const uniqueProductList = uniqueProductList2.map(
-        (product) => product.name
-      );
+    //  in development make sure to comment this section 
+    // STep 1: to get the the json file, that contain the structured data and products id's present in our database for each product
+     const response = await axios.post(
+      'https://test.letsworkwise.com/boq_to_structured_boq_and_match',
+      formData,
+      { headers: formData.getHeaders() }
+    );
+  
 
-      const prompt = `
-        You are an AI trained to extract product information from unstructured BOQ documents and cross-reference products against a provided database. Your goal is to accurately identify products and match them to the database, even if there are slight variations in naming.
-        
-        Your tasks:
-        
-        1. Extract the following details from the provided BOQ text:
-          * Product Name: Extract a valid product name. Prioritize descriptive names and use contextual clues from specifications. When an exact match isn't found in the database, consider common abbreviations, pluralizations, and slight variations in wording. Use the specifications to guide your product name extraction. If a product is present in our database, rename the product name to match the *exact* name present in our database. Avoid picking substring matches. If you are unable to find name from BOQ then use the specification column as the product name, only if specification provides a clear product identification.
-        
-          * Size: Capture specific attributes for product sizes.
-          * Specification: Capture all specifications in the current row. If specification for a product is NA then use the last available valid specification if available.
-          * Quantity: Always an integer. Ensure that the extracted quantity represents the actual quantity value and not any index, serial number, or unrelated numerical values.
-          * Unit: Always a valid measurement unit. If unavailable use NA
-        
-        2. Cross-reference each extracted product name against the provided product database list:
-          * Then, if the product exists in the database (even if the spelling or format differs slightly), rename the extracted product name to match *exactly* the product name from the database and set "productNotFound": false. Prioritize exact matches, then use fuzzy matching with a high similarity threshold.  Look for similar patterns as the examples, such as pluralization differences, abbreviations (e.g., GI), and slight word order variations.
-          * If the product does not exist in the database, add an additional key "productNotFound" with value true.
-        
-        Important Guidelines:
-        * If any field is missing in the BOQ data, mark it as "" empty string.
-        * Ensure every product is captured; be exhaustive.
-        * When cells are merged in the BOQ, propagate values to all related rows until a new value appears.
-        * Prioritize relevant Specifications over default names; capture specifics.
-        * Avoid picking serial numbers or indices as the quantity.
-        * Ensure only one product in the JSON and remove the duplicate entries.
-        * Validate with unit types to further filter out incorrect extractions.
-        * if given product present in product list or not, if present then rename the product name to match exactly the product name from the database. Prioritize exact matches, then use your intelligence matching with a high similarity threshold.  Look for similar patterns as the examples, such as pluralization differences, abbreviations (e.g., GI), and slight word order variations. product name present in databse might be change for example input product name is "xyz" and it may also be present in our database as "X YZ" you have to be extra smart. be like somone how have years of experiance working in heavy industry and have a good knowledge of product names and use your own intelegency as well.
-        
-        
-        Sample Response:
-        { "productList": [
-          { "product_name": "Product1 from DB", "size": "size1", "specifications": "spec1", "quantity": 1, "unit": "unit1"},
-          { "product_name": "Unknown Product", "size": "size2", "specifications": "spec2", "quantity": 2, "unit": "unit2"}
-        ]
-        }
-        
-        Here is the BOQ data:
-        ${boqData}
-        
-        Products present in my database:
-        ${uniqueProductList}
-        `;
+    //  in development uncomment this part
+    //  download the json file from ai server
+//    const  response = {
+//     "status": "success",
+//     "message": "Pipeline processing complete.",
+//     "download_url": "http://test.letsworkwise.com/download/json?file_hash=3a5f1635f9e3c8e8418ffc72fd3606a6ec7276c3a450407d005db320630c8e01&stage=matched",
+//     "file_hash": "3a5f1635f9e3c8e8418ffc72fd3606a6ec7276c3a450407d005db320630c8e01",
+//     "cost_usd": 0.3238,
+//     "time_sec": 40.59,
+//     "failed_sheets": []
+// }
 
-      const response = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GOOGLE_AI_API_KEY}`,
-        {
-          contents: [
-            {
-              parts: [{ text: prompt }]
-            }
-          ]
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json'
-          }
-        }
-      );
+       // download the file from ai server
+        const downloadResponse = await axios.get(response?.download_url);
 
-      if (
-        !response.data ||
-        !response.data.candidates ||
-        response.data.candidates.length === 0
-      ) {
-        return { error: 'Error processing BOQ with AI' };
-      }
 
-      const aiResponseText = response.data.candidates[0].content.parts[0].text;
-
-      const jsonString = aiResponseText.includes('```json')
-        ? aiResponseText
-            .substring(
-              aiResponseText.indexOf('```json') + 7,
-              aiResponseText.lastIndexOf('```')
-            )
-            .trim()
-        : aiResponseText.trim();
-
-      // Convert to object
-      const boqDataJson = JSON.parse(jsonString);
-      return boqDataJson;
+      return downloadResponse?.data || [] ;
     } catch (error) {
       logError(error);
       return { error: 'Error processing BOQ with AI' };
@@ -267,7 +212,7 @@ ${pdfText}
   
       // Step 3: Make API call to process-boq
       const response = await axios.post(
-        'https://test.letsworkwise.com/process-boq',
+        'https://test.letsworkwise.com//boq_to_structured_boq',
         formData,
         {
           headers: {

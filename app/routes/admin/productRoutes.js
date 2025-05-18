@@ -249,4 +249,10 @@ productRoutes.put(
   productController.approveMapping
 );
 
+productRoutes.post(
+  '/variant-mapping-approve',
+  passportSignIn,
+  productController.approvedByVariantMapping
+)
+
 export default productRoutes;

@@ -416,6 +416,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     });
   },
 
+
   getAllTerms: async () => {
     return new Promise(function (resolve, reject) {
       db.query(`SELECT * FROM tbl_rfq_terms`)
