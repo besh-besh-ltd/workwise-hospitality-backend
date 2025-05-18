@@ -4792,76 +4792,48 @@ const rfqController = {
 
       // validation error array ko keep monitor all products
       const validationErrors = [];
+      const sheetNameList = new Set();
 
 
-      // run loop on excel data 
-      for await (const value of boqDataJson?.productList) {
+       for await (const item of boqDataJson) {
 
-        // trim all inputs
-        const productName = value?.product_name.toString();
-        const size = value?.size.toString();
-        const specifications = value?.specifications.toString();
-        const quantity = value?.quantity.toString();
-        const unit = value?.unit.toString();
 
-        // if product name is not present then skip this product
-       if(!productName || productName=="NA"){
-          continue
-        }
+        let validProductId = 0;
 
-        // search product in our database
-        const searchObj = {
-          search_key: productName || "",
-          category_id: "",
-          approved_by_id: ""
-        };
+        
+           const cleanIds = Array.isArray(item?.list_of_product_ids)
+             ? item.list_of_product_ids.map(id => parseInt(id)).filter(id => !isNaN(id))
+             : [];
+           
+           if (cleanIds.length === 0) {
+             validationErrors.push({
+               errors: {
+                 product: `${item.fetched_product_name} - Product Not Found`
+               },
+             });
+             continue; // Skip this product
+           }
 
-        const searchedPro = await productModel.checkVariantExists(searchObj.search_key);
-
-        // // break if no product found
-        if (!searchedPro || searchedPro.length === 0) {
-          validationErrors.push({
-            // row: jsonData.indexOf(value) + 1,
-            errors: { product: productName + " - No variant name found " }
-          });
-          continue; // Skip this product
-        }
-
-        // check for unique product, and select first unique product from the list
-        let search_key = searchedPro[0];
-
-        // product spec object
-        const spec = [
-          { title: "Size", value: size },
-          { title: "Spec", value: specifications },
-          { title: "Quantity", value: quantity },
-          { title: "Unit", value: unit }
-        ];
-
-        let vendorResult = null
-        // seacrch vendor for the selected product
-        if(searchObj.search_key){
-          vendorResult = await rfqModel.searchVendor(
-            user.id,
-            searchObj?.search_key ,
-            searchObj.category_id,
-            searchObj.approved_by_id,
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-          );  
-        }
+          const result = await rfqModel.checkIfExists(
+            'tbl_product',
+            `id = ANY(ARRAY[${cleanIds.join(',')}])`
+          );
+     
+           if (result.length > 0) {
+             validProductId = result[0].id; // Use the first matched ID
+           }
+         
+          // current ai model returning multiple product ids for a product, and we have mapping for vendors with variants. i have tried to fetch product variants vendor list but this not giving me vendors for all prodicts.
+          // so currently decided to use product name in model this act as variant name, and the  fetch vendor list, this is not accurate but for quick developemnt i have implemented this  very soon we start fetch vendors by variant ID.
+          const vendorResult = await rfqModel.searchVendor(   user.id, item.fetched_product_name || item.core_product_name ,
+            "", "", "", "", "", "", "", "", "", "", );  
+        
 
         // if no vendor found for the product, push error in validation array
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             // row: jsonData.indexOf(value) + 1,
-            errors: { vendor: productName + " - `No vendor found for variant " }
+            errors: { vendor: item.fetched_product_name  + "Vendor Not Present For The Product " },
           });
           continue; // Skip this product
         }
@@ -4876,36 +4848,39 @@ const rfqController = {
 
         // Initialize the variant to 0
         let variant = 0;
-
         // Iterate over the existing products array to find the same product name and increment the variant
         products.forEach((product) => {
-          if (product.name === search_key.name && product.product_id === search_key.id) {
+          if (product.name == item.fetched_product_name && product.product_id == validProductId) {
             variant = Math.max(variant, product.variant) + 1;
           }
         });
 
-        // create product object and push in products array
-        const product = {
-          product_id:  search_key?.id,
-          name: search_key.name,
-          variant: variant,
-          spec: spec,
-          vendors: transformedVendorResult,
-          comment: value["Comments"] || "",
-          defaultSelectedVAB: "",
-          datasheet: "0",
-          datasheet_file: [],
-          spec_file: [],
-          qap: "0",
-          qap_file: [],
-          user_selected_predefined_tds: false,
-          user_selected_predefined_qap: false
-        };
+         const productObj = {
+      product_id: validProductId,
+      name: item.fetched_product_name || item.core_product_name || "Unnamed Product",
+      variant: variant,
+      spec: [
+        { title: "Size", value: item.size || "" },
+        { title: "Spec", value: item.feature_or_specifications || "" },
+        { title: "Quantity", value: item.quantity || "" },
+        { title: "Unit", value: item.unit || "NA" }
+      ],
+      vendors: transformedVendorResult,
+      comment: item.full_product_description || "",
+      defaultSelectedVAB: "",
+      datasheet: "0",
+      datasheet_file: [],
+      spec_file: [],
+      qap: "0",
+      qap_file: [],
+      user_selected_predefined_tds: false,
+      user_selected_predefined_qap: false,
+      sheet_name: item.sheet_name || "",
+    };
 
-        // push in products array
-        products.push(product);
-      }
-      // json data loop end here
+    sheetNameList.add(item.sheet_name || "");
+     products.push(productObj)
+  }
 
 
       // final data for fuuther processing
@@ -4924,12 +4899,11 @@ const rfqController = {
         terms: transformedTermList,
         project_id: project_id,
         term_and_condition_files:[],
+        sheetNameList: Array.from(sheetNameList)
       };
-
      
       // Delete the uploaded file to save space
       // fs.unlinkSync(file.path);
-
 
       res.status(200).json({
         status:1,
