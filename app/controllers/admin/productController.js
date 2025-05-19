@@ -3658,14 +3658,9 @@ const productController = {
       // Update by Kushal: We want to update the mapping not variant as the mapping is going to be used when showing vendors not variant
       try {
         const result = await productModel.updateVariantMappingByData(variantObj, mappingId);
-
-        // changes by mukul - send email to vendor
-        let userDetail = await vendorModel.userDetailById(
-            mappingDetails.vendor_details.id
-          );
           
             let html_variables = [
-              { name: userDetail[0].name },
+              { name: mappingDetails?.vendor_organization || mappingDetails?.name },
               {
                 message:
                   status == 1
@@ -3688,7 +3683,7 @@ const productController = {
             }
 
             // Send the email to the SPOC or vendor
-            const spocList = await vendorModel.getSpocDetails(userDetail[0]?.id);
+            const spocList = await vendorModel.getSpocDetails(mappingDetails?.vendor_id);
             
             let mailRecipients = {
               from: Config.webmasterMail,
@@ -3698,9 +3693,9 @@ const productController = {
 
             if (spocList && spocList.length > 0) {
               mailRecipients.to = spocList.map(spoc => spoc.email);
-              mailRecipients.cc = userDetail[0].email;
+              mailRecipients.cc = mappingDetails.vendor_email;
             } else {
-              mailRecipients.to = userDetail[0].email;
+              mailRecipients.to = mappingDetails.vendor_email;
             }
 
             sendMail(mailRecipients);
