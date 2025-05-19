@@ -3773,6 +3773,8 @@ getProductTechSpecByID: async (productId) => {
 
   TU.name AS vendor_name,
   TU.email AS vendor_email,
+  TU.organization_name AS vendor_organization,
+  TU.id AS vendor_id,
 
   m.status,
   m.created_at AS mapped_at,
