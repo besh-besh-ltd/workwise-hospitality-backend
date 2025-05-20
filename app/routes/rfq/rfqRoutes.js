@@ -216,7 +216,7 @@ RfqRoutes.post('/magic-search-rfq-preview',
   validateDbBody.user_id_profileexists,
   acl([2]),
   validateDbBody.rfq_project_exist,
-  schema_posts.magicSearchExcelUpload,
+  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
   rfqController.magicSearchRfqCreate
 );
 
