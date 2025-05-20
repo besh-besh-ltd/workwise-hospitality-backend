@@ -237,12 +237,40 @@ const schemas = {
     organization_name: Joi.string().optional().allow(null).allow(''),
     register_as: Joi.string()
       .required()
-      .regex(/^[2|3|4]$/, 'status should be 2 or 3 or 4'),
+      .regex(/^[2|3|4|7]$/, 'status should be 2 or 3 or 4'),
 
     password: Joi.string().min(3).max(15).required().label('Password'),
     confirm_password: Joi.any().valid(Joi.ref('password')).required().messages({
       'any.only': 'Password and Confirm password not matched'
-    })
+    }),
+
+      max_top_management: Joi.number()
+     .when('register_as', {
+      is: '7',
+      then: Joi.required().min(1).label('Max Top Management'),
+      otherwise: Joi.optional().allow(null)
+    }),
+
+  max_procurement: Joi.number()
+    .when('register_as', {
+      is: '7',
+      then: Joi.required().min(1).label('Max Procurement'),
+      otherwise: Joi.optional().allow(null)
+    }),
+
+  max_engineering: Joi.number()
+    .when('register_as', {
+      is: '7',
+      then: Joi.required().min(1).label('Max Engineering'),
+      otherwise: Joi.optional().allow(null)
+    }),
+
+  max_finance: Joi.number()
+    .when('register_as', {
+      is: '7',
+      then: Joi.required().min(1).label('Max Finance'),
+      otherwise: Joi.optional().allow(null)
+    }),
   }),
   vendor_review: Joi.object().keys({
     reviewed_to: Joi.string()

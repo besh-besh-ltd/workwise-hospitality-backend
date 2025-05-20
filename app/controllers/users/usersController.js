@@ -192,11 +192,10 @@ const UsersController = {
         password: generatePassword(password),
         status
       };
-      // console.log('userObj', userObj);
-      // return false;
+      
       let user_id = await userModel.user_register(userObj);
-      // console.log('test user id', user_id);
 
+      
       // create company profile if user type is vendor 
       if (user_id && register_as == '3') {
         const cmpObj = {
@@ -288,34 +287,11 @@ const UsersController = {
           sendMail(mailRecipients);
 
 
-          // sendMail({
-          //   from: Config.webmasterMail, // sender address
-          //   to: email, // list of receivers
-          //   subject: `Work wise | Registration`, // Subject line
-          //   html: dynamic_html // plain text body
-          // });
         }
 
         addDefaultNotifications(user_id[0].id);
 
-        let user_type_as = '';
-        if (register_as == '2') {
-          user_type_as = 'Buyer';
-        } else if (register_as == '3') {
-          user_type_as = 'Vendor';
-        } else {
-          user_type_as = 'Other User';
-        }
-        const notificationData = {
-          type: 'Registration',
-          title: `${user_type_as} Registered`,
-          message: `${user_type_as} Registered successfully`,
-          additional_data: {
-            user_type: user_type_as
-          }
-        };
-        // const receiverUserIds = [req.params.id];
-        // await sendNotification(user_id[0].id, '', notificationData);
+
 
         //activate default subscription
         let checkFreeSubscription =
@@ -334,9 +310,6 @@ const UsersController = {
             .subtract(1, 'day');
           const renewDate = startDate.clone().add(billingCycleMonths, 'months');
 
-          // console.log('Start Date:', startDate.format('YYYY-MM-DD'));
-          // console.log('End Date:', endDate.format('YYYY-MM-DD'));
-          // console.log('Renew Date:', renewDate.format('YYYY-MM-DD'));
 
           let UserSubscriptionObj = {
             user_id: user_id[0].id,
@@ -355,20 +328,10 @@ const UsersController = {
             user_id[0].id
           );
 
-          // let userDetails = await userModel.user_profile_detail(
-          //   user_id[0].id
-          // );
-          // let planDetails = await subscriptionModel.getSubscriptionDetails(
-          //   userSubscription[0].plan_id
-          // );
           let subscriptionMappingDetails =
             await subscriptionModel.getSubscriptionMappingDetails(
               checkFreeSubscription[0].id
             );
-          // console.log(
-          //   'subscriptionMappingDetails==>>>>',
-          //   subscriptionMappingDetails
-          // );
           for await (const {
             allocated_feature,
             feature_id
@@ -416,23 +379,7 @@ const UsersController = {
         .end();
     }
   },
-  /*   subscribe: async (req, res, next) => {
-    const subscription = req.body;
-    global_subscription = subscription;
-    console.log(subscription);
 
-    const payload = JSON.stringify({
-      title: 'Welcome to Workwise!',
-      body: 'It works.'
-    });
-
-    webpush
-      .sendNotification(subscription, payload)
-      .then((result) => console.log(result))
-      .catch((e) => console.log(e.stack));
-
-    res.status(200).json({ success: true });
-  }, */
   subscribe: async (req, res, next) => {
     // const subscription = req.body;
 
