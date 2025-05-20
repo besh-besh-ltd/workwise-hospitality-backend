@@ -4765,9 +4765,12 @@ const rfqController = {
         .end();
     }
   },
+
+  // mukul - 21-05-2025, removed file handling as now we just get json url in request, also reviewed we handling many fields in payload but in api call we just get json url, not removing them now as very soon we start this flow enhancements
   magicSearchRfqCreate: async (req, res, next) => {
     try {
-      const file = req.file.location;
+      // const file = req.file.location;
+      const aiProcessedBoqJson = req.body.jsonFileUrl;
       const user = req.user;
       const comment = req.body.comment;
       const response_email = user.email;
@@ -4780,8 +4783,8 @@ const rfqController = {
       const rfq_type = req.body.rfq_type || "";
       const reverse_auction = req.body.reverse_auction || "";
 
-      // process boq with AI
-      const boqDataJson = await generativeAI.processBOQWithAI(file);
+      // download boqDataJson deom ai server
+      const boqDataJson = await generativeAI.processBOQWithAI(aiProcessedBoqJson);
 
       // get all terms list
       const termList = await rfqModel.getAllTerms();
