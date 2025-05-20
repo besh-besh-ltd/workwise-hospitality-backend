@@ -135,52 +135,12 @@ ${pdfText}
   },
 
   // mukul 18-05-2025, removed gemini and implemented AI
-  processBOQWithAI: async (file) => {
+  // mukul 21-05-2025, remove ai api call as it will take lot's time to execute, leaving this function for now as it may be usefull if we need to do further processing of json or other data   if like to donload just move "downloadResponse" in rfqController
+  processBOQWithAI: async (aiProcessedBoqJson) => {
     try {
 
-      const s3Url = new URL(file);
-      const bucket = s3Url.hostname.split('.')[0];
-      const key = decodeURIComponent(s3Url.pathname).slice(1); // remove leading '/'
-      const command = new GetObjectCommand({
-        Bucket: bucket,
-        Key: key,
-      });
-      const result = await s3Client.send(command);
-      const webStream = Readable.toWeb(result.Body);
-      const ressult2 = new Response(webStream);
-      const arrayBuffer = await ressult2.arrayBuffer(); 
-      const buffer = Buffer.from(arrayBuffer);
-
-      const formData = new FormData();
-     formData.append("file", buffer, {
-      filename: key.split('/').pop(),
-      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    });
-
-    //  in development make sure to comment this section 
-    // STep 1: to get the the json file, that contain the structured data and products id's present in our database for each product
-     const response = await axios.post(
-      'https://test.letsworkwise.com/boq_to_structured_boq_and_match',
-      formData,
-      { headers: formData.getHeaders() }
-    );
-  
-
-    //  in development uncomment this part
-    //  download the json file from ai server
-//    const  response = {
-//     "status": "success",
-//     "message": "Pipeline processing complete.",
-//     "download_url": "http://test.letsworkwise.com/download/json?file_hash=3a5f1635f9e3c8e8418ffc72fd3606a6ec7276c3a450407d005db320630c8e01&stage=matched",
-//     "file_hash": "3a5f1635f9e3c8e8418ffc72fd3606a6ec7276c3a450407d005db320630c8e01",
-//     "cost_usd": 0.3238,
-//     "time_sec": 40.59,
-//     "failed_sheets": []
-// }
-
        // download the file from ai server
-        const downloadResponse = await axios.get(response?.data?.download_url);
-
+        const downloadResponse = await axios.get(aiProcessedBoqJson);
 
       return downloadResponse?.data || [] ;
     } catch (error) {
