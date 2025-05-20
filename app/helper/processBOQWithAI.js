@@ -160,7 +160,7 @@ ${pdfText}
     //  in development make sure to comment this section 
     // STep 1: to get the the json file, that contain the structured data and products id's present in our database for each product
      const response = await axios.post(
-      'https://test.letsworkwise.com/boq_to_structured_boq_and_match',
+      'http://test.letsworkwise.com/boq_to_structured_boq_and_match',
       formData,
       { headers: formData.getHeaders() }
     );
@@ -212,7 +212,7 @@ ${pdfText}
   
       // Step 3: Make API call to process-boq
       const response = await axios.post(
-        'https://test.letsworkwise.com/boq_to_structured_boq',
+        'http://test.letsworkwise.com/boq_to_structured_boq',
         formData,
         {
           headers: {
