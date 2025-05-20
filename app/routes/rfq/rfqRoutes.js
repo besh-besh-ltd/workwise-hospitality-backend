@@ -266,15 +266,6 @@ RfqRoutes.post('/magic-search-rfq-create',
 //   rfqController.addTechnicalEveluation 
 // )
 
-// create simple boq from upoaded boq - AI functionality
-RfqRoutes.post(
-  '/boq/process-and-download',
-  passportSignIn,
-  schema_posts.magicSearchExcelUpload,
-  rfqController.processBoqAndDownload
-);
-
-
 
 RfqRoutes.post('/add-clause-using-file',
   passportSignIn,

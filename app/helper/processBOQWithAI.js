@@ -149,45 +149,6 @@ ${pdfText}
     }
   },
 
-  processBoqAndDownload: async (file) => {
-    try {
-  
-      if (!file || !file.location) {
-        return { error: 'File is required' };
-      }
-  
-      // Step 1: Download file from S3
-      const fileResponse = await axios.get(file.location, {
-        responseType: 'arraybuffer',
-      });
-  
-      const buffer = Buffer.from(fileResponse.data);
-  
-      // Step 2: Create form-data and append file
-      const formData = new FormData();
-      formData.append('file', buffer, {
-        filename: file.originalname,
-        contentType: file.mimetype,
-      });
-  
-      // Step 3: Make API call to process-boq
-      const response = await axios.post(
-        'https://test.letsworkwise.com/boq_to_structured_boq',
-        formData,
-        {
-          headers: {
-            ...formData.getHeaders(),
-          },
-        }
-      );
-  
-      return response.data;
-  
-    } catch (error) {
-      logError(error);
-      return { error: 'Error processing BOQ with AI' };
-    }
-  }
 };
 
 export default generativeAI;
