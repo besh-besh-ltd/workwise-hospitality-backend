@@ -47,6 +47,12 @@ RfqRoutes.post(
   rfqController.removeVendorFromDraft
 );
 
+RfqRoutes.post(
+  '/add-product-to-rfq',
+  passportSignIn,
+  rfqController.addProductVendorsInEditRfq
+);
+
 RfqRoutes.put(
   '/update',
   passportSignIn,
@@ -113,6 +119,13 @@ RfqRoutes.post(
   validateDbBody.user_id_profileexists,
   rfqController.getVendors
 );
+
+RfqRoutes.post(
+  '/get-vendors-for-product',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  rfqController.getVendorsForProduct
+)
 
 RfqRoutes.post(
   '/quote/create',

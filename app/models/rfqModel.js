@@ -313,6 +313,28 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         });
     });
   },
+  updateWhere: async (table_name, data, where_clause) => {
+    const setClause = Object.keys(data)
+      .map((key, index) => `${key} = $${index + 1}`)
+      .join(', ');
+    const values = Object.values(data);
+    const updateQuery = `
+      UPDATE ${table_name}
+      SET ${setClause}
+      WHERE ${where_clause}
+      RETURNING *`;
+
+    return new Promise(function (resolve, reject) {
+      db.query(updateQuery, values)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
 
   getTechEvaluationRecordsByProductId: async (productId) => {
     const fetchQuery = `
@@ -836,31 +858,52 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = ${user_id}
     ) AS "quotations",
     ARRAY(
-        SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_variant_id, 'variant', RFQ_P.variant, 'comment', RFQ_P.comment, 'spec_file', RFQ_P.spec_file, 'qap', RFQ_P.qap, 'qap_file', RFQ_P.qap_file, 'datasheet_file', RFQ_P.datasheet_file,
-          'TDS_flies', (
-            SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
-          ),
-          'QAP_files', (
-            SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
-          ),
-          'SPEC_files', (
+        SELECT json_build_object(
+        'id', RFQ_P.id, 
+        'product_id', RFQ_P.product_variant_id, 
+        'name', _TPV.name, 
+        'variant', RFQ_P.variant, 
+        'comment', RFQ_P.comment, 
+        'qap', RFQ_P.qap, 
+        'qap_file', (
+          SELECT json_agg(RPF.file_url)
+          FROM tbl_rfq_product_files RPF
+          WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
+        ), 
+        'spec_file', (
             SELECT json_agg(RPF.file_url)
             FROM tbl_rfq_product_files RPF
             WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
-          ),
+        ), 
+        'datasheet_file', (
+            SELECT json_agg(RPF.file_url)
+            FROM tbl_rfq_product_files RPF
+            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
+        ),
+        'TDS_flies', (
+          SELECT json_agg(RPF.file_url)
+          FROM tbl_rfq_product_files RPF
+          WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
+        ),
+        'QAP_files', (
+          SELECT json_agg(RPF.file_url)
+          FROM tbl_rfq_product_files RPF
+          WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
+        ),
+        'SPEC_files', (
+          SELECT json_agg(RPF.file_url)
+          FROM tbl_rfq_product_files RPF
+          WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
+        ),
 
-          'datasheet', (
-            SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
-                CASE
-                  WHEN TVA.datasheet_file IS NULL THEN
-                  NULL
-                  ELSE TVA.datasheet_file
-                END
-              ))
+        'datasheet', (
+          SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
+              CASE
+                WHEN TVA.datasheet_file IS NULL THEN
+                NULL
+                ELSE TVA.datasheet_file
+              END
+          ))
             FROM tbl_vendor_approve TVA
             WHERE TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
           ),
@@ -874,7 +917,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             WHERE TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
           ),
           'product_specs', (
-            SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title,'value', RFQ_P_SPEC.value,'id', RFQ_P_SPEC.id,'product_id', RFQ_P_SPEC.product_variant_id,'rfq_id', RFQ_P_SPEC.rfq_id,'variant', RFQ_P_SPEC.variant))
+            SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title,'value', RFQ_P_SPEC.value))
             FROM tbl_rfq_products_specs RFQ_P_SPEC
             WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id AND RFQ_P.variant = RFQ_P_SPEC.variant
           ),
@@ -1025,17 +1068,33 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                   SELECT json_build_object(
                     'user_id', U.id,
                     'name', U.name,
-                    'email', U.email
+                    'company_name', C.company_name,
+                    'email', U.email,
+                    'address', U.address,
+                    'mobile', U.mobile
                   )
                   FROM tbl_users U
+                  JOIN tbl_company C ON U.id = C.user_id
                   WHERE RFQ_P_V.user_id = U.id
                 )
               ))
             FROM tbl_rfq_product_vendors RFQ_P_V
             WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id AND RFQ_P.variant = RFQ_P_V.variant
+          ),
+          'vendors', (
+            SELECT json_agg(json_build_object(
+                'user_id', RFQ_P_V.user_id,
+                'name', U.name
+            ))
+            FROM tbl_rfq_product_vendors RFQ_P_V
+            LEFT JOIN tbl_users U ON RFQ_P_V.user_id = U.id
+            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
+              AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
+              AND RFQ_P.variant = RFQ_P_V.variant
           )
         )
         FROM tbl_rfq_products RFQ_P
+        JOIN tbl_product_variant _TPV ON _TPV.id = RFQ_P.product_variant_id
         WHERE RFQ.id = RFQ_P.rfq_id
 
     ) AS "products"
@@ -1325,9 +1384,10 @@ LIMIT 1;`;
       TU.organization_name,
       TC.company_name,
       ARRAY(
-        SELECT json_build_object('id', TP.id, 'name', TP.name)
-        FROM tbl_product TP
-        WHERE TU.id = TP.created_by
+        SELECT json_build_object('id', TPV.id, 'name', TPV.name)
+        FROM tbl_product_variant_vendor_mapping PVVM
+        JOIN tbl_product_variant TPV ON TPV.id = PVVM.product_variant_id
+        WHERE PVVM.vendor_id = TU.id
       ) AS "products"
       FROM tbl_users TU
       JOIN tbl_company TC ON TU.id = TC.user_id
@@ -1342,6 +1402,38 @@ LIMIT 1;`;
           reject(error);
         });
     });
+  },
+  getVendorsForProduct: async (productId, excludeArray = null) => {
+    try {
+      let q = `
+      SELECT 
+        U.id,
+        U.name,
+        U.email,
+        U.mobile,
+        U.address,
+        U.organization_name,
+        C.company_name
+  
+        FROM tbl_product_variant_vendor_mapping PVVM
+        JOIN tbl_product_variant PV ON PVVM.product_variant_id = PV.id
+        JOIN tbl_users U ON PVVM.vendor_id = U.id
+        JOIN tbl_company C ON C.user_id = U.id
+  
+        WHERE PVVM.product_variant_id = $1
+        ${excludeArray && excludeArray.length > 0 ? ` AND U.id NOT IN ($2:csv)` : ``}
+      `
+
+
+      const params = [productId];
+      if (excludeArray && excludeArray.length > 0) {
+        params.push(excludeArray);
+      }
+  
+      return await db.any(q, params)
+    } catch (error) {
+      throw error;
+    }
   },
   checkIfExists: async (table_name, parameter) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
