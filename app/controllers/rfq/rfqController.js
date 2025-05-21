@@ -4783,8 +4783,10 @@ const rfqController = {
       const rfq_type = req.body.rfq_type || "";
       const reverse_auction = req.body.reverse_auction || "";
 
+     console.log(" aiProcessedBoqJson =>>>>>>>>   ", aiProcessedBoqJson )
       // download boqDataJson deom ai server
       const boqDataJson = await generativeAI.processBOQWithAI(aiProcessedBoqJson);
+      console.log(" boqDataJson =>>>>>>>>   ", boqDataJson )
 
       // get all terms list
       const termList = await rfqModel.getAllTerms();

@@ -141,6 +141,7 @@ ${pdfText}
 
        // download the file from ai server
         const downloadResponse = await axios.get(aiProcessedBoqJson);
+        console.log('downloadResponse =>>>>>>>>>>>>>>', downloadResponse);
 
       return downloadResponse?.data || [] ;
     } catch (error) {
