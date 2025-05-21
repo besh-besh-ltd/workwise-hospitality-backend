@@ -2148,6 +2148,7 @@ WHERE row_num_by_name_category = 1
     prevWorkedWith,
     vendor_name, // Added vendor_name parameter
     myVendorType,
+    responseKeys,
   ) => {
 
     // Adding dynamic turnover condition
@@ -2186,8 +2187,8 @@ WHERE row_num_by_name_category = 1
       ) AS vendor_info
     FROM (
       SELECT DISTINCT ON (tu.id)
-        tu.id,
-        tu.name AS vendor_name,
+        tu.id AS ${responseKeys?.vendorId ?? 'id'},
+        tu.name AS ${responseKeys?.vendorName ?? 'vendor_name'},
         ${vendor_name ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $1) AS similarity_score,' : ''}
         tu.email,
         tu.mobile,
@@ -2287,6 +2288,69 @@ WHERE row_num_by_name_category = 1
     const values = vendor_name ? [vendor_name] : [];
     return new Promise(function (resolve, reject) {
       db.query(q,values)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  genericSearchVendors: async (
+    buyerId,
+    productId,
+    productName,
+    responseKeys,
+  ) => {
+
+    productName = productName?.toLowerCase()
+
+  let q = `
+    SELECT *
+    FROM (
+      SELECT DISTINCT ON (tu.id)
+        tu.id AS ${responseKeys?.vendorId ?? 'id'},
+        tu.name AS ${responseKeys?.vendorName ?? 'vendor_name'},
+        tu.email,
+        tu.mobile,
+        COALESCE(tc.company_name, tu.organization_name) AS company_name,
+        tu.address,
+        tc.is_private,
+        tc.turnover,
+        tc.nature_of_business,
+        lc.city_name,
+        ls.state_name,
+        lcn.country_name,
+        CASE
+          WHEN bvm.vendor_id IS NOT NULL THEN 1
+          ELSE 0
+        END AS is_linked_with_buyer
+      FROM tbl_product_variant_vendor_mapping pvvm
+      JOIN tbl_product_variant pv ON pvvm.product_variant_id = pv.id 
+      JOIN tbl_product p ON p.id = pv.product_id
+      JOIN tbl_product_categories pc ON p.id = pc.product_id
+      JOIN tbl_category c ON pc.category_id = c.id
+      JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
+      LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+      LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+      LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
+      LEFT JOIN tbl_location_states ls ON tu.state = ls.id
+      LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
+
+      WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
+        AND tu.is_deleted = 0 AND tu.status = 1 
+        -- AND LOWER(pv.name) = LOWER('${productName}')
+        AND ${productId ? `pv.id = ${productId}` : `pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER('${productName}'))`}
+        AND tu.email IS NOT NULL
+
+    ) AS distinct_vendors
+    ORDER BY is_linked_with_buyer DESC, RANDOM();
+`;
+
+    return new Promise(function (resolve, reject) {
+      db.query(q)
         .then(function (data) {
           resolve(data);
         })

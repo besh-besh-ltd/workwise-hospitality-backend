@@ -4767,180 +4767,141 @@ const rfqController = {
   },
 
   // mukul - 21-05-2025, removed file handling as now we just get json url in request, also reviewed we handling many fields in payload but in api call we just get json url, not removing them now as very soon we start this flow enhancements
+  // Kushal - 21-05-2025, Highly optimized to handle large datasets
+
   magicSearchRfqCreate: async (req, res, next) => {
     try {
-      // const file = req.file.location;
       let aiProcessedBoqJson = req.body.jsonFileUrl;
       const user = req.user;
-      const comment = req.body.comment;
-      const response_email = user.email;
-      const contact_name = user.name;
-      const contact_number = user.mobile;
-      const company_name = user.organization_name || user.name;
-      const location = req.body.delivery_location || "";
-      const bid_end_date = req.body.bid_end_date || "";
-      const project_id = req.body.project_id;
-      const rfq_type = req.body.rfq_type || "";
-      const reverse_auction = req.body.reverse_auction || "";
-
+  
       if (aiProcessedBoqJson.startsWith('http:')) {
-        aiProcessedBoqJson = aiProcessedBoqJson?.replace('http:', 'https:');
-     }
-
-      console.log("---------------------------------------------------------------")
-
-     console.log(" aiProcessedBoqJson =>>>>>>>>   ", aiProcessedBoqJson )
-
-    console.log("---------------------------------------------------------------")
-
-      // download boqDataJson deom ai server
+        aiProcessedBoqJson = aiProcessedBoqJson.replace('http:', 'https:');
+      }
+  
       const boqDataJson = await generativeAI.processBOQWithAI(aiProcessedBoqJson);
-
-      console.log(" boqDataJson =>>>>>>>>   ", boqDataJson )
-
-     console.log("---------------------------------------------------------------")
-
-
-      // get all terms list
       const termList = await rfqModel.getAllTerms();
       const transformedTermList = termList.map(term => ({ id: term.id, name: term.term_content }));
-
-      // product error
-      const products = [];
-
-      // validation error array ko keep monitor all products
+  
       const validationErrors = [];
+      const products = [];
       const sheetNameList = new Set();
-
-
-       for await (const item of boqDataJson) {
-
-
-        let validProductId = 0;
-
-        
-           const cleanIds = Array.isArray(item?.list_of_product_ids)
-             ? item.list_of_product_ids.map(id => parseInt(id)).filter(id => !isNaN(id))
-             : [];
-           
-           if (cleanIds.length === 0) {
-             validationErrors.push({
-               errors: {
-                 product: `${item.fetched_product_name} - Product Not Found`
-               },
-             });
-             continue; // Skip this product
-           }
-
-          const result = await rfqModel.checkIfExists(
-            'tbl_product',
-            `id = ANY(ARRAY[${cleanIds.join(',')}])`
+      const globalVariantCount = {};
+  
+      const allProductIds = boqDataJson.flatMap(item =>
+        (Array.isArray(item?.list_of_product_ids)
+          ? item.list_of_product_ids.map(id => parseInt(id)).filter(id => !isNaN(id))
+          : [])
+      );
+  
+      const uniqueProductIds = [...new Set(allProductIds)];
+      const existingProducts = await rfqModel.checkIfExists(
+        'tbl_product',
+        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+      );
+      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
+  
+      const vendorCache = {};
+  
+      for (const item of boqDataJson) {
+        const cleanIds = Array.isArray(item?.list_of_product_ids)
+          ? item.list_of_product_ids.map(id => parseInt(id)).filter(id => !isNaN(id))
+          : [];
+  
+        if (cleanIds.length === 0) {
+          validationErrors.push({
+            errors: { product: `${item.fetched_product_name} - Product Not Found` },
+          });
+          continue;
+        }
+  
+        const validProductId = cleanIds.find(id => existingProductIdSet.has(id));
+  
+        if (!validProductId) {
+          validationErrors.push({
+            errors: { product: `${item.fetched_product_name} - Product Not Found` },
+          });
+          continue;
+        }
+  
+        const vendorKey = item.fetched_product_name || item.core_product_name;
+        if (!vendorCache[vendorKey]) {
+          const vendors = await rfqModel.genericSearchVendors(
+            user.id,
+            null,
+            vendorKey,
+            { vendorId: 'user_id', vendorName: 'name' }
           );
-     
-           if (result.length > 0) {
-             validProductId = result[0].id; // Use the first matched ID
-           }
-         
-          // current ai model returning multiple product ids for a product, and we have mapping for vendors with variants. i have tried to fetch product variants vendor list but this not giving me vendors for all prodicts.
-          // so currently decided to use product name in model this act as variant name, and the  fetch vendor list, this is not accurate but for quick developemnt i have implemented this  very soon we start fetch vendors by variant ID.
-          const vendorResult = await rfqModel.searchVendor(   user.id, item.fetched_product_name || item.core_product_name ,
-            "", "", "", "", "", "", "", "", "", "", );  
-        
-
-        // if no vendor found for the product, push error in validation array
+          vendorCache[vendorKey] = vendors;
+        }
+  
+        const vendorResult = vendorCache[vendorKey];
+  
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
-            // row: jsonData.indexOf(value) + 1,
-            errors: { vendor: item.fetched_product_name  + "Vendor Not Present For The Product " },
+            errors: {
+              vendor: `${item.fetched_product_name} - Vendor Not Present For The Product`,
+            },
           });
-          continue; // Skip this product
+          continue;
         }
-
-        // transform vendor to required form
-        const transformedVendorResult = vendorResult.map(
-          ({ id, vendor_name, ...otherData }) => ({
-            user_id: id,
-            name: vendor_name,
-            ...otherData
-          }));
-
-        // Initialize the variant to 0
-        let variant = 0;
-        // Iterate over the existing products array to find the same product name and increment the variant
-        products.forEach((product) => {
-          if (product.name == item.fetched_product_name && product.product_id == validProductId) {
-            variant = Math.max(variant, product.variant) + 1;
-          }
+  
+        const variant = globalVariantCount?.[validProductId] ?? 0;
+  
+        products.push({
+          product_id: validProductId,
+          name: vendorKey || "Unnamed Product",
+          variant,
+          spec: [
+            { title: "Size", value: item.size || "" },
+            { title: "Spec", value: item.feature_or_specifications || "" },
+            { title: "Quantity", value: item.quantity || "" },
+            { title: "Unit", value: item.unit || "NA" },
+          ],
+          vendors: vendorResult,
+          comment: item.full_product_description || "",
+          defaultSelectedVAB: "",
+          datasheet: "0",
+          datasheet_file: [],
+          spec_file: [],
+          qap: "0",
+          qap_file: [],
+          user_selected_predefined_tds: false,
+          user_selected_predefined_qap: false,
+          sheet_name: item.sheet_name || "",
         });
-
-         const productObj = {
-      product_id: validProductId,
-      name: item.fetched_product_name || item.core_product_name || "Unnamed Product",
-      variant: variant,
-      spec: [
-        { title: "Size", value: item.size || "" },
-        { title: "Spec", value: item.feature_or_specifications || "" },
-        { title: "Quantity", value: item.quantity || "" },
-        { title: "Unit", value: item.unit || "NA" }
-      ],
-      vendors: transformedVendorResult,
-      comment: item.full_product_description || "",
-      defaultSelectedVAB: "",
-      datasheet: "0",
-      datasheet_file: [],
-      spec_file: [],
-      qap: "0",
-      qap_file: [],
-      user_selected_predefined_tds: false,
-      user_selected_predefined_qap: false,
-      sheet_name: item.sheet_name || "",
-    };
-
-    sheetNameList.add(item.sheet_name || "");
-     products.push(productObj)
-  }
-
-
-      // final data for fuuther processing
+  
+        globalVariantCount[validProductId] = variant + 1;
+        sheetNameList.add(item.sheet_name || "");
+      }
+  
       const finalObject = {
         is_published: 1,
-        comment: comment,
-        response_email: response_email,
-        contact_name: contact_name,
-        contact_number: contact_number,
-        location: location,
-        rfq_type: rfq_type,
-        reverse_auction: reverse_auction,
-        bid_end_date: bid_end_date,
-        company_name: company_name,
-        products: products,
+        response_email: user.email,
+        contact_name: user.name,
+        contact_number: user.mobile,
+        company_name: user.organization_name || user.name,
+        products,
         terms: transformedTermList,
-        project_id: project_id,
-        term_and_condition_files:[],
-        sheetNameList: Array.from(sheetNameList)
+        term_and_condition_files: [],
+        sheetNameList: Array.from(sheetNameList),
       };
-     
-      // Delete the uploaded file to save space
-      // fs.unlinkSync(file.path);
-
-      res.status(200).json({
-        status:1,
-        data : finalObject,
+  
+      return res.status(200).json({
+        status: 1,
+        data: finalObject,
         validation_errors: validationErrors.length ? validationErrors : null,
-      })
-      .end();
-
+      });
+  
     } catch (error) {
       logError(error);
-      res
-        .status(500)
-        .json({
-          success: false,
-          message: 'Magic search failed to complete the action, Please try again.',
-          error: error.message,
-        });
+      return res.status(500).json({
+        success: false,
+        message: 'Magic search failed to complete the action, Please try again.',
+        error: error.message,
+      });
     }
-  },
+  },  
+
   updateQuoteItems: async (req, res, next) => {
     const { quoteId } = req.params;
     let {
