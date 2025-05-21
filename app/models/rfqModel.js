@@ -2341,16 +2341,17 @@ WHERE row_num_by_name_category = 1
 
       WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
         AND tu.is_deleted = 0 AND tu.status = 1 
-        -- AND LOWER(pv.name) = LOWER('${productName}')
-        AND ${productId ? `pv.id = ${productId}` : `pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER('${productName}'))`}
+        AND ${productId ? `pv.id = $1` : `pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER($1))`}
         AND tu.email IS NOT NULL
 
     ) AS distinct_vendors
     ORDER BY is_linked_with_buyer DESC, RANDOM();
 `;
 
+    const values = productId ? [productId] : [productName]
+
     return new Promise(function (resolve, reject) {
-      db.query(q)
+      db.query(q, values)
         .then(function (data) {
           resolve(data);
         })
