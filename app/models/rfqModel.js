@@ -2308,7 +2308,13 @@ WHERE row_num_by_name_category = 1
     productName = productName?.toLowerCase()
 
   let q = `
-    SELECT *
+    SELECT *,
+    json_build_object(
+        'is_private', is_private,
+        'is_linked_with_buyer', is_linked_with_buyer,
+        'prev_finalized', prev_finalized,
+        'rfq_added', rfq_added
+    ) AS vendor_info
     FROM (
       SELECT DISTINCT ON (tu.id)
         tu.id AS ${responseKeys?.vendorId ?? 'id'},
@@ -2326,7 +2332,15 @@ WHERE row_num_by_name_category = 1
         CASE
           WHEN bvm.vendor_id IS NOT NULL THEN 1
           ELSE 0
-        END AS is_linked_with_buyer
+        END AS is_linked_with_buyer,
+        CASE
+          WHEN qf.vendor_id IS NOT NULL THEN 1
+          ELSE 0
+        END AS prev_finalized,
+        CASE
+          WHEN rfqv.user_id IS NOT NULL THEN 1
+          ELSE 0
+        END AS rfq_added
       FROM tbl_product_variant_vendor_mapping pvvm
       JOIN tbl_product_variant pv ON pvvm.product_variant_id = pv.id 
       JOIN tbl_product p ON p.id = pv.product_id
@@ -2335,11 +2349,19 @@ WHERE row_num_by_name_category = 1
       JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
       LEFT JOIN tbl_company tc ON tc.user_id = tu.id
       LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+      LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
+      LEFT JOIN (
+        SELECT DISTINCT rpv.user_id
+        FROM tbl_rfq_product_vendors rpv
+        JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
+        WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
+      ) rfqv ON rfqv.user_id = tu.id
       LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
       LEFT JOIN tbl_location_states ls ON tu.state = ls.id
       LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
 
       WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
+        AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
         AND tu.is_deleted = 0 AND tu.status = 1 
         AND ${productId ? `pv.id = $1` : `pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER($1))`}
         AND tu.email IS NOT NULL
