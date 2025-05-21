@@ -4770,7 +4770,7 @@ const rfqController = {
   magicSearchRfqCreate: async (req, res, next) => {
     try {
       // const file = req.file.location;
-      const aiProcessedBoqJson = req.body.jsonFileUrl;
+      let aiProcessedBoqJson = req.body.jsonFileUrl;
       const user = req.user;
       const comment = req.body.comment;
       const response_email = user.email;
@@ -4783,10 +4783,23 @@ const rfqController = {
       const rfq_type = req.body.rfq_type || "";
       const reverse_auction = req.body.reverse_auction || "";
 
+      if (aiProcessedBoqJson.startsWith('http:')) {
+        aiProcessedBoqJson = aiProcessedBoqJson?.replace('http:', 'https:');
+     }
+
+      console.log("---------------------------------------------------------------")
+
      console.log(" aiProcessedBoqJson =>>>>>>>>   ", aiProcessedBoqJson )
+
+    console.log("---------------------------------------------------------------")
+
       // download boqDataJson deom ai server
       const boqDataJson = await generativeAI.processBOQWithAI(aiProcessedBoqJson);
+
       console.log(" boqDataJson =>>>>>>>>   ", boqDataJson )
+
+     console.log("---------------------------------------------------------------")
+
 
       // get all terms list
       const termList = await rfqModel.getAllTerms();
