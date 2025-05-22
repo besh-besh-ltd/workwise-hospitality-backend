@@ -200,6 +200,28 @@ function processQuotCompare(data) {
   return data;
 }
 
+const saveMagicSearchInDraft = async (data, createdBy) => {
+  // Data payload structure
+  // const finalObject = {
+  //   is_published: 1,
+  //   response_email: user.email,
+  //   contact_name: user.name,
+  //   contact_number: user.mobile,
+  //   company_name: user.organization_name || user.name,
+  //   products,
+  //   terms: transformedTermList,
+  //   term_and_condition_files: [],
+  //   sheetNameList: Array.from(sheetNameList),
+  // };
+
+  try {
+    const nextRfqNumber = await getNextRfQNumber()
+    return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy);
+  } catch (error) {
+    throw error
+  }
+}
+
 const insertProduct = async (
   {
     product_id,
@@ -4885,9 +4907,12 @@ const rfqController = {
         term_and_condition_files: [],
         sheetNameList: Array.from(sheetNameList),
       };
+
+      const savedRfq = await saveMagicSearchInDraft(finalObject, req.user.id)
   
       return res.status(200).json({
         status: 1,
+        savedRfq,
         data: finalObject,
         validation_errors: validationErrors.length ? validationErrors : null,
       });
@@ -4900,7 +4925,7 @@ const rfqController = {
         error: error.message,
       });
     }
-  },  
+  },
 
   updateQuoteItems: async (req, res, next) => {
     const { quoteId } = req.params;

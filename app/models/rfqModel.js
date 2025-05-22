@@ -24,6 +24,120 @@ const rfqModel = {
     });
   },
 
+  saveMagicSearchInDraft: async (data, nextRFQNumber, createdBy) => {
+    try {
+      return await db.tx(async t => {
+        // Insert into tbl_rfq
+        const rfqInsertQuery = `
+          INSERT INTO tbl_rfq (
+            rfq_no, 
+            comment, 
+            location,
+            company_name, 
+            response_email, 
+            contact_name, 
+            contact_number, 
+            is_published, 
+            status,
+            reverse_auction,
+            created_by, 
+            updated_by, 
+            bid_end_date,
+            timestamp
+          )
+          VALUES (
+            $1, 
+            $2, 
+            $3, 
+            $4, 
+            $5,
+            $6,
+            $7,
+            $8,
+            $9,
+            $10,
+            $11,
+            $12,
+            $13,
+            $14
+          )
+          RETURNING id
+        `;
+
+        const today = new Date();
+        const nextMonth = new Date(today);
+        nextMonth.setMonth(today.getMonth() + 1);
+
+        const formattedDate = nextMonth.toISOString().split('T')[0];
+
+        const rfqValues = [
+          nextRFQNumber,
+          "",
+          "",
+          data.company_name,
+          data.response_email,
+          data.contact_name,
+          data.contact_number,
+          0,
+          1,
+          0,
+          createdBy,
+          createdBy,
+          formattedDate,
+          new Date().toISOString(),
+        ];
+
+        const { id: rfq_id } = await t.one(rfqInsertQuery, rfqValues);
+
+        //Insert into tbl_rfq_products and get back their IDs
+        for (const product of data.products) {
+          const productQuery = `
+            INSERT INTO tbl_rfq_products (rfq_id, product_variant_id, variant, comment, datasheet, spec_file, qap_file, qap)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING id
+          `;
+
+          const productValues = [
+            rfq_id,
+            product.product_id,
+            product.variant,
+            product.comment,
+            0,
+            0,
+            "",
+            "",
+          ];
+
+          const { id } = await t.one(productQuery, productValues);
+
+          // Insert into tbl_rfq_products_specs
+          for (const spec of product.spec || []) {
+            await t.none(
+              `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, variant, title, value)
+              VALUES ($1, $2, $3, $4, $5)`,
+              [rfq_id, product.product_id, product.variant, spec.title, spec.value]
+            );
+          }
+
+          // 4. Insert into tbl_rfq_product_vendors
+          for (const vendor of product.vendors || []) {
+            await t.none(
+              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id)
+              VALUES ($1, $2, $3, $4)`,
+              [rfq_id, product.product_id, product.variant, vendor.user_id]
+            );
+          }
+        }
+
+        return rfq_id;
+      });
+
+    } catch (error) {
+      console.error('Transaction failed. All operations rolled back.', error);
+      throw error;
+    }
+  },
+
   insertReturnId: async (table_name, data) => {
     const keys = Object.keys(data);
     const values = Object.values(data);
