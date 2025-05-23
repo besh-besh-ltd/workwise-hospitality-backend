@@ -327,18 +327,48 @@ deleteProductFilesByIds: async (rfqProductIds) => {
   },
 
   findAll: async (table, conditions) => {
-    const conditionKeys = Object.keys(conditions);
-    const conditionString = conditionKeys.map((key, index) => `${key} = $${index+1}`).join(' AND ');
-    const conditionValues = conditionKeys.map(key => conditions[key]);
-
-    const query = `SELECT * FROM ${table} WHERE ${conditionString}`;
-
     try {
-        const results  = await db.query(query, conditionValues);
-        return results;
+      let query = `SELECT * FROM ${table}`;
+      
+      if (conditions && Object.keys(conditions).length > 0) {
+        const whereConditions = [];
+        const values = [];
+        
+        Object.entries(conditions).forEach(([key, value], index) => {
+          whereConditions.push(`${key} = $${index + 1}`);
+          values.push(value);
+        });
+        
+        query += ` WHERE ${whereConditions.join(' AND ')}`;
+      }
+      
+      return await db.query(query, Object.values(conditions || {}));
     } catch (error) {
-        console.error(`Error finding all from ${table}:`, error);
-        throw error;
+      console.error(`Error finding all from ${table}:`, error);
+      throw error;
+    }
+  },
+  findOne: async (table, conditions) => {
+    try {
+      let query = `SELECT * FROM ${table}`;
+      
+      if (conditions && Object.keys(conditions).length > 0) {
+        const whereConditions = [];
+        const values = [];
+        
+        Object.entries(conditions).forEach(([key, value], index) => {
+          whereConditions.push(`${key} = $${index + 1}`);
+          values.push(value);
+        });
+        
+        query += ` WHERE ${whereConditions.join(' AND ')} LIMIT 1`;
+      }
+      
+      const results = await db.query(query, Object.values(conditions || {}));
+      return results.length > 0 ? results[0] : null;
+    } catch (error) {
+      console.error(`Error finding one from ${table}:`, error);
+      throw error;
     }
   },
 

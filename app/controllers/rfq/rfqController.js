@@ -1668,16 +1668,27 @@ const rfqController = {
             return res.status(404).json({ status: 2, message: 'User not found' });
         }
 
-        //Check for existing RFQ drafts
-        const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: user_id });
-
         let rfq_id;
         let rfqData;
 
-        if (rfqList.length > 0) {
-
-            rfqData = rfqList[0];
-            rfq_id = rfqData.id;
+        // Changes by Agnij 2025-06-17 [Improved handling of specific RFQ ID]
+        // If rfq_id is provided in request, use that specific ID instead of creating a new draft
+        if (req.body.rfq_id) {
+            const specificRfq = await rfqModel.findOne('tbl_rfq', { 
+                id: req.body.rfq_id, 
+                created_by: user_id,
+                is_published: 0 
+            });
+            
+            if (!specificRfq) {
+                return res.status(404).json({ 
+                    status: 2, 
+                    message: 'Specified draft RFQ not found or not authorized' 
+                });
+            }
+            
+            rfqData = specificRfq;
+            rfq_id = specificRfq.id;
         } else {
             // Create a new RFQ
 
@@ -1751,7 +1762,9 @@ const rfqController = {
         res.status(200).json({
             status: 1,
             message: 'RFQ draft created/updated successfully',
-            rfq_id
+            data: {
+                rfq_id
+            }
         });
 
     } catch (error) {
