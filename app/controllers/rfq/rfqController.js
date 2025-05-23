@@ -1511,6 +1511,39 @@ const rfqController = {
 
   getRFQDraftData: async (req, res) => {
     try {
+        // Changes by Agnij 2025-06-17 [Modified to use create-fresh-draft query parameter]
+        const createFreshDraft = req.query.fresh === 'true';
+        
+        if (createFreshDraft) {
+            // Return empty draft data structure
+            return res.status(200).json({
+                status: 1,
+                data: {
+                    rfq_id: null,
+                    rfq_no: null,
+                    rfq_form_data: {
+                        is_published: 0,
+                        comment: '',
+                        response_email: '',
+                        contact_name: '',
+                        contact_number: '',
+                        company_name: '',
+                        bid_end_date: '',
+                        rfq_type: '',
+                        reverse_auction: 0,
+                        ra_start_date: null,
+                        ra_end_date: null,
+                        project_id: null,
+                        location: '',
+                        terms: [],
+                        term_and_condition_files: []
+                    },
+                    rfq_products: []
+                }
+            });
+        }
+        
+        // Original behavior - get existing draft
         const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: req.user.id });
 
         if (!rfqList.length) {
@@ -1533,6 +1566,96 @@ const rfqController = {
             status: 3,
             message: "An error occurred while fetching RFQ draft data"
         });
+    }
+  },
+
+  // Changes by Agnij 2025-05-24 [Added method to get all draft RFQs]
+  getDraftRFQs: async (req, res) => {
+    try {
+      const user_id = req.user.id;
+      
+      const page = parseInt(req.body.page) || 1;
+      const limit = parseInt(req.body.limit) || 10;
+      const offset = (page - 1) * limit;
+      const project_id = req.body.project_id || -1;
+      const sort = req.body.sort || 'DESC';
+      const reverse_auction = req.body.reverse_auction || '-1';
+      const rfq_type = req.body.rfq_type || '';
+      const rfq_no = req.body.rfq_no || null;
+
+      const result = await rfqModel.getAllDraftRfqs(
+        limit, 
+        offset, 
+        user_id, 
+        project_id, 
+        sort, 
+        reverse_auction, 
+        rfq_type, 
+        rfq_no
+      );
+
+      res.status(200).json({
+        status: 1,
+        data: result.data,
+        total_items: parseInt(result.total_count)
+      });
+    } catch (error) {
+      logError("Error fetching draft RFQs:", error);
+      res.status(500).json({
+        status: 3,
+        message: "An error occurred while fetching draft RFQs"
+      });
+    }
+  },
+
+  // Changes by Agnij 2025-05-24 [Updated method to get a specific draft RFQ by ID with debug logs]
+  // Changes by Agnij 2025-06-17 [Fixed draft RFQ retrieval issue]
+  getDraftById: async (req, res) => {
+    try {
+      const { id } = req.params;
+      const user_id = req.user.id;
+
+      console.log(`[getDraftById] Fetching draft RFQ with ID: ${id} for user: ${user_id}`);
+
+      // Use the model's getRfqDraftById method directly which has the complex SQL query
+      const draftData = await rfqModel.getRfqDraftById(id);
+      
+      console.log(`[getDraftById] Draft data found:`, draftData ? `Yes (${draftData.length} items)` : 'No');
+      
+      if (!draftData || draftData.length === 0) {
+        return res.status(404).json({ 
+          status: 2, 
+          message: "Draft RFQ details not found" 
+        });
+      }
+      
+      // Check if the RFQ belongs to the requesting user and is a draft
+      if (draftData[0].rfq_form_data.is_published !== 0) {
+        return res.status(403).json({ 
+          status: 2, 
+          message: "This is not a draft RFQ" 
+        });
+      }
+
+      console.log(`[getDraftById] Returning draft data for RFQ ID: ${id}`);
+      
+      // Return in the same format as getRFQDraftData
+      res.status(200).json({
+        status: 1,
+        data: draftData[0]
+      });
+    } catch (error) {
+      console.error(`[getDraftById] Error:`, error);
+      
+      // Changes by Agnij 2025-05-24 [Fixed error handling to properly use logError]
+      const err = new Error("Error fetching draft RFQ by ID");
+      err.original = error;
+      logError(err);
+      
+      res.status(500).json({
+        status: 3,
+        message: "An error occurred while fetching the draft RFQ"
+      });
     }
   },
 

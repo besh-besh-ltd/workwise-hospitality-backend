@@ -377,5 +377,28 @@ RfqRoutes.post('/report/send-on-email',
   rfqController.sendReportOnEmail
 )
 
+RfqRoutes.get(
+  '/rfq-draft-data',
+  passportSignIn,
+  rfqController.getRFQDraftData
+);
+
+RfqRoutes.post(
+  '/get-draft-rfqs',
+  passportSignIn,
+  rfqController.getDraftRFQs
+);
+
+RfqRoutes.get(
+  '/get-draft-by-id/:id',
+  passportSignIn,
+  rfqController.getDraftById
+);
+
+RfqRoutes.post(
+  '/draft-product-vendors',
+  passportSignIn,
+  rfqController.createOrUpdateRfqDraftWithProductVendors
+);
 
 export default RfqRoutes;
