@@ -229,7 +229,60 @@ export const rfqSchemas = {
         }
         return value;
       }),
+    ra_start_date: Joi.string()
+    .optional()
+    .allow(null)
+    .allow('')
+    .custom((value, helpers) => {
+
+      // mukul: 04/may/2025 : Check if reverse_auction is 1 and bid_end_date is present, and ra_start_date is after bid end date only
+      const { reverse_auction, bid_end_date } = helpers.state.ancestors[0];
+
+      if (value && reverse_auction === 1 && bid_end_date) {
+        const raStart = new Date(value);
+        const bidEnd = new Date(bid_end_date);
+  
+        if (raStart.toDateString() === bidEnd.toDateString() || raStart < bidEnd) {
+          return helpers.message(
+            'Reverse Auction Start Date must be after the Procurement End Date'
+          );
+        }
+  
+        const now = new Date();
+        if (raStart < now) {
+          return helpers.message('ra_start_date cannot be in the past');
+        }
+      }
+  
+      return value;
+    }),
+    ra_end_date: Joi.string()
+      .optional()
+      .allow(null)
+      .allow('')
+      .custom((value, helpers) => {
+        const { ra_start_date } = helpers.state.ancestors[0];
+    
+        // mukul: 04/may/2025 : Check if reverse_auction is 1 and ra_start_date is present, and ra_end_date is after ra_start_date only with 60min gap
+        if (value && ra_start_date) {
+          const raEnd = new Date(value);
+          const raStart = new Date(ra_start_date);
+    
+          const diffInMinutes = (raEnd - raStart) / (1000 * 60); // convert ms to minutes
+    
+          if (diffInMinutes < 60) {
+          return helpers.message(
+          'Reverse Auction End Date & Time must be at least 60 minutes after the Reverse Auction Start Time.'
+          );
+        }
+    }
+        return value;
+      }),
     project_id: Joi.number().integer().allow(null).optional(),
+    rfq_type: Joi.string().trim().optional(),
+    reverse_auction: Joi.valid(0, 1).allow(''),
+    location: Joi.string().optional().allow('').allow(null),
+    updatableData: Joi.object().optional(),
   }),
   finalize: Joi.object().keys({
     rfq_id: Joi.number().required(),
