@@ -96,15 +96,6 @@ const add_vendor_product = async (productDetails, vendorId) => {
       err++;
       errors.name = 'Product is already mapped with vendor';
     }
-    // if (is_approve != 1) {
-    //   let checkMasterNameExist = await productModel.checkMasterNameExist(
-    //     name
-    //   );
-    //   if (checkMasterNameExist.length > 0) {
-    //     err++;
-    //     errors.name = 'This product is available in master product';
-    //   }
-    // } else 
 
     if (master_id) {
       let findProduct = await productModel.check_product(master_id);
@@ -123,6 +114,7 @@ const add_vendor_product = async (productDetails, vendorId) => {
     return err;
   }
 }
+
 
 const UsersController = {
   userBookDemo: async (req, res, next) => {
@@ -181,55 +173,67 @@ const UsersController = {
         token, state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
        import_export_code,established_year,website, is_private, max_top_management, max_procurement, max_engineering, max_finance } = req.body;
 
-
         const user_data = {
-  name: name || null,
-  email: email?.toLowerCase() || null,
-  mobile: mobile || null,
-  user_type: user_type || null,
-  status: user_type == 7 ? 1 : 0,
-  password: generatePassword(password), // Use your encryption method
-  address: address || null,
-  created_by: created_by || null,
-  country: country || null,
-  whatsapp: whatsapp || null,
-  token: token || null,
-  state: state || null,
-  city: city || null,
-  postal_code: postal_code || null
-};
+         name: name || null,
+         email: email?.toLowerCase() || null,
+         mobile: mobile || null,
+         user_type: user_type || null,
+         status: user_type == 7 ? 1 : 0,
+         password: generatePassword(password), // Use your encryption method
+         address: address || null,
+         created_by: created_by || null,
+         country: country || null,
+         whatsapp: whatsapp || null,
+         token: token || null,
+         state: state || null,
+         city: city || null,
+         postal_code: postal_code || null
+       };
 
-const company_data = {
-  company_name: organization_name || null,
-  profile: profile || null,
-  nature_of_business: nature_of_business || null,
-  type_of_business: type_of_business || null,
-  turnover: turnover || null,
-  no_of_employess: no_of_employess || null,
-  import_export_code: import_export_code || null,
-  gstin: gstin || null,
-  cin: cin || null,
-  logo:  null, 
-  established_year: established_year || null,
-  website: website || null,
-  location: address || null,
-  is_private:  is_private || null, // Assuming companies created via this API are private
-};
-
-
-const buyer_company_max_account_data = {
-  max_top_management: max_top_management || 0,
-  max_procurement: max_procurement || 0,
-  max_engineering: max_engineering || 0,
-  max_finance: max_finance || 0
-};
+       const company_data = {
+         company_name: organization_name || null,
+         profile: profile || null,
+         nature_of_business: nature_of_business || null,
+         type_of_business: type_of_business || null,
+         turnover: turnover || null,
+         no_of_employess: no_of_employess || null,
+         import_export_code: import_export_code || null,
+         gstin: gstin || null,
+         cin: cin || null,
+         logo:  null, 
+         established_year: established_year || null,
+         website: website || null,
+         location: address || null,
+         is_private:  is_private || null, // Assuming companies created via this API are private
+       };
 
 
-const createdCompanyDetails = userModel.company_registration(user_data, company_data)
+        const buyer_company_max_account_data = {
+          max_top_management: max_top_management || 0,
+          max_procurement: max_procurement || 0,
+          max_engineering: max_engineering || 0,
+          max_finance: max_finance || 0
+        };
 
-if (user_type == 7) {
-  userModel.insertBuyerAccountLimits(buyer_company_max_account_data, createdCompanyDetails)
-}
+        
+          const {company_id} = await userModel.company_registration(user_data, company_data)
+          
+          let accountLimitSaved = null
+          if (user_type == 7 && company_id) {
+            accountLimitSaved = await userModel.insertBuyerAccountLimits(buyer_company_max_account_data, company_id)
+
+          }
+
+
+          res
+            .status(200)
+            .json({
+              status: 1,
+              message: 'Company registered successfully',
+              accountLimitSaved : accountLimitSaved ? "account limit saved" : "Not able to save account limit"
+
+            })
+            .end();
 
     } catch (err) {
        logError(err);

@@ -57,18 +57,19 @@ user_book_demo: async (mobile) => {
         // Step 2: Insert into tbl_users
         await t.none(
           `INSERT INTO tbl_users (
-            name, email, mobile, user_type, password, address,
+            name, email, mobile,status, user_type, password, address,
             created_by, country, whatsapp, token,
             state, city, postal_code, company_id
           ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $9, $10,
-            $11, $12, $13, $14
+            $11, $12, $13, $14, $15
           )`,
           [
             user_data.name,
             user_data.email,
             user_data.mobile,
+            user_data.status,
             user_data.user_type,
             user_data.password,
             user_data.address,
@@ -85,6 +86,7 @@ user_book_demo: async (mobile) => {
 
         resolve({ success: true, company_id });
       }).catch(function (err) {
+        console.error('Transaction error:', err);
         reject(new Error(err));
       });
     });
@@ -93,31 +95,28 @@ user_book_demo: async (mobile) => {
   insertBuyerAccountLimits: async (limitsData, company_id) => {
   return new Promise(function (resolve, reject) {
     db.none(
-      `INSERT INTO tbl_company_buyer_account_limits (
+      `INSERT INTO tbl_company_buyer_account_limit (
          company_id,
          max_top_management,
          max_procurement,
          max_engineering,
-         max_finance,
-         created_at,
-         updated_at
+         max_finance
        ) VALUES (
-         $1, $2, $3, $4, $5, $6, $7
+         $1, $2, $3, $4, $5
        )`,
       [
         company_id,
         limitsData.max_top_management || 0,
         limitsData.max_procurement || 0,
         limitsData.max_engineering || 0,
-        limitsData.max_finance || 0,
-        new Date(),
-        new Date()
+        limitsData.max_finance || 0
       ]
     )
     .then(() => {
       resolve({ success: true });
     })
     .catch(err => {
+      console.error('Error inserting into tbl_company_buyer_account_limit:', err);
       reject(new Error(err));
     });
   });

@@ -243,34 +243,6 @@ const schemas = {
     confirm_password: Joi.any().valid(Joi.ref('password')).required().messages({
       'any.only': 'Password and Confirm password not matched'
     }),
-
-      max_top_management: Joi.number()
-     .when('register_as', {
-      is: '7',
-      then: Joi.number().required().min(0).label('Max Top Management'),
-      otherwise: Joi.optional().allow(null)
-    }),
-
-  max_procurement: Joi.number()
-    .when('register_as', {
-      is: '7',
-      then: Joi.number().required().min(0).label('Max Procurement'),
-      otherwise: Joi.optional().allow(null)
-    }),
-
-  max_engineering: Joi.number()
-    .when('register_as', {
-      is: '7',
-      then: Joi.number().required().min(0).label('Max Engineering'),
-      otherwise: Joi.optional().allow(null)
-    }),
-
-  max_finance: Joi.number()
-    .when('register_as', {
-      is: '7',
-      then: Joi.number().required().min(0).label('Max Finance'),
-      otherwise: Joi.optional().allow(null)
-    }),
   }),
   vendor_review: Joi.object().keys({
     reviewed_to: Joi.string()
