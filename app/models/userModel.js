@@ -19,6 +19,110 @@ user_book_demo: async (mobile) => {
       });
   });
 },
+
+ company_registration: async (user_data, company_data) => {
+    return new Promise(function (resolve, reject) {
+      db.tx(async t => {
+        // Step 1: Insert into tbl_company
+        const companyInsert = await t.one(
+          `INSERT INTO tbl_company (
+            company_name, profile, nature_of_business, type_of_business,
+            turnover, no_of_employess, import_export_code, gstin, cin, logo,
+            established_year, website, location, is_private
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+            $11, $12, $13, $14
+          ) RETURNING id`,
+          [
+            company_data.company_name,
+            company_data.profile,
+            company_data.nature_of_business,
+            company_data.type_of_business,
+            company_data.turnover,
+            company_data.no_of_employess,
+            company_data.import_export_code,
+            company_data.gstin,
+            company_data.cin,
+            company_data.logo,
+            company_data.established_year,
+            company_data.website,
+            company_data.location,
+            company_data.is_private,
+            company_data.createdAt
+          ]
+        );
+
+        const company_id = companyInsert.id;
+
+        // Step 2: Insert into tbl_users
+        await t.none(
+          `INSERT INTO tbl_users (
+            name, email, mobile, user_type, password, address,
+            created_by, country, whatsapp, token,
+            state, city, postal_code, company_id
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, $9, $10,
+            $11, $12, $13, $14
+          )`,
+          [
+            user_data.name,
+            user_data.email,
+            user_data.mobile,
+            user_data.user_type,
+            user_data.password,
+            user_data.address,
+            user_data.created_by,
+            user_data.country,
+            user_data.whatsapp,
+            user_data.token,
+            user_data.state,
+            user_data.city,
+            user_data.postal_code,
+            company_id
+          ]
+        );
+
+        resolve({ success: true, company_id });
+      }).catch(function (err) {
+        reject(new Error(err));
+      });
+    });
+  },
+
+  insertBuyerAccountLimits: async (limitsData, company_id) => {
+  return new Promise(function (resolve, reject) {
+    db.none(
+      `INSERT INTO tbl_company_buyer_account_limits (
+         company_id,
+         max_top_management,
+         max_procurement,
+         max_engineering,
+         max_finance,
+         created_at,
+         updated_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7
+       )`,
+      [
+        company_id,
+        limitsData.max_top_management || 0,
+        limitsData.max_procurement || 0,
+        limitsData.max_engineering || 0,
+        limitsData.max_finance || 0,
+        new Date(),
+        new Date()
+      ]
+    )
+    .then(() => {
+      resolve({ success: true });
+    })
+    .catch(err => {
+      reject(new Error(err));
+    });
+  });
+},
+
   user_register: async (usrobj) => {
     return new Promise(function (resolve, reject) {
       db.any(

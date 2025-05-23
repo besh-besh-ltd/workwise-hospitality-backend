@@ -25,6 +25,12 @@ UsersRoutes.post(
   UsersController.userBookDemo
 );
 
+// can be user to register buyer and vendor company
+UsersRoutes.post(
+  '/company-registration',
+  UsersController.company_registration
+);
+
 UsersRoutes.post(
   '/user-registration',
   validateBody(schemas.user_register),

@@ -172,6 +172,78 @@ const UsersController = {
         .end();
     }
   },
+
+  company_registration: async (req, res, next) => {
+
+    try {
+
+       const { name, email, mobile, organization_name, user_type, password, address, created_by, country, whatsapp, 
+        token, state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
+       import_export_code,established_year,website, is_private, max_top_management, max_procurement, max_engineering, max_finance } = req.body;
+
+
+        const user_data = {
+  name: name || null,
+  email: email?.toLowerCase() || null,
+  mobile: mobile || null,
+  user_type: user_type || null,
+  status: user_type == 7 ? 1 : 0,
+  password: generatePassword(password), // Use your encryption method
+  address: address || null,
+  created_by: created_by || null,
+  country: country || null,
+  whatsapp: whatsapp || null,
+  token: token || null,
+  state: state || null,
+  city: city || null,
+  postal_code: postal_code || null
+};
+
+const company_data = {
+  company_name: organization_name || null,
+  profile: profile || null,
+  nature_of_business: nature_of_business || null,
+  type_of_business: type_of_business || null,
+  turnover: turnover || null,
+  no_of_employess: no_of_employess || null,
+  import_export_code: import_export_code || null,
+  gstin: gstin || null,
+  cin: cin || null,
+  logo:  null, 
+  established_year: established_year || null,
+  website: website || null,
+  location: address || null,
+  is_private:  is_private || null, // Assuming companies created via this API are private
+};
+
+
+const buyer_company_max_account_data = {
+  max_top_management: max_top_management || 0,
+  max_procurement: max_procurement || 0,
+  max_engineering: max_engineering || 0,
+  max_finance: max_finance || 0
+};
+
+
+const createdCompanyDetails = userModel.company_registration(user_data, company_data)
+
+if (user_type == 7) {
+  userModel.insertBuyerAccountLimits(buyer_company_max_account_data, createdCompanyDetails)
+}
+
+    } catch (err) {
+       logError(err);
+      res
+        .status(400)
+        .json({
+          status: false,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+
+  },
+
   user_registration: async (req, res, next) => {
     try {
       const now = currentDateTime();
