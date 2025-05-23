@@ -220,6 +220,24 @@ RfqRoutes.post('/magic-search-rfq-preview',
   rfqController.magicSearchRfqCreate
 );
 
+RfqRoutes.get('/draft-sheets',
+  passportSignIn, 
+  validateDbBody.user_id_profileexists,
+  acl([2]),
+  validateDbBody.rfq_project_exist,
+  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
+  rfqController.getRfqDraftSheets
+);
+
+RfqRoutes.get('/draft-sheet-wise',
+  passportSignIn, 
+  validateDbBody.user_id_profileexists,
+  acl([2]),
+  validateDbBody.rfq_project_exist,
+  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
+  rfqController.getDraftRfqSheetWise
+);
+
 RfqRoutes.post(
   '/send-query-message',
   noLogin.customer_auth,
