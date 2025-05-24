@@ -1720,7 +1720,6 @@ LIMIT 1;`;
       throw error;
     }
   },
-  checkIfExists: async (table_name, parameter) => {
   checkIfExists: async (table_name, parameter, db_con = db) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
     return new Promise(function (resolve, reject) {
