@@ -2,7 +2,7 @@ import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 
 const rfqModel = {
-  insert: async (table_name, data) => {
+  insert: async (table_name, data, db_con = db) => {
     const keys = Object.keys(data);
     const values = Object.values(data);
     const d_keys = keys.join(', ');
@@ -13,7 +13,7 @@ const rfqModel = {
 
 
     return new Promise(function (resolve, reject) {
-      db.query(query, values)
+      db_con.query(query, values)
         .then(function (result) {
           resolve(result);
         })
@@ -24,9 +24,106 @@ const rfqModel = {
     });
   },
 
+  getSheetsForDraftRfq: async (rfq_id, is_processed) => {
+    try {
+      const condition = `rfq_id = ${rfq_id} ${is_processed && is_processed == 'true' ? 'AND is_processed' : ''}`
+
+      return await rfqModel.checkIfExists('tbl_rfq_draft_sheets', condition)
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  getDraftRfqSheetWise: async (rfq_id, sheet_id) => {
+    try {
+
+      let q = `
+        SELECT 
+          rfq.response_email,
+          rfq.contact_name,
+          rfq.contact_number,
+          rfq.company_name,
+
+          jsonb_agg(
+            jsonb_build_object(
+              'product_id', pv.id,
+              'name', COALESCE(pv.name, 'Unnamed Product'),
+              'variant', rp.variant,
+              'spec', (
+                SELECT jsonb_agg(
+                  jsonb_build_object(
+                    'title', s.title,
+                    'value', s.value
+                  )
+                )
+                FROM tbl_rfq_products_specs s
+                WHERE s.product_variant_id = rp.product_variant_id
+                  AND s.variant = rp.variant
+                  AND s.rfq_id = rfq.id
+              ),
+              'vendors', (
+                SELECT jsonb_agg(
+                  jsonb_build_object(
+                    'id', tu.id,
+                    'vendor_name', tu.name,
+                    'email', tu.email,
+                    'mobile', tu.mobile,
+                    'company_name', COALESCE(tc.company_name, tu.organization_name),
+                    'address', tu.address,
+                    'is_private', tc.is_private,
+                    'turnover', tc.turnover,
+                    'nature_of_business', tc.nature_of_business,
+                    'city_name', lc.city_name,
+                    'state_name', ls.state_name,
+                    'country_name', lcn.country_name
+                  )
+                )
+                FROM tbl_rfq_product_vendors rpv
+                JOIN tbl_users tu ON tu.id = rpv.user_id
+                LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+                LEFT JOIN tbl_location_cities lc ON lc.id = tu.city
+                LEFT JOIN tbl_location_states ls ON ls.id = tu.state
+                LEFT JOIN tbl_location_country lcn ON lcn.id = tu.country::INT
+                WHERE rpv.product_variant_id = rp.product_variant_id
+                  AND rpv.variant = rp.variant
+                  AND rpv.rfq_id = rfq.id
+              ),
+              'comment', COALESCE(rp.comment, ''),
+              'defaultSelectedVAB', '',
+              'datasheet', '0',
+              'datasheet_file', '[]'::jsonb,
+              'spec_file', '[]'::jsonb,
+              'qap', '0',
+              'qap_file', '[]'::jsonb,
+              'user_selected_predefined_tds', false,
+              'user_selected_predefined_qap', false,
+              'sheet_name', COALESCE(rds.sheet_name, '')
+            )
+          ) AS products
+
+        FROM tbl_rfq rfq
+        JOIN tbl_rfq_draft_sheets rds ON rds.rfq_id = rfq.id
+        JOIN tbl_rfq_products rp ON rp.rfq_id = rfq.id AND rp.sheet_id = rds.id
+        JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+
+        WHERE rfq.id = $1 AND rds.id = $2 AND rds.is_processed
+
+        GROUP BY rfq.response_email, rfq.contact_name, rfq.contact_number, rfq.company_name;
+      `
+
+      return await db.many(q, [rfq_id, sheet_id])
+
+    } catch (error) {
+      throw error;
+    }
+  },
+
   saveMagicSearchInDraft: async (data, nextRFQNumber, createdBy) => {
     try {
       return await db.tx(async t => {
+
+        const sheetToProcess = data?.sheetNameList?.[0];
+
         // Insert into tbl_rfq
         const rfqInsertQuery = `
           INSERT INTO tbl_rfq (
@@ -89,11 +186,48 @@ const rfqModel = {
 
         const { id: rfq_id } = await t.one(rfqInsertQuery, rfqValues);
 
-        //Insert into tbl_rfq_products and get back their IDs
+        // Inserting every sheets
+        for(const sheet_name of (data?.sheetNameList ?? [])) {
+          const parameters = { rfq_id, sheet_name, is_processed: sheetToProcess == sheet_name, processed_at: sheetToProcess == sheet_name ? new Date().toISOString() : null }
+          await rfqModel.insert('tbl_rfq_draft_sheets', parameters, t)
+        }
+
+        // Map all the terms to this rfq, defaults to all the terms map
+        for (const term of data.termList) {
+          if(!term || !term.id) continue;
+          const dataToInsert = {
+            rfq_id,
+            terms_id: term.id
+          }
+
+          await rfqModel.insert('tbl_rfq_terms_map', dataToInsert, t)
+        }
+
+        // Insert into tbl_rfq_products and get back their IDs
         for (const product of data.products) {
+          if(product.sheet_name != sheetToProcess) continue;
+
+          let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${product.sheet_name}'`;
+          let sheet = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', parameter, t)
+
+          if(!sheet)
+            sheet = null;
+          else 
+          sheet = sheet[0];
+
           const productQuery = `
-            INSERT INTO tbl_rfq_products (rfq_id, product_variant_id, variant, comment, datasheet, spec_file, qap_file, qap)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO tbl_rfq_products (
+              rfq_id, 
+              product_variant_id, 
+              variant, 
+              comment, 
+              datasheet, 
+              spec_file, 
+              qap_file, 
+              qap, 
+              sheet_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id
           `;
 
@@ -106,27 +240,34 @@ const rfqModel = {
             0,
             "",
             "",
+            sheet.id,
           ];
 
-          const { id } = await t.one(productQuery, productValues);
+          await t.one(productQuery, productValues);
+
+          console.log("INSERTED PRODUCT")
 
           // Insert into tbl_rfq_products_specs
           for (const spec of product.spec || []) {
             await t.none(
-              `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, variant, title, value)
-              VALUES ($1, $2, $3, $4, $5)`,
-              [rfq_id, product.product_id, product.variant, spec.title, spec.value]
+              `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, variant, title, value, sheet_id)
+              VALUES ($1, $2, $3, $4, $5, $6)`,
+              [rfq_id, product.product_id, product.variant, spec.title, spec.value, sheet.id]
             );
           }
+
+          console.log("INSERTED PRODUCT SPECS")
 
           // 4. Insert into tbl_rfq_product_vendors
           for (const vendor of product.vendors || []) {
             await t.none(
-              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id)
-              VALUES ($1, $2, $3, $4)`,
-              [rfq_id, product.product_id, product.variant, vendor.user_id]
+              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id)
+              VALUES ($1, $2, $3, $4, $5)`,
+              [rfq_id, product.product_id, product.variant, vendor.user_id, sheet.id]
             );
           }
+
+          console.log("INSERTED PRODUCT VENDORS")
         }
 
         return rfq_id;
@@ -1580,9 +1721,10 @@ LIMIT 1;`;
     }
   },
   checkIfExists: async (table_name, parameter) => {
+  checkIfExists: async (table_name, parameter, db_con = db) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
     return new Promise(function (resolve, reject) {
-      db.any(query,[table_name,parameter])
+      db_con.any(query,[table_name])
         .then(function (data) {
           resolve(data);
         })

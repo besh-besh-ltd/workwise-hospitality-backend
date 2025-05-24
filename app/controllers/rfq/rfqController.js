@@ -201,19 +201,6 @@ function processQuotCompare(data) {
 }
 
 const saveMagicSearchInDraft = async (data, createdBy) => {
-  // Data payload structure
-  // const finalObject = {
-  //   is_published: 1,
-  //   response_email: user.email,
-  //   contact_name: user.name,
-  //   contact_number: user.mobile,
-  //   company_name: user.organization_name || user.name,
-  //   products,
-  //   terms: transformedTermList,
-  //   term_and_condition_files: [],
-  //   sheetNameList: Array.from(sheetNameList),
-  // };
-
   try {
     const nextRfqNumber = await getNextRfQNumber()
     return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy);
@@ -5414,23 +5401,25 @@ const rfqController = {
       }
   
       const finalObject = {
-        is_published: 1,
         response_email: user.email,
         contact_name: user.name,
         contact_number: user.mobile,
         company_name: user.organization_name || user.name,
         products,
         terms: transformedTermList,
+        termList,
         term_and_condition_files: [],
         sheetNameList: Array.from(sheetNameList),
       };
 
       const savedRfq = await saveMagicSearchInDraft(finalObject, req.user.id)
+      const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq)
   
       return res.status(200).json({
         status: 1,
         savedRfq,
-        data: finalObject,
+        sheets,
+        data: finalObject, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
         validation_errors: validationErrors.length ? validationErrors : null,
       });
   
@@ -5439,6 +5428,87 @@ const rfqController = {
       return res.status(500).json({
         success: false,
         message: 'Magic search failed to complete the action, Please try again.',
+        error: error.message,
+      });
+    }
+  },
+
+  getDraftRfqSheetWise: async (req, res) => {
+    try {
+      let { rfqId, sheetId } = req.query;
+
+      if(!rfqId || isNaN(rfqId) || parseInt(rfqId) < 0) 
+        return res.status(400).json({
+          success: false,
+          message: 'RFQ id is invalid, please provide a valid RFQ id!',
+        });
+
+      const sheets = await rfqModel.getSheetsForDraftRfq(rfqId)
+
+      if(!sheets || !sheets.length > 0)
+        sheetId = null
+      else {
+        if(!sheetId || isNaN(sheetId) || parseInt(sheetId) < 0)
+          sheetId = sheets[0].id;
+  
+        let sheetData = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', `rfq_id = ${rfqId} AND id = ${sheetId}`)
+        if(!sheetData || !sheetData.length > 0)
+          return res.status(400).json({
+            success: false,
+            message: 'Sheet does not exists, either its inactive or does not exist!',
+          });
+
+        sheetData = sheetData[0];
+  
+        if(!sheetData.is_processed)
+          return res.status(400).json({
+            success: false,
+            message: 'Sheet is not yet processed, please make a post request to this endpoint to process this sheet!',
+          });
+      }
+
+      const data = await rfqModel.getDraftRfqSheetWise(rfqId, sheetId);
+
+      return res.status(200).json({
+        status: 1,
+        sheets,
+        data,
+      });
+
+    } catch (error) {
+      console.log(error)
+      logError(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch drafted RFQ data, either the sheet id is invalid or this rfq is no longer available!',
+        error: error.message,
+      });
+    }
+  },
+
+  getRfqDraftSheets: async (req, res) => {
+    try {
+      const { rfqId } = req.query;
+
+      if(!rfqId || isNaN(rfqId) || parseInt(rfqId) < 0) 
+        return res.status(400).json({
+          success: false,
+          message: 'RFQ id is invalid, please provide a valid RFQ id!',
+        });
+
+      const sheets = await rfqModel.getSheetsForDraftRfq(rfqId)
+
+      return res.status(200).json({
+        status: 1,
+        sheets,
+      });
+
+    } catch (error) {
+      console.log(error)
+      logError(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch drafted RFQ data, either the sheet id is invalid or this rfq is no longer available!',
         error: error.message,
       });
     }
