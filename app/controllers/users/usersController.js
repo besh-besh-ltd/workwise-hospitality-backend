@@ -214,8 +214,6 @@ const UsersController = {
           max_engineering: max_engineering || 0,
           max_finance: max_finance || 0
         };
-
-        
           const {company_id} = await userModel.company_registration(user_data, company_data)
           
           let accountLimitSaved = null
@@ -223,6 +221,25 @@ const UsersController = {
             accountLimitSaved = await userModel.insertBuyerAccountLimits(buyer_company_max_account_data, company_id)
 
           }
+
+
+          const emailHeaderContent = `<h2>Hello ${name || ''},</h2>`
+          const emailContainerContent = `
+          <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
+           <p>Welcome to WorkWise, Your admin account for <strong ${organization_name} </strong> has been successfully registered.</p>
+            <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
+            <ul>
+            <li> <strong> Email: </strong> ${email} </li>
+            <li> <strong>Password: </strong> ${password} </li>
+            </ul>
+            <p>You can log in to your account using this link: <a href="https://letsworkwise.com/?user_registered=1" >Click Here</a></p>
+            <p style="font-size: 14px; color: #777;"><em>For security reasons, we recommend changing your password after your first login.</em></p>    
+          </div>`
+
+          dynamic_html = generateEmailTemplate(emailHeaderContent, emailContainerContent)
+          
+
+          sendMail(mailRecipients);
 
 
           res
@@ -247,6 +264,163 @@ const UsersController = {
     }
 
   },
+
+create_buyer_company_users: async (req, res, next) => {
+  try {
+    const { name, email, mobile, user_type, password } = req.body;
+    const { company_id: companyID, id: loginUserID } = req.user;
+
+    // Prepare user details
+    const userDetails = {
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      mobile: mobile.trim(),
+      user_type,
+      status: 1,
+      password: generatePassword(password),
+      created_by: loginUserID,
+      company_id: companyID
+    };
+
+    // Fetch company limits and current active user count concurrently
+    const [companyLimits, activeUsers] = await Promise.all([
+      rfqModel.checkIfExists("tbl_company_buyer_account_limit", `company_id = ${companyID}`),
+      rfqModel.checkIfExists("tbl_users", `company_id = ${companyID} AND user_type = ${user_type} AND is_deleted = 0`)
+    ]);
+
+    if (!companyLimits.length) {
+      return res.status(400).json({ status: false, message: "Company account limits not set." }).end();
+    }
+
+    const limits = companyLimits[0];
+    const maxMap = {
+      8: limits.max_top_management,
+      2: limits.max_procurement,
+      9: limits.max_engineering,
+      10: limits.max_finance
+    };
+    const maxAllowed = maxMap[user_type];
+    const currentCount = activeUsers.length;
+
+    if (maxAllowed === undefined) {
+      return res.status(400).json({ status: false, message: "Invalid user_type." }).end();
+    }
+
+    if (currentCount >= maxAllowed) {
+      return res.status(400).json({
+        status: false,
+        message: `Limit reached: Only ${maxAllowed} account(s) of this type allowed.`
+      }).end();
+    }
+
+    // Insert user
+    const insertResult = await rfqModel.insert("tbl_users", userDetails);
+    const createdUser = insertResult[0];
+
+
+            //activate default subscription
+        let checkFreeSubscription =
+          await subscriptionModel.checkFreeSubscription();
+          const startDate = Moment(); // Replace with the actual start date
+
+          const billingCycleMonths = checkFreeSubscription[0].duration;
+
+          // Calculate the end date by adding the billing cycle and subtracting one day
+          const endDate = startDate
+            .clone()
+            .add(billingCycleMonths, 'months')
+            .subtract(1, 'day');
+          const renewDate = startDate.clone().add(billingCycleMonths, 'months');
+
+
+          let UserSubscriptionObj = {
+            user_id: createdUser.id,
+            plan_id: checkFreeSubscription[0].id,
+            status: 1, //By default payment done
+            start_date: startDate.format('YYYY-MM-DD'),
+            end_date: endDate.format('YYYY-MM-DD'),
+            renew_date: renewDate.format('YYYY-MM-DD')
+          };
+
+          let createUserSubscription =
+            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
+
+          await subscriptionModel.updateUserSubscriptionId(
+            checkFreeSubscription[0].id,
+            createdUser.id
+          );
+
+          let subscriptionMappingDetails =
+            await subscriptionModel.getSubscriptionMappingDetails(
+              checkFreeSubscription[0].id
+            );
+          for await (const {
+            allocated_feature,
+            feature_id
+          } of subscriptionMappingDetails) {
+            let userSubscriptionFeatureObj = {
+              user_subscriptions_id: createUserSubscription.id,
+              feature_id: feature_id,
+              plan_id: checkFreeSubscription[0].id,
+              used_feature_count: 0,
+              allocated_feature: allocated_feature,
+              user_id: createdUser.id
+            };
+            await subscriptionModel.createUserSubscriptionFeature(
+              userSubscriptionFeatureObj
+            );
+          }
+
+
+    // Build account type label
+    const accountTypeMap = {
+      8: "Management",
+      2: "Procurement",
+      9: "Engineering",
+      10: "Finance"
+    };
+    const accountTypeLabel = accountTypeMap[user_type] || "User";
+
+    // Compose and send email
+    const emailHeader = `<h2>Hello ${name},</h2>`;
+    const emailContent = `
+      <div style="font-size:16px; font-family:'Roboto',sans-serif;">
+        <p>Welcome to WorkWise, your account has been successfully registered.</p>
+        <p><strong>Login Details:</strong></p>
+        <ul>
+          <li><strong>Email:</strong> ${email}</li>
+          <li><strong>Password:</strong> ${password}</li>
+          <li><strong>Mobile:</strong> ${mobile}</li>
+          <li><strong>Account Type:</strong> ${accountTypeLabel}</li>
+        </ul>
+        <p>Login here: <a href="https://letsworkwise.com/?user_registered=1">Click Here</a></p>
+        <p style="font-size:14px;color:#777;"><em>Please change your password after first login for security.</em></p>
+      </div>`;
+
+    const emailHTML = generateEmailTemplate(emailHeader, emailContent);
+    const mailRecipients = {
+      to: email,
+      subject: "Welcome to WorkWise - Account Created",
+      html: emailHTML
+    };
+
+    sendMail(mailRecipients);
+
+    return res.status(200).json({
+      status: true,
+      message: "User account created successfully",
+    }).end();
+
+  } catch (err) {
+    console.error("create_buyer_company_users error:", err);
+    return res.status(500).json({
+      status: false,
+      message: "Error creating buyer company user.",
+      error: err.message
+    }).end();
+  }
+},
+
 
   user_registration: async (req, res, next) => {
     try {
@@ -366,8 +540,6 @@ const UsersController = {
         }
 
         addDefaultNotifications(user_id[0].id);
-
-
 
         //activate default subscription
         let checkFreeSubscription =

@@ -28,9 +28,20 @@ UsersRoutes.post(
 // can be user to register buyer and vendor company
 UsersRoutes.post(
   '/company-registration',
+  passportSignIn,
   validateDbBody.user_exists,
   UsersController.company_registration
 );
+
+// use to create dufferent type of buyer company users,
+// like procurment, management, finance, engineering
+UsersRoutes.post(
+  '/create-buyer-company-user',
+  passportSignIn,
+  validateDbBody.user_exists,
+  UsersController.create_buyer_company_users
+);
+
 
 UsersRoutes.post(
   '/user-registration',
