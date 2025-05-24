@@ -200,10 +200,10 @@ function processQuotCompare(data) {
   return data;
 }
 
-const saveMagicSearchInDraft = async (data, createdBy) => {
+const saveMagicSearchInDraft = async (data, createdBy, processedUrl, rfqId, sheetId) => {
   try {
     const nextRfqNumber = await getNextRfQNumber()
-    return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy);
+    return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy, processedUrl, rfqId, sheetId);
   } catch (error) {
     throw error
   }
@@ -5292,19 +5292,30 @@ const rfqController = {
     }
   },
 
-  // mukul - 21-05-2025, removed file handling as now we just get json url in request, also reviewed we handling many fields in payload but in api call we just get json url, not removing them now as very soon we start this flow enhancements
-  // Kushal - 21-05-2025, Highly optimized to handle large datasets
-
-  magicSearchRfqCreate: async (req, res, next) => {
+  processRfqDraftSheetWise: async (processedUrl, user, rfqId = null, sheetId = null) => {
     try {
-      let aiProcessedBoqJson = req.body.jsonFileUrl;
-      const user = req.user;
-  
-      if (aiProcessedBoqJson.startsWith('http:')) {
-        aiProcessedBoqJson = aiProcessedBoqJson.replace('http:', 'https:');
+      
+      if (rfqId && !isNaN(parseInt(rfqId))) {
+        let rfqDetails = await rfqModel.checkIfExists(
+          'tbl_rfq',
+          `id = ${rfqId}`
+        );
+        if (rfqDetails) {
+          rfqDetails = rfqDetails[0];
+          processedUrl = rfqDetails.processed_url;
+
+          console.log("PROCESSED URL -- ", processedUrl)
+
+          if (!processedUrl)
+            throw new Error('Processed URL does not exist for given RFQ')
+        }
+      }
+
+      if (processedUrl.startsWith('http:')) {
+        processedUrl = processedUrl.replace('http:', 'https:');
       }
   
-      const boqDataJson = await generativeAI.processBOQWithAI(aiProcessedBoqJson);
+      const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
       const termList = await rfqModel.getAllTerms();
       const transformedTermList = termList.map(term => ({ id: term.id, name: term.term_content }));
   
@@ -5327,8 +5338,18 @@ const rfqController = {
       const existingProductIdSet = new Set(existingProducts.map(p => p.id));
   
       const vendorCache = {};
+
+      let sheetData = null;
+      if(sheetId && !isNaN(parseInt(sheetId))) {
+        let sheetDetails = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', `id = ${sheetId}`);
+        if(sheetDetails) {
+          sheetData = sheetDetails[0];
+        }
+      }
   
       for (const item of boqDataJson) {
+        if(sheetData && sheetData.sheet_name != item.sheet_name) continue;
+
         const cleanIds = Array.isArray(item?.list_of_product_ids)
           ? item.list_of_product_ids.map(id => parseInt(id)).filter(id => !isNaN(id))
           : [];
@@ -5412,15 +5433,70 @@ const rfqController = {
         sheetNameList: Array.from(sheetNameList),
       };
 
-      const savedRfq = await saveMagicSearchInDraft(finalObject, req.user.id)
+      return [validationErrors, finalObject];
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  // mukul - 21-05-2025, removed file handling as now we just get json url in request, also reviewed we handling many fields in payload but in api call we just get json url, not removing them now as very soon we start this flow enhancements
+  // Kushal - 21-05-2025, Highly optimized to handle large datasets
+  // Kushal - 23-05-2025, Completed Sheet wise processing while saving Draft of Magic Search
+  magicSearchRfqCreate: async (req, res, next) => {
+    try {
+      let aiProcessedBoqJson = req.body.jsonFileUrl;
+      const user = req.user;
+  
+      const [validationErrors, processedData] = await rfqController.processRfqDraftSheetWise(aiProcessedBoqJson, user)
+
+      const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, aiProcessedBoqJson)
       const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq)
   
       return res.status(200).json({
         status: 1,
         savedRfq,
         sheets,
-        data: finalObject, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
+        data: processedData, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
         validation_errors: validationErrors.length ? validationErrors : null,
+      });
+  
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Magic search failed to complete the action, Please try again.',
+        error: error.message,
+      });
+    }
+  },
+
+  processMagicSearchDraft: async (req, res, next) => {
+    try {
+      const {rfqId, sheetId} = req.query;
+      const user = req.user;
+
+      if(!rfqId || isNaN(parseInt(rfqId))) 
+        return res.status(400).json({
+          success: false,
+          message: 'RFQ Id is required to process a draft sheet!',
+        });
+      
+      if(!sheetId || isNaN(parseInt(sheetId))) 
+        return res.status(400).json({
+          success: false,
+          message: 'Sheet Id is required to process a draft sheet!',
+        });
+  
+      const [,processedData] = await rfqController.processRfqDraftSheetWise(null, user, rfqId, sheetId)
+
+      const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, null, rfqId, sheetId);
+      const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq)
+  
+      return res.status(200).json({
+        status: 1,
+        savedRfq,
+        sheets,
+        data: processedData, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
       });
   
     } catch (error) {
@@ -5460,11 +5536,10 @@ const rfqController = {
 
         sheetData = sheetData[0];
   
-        if(!sheetData.is_processed)
-          return res.status(400).json({
-            success: false,
-            message: 'Sheet is not yet processed, please make a post request to this endpoint to process this sheet!',
-          });
+        if(!sheetData.is_processed) {
+          const [,processedData] = await rfqController.processRfqDraftSheetWise(null, req.user, rfqId, sheetId);
+          await saveMagicSearchInDraft(processedData, req.user.id, null, rfqId, sheetId);
+        }
       }
 
       const data = await rfqModel.getDraftRfqSheetWise(rfqId, sheetId);

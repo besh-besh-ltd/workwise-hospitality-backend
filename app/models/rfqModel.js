@@ -90,13 +90,36 @@ const rfqModel = {
               ),
               'comment', COALESCE(rp.comment, ''),
               'defaultSelectedVAB', '',
-              'datasheet', '0',
-              'datasheet_file', '[]'::jsonb,
-              'spec_file', '[]'::jsonb,
-              'qap', '0',
-              'qap_file', '[]'::jsonb,
-              'user_selected_predefined_tds', false,
-              'user_selected_predefined_qap', false,
+              'TDS_flies', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'TDS'
+              ),
+              'QAP_files', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'QAP'
+              ),
+              'SPEC_files', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'SPEC'
+              ),
+              'datasheet_file', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'TDS'
+              ),
+              'spec_file', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'SPEC'
+              ),
+              'qap_file', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'QAP'
+              ),
               'sheet_name', COALESCE(rds.sheet_name, '')
             )
           ) AS products
@@ -118,94 +141,147 @@ const rfqModel = {
     }
   },
 
-  saveMagicSearchInDraft: async (data, nextRFQNumber, createdBy) => {
+  saveMagicSearchInDraft: async (data, nextRFQNumber, createdBy, processedUrl, rfqId, sheetId) => {
     try {
       return await db.tx(async t => {
 
-        const sheetToProcess = data?.sheetNameList?.[0];
+        let sheetToProcess = null;
+
+        let q = `
+         SELECT id, sheet_name FROM tbl_rfq_draft_sheets
+        `
+        let sheetValues = [];
+        
+        if(sheetId && !isNaN(parseInt(sheetId))) {
+          q += 'WHERE id = $1';
+          sheetValues.push(sheetId)
+        } else if(rfqId) {
+          q += 'WHERE rfq_id = $1 AND NOT is_processed ORDER BY id'
+          sheetValues.push(rfqId);
+        } else {
+          sheetToProcess = {
+            sheet_name: data?.sheetNameList?.[0],
+          }
+        }
+
+        if(sheetId || rfqId) {
+          let sheetData = await t.one(q, sheetValues);
+          if(sheetData && !sheetData.is_processed) {
+            sheetToProcess = sheetData;
+          } else {
+            throw Error("RFQ Draft Sheet not found or is already processed!");
+          }
+        }
+
 
         // Insert into tbl_rfq
-        const rfqInsertQuery = `
-          INSERT INTO tbl_rfq (
-            rfq_no, 
-            comment, 
-            location,
-            company_name, 
-            response_email, 
-            contact_name, 
-            contact_number, 
-            is_published, 
-            status,
-            reverse_auction,
-            created_by, 
-            updated_by, 
-            bid_end_date,
-            timestamp
-          )
-          VALUES (
-            $1, 
-            $2, 
-            $3, 
-            $4, 
-            $5,
-            $6,
-            $7,
-            $8,
-            $9,
-            $10,
-            $11,
-            $12,
-            $13,
-            $14
-          )
-          RETURNING id
-        `;
+        let rfqQuery = ``;
+        let rfqQueryValues = [];
 
-        const today = new Date();
-        const nextMonth = new Date(today);
-        nextMonth.setMonth(today.getMonth() + 1);
+        if(rfqId && !isNaN(parseInt(rfqId))) {
+          rfqQuery = `SELECT id FROM tbl_rfq WHERE id = $1 AND is_published = 0`;
+          rfqQueryValues.push(rfqId);
+        } else {
+          rfqQuery = `
+            INSERT INTO tbl_rfq (
+              rfq_no, 
+              comment, 
+              location,
+              company_name, 
+              response_email, 
+              contact_name, 
+              contact_number, 
+              is_published, 
+              status,
+              reverse_auction,
+              created_by, 
+              updated_by, 
+              bid_end_date,
+              timestamp,
+              rfq_added_from,
+              processed_url
+            )
+            VALUES (
+              $1, 
+              $2, 
+              $3, 
+              $4, 
+              $5,
+              $6,
+              $7,
+              $8,
+              $9,
+              $10,
+              $11,
+              $12,
+              $13,
+              $14,
+              $15,
+              $16
+            )
+            RETURNING id
+          `;
+  
+          const today = new Date();
+          const nextMonth = new Date(today);
+          nextMonth.setMonth(today.getMonth() + 1);
+  
+          const formattedDate = nextMonth.toISOString().split('T')[0];
+  
+          const rfqValues = [
+            nextRFQNumber,
+            "",
+            "",
+            data.company_name,
+            data.response_email,
+            data.contact_name,
+            data.contact_number,
+            0,
+            1,
+            0,
+            createdBy,
+            createdBy,
+            formattedDate,
+            new Date().toISOString(),
+            'magic',
+            processedUrl,
+          ];
 
-        const formattedDate = nextMonth.toISOString().split('T')[0];
+          rfqQueryValues.push(...rfqValues);
+        }
 
-        const rfqValues = [
-          nextRFQNumber,
-          "",
-          "",
-          data.company_name,
-          data.response_email,
-          data.contact_name,
-          data.contact_number,
-          0,
-          1,
-          0,
-          createdBy,
-          createdBy,
-          formattedDate,
-          new Date().toISOString(),
-        ];
 
-        const { id: rfq_id } = await t.one(rfqInsertQuery, rfqValues);
+        const rfqResult = await t.one(rfqQuery, rfqQueryValues);
+        if(!rfqResult) throw Error("RFQ does not exist or is no longer in draft!")
+
+        const { id: rfq_id } = rfqResult;
 
         // Inserting every sheets
-        for(const sheet_name of (data?.sheetNameList ?? [])) {
-          const parameters = { rfq_id, sheet_name, is_processed: sheetToProcess == sheet_name, processed_at: sheetToProcess == sheet_name ? new Date().toISOString() : null }
-          await rfqModel.insert('tbl_rfq_draft_sheets', parameters, t)
-        }
-
-        // Map all the terms to this rfq, defaults to all the terms map
-        for (const term of data.termList) {
-          if(!term || !term.id) continue;
-          const dataToInsert = {
-            rfq_id,
-            terms_id: term.id
+        if(!sheetId)
+          for(const sheet_name of (data?.sheetNameList ?? [])) {
+            const parameters = {
+              rfq_id,
+              sheet_name,
+              is_processed: false
+            };
+            await rfqModel.insert('tbl_rfq_draft_sheets', parameters, t)
           }
 
-          await rfqModel.insert('tbl_rfq_terms_map', dataToInsert, t)
-        }
+        // Map all the terms to this rfq, defaults to all the terms map
+        if(!sheetId)
+          for (const term of data.termList) {
+            if(!term || !term.id) continue;
+            const dataToInsert = {
+              rfq_id,
+              terms_id: term.id
+            }
+
+            await rfqModel.insert('tbl_rfq_terms_map', dataToInsert, t)
+          }
 
         // Insert into tbl_rfq_products and get back their IDs
         for (const product of data.products) {
-          if(product.sheet_name != sheetToProcess) continue;
+          if(product.sheet_name != sheetToProcess.sheet_name) continue;
 
           let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${product.sheet_name}'`;
           let sheet = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', parameter, t)
@@ -245,8 +321,6 @@ const rfqModel = {
 
           await t.one(productQuery, productValues);
 
-          console.log("INSERTED PRODUCT")
-
           // Insert into tbl_rfq_products_specs
           for (const spec of product.spec || []) {
             await t.none(
@@ -256,8 +330,6 @@ const rfqModel = {
             );
           }
 
-          console.log("INSERTED PRODUCT SPECS")
-
           // 4. Insert into tbl_rfq_product_vendors
           for (const vendor of product.vendors || []) {
             await t.none(
@@ -266,8 +338,19 @@ const rfqModel = {
               [rfq_id, product.product_id, product.variant, vendor.user_id, sheet.id]
             );
           }
+        }
 
-          console.log("INSERTED PRODUCT VENDORS")
+        let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${sheetToProcess.sheet_name}'`;
+        let sheet = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', parameter, t)
+
+        console.log("SHEET ----- ", sheet);
+        if(sheet && sheet.length > 0) {
+          sheet = sheet[0];
+          const updatableData = {
+            is_processed: true,
+            processed_at: new Date().toISOString(),
+          }
+          await rfqModel.update('tbl_rfq_draft_sheets', updatableData, sheet.id, t);
         }
 
         return rfq_id;
@@ -576,7 +659,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         });
     });
   },
-  update: async (table_name, data, primary_key) => {
+  update: async (table_name, data, primary_key, db_con = db) => {
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
       .join(', ');
@@ -588,7 +671,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       RETURNING *`;
 
     return new Promise(function (resolve, reject) {
-      db.query(updateQuery, values)
+      db_con.query(updateQuery, values)
         .then(function (data) {
           resolve(data);
         })
