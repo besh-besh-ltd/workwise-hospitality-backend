@@ -29,6 +29,7 @@ import {
   schemas,
   validateBodyController
 } from '../../validations/paramValidation/userValidation.js';
+import generalModel from '../../models/generalModel.js';
 async function getAllData(products) {
   const promises = products.map(async (item) => {
     try {
@@ -1240,6 +1241,28 @@ const ProductsController = {
       return res
         .status(500)
         .json({ error: 'Internal server error. Please try again later.' })
+        .end();
+    }
+  },
+
+   // 25-05-2025 mukul jatav. to fetch unique make list 
+  getProductMakeList: async (req, res, next) =>{
+    try {
+      
+      const tableName = "tbl_product_variant_vendor_make"
+      const columnName = "make_name"
+      const makeList = await generalModel.getUniqueColumnValues(tableName, columnName)
+
+      return res.status(200).json({ status: 1, data: makeList }).end();
+
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
         .end();
     }
   }
