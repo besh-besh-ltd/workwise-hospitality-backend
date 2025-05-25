@@ -1,6 +1,46 @@
 import db from '../config/dbConn.js';
 
 const generalModel = {
+
+// insertMany: used to insert multiple records into a table, Prevents SQL injection for values using positional placeholders, Suitable for low-to-medium data volume, problem is still we useing use input table_name good we create alist of while list tables for such models
+// Example usage:
+//  const tableName = "tbl_product_variant_vendor_make";
+//  const data = [dor_map_id: 101, make_name: "Jindal"},
+//   { variant_vendor_map_id: 102, make_name: "SAIL"}
+// ];
+  insertMany: async (tableName, data) => {
+    if (!tableName || !data || !Array.isArray(data) || data.length === 0) {
+    throw new Error("Table name and non-empty data array are required.");
+  }
+
+  // Extract column names from the first object in data array
+  const columns = Object.keys(data[0]);
+  const columnList = columns.map((col) => `"${col}"`).join(", ");
+
+  // Prepare the positional placeholders and the value array
+  const values = [];
+  const valuePlaceholders = data
+    .map((row, rowIndex) => {
+      const placeholders = columns
+        .map((col, colIndex) => {
+          values.push(row[col]); // Collect values in order
+          return `$${values.length}`; // Positional placeholders
+        })
+        .join(", ");
+      return `(${placeholders})`;
+    })
+    .join(", ");
+
+  const query = `INSERT INTO ${tableName} (${columnList}) VALUES ${valuePlaceholders} RETURNING *;`;
+
+  try {
+    const result = await db.any(query, values);
+    return result;
+  } catch (err) {
+    throw new Error(err);
+  }
+  },
+
   getStates: async () => {
     return new Promise(function (resolve, reject) {
       db.any(
