@@ -229,12 +229,12 @@ const insertProduct = async (
       product_variant_id: product_id,
       variant,
       comment,
-      datasheet,
+      datasheet: datasheet || '', // Changes by Agnij 2025-06-18 [Fixed not-null constraint violation]
       spec_file:'',// this field we have to remove from database
       qap_file:'',// this field we have to remove from database
       rfq_id: created_rfq_id,
       datasheet_file:"",// this field we have to remove from database
-      qap
+      qap: qap || '' // Also ensuring qap is not null
     };
     
     let spec_array = spec?.map((item) => {
@@ -247,13 +247,23 @@ const insertProduct = async (
 
     const vendor_keys = ['user_id', 'rfq_id', 'product_variant_id', 'variant'];
     var vendor_array = [];
-    if (vendors.length > 0) {
+    // Changes by Agnij 2025-06-18 [Added null check for vendors]
+    if (vendors && vendors.length > 0) {
       vendor_array = vendors.map((item) => {
+        // Changes by Agnij 2025-06-18 [Fixed missing user_id property]
+        // Check if vendor has user_id property, if not try to get it from id
+        if (!item.user_id && item.id) {
+          item.user_id = item.id;
+        }
+        
         item.rfq_id = created_rfq_id;
         item.product_variant_id = product_id;
         item.variant = variant;
         return item;
       });
+      
+      // Filter out any vendors that still don't have user_id
+      vendor_array = vendor_array.filter(item => item.user_id);
     }
 
     const productResult = await rfqModel.insert(
@@ -268,7 +278,8 @@ const insertProduct = async (
     );
 
     var vendor_info = [];
-    if (vendors.length > 0) {
+    // Changes by Agnij 2025-06-18 [Added null check for vendors and vendor_array]
+    if (vendors && vendors.length > 0 && vendor_array.length > 0) {
       vendor_info = await rfqModel.insertArray(
         vendor_array,
         vendor_keys,

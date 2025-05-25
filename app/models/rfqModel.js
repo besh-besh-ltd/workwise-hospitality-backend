@@ -320,10 +320,10 @@ const rfqModel = {
             product.product_id,
             product.variant,
             product.comment,
-            0,
-            0,
-            "",
-            "",
+            0, // datasheet - using 0 as a default value to avoid null constraint
+            '', // spec_file - this field will be removed from database
+            '', // qap_file - this field will be removed from database
+            '', // qap - using empty string as default
             sheet.id,
           ];
 
@@ -340,10 +340,16 @@ const rfqModel = {
 
           // 4. Insert into tbl_rfq_product_vendors
           for (const vendor of product.vendors || []) {
+            // Skip vendors without user_id
+            if (!vendor.user_id && !vendor.id) continue;
+            
+            // Use id as user_id if user_id is not available
+            const userId = vendor.user_id || vendor.id;
+            
             await t.none(
               `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id)
               VALUES ($1, $2, $3, $4, $5)`,
-              [rfq_id, product.product_id, product.variant, vendor.user_id, sheet.id]
+              [rfq_id, product.product_id, product.variant, userId, sheet.id]
             );
           }
         }
