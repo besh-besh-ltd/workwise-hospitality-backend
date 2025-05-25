@@ -3771,6 +3771,12 @@ getProductTechSpecByID: async (productId) => {
     WHERE vpm.variant_vendor_mapping_id = m.id
   ) AS approved_ids,
 
+  ARRAY(
+    SELECT pvvm.make_name 
+    FROM tbl_product_variant_vendor_make pvvm
+    WHERE pvvm.variant_vendor_map_id = m.id
+  ) AS make_list,
+
   TU.name AS vendor_name,
   TU.email AS vendor_email,
   TU.organization_name AS vendor_organization,
