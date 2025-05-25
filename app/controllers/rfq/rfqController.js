@@ -1917,6 +1917,16 @@ const rfqController = {
           message: "This is not a draft RFQ" 
         });
       }
+      // Check if this is a Magic Search RFQ
+      const isMagicRfq = draftData[0].rfq_form_data.rfq_added_from === 'magic';
+      
+      // If it's a Magic RFQ, make sure sheets are included
+      if (isMagicRfq && (!draftData[0].sheets || draftData[0].sheets.length === 0)) {
+        const sheets = await rfqModel.getSheetsForDraftRfq(id);
+        if (sheets && sheets.length > 0) {
+          draftData[0].sheets = sheets;
+        }
+      }
 
       console.log(`[getDraftById] Returning draft data for RFQ ID: ${id}`);
       
@@ -5475,36 +5485,51 @@ const rfqController = {
       const {rfqId, sheetId} = req.query;
       const user = req.user;
 
-      if(!rfqId || isNaN(parseInt(rfqId))) 
-        return res.status(400).json({
-          success: false,
-          message: 'RFQ Id is required to process a draft sheet!',
-        });
-      
-      if(!sheetId || isNaN(parseInt(sheetId))) 
-        return res.status(400).json({
-          success: false,
-          message: 'Sheet Id is required to process a draft sheet!',
-        });
-  
-      const [,processedData] = await rfqController.processRfqDraftSheetWise(null, user, rfqId, sheetId)
 
-      const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, null, rfqId, sheetId);
-      const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq)
-  
-      return res.status(200).json({
-        status: 1,
-        savedRfq,
-        sheets,
-        data: processedData, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
-      });
-  
+      if(!rfqId || isNaN(parseInt(rfqId))) {
+        console.log(`[processMagicSearchDraft] Invalid RFQ ID: ${rfqId}`);
+        return res.status(400).json({
+          status: 0,
+          success: false,
+          message: 'RFQ Id is required to process a draft sheet!'
+        });
+      }
+      
+      if(!sheetId || isNaN(parseInt(sheetId))) {
+        console.log(`[processMagicSearchDraft] Invalid Sheet ID: ${sheetId}`);
+        return res.status(400).json({
+          status: 0,
+          success: false,
+          message: 'Sheet Id is required to process a draft sheet!'
+        });
+      }
+      try {
+        const [,processedData] = await rfqController.processRfqDraftSheetWise(null, user, rfqId, sheetId);
+        const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, null, rfqId, sheetId);
+        
+        const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq);
+        return res.status(200).json({
+          status: 1,
+          success: true,
+          savedRfq,
+          sheets,
+          data: processedData // Including the processed data in the response
+        });
+      } catch (error) {
+        return res.status(500).json({
+          status: 0,
+          success: false,
+          message: 'Failed to fetch sheet data, please try again.',
+          sheets
+        });
+      }
     } catch (error) {
       logError(error);
       return res.status(500).json({
+        status: 0,
         success: false,
-        message: 'Magic search failed to complete the action, Please try again.',
-        error: error.message,
+        message: 'Failed to fetch drafted RFQ data, either the sheet id is invalid or this rfq is no longer available!',
+        error: error.message
       });
     }
   },
@@ -5513,50 +5538,92 @@ const rfqController = {
     try {
       let { rfqId, sheetId } = req.query;
 
-      if(!rfqId || isNaN(rfqId) || parseInt(rfqId) < 0) 
+      if(!rfqId || isNaN(parseInt(rfqId)) || parseInt(rfqId) < 0) {
         return res.status(400).json({
+          status: 0,
           success: false,
-          message: 'RFQ id is invalid, please provide a valid RFQ id!',
+          message: 'RFQ id is invalid, please provide a valid RFQ id!'
         });
+      }
 
-      const sheets = await rfqModel.getSheetsForDraftRfq(rfqId)
+      // Convert to integers
+      rfqId = parseInt(rfqId);
+      
+      // Get sheets for this RFQ
+      const sheets = await rfqModel.getSheetsForDraftRfq(rfqId);
 
-      if(!sheets || !sheets.length > 0)
-        sheetId = null
-      else {
-        if(!sheetId || isNaN(sheetId) || parseInt(sheetId) < 0)
-          sheetId = sheets[0].id;
-  
-        let sheetData = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', `rfq_id = ${rfqId} AND id = ${sheetId}`)
-        if(!sheetData || !sheetData.length > 0)
-          return res.status(400).json({
-            success: false,
-            message: 'Sheet does not exists, either its inactive or does not exist!',
-          });
+      if(!sheets || !sheets.length > 0) {
+        return res.status(200).json({
+          status: 0,
+          success: false,
+          message: 'No sheets found for this RFQ',
+          sheets: []
+        });
+      }
+      
+      // Validate and select sheetId
+      if(!sheetId || isNaN(parseInt(sheetId)) || parseInt(sheetId) < 0) {
+        sheetId = sheets[0].id;
+      } else {
+        sheetId = parseInt(sheetId);
+      }
 
-        sheetData = sheetData[0];
-  
-        if(!sheetData.is_processed) {
+      // Verify the sheet exists for this RFQ
+      let sheetData = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', `rfq_id = ${rfqId} AND id = ${sheetId}`);
+      
+      if(!sheetData || !sheetData.length > 0) {
+        console.log(`[getDraftRfqSheetWise] Sheet ${sheetId} does not exist for RFQ ${rfqId}`);
+        return res.status(400).json({
+          status: 0,
+          success: false,
+          message: 'Sheet does not exist, either it is inactive or does not exist!',
+          sheets
+        });
+      }
+
+      sheetData = sheetData[0];
+
+      // Process unprocessed sheet if needed
+      if(!sheetData.is_processed) {
+        try {
           const [,processedData] = await rfqController.processRfqDraftSheetWise(null, req.user, rfqId, sheetId);
           await saveMagicSearchInDraft(processedData, req.user.id, null, rfqId, sheetId);
+        } catch (error) {
+          return res.status(500).json({
+            status: 0,
+            success: false,
+            message: 'Failed to process sheet data. Please try again.',
+            sheets
+          });
         }
       }
 
-      const data = await rfqModel.getDraftRfqSheetWise(rfqId, sheetId);
-
-      return res.status(200).json({
-        status: 1,
-        sheets,
-        data,
-      });
-
+      // Get the data for this sheet
+      try {
+        const data = await rfqModel.getDraftRfqSheetWise(rfqId, sheetId);
+        
+        return res.status(200).json({
+          status: 1,
+          success: true,
+          sheets,
+          data
+        });
+      } catch (error) {
+        return res.status(500).json({
+          status: 0,
+          success: false,
+          message: 'Failed to fetch sheet data, please try again.',
+          sheets
+        });
+      }
     } catch (error) {
-      console.log(error)
+      console.error(`[getDraftRfqSheetWise] Unhandled error:`, error);
       logError(error);
       return res.status(500).json({
+        status: 0,
         success: false,
         message: 'Failed to fetch drafted RFQ data, either the sheet id is invalid or this rfq is no longer available!',
-        error: error.message,
+        error: error.message
       });
     }
   },

@@ -132,10 +132,18 @@ const rfqModel = {
         WHERE rfq.id = $1 AND rds.id = $2 AND rds.is_processed
 
         GROUP BY rfq.response_email, rfq.contact_name, rfq.contact_number, rfq.company_name;
-      `
+      `;
 
-      return await db.many(q, [rfq_id, sheet_id])
-
+      try {
+        const result = await db.many(q, [rfq_id, sheet_id]);
+        return result;
+      } catch (error) {
+        // If no data found, db.many throws an error, but we want to return an empty array
+        if (error.code === 0) {
+          return [];
+        }
+        throw error;
+      }
     } catch (error) {
       throw error;
     }
@@ -568,8 +576,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       
       return await db.query(query, Object.values(conditions || {}));
     } catch (error) {
-      console.error(`Error finding all from ${table}:`, error);
-      throw error;
+        console.error(`Error finding all from ${table}:`, error);
+        throw error;
     }
   },
   findOne: async (table, conditions) => {
@@ -592,7 +600,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       return results.length > 0 ? results[0] : null;
     } catch (error) {
       console.error(`Error finding one from ${table}:`, error);
-      throw error;
+        throw error;
     }
   },
 
@@ -960,6 +968,9 @@ deleteProductFilesByIds: async (rfqProductIds) => {
   },
 
   getRfqDraftById: async (id) => {
+    // First get any sheets associated with this RFQ draft
+    const sheets = await rfqModel.getSheetsForDraftRfq(id);
+    
     const q = `SELECT
       RFQ.id AS rfq_id,
       RFQ.rfq_no,
@@ -979,6 +990,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           'ra_end_date', RFQ.ra_end_date,
           'project_id', RFQ.project_id,
           'location', RFQ.location,
+          'rfq_added_from', RFQ.rfq_added_from,
 
           -- Selected Terms
           'terms', (
@@ -1052,7 +1064,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                   WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
               ),
               'user_selected_predefined_tds', (RFQ_P.datasheet = '1'),
-              'user_selected_predefined_qap', (RFQ_P.qap = '1')
+              'user_selected_predefined_qap', (RFQ_P.qap = '1'),
+              'sheet_id', RFQ_P.sheet_id
           )
           FROM tbl_rfq_products RFQ_P
           LEFT JOIN tbl_product_variant TV ON RFQ_P.product_variant_id = TV.id
@@ -1063,18 +1076,24 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     FROM tbl_rfq RFQ
     WHERE RFQ.id = $1
     ORDER BY RFQ.id DESC
-    LIMIT 1;`;
-
-    return new Promise(function (resolve, reject) {
-      db.query(q,[id])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
+    LIMIT 1;
+    `;
+    try {
+        const result = await db.many(q, [id]);
+        
+        // Attach sheets data if this is a Magic RFQ
+        if (sheets && sheets.length > 0) {
+            const hasMagicFlag = result[0]?.rfq_form_data?.rfq_added_from === 'magic';
+            
+            if (hasMagicFlag) {
+                result[0].sheets = sheets;
+            }
+        }
+        
+        return result;
+    } catch (error) {
+        throw error;
+    }
   },
 
   getNextVariant: async (rfq_id, product_id) => {
@@ -1248,30 +1267,30 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             FROM tbl_rfq_product_files RPF
             WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
         ),
-        'TDS_flies', (
-          SELECT json_agg(RPF.file_url)
-          FROM tbl_rfq_product_files RPF
-          WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
-        ),
-        'QAP_files', (
-          SELECT json_agg(RPF.file_url)
-          FROM tbl_rfq_product_files RPF
-          WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
-        ),
-        'SPEC_files', (
-          SELECT json_agg(RPF.file_url)
-          FROM tbl_rfq_product_files RPF
-          WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
-        ),
+          'TDS_flies', (
+            SELECT json_agg(RPF.file_url)
+            FROM tbl_rfq_product_files RPF
+            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
+          ),
+          'QAP_files', (
+            SELECT json_agg(RPF.file_url)
+            FROM tbl_rfq_product_files RPF
+            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
+          ),
+          'SPEC_files', (
+            SELECT json_agg(RPF.file_url)
+            FROM tbl_rfq_product_files RPF
+            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
+          ),
 
-        'datasheet', (
-          SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
-              CASE
-                WHEN TVA.datasheet_file IS NULL THEN
-                NULL
-                ELSE TVA.datasheet_file
-              END
-          ))
+          'datasheet', (
+            SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
+                CASE
+                  WHEN TVA.datasheet_file IS NULL THEN
+                  NULL
+                  ELSE TVA.datasheet_file
+                END
+              ))
             FROM tbl_vendor_approve TVA
             WHERE TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
           ),
@@ -2726,7 +2745,6 @@ WHERE row_num_by_name_category = 1
             WHERE TRIM(nb) IN (${vendorType.map(vt => `'${vt.value.toLowerCase().trim()}'`).join(", ")})
           )
         ` : ``}
-        ${category_id != '' ? `AND c.id = ${category_id}` : ``}
         ${approved_by_id != '' ? `
           AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")})
         ` : ``}
