@@ -3354,9 +3354,11 @@ const productController = {
       // Handle variant-vendor map- make insertion
       const tableName = 'tbl_product_variant_vendor_make';
       
-      const makeData = makeList.map(makeName => ({
+      const makeData = makeList
+      .filter(makeName => makeName && makeName.trim() !== '') // Exclude null/empty/whitespace
+      .map(makeName => ({
         variant_vendor_map_id: mappingResult.id,
-        make_name: makeName,
+        make_name: makeName.trim(), 
       }));
       
       // Insert make datam if there are any makes to insert
