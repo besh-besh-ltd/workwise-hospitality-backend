@@ -642,22 +642,6 @@ const ProductsController = {
         })
         .end();
     } catch (err) {
-      /* if (req.files?.featured && req.files?.featured.length > 0) {
-        fs.unlink(req.files.featured[0].path, (unlinkError) => {
-          if (unlinkError) {
-            console.error('Error deleting file:', unlinkError);
-          }
-        });
-      }
-      if (req.files?.gallery && req.files?.gallery.length > 0) {
-        req.files.gallery.forEach((file) => {
-          fs.unlink(file.path, (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          });
-        });
-      } */
       logError(err);
       res
         .status(400)
@@ -781,12 +765,6 @@ const ProductsController = {
         return;
       }
 
-      // const options = {
-      //   header: 1, // Treat the first row as header
-      //   defval: '', // Replace undefined or null values with an empty string
-      //   blankrows: false // Do not include blank rows
-      // };
-
       // Convert sheet to JSON
       // console.log(sheet);
       const jsonData = xlsx.utils.sheet_to_json(sheet);
@@ -873,24 +851,6 @@ const ProductsController = {
             // console.log('product ==>>>>>>>>', product);
             productId = product.id;
 
-            // if (value['Specification Key'] && value['Specification Value']) {
-            //   let varientObj = {
-            //     product_id: productId,
-            //     variant_name: value['Specification Key'],
-            //     variant_value: value['Specification Value']
-            //   };
-            //   // console.log(categoryObj);
-
-            //   await productModel.createProductveriants(varientObj);
-            // }
-
-            // if (value['Category']) {
-            //   let categoryObj = {
-            //     product_id: productId,
-            //     category_name: value['Category']
-            //   };
-            //   await productModel.createProductCategory(categoryObj);
-            // }
           } else {
             isMaster = 1;
             let productDetails = await productModel.vendorProductDetails(
