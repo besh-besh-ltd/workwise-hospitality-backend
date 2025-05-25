@@ -3749,6 +3749,7 @@ getProductTechSpecByID: async (productId) => {
   },
   
   // Changes by Agnij May 01, 2025 [Added function to get mapping by ID]
+  // 25-05-2025 mukul make_name added
   getVariantVendorMappingById: async (mappingId) => {
     return new Promise(function (resolve, reject) {
       db.oneOrNone(
