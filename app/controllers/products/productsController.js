@@ -1249,9 +1249,12 @@ const ProductsController = {
   getProductMakeList: async (req, res, next) =>{
     try {
       
-      const tableName = "tbl_product_variant_vendor_make"
-      const columnName = "make_name"
-      const makeList = await generalModel.getUniqueColumnValues(tableName, columnName)
+     const { variant_id } = req.query;
+     const makeList = await productModel.getMakeListByVariantId(variant_id);
+
+     if (!makeList || makeList.length === 0) {
+     return res.status(204).end(); // No Content, no body
+     }
 
       return res.status(200).json({ status: 1, data: makeList }).end();
 

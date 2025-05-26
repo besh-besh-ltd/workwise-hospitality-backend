@@ -4290,7 +4290,33 @@ WHERE m.id = $1;
         });
       }
     });
-  }
+  },
+
+  // 26-05-2025 mukul added function to get unique value from make list by variant id
+ getMakeListByVariantId : async (variantId) => {
+  return new Promise(function (resolve, reject) {
+  const query = `
+  SELECT DISTINCT m.id, m.make_name
+  FROM tbl_product_variant_vendor_make m
+  JOIN tbl_product_variant_vendor_mapping map ON m.variant_vendor_map_id = map.id
+  JOIN tbl_product_variant v ON map.product_variant_id = v.id
+  JOIN tbl_product p ON v.product_id = p.id
+  WHERE map.product_variant_id = $1
+  AND map.is_approved = TRUE   -- Vendor approval (minimum 1 approved vendor)
+  AND v.is_approve = 1         -- Variant must be approved
+  AND p.is_approve = 1         -- Product of variant must be approved
+  `;
+
+    db.any(query, [variantId])
+      .then(function (data) {
+        resolve(data); // Extract just the make_name
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+  });
+}
 };
 
 export default productModel;
