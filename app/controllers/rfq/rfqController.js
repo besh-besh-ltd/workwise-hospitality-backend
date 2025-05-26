@@ -222,7 +222,8 @@ const insertProduct = async (
     datasheet_file,
     qap
   },
-  created_rfq_id
+  created_rfq_id,
+  sheet_id,
 ) => {
   try {
     let tbl_rfq_products_data = {
@@ -234,18 +235,20 @@ const insertProduct = async (
       qap_file:'',// this field we have to remove from database
       rfq_id: created_rfq_id,
       datasheet_file:"",// this field we have to remove from database
-      qap: qap || '' // Also ensuring qap is not null
+      qap: qap || '', // Also ensuring qap is not null
+      sheet_id,
     };
     
     let spec_array = spec?.map((item) => {
       item.rfq_id = created_rfq_id;
       item.product_variant_id = product_id;
       item.variant = variant;
+      item.sheet_id = sheet_id;
       return item;
     });
-    const spec_keys = ['title', 'value', 'rfq_id', 'product_variant_id', 'variant'];
+    const spec_keys = ['title', 'value', 'rfq_id', 'product_variant_id', 'variant', 'sheet_id'];
 
-    const vendor_keys = ['user_id', 'rfq_id', 'product_variant_id', 'variant'];
+    const vendor_keys = ['user_id', 'rfq_id', 'product_variant_id', 'variant', 'sheet_id'];
     var vendor_array = [];
     // Changes by Agnij 2025-06-18 [Added null check for vendors]
     if (vendors && vendors.length > 0) {
@@ -259,6 +262,7 @@ const insertProduct = async (
         item.rfq_id = created_rfq_id;
         item.product_variant_id = product_id;
         item.variant = variant;
+        item.sheet_id = sheet_id;
         return item;
       });
       
@@ -1266,7 +1270,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
       ra_start_date,
       ra_end_date,
       project_id,
-      term_and_condition_files
+      term_and_condition_files,
+      sheet_id,
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
   
@@ -1299,11 +1304,11 @@ const saveRfqDraft = async (user_id, reqBody) => {
   // Only delete product-related records, preserve terms
   await Promise.all([
       rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }),
-      rfqModel.deleteWithReturnIds('tbl_rfq_product_vendors', { rfq_id }),
-      rfqModel.deleteWithReturnIds('tbl_rfq_products_specs', { rfq_id })
+      rfqModel.deleteWithReturnIds('tbl_rfq_product_vendors', { rfq_id }, {key: 'sheet_id', values: [sheet_id]}),
+      rfqModel.deleteWithReturnIds('tbl_rfq_products_specs', { rfq_id }, {key: 'sheet_id', values: [sheet_id]})
   ]);
 
-  const rfqProductIds = await rfqModel.deleteWithReturnIds('tbl_rfq_products', { rfq_id });
+  const rfqProductIds = await rfqModel.deleteWithReturnIds('tbl_rfq_products', { rfq_id }, {key: 'sheet_id', values: [sheet_id]});
   if (rfqProductIds.length > 0) {
       await rfqModel.deleteProductFilesByIds(rfqProductIds);
   }
@@ -1333,7 +1338,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
   if (products && products.length > 0) {
     await Promise.all(
       products.map(async (product) => {
-        const insertResult = await insertProduct(product, rfq_id);
+        const insertResult = await insertProduct(product, rfq_id, sheet_id);
         const oldProductId = product.id;
         const newProductId = insertResult.product_info.id;
   
@@ -1348,79 +1353,33 @@ const saveRfqDraft = async (user_id, reqBody) => {
 const rfqController = {
   create: async (req, res, next) => {
     if (!req.user.subscription_plan_id) {
-      res.status(400).json({
+      return res.status(400).json({
         status: 3,
         message: 'You need to purchase subscription to create RFQ'
       }).end();
-      return;
     }
 
     try {
-      let {
-        rfq_id,
-        comment,
-        company_name,
-        contact_name,
-        contact_number,
-        bid_end_date,
-        location,
-        rfq_type,
-        reverse_auction,
-        project_id,
-        ra_start_date,
-        ra_end_date
-      } = req.body;
-      const response_email = req.body.response_email?.toLowerCase();
-      const is_update = !!rfq_id;
+      let { rfq_id } = req.body;
       const user_id = req.user.id;
-      const { products } = req.body;
 
-
-    if (!rfq_id) {
-      const nextRFQNumber = await getNextRfQNumber();
-
-      const tbl_rfq_data = {
-        comment,
-        company_name,
-        response_email,
-        contact_name,
-        contact_number,
-        bid_end_date,
-        location,
-        is_published: 0,
-        rfq_type,
-        rfq_no: nextRFQNumber,
-        created_by: user_id,
-        updated_by: user_id,
-        reverse_auction,
-        ra_start_date,
-        ra_end_date
-      };
-
-      if (project_id != -1) {
-        tbl_rfq_data.project_id = project_id;
+      if (!rfq_id) {
+        return res.status(400).json({
+          status: 3,
+          message: 'RFQ Id is required to create an RFQ from Draft!'
+        }).end();
       }
 
-      const responseInsert = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
+      await saveRfqDraft(user_id, req.body);
 
-      if (responseInsert.length > 0) {
-        req.body.rfq_id = responseInsert[0].id;
-        rfq_id = responseInsert[0].id;
+      const responseUpdate = await rfqModel.update(
+        'tbl_rfq',
+        { is_published: 1 },
+        rfq_id
+      );
 
-        const savedRfq = await rfqModel.getRFQDetails(rfq_id);
-      }
-    }
-
-    await saveRfqDraft(user_id, req.body);
-
-    const responseUpdate = await rfqModel.update(
-      'tbl_rfq',
-      { is_published: 1 },
-      rfq_id
-    );
-
-    await sendMailtoVendors(req, rfq_id);
-    await sendQuotationMailToBuyer(req, rfq_id);
+      await sendMailtoVendors(req, rfq_id);
+      await sendQuotationMailToBuyer(req, rfq_id);
 
       const buyerMsgPayload = {
         mobile: req.user.mobile,
@@ -1429,29 +1388,16 @@ const rfqController = {
       };
   
       whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload);
-      if (reverse_auction == 1) {
-        
-        // FORCE set auction start date to today if not provided or empty
-        if (!ra_start_date || ra_start_date === '') {
-          ra_start_date = new Date().toISOString().split('T')[0];
-          throw new Error('Please provide reverse auction start date');
-        }
 
-        if ((!ra_end_date || ra_end_date === '') && bid_end_date) {
-          throw new Error('Please provide reverse auction end date');
-        }
-      } else {
-        ra_start_date = null;
-        ra_end_date = null;
-      }
-  res.status(200).json({
-       status: 1,
+      return res.status(200).json({
+        status: 1,
         data: responseUpdate[0],
         mail_sent: true
       }).end();
+
     } catch (error) {
       logError(error);
-      res.status(400).json({
+      return res.status(400).json({
         status: 3,
         message: Config.errorText.value
       }).end();
@@ -1905,14 +1851,32 @@ const rfqController = {
   getDraftById: async (req, res) => {
     try {
       const { id } = req.params;
+      const { sheetId } = req.query;
       const user_id = req.user.id;
 
-      console.log(`[getDraftById] Fetching draft RFQ with ID: ${id} for user: ${user_id}`);
+      let sheetData = null;
+      const sheets = await rfqModel.getSheetsForDraftRfq(id, null, sheetId);
 
-      // Use the model's getRfqDraftById method directly which has the complex SQL query
-      const draftData = await rfqModel.getRfqDraftById(id);
-      
-      console.log(`[getDraftById] Draft data found:`, draftData ? `Yes (${draftData.length} items)` : 'No');
+      if(sheets) {
+        sheetData = sheets[0];
+      }
+
+      if(!sheetData.is_processed) {
+        try {
+          const [,processedData] = await rfqController.processRfqDraftSheetWise(null, req.user, id, sheetId);
+          await saveMagicSearchInDraft(processedData, user_id, null, id, sheetId);
+        } catch (error) {
+          console.log(error)
+          return res.status(500).json({
+            status: 0,
+            success: false,
+            message: 'Failed to process sheet data. Please try again.',
+            sheets
+          });
+        }
+      }
+
+      const draftData = await rfqModel.getRfqDraftById(id, sheetData);
       
       if (!draftData || draftData.length === 0) {
         return res.status(404).json({ 
@@ -1921,25 +1885,21 @@ const rfqController = {
         });
       }
       
-      // Check if the RFQ belongs to the requesting user and is a draft
       if (draftData[0].rfq_form_data.is_published !== 0) {
         return res.status(403).json({ 
           status: 2, 
           message: "This is not a draft RFQ" 
         });
       }
-      // Check if this is a Magic Search RFQ
+
       const isMagicRfq = draftData[0].rfq_form_data.rfq_added_from === 'magic';
       
-      // If it's a Magic RFQ, make sure sheets are included
       if (isMagicRfq && (!draftData[0].sheets || draftData[0].sheets.length === 0)) {
         const sheets = await rfqModel.getSheetsForDraftRfq(id);
         if (sheets && sheets.length > 0) {
           draftData[0].sheets = sheets;
         }
       }
-
-      console.log(`[getDraftById] Returning draft data for RFQ ID: ${id}`);
       
       // Return in the same format as getRFQDraftData
       res.status(200).json({
@@ -1972,6 +1932,8 @@ const rfqController = {
 
         let rfq_id;
         let rfqData;
+
+        const sheet_id = req.body.sheet_id;
 
         // Changes by Agnij 2025-06-17 [Improved handling of specific RFQ ID]
         // If rfq_id is provided in request, use that specific ID instead of creating a new draft
@@ -2043,7 +2005,8 @@ const rfqController = {
             spec_file: "",
             qap_file: "",
             qap: "",
-            datasheet_file: ""
+            datasheet_file: "",
+            sheet_id,
         };
 
         await rfqModel.insert('tbl_rfq_products', productData);
@@ -2054,7 +2017,8 @@ const rfqController = {
                 rfq_id,
                 product_variant_id: product.variant_id,
                 user_id: vendor.vendor_id,
-                variant: variant
+                variant: variant,
+                sheet_id,
             };
             return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
         });
@@ -5600,6 +5564,7 @@ const rfqController = {
           const [,processedData] = await rfqController.processRfqDraftSheetWise(null, req.user, rfqId, sheetId);
           await saveMagicSearchInDraft(processedData, req.user.id, null, rfqId, sheetId);
         } catch (error) {
+          console.log(error)
           return res.status(500).json({
             status: 0,
             success: false,

@@ -24,9 +24,9 @@ const rfqModel = {
     });
   },
 
-  getSheetsForDraftRfq: async (rfq_id, is_processed) => {
+  getSheetsForDraftRfq: async (rfq_id, is_processed, sheet_id) => {
     try {
-      const condition = `rfq_id = ${rfq_id} ${is_processed && is_processed == 'true' ? 'AND is_processed' : ''}`
+      const condition = `rfq_id = ${rfq_id} ${is_processed && is_processed == 'true' ? 'AND is_processed' : ''} ${sheet_id && !isNaN(parseInt(sheet_id)) ? ` AND id = ${sheet_id}` : ``} ORDER BY id`
 
       return await rfqModel.checkIfExists('tbl_rfq_draft_sheets', condition)
     } catch (error) {
@@ -258,21 +258,24 @@ const rfqModel = {
           rfqQueryValues.push(...rfqValues);
         }
 
-
         const rfqResult = await t.one(rfqQuery, rfqQueryValues);
+
+        console.log("RFQ INSERTION RESULT -> ", rfqResult)
+
         if(!rfqResult) throw Error("RFQ does not exist or is no longer in draft!")
 
         const { id: rfq_id } = rfqResult;
 
         // Inserting every sheets
-        if(!sheetId)
+        if(!sheetId && !rfqId)
           for(const sheet_name of (data?.sheetNameList ?? [])) {
             const parameters = {
               rfq_id,
               sheet_name,
               is_processed: false
             };
-            await rfqModel.insert('tbl_rfq_draft_sheets', parameters, t)
+            const sheetInsertionResult = await rfqModel.insert('tbl_rfq_draft_sheets', parameters, t)
+            console.log(`INSERTED ${sheet_name} AS ${sheetInsertionResult}`)
           }
 
         // Map all the terms to this rfq, defaults to all the terms map
@@ -327,7 +330,9 @@ const rfqModel = {
             sheet.id,
           ];
 
-          await t.one(productQuery, productValues);
+          const productInsertionResult = await t.one(productQuery, productValues);
+
+          console.log("PRODUCT INSERTION RESULT -> ", productInsertionResult);
 
           // Insert into tbl_rfq_products_specs
           for (const spec of product.spec || []) {
@@ -346,11 +351,13 @@ const rfqModel = {
             // Use id as user_id if user_id is not available
             const userId = vendor.user_id || vendor.id;
             
-            await t.none(
+            const vendorInsertionResult = await t.none(
               `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id)
               VALUES ($1, $2, $3, $4, $5)`,
               [rfq_id, product.product_id, product.variant, userId, sheet.id]
             );
+
+            console.log("VENDOR INSERTION RESULT -> ", vendorInsertionResult)
           }
         }
 
@@ -522,14 +529,24 @@ const rfqModel = {
     }
   },
 
-  deleteWithReturnIds: async (table, conditions) => {
+  deleteWithReturnIds: async (table, conditions, includeMeta, excludeMeta) => {
     const conditionKeys = Object.keys(conditions);
     const conditionString = conditionKeys.map((key, index) => `${key} = $${index + 1}`).join(' AND ');
     const conditionValues = conditionKeys.map(key => conditions[key]);
 
+    let includeCondition = ``;
+    if(includeMeta) {
+      includeCondition += ` AND ${includeMeta.key} IN (${includeMeta.values.join(",")})`
+    }
+
+    const excludeCondition = ``;
+    if(excludeMeta) {
+      excludeCondition += ` AND ${excludeMeta.key} NOT IN (${excludeMeta.values.join(",")})`
+    }
+
     // Query to fetch IDs before deletion
-    const idQuery = `SELECT id FROM ${table} WHERE ${conditionString}`;
-    const deleteQuery = `DELETE FROM ${table} WHERE ${conditionString}`;
+    const idQuery = `SELECT id FROM ${table} WHERE ${conditionString} ${includeCondition} ${excludeCondition}`;
+    const deleteQuery = `DELETE FROM ${table} WHERE ${conditionString} ${includeCondition} ${excludeCondition}`;
 
     return new Promise((resolve, reject) => {
         db.query(idQuery, conditionValues)
@@ -973,10 +990,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     });
   },
 
-  getRfqDraftById: async (id) => {
-    // First get any sheets associated with this RFQ draft
-    const sheets = await rfqModel.getSheetsForDraftRfq(id);
-    
+  getRfqDraftById: async (id, oldestSheet) => {
     const q = `SELECT
       RFQ.id AS rfq_id,
       RFQ.rfq_no,
@@ -1077,6 +1091,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           LEFT JOIN tbl_product_variant TV ON RFQ_P.product_variant_id = TV.id
           LEFT JOIN tbl_product T_P ON T_P.id = TV.product_id
           WHERE RFQ.id = RFQ_P.rfq_id
+          ${oldestSheet && oldestSheet.id ? ` AND RFQ_P.sheet_id = $2` : ``}
           ORDER BY RFQ_P.id
       ) AS rfq_products
     FROM tbl_rfq RFQ
@@ -1085,20 +1100,13 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     LIMIT 1;
     `;
     try {
-        const result = await db.many(q, [id]);
-        
-        // Attach sheets data if this is a Magic RFQ
-        if (sheets && sheets.length > 0) {
-            const hasMagicFlag = result[0]?.rfq_form_data?.rfq_added_from === 'magic';
-            
-            if (hasMagicFlag) {
-                result[0].sheets = sheets;
-            }
-        }
-        
-        return result;
+      const values = [id];
+      if(oldestSheet && oldestSheet.id) values.push(oldestSheet.id)
+
+      const result = await db.many(q, values);
+      return result;
     } catch (error) {
-        throw error;
+      throw error;
     }
   },
 
