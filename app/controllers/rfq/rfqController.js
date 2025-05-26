@@ -1275,7 +1275,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
   
-  
   const rfqData = {
       comment,
       company_name,

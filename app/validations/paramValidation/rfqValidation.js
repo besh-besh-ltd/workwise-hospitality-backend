@@ -34,6 +34,8 @@ const productItems = Joi.object({
   spec_file: Joi.array().items(Joi.string()).optional(),
   qap_file: Joi.array().items(Joi.string()).optional(),
   qap: Joi.string().optional().allow(null).allow(''),
+  sheet_id: Joi.number().optional().allow(null),
+  sheet_name: Joi.string().optional().allow(null).allow(''),
   vendors: Joi.array()
     .items(vendorItems)
     .min(1)
@@ -202,7 +204,9 @@ export const rfqSchemas = {
     location: Joi.string().optional().allow('').allow(null),
     is_published: Joi.number().integer().min(0).max(1).required(),
     rfq_type: Joi.string().valid('firm', 'budgetary').allow('').allow(null),
+    rfq_added_from: Joi.string().valid('magic', 'manual').allow('').allow(null),
     reverse_auction: Joi.valid(0, 1).allow(''),
+    sheet_id: Joi.number().optional().allow(null),
     products: Joi.array().items(productItems).min(1).required(),
     terms: Joi.array().items(termsItems).allow(null).allow(''),
     project_id: Joi.number().integer().required(),
