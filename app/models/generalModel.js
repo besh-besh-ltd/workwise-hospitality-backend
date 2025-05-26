@@ -73,6 +73,41 @@ getUniqueColumnValues: (tableName, columnName) => {
   });
 },
 
+/**  26-05-2025 Mukul Jatav
+ deleteManyByIds: Deletes multiple records from a table based on an array of IDs. 
+ Suitable for batch deletions without changing existing core delete logic. 
+ Prevents SQL injection for values using positional placeholders.
+ Example usage: await rfqModel.deleteManyByIds("tbl_product_variant_vendor_make", [1, 2, 3]);
+ 
+ NOTE:: 2 similar model already exit in rfq model, not using them as they just relete simgle product and changes them require lots of testing and this feature has to be shipped ASAP
+ */
+deleteManyByIds: (tableName, idArray) => {
+  return new Promise(async (resolve, reject) => {
+    if (!tableName || !idArray || !Array.isArray(idArray) || idArray.length === 0) {
+      return reject(new Error("Table name and non-empty id array are required."));
+    }
+
+    // Validate inputs (basic sanity check)
+    const validTableName = /^[a-zA-Z0-9_]+$/.test(tableName);
+    if (!validTableName) {
+      return reject(new Error("Invalid table name."));
+    }
+
+    // Prepare placeholders for IDs
+    const placeholders = idArray.map((_, index) => `$${index + 1}`).join(", ");
+    const query = `DELETE FROM "${tableName}" WHERE id IN (${placeholders}) RETURNING *;`;
+
+    try {
+      const result = await db.any(query, idArray);
+      resolve(result); // Returns deleted rows
+    } catch (error) {
+      console.error(`Error deleting from ${tableName}:`, error);
+      reject(error);
+    }
+  });
+},
+
+
   getStates: async () => {
     return new Promise(function (resolve, reject) {
       db.any(
