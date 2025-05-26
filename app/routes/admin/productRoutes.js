@@ -253,10 +253,14 @@ productRoutes.put(
   productController.approveMapping
 );
 
+
+/**  used to make changes in variant and vendor mapping
+ *  currently we only update, vendor approve by list and prodict make after mapping vendor and variant
+ *   */
 productRoutes.post(
-  '/variant-mapping-approve',
+  '/variant-vendor-mapping',
   passportSignIn,
-  productController.approvedByVariantMapping
+  productController.updateVariantVendorMapping
 )
 
 export default productRoutes;
