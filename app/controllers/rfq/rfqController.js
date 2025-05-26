@@ -3275,6 +3275,7 @@ const rfqController = {
     let vendorType = '';
     let prevWorkedWith = '';
     let myVendorType = '';
+    const productMakes = req.body?.productMakes || [] 
     search_key = req.body?.search_key ? req.body?.search_key : '';
     category_id = req.body?.category_id ? req.body?.category_id : '';
     approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
@@ -3349,32 +3350,10 @@ const rfqController = {
             prevWorkedWith,
             vendor_name,
             myVendorType,
+            "", // responseKeys : function accepting this - need to recheck it's use and remove it if not required 
+            productMakes
           );
 
-          let dummyOBJ = {
-            sp: false,
-            id: '**',
-            vendor_name: '***** ******',
-            email: '********@*****.***',
-            mobile: '**********',
-            company_name: '******',
-            address: '******** ******* ** ****** **** ******** ****',
-            image_url: null,
-            vendor_approved: [
-              {
-                id: '**',
-                vendor_approve: '****'
-              },
-              {
-                id: '**',
-                vendor_approve: '**** **'
-              },
-              {
-                id: '**',
-                vendor_approve: '****'
-              }
-            ]
-          };
           let items_to_show = 1;
           let total_items = vendorResult.length;
           let rest_items = 0;

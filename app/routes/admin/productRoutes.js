@@ -224,6 +224,8 @@ productRoutes.delete(
   productController.deleteProductVariant
 );
 
+
+// used to map product-variant with vendor
 productRoutes.post(
   '/map-variant-with-vendor',
   passportSignIn,
@@ -236,6 +238,8 @@ productRoutes.get(
   productController.getVariantMappings
 );
 
+
+// get variant + vendor mapping by id, including variant and products basic details
 productRoutes.get(
   '/variant-mappings/:id',
   passportSignIn,

@@ -3749,6 +3749,7 @@ getProductTechSpecByID: async (productId) => {
   },
   
   // Changes by Agnij May 01, 2025 [Added function to get mapping by ID]
+  // 25-05-2025 mukul make_name added
   getVariantVendorMappingById: async (mappingId) => {
     return new Promise(function (resolve, reject) {
       db.oneOrNone(
@@ -3770,6 +3771,12 @@ getProductTechSpecByID: async (productId) => {
     FROM tbl_vendorapprove_product_mapping vpm 
     WHERE vpm.variant_vendor_mapping_id = m.id
   ) AS approved_ids,
+
+ARRAY(
+  SELECT json_build_object('id', pvvm.id, 'make_name', pvvm.make_name)
+  FROM tbl_product_variant_vendor_make pvvm
+  WHERE pvvm.variant_vendor_map_id = m.id
+) AS make_list,
 
   TU.name AS vendor_name,
   TU.email AS vendor_email,
