@@ -1,6 +1,78 @@
 import db from '../config/dbConn.js';
 
 const generalModel = {
+
+// 25-05-2025 Mukul jatav
+// insertMany: used to insert multiple records into a table, Prevents SQL injection for values using positional placeholders, Suitable for low-to-medium data volume, problem is still we useing use input table_name good we create alist of while list tables for such models
+// Example usage:
+//  const tableName = "tbl_product_variant_vendor_make";
+//  const data = [dor_map_id: 101, make_name: "Jindal"},
+//   { variant_vendor_map_id: 102, make_name: "SAIL"}
+// ];
+  insertMany: async (tableName, data) => {
+  return new Promise(async (resolve, reject) => {
+    if (!tableName || !data || !Array.isArray(data) || data.length === 0) {
+    return reject(new Error("Table name and non-empty data array are required."));
+  }
+
+  const columns = Object.keys(data[0]);
+  const columnList = columns.map((col) => `"${col}"`).join(", ");
+  const values = [];
+  const valuePlaceholders = data
+    .map((row) => {
+      const placeholders = columns
+        .map((col) => {
+          values.push(row[col]);
+          return `$${values.length}`;
+        })
+        .join(", ");
+      return `(${placeholders})`;
+    })
+    .join(", ");
+
+  const query = `INSERT INTO ${tableName} (${columnList}) VALUES ${valuePlaceholders} RETURNING *;`;
+    db.any(query, values)
+      .then(resolve)
+      .catch(reject);
+  });
+},
+
+// 25-05-2025 mukul jatav
+//Fetches a list of unique, non-null values from a specified column of a given table, ordered ascendingly.
+// return response like [{id:1, value:"abc"}]
+getUniqueColumnValues: (tableName, columnName) => {
+  return new Promise(async (resolve, reject) => {
+    if (!tableName || !columnName) {
+      return reject(new Error("Table name and column name are required."));
+    }
+
+    // Validate inputs (basic sanity check to avoid SQL injection)
+    const validTableName = /^[a-zA-Z0-9_]+$/.test(tableName);
+    const validColumnName = /^[a-zA-Z0-9_]+$/.test(columnName);
+
+    if (!validTableName || !validColumnName) {
+      return reject(new Error("Invalid table or column name."));
+    }
+
+    const query = `
+      SELECT DISTINCT ON ("${columnName}") 
+      id AS "id", 
+      "${columnName}" AS "value"
+      FROM "${tableName}"
+      WHERE "${columnName}" IS NOT NULL
+      ORDER BY "${columnName}" ASC;
+    `;
+
+    try {
+      const result = await db.any(query);
+      resolve(result);
+    } catch (error) {
+      console.error(`Error fetching unique values for ${tableName}.${columnName}:`, error);
+      reject(error);
+    }
+  });
+},
+
   getStates: async () => {
     return new Promise(function (resolve, reject) {
       db.any(

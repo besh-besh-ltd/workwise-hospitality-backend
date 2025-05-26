@@ -135,6 +135,13 @@ ProductsRoutes.get(
     '/products-by-name-category-slug',
      ProductsController.getProductBySlugAndCategorySlug
     );
+
+//  this api return a uniqle list for make product filter, mainly used in search vendor page of letsworkwise
+ProductsRoutes.get(
+'/product-make-list',
+// passportSignIn,
+ProductsController.getProductMakeList
+);
 //End API
 
 export default ProductsRoutes;

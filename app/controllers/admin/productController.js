@@ -3295,6 +3295,7 @@ const productController = {
       const variantId = req.body.variant_id || req.body.product_variant_id;
       const vendorId = req.body.vendor_id;
       let vendorApproveId = req.body.approved_by ?? [];
+      const makeList = req.body.make_list || [];
       
       // Validate input
       if (!variantId || !vendorId) {
@@ -3349,6 +3350,22 @@ const productController = {
       
       // Create the mapping
       const mappingResult = await productModel.createProductVariantVendorMapping(mappingObj);
+
+      // Handle variant-vendor map- make insertion
+      const tableName = 'tbl_product_variant_vendor_make';
+      
+      const makeData = makeList
+      .filter(makeName => makeName && makeName.trim() !== '') // Exclude null/empty/whitespace
+      .map(makeName => ({
+        variant_vendor_map_id: mappingResult.id,
+        make_name: makeName.trim(), 
+      }));
+      
+      // Insert make datam if there are any makes to insert
+      if (makeData.length > 0) {
+        await generalModel.insertMany(tableName, makeData);
+      }
+
 
       console.log("MAPPING RES: ", mappingResult, "\nVENDOR APPROVE ID: ", vendorApproveId);
 
