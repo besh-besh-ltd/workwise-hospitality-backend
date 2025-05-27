@@ -4753,11 +4753,20 @@ const rfqController = {
       let aiProcessedBoqJson = req.body.jsonFileUrl;
       const user = req.user;
   
+      console.log(" line 4756 rfqcontroller aiProcessedBoqJson =>>>>>> ", aiProcessedBoqJson)
+
       if (aiProcessedBoqJson.startsWith('http:')) {
         aiProcessedBoqJson = aiProcessedBoqJson.replace('http:', 'https:');
       }
+
+       console.log(" line 4762 rfqcontroller  aiProcessedBoqJson =>>>>>> ", aiProcessedBoqJson)
+
   
       const boqDataJson = await generativeAI.processBOQWithAI(aiProcessedBoqJson);
+
+      // console.log(" line 4762  boqDataJson =>>>>>> ", boqDataJson)
+
+
       const termList = await rfqModel.getAllTerms();
       const transformedTermList = termList.map(term => ({ id: term.id, name: term.term_content }));
   
@@ -4769,9 +4778,13 @@ const rfqController = {
   
       const vendorCache = {};
   
+      console.log(" start product searching line 4781 rfqcontroller ")
       for (const item of boqDataJson) {
         const variantId = item.variant_id ? parseInt(item.variant_id) : null;
         const ProductName = item.fetched_product_name || item.core_product_name || "Unnamed Product";
+
+        console.log(" line 4785 rfqcontroller ", ProductName, variantId)
+
 
     if (!variantId || isNaN(variantId)) {
       validationErrors.push({
