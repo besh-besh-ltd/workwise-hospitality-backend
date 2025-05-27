@@ -1041,10 +1041,10 @@ const sendQuoteNotificationEmail = async (req) => {
        if (validSpocEmails.length > 0) {
          mail.to = validSpocEmails;
          mail.cc = email || '';
-         mail.bcc = 'ayush@letsworkwise.com';
+         mail.bcc = 'mukuljatav1010@gmail.com';
        } else {
          mail.to = email || '';
-         mail.bcc = 'ayush@letsworkwise.com';
+         mail.bcc = 'mukuljatav1010@gmail.com';
        }
 
        sendMail(mail);
@@ -1487,6 +1487,7 @@ const rfqController = {
           await Promise.all(
             products.addable.map(async (productId) => {
               const vendors = await rfqModel.searchEmailAndNameForVendor(
+                rfq_id,
                 productId
               ); // returns array of { name, email, product_name }
               
@@ -1658,6 +1659,7 @@ const rfqController = {
             //   products.updatable.files?.[rfqProductId]?.product_id;
 
             const vendors = await rfqModel.searchEmailAndNameForVendor(
+              rfq_id,
               rfqProductId
             ); // returns array of { name, email, product_name }
             // console.log('vendors for updated product', vendors);
@@ -1693,6 +1695,7 @@ const rfqController = {
      if (products && products?.deletable && products.deletable.length > 0) {
        for (const rfqProductId of products.deletable) {
          const vendors = await rfqModel.searchEmailAndNameForVendor(
+          rfq_id,
            rfqProductId
          );
 
