@@ -4775,7 +4775,7 @@ const rfqController = {
 
     if (!variantId || isNaN(variantId)) {
       validationErrors.push({
-        errors: { product: `${ProductName} - product not found` }
+        errors: { product: `${item.core_product_name || item.fetched_product_name} - product not found` }
       });
       continue;
     }
