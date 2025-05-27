@@ -4830,7 +4830,7 @@ const rfqController = {
             { title: "Unit", value: item.unit || "NA" },
           ],
           vendors: vendorResult,
-          comment: item.full_product_description || "",
+          comment: item.summary_of_product_description || "",
           defaultSelectedVAB: "",
           datasheet: "0",
           datasheet_file: [],
