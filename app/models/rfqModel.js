@@ -5376,10 +5376,12 @@ searchEmailAndNameForVendor: async (product_id) => {
       ON trp.product_variant_id = tpv.id 
     JOIN tbl_users tbu 
       ON tbu.id = trpv.user_id
-    WHERE trp.id = $1
+    WHERE trpv.rfq_id = $1 AND trp.id = $2
   `;
 
-  const result = await db.query(query, [product_id]);
+  const result = await db.query(query, [rfq_id, product_id]);
+
+
   return result || [];
 }
 
