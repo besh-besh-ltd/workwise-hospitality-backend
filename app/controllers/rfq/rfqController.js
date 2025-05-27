@@ -13,7 +13,7 @@ import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import vendorModel from '../../models/vendorModel.js';
 import projectModel from '../../models/projectModel.js';
 import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
-import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
+import { generateEmailTemplate, getRfqEmailContent, RFQ_EMAIL_TYPE } from '../../helper/notificationEmailLayout.js';
 import fs from 'fs';
 import productModel from '../../models/productModel.js';
 import generativeAI from '../../helper/processBOQWithAI.js';
@@ -1002,52 +1002,59 @@ const sendQuoteNotificationEmail = async (req) => {
 
 
   //  vendorData, rfq_id, rfq_no, buyerName
-  const sendRfqUpdatedMailToVendors = async (vendorData, rfq_id, rfq_no, buyer_name, updated_data) => {
-    try {
-      for (const vendor of vendorData) {
-        const { vendor_name, vendor_email, spocs = [], token } = vendor;
-  
-        // Skip if no main email and no spocs
-        const validSpocEmails = spocs
-        .map(spoc => spoc?.email)
-        .filter(email => typeof email === 'string' && email.includes('@'));
-        
-        const headerContent = `<h2>Hello ${vendor_name},</h2>`;
-        const containerContent = `
-          <p style="font-size: 15px;">
-            RFQ #${rfq_no} has been updated by ${buyer_name}.
-          </p>
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}"
-             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
-            View RFQ
-          </a>
-        `;
-  
-        const html = generateEmailTemplate(headerContent, containerContent);
-  
-        const mail = {
-          from:  `${buyer_name} ${Config.masterEmail}`,
-          subject: `RFQ #${rfq_no} Details has beed updated by ${buyer_name}`,
-          html
-        };
-  
+ const sendRfqUpdatedMailToVendors = async (
+   vendorData,
+   rfq_id,
+   rfq_no,
+   buyer_name,
+   emailType
+ ) => {
+   try {
+     for (const vendor of vendorData) {
+       const { name, email, vendor_id } = vendor;
 
-        if (validSpocEmails.length > 0) {
-          mail.to = validSpocEmails;
-          mail.cc = vendor_email || '';
-          mail.bcc = "mukuljatav1010+if@gmail.com";
-        } else {
-          mail.to = vendor_email || '';
-          mail.bcc = "mukuljatav1010+else@gmail.com";
-        }
+        // Fetch vendor's SPOC details and token
+        const spocs = await vendorModel.getSpocDetails(vendor_id);
+        const token = await rfqModel.getVendorRfqToken(vendor_id, rfq_id);
 
-         sendMail(mail);
-      }
-    } catch (err) {
-      console.error("Error in sendRfqUpdatedMailToVendors:", err);
-      throw err;
-    }
-  };
+       const validSpocEmails = spocs
+         .map((spoc) => spoc?.email)
+         .filter((email) => typeof email === 'string' && email.includes('@'));
+
+       const { subject, header, content } = getRfqEmailContent({
+         vendor_name : name,
+         rfq_no,
+         buyer_name,
+         rfq_id,
+         token,
+         emailType
+       });
+
+       const html = generateEmailTemplate(header, content);
+
+       const mail = {
+         from: `${buyer_name} ${Config.masterEmail}`,
+         subject,
+         html
+       };
+
+       if (validSpocEmails.length > 0) {
+         mail.to = validSpocEmails;
+         mail.cc = email || '';
+         mail.bcc = 'ayush@letsworkwise.com';
+       } else {
+         mail.to = email || '';
+         mail.bcc = 'ayush@letsworkwise.com';
+       }
+
+       sendMail(mail);
+     }
+   } catch (err) {
+     console.error('Error in sendRfqUpdatedMailToVendors:', err);
+     throw err;
+   }
+ };
+
 
   const sendRfqAddVendorMail = async (vendorData, rfq_id, rfq_no, buyer_name) => {
     try {
@@ -1463,248 +1470,464 @@ const rfqController = {
 
       const products = updatableData?.products
       const updatableVendors = updatableData?.vendors
+      const newAddedproductVendors = {};   // { [email]: { name, email, product_names: [] } }  
+      const deletedProductVendors = {};    // { [email]: { name, email, product_names: [] } }
+      const deletedVendorsFromExistingProducts = {} // { [email]: { name, email, product_names: [] } }
+      const addedVednorsToExistingProducts = {};   // { [email]: { name, email, product_names: [] } }
+      const updatedDataVendors = {};
 
       let mailDetails = {
         vendors: {},
       }
 
-      if(products && products?.updatable) {
-        // Handling Specs insert and/or update
-        if(products.updatable?.specs)
-          Object.keys(products.updatable.specs).forEach(rfqProductId => {
-            const productId = products.updatable.specs[rfqProductId].product_id
-            const variant = products.updatable.specs[rfqProductId].variant
-            delete products.updatable.specs[rfqProductId].variant
-            delete products.updatable.specs[rfqProductId].productId
+      if (products && products?.updatable) {
+        const updatableKeys = new Set();
+        //handling new Product added
+        if (products?.addable?.length > 0) {
+          await Promise.all(
+            products.addable.map(async (productId) => {
+              const vendors = await rfqModel.searchEmailAndNameForVendor(
+                productId
+              ); // returns array of { name, email, product_name }
+              
+              if (Array.isArray(vendors) && vendors.length > 0) {
+                vendors.forEach(({vendor_id , name, email, product_name }) => {
+                  if (!newAddedproductVendors[vendor_id]) {
+                    newAddedproductVendors[vendor_id] = {
+                      name,
+                      email,
+                      product_names: [],
+                      vendor_id
+                      };
+                  }
 
-            let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${variant ?? '0'})::INT`
-    
-            Object.keys(products.updatable.specs[rfqProductId]).forEach(async spec => {
-              const data = {
-                value: products.updatable.specs[rfqProductId][spec]
-              }
-              const currentWhereClause = whereClause + ` AND title = '${spec}'`
-              const doesExist = await rfqModel.checkIfExists('tbl_rfq_products_specs', currentWhereClause)
-              if(doesExist && doesExist.length > 0) {
-                await rfqModel.updateWhere('tbl_rfq_products_specs', data, currentWhereClause)
-              }
-              else {
-                const insertData = {
-                  ...data,
-                  rfq_id,
-                  product_variant_id: productId,
-                  title: spec,
-                  variant: parseInt(products.updatable.specs[productId]?.variant ?? "0")
-                }
-                await rfqModel.insert('tbl_rfq_products_specs', insertData)
+                  if (
+                    !newAddedproductVendors[vendor_id].product_names.includes(
+                      product_name
+                    )
+                  ) {
+                    newAddedproductVendors[vendor_id].product_names.push(
+                      product_name
+                    );
+                  }
+                });
               }
             })
-          })
+          );
+        }
+
+        // Handling Specs insert and/or update
+        if (products.updatable?.specs)
+          Object.keys(products.updatable.specs).forEach((rfqProductId) => {
+            const productId = products.updatable.specs[rfqProductId].product_id;
+            const variant = products.updatable.specs[rfqProductId].variant;
+            delete products.updatable.specs[rfqProductId].variant;
+            delete products.updatable.specs[rfqProductId].productId;
+
+
+            if (!products.addable?.includes(parseInt(rfqProductId))) {
+                  updatableKeys.add(rfqProductId);
+                }
+
+            let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${
+              variant ?? '0'
+            })::INT`;
+
+            Object.keys(products.updatable.specs[rfqProductId]).forEach(
+              async (spec) => {
+                const data = {
+                  value: products.updatable.specs[rfqProductId][spec]
+                };
+                const currentWhereClause =
+                  whereClause + ` AND title = '${spec}'`;
+                const doesExist = await rfqModel.checkIfExists(
+                  'tbl_rfq_products_specs',
+                  currentWhereClause
+                );
+                if (doesExist && doesExist.length > 0) {
+                  await rfqModel.updateWhere(
+                    'tbl_rfq_products_specs',
+                    data,
+                    currentWhereClause
+                  );
+                } else {
+                  const insertData = {
+                    ...data,
+                    rfq_id,
+                    product_variant_id: productId,
+                    title: spec,
+                    variant: parseInt(
+                      products.updatable.specs[productId]?.variant ?? '0'
+                    )
+                  };
+                  await rfqModel.insert('tbl_rfq_products_specs', insertData);
+                }
+                
+              }
+            );
+          });
 
         // Handling Files insert and/or update
-        if(products.updatable?.files)
-          Object.keys(products.updatable.files).forEach(rfqProductId => {
-            delete products.updatable.files[rfqProductId].variant
-            delete products.updatable.files[rfqProductId].product_id
+        if (products.updatable?.files)
+          Object.keys(products.updatable.files).forEach((rfqProductId) => {
+            delete products.updatable.files[rfqProductId].variant;
+            delete products.updatable.files[rfqProductId].product_id;
 
-            let whereClause = `rfq_product_id = (${rfqProductId})::INT`
-    
-            Object.keys(products.updatable.files[rfqProductId]).forEach(async fileType => {
-              const transformedFileType = fileType == 'qap_file' ? 'QAP' : fileType == 'spec_file' ? 'SPEC' : 'TDS'
 
-              const data = {
-                file_url: products.updatable.files[rfqProductId][fileType]
-              }
-              const currentWhereClause = whereClause + ` AND file_type = '${transformedFileType}'`
-              const doesExist = await rfqModel.checkIfExists('tbl_rfq_product_files', currentWhereClause)
-              if(doesExist && doesExist.length > 0) {
-                if(data.file_url == 'rm') {
-                  const conditions = {
+             if (!products.addable?.includes(parseInt(rfqProductId))) {
+              updatableKeys.add(rfqProductId);
+            }
+
+            let whereClause = `rfq_product_id = (${rfqProductId})::INT`;
+
+            Object.keys(products.updatable.files[rfqProductId]).forEach(
+              async (fileType) => {
+                const transformedFileType =
+                  fileType == 'qap_file'
+                    ? 'QAP'
+                    : fileType == 'spec_file'
+                    ? 'SPEC'
+                    : 'TDS';
+
+                const data = {
+                  file_url: products.updatable.files[rfqProductId][fileType]
+                };
+                const currentWhereClause =
+                  whereClause + ` AND file_type = '${transformedFileType}'`;
+                const doesExist = await rfqModel.checkIfExists(
+                  'tbl_rfq_product_files',
+                  currentWhereClause
+                );
+                if (doesExist && doesExist.length > 0) {
+                  if (data.file_url == 'rm') {
+                    const conditions = {
+                      rfq_product_id: rfqProductId,
+                      file_type: transformedFileType
+                    };
+                    await rfqModel.delete('tbl_rfq_product_files', conditions);
+                  } else {
+                    await rfqModel.updateWhere(
+                      'tbl_rfq_product_files',
+                      data,
+                      currentWhereClause
+                    );
+                  }
+                } else {
+                  const insertData = {
+                    ...data,
                     rfq_product_id: rfqProductId,
                     file_type: transformedFileType
-                  }
-                  await rfqModel.delete('tbl_rfq_product_files', conditions)
-                }
-                else {
-                  await rfqModel.updateWhere('tbl_rfq_product_files', data, currentWhereClause)
+                  };
+                  await rfqModel.insert('tbl_rfq_product_files', insertData);
                 }
               }
-              else {
-                const insertData = {
-                  ...data,
-                  rfq_product_id: rfqProductId,
-                  file_type: transformedFileType,
-                }
-                await rfqModel.insert('tbl_rfq_product_files', insertData)
+            );
+           
+          });
+
+        if (products.updatable?.comment)
+          Object.keys(products.updatable.comment).forEach(
+            async (rfqProductId) => {
+              const productId =
+                products.updatable.comment[rfqProductId].product_id;
+              const variant = products.updatable.comment[rfqProductId].variant;
+              const comment = products.updatable.comment[rfqProductId].comment;
+
+              if (!products.addable?.includes(parseInt(rfqProductId))) {
+                updatableKeys.add(rfqProductId);
               }
-            })
-          })
 
-        if(products.updatable?.comment)
-          Object.keys(products.updatable.comment).forEach(async rfqProductId => {
-            const productId = products.updatable.comment[rfqProductId].product_id
-            const variant = products.updatable.comment[rfqProductId].variant
-            const comment = products.updatable.comment[rfqProductId].comment
+              let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${variant})::INT`;
 
-            let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${variant})::INT`
-            
-            const data = {
-              comment
+              const data = {
+                comment
+              };
+              await rfqModel.updateWhere('tbl_rfq_products', data, whereClause);
+             
+              
             }
-            await rfqModel.updateWhere('tbl_rfq_products', data, whereClause)
+          );
+
+        const uniqueVendorMap = {};
+        // Fetch vendors for updated product RFQ IDs
+        await Promise.all(
+          Array.from(updatableKeys).map(async (rfqProductId) => {
+            // const productId =
+            //   products.updatable.specs?.[rfqProductId]?.product_id ||
+            //   products.updatable.comment?.[rfqProductId]?.product_id ||
+            //   products.updatable.files?.[rfqProductId]?.product_id;
+
+            const vendors = await rfqModel.searchEmailAndNameForVendor(
+              rfqProductId
+            ); // returns array of { name, email, product_name }
+            // console.log('vendors for updated product', vendors);
+
+              if (Array.isArray(vendors)) {
+                vendors.forEach(({vendor_id, name, email, product_name }) => {
+                  if (!uniqueVendorMap[vendor_id]) {
+                    uniqueVendorMap[vendor_id] = {
+                      name,
+                      email,
+                      product_names: new Set(),
+                      vendor_id
+                    };
+                  }
+                  uniqueVendorMap[vendor_id].product_names.add(product_name);
+                });
+              
+            }
           })
+        );
+
+        // Convert Set to array
+        for (const vendor of Object.values(uniqueVendorMap)) {
+          updatedDataVendors.push({
+            name: vendor.name,
+            email: vendor.email,
+            product_name: [...vendor.product_names].join(', '),
+            vendor_id : vendor.vendor_id
+          });
+        }
       }
 
-      if(products && products?.deletable && products.deletable.length > 0) {
-        products.deletable.forEach(async rfqProductId => {
-          // Delete records from tbl_rfq_products 
-          let deletedRecord = await rfqModel.delete('tbl_rfq_products', { id: rfqProductId })
-          if(!deletedRecord || !deletedRecord.length > 0) return;
+     if (products && products?.deletable && products.deletable.length > 0) {
+       for (const rfqProductId of products.deletable) {
+         const vendors = await rfqModel.searchEmailAndNameForVendor(
+           rfqProductId
+         );
 
-          deletedRecord = deletedRecord[0]
+         if (Array.isArray(vendors) && vendors.length > 0) {
+           for (const {vendor_id, name, email, product_name } of vendors) {
+             if (!deletedProductVendors[vendor_id]) {
+               deletedProductVendors[vendor_id] = {
+                 name,
+                 email,
+                 product_names: [],
+                 vendor_id
+               };
+             }
 
-          // Delete vendor mapping for this tbl_rfq_products that were deleted
-          const vendorConditions = {
+             if (
+               !deletedProductVendors[vendor_id].product_names.includes(
+                 product_name
+               )
+             ) {
+               deletedProductVendors[vendor_id].product_names.push(product_name);
+             }
+           }
+         }
+
+         // Delete records from tbl_rfq_products
+         let deletedRecord = await rfqModel.delete('tbl_rfq_products', {
+           id: rfqProductId
+         });
+         if (!deletedRecord || deletedRecord.length === 0) continue;
+
+         deletedRecord = deletedRecord[0];
+
+         // Delete vendor mapping
+         const vendorConditions = {
+           rfq_id,
+           product_variant_id: deletedRecord.product_variant_id,
+           variant: deletedRecord.variant
+         };
+         await rfqModel.delete('tbl_rfq_product_vendors', vendorConditions);
+
+         // Delete associated files
+         const directRfqProductConditions = { rfq_product_id: rfqProductId };
+         await rfqModel.delete(
+           'tbl_rfq_product_files',
+           directRfqProductConditions
+         );
+
+         // Delete tech evaluations
+         const techEvaluationCondition = { tbl_rfq_product_id: rfqProductId };
+         const techEvaluationDeletedRecordsIds =
+           await rfqModel.deleteWithReturnIds(
+             'tbl_rfq_product_tech_evaluation',
+             techEvaluationCondition
+           );
+
+         // Delete tech evaluation clauses and other nested data
+         if (techEvaluationDeletedRecordsIds?.length > 0) {
+           for (const techEvaluationId of techEvaluationDeletedRecordsIds) {
+             const techEvaluationClauseCondition = {
+               tbl_rfq_product_tech_evaluation_id: techEvaluationId
+             };
+
+             const techEvaluationClausesDeletedRecordsIds =
+               await rfqModel.deleteWithReturnIds(
+                 'tbl_rfq_product_tech_evaluation_clauses',
+                 techEvaluationClauseCondition
+               );
+
+             // Delete cleared vendors
+             await rfqModel.deleteWithReturnIds(
+               'tbl_rfq_product_tech_evaluation_cleared_vendors',
+               techEvaluationClauseCondition
+             );
+
+             if (techEvaluationClausesDeletedRecordsIds?.length > 0) {
+               for (const techEvaluationClauseId of techEvaluationClausesDeletedRecordsIds) {
+                 const clauseCondition = {
+                   tbl_rfq_product_tech_evaluation_clauses_id:
+                     techEvaluationClauseId
+                 };
+
+                 await rfqModel.delete(
+                   'tbl_rfq_product_tech_evaluation_clauses_files',
+                   clauseCondition
+                 );
+
+                 const techEvaluationVendorResponseDeletedRecords =
+                   await rfqModel.deleteWithReturnIds(
+                     'tbl_rfq_product_tech_evaluation_vendors_response',
+                     clauseCondition
+                   );
+
+                 if (techEvaluationVendorResponseDeletedRecords?.length > 0) {
+                   for (const vendorResponse of techEvaluationVendorResponseDeletedRecords) {
+                     const vendorResponseCondition = {
+                       tbl_rfq_product_tech_evaluation_vendors_response_id:
+                         vendorResponse
+                     };
+
+                     await rfqModel.delete(
+                       'tbl_rfq_product_tech_evaluation_vendors_response_files',
+                       vendorResponseCondition
+                     );
+                   }
+                 }
+
+                 const techEvaluationCommentsDeletedRecords =
+                   await rfqModel.deleteWithReturnIds(
+                     'tbl_rfq_product_tech_evaluation_comments',
+                     clauseCondition
+                   );
+
+                 if (techEvaluationCommentsDeletedRecords?.length > 0) {
+                   for (const evaluationComment of techEvaluationCommentsDeletedRecords) {
+                     const commentFilesCondition = {
+                       tbl_rfq_product_tech_evaluation_comments_id:
+                         evaluationComment
+                     };
+
+                     await rfqModel.deleteWithReturnIds(
+                       'tbl_rfq_product_tech_evaluation_comments_files',
+                       commentFilesCondition
+                     );
+                   }
+                 }
+               }
+             }
+           }
+         }
+       }
+     }
+
+
+    if (updatableVendors && Object.keys(updatableVendors).length > 0) {
+      for (const rfqProductId of Object.keys(updatableVendors)) {
+        const productId = updatableVendors[rfqProductId].product_id;
+        const variant = updatableVendors[rfqProductId].variant;
+
+        const addable = updatableVendors[rfqProductId]?.addable ?? [];
+        const deletable = updatableVendors[rfqProductId]?.deletable ?? [];
+
+        const productDetails =
+          await rfqModel.getProductOrVariantNameByRfqProductId(rfqProductId);
+
+        // Extract Deleted Vendors Before deletion operation
+        for (const vendorId of deletable) {
+          const vendordata = await userModel.getUserById(vendorId);
+          if (!vendordata || vendordata.length === 0) continue;
+
+          const {id , name, email } = vendordata[0];
+
+          if (productDetails) {
+            deletedVendorsFromExistingProducts[id] = {
+              name: name || 'Unknown',
+              email: email || 'Unknown',
+              productDetails,
+              vendor_id : id
+
+            };
+          }
+        }
+
+        // Extract Added Vendors
+        for (const vendorId of addable) {
+          const vendordata = await userModel.getUserById(vendorId);
+          if (!vendordata || vendordata.length === 0) continue;
+
+          const {id, name, email } = vendordata[0];
+
+          if (productDetails) {
+            addedVednorsToExistingProducts[id] = {
+              name: name || 'Unknown',
+              email: email || 'Unknown',
+              productDetails,
+              vendor_id : id
+            };
+          }
+        }
+
+        // Insert new vendors
+        if (addable.length > 0) {
+          const addableData = addable.map((vendor) => ({
             rfq_id,
-            product_variant_id: deletedRecord.product_variant_id,
-            variant: deletedRecord.variant,
-          }
-          await rfqModel.delete('tbl_rfq_product_vendors', vendorConditions)
+            product_variant_id: productId,
+            user_id: vendor,
+            variant
+          }));
 
-          // Generic conditions to delete records directly with rfq_product_id affiliation
-          const directRfqProductConditions = { 
-            rfq_product_id: rfqProductId
-          }
+          await rfqModel.insertArray(
+            addableData,
+            Object.keys(addableData[0]),
+            'tbl_rfq_product_vendors'
+          );
+        }
 
-          // Delete files associated with this rfq product
-          await rfqModel.delete('tbl_rfq_product_files', directRfqProductConditions)
+        // Delete existing vendors
+        if (deletable.length > 0) {
+          for (const vendor of deletable) {
+            let productDetails = await rfqModel.checkIfExists(
+              'tbl_product_variant',
+              `id = ${productId}`
+            );
+            if (!productDetails || productDetails.length === 0) continue;
 
-          // Delete tech evaluations associated with this rfq product
-          const techEvaluationCondition = { 
-            tbl_rfq_product_id: rfqProductId
-          }
-          const techEvaluationDeletedRecordsIds = await rfqModel.deleteWithReturnIds('tbl_rfq_product_tech_evaluation', techEvaluationCondition)
+            productDetails = productDetails[0];
 
-          // Delete tech evaluation clauses associated with this rfq product
-          if(techEvaluationDeletedRecordsIds && techEvaluationDeletedRecordsIds.length > 0) {
-            techEvaluationDeletedRecordsIds.forEach(async techEvaluationId => {
-              const techEvaluationClauseCondition = { 
-                tbl_rfq_product_tech_evaluation_id: techEvaluationId
-              }
-
-              const techEvaluationClausesDeletedRecordsIds = await rfqModel.deleteWithReturnIds('tbl_rfq_product_tech_evaluation_clauses', techEvaluationClauseCondition)
-
-              // Deleting Tech evaluation cleared vendors
-              await rfqModel.deleteWithReturnIds('tbl_rfq_product_tech_evaluation_cleared_vendors', techEvaluationClauseCondition)
-
-              if(techEvaluationClausesDeletedRecordsIds && techEvaluationClausesDeletedRecordsIds.length > 0) {
-                techEvaluationClausesDeletedRecordsIds.forEach(async techEvaluationClauseId => {
-                  const techEvaluationClauseCondition = { 
-                    tbl_rfq_product_tech_evaluation_clauses_id: techEvaluationClauseId
-                  }
-    
-                  await rfqModel.delete('tbl_rfq_product_tech_evaluation_clauses_files', techEvaluationClauseCondition)
-                  const techEvaluationVendorResponseDeletedRecords = rfqModel.deleteWithReturnIds('tbl_rfq_product_tech_evaluation_vendors_response', techEvaluationClauseCondition)
-                  if(techEvaluationVendorResponseDeletedRecords && techEvaluationVendorResponseDeletedRecords.length > 0) {
-                    techEvaluationVendorResponseDeletedRecords.forEach(async vendorResponse => {
-                      const techEvaluationVendorResponseCondition = {
-                        tbl_rfq_product_tech_evaluation_vendors_response_id: vendorResponse
-                      }
-
-                      await rfqModel.delete('tbl_rfq_product_tech_evaluation_vendors_response_files', techEvaluationVendorResponseCondition)
-                    })
-                  }
-
-                  const techEvaluationCommentsDeletedRecords = await rfqModel.deleteWithReturnIds('tbl_rfq_product_tech_evaluation_comments', techEvaluationClauseCondition)
-
-                  if(techEvaluationCommentsDeletedRecords && techEvaluationCommentsDeletedRecords.length > 0) {
-                    techEvaluationCommentsDeletedRecords.forEach(async evaluationComment => {
-                      const techEvaluationCommentFilesCondition = { 
-                        tbl_rfq_product_tech_evaluation_comments_id: evaluationComment
-                      }
-
-                      await rfqModel.deleteWithReturnIds('tbl_rfq_product_tech_evaluation_comments_files', techEvaluationCommentFilesCondition)
-                    })
-                  }
-                })
-              }
-            })
-          }
-        })
-
-      }
-
-      if(updatableVendors && Object.keys(updatableVendors).length > 0) {
-        Object.keys(updatableVendors).forEach(async rfqProductId => {
-          const productId = updatableVendors[rfqProductId].product_id
-          const variant = updatableVendors[rfqProductId].variant
-
-          const addable = updatableVendors[rfqProductId]?.addable ?? []
-          const deletable = updatableVendors[rfqProductId]?.deletable ?? []
-
-          const productDetails = rfqModel.getProductOrVariantNameByRfqProductId(rfqProductId);
-
-          // Inserting new vendors for this RFQ and Product + Variant
-          if(addable && addable.length > 0) {
-            const addableData = addable.map(vendor => ({
+            const conditions = {
               rfq_id,
               product_variant_id: productId,
               user_id: vendor,
-              variant,
-            }))
-  
-            await rfqModel.insertArray(addableData, Object.keys(addableData[0]), 'tbl_rfq_product_vendors')
+              variant
+            };
 
-            // Adding the product to all the vendors mail list
-            addable.forEach(vendor => {
-              mailDetails = {
-                ...mailDetails,
-                vendors: {
-                  ...mailDetails.vendors,
-                  added: {
-                    [vendor]: [
-                      ...(mailDetails.vendors?.added?.[vendor] ?? []),
-                      productDetails.variant_name,
-                    ]
-                  }
-                }
-              }
-            })
+            await rfqModel.delete('tbl_rfq_product_vendors', conditions);
           }
-
-          // Deleting existing selected vendors from this RFQ and Product + Variant
-          if(deletable && deletable.length > 0)
-            deletable.forEach(async vendor => {
-              let productDetails = await rfqModel.checkIfExists('tbl_product_variant',  `id = ${productId}`)
-              if(!productDetails || !productDetails.length > 0) return;
-
-              productDetails = productDetails[0]
-
-              const conditions = {
-                rfq_id,
-                product_variant_id: productId,
-                user_id: vendor,
-                variant,
-              }
-              await rfqModel.delete('tbl_rfq_product_vendors', conditions)
-
-              mailDetails = {
-                ...mailDetails,
-                vendors: {
-                  ...mailDetails.vendors,
-                  deleted: {
-                    [vendor]: [
-                      ...(mailDetails.vendors?.deleted?.[vendor] ?? []),
-                      productDetails.name,
-                    ]
-                  }
-                }
-              }
-            })
-        })
+        }
       }
+    }
+     
+     
+     console.log("new added products" , newAddedproductVendors);
 
-      console.log("MAIL DETAILS ------ ", mailDetails)
+     console.log("deleeted product vednors" , deletedProductVendors);
+
+     console.log(
+       'deletedVendorsFromExistingProducts',
+       deletedVendorsFromExistingProducts
+     );
+     console.log(
+       'addedVednorsToExistingProducts',
+       addedVednorsToExistingProducts
+     );
+
+
+     console.log("Vendors for updated products:", updatedDataVendors);
 
       // Explicitly handle potential empty strings from frontend, converting them to null
       if ('ra_start_date' in data && data.ra_start_date === '') {
@@ -1740,8 +1963,25 @@ const rfqController = {
       
       const buyerName = updatedData?.[0]?.company_name ?? "-"
       const rfqNo = updatedData?.[0]?.rfq_no ?? "000000"
+     
+     
+      const newAddedproductVendorsArray = Object.values(newAddedproductVendors);
+      const deletedProductVendorsArray = Object.values(deletedProductVendors);
+      const deletedVendorsFromExistingProductsArray = Object.values(deletedVendorsFromExistingProducts);
+      const addedVednorsToExistingProductsArray = Object.values(addedVednorsToExistingProducts);
+      const updatedDataVendorsArray = Object.values(updatedDataVendors);
 
-      await sendRfqUpdatedMailToVendors(vendorData, rfq_id, rfqNo, buyerName, data);
+
+      await sendRfqUpdatedMailToVendors(newAddedproductVendorsArray, rfq_id, rfqNo, buyerName, RFQ_EMAIL_TYPE.NEW_PRODUCT);  //for new add produccts
+
+      await sendRfqUpdatedMailToVendors(deletedProductVendorsArray , rfq_id, rfqNo, buyerName, RFQ_EMAIL_TYPE.REMOVED_VENDOR);  //for deleted products from RFQ
+
+      await sendRfqUpdatedMailToVendors(deletedVendorsFromExistingProductsArray, rfq_id, rfqNo, buyerName, RFQ_EMAIL_TYPE.REMOVED_VENDOR_FROM_EXISTING_PRODUCT); //for deleted vendors from existing products
+
+      await sendRfqUpdatedMailToVendors(addedVednorsToExistingProductsArray, rfq_id, rfqNo, buyerName, RFQ_EMAIL_TYPE.ADDED_VENDOR_TO_EXISTING_PRODUCT); //for added vendors to existing products
+
+      // Send updated RFQ mail to vendors
+      await sendRfqUpdatedMailToVendors(updatedDataVendorsArray, rfq_id, rfqNo, buyerName, RFQ_EMAIL_TYPE.UPDATED_VENDOR);
 
       res.status(200).json({
         status: 1,
