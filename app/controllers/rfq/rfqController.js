@@ -4778,7 +4778,10 @@ const rfqController = {
   
       const vendorCache = {};
   
-      console.log(" start product searching line 4781 rfqcontroller ")
+      console.log(" 4781 =>>>>> rfq controller boq ", boqDataJson)
+
+
+
       for (const item of boqDataJson) {
         const variantId = item.variant_id ? parseInt(item.variant_id) : null;
         const ProductName = item.fetched_product_name || item.core_product_name || "Unnamed Product";
