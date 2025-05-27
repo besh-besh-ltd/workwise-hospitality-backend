@@ -87,4 +87,12 @@ buyerRoutes.put(
 //  get the list of vendor to review.
 buyerRoutes.get('/buyer-private-vendor-list', passportSignIn, buyerController.getBuyerPrivateVendorList);
 
+// Changes by Agnij 2025-05-27 [Added admin company registration endpoint]
+buyerRoutes.post(
+  '/company-registration',
+  passportSignIn,
+  schema_posts.add_buyer,
+  buyerController.companyRegistration
+);
+
 export default buyerRoutes;

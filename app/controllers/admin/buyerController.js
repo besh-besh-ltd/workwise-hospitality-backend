@@ -11,6 +11,7 @@ import vendorModel from '../../models/vendorModel.js';
 import userModel from '../../models/userModel.js';
 import productModel from '../../models/productModel.js';
 import vendorapproveModel from '../../models/vendorapproveModel.js';
+import db from '../../config/dbConn.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -287,6 +288,121 @@ const buyerController = {
         .end();
     }
   },
+
+  // Changes by Agnij 2025-05-27 [Added admin company registration controller]
+  companyRegistration: async (req, res, next) => {
+    try {
+      const { name, email, mobile, organization_name, user_type, password, address, created_by, country, whatsapp, 
+        token, state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
+       import_export_code, established_year, website, is_private, max_top_management, max_procurement, max_engineering, max_finance } = req.body;
+
+      // Changes by Agnij 2025-05-27 [Convert state and city names to IDs]
+      let state_id = null;
+      let city_id = null;
+
+      // Look up state ID if state name is provided
+      if (state && state.trim()) {
+        try {
+          const stateResult = await db.oneOrNone(
+            'SELECT id FROM tbl_location_states WHERE LOWER(state_name) = LOWER($1) LIMIT 1',
+            [state.trim()]
+          );
+          if (stateResult) {
+            state_id = stateResult.id;
+          } else {
+          }
+        } catch (err) {
+          console.log('Error looking up state:', err);
+        }
+      }
+
+      // Look up city ID if city name is provided
+      if (city && city.trim()) {
+        try {
+          const cityResult = await db.oneOrNone(
+            'SELECT id FROM tbl_location_cities WHERE LOWER(city_name) = LOWER($1) LIMIT 1',
+            [city.trim()]
+          );
+          if (cityResult) {
+            city_id = cityResult.id;
+          } else {
+          }
+        } catch (err) {
+          console.log('Error looking up city:', err);
+        }
+      }
+
+      const user_data = {
+        name: name || null,
+        email: email?.toLowerCase() || null,
+        mobile: mobile || null,
+        user_type: user_type || 7, // Default to buyer
+        status: user_type == 7 ? 1 : 0,
+        password: generatePassword(password), 
+        address: address || null,
+        created_by: req.user.id, // Use admin ID
+        country: country || null,
+        whatsapp: whatsapp || null,
+        token: token || null,
+        state: state_id, // Use ID instead of name
+        city: city_id,   // Use ID instead of name
+        postal_code: postal_code || null
+      };
+
+      const company_data = {
+        company_name: organization_name || null,
+        profile: req.file?.location || null, // S3 file URL
+        nature_of_business: nature_of_business || null,
+        type_of_business: type_of_business || null,
+        turnover: turnover || null,
+        no_of_employess: no_of_employess || null,
+        import_export_code: import_export_code || null,
+        gstin: gstin || null,
+        cin: cin || null,
+        logo: req.file?.location || null, 
+        established_year: established_year || null,
+        website: website || null,
+        location: address || null,
+        is_private: is_private || 1, 
+      };
+
+      const buyer_company_max_account_data = {
+        max_top_management: max_top_management || 2,
+        max_procurement: max_procurement || 5,
+        max_engineering: max_engineering || 15,
+        max_finance: max_finance || 3
+      };
+
+      const {company_id} = await userModel.company_registration(user_data, company_data);
+      
+      let accountLimitSaved = null;
+      if (user_type == 7 && company_id) {
+        accountLimitSaved = await userModel.insertBuyerAccountLimits(buyer_company_max_account_data, company_id);
+      }
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          message: 'Company registered successfully by admin',
+          company_id: company_id,
+          accountLimitSaved: accountLimitSaved ? "account limit saved" : "Not able to save account limit"
+        })
+        .end();
+
+    } catch (err) {
+      logError(err);
+      res
+        .status(400)
+        .json({
+          status: false,
+          message: Config.errorText.value,
+          error: err.message || 'Unknown error'
+        })
+        .end();
+    }
+  },
+
   reviewBuyerPrivateVendors: async (req, res, next) => {
     try {
       let createdBy = req.user.id;

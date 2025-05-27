@@ -171,6 +171,93 @@ const schemas = {
 };
 
 const schema_posts = {
+  // Changes by Agnij 2025-05-27 [Added add_buyer validation schema for company registration]
+  add_buyer: async (req, res, next) => {
+    try {
+      let upload = multer({
+        storage: store_profile_images,
+        limits: {
+          fileSize: 2000000 // 2MB limit
+        },
+        fileFilter: (req, file, cb) => {
+          let ext = path.extname(file.originalname).toLowerCase();
+          if (ext == '.png' || ext == '.jpg' || ext == '.jpeg' || ext == '.webp') {
+            cb(null, true);
+          } else {
+            cb(null, false);
+            return cb('Only .png, .jpg, .jpeg, .webp format allowed!', null);
+          }
+        }
+      }).single('profile'); // Single file upload for profile image
+
+      upload(req, res, async function (err) {
+        if (err) {
+          let data = {};
+          data.profile = err;
+          res
+            .status(400)
+            .json({
+              status: 2,
+              errors: data
+            })
+            .end();
+        } else {
+          // Validate required fields
+          const addBuyerSchema = Joi.object().keys({
+            name: Joi.string().required(),
+            email: Joi.string().email().required(),
+            mobile: Joi.string().required(),
+            organization_name: Joi.string().required(),
+            user_type: Joi.number().optional().default(7),
+            password: Joi.string().optional().allow(''),
+            address: Joi.string().required(),
+            country: Joi.string().required(),
+            whatsapp: Joi.string().optional().allow(''),
+            state: Joi.string().optional().allow(''),
+            city: Joi.string().optional().allow(''),
+            postal_code: Joi.string().optional().allow(''),
+            gstin: Joi.string().optional().allow(''),
+            cin: Joi.string().optional().allow(''),
+            nature_of_business: Joi.string().required(),
+            type_of_business: Joi.string().required(),
+            turnover: Joi.string().optional().allow(''),
+            no_of_employess: Joi.number().optional(),
+            import_export_code: Joi.string().optional().allow(''),
+            established_year: Joi.string().optional().allow(''),
+            website: Joi.string().uri().optional().allow(''),
+            max_top_management: Joi.number().min(1).required(),
+            max_procurement: Joi.number().min(1).required(),
+            max_engineering: Joi.number().min(1).required(),
+            max_finance: Joi.number().min(1).required(),
+            created_by: Joi.number().optional(),
+            token: Joi.string().optional().allow(''),
+            is_private: Joi.number().optional().default(1)
+          });
+
+          const result = addBuyerSchema.validate(req.body, { abortEarly: false });
+          if (result.error) {
+            let err_msg = {};
+            for (let counter in result.error.details) {
+              let k = result.error.details[counter].context.key;
+              let val = result.error.details[counter].message;
+              err_msg[k] = val;
+            }
+            let return_err = { status: 2, errors: err_msg };
+            return res.status(400).json(return_err);
+          } else {
+            next();
+          }
+        }
+      });
+    } catch (err) {
+      logError(err);
+      res.status(400).json({
+        status: 3,
+        message: 'server error'
+      });
+    }
+  },
+
   add_user_profile_image: async (req, res, next) => {
     try {
       var upload = multer({
