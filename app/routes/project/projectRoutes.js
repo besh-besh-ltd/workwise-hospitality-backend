@@ -13,7 +13,7 @@ const projectRoutes = Router();
 projectRoutes.post(
     '/create',
     passportSignIn,
-    acl([2]),
+    acl([2, 7]),
     validateBody(projectSchemas.create),
     validateDbBody.project_exist,
     projectController.create
@@ -22,6 +22,7 @@ projectRoutes.post(
 projectRoutes.post(
     '/upload-file',
     passportSignIn,
+    acl([2, 7]),
     projectSchemas.projectFileUploadHandler, 
     validateBody(projectSchemas.saveFiles),
     projectController.saveProjectFiles
@@ -31,6 +32,7 @@ projectRoutes.post(
 projectRoutes.post(
     '/:project_id',
     passportSignIn,
+    acl([2, 7]),
     validateParam(projectSchemas.project_id),
     projectController.getProjectById
 )
@@ -39,6 +41,7 @@ projectRoutes.post(
 projectRoutes.get(
     '/:project_id',
     passportSignIn,
+    acl([2, 7]),
     validateParam(projectSchemas.project_id),
     projectController.getProjectTableDataById
 )
@@ -47,6 +50,7 @@ projectRoutes.get(
 projectRoutes.get(
     '/',
     passportSignIn,
+    acl([2, 7]),
     projectController.getAllProjects
 )
 
@@ -54,6 +58,7 @@ projectRoutes.get(
 projectRoutes.put(
     '/update/:project_id',
     passportSignIn,
+    acl([2, 7]),
     validateBody(projectSchemas.update),
     validateParam(projectSchemas.project_id), 
     projectController.update
@@ -63,12 +68,8 @@ projectRoutes.put(
 projectRoutes.get(
     '/name/list',
     passportSignIn,
+    acl([2, 7]),
     projectController.getIdAndNameOfProjects
 )
-
-
-
-
-
 
 export default projectRoutes;

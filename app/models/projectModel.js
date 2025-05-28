@@ -2,7 +2,6 @@ import db, { pgp } from '../config/dbConn.js';
 
 const projectModel = {
     createProject: async (projectObj) => {
-        console.log(projectObj);
         return new Promise(function (resolve, reject) {
             db.any(
                 `INSERT INTO tbl_projects(name, description, location, ended_at, user_id, rfq_type, reverse_auction)
@@ -58,12 +57,10 @@ const projectModel = {
               [project_id, user_id]
             )
                 .then(function (data) {
-                    console.log("data: ", data)
                 resolve(data);
               })
                .catch(function (err) {
                 let error = new Error(err);
-                console.log("error: ", error)
                 reject(error);
               });
         })
@@ -185,7 +182,6 @@ const projectModel = {
     },
 
     updateProject: async (projectObj) => {
-      console.log(projectObj);
       return new Promise(function (resolve, reject) {
           db.oneOrNone(
             `UPDATE tbl_projects
