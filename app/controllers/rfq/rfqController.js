@@ -4753,11 +4753,20 @@ const rfqController = {
       let aiProcessedBoqJson = req.body.jsonFileUrl;
       const user = req.user;
   
+      console.log(" line 4756 rfqcontroller aiProcessedBoqJson =>>>>>> ", aiProcessedBoqJson)
+
       if (aiProcessedBoqJson.startsWith('http:')) {
         aiProcessedBoqJson = aiProcessedBoqJson.replace('http:', 'https:');
       }
+
+       console.log(" line 4762 rfqcontroller  aiProcessedBoqJson =>>>>>> ", aiProcessedBoqJson)
+
   
       const boqDataJson = await generativeAI.processBOQWithAI(aiProcessedBoqJson);
+
+      // console.log(" line 4762  boqDataJson =>>>>>> ", boqDataJson)
+
+
       const termList = await rfqModel.getAllTerms();
       const transformedTermList = termList.map(term => ({ id: term.id, name: term.term_content }));
   
@@ -4766,70 +4775,54 @@ const rfqController = {
       const sheetNameList = new Set();
       const globalVariantCount = {};
   
-      const allProductIds = boqDataJson.flatMap(item =>
-        (Array.isArray(item?.list_of_product_ids)
-          ? item.list_of_product_ids.map(id => parseInt(id)).filter(id => !isNaN(id))
-          : [])
-      );
-  
-      const uniqueProductIds = [...new Set(allProductIds)];
-      const existingProducts = await rfqModel.checkIfExists(
-        'tbl_product',
-        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
-      );
-      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
   
       const vendorCache = {};
   
+      console.log(" 4781 =>>>>> rfq controller boq ", boqDataJson)
+
+
+
       for (const item of boqDataJson) {
-        const cleanIds = Array.isArray(item?.list_of_product_ids)
-          ? item.list_of_product_ids.map(id => parseInt(id)).filter(id => !isNaN(id))
-          : [];
+        const variantId = item.variant_id ? parseInt(item.variant_id) : null;
+        const ProductName = item.fetched_product_name || item.core_product_name || "Unnamed Product";
+
+        console.log(" line 4785 rfqcontroller ", ProductName, variantId)
+
+
+    if (!variantId || isNaN(variantId)) {
+      validationErrors.push({
+        errors: { product: `${item.core_product_name || item.fetched_product_name} - product not found` }
+      });
+      continue;
+    }
+
+    // Fetch vendors by variantId, using cache
+    if (!vendorCache[variantId]) {
+      const vendors = await rfqModel.genericSearchVendors(
+        user.id,
+        variantId,      // Pass variantId for vendor filtering
+        null,           // No search_key needed
+        { vendorId: 'user_id', vendorName: 'name' }
+      );
+      vendorCache[variantId] = vendors;
+    }
   
-        if (cleanIds.length === 0) {
-          validationErrors.push({
-            errors: { product: `${item.fetched_product_name} - Product Not Found` },
-          });
-          continue;
-        }
-  
-        const validProductId = cleanIds.find(id => existingProductIdSet.has(id));
-  
-        if (!validProductId) {
-          validationErrors.push({
-            errors: { product: `${item.fetched_product_name} - Product Not Found` },
-          });
-          continue;
-        }
-  
-        const vendorKey = item.fetched_product_name || item.core_product_name;
-        if (!vendorCache[vendorKey]) {
-          const vendors = await rfqModel.genericSearchVendors(
-            user.id,
-            null,
-            vendorKey,
-            { vendorId: 'user_id', vendorName: 'name' }
-          );
-          vendorCache[vendorKey] = vendors;
-        }
-  
-        const vendorResult = vendorCache[vendorKey];
+        const vendorResult = vendorCache[variantId];
   
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             errors: {
-              vendor: `${item.fetched_product_name} - Vendor Not Present For The Product`,
-            },
+              vendor: `${ProductName} - No Vendors Found` }
           });
           continue;
         }
   
-        const variant = globalVariantCount?.[validProductId] ?? 0;
+        const variantCount = globalVariantCount[variantId] ?? 0;
   
         products.push({
-          product_id: validProductId,
-          name: vendorKey || "Unnamed Product",
-          variant,
+          product_id: variantId,
+          name: item.fetched_product_name || item.core_product_name || "Unnamed Product",
+          variant: variantCount,
           spec: [
             { title: "Size", value: item.size || "" },
             { title: "Spec", value: item.feature_or_specifications || "" },
@@ -4837,7 +4830,7 @@ const rfqController = {
             { title: "Unit", value: item.unit || "NA" },
           ],
           vendors: vendorResult,
-          comment: item.full_product_description || "",
+          comment: item.summary_of_product_description || "",
           defaultSelectedVAB: "",
           datasheet: "0",
           datasheet_file: [],
@@ -4849,7 +4842,7 @@ const rfqController = {
           sheet_name: item.sheet_name || "",
         });
   
-        globalVariantCount[validProductId] = variant + 1;
+        globalVariantCount[variantId] = variantCount + 1;
         sheetNameList.add(item.sheet_name || "");
       }
   
