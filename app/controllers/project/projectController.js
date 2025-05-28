@@ -429,5 +429,271 @@ const projectController = {
       }
     },
     
+    // Changes by Agnij 14-01-2025 [Added controller methods for project team operations]
+    
+    // Get team members for a project
+    getProjectTeamMembers: async (req, res, next) => {
+      try {
+        const { project_id } = req.params;
+        const user_id = req.user.id;
+        const user_type = req.user.user_type;
+                
+        // Check if the user is allowed to access this project
+        let canAccess = false;
+        
+        if (user_type === 7) {
+          // Admin can access any project
+          canAccess = true;
+        } else {
+          // Regular user can only access their own projects or projects they're a member of
+          const projectData = await db.oneOrNone(
+            `SELECT 1 FROM tbl_projects WHERE id = $1 AND user_id = $2`,
+            [project_id, user_id]
+          );
+          
+          if (projectData) {
+            canAccess = true;
+          } else {
+            // Check if user is a team member
+            const isMember = await projectModel.isTeamMember(project_id, user_id);
+            canAccess = isMember;
+          }
+        }
+        
+        if (!canAccess) {
+          return res.status(403).json({
+            status: false,
+            message: "You don't have permission to access this project's team"
+          });
+        }
+        
+        // Get team members
+        const teamMembers = await projectModel.getProjectTeamMembers(project_id);
+        
+        // Log the response data structure for debugging
+        const responseData = {
+          status: true,
+          data: teamMembers // This is always an array from the model
+        };
+        
+        return res.status(200).json(responseData);
+      } catch (err) {
+        logError(err);
+        return res.status(400).json({
+          status: false,
+          message: Config.errorText.value
+        });
+      }
+    },
+    
+    // Add a team member to a project
+    addTeamMember: async (req, res, next) => {
+      try {
+        const { project_id } = req.params;
+        const { user_id, role } = req.body;
+        const current_user_id = req.user.id;
+        const user_type = req.user.user_type;
+        
+        // Check if the user is allowed to modify this project
+        let canModify = false;
+        
+        if (user_type === 7) {
+          // Admin can modify any project
+          canModify = true;
+        } else {
+          // Regular user can only modify their own projects
+          const projectData = await db.oneOrNone(
+            `SELECT 1 FROM tbl_projects WHERE id = $1 AND user_id = $2`,
+            [project_id, current_user_id]
+          );
+          
+          canModify = projectData !== null;
+        }
+        
+        if (!canModify) {
+          return res.status(403).json({
+            status: false,
+            message: "You don't have permission to add team members to this project"
+          });
+        }
+        
+        // Check if the user exists
+        const userExists = await db.oneOrNone(
+          `SELECT 1 FROM tbl_users WHERE id = $1`,
+          [user_id]
+        );
+        
+        if (!userExists) {
+          return res.status(404).json({
+            status: false,
+            message: "User not found"
+          });
+        }
+        
+        // Check if the user is already a team member
+        const isAlreadyMember = await projectModel.isTeamMember(project_id, user_id);
+        
+        if (isAlreadyMember) {
+          return res.status(400).json({
+            status: false,
+            message: "User is already a team member of this project"
+          });
+        }
+        
+        // Add the team member
+        const memberData = {
+          project_id: parseInt(project_id),
+          user_id: parseInt(user_id),
+          role: parseInt(role),
+          created_by: parseInt(current_user_id)
+        };
+        
+        try {
+          const result = await projectModel.addTeamMember(memberData);
+          
+          // Get full user details to return
+          const memberDetails = await db.one(
+            `SELECT 
+              pt.id,
+              pt.project_id,
+              pt.user_id,
+              pt.role,
+              pt.created_at,
+              u.name,
+              u.email,
+              u.mobile
+            FROM 
+              tbl_project_team pt
+            JOIN
+              tbl_users u ON pt.user_id = u.id
+            WHERE 
+              pt.id = $1`,
+            [result.id]
+          );
+          
+          const responseData = {
+            status: true,
+            message: "Team member added successfully",
+            data: memberDetails
+          };
+          
+          return res.status(200).json(responseData);
+        } catch (dbError) {
+          // Special handling for unique constraint violations (user already added)
+          if (dbError.message && dbError.message.includes('duplicate key value violates unique constraint')) {
+            return res.status(400).json({
+              status: false,
+              message: "User is already a team member of this project"
+            });
+          }
+          
+          // Rethrow for general error handling
+          throw dbError;
+        }
+      } catch (err) {
+        logError(err);
+        return res.status(400).json({
+          status: false,
+          message: err.message || Config.errorText.value
+        });
+      }
+    },
+    
+    // Remove a team member from a project
+    removeTeamMember: async (req, res, next) => {
+      try {
+        const { project_id } = req.params;
+        const { user_id } = req.body;
+        const current_user_id = req.user.id;
+        const user_type = req.user.user_type;
+        
+        // Check if the user is allowed to modify this project
+        let canModify = false;
+        
+        if (user_type === 7) {
+          // Admin can modify any project
+          canModify = true;
+        } else {
+          // Regular user can only modify their own projects
+          const projectData = await db.oneOrNone(
+            `SELECT 1 FROM tbl_projects WHERE id = $1 AND user_id = $2`,
+            [project_id, current_user_id]
+          );
+          
+          canModify = projectData !== null;
+        }
+        
+        if (!canModify) {
+          return res.status(403).json({
+            status: false,
+            message: "You don't have permission to remove team members from this project"
+          });
+        }
+        
+        // Check if the user is a team member
+        const isTeamMember = await projectModel.isTeamMember(project_id, user_id);
+        
+        if (!isTeamMember) {
+          return res.status(404).json({
+            status: false,
+            message: "User is not a team member of this project"
+          });
+        }
+        
+        // Remove the team member
+        try {
+          const result = await projectModel.removeTeamMember(
+            parseInt(project_id), 
+            parseInt(user_id)
+          );
+          
+          if (result.rowCount === 0) {
+            return res.status(404).json({
+              status: false,
+              message: "Team member not found or already removed"
+            });
+          }
+          
+          // Create a consistent response
+          const responseData = {
+            status: true,
+            message: "Team member removed successfully",
+            data: { user_id, project_id }
+          };
+          
+          return res.status(200).json(responseData);
+        } catch (dbError) {
+          throw dbError;
+        }
+      } catch (err) {
+        logError(err);
+        return res.status(400).json({
+          status: false,
+          message: err.message || Config.errorText.value
+        });
+      }
+    },
+    
+    // Get all projects where the current user is a team member
+    getUserProjects: async (req, res, next) => {
+      try {
+        const user_id = req.user.id;
+        
+        // Get projects where the user is a team member
+        const projects = await projectModel.getUserProjects(user_id);
+        
+        return res.status(200).json({
+          status: true,
+          data: projects
+        });
+      } catch (err) {
+        logError(err);
+        return res.status(400).json({
+          status: false,
+          message: Config.errorText.value
+        });
+      }
+    }
 }
+
 export default projectController;

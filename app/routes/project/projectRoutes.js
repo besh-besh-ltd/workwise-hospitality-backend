@@ -72,4 +72,42 @@ projectRoutes.get(
     projectController.getIdAndNameOfProjects
 )
 
+// Changes by Agnij 14-01-2025 [Added routes for project team operations]
+
+// Route for getting team members of a project
+projectRoutes.get(
+    '/:project_id/team',
+    passportSignIn,
+    acl([2, 7]),
+    validateParam(projectSchemas.project_id),
+    projectController.getProjectTeamMembers
+)
+
+// Route for adding a team member to a project
+projectRoutes.post(
+    '/:project_id/team',
+    passportSignIn,
+    acl([2, 7]),
+    validateParam(projectSchemas.project_id),
+    validateBody(projectSchemas.addTeamMember),
+    projectController.addTeamMember
+)
+
+// Route for removing a team member from a project
+projectRoutes.delete(
+    '/:project_id/team',
+    passportSignIn,
+    acl([2, 7]),
+    validateParam(projectSchemas.project_id),
+    validateBody(projectSchemas.removeTeamMember),
+    projectController.removeTeamMember
+)
+
+// Route for getting all projects where the current user is a team member
+projectRoutes.get(
+    '/team/user-projects',
+    passportSignIn,
+    projectController.getUserProjects
+)
+
 export default projectRoutes;

@@ -237,7 +237,148 @@ const projectModel = {
             reject(error);
           });
     })
-}
+  },
+
+  // Changes by Agnij 14-01-2025 [Added functions to handle project team members]
+  
+  // Get all team members for a project
+  getProjectTeamMembers: async (project_id) => {
+    return new Promise(function (resolve, reject) {
+        db.any(
+            `SELECT 
+                pt.id,
+                pt.project_id,
+                pt.user_id,
+                pt.role,
+                pt.created_at,
+                pt.created_by,
+                u.name,
+                u.email,
+                u.mobile
+            FROM 
+                tbl_project_team pt
+            JOIN
+                tbl_users u ON pt.user_id = u.id
+            WHERE 
+                pt.project_id = $1
+            ORDER BY
+                pt.created_at DESC`,
+            [project_id]
+        )
+            .then(function (data) {
+                // Ensure data is always an array
+                const teamMembers = Array.isArray(data) ? data : (data ? [data] : []);
+                resolve(teamMembers);
+            })
+            .catch(function (err) {
+                let error = new Error(err);
+                reject(error);
+            });
+    });
+  },
+
+  // Add a team member to a project
+  addTeamMember: async (memberObj) => {
+    return new Promise(function (resolve, reject) {
+        db.one(
+            `INSERT INTO tbl_project_team
+                (project_id, user_id, role, created_by)
+             VALUES
+                ($1, $2, $3, $4)
+             RETURNING *`,
+            [
+                memberObj.project_id,
+                memberObj.user_id,
+                memberObj.role,
+                memberObj.created_by
+            ]
+        )
+            .then(function (data) {
+                resolve(data);
+            })
+            .catch(function (err) {
+                let error = new Error(err);
+                reject(error);
+            });
+    });
+  },
+
+  // Remove a team member from a project
+  removeTeamMember: async (project_id, user_id) => {
+    return new Promise(function (resolve, reject) {
+        // Ensure parameters are integers
+        project_id = parseInt(project_id);
+        user_id = parseInt(user_id);
+        
+        db.result(
+            `DELETE FROM tbl_project_team
+             WHERE project_id = $1 AND user_id = $2`,
+            [project_id, user_id]
+        )
+            .then(function (result) {
+                if (result.rowCount === 0) {
+                }
+                resolve({ rowCount: result.rowCount });
+            })
+            .catch(function (err) {
+                let error = new Error(err);
+                reject(error);
+            });
+    });
+  },
+
+  // Check if a user is already a member of a project
+  isTeamMember: async (project_id, user_id) => {
+    return new Promise(function (resolve, reject) {
+        db.oneOrNone(
+            `SELECT 1
+             FROM tbl_project_team
+             WHERE project_id = $1 AND user_id = $2`,
+            [project_id, user_id]
+        )
+            .then(function (data) {
+                const isMember = data !== null;
+                resolve(isMember);
+            })
+            .catch(function (err) {
+                let error = new Error(err);
+                reject(error);
+            });
+    });
+  },
+
+  // Get all projects where a user is a team member
+  getUserProjects: async (user_id) => {
+    return new Promise(function (resolve, reject) {
+        db.any(
+            `SELECT 
+                p.id, 
+                p.name,
+                p.description,
+                p.location,
+                p.ended_at,
+                p.created_at,
+                pt.role
+            FROM 
+                tbl_projects p
+            JOIN
+                tbl_project_team pt ON p.id = pt.project_id
+            WHERE 
+                pt.user_id = $1
+            ORDER BY
+                p.created_at DESC`,
+            [user_id]
+        )
+            .then(function (data) {
+                resolve(data);
+            })
+            .catch(function (err) {
+                let error = new Error(err);
+                reject(error);
+            });
+    });
+  }
 
 }
+
 export default projectModel;
