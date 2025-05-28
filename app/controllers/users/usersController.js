@@ -421,6 +421,48 @@ create_buyer_company_users: async (req, res, next) => {
   }
 },
 
+// Changes by Agnij 14-01-2025 [Added controller method to get company users]
+get_company_users: async (req, res, next) => {
+  try {
+    const { company_id: companyID } = req.user;
+    
+    // Get all users for this company
+    const users = await userModel.getCompanyUsers(companyID);
+    
+    // Map user_type to role names for better readability
+    const userTypeMap = {
+      7: "Admin",
+      8: "Top Management",
+      2: "Procurement",
+      9: "Engineering",
+      10: "Finance"
+    };
+    
+    const formattedUsers = users.map(user => ({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      mobile: user.mobile,
+      role: user.user_type,
+      role_name: userTypeMap[user.user_type] || "Unknown",
+      status: user.status === 1 ? "active" : "inactive",
+      created_at: user.created_at
+    }));
+    
+    res.status(200).json({
+      status: true,
+      message: "Company users retrieved successfully",
+      data: formattedUsers
+    }).end();
+    
+  } catch (err) {
+    logError(err);
+    res.status(400).json({
+      status: false,
+      message: err.message || Config.errorText.value
+    }).end();
+  }
+},
 
   user_registration: async (req, res, next) => {
     try {

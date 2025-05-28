@@ -42,6 +42,11 @@ UsersRoutes.post(
   UsersController.create_buyer_company_users
 );
 
+UsersRoutes.get(
+  '/company-users',
+  passportSignIn,
+  UsersController.get_company_users
+);
 
 UsersRoutes.post(
   '/user-registration',

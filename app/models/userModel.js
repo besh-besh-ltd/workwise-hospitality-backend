@@ -3429,7 +3429,27 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
           reject(error);
         });
     });
-  }
+  },
+
+  // Changes by Agnij 28-05-2025 [Added function to get users by company ID]
+  getCompanyUsers: async (company_id) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT tu.id, tu.name, tu.email, tu.mobile, tu.user_type, tu.status, tu.created_at
+         FROM tbl_users tu
+         WHERE tu.company_id = $1 AND tu.is_deleted = 0
+         ORDER BY tu.created_at DESC`,
+        [company_id]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
 
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];
