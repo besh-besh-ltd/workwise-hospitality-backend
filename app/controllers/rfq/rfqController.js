@@ -325,7 +325,6 @@ const insertProduct = async (
       }
     }
 
-console.log({ product_info: productResult[0], spec_info, vendor_info })
     return { product_info: productResult[0], spec_info, vendor_info };
   } catch (error) {
     console.error('Error inserting data:', error);
@@ -1365,11 +1364,24 @@ const rfqController = {
       if (!rfq_id) {
         return res.status(400).json({
           status: 3,
-          message: 'RFQ Id is required to create an RFQ from Draft!'
+          errors: {
+            rfq: 'RFQ Id is required to create an RFQ from Draft!'
+          }
         }).end();
       }
 
       await saveRfqDraft(user_id, req.body);
+
+      const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id);
+
+      if(!isRFQComplete) {
+        return res.status(400).json({
+          status: 2,
+          errors: {
+            rfq_specs: 'Some products are missing quantity or unit. Please fill them before proceeding.'
+          }
+        }).end();
+      }
 
       const responseUpdate = await rfqModel.update(
         'tbl_rfq',
@@ -1860,7 +1872,7 @@ const rfqController = {
         sheetData = sheets[0];
       }
 
-      if(!sheetData.is_processed) {
+      if(sheetData && !sheetData.is_processed) {
         try {
           const [,processedData] = await rfqController.processRfqDraftSheetWise(null, req.user, id, sheetId);
           await saveMagicSearchInDraft(processedData, user_id, null, id, sheetId);
@@ -2119,7 +2131,7 @@ const rfqController = {
     try {
         const conditions = {
             rfq_id: rfq_id,
-            product_id: product_id,
+            product_variant_id: product_id,
             user_ids: vendor_ids,
             variant: variant
         };
@@ -5255,30 +5267,41 @@ const rfqController = {
     }
   },
 
-  processRfqDraftSheetWise: async (processedUrl, user, rfqId = null, sheetId = null) => {
+  processRfqDraftSheetWise: async (processedUrl, user, rfqId = null, sheetId = null, availableSheets) => {
     try {
       
-      if (rfqId && !isNaN(parseInt(rfqId))) {
+      if (rfqId && !isNaN(parseInt(rfqId)) && sheetId && !isNaN(parseInt(sheetId))) {
         let rfqDetails = await rfqModel.checkIfExists(
           'tbl_rfq',
           `id = ${rfqId}`
         );
         if (rfqDetails) {
           rfqDetails = rfqDetails[0];
-          processedUrl = rfqDetails.processed_url;
-
-          console.log("PROCESSED URL -- ", processedUrl)
+          let sheetDetails = await rfqModel.checkIfExists(
+            'tbl_rfq_draft_sheets',
+            `rfq_id = ${rfqId} AND id = ${sheetId}`
+          );
+          if(sheetDetails) {
+            sheetDetails = sheetDetails[0];
+            processedUrl = sheetDetails.processed_url;
+          } else
+            processedUrl = rfqDetails.processed_url;
 
           if (!processedUrl)
-            throw new Error('Processed URL does not exist for given RFQ')
+            throw new Error('Processed URL does not exist for given Sheet OR RFQ')
         }
       }
 
       if (processedUrl.startsWith('http:')) {
         processedUrl = processedUrl.replace('http:', 'https:');
       }
+
+      console.log("PROCESSED URL -> ", processedUrl)
   
       const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
+
+      console.log("BOQ DATA JSON -> ", boqDataJson)
+
       const termList = await rfqModel.getAllTerms();
       const transformedTermList = termList.map(term => ({ id: term.id, name: term.term_content }));
   
@@ -5287,32 +5310,36 @@ const rfqController = {
       const sheetNameList = new Set();
       const globalVariantCount = {};
   
+      const allProductIds = boqDataJson.flatMap(item =>
+        (Array.isArray(item?.list_of_product_ids)
+          ? item.list_of_product_ids.map(id => parseInt(id)).filter(id => !isNaN(id))
+          : [])
+      );
+  
+      const uniqueProductIds = [...new Set(allProductIds)];
+      const existingProducts = await rfqModel.checkIfExists(
+        'tbl_product',
+        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+      );
+      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
   
       const vendorCache = {};
-
-      let sheetData = null;
-      if(sheetId && !isNaN(parseInt(sheetId))) {
-        let sheetDetails = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', `id = ${sheetId}`);
-        if(sheetDetails) {
-          sheetData = sheetDetails[0];
-        }
-      }
   
       for (const item of boqDataJson) {
-        if(sheetData && sheetData.sheet_name != item.sheet_name) continue;
+        if (item.is_product == "No") {
+          continue
+       }
 
-        const cleanIds = Array.isArray(item?.list_of_product_ids)
-          ? item.list_of_product_ids.map(id => parseInt(id)).filter(id => !isNaN(id))
-          : [];
+        const cleanId = item?.variant_id;
   
-        if (cleanIds.length === 0) {
+        if (!cleanId) {
           validationErrors.push({
             errors: { product: `${item.fetched_product_name} - Product Not Found` },
           });
           continue;
         }
   
-        const validProductId = cleanIds.find(id => existingProductIdSet.has(id));
+        const validProductId = existingProductIdSet.has(cleanId) ? cleanId : null;
   
         if (!validProductId) {
           validationErrors.push({
@@ -5321,18 +5348,19 @@ const rfqController = {
           continue;
         }
   
-        const vendorKey = item.fetched_product_name || item.core_product_name;
-        if (!vendorCache[vendorKey]) {
+        const productName = item.fetched_product_name || item.core_product_name;
+
+        if (!vendorCache[validProductId]) {
           const vendors = await rfqModel.genericSearchVendors(
             user.id,
+            validProductId,
             null,
-            vendorKey,
             { vendorId: 'user_id', vendorName: 'name' }
           );
-          vendorCache[vendorKey] = vendors;
+          vendorCache[validProductId] = vendors;
         }
   
-        const vendorResult = vendorCache[variantId];
+        const vendorResult = vendorCache[vendorKey];
   
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
@@ -5345,9 +5373,9 @@ const rfqController = {
         const variantCount = globalVariantCount[variantId] ?? 0;
   
         products.push({
-          product_id: variantId,
-          name: item.fetched_product_name || item.core_product_name || "Unnamed Product",
-          variant: variantCount,
+          product_id: validProductId,
+          name: vendorKey || "Unnamed Product",
+          variant,
           spec: [
             { title: "Size", value: item.size || "" },
             { title: "Spec", value: item.feature_or_specifications || "" },
@@ -5380,7 +5408,8 @@ const rfqController = {
         terms: transformedTermList,
         termList,
         term_and_condition_files: [],
-        sheetNameList: Array.from(sheetNameList),
+        sheetNameList: (availableSheets && availableSheets.length > 0) ? availableSheets.map(sheet => sheet.sheet_name) : Array.from(sheetNameList),
+        availableSheets,
       };
 
       return [validationErrors, finalObject];
@@ -5395,9 +5424,14 @@ const rfqController = {
   magicSearchRfqCreate: async (req, res, next) => {
     try {
       let aiProcessedBoqJson = req.body.jsonFileUrl;
+      let availableSheets = req.body.availableSheets
       const user = req.user;
+
+      if(availableSheets && availableSheets.length > 0) {
+        aiProcessedBoqJson = availableSheets[0]?.download_url ?? aiProcessedBoqJson
+      }
   
-      const [validationErrors, processedData] = await rfqController.processRfqDraftSheetWise(aiProcessedBoqJson, user)
+      const [validationErrors, processedData] = await rfqController.processRfqDraftSheetWise(aiProcessedBoqJson, user, null, null, availableSheets)
 
       const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, aiProcessedBoqJson)
       const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq)

@@ -24,10 +24,32 @@ const rfqModel = {
     });
   },
 
+  checkRFQCompletion: async (rfq_id) => {
+    try {
+      let totalQ = `
+        SELECT DISTINCT(product_variant_id) 
+          FROM tbl_rfq_products rp
+          WHERE rp.rfq_id = $1;
+      `
+
+      let qualifiedQ = `
+        SELECT DISTINCT(product_variant_id) 
+          FROM tbl_rfq_products_specs s
+          WHERE s.rfq_id = $1 AND s.title IN ('Quantity', 'Unit') AND TRIM(s.value) != ''
+            AND TRIM(s.value) != 'NA';
+      `;
+
+      const totalRes = await db.any(totalQ, [rfq_id]);
+      const qualifiedRes = await db.any(qualifiedQ, [rfq_id]);
+      return ((totalRes ?? []).length == (qualifiedRes ?? []).length);
+    } catch (error) {
+      throw error;
+    }
+  },
+
   getSheetsForDraftRfq: async (rfq_id, is_processed, sheet_id) => {
     try {
       const condition = `rfq_id = ${rfq_id} ${is_processed && is_processed == 'true' ? 'AND is_processed' : ''} ${sheet_id && !isNaN(parseInt(sheet_id)) ? ` AND id = ${sheet_id}` : ``} ORDER BY id`
-
       return await rfqModel.checkIfExists('tbl_rfq_draft_sheets', condition)
     } catch (error) {
       throw error;
@@ -181,7 +203,6 @@ const rfqModel = {
           }
         }
 
-
         // Insert into tbl_rfq
         let rfqQuery = ``;
         let rfqQueryValues = [];
@@ -266,16 +287,25 @@ const rfqModel = {
 
         const { id: rfq_id } = rfqResult;
 
+        const sheetDetails = data?.availableSheets ?? data?.sheetNameList ?? [];
+
         // Inserting every sheets
         if(!sheetId && !rfqId)
-          for(const sheet_name of (data?.sheetNameList ?? [])) {
-            const parameters = {
+          for(const sheet of sheetDetails) {
+            let parameters = {
               rfq_id,
-              sheet_name,
-              is_processed: false
+              is_processed: false,
             };
+            if(typeof sheet == 'object' && 'download_url' in sheet) {
+              parameters.sheet_name = sheet.sheet_name;
+              parameters.processed_url = sheet.download_url;
+            }
+            else {
+              parameters.sheet_name = sheet;
+              parameters.processed_url = processedUrl
+            }
             const sheetInsertionResult = await rfqModel.insert('tbl_rfq_draft_sheets', parameters, t)
-            console.log(`INSERTED ${sheet_name} AS ${sheetInsertionResult}`)
+            console.log(`INSERTED ${sheet?.sheet_name ?? sheet} AS ${sheetInsertionResult}`)
           }
 
         // Map all the terms to this rfq, defaults to all the terms map
@@ -292,15 +322,13 @@ const rfqModel = {
 
         // Insert into tbl_rfq_products and get back their IDs
         for (const product of data.products) {
-          if(product.sheet_name != sheetToProcess.sheet_name) continue;
-
-          let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${product.sheet_name}'`;
+          let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${sheetToProcess.sheet_name}'`;
           let sheet = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', parameter, t)
 
           if(!sheet)
             sheet = null;
           else 
-          sheet = sheet[0];
+           sheet = sheet[0];
 
           const productQuery = `
             INSERT INTO tbl_rfq_products (
@@ -535,12 +563,12 @@ const rfqModel = {
     const conditionValues = conditionKeys.map(key => conditions[key]);
 
     let includeCondition = ``;
-    if(includeMeta) {
+    if(includeMeta && includeMeta.values && includeMeta.values.filter(Boolean).length > 0) {
       includeCondition += ` AND ${includeMeta.key} IN (${includeMeta.values.join(",")})`
     }
 
     const excludeCondition = ``;
-    if(excludeMeta) {
+    if(excludeMeta && excludeMeta.values && excludeMeta.values.filter(Boolean).length > 0) {
       excludeCondition += ` AND ${excludeMeta.key} NOT IN (${excludeMeta.values.join(",")})`
     }
 
@@ -2808,7 +2836,7 @@ WHERE row_num_by_name_category = 1
     responseKeys,
   ) => {
 
-    productName = productName?.toLowerCase()
+  productName = productName?.toLowerCase()
 
   let q = `
     SELECT *,
@@ -2866,7 +2894,7 @@ WHERE row_num_by_name_category = 1
       WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
         AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
         AND tu.is_deleted = 0 AND tu.status = 1 
-        AND ${productId ? `pv.id = $1` : `pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER($1))`}
+        AND ${productId ? `pv.id = $1` : productName ? `LOWER(pv.name) = LOWER($1)` : ``}
         AND tu.email IS NOT NULL
 
     ) AS distinct_vendors
