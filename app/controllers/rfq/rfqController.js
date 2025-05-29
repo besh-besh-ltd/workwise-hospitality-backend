@@ -3785,6 +3785,7 @@ const rfqController = {
     let vendorType = '';
     let prevWorkedWith = '';
     let myVendorType = '';
+    const productMakes = req.body?.productMakes || [] 
     search_key = req.body?.search_key ? req.body?.search_key : '';
     category_id = req.body?.category_id ? req.body?.category_id : '';
     approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
@@ -3859,32 +3860,10 @@ const rfqController = {
             prevWorkedWith,
             vendor_name,
             myVendorType,
+            "", // responseKeys : function accepting this - need to recheck it's use and remove it if not required 
+            productMakes
           );
 
-          let dummyOBJ = {
-            sp: false,
-            id: '**',
-            vendor_name: '***** ******',
-            email: '********@*****.***',
-            mobile: '**********',
-            company_name: '******',
-            address: '******** ******* ** ****** **** ******** ****',
-            image_url: null,
-            vendor_approved: [
-              {
-                id: '**',
-                vendor_approve: '****'
-              },
-              {
-                id: '**',
-                vendor_approve: '**** **'
-              },
-              {
-                id: '**',
-                vendor_approve: '****'
-              }
-            ]
-          };
           let items_to_show = 1;
           let total_items = vendorResult.length;
           let rest_items = 0;
@@ -5308,18 +5287,6 @@ const rfqController = {
       const sheetNameList = new Set();
       const globalVariantCount = {};
   
-      const allProductIds = boqDataJson.flatMap(item =>
-        (Array.isArray(item?.list_of_product_ids)
-          ? item.list_of_product_ids.map(id => parseInt(id)).filter(id => !isNaN(id))
-          : [])
-      );
-  
-      const uniqueProductIds = [...new Set(allProductIds)];
-      const existingProducts = await rfqModel.checkIfExists(
-        'tbl_product',
-        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
-      );
-      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
   
       const vendorCache = {};
 
@@ -5365,23 +5332,22 @@ const rfqController = {
           vendorCache[vendorKey] = vendors;
         }
   
-        const vendorResult = vendorCache[vendorKey];
+        const vendorResult = vendorCache[variantId];
   
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             errors: {
-              vendor: `${item.fetched_product_name} - Vendor Not Present For The Product`,
-            },
+              vendor: `${ProductName} - No Vendors Found` }
           });
           continue;
         }
   
-        const variant = globalVariantCount?.[validProductId] ?? 0;
+        const variantCount = globalVariantCount[variantId] ?? 0;
   
         products.push({
-          product_id: validProductId,
-          name: vendorKey || "Unnamed Product",
-          variant,
+          product_id: variantId,
+          name: item.fetched_product_name || item.core_product_name || "Unnamed Product",
+          variant: variantCount,
           spec: [
             { title: "Size", value: item.size || "" },
             { title: "Spec", value: item.feature_or_specifications || "" },
@@ -5401,7 +5367,7 @@ const rfqController = {
           sheet_name: item.sheet_name || "",
         });
   
-        globalVariantCount[validProductId] = variant + 1;
+        globalVariantCount[variantId] = variantCount + 1;
         sheetNameList.add(item.sheet_name || "");
       }
   

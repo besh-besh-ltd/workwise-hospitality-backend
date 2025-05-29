@@ -224,6 +224,8 @@ productRoutes.delete(
   productController.deleteProductVariant
 );
 
+
+// used to map product-variant with vendor
 productRoutes.post(
   '/map-variant-with-vendor',
   passportSignIn,
@@ -236,6 +238,8 @@ productRoutes.get(
   productController.getVariantMappings
 );
 
+
+// get variant + vendor mapping by id, including variant and products basic details
 productRoutes.get(
   '/variant-mappings/:id',
   passportSignIn,
@@ -249,10 +253,14 @@ productRoutes.put(
   productController.approveMapping
 );
 
+
+/**  used to make changes in variant and vendor mapping
+ *  currently we only update, vendor approve by list and prodict make after mapping vendor and variant
+ *   */
 productRoutes.post(
-  '/variant-mapping-approve',
+  '/variant-vendor-mapping',
   passportSignIn,
-  productController.approvedByVariantMapping
+  productController.updateVariantVendorMapping
 )
 
 export default productRoutes;

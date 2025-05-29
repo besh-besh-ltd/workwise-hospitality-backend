@@ -2627,6 +2627,8 @@ WHERE row_num_by_name_category = 1
     });
   }
   ,
+
+  // 25-05-2025 mukul jatav, product make added 
   searchVendor: async (
     buyerId,
     search_key="",
@@ -2641,6 +2643,7 @@ WHERE row_num_by_name_category = 1
     vendor_name, // Added vendor_name parameter
     myVendorType,
     responseKeys,
+    productMakes
   ) => {
 
     // Adding dynamic turnover condition
@@ -2771,6 +2774,15 @@ WHERE row_num_by_name_category = 1
         ${prevWorkedWith === 'prev_finalized' ? `AND qf.id IS NOT NULL` : ``}
         ${prevWorkedWith === 'rfq_sent' ? `AND rfqv.user_id IS NOT NULL` : ``}
 
+        ${productMakes && productMakes.length > 0 ? `
+         AND EXISTS (
+           SELECT 1
+           FROM tbl_product_variant_vendor_make pvmm
+           WHERE pvmm.variant_vendor_map_id = pvvm.id
+           AND LOWER(pvmm.make_name) IN (${productMakes.map(m => `'${m.toLowerCase().trim()}'`).join(", ")})
+         )
+       ` : ``}
+       
     ) AS distinct_vendors
     ORDER BY ${vendor_name ? 'similarity_score DESC, is_linked_with_buyer DESC' : 'is_linked_with_buyer DESC, RANDOM()'};
 `;

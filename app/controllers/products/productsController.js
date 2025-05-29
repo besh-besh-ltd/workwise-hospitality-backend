@@ -29,6 +29,7 @@ import {
   schemas,
   validateBodyController
 } from '../../validations/paramValidation/userValidation.js';
+import generalModel from '../../models/generalModel.js';
 async function getAllData(products) {
   const promises = products.map(async (item) => {
     try {
@@ -642,22 +643,6 @@ const ProductsController = {
         })
         .end();
     } catch (err) {
-      /* if (req.files?.featured && req.files?.featured.length > 0) {
-        fs.unlink(req.files.featured[0].path, (unlinkError) => {
-          if (unlinkError) {
-            console.error('Error deleting file:', unlinkError);
-          }
-        });
-      }
-      if (req.files?.gallery && req.files?.gallery.length > 0) {
-        req.files.gallery.forEach((file) => {
-          fs.unlink(file.path, (unlinkError) => {
-            if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
-            }
-          });
-        });
-      } */
       logError(err);
       res
         .status(400)
@@ -781,12 +766,6 @@ const ProductsController = {
         return;
       }
 
-      // const options = {
-      //   header: 1, // Treat the first row as header
-      //   defval: '', // Replace undefined or null values with an empty string
-      //   blankrows: false // Do not include blank rows
-      // };
-
       // Convert sheet to JSON
       // console.log(sheet);
       const jsonData = xlsx.utils.sheet_to_json(sheet);
@@ -873,24 +852,6 @@ const ProductsController = {
             // console.log('product ==>>>>>>>>', product);
             productId = product.id;
 
-            // if (value['Specification Key'] && value['Specification Value']) {
-            //   let varientObj = {
-            //     product_id: productId,
-            //     variant_name: value['Specification Key'],
-            //     variant_value: value['Specification Value']
-            //   };
-            //   // console.log(categoryObj);
-
-            //   await productModel.createProductveriants(varientObj);
-            // }
-
-            // if (value['Category']) {
-            //   let categoryObj = {
-            //     product_id: productId,
-            //     category_name: value['Category']
-            //   };
-            //   await productModel.createProductCategory(categoryObj);
-            // }
           } else {
             isMaster = 1;
             let productDetails = await productModel.vendorProductDetails(
@@ -1280,6 +1241,31 @@ const ProductsController = {
       return res
         .status(500)
         .json({ error: 'Internal server error. Please try again later.' })
+        .end();
+    }
+  },
+
+   // 25-05-2025 mukul jatav. to fetch unique make list 
+  getProductMakeList: async (req, res, next) =>{
+    try {
+      
+     const { variant_id } = req.query;
+     const makeList = await productModel.getMakeListByVariantId(variant_id);
+
+     if (!makeList || makeList.length === 0) {
+     return res.status(204).end(); // No Content, no body
+     }
+
+      return res.status(200).json({ status: 1, data: makeList }).end();
+
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
         .end();
     }
   }

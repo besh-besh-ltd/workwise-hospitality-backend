@@ -3295,6 +3295,7 @@ const productController = {
       const variantId = req.body.variant_id || req.body.product_variant_id;
       const vendorId = req.body.vendor_id;
       let vendorApproveId = req.body.approved_by ?? [];
+      const makeList = req.body.make_list || [];
       
       // Validate input
       if (!variantId || !vendorId) {
@@ -3349,6 +3350,22 @@ const productController = {
       
       // Create the mapping
       const mappingResult = await productModel.createProductVariantVendorMapping(mappingObj);
+
+      // Handle variant-vendor map- make insertion
+      const tableName = 'tbl_product_variant_vendor_make';
+      
+      const makeData = makeList
+      .filter(makeName => makeName && makeName.trim() !== '') // Exclude null/empty/whitespace
+      .map(makeName => ({
+        variant_vendor_map_id: mappingResult.id,
+        make_name: makeName.trim(), 
+      }));
+      
+      // Insert make datam if there are any makes to insert
+      if (makeData.length > 0) {
+        await generalModel.insertMany(tableName, makeData);
+      }
+
 
       console.log("MAPPING RES: ", mappingResult, "\nVENDOR APPROVE ID: ", vendorApproveId);
 
@@ -3722,9 +3739,9 @@ const productController = {
       });
     }
   },
-  approvedByVariantMapping: async (req, res) => {
+  updateVariantVendorMapping: async (req, res) => {
     try {
-      let { mapping_id, approved_id } = req.body;
+      let { mapping_id, approved_id, make_list } = req.body;
       if (!mapping_id || !approved_id) {
         return res.status(400).json({
           status: 3,
@@ -3742,6 +3759,41 @@ const productController = {
           message: 'Mapping not found'
         });
       }
+
+
+      //  START: Handle makes for the mapping
+
+      // fetch existing product makes for the mapping
+      const tblProductMake = 'tbl_product_variant_vendor_make';
+      const fetchedMakeList = await rfqModel.checkIfExists(tblProductMake, `variant_vendor_map_id = ${mapping_id}`);
+  
+      // Prepare clean lists
+      const existingMakes = fetchedMakeList.map(m => m.make_name?.toLowerCase().trim());
+      const newMakes = (make_list || []).filter(m => m && m.trim()).map(m => m.toLowerCase().trim());
+  
+      // Identify makes to delete
+      const makesToDelete = fetchedMakeList
+        .filter(m => !newMakes.includes(m.make_name?.toLowerCase().trim()))
+        .map(m => m.id); // Collect the IDs to delete
+  
+      // Identify makes to insert
+      const makesToInsert = newMakes
+        .filter(m => !existingMakes.includes(m))
+        .map(m => ({
+          variant_vendor_map_id: mapping_id,
+          make_name: m
+        }));
+              // Perform insertion if needed
+      if (makesToInsert.length > 0) {
+        const result = await generalModel.insertMany(tblProductMake, makesToInsert);
+      }
+  
+       // Perform deletion if needed
+       if(makesToDelete.length>0){
+         await generalModel.deleteManyByIds("tbl_product_variant_vendor_make", makesToDelete);
+      }
+    //  END: Handle makes for the mapping
+
       // Check if approved ID exists
       // Dynamically build placeholders: $1, $2, ...
       const tbl = 'tbl_vendor_approve';
@@ -3751,8 +3803,6 @@ const productController = {
 
       for (let id of approved_id) {
         const result = await rfqModel.checkIfExists(tbl, `id = ${id}`);
-        // console.log("RESULT: ", result);
-        // Check if the result is null or undefined
         if (!result) {
           missingIds.push(id);
         }
@@ -3765,14 +3815,7 @@ const productController = {
         });
       }
 
-
-
-      // const approvedObj = {
-      //   product_id: 0, // Nowhere its used hence hardcoded to 0
-      //   variant_vendor_mapping_id: mapping_id,
-      //   vendor_approve_id: approved_id
-      // };
-       //Delete the records first
+      //Delete the records first
       await generalModel.deleteFromTable("tbl_vendorapprove_product_mapping","variant_vendor_mapping_id", mapping_id);
 
       // Then insert the new records
