@@ -283,7 +283,6 @@ const projectController = {
       const user_type = req.user.user_type;
       const {project_id} = req.params;
 
-      // Changes by Agnij 28-05-2025 [Added admin check for updating projects]
       let udpatedProject;
       
       if (user_type === 7) {
@@ -428,8 +427,6 @@ const projectController = {
         res.status(500).json({ status: 3, message: 'Server error' });
       }
     },
-    
-    // Changes by Agnij 14-01-2025 [Added controller methods for project team operations]
     
     // Get team members for a project
     getProjectTeamMembers: async (req, res, next) => {
@@ -691,6 +688,27 @@ const projectController = {
         return res.status(400).json({
           status: false,
           message: Config.errorText.value
+        });
+      }
+    },
+    
+    getUserProjectsByUserId: async (req, res, next) => {
+      try {
+        const { user_id } = req.params;
+        
+        // Get projects where the specified user is a team member
+        const projects = await projectModel.getUserProjects(user_id);
+        
+        return res.status(200).json({
+          status: true,
+          message: "User projects retrieved successfully",
+          data: projects
+        });
+      } catch (err) {
+        logError(err);
+        return res.status(400).json({
+          status: false,
+          message: err.message || Config.errorText.value
         });
       }
     }
