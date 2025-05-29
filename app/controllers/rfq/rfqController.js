@@ -4781,8 +4781,12 @@ const rfqController = {
       console.log(" 4781 =>>>>> rfq controller boq ", boqDataJson)
 
 
-
       for (const item of boqDataJson) {
+
+        if (item.is_product == "No") {
+          continue
+       }
+
         const variantId = item.variant_id ? parseInt(item.variant_id) : null;
         const ProductName = item.fetched_product_name || item.core_product_name || "Unnamed Product";
 
