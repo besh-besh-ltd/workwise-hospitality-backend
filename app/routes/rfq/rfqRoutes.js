@@ -47,12 +47,6 @@ RfqRoutes.post(
   rfqController.removeVendorFromDraft
 );
 
-RfqRoutes.post(
-  '/add-product-to-rfq',
-  passportSignIn,
-  rfqController.addProductVendorsInEditRfq
-);
-
 RfqRoutes.put(
   '/update',
   passportSignIn,
@@ -119,13 +113,6 @@ RfqRoutes.post(
   validateDbBody.user_id_profileexists,
   rfqController.getVendors
 );
-
-RfqRoutes.post(
-  '/get-vendors-for-product',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
-  rfqController.getVendorsForProduct
-)
 
 RfqRoutes.post(
   '/quote/create',
@@ -231,33 +218,6 @@ RfqRoutes.post('/magic-search-rfq-preview',
   validateDbBody.rfq_project_exist,
   // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
   rfqController.magicSearchRfqCreate
-);
-
-RfqRoutes.get('/process-magic-search-draft',
-  passportSignIn, 
-  validateDbBody.user_id_profileexists,
-  acl([2]),
-  validateDbBody.rfq_project_exist,
-  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
-  rfqController.processMagicSearchDraft
-);
-
-RfqRoutes.get('/draft-sheets',
-  passportSignIn, 
-  validateDbBody.user_id_profileexists,
-  acl([2]),
-  validateDbBody.rfq_project_exist,
-  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
-  rfqController.getRfqDraftSheets
-);
-
-RfqRoutes.get('/draft-sheet-wise',
-  passportSignIn, 
-  validateDbBody.user_id_profileexists,
-  acl([2]),
-  validateDbBody.rfq_project_exist,
-  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
-  rfqController.getDraftRfqSheetWise
 );
 
 RfqRoutes.post(
@@ -417,28 +377,5 @@ RfqRoutes.post('/report/send-on-email',
   rfqController.sendReportOnEmail
 )
 
-RfqRoutes.get(
-  '/rfq-draft-data',
-  passportSignIn,
-  rfqController.getRFQDraftData
-);
-
-RfqRoutes.post(
-  '/get-draft-rfqs',
-  passportSignIn,
-  rfqController.getDraftRFQs
-);
-
-RfqRoutes.get(
-  '/get-draft-by-id/:id',
-  passportSignIn,
-  rfqController.getDraftById
-);
-
-RfqRoutes.post(
-  '/draft-product-vendors',
-  passportSignIn,
-  rfqController.createOrUpdateRfqDraftWithProductVendors
-);
 
 export default RfqRoutes;

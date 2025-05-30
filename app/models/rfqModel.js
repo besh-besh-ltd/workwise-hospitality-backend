@@ -2,7 +2,7 @@ import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 
 const rfqModel = {
-  insert: async (table_name, data, db_con = db) => {
+  insert: async (table_name, data) => {
     const keys = Object.keys(data);
     const values = Object.values(data);
     const d_keys = keys.join(', ');
@@ -13,7 +13,7 @@ const rfqModel = {
 
 
     return new Promise(function (resolve, reject) {
-      db_con.query(query, values)
+      db.query(query, values)
         .then(function (result) {
           resolve(result);
         })
@@ -22,365 +22,6 @@ const rfqModel = {
           reject(error);
         });
     });
-  },
-
-  getSheetsForDraftRfq: async (rfq_id, is_processed, sheet_id) => {
-    try {
-      const condition = `rfq_id = ${rfq_id} ${is_processed && is_processed == 'true' ? 'AND is_processed' : ''} ${sheet_id && !isNaN(parseInt(sheet_id)) ? ` AND id = ${sheet_id}` : ``} ORDER BY id`
-
-      return await rfqModel.checkIfExists('tbl_rfq_draft_sheets', condition)
-    } catch (error) {
-      throw error;
-    }
-  },
-
-  getDraftRfqSheetWise: async (rfq_id, sheet_id) => {
-    try {
-
-      let q = `
-        SELECT 
-          rfq.response_email,
-          rfq.contact_name,
-          rfq.contact_number,
-          rfq.company_name,
-
-          jsonb_agg(
-            jsonb_build_object(
-              'product_id', pv.id,
-              'name', COALESCE(pv.name, 'Unnamed Product'),
-              'variant', rp.variant,
-              'spec', (
-                SELECT jsonb_agg(
-                  jsonb_build_object(
-                    'title', s.title,
-                    'value', s.value
-                  )
-                )
-                FROM tbl_rfq_products_specs s
-                WHERE s.product_variant_id = rp.product_variant_id
-                  AND s.variant = rp.variant
-                  AND s.rfq_id = rfq.id
-              ),
-              'vendors', (
-                SELECT jsonb_agg(
-                  jsonb_build_object(
-                    'id', tu.id,
-                    'vendor_name', tu.name,
-                    'email', tu.email,
-                    'mobile', tu.mobile,
-                    'company_name', COALESCE(tc.company_name, tu.organization_name),
-                    'address', tu.address,
-                    'is_private', tc.is_private,
-                    'turnover', tc.turnover,
-                    'nature_of_business', tc.nature_of_business,
-                    'city_name', lc.city_name,
-                    'state_name', ls.state_name,
-                    'country_name', lcn.country_name
-                  )
-                )
-                FROM tbl_rfq_product_vendors rpv
-                JOIN tbl_users tu ON tu.id = rpv.user_id
-                LEFT JOIN tbl_company tc ON tc.user_id = tu.id
-                LEFT JOIN tbl_location_cities lc ON lc.id = tu.city
-                LEFT JOIN tbl_location_states ls ON ls.id = tu.state
-                LEFT JOIN tbl_location_country lcn ON lcn.id = tu.country::INT
-                WHERE rpv.product_variant_id = rp.product_variant_id
-                  AND rpv.variant = rp.variant
-                  AND rpv.rfq_id = rfq.id
-              ),
-              'comment', COALESCE(rp.comment, ''),
-              'defaultSelectedVAB', '',
-              'TDS_flies', (
-                SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'TDS'
-              ),
-              'QAP_files', (
-                SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'QAP'
-              ),
-              'SPEC_files', (
-                SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'SPEC'
-              ),
-              'datasheet_file', (
-                SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'TDS'
-              ),
-              'spec_file', (
-                SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'SPEC'
-              ),
-              'qap_file', (
-                SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'QAP'
-              ),
-              'sheet_name', COALESCE(rds.sheet_name, '')
-            )
-          ) AS products
-
-        FROM tbl_rfq rfq
-        JOIN tbl_rfq_draft_sheets rds ON rds.rfq_id = rfq.id
-        JOIN tbl_rfq_products rp ON rp.rfq_id = rfq.id AND rp.sheet_id = rds.id
-        JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
-
-        WHERE rfq.id = $1 AND rds.id = $2 AND rds.is_processed
-
-        GROUP BY rfq.response_email, rfq.contact_name, rfq.contact_number, rfq.company_name;
-      `;
-
-      try {
-        const result = await db.many(q, [rfq_id, sheet_id]);
-        return result;
-      } catch (error) {
-        // If no data found, db.many throws an error, but we want to return an empty array
-        if (error.code === 0) {
-          return [];
-        }
-        throw error;
-      }
-    } catch (error) {
-      throw error;
-    }
-  },
-
-  saveMagicSearchInDraft: async (data, nextRFQNumber, createdBy, processedUrl, rfqId, sheetId) => {
-    try {
-      return await db.tx(async t => {
-
-        let sheetToProcess = null;
-
-        let q = `
-         SELECT id, sheet_name FROM tbl_rfq_draft_sheets
-        `
-        let sheetValues = [];
-        
-        if(sheetId && !isNaN(parseInt(sheetId))) {
-          q += 'WHERE id = $1';
-          sheetValues.push(sheetId)
-        } else if(rfqId) {
-          q += 'WHERE rfq_id = $1 AND NOT is_processed ORDER BY id'
-          sheetValues.push(rfqId);
-        } else {
-          sheetToProcess = {
-            sheet_name: data?.sheetNameList?.[0],
-          }
-        }
-
-        if(sheetId || rfqId) {
-          let sheetData = await t.one(q, sheetValues);
-          if(sheetData && !sheetData.is_processed) {
-            sheetToProcess = sheetData;
-          } else {
-            throw Error("RFQ Draft Sheet not found or is already processed!");
-          }
-        }
-
-
-        // Insert into tbl_rfq
-        let rfqQuery = ``;
-        let rfqQueryValues = [];
-
-        if(rfqId && !isNaN(parseInt(rfqId))) {
-          rfqQuery = `SELECT id FROM tbl_rfq WHERE id = $1 AND is_published = 0`;
-          rfqQueryValues.push(rfqId);
-        } else {
-          rfqQuery = `
-            INSERT INTO tbl_rfq (
-              rfq_no, 
-              comment, 
-              location,
-              company_name, 
-              response_email, 
-              contact_name, 
-              contact_number, 
-              is_published, 
-              status,
-              reverse_auction,
-              created_by, 
-              updated_by, 
-              bid_end_date,
-              timestamp,
-              rfq_added_from,
-              processed_url
-            )
-            VALUES (
-              $1, 
-              $2, 
-              $3, 
-              $4, 
-              $5,
-              $6,
-              $7,
-              $8,
-              $9,
-              $10,
-              $11,
-              $12,
-              $13,
-              $14,
-              $15,
-              $16
-            )
-            RETURNING id
-          `;
-  
-          const today = new Date();
-          const nextMonth = new Date(today);
-          nextMonth.setMonth(today.getMonth() + 1);
-  
-          const formattedDate = nextMonth.toISOString().split('T')[0];
-  
-          const rfqValues = [
-            nextRFQNumber,
-            "",
-            "",
-            data.company_name,
-            data.response_email,
-            data.contact_name,
-            data.contact_number,
-            0,
-            1,
-            0,
-            createdBy,
-            createdBy,
-            formattedDate,
-            new Date().toISOString(),
-            'magic',
-            processedUrl,
-          ];
-
-          rfqQueryValues.push(...rfqValues);
-        }
-
-        const rfqResult = await t.one(rfqQuery, rfqQueryValues);
-
-        console.log("RFQ INSERTION RESULT -> ", rfqResult)
-
-        if(!rfqResult) throw Error("RFQ does not exist or is no longer in draft!")
-
-        const { id: rfq_id } = rfqResult;
-
-        // Inserting every sheets
-        if(!sheetId && !rfqId)
-          for(const sheet_name of (data?.sheetNameList ?? [])) {
-            const parameters = {
-              rfq_id,
-              sheet_name,
-              is_processed: false
-            };
-            const sheetInsertionResult = await rfqModel.insert('tbl_rfq_draft_sheets', parameters, t)
-            console.log(`INSERTED ${sheet_name} AS ${sheetInsertionResult}`)
-          }
-
-        // Map all the terms to this rfq, defaults to all the terms map
-        if(!sheetId)
-          for (const term of data.termList) {
-            if(!term || !term.id) continue;
-            const dataToInsert = {
-              rfq_id,
-              terms_id: term.id
-            }
-
-            await rfqModel.insert('tbl_rfq_terms_map', dataToInsert, t)
-          }
-
-        // Insert into tbl_rfq_products and get back their IDs
-        for (const product of data.products) {
-          if(product.sheet_name != sheetToProcess.sheet_name) continue;
-
-          let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${product.sheet_name}'`;
-          let sheet = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', parameter, t)
-
-          if(!sheet)
-            sheet = null;
-          else 
-          sheet = sheet[0];
-
-          const productQuery = `
-            INSERT INTO tbl_rfq_products (
-              rfq_id, 
-              product_variant_id, 
-              variant, 
-              comment, 
-              datasheet, 
-              spec_file, 
-              qap_file, 
-              qap, 
-              sheet_id
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING id
-          `;
-
-          const productValues = [
-            rfq_id,
-            product.product_id,
-            product.variant,
-            product.comment,
-            0, // datasheet - using 0 as a default value to avoid null constraint
-            '', // spec_file - this field will be removed from database
-            '', // qap_file - this field will be removed from database
-            '', // qap - using empty string as default
-            sheet.id,
-          ];
-
-          const productInsertionResult = await t.one(productQuery, productValues);
-
-          console.log("PRODUCT INSERTION RESULT -> ", productInsertionResult);
-
-          // Insert into tbl_rfq_products_specs
-          for (const spec of product.spec || []) {
-            await t.none(
-              `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, variant, title, value, sheet_id)
-              VALUES ($1, $2, $3, $4, $5, $6)`,
-              [rfq_id, product.product_id, product.variant, spec.title, spec.value, sheet.id]
-            );
-          }
-
-          // 4. Insert into tbl_rfq_product_vendors
-          for (const vendor of product.vendors || []) {
-            // Skip vendors without user_id
-            if (!vendor.user_id && !vendor.id) continue;
-            
-            // Use id as user_id if user_id is not available
-            const userId = vendor.user_id || vendor.id;
-            
-            const vendorInsertionResult = await t.none(
-              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id)
-              VALUES ($1, $2, $3, $4, $5)`,
-              [rfq_id, product.product_id, product.variant, userId, sheet.id]
-            );
-
-            console.log("VENDOR INSERTION RESULT -> ", vendorInsertionResult)
-          }
-        }
-
-        let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${sheetToProcess.sheet_name}'`;
-        let sheet = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', parameter, t)
-
-        console.log("SHEET ----- ", sheet);
-        if(sheet && sheet.length > 0) {
-          sheet = sheet[0];
-          const updatableData = {
-            is_processed: true,
-            processed_at: new Date().toISOString(),
-          }
-          await rfqModel.update('tbl_rfq_draft_sheets', updatableData, sheet.id, t);
-        }
-
-        return rfq_id;
-      });
-
-    } catch (error) {
-      console.error('Transaction failed. All operations rolled back.', error);
-      throw error;
-    }
   },
 
   insertReturnId: async (table_name, data) => {
@@ -529,24 +170,14 @@ const rfqModel = {
     }
   },
 
-  deleteWithReturnIds: async (table, conditions, includeMeta, excludeMeta) => {
+  deleteWithReturnIds: async (table, conditions) => {
     const conditionKeys = Object.keys(conditions);
     const conditionString = conditionKeys.map((key, index) => `${key} = $${index + 1}`).join(' AND ');
     const conditionValues = conditionKeys.map(key => conditions[key]);
 
-    let includeCondition = ``;
-    if(includeMeta) {
-      includeCondition += ` AND ${includeMeta.key} IN (${includeMeta.values.join(",")})`
-    }
-
-    const excludeCondition = ``;
-    if(excludeMeta) {
-      excludeCondition += ` AND ${excludeMeta.key} NOT IN (${excludeMeta.values.join(",")})`
-    }
-
     // Query to fetch IDs before deletion
-    const idQuery = `SELECT id FROM ${table} WHERE ${conditionString} ${includeCondition} ${excludeCondition}`;
-    const deleteQuery = `DELETE FROM ${table} WHERE ${conditionString} ${includeCondition} ${excludeCondition}`;
+    const idQuery = `SELECT id FROM ${table} WHERE ${conditionString}`;
+    const deleteQuery = `DELETE FROM ${table} WHERE ${conditionString}`;
 
     return new Promise((resolve, reject) => {
         db.query(idQuery, conditionValues)
@@ -582,47 +213,17 @@ deleteProductFilesByIds: async (rfqProductIds) => {
   },
 
   findAll: async (table, conditions) => {
+    const conditionKeys = Object.keys(conditions);
+    const conditionString = conditionKeys.map((key, index) => `${key} = $${index+1}`).join(' AND ');
+    const conditionValues = conditionKeys.map(key => conditions[key]);
+
+    const query = `SELECT * FROM ${table} WHERE ${conditionString}`;
+
     try {
-      let query = `SELECT * FROM ${table}`;
-      
-      if (conditions && Object.keys(conditions).length > 0) {
-        const whereConditions = [];
-        const values = [];
-        
-        Object.entries(conditions).forEach(([key, value], index) => {
-          whereConditions.push(`${key} = $${index + 1}`);
-          values.push(value);
-        });
-        
-        query += ` WHERE ${whereConditions.join(' AND ')}`;
-      }
-      
-      return await db.query(query, Object.values(conditions || {}));
+        const results  = await db.query(query, conditionValues);
+        return results;
     } catch (error) {
         console.error(`Error finding all from ${table}:`, error);
-        throw error;
-    }
-  },
-  findOne: async (table, conditions) => {
-    try {
-      let query = `SELECT * FROM ${table}`;
-      
-      if (conditions && Object.keys(conditions).length > 0) {
-        const whereConditions = [];
-        const values = [];
-        
-        Object.entries(conditions).forEach(([key, value], index) => {
-          whereConditions.push(`${key} = $${index + 1}`);
-          values.push(value);
-        });
-        
-        query += ` WHERE ${whereConditions.join(' AND ')} LIMIT 1`;
-      }
-      
-      const results = await db.query(query, Object.values(conditions || {}));
-      return results.length > 0 ? results[0] : null;
-    } catch (error) {
-      console.error(`Error finding one from ${table}:`, error);
         throw error;
     }
   },
@@ -690,7 +291,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         });
     });
   },
-  update: async (table_name, data, primary_key, db_con = db) => {
+  update: async (table_name, data, primary_key) => {
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
       .join(', ');
@@ -699,28 +300,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       UPDATE ${table_name}
       SET ${setClause}
       WHERE id = ${primary_key}
-      RETURNING *`;
-
-    return new Promise(function (resolve, reject) {
-      db_con.query(updateQuery, values)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  updateWhere: async (table_name, data, where_clause) => {
-    const setClause = Object.keys(data)
-      .map((key, index) => `${key} = $${index + 1}`)
-      .join(', ');
-    const values = Object.values(data);
-    const updateQuery = `
-      UPDATE ${table_name}
-      SET ${setClause}
-      WHERE ${where_clause}
       RETURNING *`;
 
     return new Promise(function (resolve, reject) {
@@ -990,7 +569,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     });
   },
 
-  getRfqDraftById: async (id, oldestSheet) => {
+  getRfqDraftById: async (id) => {
+
     const q = `SELECT
       RFQ.id AS rfq_id,
       RFQ.rfq_no,
@@ -1010,7 +590,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           'ra_end_date', RFQ.ra_end_date,
           'project_id', RFQ.project_id,
           'location', RFQ.location,
-          'rfq_added_from', RFQ.rfq_added_from,
 
           -- Selected Terms
           'terms', (
@@ -1084,30 +663,29 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                   WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
               ),
               'user_selected_predefined_tds', (RFQ_P.datasheet = '1'),
-              'user_selected_predefined_qap', (RFQ_P.qap = '1'),
-              'sheet_id', RFQ_P.sheet_id
+              'user_selected_predefined_qap', (RFQ_P.qap = '1')
           )
           FROM tbl_rfq_products RFQ_P
           LEFT JOIN tbl_product_variant TV ON RFQ_P.product_variant_id = TV.id
           LEFT JOIN tbl_product T_P ON T_P.id = TV.product_id
           WHERE RFQ.id = RFQ_P.rfq_id
-          ${oldestSheet && oldestSheet.id ? ` AND RFQ_P.sheet_id = $2` : ``}
           ORDER BY RFQ_P.id
       ) AS rfq_products
     FROM tbl_rfq RFQ
     WHERE RFQ.id = $1
     ORDER BY RFQ.id DESC
-    LIMIT 1;
-    `;
-    try {
-      const values = [id];
-      if(oldestSheet && oldestSheet.id) values.push(oldestSheet.id)
+    LIMIT 1;`;
 
-      const result = await db.many(q, values);
-      return result;
-    } catch (error) {
-      throw error;
-    }
+    return new Promise(function (resolve, reject) {
+      db.query(q,[id])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
   },
 
   getNextVariant: async (rfq_id, product_id) => {
@@ -1259,28 +837,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = ${user_id}
     ) AS "quotations",
     ARRAY(
-        SELECT json_build_object(
-        'id', RFQ_P.id, 
-        'product_id', RFQ_P.product_variant_id, 
-        'name', _TPV.name, 
-        'variant', RFQ_P.variant, 
-        'comment', RFQ_P.comment, 
-        'qap', RFQ_P.qap, 
-        'qap_file', (
-          SELECT json_agg(RPF.file_url)
-          FROM tbl_rfq_product_files RPF
-          WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
-        ), 
-        'spec_file', (
-            SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
-        ), 
-        'datasheet_file', (
-            SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
-        ),
+        SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_variant_id, 'variant', RFQ_P.variant, 'comment', RFQ_P.comment, 'spec_file', RFQ_P.spec_file, 'qap', RFQ_P.qap, 'qap_file', RFQ_P.qap_file, 'datasheet_file', RFQ_P.datasheet_file,
           'TDS_flies', (
             SELECT json_agg(RPF.file_url)
             FROM tbl_rfq_product_files RPF
@@ -1318,7 +875,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             WHERE TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
           ),
           'product_specs', (
-            SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title,'value', RFQ_P_SPEC.value))
+            SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title,'value', RFQ_P_SPEC.value,'id', RFQ_P_SPEC.id,'product_id', RFQ_P_SPEC.product_variant_id,'rfq_id', RFQ_P_SPEC.rfq_id,'variant', RFQ_P_SPEC.variant))
             FROM tbl_rfq_products_specs RFQ_P_SPEC
             WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id AND RFQ_P.variant = RFQ_P_SPEC.variant
           ),
@@ -1469,33 +1026,17 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                   SELECT json_build_object(
                     'user_id', U.id,
                     'name', U.name,
-                    'company_name', C.company_name,
-                    'email', U.email,
-                    'address', U.address,
-                    'mobile', U.mobile
+                    'email', U.email
                   )
                   FROM tbl_users U
-                  JOIN tbl_company C ON U.id = C.user_id
                   WHERE RFQ_P_V.user_id = U.id
                 )
               ))
             FROM tbl_rfq_product_vendors RFQ_P_V
             WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id AND RFQ_P.variant = RFQ_P_V.variant
-          ),
-          'vendors', (
-            SELECT json_agg(json_build_object(
-                'user_id', RFQ_P_V.user_id,
-                'name', U.name
-            ))
-            FROM tbl_rfq_product_vendors RFQ_P_V
-            LEFT JOIN tbl_users U ON RFQ_P_V.user_id = U.id
-            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
-              AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
-              AND RFQ_P.variant = RFQ_P_V.variant
           )
         )
         FROM tbl_rfq_products RFQ_P
-        JOIN tbl_product_variant _TPV ON _TPV.id = RFQ_P.product_variant_id
         WHERE RFQ.id = RFQ_P.rfq_id
 
     ) AS "products"
@@ -1785,10 +1326,9 @@ LIMIT 1;`;
       TU.organization_name,
       TC.company_name,
       ARRAY(
-        SELECT json_build_object('id', TPV.id, 'name', TPV.name)
-        FROM tbl_product_variant_vendor_mapping PVVM
-        JOIN tbl_product_variant TPV ON TPV.id = PVVM.product_variant_id
-        WHERE PVVM.vendor_id = TU.id
+        SELECT json_build_object('id', TP.id, 'name', TP.name)
+        FROM tbl_product TP
+        WHERE TU.id = TP.created_by
       ) AS "products"
       FROM tbl_users TU
       JOIN tbl_company TC ON TU.id = TC.user_id
@@ -1804,42 +1344,10 @@ LIMIT 1;`;
         });
     });
   },
-  getVendorsForProduct: async (productId, excludeArray = null) => {
-    try {
-      let q = `
-      SELECT 
-        U.id,
-        U.name,
-        U.email,
-        U.mobile,
-        U.address,
-        U.organization_name,
-        C.company_name
-  
-        FROM tbl_product_variant_vendor_mapping PVVM
-        JOIN tbl_product_variant PV ON PVVM.product_variant_id = PV.id
-        JOIN tbl_users U ON PVVM.vendor_id = U.id
-        JOIN tbl_company C ON C.user_id = U.id
-  
-        WHERE PVVM.product_variant_id = $1
-        ${excludeArray && excludeArray.length > 0 ? ` AND U.id NOT IN ($2:csv)` : ``}
-      `
-
-
-      const params = [productId];
-      if (excludeArray && excludeArray.length > 0) {
-        params.push(excludeArray);
-      }
-  
-      return await db.any(q, params)
-    } catch (error) {
-      throw error;
-    }
-  },
-  checkIfExists: async (table_name, parameter, db_con = db) => {
+  checkIfExists: async (table_name, parameter) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
     return new Promise(function (resolve, reject) {
-      db_con.any(query,[table_name])
+      db.any(query,[table_name,parameter])
         .then(function (data) {
           resolve(data);
         })
@@ -2762,6 +2270,7 @@ WHERE row_num_by_name_category = 1
             WHERE TRIM(nb) IN (${vendorType.map(vt => `'${vt.value.toLowerCase().trim()}'`).join(", ")})
           )
         ` : ``}
+        ${category_id != '' ? `AND c.id = ${category_id}` : ``}
         ${approved_by_id != '' ? `
           AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")})
         ` : ``}
@@ -5858,82 +5367,6 @@ searchVariantVendors: async (product_id, variant_id) => {
     return [];
   }
 },
-getAllDraftRfqs: async (limit, offset, user_id, project_id, sort, reverse_auction, rfq_type, rfq_no) => {
-  return new Promise(function (resolve, reject) {
-    let q = `
-      SELECT
-        RFQ.*,
-        P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
-        (SELECT COUNT(*)
-        FROM tbl_query_messages TQM
-        WHERE TQM.receiver_id = ${user_id}
-        AND TQM.rfq_id = RFQ.id
-        AND TQM.is_seen = false
-        ) AS "unseen_query_count",
-        ARRAY(
-            SELECT json_build_object(
-                'id', RFQ_P.id, 
-                'product_id', RFQ_P.product_variant_id,
-                'product_specs', (
-                    SELECT json_agg(json_build_object(
-                        'title', RFQ_P_SPEC.title, 
-                        'value', RFQ_P_SPEC.value, 
-                        'id', RFQ_P_SPEC.id, 
-                        'product_id', RFQ_P_SPEC.product_variant_id, 
-                        'rfq_id', RFQ_P_SPEC.rfq_id))
-                    FROM tbl_rfq_products_specs RFQ_P_SPEC
-                    WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id 
-                      AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
-                      AND RFQ_P.variant = RFQ_P_SPEC.variant
-                  ),
-                  'product_details', (
-                      SELECT json_agg(json_build_object(
-                          'id', T_P.id,
-                          'name', T_P.name))
-                      FROM tbl_product_variant T_P
-                      WHERE RFQ_P.product_variant_id = T_P.id
-                  )
-              )
-              FROM tbl_rfq_products RFQ_P
-              WHERE RFQ.id = RFQ_P.rfq_id
-          ) AS "products"
-      FROM tbl_rfq RFQ
-      LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
-      WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 0
-      ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
-      ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
-      ${reverse_auction == '-1' ? '' : ` AND RFQ.reverse_auction = ${reverse_auction}`}
-      ${rfq_no == null ? '' : ` AND CAST(RFQ.rfq_no AS TEXT) LIKE '%${rfq_no}%'`}
-      ORDER BY RFQ.id ${sort ? sort : 'ASC'} LIMIT ${limit} OFFSET ${offset}`;
-      
-      const countQuery = `
-        SELECT COUNT(*) AS total_count
-        FROM tbl_rfq RFQ
-        WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 0
-        ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
-        ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
-        ${reverse_auction == '-1' ? '' : ` AND RFQ.reverse_auction = ${reverse_auction}`}
-        ${rfq_no == null ? '' : ` AND CAST(RFQ.rfq_no AS TEXT) LIKE '%${rfq_no}%'`}
-      `;
-
-      db.tx(t => {
-        return t.batch([
-          db.query(q),
-          db.query(countQuery)
-        ]);
-      })
-      .then(([data, countResult]) => {
-        resolve({
-          data: data,
-          total_count: countResult[0].total_count
-        });
-      })
-      .catch(function (err) {
-        let error = new Error(err);
-        reject(error);
-      });
-    });
-  },
 
 }
 export default rfqModel;
