@@ -5295,12 +5295,8 @@ const rfqController = {
       if (processedUrl.startsWith('http:')) {
         processedUrl = processedUrl.replace('http:', 'https:');
       }
-
-      console.log("PROCESSED URL -> ", processedUrl)
   
       const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
-
-      console.log("BOQ DATA JSON -> ", boqDataJson)
 
       const termList = await rfqModel.getAllTerms();
       const transformedTermList = termList.map(term => ({ id: term.id, name: term.term_content }));
@@ -5310,11 +5306,7 @@ const rfqController = {
       const sheetNameList = new Set();
       const globalVariantCount = {};
   
-      const allProductIds = boqDataJson.flatMap(item =>
-        (Array.isArray(item?.list_of_product_ids)
-          ? item.list_of_product_ids.map(id => parseInt(id)).filter(id => !isNaN(id))
-          : [])
-      );
+      const allProductIds = boqDataJson.map(item => item.variant_id);
   
       const uniqueProductIds = [...new Set(allProductIds)];
       const existingProducts = await rfqModel.checkIfExists(
@@ -5360,7 +5352,7 @@ const rfqController = {
           vendorCache[validProductId] = vendors;
         }
   
-        const vendorResult = vendorCache[vendorKey];
+        const vendorResult = vendorCache[validProductId];
   
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
@@ -5374,7 +5366,7 @@ const rfqController = {
   
         products.push({
           product_id: validProductId,
-          name: vendorKey || "Unnamed Product",
+          name: productName || "Unnamed Product",
           variant,
           spec: [
             { title: "Size", value: item.size || "" },
