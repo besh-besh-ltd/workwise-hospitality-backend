@@ -147,6 +147,10 @@ export const projectSchemas = {
     // Schema for removing a team member
     removeTeamMember: Joi.object().keys({
         user_id: Joi.number().required()
+    }),
+    
+    user_id: Joi.object().keys({
+        user_id: Joi.number().integer().required()
     })
 }
 

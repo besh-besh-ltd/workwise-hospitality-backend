@@ -109,5 +109,13 @@ projectRoutes.get(
     passportSignIn,
     projectController.getUserProjects
 )
+// Route for getting all projects assigned to a specific user
+projectRoutes.get(
+    '/user/:user_id/projects',
+    passportSignIn,
+    acl([2, 7]),
+    validateParam(projectSchemas.user_id),
+    projectController.getUserProjectsByUserId
+)
 
 export default projectRoutes;

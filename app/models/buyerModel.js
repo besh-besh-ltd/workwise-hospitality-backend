@@ -19,11 +19,7 @@ const buyerModel = {
       }
       db.any(
         `SELECT tbl_users.*,
-        CASE
-        WHEN new_profile_image IS NULL THEN
-        NULL
-        ELSE new_profile_image
-        END AS profile_image  FROM tbl_users WHERE user_type = 2 ${dynamicQuery}
+        NULL AS profile_image  FROM tbl_users WHERE user_type = 2 ${dynamicQuery}
         ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
       )
@@ -80,11 +76,7 @@ const buyerModel = {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT tbl_users.*,tbl_company.profile,tbl_company.nature_of_business,
-        CASE
-        WHEN new_profile_image IS NULL THEN
-        NULL
-        ELSE new_profile_image
-        END AS profile_image  FROM tbl_users left join tbl_company ON tbl_users.id = tbl_company.user_id  WHERE tbl_users.is_deleted = 0 AND tbl_users.user_type = 2 AND tbl_users.id = $1`,
+        NULL AS profile_image  FROM tbl_users left join tbl_company ON tbl_users.id = tbl_company.user_id  WHERE tbl_users.is_deleted = 0 AND tbl_users.user_type = 2 AND tbl_users.id = $1`,
         [buyerId]
       )
         .then(function (data) {
@@ -150,7 +142,7 @@ const buyerModel = {
     return new Promise(function (resolve, reject) {
       let dynamicUpdate = ``;
       if (buyerObj.originalFilename) {
-        dynamicUpdate = `,new_profile_image = '${buyerObj.fileName}',original_profile_image = '${buyerObj.originalFilename}'`;
+        dynamicUpdate = `,original_profile_image = '${buyerObj.originalFilename}'`;
       }
       db.one(
         `UPDATE 
