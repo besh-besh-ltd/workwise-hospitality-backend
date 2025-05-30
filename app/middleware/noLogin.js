@@ -14,15 +14,20 @@ const noLogin = {
                     if (err) {
                         // Pass errors to Express error handler
                         console.log(err);
+                        
                         return next(err);
                     }
 
                     // Call validateDbBody.user_id_profileexists after passportSignIn
                     validateDbBody.user_id_profileexists(req, res, (err) => {
+                        if (err) {
+                            // Pass errors to Express error handler
+                            return next(err);
+                        }
 
-                    // Set verification flag and proceed to the next middleware
-                    req.is_verified = true;
-                    return next();
+                        // Set verification flag and proceed to the next middleware
+                        req.is_verified = true;
+                        next();
                     });
                 });
             } else {
