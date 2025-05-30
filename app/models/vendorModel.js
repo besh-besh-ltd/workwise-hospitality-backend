@@ -99,8 +99,6 @@ const vendorModel = {
           tbl_users.mobile,
           tbl_users.organization_name,
           tbl_users.status,
-          tbl_users.new_profile_image,
-          tbl_users.original_profile_image,
           tbl_users.created_at,
           tbl_users.updated_at,
           creator.name AS created_by_name,
@@ -125,10 +123,7 @@ const vendorModel = {
             COALESCE(similarity(tbl_users.organization_name, '${escapedName || escapedOrganization}'), 0)
           ) AS similarity_score,
           ` : ''}
-          CASE
-            WHEN tbl_users.new_profile_image IS NULL THEN NULL
-            ELSE tbl_users.new_profile_image
-          END AS profile_image  
+          NULL AS profile_image  
         FROM tbl_users 
         LEFT JOIN tbl_reject_reason trr ON tbl_users.reject_reason_id = trr.id
         LEFT JOIN tbl_users creator ON tbl_users.created_by = creator.id
@@ -369,11 +364,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
               ELSE 0
             END DESC
         ) AS "vendor_approve",
-        CASE
-        WHEN new_profile_image IS NULL THEN
-        NULL
-        ELSE new_profile_image
-        END AS profile_image  FROM tbl_users left join tbl_company on tbl_users.id = tbl_company.user_id  WHERE is_deleted = 0 AND user_type = 3 AND tbl_users.id = $1`,
+        NULL AS profile_image  FROM tbl_users left join tbl_company on tbl_users.id = tbl_company.user_id  WHERE is_deleted = 0 AND user_type = 3 AND tbl_users.id = $1`,
         [vendorId]
       )
         .then(function (data) {
@@ -439,8 +430,8 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     return new Promise(function (resolve, reject) {
       db.any(
         `INSERT INTO tbl_users(name, email, mobile, organization_name, user_type, password,
-           status,created_by,new_profile_image,original_profile_image) 
-        VALUES($1, $2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+           status,created_by) 
+        VALUES($1, $2,$3,$4,$5,$6,$7,$8) RETURNING id`,
         [
           vendorObj.name,
           vendorObj.email,
@@ -449,9 +440,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
           vendorObj.register_as,
           vendorObj.password,
           vendorObj.status,
-          vendorObj.created_by,
-          vendorObj.fileName || null,
-          vendorObj.originalFilename || null
+          vendorObj.created_by
         ]
       )
         .then(function (data) {
@@ -535,7 +524,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     return new Promise(function (resolve, reject) {
       let dynamicUpdate = ``;
       if (vendorObj.originalFilename) {
-        dynamicUpdate = `,new_profile_image = '${vendorObj.fileName}',original_profile_image = '${vendorObj.originalFilename}'`;
+        dynamicUpdate = ``;
       }
       db.one(
         `UPDATE 
