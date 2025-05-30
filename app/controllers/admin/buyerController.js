@@ -296,6 +296,13 @@ const buyerController = {
         token, state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
        import_export_code, established_year, website, is_private, max_top_management, max_procurement, max_engineering, max_finance } = req.body;
 
+      let cleanedMobile = mobile || null;
+      if (cleanedMobile) {
+        cleanedMobile = cleanedMobile.toString().replace(/^\+\d+\-\+\d+/, '+91');
+        // Ensure it fits within the database limit
+        cleanedMobile = cleanedMobile.substring(0, 15);
+      }
+
       // Changes by Agnij 2025-05-27 [Convert state and city names to IDs]
       let state_id = null;
       let city_id = null;
@@ -335,7 +342,7 @@ const buyerController = {
       const user_data = {
         name: name || null,
         email: email?.toLowerCase() || null,
-        mobile: mobile || null,
+        mobile: cleanedMobile,
         user_type: user_type || 7, // Default to buyer
         status: user_type == 7 ? 1 : 0,
         password: generatePassword(password), 

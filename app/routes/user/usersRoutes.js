@@ -28,7 +28,6 @@ UsersRoutes.post(
 // can be user to register buyer and vendor company
 UsersRoutes.post(
   '/company-registration',
-  passportSignIn,
   validateDbBody.user_exists,
   UsersController.company_registration
 );
