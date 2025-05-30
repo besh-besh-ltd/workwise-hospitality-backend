@@ -5361,7 +5361,7 @@ searchVariantVendors: async (product_id, variant_id) => {
 },
 
   //New Model added By Ayush For Fetching Vendors Associated with a particular product in an RFQ
-searchEmailAndNameForVendor: async (product_id) => {
+searchEmailAndNameForVendor: async (rfq_id , product_id) => {
   const query = `
     SELECT 
       tbu.id AS vendor_id,
