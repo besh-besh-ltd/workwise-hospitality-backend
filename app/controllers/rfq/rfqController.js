@@ -4753,11 +4753,20 @@ const rfqController = {
       let aiProcessedBoqJson = req.body.jsonFileUrl;
       const user = req.user;
   
+      console.log(" line 4756 rfqcontroller aiProcessedBoqJson =>>>>>> ", aiProcessedBoqJson)
+
       if (aiProcessedBoqJson.startsWith('http:')) {
         aiProcessedBoqJson = aiProcessedBoqJson.replace('http:', 'https:');
       }
+
+       console.log(" line 4762 rfqcontroller  aiProcessedBoqJson =>>>>>> ", aiProcessedBoqJson)
+
   
       const boqDataJson = await generativeAI.processBOQWithAI(aiProcessedBoqJson);
+
+      // console.log(" line 4762  boqDataJson =>>>>>> ", boqDataJson)
+
+
       const termList = await rfqModel.getAllTerms();
       const transformedTermList = termList.map(term => ({ id: term.id, name: term.term_content }));
   
@@ -4769,9 +4778,20 @@ const rfqController = {
   
       const vendorCache = {};
   
+      console.log(" 4781 =>>>>> rfq controller boq ", boqDataJson)
+
+
       for (const item of boqDataJson) {
+
+        if (item.is_product == "No") {
+          continue
+       }
+
         const variantId = item.variant_id ? parseInt(item.variant_id) : null;
         const ProductName = item.fetched_product_name || item.core_product_name || "Unnamed Product";
+
+        console.log(" line 4785 rfqcontroller ", ProductName, variantId)
+
 
     if (!variantId || isNaN(variantId)) {
       validationErrors.push({
@@ -4814,7 +4834,7 @@ const rfqController = {
             { title: "Unit", value: item.unit || "NA" },
           ],
           vendors: vendorResult,
-          comment: item.full_product_description || "",
+          comment: item.summary_of_product_description || "",
           defaultSelectedVAB: "",
           datasheet: "0",
           datasheet_file: [],
