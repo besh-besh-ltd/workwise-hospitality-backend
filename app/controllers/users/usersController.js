@@ -282,10 +282,11 @@ const UsersController = {
       };
 
       const buyer_company_max_account_data = {
-        max_top_management: 0,
-        max_procurement: 0,
-        max_engineering: 0,
-        max_finance: 0
+        // Changes by Agnij 30 May 2025 [Fixed to use actual form values instead of hardcoded 0s]
+        max_top_management: parseInt(req.body.max_top_management) || 0,
+        max_procurement: parseInt(req.body.max_procurement) || 0,
+        max_engineering: parseInt(req.body.max_engineering) || 0,
+        max_finance: parseInt(req.body.max_finance) || 0
       };
         const {company_id} = await userModel.company_registration(user_data, company_data)
         
@@ -401,6 +402,7 @@ create_buyer_company_users: async (req, res, next) => {
     const insertResult = await rfqModel.insert("tbl_users", userDetails);
     const createdUser = insertResult[0];
 
+    console.log(`DEBUG: User created successfully with ID: ${createdUser.id}`);
 
             //activate default subscription
         let checkFreeSubscription =
