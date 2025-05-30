@@ -207,7 +207,9 @@ export const rfqSchemas = {
     rfq_added_from: Joi.string().valid('magic', 'manual').allow('').allow(null),
     reverse_auction: Joi.valid(0, 1).allow(''),
     sheet_id: Joi.number().optional().allow(null),
-    products: Joi.array().items(productItems).min(1).required(),
+    updatableData: Joi.object().optional(),
+    termsChanged: Joi.boolean().optional(),
+    termFilesChanged: Joi.boolean().optional(),
     terms: Joi.array().items(termsItems).allow(null).allow(''),
     project_id: Joi.number().integer().required(),
     term_and_condition_files: Joi.array().items(Joi.string()).optional()

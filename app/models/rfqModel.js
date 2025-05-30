@@ -24,6 +24,44 @@ const rfqModel = {
     });
   },
 
+  getProductsByRfqId: async (rfqId) => {
+    try {
+      if(!rfqId) throw new Error("RFQ ID is required!")
+      let q = `
+        SELECT pv.name,
+              (SELECT JSON_AGG(JSON_BUILD_OBJECT(
+                      'title', rps.title,
+                      'value', rps.value
+                                ))
+                FROM tbl_rfq_products_specs rps
+                WHERE rps.rfq_id = rfq.id
+                  AND rps.product_variant_id = rp.product_variant_id
+                  AND rps.variant = rp.variant) AS spec,
+              (SELECT JSON_AGG(JSON_BUILD_OBJECT(
+                      'user_id', u.id,
+                      'name', u.name,
+                      'organization_name', COALESCE(c.company_name, u.organization_name, u.name)
+                                ))
+                FROM tbl_rfq_product_vendors rpv
+                        JOIN tbl_users u ON rpv.user_id = u.id
+                        JOIN tbl_company c ON u.id = c.user_id
+                WHERE rpv.rfq_id = rfq.id
+                  AND rpv.product_variant_id = rp.product_variant_id
+                  AND rpv.variant = rp.variant) AS vendors
+
+        FROM tbl_rfq rfq
+                JOIN tbl_rfq_products rp ON rp.rfq_id = rfq.id
+                JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+
+        WHERE rfq.id = 712;
+      `
+
+      return await db.any(q, [rfqId])
+    } catch (error) {
+      throw error;
+    }
+  },
+
   checkRFQCompletion: async (rfq_id) => {
     try {
       let totalQ = `

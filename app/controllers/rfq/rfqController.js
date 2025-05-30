@@ -553,10 +553,12 @@ const validateEmailAddresses = (emails) => {
 // Update the sendMailtoVendors function
 const sendMailtoVendors = async (req, rfqNumber) => {
   try {
-    const { products } = req.body;
     const vendorProductMap = {};
 
+    const products = await rfqModel.getProductsByRfqId(rfqNumber);
+
     products.forEach((item) => {
+      console.log("ITEM -> ", item)
       item.vendors.forEach((vendor) => {
         if (!vendorProductMap[vendor.user_id]) {
           vendorProductMap[vendor.user_id] = {
@@ -1477,7 +1479,7 @@ const rfqController = {
         { is_published: 1 },
         rfq_id
       );
-
+      
       await sendMailtoVendors(req, rfq_id);
       await sendQuotationMailToBuyer(req, rfq_id);
 
