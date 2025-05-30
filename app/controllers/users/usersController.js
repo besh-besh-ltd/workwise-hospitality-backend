@@ -330,6 +330,7 @@ const UsersController = {
           .json({
             status: 1,
             message: `${userTypeLabel} registered successfully`,
+            company_id: company_id,
             accountLimitSaved : accountLimitSaved ? "account limit saved" : "Not able to save account limit",
             userType: finalUserType
           })

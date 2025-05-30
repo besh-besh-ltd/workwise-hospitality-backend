@@ -3,6 +3,7 @@ import Config from '../../config/app.config.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
 import rfqModel from "../../models/rfqModel.js";
 import db from "../../config/dbConn.js";
+import userModel from "../../models/userModel.js";
 
 const projectController = {
     create: async (req, res, next) => {
@@ -78,77 +79,7 @@ const projectController = {
         
         if (user_type === 7) {
           // Admin can access any project
-          projectDetails = await db.any(
-            `SELECT 
-              p.*, 
-              -- Aggregated RFQ counts
-              COUNT(r.id) AS total_rfqs,
-              COUNT(CASE WHEN r.status = 0 THEN 1 END) AS closed_rfqs,
-              COUNT(CASE WHEN r.status = 1 THEN 1 END) AS open_rfqs,
-
-              COALESCE(
-                  jsonb_object_agg(
-                      f.file_type,
-                      ARRAY(
-                          SELECT json_build_object(
-                              'name', file.file_name,
-                              'url', file.file_url
-                          )
-                          FROM tbl_project_files file
-                          WHERE file.project_id = p.id AND file.file_type = f.file_type
-                      )
-                  ) FILTER (WHERE f.file_type IS NOT NULL),
-                  '{}'::jsonb
-              ) AS files,
-
-              -- Fetch RFQ details with vendors, number of products and quotes, including all RFQ columns
-              ARRAY(
-                  SELECT json_build_object(
-                      -- Fetch all columns of tbl_rfq
-                      'rfq_details', row_to_json(r),
-                      'no_of_quotes', (
-                          SELECT COUNT(*)
-                          FROM tbl_quotes tq
-                          WHERE tq.rfq_id = r.id
-                      ),
-                      'vendors', (
-                          SELECT json_build_object(
-                              'total_vendors', COUNT(DISTINCT trpv.user_id),
-                              'quote_received', (
-                                  SELECT COUNT(DISTINCT tq.created_by)
-                                  FROM tbl_quotes tq
-                                  WHERE tq.rfq_id = r.id
-                              )
-                          )
-                          FROM tbl_rfq_product_vendors trpv
-                          WHERE trpv.rfq_id = r.id
-                          GROUP BY trpv.rfq_id
-                      ),
-                      'no_of_products', (
-                          SELECT COUNT(*)
-                          FROM tbl_rfq_products rfq_p
-                          WHERE rfq_p.rfq_id = r.id
-                      )
-                  )
-                  FROM tbl_rfq r
-                  WHERE r.project_id = p.id
-                  ORDER BY r.timestamp DESC
-                  LIMIT $2 OFFSET $3
-              ) AS rfqs
-
-          FROM 
-              tbl_projects p
-          LEFT JOIN 
-              tbl_rfq r ON r.project_id = p.id
-          LEFT JOIN 
-              tbl_project_files f ON f.project_id = p.id    
-          WHERE 
-              p.id = $1
-          GROUP BY 
-              p.id;
-            `,
-            [project_id, limit, offset]
-          );
+          projectDetails = await projectModel.getProjectByIdForAdmin(project_id, limit, offset);
         } else {
           // Regular user can only access their own projects
           projectDetails = await projectModel.getProjectById(project_id, user_id, limit, offset);
@@ -183,11 +114,7 @@ const projectController = {
         
         if (user_type === 7) {
           // Admin can access any project
-          projectDetails = await db.any(`
-            SELECT t.* 
-            FROM tbl_projects t
-            WHERE t.id = $1;
-          `, [project_id]);
+          projectDetails = await projectModel.getProjectTableDataByIdForAdmin(project_id);
         } else {
           // Regular user can only access their own projects
           projectDetails = await projectModel.getProjectTableDataById(project_id, user_id);
@@ -221,24 +148,9 @@ const projectController = {
           let projects = [];
           
           if (user_type === 7) {
+            // Changes by Agnij 31 January 2025 [Use model function instead of direct SQL query]
             // Admin users should only see their own projects
-            projects = await db.any(`
-              SELECT 
-                p.*, 
-                COUNT(r.id) AS total_rfqs,
-                COUNT(CASE WHEN r.status = 2 THEN 1 END) AS closed_rfqs,
-                COUNT(CASE WHEN r.status = 1 THEN 1 END) AS open_rfqs
-              FROM 
-                tbl_projects p
-              LEFT JOIN 
-                tbl_rfq r ON r.project_id = p.id 
-              WHERE 
-                p.user_id = $1
-              GROUP BY 
-                p.id
-              ORDER BY 
-                p.created_at DESC
-            `, [user_id]);
+            projects = await projectModel.getAllProjectsForAdmin(user_id);
           } else {
             // Regular user query: fetch only their projects
             projects = await projectModel.getAllProjects(user_id);
@@ -297,29 +209,7 @@ const projectController = {
           project_id
         };
         
-        udpatedProject = await db.oneOrNone(
-          `UPDATE tbl_projects
-          SET
-             status = $1,
-             description = $2,
-             location = $3,
-             ended_at = $4,
-             rfq_type = $5,
-             reverse_auction = $6,
-             updated_at = NOW()
-          WHERE
-             id = $7
-          RETURNING *;`,
-         [
-             status,        
-             description,   
-             location,      
-             ended_at,      
-             rfq_type,
-             reverse_auction,
-             project_id        
-         ]
-        );
+        udpatedProject = await projectModel.updateProjectForAdmin(tbl_project_data);
       } else {
         // Regular users can only update their own projects
         const tbl_project_data = {
@@ -364,15 +254,7 @@ const projectController = {
           
           if (user_type === 7) {
             // Admin query: fetch all projects' names and IDs
-            projects = await db.any(`
-              SELECT 
-                p.id,
-                p.name 
-              FROM 
-                tbl_projects p
-              ORDER BY 
-                p.name ASC
-            `);
+            projects = await projectModel.getAllProjectNamesForAdmin();
           } else {
             // Regular user query: fetch only their projects
             projects = await projectModel.getIdAndNameOfProjects(user_id);
@@ -443,10 +325,7 @@ const projectController = {
           canAccess = true;
         } else {
           // Regular user can only access their own projects or projects they're a member of
-          const projectData = await db.oneOrNone(
-            `SELECT 1 FROM tbl_projects WHERE id = $1 AND user_id = $2`,
-            [project_id, user_id]
-          );
+          const projectData = await projectModel.checkProjectOwnership(project_id, user_id);
           
           if (projectData) {
             canAccess = true;
@@ -499,10 +378,7 @@ const projectController = {
           canModify = true;
         } else {
           // Regular user can only modify their own projects
-          const projectData = await db.oneOrNone(
-            `SELECT 1 FROM tbl_projects WHERE id = $1 AND user_id = $2`,
-            [project_id, current_user_id]
-          );
+          const projectData = await projectModel.checkProjectOwnership(project_id, current_user_id);
           
           canModify = projectData !== null;
         }
@@ -515,10 +391,7 @@ const projectController = {
         }
         
         // Check if the user exists
-        const userExists = await db.oneOrNone(
-          `SELECT 1 FROM tbl_users WHERE id = $1`,
-          [user_id]
-        );
+        const userExists = await userModel.userExistsById(user_id);
         
         if (!userExists) {
           return res.status(404).json({
@@ -549,24 +422,7 @@ const projectController = {
           const result = await projectModel.addTeamMember(memberData);
           
           // Get full user details to return
-          const memberDetails = await db.one(
-            `SELECT 
-              pt.id,
-              pt.project_id,
-              pt.user_id,
-              pt.role,
-              pt.created_at,
-              u.name,
-              u.email,
-              u.mobile
-            FROM 
-              tbl_project_team pt
-            JOIN
-              tbl_users u ON pt.user_id = u.id
-            WHERE 
-              pt.id = $1`,
-            [result.id]
-          );
+          const memberDetails = await projectModel.getTeamMemberDetails(result.id);
           
           const responseData = {
             status: true,
@@ -612,10 +468,7 @@ const projectController = {
           canModify = true;
         } else {
           // Regular user can only modify their own projects
-          const projectData = await db.oneOrNone(
-            `SELECT 1 FROM tbl_projects WHERE id = $1 AND user_id = $2`,
-            [project_id, current_user_id]
-          );
+          const projectData = await projectModel.checkProjectOwnership(project_id, current_user_id);
           
           canModify = projectData !== null;
         }

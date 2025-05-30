@@ -3458,6 +3458,21 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   },
+  userExistsById: async (user_id) => {
+    return new Promise(function (resolve, reject) {
+      db.oneOrNone(
+        `SELECT 1 FROM tbl_users WHERE id = $1`,
+        [user_id]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
 
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];
