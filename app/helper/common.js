@@ -410,4 +410,5 @@ export {
   getDateRange,
   deleteFileFromS3,
   buildProductFilters,
+  withTransaction
 };
