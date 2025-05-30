@@ -3,6 +3,7 @@ import subscriptionModel from '../../models/subscriptionModel.js';
 import notificationModel from '../../models/notificationModel.js';
 import couponModel from '../../models/couponModel.js';
 import Config from '../../config/app.config.js';
+import db from '../../config/dbConn.js';
 import {
   logError,
   currentDateTime,
@@ -166,91 +167,173 @@ const UsersController = {
   },
 
   company_registration: async (req, res, next) => {
-
     try {
+      let cleanedMobile = req.body.mobile || null;
+      
+      // Handle mobile number formatting
+      if (cleanedMobile) {
+        cleanedMobile = cleanedMobile.toString().replace(/^\+\d+\-\+\d+/, '+91');
+        cleanedMobile = cleanedMobile.substring(0, 15);
+      }
+      
+      const cleanedOrgName = req.body.organization_name ? req.body.organization_name.toString().substring(0, 100) : null;
+      
+      const company_data_cleaned = {
+        company_name: cleanedOrgName,
+        profile: req.body.profile || null,
+        nature_of_business: req.body.nature_of_business || null,
+        type_of_business: req.body.type_of_business || null,
+        turnover: req.body.turnover || null,
+        no_of_employess: req.body.no_of_employess || null,
+        import_export_code: req.body.import_export_code || null,
+        gstin: req.body.gstin || null,
+        cin: req.body.cin || null,
+        logo: req.body.logo || null,
+        established_year: req.body.established_year || null,
+        website: req.body.website || null,
+        location: req.body.location || null,
+        is_private: req.body.is_private || 0
+      };
+      
+      const user_data_cleaned = {
+        name: req.body.name,
+        email: req.body.email?.toLowerCase(),
+        mobile: cleanedMobile,
+        status: req.body.status || 0,
+        user_type: req.body.user_type || 3,
+        password: req.body.password,
+        address: req.body.address || null,
+        created_by: req.body.created_by || null,
+        country: req.body.country || null,
+        whatsapp: req.body.whatsapp || null,
+        token: req.body.token || null,
+        state: req.body.state || null,
+        city: req.body.city || null,
+        postal_code: req.body.postal_code || null
+      };
 
-       const { name, email, mobile, organization_name, user_type, password, address, created_by, country, whatsapp, 
-        token, state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
-       import_export_code,established_year,website, is_private, max_top_management, max_procurement, max_engineering, max_finance } = req.body;
+      const finalUserType = user_data_cleaned.user_type || 3; // Default to vendor (3) if not specified
+      
+      const defaultPassword = user_data_cleaned.password || `${(cleanedOrgName || user_data_cleaned.name)?.substring(0, 4) || 'Work'}@123`;
+      
+      // Convert state and city names to IDs if provided
+      let state_id = null;
+      let city_id = null;
 
-        const user_data = {
-         name: name || null,
-         email: email?.toLowerCase() || null,
-         mobile: mobile || null,
-         user_type: user_type || null,
-         status: user_type == 7 ? 1 : 0,
-         password: generatePassword(password), // Use your encryption method
-         address: address || null,
-         created_by: created_by || null,
-         country: country || null,
-         whatsapp: whatsapp || null,
-         token: token || null,
-         state: state || null,
-         city: city || null,
-         postal_code: postal_code || null
-       };
-
-       const company_data = {
-         company_name: organization_name || null,
-         profile: profile || null,
-         nature_of_business: nature_of_business || null,
-         type_of_business: type_of_business || null,
-         turnover: turnover || null,
-         no_of_employess: no_of_employess || null,
-         import_export_code: import_export_code || null,
-         gstin: gstin || null,
-         cin: cin || null,
-         logo:  null, 
-         established_year: established_year || null,
-         website: website || null,
-         location: address || null,
-         is_private:  is_private || null, // Assuming companies created via this API are private
-       };
-
-
-        const buyer_company_max_account_data = {
-          max_top_management: max_top_management || 0,
-          max_procurement: max_procurement || 0,
-          max_engineering: max_engineering || 0,
-          max_finance: max_finance || 0
-        };
-          const {company_id} = await userModel.company_registration(user_data, company_data)
-          
-          let accountLimitSaved = null
-          if (user_type == 7 && company_id) {
-            accountLimitSaved = await userModel.insertBuyerAccountLimits(buyer_company_max_account_data, company_id)
-
+      if (user_data_cleaned.state && user_data_cleaned.state.trim()) {
+        try {
+          const stateResult = await db.oneOrNone(
+            'SELECT id FROM tbl_location_states WHERE LOWER(state_name) = LOWER($1) LIMIT 1',
+            [user_data_cleaned.state.trim()]
+          );
+          if (stateResult) {
+            state_id = stateResult.id;
           }
+        } catch (err) {
+        }
+      }
+
+      if (user_data_cleaned.city && user_data_cleaned.city.trim()) {
+        try {
+          const cityResult = await db.oneOrNone(
+            'SELECT id FROM tbl_location_cities WHERE LOWER(city_name) = LOWER($1) LIMIT 1',
+            [user_data_cleaned.city.trim()]
+          );
+          if (cityResult) {
+            city_id = cityResult.id;
+          }
+        } catch (err) {
+          console.error('Error looking up city:', err);
+        }
+      }
+
+      const user_data = {
+        name: user_data_cleaned.name || null,
+        email: user_data_cleaned.email || null,
+        mobile: user_data_cleaned.mobile || null,
+        user_type: finalUserType,
+        status: finalUserType == 7 ? 1 : 0, // Auto-approve buyers (7), require approval for vendors (3)
+        password: generatePassword(defaultPassword),
+        address: user_data_cleaned.address || null,
+        created_by: user_data_cleaned.created_by || (req.user ? req.user.id : null),
+        country: user_data_cleaned.country || null,
+        whatsapp: user_data_cleaned.whatsapp || null,
+        token: user_data_cleaned.token || null,
+        state: state_id,
+        city: city_id,
+        postal_code: user_data_cleaned.postal_code || null
+      };
+
+      const company_data = {
+        company_name: company_data_cleaned.company_name || null,
+        profile: req.file?.location || company_data_cleaned.profile || null,
+        nature_of_business: company_data_cleaned.nature_of_business || null,
+        type_of_business: company_data_cleaned.type_of_business || null,
+        turnover: company_data_cleaned.turnover || null,
+        no_of_employess: company_data_cleaned.no_of_employess || null,
+        import_export_code: company_data_cleaned.import_export_code || null,
+        gstin: company_data_cleaned.gstin || null,
+        cin: company_data_cleaned.cin || null,
+        logo: req.file?.location || company_data_cleaned.logo || null, 
+        established_year: company_data_cleaned.established_year || null,
+        website: company_data_cleaned.website || null,
+        location: user_data_cleaned.address || company_data_cleaned.location || null,
+        is_private: company_data_cleaned.is_private || 0
+      };
+
+      const buyer_company_max_account_data = {
+        max_top_management: 0,
+        max_procurement: 0,
+        max_engineering: 0,
+        max_finance: 0
+      };
+        const {company_id} = await userModel.company_registration(user_data, company_data)
+        
+        let accountLimitSaved = null
+        if (finalUserType == 7 && company_id) {
+          accountLimitSaved = await userModel.insertBuyerAccountLimits(buyer_company_max_account_data, company_id)
+        }
+
+        // Generate appropriate email content based on user type
+        const userTypeLabel = finalUserType == 3 ? 'Vendor' : finalUserType == 7 ? 'Buyer' : 'User';
+        const loginUrl = finalUserType == 3 ? 'https://letsworkwise.com/?user_registered=1' : 
+                        finalUserType == 7 ? 'https://letsworkwise.com/?user_registered=1' : 
+                        'https://letsworkwise.com/?user_registered=1';
+
+        const emailHeaderContent = `<h2>Hello ${user_data.name || ''},</h2>`
+        const emailContainerContent = `
+        <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
+         <p>Welcome to WorkWise, Your ${userTypeLabel.toLowerCase()} account for <strong>${user_data.organization_name}</strong> has been successfully registered.</p>
+          <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
+          <ul>
+          <li> <strong> Email: </strong> ${user_data.email} </li>
+          <li> <strong>Password: </strong> ${defaultPassword} </li>
+          <li> <strong>Account Type: </strong> ${userTypeLabel} </li>
+          </ul>
+          <p>You can log in to your account using this link: <a href="${loginUrl}" >Click Here</a></p>
+          <p style="font-size: 14px; color: #777;"><em>For security reasons, we recommend changing your password after your first login.</em></p>    
+        </div>`
+
+        const dynamic_html = generateEmailTemplate(emailHeaderContent, emailContainerContent)
+        
+        const mailRecipients = {
+          to: user_data.email,
+          subject: `Welcome to WorkWise - ${userTypeLabel} Account Created`,
+          html: dynamic_html
+        };
+
+        sendMail(mailRecipients);
 
 
-          const emailHeaderContent = `<h2>Hello ${name || ''},</h2>`
-          const emailContainerContent = `
-          <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
-           <p>Welcome to WorkWise, Your admin account for <strong ${organization_name} </strong> has been successfully registered.</p>
-            <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
-            <ul>
-            <li> <strong> Email: </strong> ${email} </li>
-            <li> <strong>Password: </strong> ${password} </li>
-            </ul>
-            <p>You can log in to your account using this link: <a href="https://letsworkwise.com/?user_registered=1" >Click Here</a></p>
-            <p style="font-size: 14px; color: #777;"><em>For security reasons, we recommend changing your password after your first login.</em></p>    
-          </div>`
-
-          dynamic_html = generateEmailTemplate(emailHeaderContent, emailContainerContent)
-          
-
-          sendMail(mailRecipients);
-
-
-          res
-            .status(200)
-            .json({
-              status: 1,
-              message: 'Company registered successfully',
-              accountLimitSaved : accountLimitSaved ? "account limit saved" : "Not able to save account limit"
-
-            })
-            .end();
+        res
+          .status(200)
+          .json({
+            status: 1,
+            message: `${userTypeLabel} registered successfully`,
+            accountLimitSaved : accountLimitSaved ? "account limit saved" : "Not able to save account limit",
+            userType: finalUserType
+          })
+          .end();
 
     } catch (err) {
        logError(err);
@@ -3612,7 +3695,8 @@ get_company_users: async (req, res, next) => {
         // trim all inputs
         const vendorName = (value["Vendor Name"] || "").trim();
         const email = (value["Vendor Email"]?.toLowerCase() || "").trim();
-        const mobile = (value["Vendor company owner/hr/official contact number"] || "").toString();
+        const rawMobile = (value["Vendor company owner/hr/official contact number"] || "").toString();
+        const mobile = rawMobile.replace(/^\+91-\+91/, '+91').substring(0, 15);
         const productList = (value["Product List (ex-pipe,valve)"] || "").trim();
 
         // now check validation for vendor name number and email

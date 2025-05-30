@@ -115,14 +115,18 @@ const vendorController = {
         cin,
         turn_over,
         total_employees,
-        ptr_project_name,
-        ptr_project_description,
-        ptr_project_start_date,
-        ptr_project_end_date,
         about_vendor_company,
         spocs
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
+      
+      let cleanedMobile = mobile || null;
+      if (cleanedMobile) {
+        cleanedMobile = cleanedMobile.toString().replace(/^\+\d+\-\+\d+/, '+91');
+        // Ensure it fits within the database limit
+        cleanedMobile = cleanedMobile.substring(0, 15);
+      }
+      
       let orgChar = organization_name
         .match(/[a-zA-Z]/g)
         .join('')
@@ -130,7 +134,7 @@ const vendorController = {
       let capitalizeFourOrganizationLetter = `${orgChar
         .charAt(0)
         .toUpperCase()}${orgChar.substring(1, 4)}`;
-      let password = `${capitalizeFourOrganizationLetter}@${mobile.substring(
+      let password = `${capitalizeFourOrganizationLetter}@${cleanedMobile.substring(
         6,
         10
       )}`;
@@ -142,7 +146,7 @@ const vendorController = {
         city: city || null,
         state: state || null,
         country: country || 1,
-        mobile: mobile || null,
+        mobile: cleanedMobile || null,
         website: website || null,
         postal_code: postal_code || null,
         user_type: '3',
@@ -158,7 +162,7 @@ const vendorController = {
         profile: about_vendor_company || null,
         logo: req.files.logo?.[0]?.location || null,
         email: email || null,
-        mobile: mobile || null,
+        mobile: cleanedMobile || null,
         company_name: organization_name || null,
         nature_of_business: nature_business || null,
         established_year: estd_year || null,
@@ -167,10 +171,10 @@ const vendorController = {
         cin: cin || null,
         turnover: turn_over || null,
         no_of_employess: total_employees || null,
-        project_name: ptr_project_name || null,
-        project_description: ptr_project_description || null,
-        project_start_date: ptr_project_start_date || null,
-        project_end_date: ptr_project_end_date || null
+        project_name: null,
+        project_description: null,
+        project_start_date: null,
+        project_end_date: null
       };
 
 
@@ -488,10 +492,10 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         cin,
         turn_over,
         total_employees,
-        ptr_project_name,
-        ptr_project_description,
-        ptr_project_start_date,
-        ptr_project_end_date,
+        // ptr_project_name,
+        // ptr_project_description,
+        // ptr_project_start_date,
+        // ptr_project_end_date,
         about_vendor_company
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
@@ -541,13 +545,10 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           cin: cin || companyDetails[0].cin,
           turnover: turn_over || companyDetails[0].turnover,
           no_of_employess: total_employees || companyDetails[0].no_of_employess,
-          project_name: ptr_project_name || companyDetails[0].project_name,
-          project_description:
-            ptr_project_description || companyDetails[0].project_description,
-          project_start_date:
-            ptr_project_start_date || companyDetails[0].project_start_date,
-          project_end_date:
-            ptr_project_end_date || companyDetails[0].project_end_date
+          project_name: null,
+          project_description: null,
+          project_start_date: null,
+          project_end_date: null
         };
 
         companyObj.user_id = vendorId;
@@ -573,10 +574,10 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           cin: cin || null,
           turnover: turn_over || null,
           no_of_employess: total_employees || null,
-          project_name: ptr_project_name || null,
-          project_description: ptr_project_description || null,
-          project_start_date: ptr_project_start_date || null,
-          project_end_date: ptr_project_end_date || null
+          project_name: null,
+          project_description: null,
+          project_start_date: null,
+          project_end_date: null
         };
         companyObj.user_id = vendorId;
         await productModel.addCompany(companyObj);
