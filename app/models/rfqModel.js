@@ -5802,5 +5802,31 @@ searchVariantVendors: async (product_id, variant_id) => {
   }
 },
 
+  //New Model added By Ayush For Fetching Vendors Associated with a particular product in an RFQ
+searchEmailAndNameForVendor: async (rfq_id , product_id) => {
+  const query = `
+    SELECT 
+      tbu.id AS vendor_id,
+      tbu.name, 
+      tbu.email,
+      tpv.name AS product_name
+    FROM tbl_rfq_product_vendors trpv
+    JOIN tbl_rfq_products trp 
+      ON trp.product_variant_id = trpv.product_variant_id 
+      AND trp.variant = trpv.variant
+    JOIN tbl_product_variant tpv 
+      ON trp.product_variant_id = tpv.id 
+    JOIN tbl_users tbu 
+      ON tbu.id = trpv.user_id
+    WHERE trpv.rfq_id = $1 AND trp.id = $2
+  `;
+
+  const result = await db.query(query, [rfq_id, product_id]);
+
+
+  return result || [];
 }
+
+
+};
 export default rfqModel;
