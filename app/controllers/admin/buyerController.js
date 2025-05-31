@@ -17,7 +17,7 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 const buyerController = {
   buyerList: async (req, res, next) => {
     try {
-      let page, limit, offset, organization, verified, name;
+      let page, limit, offset, organization, verified, name, user_type;
       if (req.query.page && req.query.page > 0) {
         page = req.query.page;
         limit = req.query.limit || Config.globalAdminLimit;
@@ -35,18 +35,23 @@ const buyerController = {
       if (req.query.verified) {
         verified = req.query.verified;
       }
+      if (req.query.user_type) {
+        user_type = req.query.user_type;
+      }
 
       let buyerList = await buyerModel.getBuyerList(
         limit,
         offset,
         organization,
         verified,
-        name
+        name,
+        user_type
       );
       let buyerCount = await buyerModel.getBuyerListCount(
         organization,
         verified,
-        name
+        name,
+        user_type
       );
       res
         .status(200)
