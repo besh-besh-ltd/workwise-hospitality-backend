@@ -1765,7 +1765,7 @@ LIMIT 1;`;
         WHERE TU.id = TP.created_by
       ) AS "products"
       FROM tbl_users TU
-      JOIN tbl_company TC ON TU.id = TC.user_id
+      JOIN tbl_company TC ON TU.company_id = TC.id
       WHERE TU.id IN (${placeholders})`;
     return new Promise(function (resolve, reject) {
       db.any(query, vendors)
