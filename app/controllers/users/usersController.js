@@ -323,6 +323,9 @@ const UsersController = {
           html: dynamic_html
         };
 
+        console.log('Sending email to:', user_data.email);
+        console.log('Email HTML:', dynamic_html);
+
         sendMail(mailRecipients);
 
 
@@ -401,8 +404,6 @@ create_buyer_company_users: async (req, res, next) => {
     // Insert user
     const insertResult = await rfqModel.insert("tbl_users", userDetails);
     const createdUser = insertResult[0];
-
-    console.log(`DEBUG: User created successfully with ID: ${createdUser.id}`);
 
             //activate default subscription
         let checkFreeSubscription =
@@ -489,6 +490,9 @@ create_buyer_company_users: async (req, res, next) => {
       subject: "Welcome to WorkWise - Account Created",
       html: emailHTML
     };
+
+    console.log('Sending email to:', email);
+    console.log('Email HTML:', emailHTML);
 
     sendMail(mailRecipients);
 

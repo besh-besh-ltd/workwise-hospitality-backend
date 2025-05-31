@@ -2,7 +2,7 @@ import db from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 
 const buyerModel = {
-  getBuyerList: async (limit, offset, organization, verified, name) => {
+  getBuyerList: async (limit, offset, organization, verified, name, user_type) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (name) {
@@ -17,9 +17,14 @@ const buyerModel = {
       } else if (verified == 'f') {
         dynamicQuery += `AND status = 0 `;
       }
+      
+      if (user_type) {
+        dynamicQuery += `AND user_type = ${user_type} `;
+      }
+      
       db.any(
         `SELECT tbl_users.*,
-        NULL AS profile_image  FROM tbl_users WHERE user_type = 2 ${dynamicQuery}
+        NULL AS profile_image FROM tbl_users WHERE (user_type = 2 OR user_type = 7 OR user_type = 8 OR user_type = 9 OR user_type = 10) ${dynamicQuery}
         ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
       )
@@ -32,7 +37,7 @@ const buyerModel = {
         });
     });
   },
-  getBuyerListCount: async (organization, verified, name) => {
+  getBuyerListCount: async (organization, verified, name, user_type) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (name) {
@@ -46,8 +51,13 @@ const buyerModel = {
       } else if (verified == 'f') {
         dynamicQuery += `AND status = 0 `;
       }
+      
+      if (user_type) {
+        dynamicQuery += `AND user_type = ${user_type} `;
+      }
+      
       db.one(
-        `SELECT count(id) from tbl_users WHERE is_deleted = 0 AND user_type = 2 ${dynamicQuery}`
+        `SELECT count(id) from tbl_users WHERE is_deleted = 0 AND (user_type = 2 OR user_type = 7 OR user_type = 8 OR user_type = 9 OR user_type = 10) ${dynamicQuery}`
       )
         .then(function (data) {
           resolve(data);
