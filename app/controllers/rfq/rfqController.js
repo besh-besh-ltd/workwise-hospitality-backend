@@ -5061,6 +5061,7 @@ const rfqController = {
       };
 
       return [validationErrors, finalObject];
+    }
     } catch (error) {
       throw error;
     }
