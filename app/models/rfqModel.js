@@ -24,6 +24,430 @@ const rfqModel = {
     });
   },
 
+  getProductsByRfqId: async (rfqId) => {
+    try {
+      if(!rfqId) throw new Error("RFQ ID is required!")
+      let q = `
+        SELECT pv.name,
+              (SELECT JSON_AGG(JSON_BUILD_OBJECT(
+                      'title', rps.title,
+                      'value', rps.value
+                                ))
+                FROM tbl_rfq_products_specs rps
+                WHERE rps.rfq_id = rfq.id
+                  AND rps.product_variant_id = rp.product_variant_id
+                  AND rps.variant = rp.variant) AS spec,
+              (SELECT JSON_AGG(JSON_BUILD_OBJECT(
+                      'user_id', u.id,
+                      'name', u.name,
+                      'organization_name', COALESCE(c.company_name, u.organization_name, u.name)
+                                ))
+                FROM tbl_rfq_product_vendors rpv
+                        JOIN tbl_users u ON rpv.user_id = u.id
+                        JOIN tbl_company c ON u.id = c.user_id
+                WHERE rpv.rfq_id = rfq.id
+                  AND rpv.product_variant_id = rp.product_variant_id
+                  AND rpv.variant = rp.variant) AS vendors
+
+        FROM tbl_rfq rfq
+                JOIN tbl_rfq_products rp ON rp.rfq_id = rfq.id
+                JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+
+        WHERE rfq.id = 712;
+      `
+
+      return await db.any(q, [rfqId])
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  checkRFQCompletion: async (rfq_id) => {
+    try {
+      let totalQ = `
+        SELECT DISTINCT(product_variant_id) 
+          FROM tbl_rfq_products rp
+          WHERE rp.rfq_id = $1;
+      `
+
+      let qualifiedQ = `
+        SELECT DISTINCT(product_variant_id) 
+          FROM tbl_rfq_products_specs s
+          WHERE s.rfq_id = $1 AND s.title IN ('Quantity', 'Unit') AND TRIM(s.value) != ''
+            AND TRIM(s.value) != 'NA';
+      `;
+
+      const totalRes = await db.any(totalQ, [rfq_id]);
+      const qualifiedRes = await db.any(qualifiedQ, [rfq_id]);
+      return ((totalRes ?? []).length == (qualifiedRes ?? []).length);
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  getSheetsForDraftRfq: async (rfq_id, is_processed, sheet_id) => {
+    try {
+      const condition = `rfq_id = ${rfq_id} ${is_processed && is_processed == 'true' ? 'AND is_processed' : ''} ${sheet_id && !isNaN(parseInt(sheet_id)) ? ` AND id = ${sheet_id}` : ``} ORDER BY id`
+      return await rfqModel.checkIfExists('tbl_rfq_draft_sheets', condition)
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  getDraftRfqSheetWise: async (rfq_id, sheet_id) => {
+    try {
+
+      let q = `
+        SELECT 
+          rfq.response_email,
+          rfq.contact_name,
+          rfq.contact_number,
+          rfq.company_name,
+
+          jsonb_agg(
+            jsonb_build_object(
+              'product_id', pv.id,
+              'name', COALESCE(pv.name, 'Unnamed Product'),
+              'variant', rp.variant,
+              'spec', (
+                SELECT jsonb_agg(
+                  jsonb_build_object(
+                    'title', s.title,
+                    'value', s.value
+                  )
+                )
+                FROM tbl_rfq_products_specs s
+                WHERE s.product_variant_id = rp.product_variant_id
+                  AND s.variant = rp.variant
+                  AND s.rfq_id = rfq.id
+              ),
+              'vendors', (
+                SELECT jsonb_agg(
+                  jsonb_build_object(
+                    'id', tu.id,
+                    'vendor_name', tu.name,
+                    'email', tu.email,
+                    'mobile', tu.mobile,
+                    'company_name', COALESCE(tc.company_name, tu.organization_name),
+                    'address', tu.address,
+                    'is_private', tc.is_private,
+                    'turnover', tc.turnover,
+                    'nature_of_business', tc.nature_of_business,
+                    'city_name', lc.city_name,
+                    'state_name', ls.state_name,
+                    'country_name', lcn.country_name
+                  )
+                )
+                FROM tbl_rfq_product_vendors rpv
+                JOIN tbl_users tu ON tu.id = rpv.user_id
+                LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+                LEFT JOIN tbl_location_cities lc ON lc.id = tu.city
+                LEFT JOIN tbl_location_states ls ON ls.id = tu.state
+                LEFT JOIN tbl_location_country lcn ON lcn.id = tu.country::INT
+                WHERE rpv.product_variant_id = rp.product_variant_id
+                  AND rpv.variant = rp.variant
+                  AND rpv.rfq_id = rfq.id
+              ),
+              'comment', COALESCE(rp.comment, ''),
+              'defaultSelectedVAB', '',
+              'TDS_flies', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'TDS'
+              ),
+              'QAP_files', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'QAP'
+              ),
+              'SPEC_files', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'SPEC'
+              ),
+              'datasheet_file', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'TDS'
+              ),
+              'spec_file', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'SPEC'
+              ),
+              'qap_file', (
+                SELECT json_agg(RPF.file_url)
+                FROM tbl_rfq_product_files RPF
+                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'QAP'
+              ),
+              'sheet_name', COALESCE(rds.sheet_name, '')
+            )
+          ) AS products
+
+        FROM tbl_rfq rfq
+        JOIN tbl_rfq_draft_sheets rds ON rds.rfq_id = rfq.id
+        JOIN tbl_rfq_products rp ON rp.rfq_id = rfq.id AND rp.sheet_id = rds.id
+        JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+
+        WHERE rfq.id = $1 AND rds.id = $2 AND rds.is_processed
+
+        GROUP BY rfq.response_email, rfq.contact_name, rfq.contact_number, rfq.company_name;
+      `;
+
+      try {
+        const result = await db.many(q, [rfq_id, sheet_id]);
+        return result;
+      } catch (error) {
+        // If no data found, db.many throws an error, but we want to return an empty array
+        if (error.code === 0) {
+          return [];
+        }
+        throw error;
+      }
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  saveMagicSearchInDraft: async (data, nextRFQNumber, createdBy, processedUrl, rfqId, sheetId) => {
+    try {
+      return await db.tx(async t => {
+
+        let sheetToProcess = null;
+
+        let q = `
+         SELECT id, sheet_name FROM tbl_rfq_draft_sheets
+        `
+        let sheetValues = [];
+        
+        if(sheetId && !isNaN(parseInt(sheetId))) {
+          q += 'WHERE id = $1';
+          sheetValues.push(sheetId)
+        } else if(rfqId) {
+          q += 'WHERE rfq_id = $1 AND NOT is_processed ORDER BY id'
+          sheetValues.push(rfqId);
+        } else {
+          sheetToProcess = {
+            sheet_name: data?.sheetNameList?.[0],
+          }
+        }
+
+        if(sheetId || rfqId) {
+          let sheetData = await t.one(q, sheetValues);
+          if(sheetData && !sheetData.is_processed) {
+            sheetToProcess = sheetData;
+          } else {
+            throw Error("RFQ Draft Sheet not found or is already processed!");
+          }
+        }
+
+        // Insert into tbl_rfq
+        let rfqQuery = ``;
+        let rfqQueryValues = [];
+
+        if(rfqId && !isNaN(parseInt(rfqId))) {
+          rfqQuery = `SELECT id FROM tbl_rfq WHERE id = $1 AND is_published = 0`;
+          rfqQueryValues.push(rfqId);
+        } else {
+          rfqQuery = `
+            INSERT INTO tbl_rfq (
+              rfq_no, 
+              comment, 
+              location,
+              company_name, 
+              response_email, 
+              contact_name, 
+              contact_number, 
+              is_published, 
+              status,
+              reverse_auction,
+              created_by, 
+              updated_by, 
+              bid_end_date,
+              timestamp,
+              rfq_added_from,
+              processed_url
+            )
+            VALUES (
+              $1, 
+              $2, 
+              $3, 
+              $4, 
+              $5,
+              $6,
+              $7,
+              $8,
+              $9,
+              $10,
+              $11,
+              $12,
+              $13,
+              $14,
+              $15,
+              $16
+            )
+            RETURNING id
+          `;
+  
+          const today = new Date();
+          const nextMonth = new Date(today);
+          nextMonth.setMonth(today.getMonth() + 1);
+  
+          const formattedDate = nextMonth.toISOString().split('T')[0];
+  
+          const rfqValues = [
+            nextRFQNumber,
+            "",
+            "",
+            data.company_name,
+            data.response_email,
+            data.contact_name,
+            data.contact_number,
+            0,
+            1,
+            0,
+            createdBy,
+            createdBy,
+            formattedDate,
+            new Date().toISOString(),
+            'magic',
+            processedUrl,
+          ];
+
+          rfqQueryValues.push(...rfqValues);
+        }
+
+        const rfqResult = await t.one(rfqQuery, rfqQueryValues);
+
+        console.log("RFQ INSERTION RESULT -> ", rfqResult)
+
+        if(!rfqResult) throw Error("RFQ does not exist or is no longer in draft!")
+
+        const { id: rfq_id } = rfqResult;
+
+        const sheetDetails = data?.availableSheets ?? data?.sheetNameList ?? [];
+
+        // Inserting every sheets
+        if(!sheetId && !rfqId)
+          for(const sheet of sheetDetails) {
+            let parameters = {
+              rfq_id,
+              is_processed: false,
+            };
+            if(typeof sheet == 'object' && 'download_url' in sheet) {
+              parameters.sheet_name = sheet.sheet_name;
+              parameters.processed_url = sheet.download_url;
+            }
+            else {
+              parameters.sheet_name = sheet;
+              parameters.processed_url = processedUrl
+            }
+            const sheetInsertionResult = await rfqModel.insert('tbl_rfq_draft_sheets', parameters, t)
+            console.log(`INSERTED ${sheet?.sheet_name ?? sheet} AS ${sheetInsertionResult}`)
+          }
+
+        // Map all the terms to this rfq, defaults to all the terms map
+        if(!sheetId)
+          for (const term of data.termList) {
+            if(!term || !term.id) continue;
+            const dataToInsert = {
+              rfq_id,
+              terms_id: term.id
+            }
+
+            await rfqModel.insert('tbl_rfq_terms_map', dataToInsert, t)
+          }
+
+        // Insert into tbl_rfq_products and get back their IDs
+        for (const product of data.products) {
+          let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${sheetToProcess.sheet_name}'`;
+          let sheet = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', parameter, t)
+
+          if(!sheet)
+            sheet = null;
+          else 
+           sheet = sheet[0];
+
+          const productQuery = `
+            INSERT INTO tbl_rfq_products (
+              rfq_id, 
+              product_variant_id, 
+              variant, 
+              comment, 
+              datasheet, 
+              spec_file, 
+              qap_file, 
+              qap, 
+              sheet_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id
+          `;
+
+          const productValues = [
+            rfq_id,
+            product.product_id,
+            product.variant,
+            product.comment,
+            0, // datasheet - using 0 as a default value to avoid null constraint
+            '', // spec_file - this field will be removed from database
+            '', // qap_file - this field will be removed from database
+            '', // qap - using empty string as default
+            sheet.id,
+          ];
+
+          const productInsertionResult = await t.one(productQuery, productValues);
+
+          console.log("PRODUCT INSERTION RESULT -> ", productInsertionResult);
+
+          // Insert into tbl_rfq_products_specs
+          for (const spec of product.spec || []) {
+            await t.none(
+              `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, variant, title, value, sheet_id)
+              VALUES ($1, $2, $3, $4, $5, $6)`,
+              [rfq_id, product.product_id, product.variant, spec.title, spec.value, sheet.id]
+            );
+          }
+
+          // 4. Insert into tbl_rfq_product_vendors
+          for (const vendor of product.vendors || []) {
+            // Skip vendors without user_id
+            if (!vendor.user_id && !vendor.id) continue;
+            
+            // Use id as user_id if user_id is not available
+            const userId = vendor.user_id || vendor.id;
+            
+            const vendorInsertionResult = await t.none(
+              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id)
+              VALUES ($1, $2, $3, $4, $5)`,
+              [rfq_id, product.product_id, product.variant, userId, sheet.id]
+            );
+
+            console.log("VENDOR INSERTION RESULT -> ", vendorInsertionResult)
+          }
+        }
+
+        let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${sheetToProcess.sheet_name}'`;
+        let sheet = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', parameter, t)
+
+        console.log("SHEET ----- ", sheet);
+        if(sheet && sheet.length > 0) {
+          sheet = sheet[0];
+          const updatableData = {
+            is_processed: true,
+            processed_at: new Date().toISOString(),
+          }
+          await rfqModel.update('tbl_rfq_draft_sheets', updatableData, sheet.id, t);
+        }
+
+        return rfq_id;
+      });
+
+    } catch (error) {
+      console.error('Transaction failed. All operations rolled back.', error);
+      throw error;
+    }
+  },
   insertReturnId: async (table_name, data) => {
     const keys = Object.keys(data);
     const values = Object.values(data);
@@ -174,6 +598,16 @@ const rfqModel = {
     const conditionKeys = Object.keys(conditions);
     const conditionString = conditionKeys.map((key, index) => `${key} = $${index + 1}`).join(' AND ');
     const conditionValues = conditionKeys.map(key => conditions[key]);
+
+    let includeCondition = ``;
+    if(includeMeta && includeMeta.values && includeMeta.values.filter(Boolean).length > 0) {
+      includeCondition += ` AND ${includeMeta.key} IN (${includeMeta.values.join(",")})`
+    }
+
+    const excludeCondition = ``;
+    if(excludeMeta && excludeMeta.values && excludeMeta.values.filter(Boolean).length > 0) {
+      excludeCondition += ` AND ${excludeMeta.key} NOT IN (${excludeMeta.values.join(",")})`
+    }
 
     // Query to fetch IDs before deletion
     const idQuery = `SELECT id FROM ${table} WHERE ${conditionString}`;
@@ -2317,7 +2751,7 @@ WHERE row_num_by_name_category = 1
     responseKeys,
   ) => {
 
-    productName = productName?.toLowerCase()
+  productName = productName?.toLowerCase()
 
   let q = `
     SELECT *,
@@ -2375,7 +2809,7 @@ WHERE row_num_by_name_category = 1
       WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
         AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
         AND tu.is_deleted = 0 AND tu.status = 1 
-        AND ${productId ? `pv.id = $1` : `pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER($1))`}
+        AND ${productId ? `pv.id = $1` : productName ? `LOWER(pv.name) = LOWER($1)` : ``}
         AND tu.email IS NOT NULL
 
     ) AS distinct_vendors

@@ -301,7 +301,6 @@ const insertProduct = async (
       }
     }
 
-console.log({ product_info: productResult[0], spec_info, vendor_info })
     return { product_info: productResult[0], spec_info, vendor_info };
   } catch (error) {
     console.error('Error inserting data:', error);
@@ -530,10 +529,12 @@ const validateEmailAddresses = (emails) => {
 // Update the sendMailtoVendors function
 const sendMailtoVendors = async (req, rfqNumber) => {
   try {
-    const { products } = req.body;
     const vendorProductMap = {};
 
+    const products = await rfqModel.getProductsByRfqId(rfqNumber);
+
     products.forEach((item) => {
+      console.log("ITEM -> ", item)
       item.vendors.forEach((vendor) => {
         if (!vendorProductMap[vendor.user_id]) {
           vendorProductMap[vendor.user_id] = {
@@ -1192,14 +1193,16 @@ const saveRfqDraft = async (user_id, reqBody) => {
       contact_number,
       bid_end_date,
       location,
-      products,
+      updatableData,
       terms,
       rfq_type,
       reverse_auction,
       ra_start_date,
       ra_end_date,
       project_id,
-      term_and_condition_files
+      term_and_condition_files,
+      termsChanged,
+      termFilesChanged,
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
   
@@ -1227,23 +1230,10 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
   await rfqModel.update('tbl_rfq', rfqData, rfq_id);
   await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id);
-  
-  
-  // Only delete product-related records, preserve terms
-  await Promise.all([
-      rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }),
-      rfqModel.deleteWithReturnIds('tbl_rfq_product_vendors', { rfq_id }),
-      rfqModel.deleteWithReturnIds('tbl_rfq_products_specs', { rfq_id })
-  ]);
-
-  const rfqProductIds = await rfqModel.deleteWithReturnIds('tbl_rfq_products', { rfq_id });
-  if (rfqProductIds.length > 0) {
-      await rfqModel.deleteProductFilesByIds(rfqProductIds);
-  }
 
   // Handle terms update
-  if (terms && terms.length > 0) {
-      // First delete existing terms
+  if (termsChanged && terms && terms.length > 0) {
+      // First delete existing terms only if terms have changed
       await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id });
       
       // Then insert new terms
@@ -1254,7 +1244,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
       await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
   }
 
-  if (term_and_condition_files && term_and_condition_files.length > 0) {
+  if (termFilesChanged && term_and_condition_files && term_and_condition_files.length > 0) {
+    // First delete existing term files only if term files have changed
       const rfqFiles = term_and_condition_files.map(url => ({
           rfq_id,
           file_type: 'term_and_condition',
@@ -1263,16 +1254,116 @@ const saveRfqDraft = async (user_id, reqBody) => {
       await rfqModel.insertArray(rfqFiles, ['rfq_id', 'file_type', 'file_url'], 'tbl_rfq_files');
   }
 
-  if (products && products.length > 0) {
-    await Promise.all(
-      products.map(async (product) => {
-        const insertResult = await insertProduct(product, rfq_id);
-        const oldProductId = product.id;
-        const newProductId = insertResult.product_info.id;
-  
-        await updateRfqProductIdInTechEvaluation(oldProductId, newProductId);
-      })
-    );
+  const products = updatableData?.products
+
+  if (products && products?.updatable) {
+    if (products.updatable?.specs)
+      Object.keys(products.updatable.specs).forEach((rfqProductId) => {
+        const productId = products.updatable.specs[rfqProductId].product_id;
+        const variant = products.updatable.specs[rfqProductId].variant;
+        delete products.updatable.specs[rfqProductId].variant;
+        delete products.updatable.specs[rfqProductId].productId;
+
+        let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${
+          variant ?? '0'
+        })::INT`;
+
+        Object.keys(products.updatable.specs[rfqProductId]).forEach(
+          async (spec) => {
+            const data = {
+              value: products.updatable.specs[rfqProductId][spec]
+            };
+            const currentWhereClause = whereClause + ` AND title = '${spec}'`;
+            const doesExist = await rfqModel.checkIfExists(
+              'tbl_rfq_products_specs',
+              currentWhereClause
+            );
+            if (doesExist && doesExist.length > 0) {
+              await rfqModel.updateWhere(
+                'tbl_rfq_products_specs',
+                data,
+                currentWhereClause
+              );
+            } else {
+              const insertData = {
+                ...data,
+                rfq_id,
+                product_variant_id: productId,
+                title: spec,
+                variant: parseInt(
+                  products.updatable.specs[productId]?.variant ?? '0'
+                )
+              };
+              await rfqModel.insert('tbl_rfq_products_specs', insertData);
+            }
+          }
+        );
+      });
+
+    if (products.updatable?.files)
+      Object.keys(products.updatable.files).forEach((rfqProductId) => {
+        delete products.updatable.files[rfqProductId].variant;
+        delete products.updatable.files[rfqProductId].product_id;
+
+        let whereClause = `rfq_product_id = (${rfqProductId})::INT`;
+
+        Object.keys(products.updatable.files[rfqProductId]).forEach(
+          async (fileType) => {
+            const transformedFileType =
+              fileType == 'qap_file'
+                ? 'QAP'
+                : fileType == 'spec_file'
+                ? 'SPEC'
+                : 'TDS';
+
+            const data = {
+              file_url: products.updatable.files[rfqProductId][fileType]
+            };
+            const currentWhereClause =
+              whereClause + ` AND file_type = '${transformedFileType}'`;
+            const doesExist = await rfqModel.checkIfExists(
+              'tbl_rfq_product_files',
+              currentWhereClause
+            );
+            if (doesExist && doesExist.length > 0) {
+              if (data.file_url == 'rm') {
+                const conditions = {
+                  rfq_product_id: rfqProductId,
+                  file_type: transformedFileType
+                };
+                await rfqModel.delete('tbl_rfq_product_files', conditions);
+              } else {
+                await rfqModel.updateWhere(
+                  'tbl_rfq_product_files',
+                  data,
+                  currentWhereClause
+                );
+              }
+            } else {
+              const insertData = {
+                ...data,
+                rfq_product_id: rfqProductId,
+                file_type: transformedFileType
+              };
+              await rfqModel.insert('tbl_rfq_product_files', insertData);
+            }
+          }
+        );
+      });
+
+    if (products.updatable?.comment)
+      Object.keys(products.updatable.comment).forEach(async (rfqProductId) => {
+        const productId = products.updatable.comment[rfqProductId].product_id;
+        const variant = products.updatable.comment[rfqProductId].variant;
+        const comment = products.updatable.comment[rfqProductId].comment;
+
+        let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${variant})::INT`;
+
+        const data = {
+          comment
+        };
+        await rfqModel.updateWhere('tbl_rfq_products', data, whereClause);
+      });
   }
 
   return { status: 1, message: 'Draft saved successfully', rfq_id };
@@ -1291,69 +1382,39 @@ const rfqController = {
     try {
       let {
         rfq_id,
-        comment,
-        company_name,
-        contact_name,
-        contact_number,
-        bid_end_date,
-        location,
-        rfq_type,
-        reverse_auction,
-        project_id,
-        ra_start_date,
-        ra_end_date
       } = req.body;
-      const response_email = req.body.response_email?.toLowerCase();
-      const is_update = !!rfq_id;
       const user_id = req.user.id;
-      const { products } = req.body;
 
+      if (!rfq_id) {
+        return res.status(400).json({
+          status: 3,
+          errors: {
+            rfq: 'RFQ Id is required to create an RFQ from Draft!'
+          }
+        }).end();
+      }
+      
+      await saveRfqDraft(user_id, req.body);
 
-    if (!rfq_id) {
-      const nextRFQNumber = await getNextRfQNumber();
+      const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id);
 
-      const tbl_rfq_data = {
-        comment,
-        company_name,
-        response_email,
-        contact_name,
-        contact_number,
-        bid_end_date,
-        location,
-        is_published: 0,
-        rfq_type,
-        rfq_no: nextRFQNumber,
-        created_by: user_id,
-        updated_by: user_id,
-        reverse_auction,
-        ra_start_date,
-        ra_end_date
-      };
-
-      if (project_id != -1) {
-        tbl_rfq_data.project_id = project_id;
+      if(!isRFQComplete) {
+        return res.status(400).json({
+          status: 2,
+          errors: {
+            rfq_specs: 'Some products are missing quantity or unit. Please fill them before proceeding.'
+          }
+        }).end();
       }
 
-      const responseInsert = await rfqModel.insert('tbl_rfq', tbl_rfq_data);
-
-      if (responseInsert.length > 0) {
-        req.body.rfq_id = responseInsert[0].id;
-        rfq_id = responseInsert[0].id;
-
-        const savedRfq = await rfqModel.getRFQDetails(rfq_id);
-      }
-    }
-
-    await saveRfqDraft(user_id, req.body);
-
-    const responseUpdate = await rfqModel.update(
-      'tbl_rfq',
-      { is_published: 1 },
-      rfq_id
-    );
-
-    await sendMailtoVendors(req, rfq_id);
-    await sendQuotationMailToBuyer(req, rfq_id);
+      const responseUpdate = await rfqModel.update(
+        'tbl_rfq',
+        { is_published: 1 },
+        rfq_id
+      );
+      
+      await sendMailtoVendors(req, rfq_id);
+      await sendQuotationMailToBuyer(req, rfq_id);
 
       const buyerMsgPayload = {
         mobile: req.user.mobile,
@@ -1479,6 +1540,7 @@ const rfqController = {
         message: response
       });
     } catch (error) {
+      console.log("ERROR -> ", error)
       logError(error);
       res.status(500).json({
         status: 3,
@@ -1514,6 +1576,119 @@ const rfqController = {
     }
   },
 
+  // Changes by Agnij 2025-05-24 [Added method to get all draft RFQs]
+  getDraftRFQs: async (req, res) => {
+    try {
+      const user_id = req.user.id;
+      
+      const page = parseInt(req.body.page) || 1;
+      const limit = parseInt(req.body.limit) || 10;
+      const offset = (page - 1) * limit;
+      const project_id = req.body.project_id || -1;
+      const sort = req.body.sort || 'DESC';
+      const reverse_auction = req.body.reverse_auction || '-1';
+      const rfq_type = req.body.rfq_type || '';
+      const rfq_no = req.body.rfq_no || null;
+
+      const result = await rfqModel.getAllDraftRfqs(
+        limit, 
+        offset, 
+        user_id, 
+        project_id, 
+        sort, 
+        reverse_auction, 
+        rfq_type, 
+        rfq_no
+      );
+
+      res.status(200).json({
+        status: 1,
+        data: result.data,
+        total_items: parseInt(result.total_count)
+      });
+    } catch (error) {
+      logError("Error fetching draft RFQs:", error);
+      res.status(500).json({
+        status: 3,
+        message: "An error occurred while fetching draft RFQs"
+      });
+    }
+  },
+
+  // Changes by Agnij 2025-05-24 [Updated method to get a specific draft RFQ by ID with debug logs]
+  // Changes by Agnij 2025-06-17 [Fixed draft RFQ retrieval issue]
+  getDraftById: async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { sheetId } = req.query;
+      const user_id = req.user.id;
+
+      let sheetData = null;
+      const sheets = await rfqModel.getSheetsForDraftRfq(id, null, sheetId);
+
+      if(sheets) {
+        sheetData = sheets[0];
+      }
+
+      if(sheetData && !sheetData.is_processed) {
+        try {
+          const [,processedData] = await rfqController.processRfqDraftSheetWise(null, req.user, id, sheetId);
+          await saveMagicSearchInDraft(processedData, user_id, null, id, sheetId);
+        } catch (error) {
+          console.log(error)
+          return res.status(500).json({
+            status: 0,
+            success: false,
+            message: 'Failed to process sheet data. Please try again.',
+            sheets
+          });
+        }
+      }
+
+      const draftData = await rfqModel.getRfqDraftById(id, sheetData);
+      
+      if (!draftData || draftData.length === 0) {
+        return res.status(404).json({ 
+          status: 2, 
+          message: "Draft RFQ details not found" 
+        });
+      }
+      
+      if (draftData[0].rfq_form_data.is_published !== 0) {
+        return res.status(403).json({ 
+          status: 2, 
+          message: "This is not a draft RFQ" 
+        });
+      }
+
+      const isMagicRfq = draftData[0].rfq_form_data.rfq_added_from === 'magic';
+      
+      if (isMagicRfq && (!draftData[0].sheets || draftData[0].sheets.length === 0)) {
+        const sheets = await rfqModel.getSheetsForDraftRfq(id);
+        if (sheets && sheets.length > 0) {
+          draftData[0].sheets = sheets;
+        }
+      }
+      
+      // Return in the same format as getRFQDraftData
+      res.status(200).json({
+        status: 1,
+        data: draftData[0]
+      });
+    } catch (error) {
+      console.error(`[getDraftById] Error:`, error);
+      
+      // Changes by Agnij 2025-05-24 [Fixed error handling to properly use logError]
+      const err = new Error("Error fetching draft RFQ by ID");
+      err.original = error;
+      logError(err);
+      
+      res.status(500).json({
+        status: 3,
+        message: "An error occurred while fetching the draft RFQ"
+      });
+    }
+  },
   createOrUpdateRfqDraftWithProductVendors : async (req, res) => {
     try {
         const user_id = req.user.id;
@@ -1633,7 +1808,7 @@ const rfqController = {
     try {
         const conditions = {
             rfq_id: rfq_id,
-            product_id: product_id,
+            product_variant_id: product_id,
             user_ids: vendor_ids,
             variant: variant
         };
@@ -4745,27 +4920,36 @@ const rfqController = {
     }
   },
 
+  processRfqDraftSheetWise: async (processedUrl, user, rfqId = null, sheetId = null, availableSheets) => {
+    try {
+      
+      if (rfqId && !isNaN(parseInt(rfqId)) && sheetId && !isNaN(parseInt(sheetId))) {
+        let rfqDetails = await rfqModel.checkIfExists(
+          'tbl_rfq',
+          `id = ${rfqId}`
+        );
+        if (rfqDetails) {
+          rfqDetails = rfqDetails[0];
+          let sheetDetails = await rfqModel.checkIfExists(
+            'tbl_rfq_draft_sheets',
+            `rfq_id = ${rfqId} AND id = ${sheetId}`
+          );
+          if(sheetDetails) {
+            sheetDetails = sheetDetails[0];
+            processedUrl = sheetDetails.processed_url;
+          } else
+            processedUrl = rfqDetails.processed_url;
+
+          if (!processedUrl)
+            throw new Error('Processed URL does not exist for given Sheet OR RFQ')
+        }
   // mukul - 21-05-2025, removed file handling as now we just get json url in request, also reviewed we handling many fields in payload but in api call we just get json url, not removing them now as very soon we start this flow enhancements
   // Kushal - 21-05-2025, Highly optimized to handle large datasets
 
-  magicSearchRfqCreate: async (req, res, next) => {
-    try {
-      let aiProcessedBoqJson = req.body.jsonFileUrl;
-      const user = req.user;
   
-      console.log(" line 4756 rfqcontroller aiProcessedBoqJson =>>>>>> ", aiProcessedBoqJson)
-
-      if (aiProcessedBoqJson.startsWith('http:')) {
-        aiProcessedBoqJson = aiProcessedBoqJson.replace('http:', 'https:');
-      }
-
-       console.log(" line 4762 rfqcontroller  aiProcessedBoqJson =>>>>>> ", aiProcessedBoqJson)
-
-  
-      const boqDataJson = await generativeAI.processBOQWithAI(aiProcessedBoqJson);
+      const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
 
       // console.log(" line 4762  boqDataJson =>>>>>> ", boqDataJson)
-
 
       const termList = await rfqModel.getAllTerms();
       const transformedTermList = termList.map(term => ({ id: term.id, name: term.term_content }));
@@ -4775,6 +4959,14 @@ const rfqController = {
       const sheetNameList = new Set();
       const globalVariantCount = {};
   
+      const allProductIds = boqDataJson.map(item => item.variant_id);
+  
+      const uniqueProductIds = [...new Set(allProductIds)];
+      const existingProducts = await rfqModel.checkIfExists(
+        'tbl_product',
+        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+      );
+      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
   
       const vendorCache = {};
   
@@ -4782,50 +4974,55 @@ const rfqController = {
 
 
       for (const item of boqDataJson) {
-
         if (item.is_product == "No") {
           continue
        }
 
-        const variantId = item.variant_id ? parseInt(item.variant_id) : null;
-        const ProductName = item.fetched_product_name || item.core_product_name || "Unnamed Product";
-
-        console.log(" line 4785 rfqcontroller ", ProductName, variantId)
-
-
-    if (!variantId || isNaN(variantId)) {
-      validationErrors.push({
-        errors: { product: `${item.core_product_name || item.fetched_product_name} - product not found` }
-      });
-      continue;
-    }
-
-    // Fetch vendors by variantId, using cache
-    if (!vendorCache[variantId]) {
-      const vendors = await rfqModel.genericSearchVendors(
-        user.id,
-        variantId,      // Pass variantId for vendor filtering
-        null,           // No search_key needed
-        { vendorId: 'user_id', vendorName: 'name' }
-      );
-      vendorCache[variantId] = vendors;
-    }
+        const cleanId = item?.variant_id;
   
-        const vendorResult = vendorCache[variantId];
-  
-        if (!vendorResult || vendorResult.length === 0) {
+        if (!cleanId) {
           validationErrors.push({
-            errors: {
-              vendor: `${ProductName} - No Vendors Found` }
+            errors: { product: `${item.fetched_product_name} - Product Not Found` },
           });
           continue;
         }
   
-        const variantCount = globalVariantCount[variantId] ?? 0;
+        const validProductId = existingProductIdSet.has(cleanId) ? cleanId : null;
+  
+        if (!validProductId) {
+          validationErrors.push({
+            errors: { product: `${item.fetched_product_name} - Product Not Found` },
+          });
+          continue;
+        }
+  
+        const productName = item.fetched_product_name || item.core_product_name;
+
+        if (!vendorCache[validProductId]) {
+          const vendors = await rfqModel.genericSearchVendors(
+            user.id,
+            validProductId,
+            null,
+            { vendorId: 'user_id', vendorName: 'name' }
+          );
+          vendorCache[validProductId] = vendors;
+        }
+  
+        const vendorResult = vendorCache[validProductId];
+  
+        if (!vendorResult || vendorResult.length === 0) {
+          validationErrors.push({
+            errors: {
+              vendor: `${productName} - No Vendors Found` }
+          });
+          continue;
+        }
+  
+        const variantCount = globalVariantCount[validProductId] ?? 0;
   
         products.push({
-          product_id: variantId,
-          name: item.fetched_product_name || item.core_product_name || "Unnamed Product",
+          product_id: validProductId,
+          name: productName || "Unnamed Product",
           variant: variantCount,
           spec: [
             { title: "Size", value: item.size || "" },
@@ -4846,7 +5043,7 @@ const rfqController = {
           sheet_name: item.sheet_name || "",
         });
   
-        globalVariantCount[variantId] = variantCount + 1;
+        globalVariantCount[validProductId] = variantCount + 1;
         sheetNameList.add(item.sheet_name || "");
       }
   
@@ -4859,8 +5056,33 @@ const rfqController = {
         products,
         terms: transformedTermList,
         term_and_condition_files: [],
-        sheetNameList: Array.from(sheetNameList),
+        sheetNameList: (availableSheets && availableSheets.length > 0) ? availableSheets.map(sheet => sheet.sheet_name) : Array.from(sheetNameList),
+        availableSheets,
       };
+
+      return [validationErrors, finalObject];
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  // mukul - 21-05-2025, removed file handling as now we just get json url in request, also reviewed we handling many fields in payload but in api call we just get json url, not removing them now as very soon we start this flow enhancements
+  // Kushal - 21-05-2025, Highly optimized to handle large datasets
+  // Kushal - 23-05-2025, Completed Sheet wise processing while saving Draft of Magic Search
+  magicSearchRfqCreate: async (req, res, next) => {
+    try {
+      let aiProcessedBoqJson = req.body.jsonFileUrl;
+      let availableSheets = req.body.availableSheets
+      const user = req.user;
+
+      if(availableSheets && availableSheets.length > 0) {
+        aiProcessedBoqJson = availableSheets[0]?.download_url ?? aiProcessedBoqJson
+      }
+  
+      const [validationErrors, processedData] = await rfqController.processRfqDraftSheetWise(aiProcessedBoqJson, user, null, null, availableSheets)
+
+      const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, aiProcessedBoqJson)
+      const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq)
   
       return res.status(200).json({
         status: 1,
