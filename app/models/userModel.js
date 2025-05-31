@@ -761,19 +761,16 @@ user_book_demo: async (mobile) => {
 
       // query changes by Mukul Jatav 13-09-2024, added product_list with approved vendor list for each product in /vendor-profile/id API, this model returning product list but it's variant not changing product_name to variant_name or product_list to variant_list as this is quick fix for now
 
+      // mukul 31-05-2025 changes as per the top management flow requerment
+
       // Base query with common fields
       let baseQuery = `
       SELECT tbl_users.id as user_id,
              tbl_users.name as vendor_name,
-             tbl_users.new_profile_image as profile_image,
+             tbl_company.logo as profile_image,
              tbl_users.address,
-             tbl_users.dob,
-             tbl_users.nationality,
              tbl_users.status,
-             tbl_users.linkedin,
-             tbl_users.facebook,
              tbl_users.whatsapp,
-             tbl_users.skype,
              tbl_company.id as company_id,
              tbl_company.gstin,
              tbl_company.cin,
@@ -783,7 +780,6 @@ user_book_demo: async (mobile) => {
              tbl_company.turnover,
              tbl_company.no_of_employess,
              tbl_company.import_export_code,
-             tbl_company.certifications,
              tbl_company.company_name,
              tbl_company.profile,
              tbl_company.location,
@@ -818,16 +814,16 @@ user_book_demo: async (mobile) => {
            WHERE M.vendor_id = tbl_users.id
        ) AS "product_list",
              CASE
-                 WHEN tbl_users.new_profile_image IS NULL THEN
+                 WHEN tbl_company.logo IS NULL THEN
                      NULL
-                 ELSE tbl_users.new_profile_image
+                 ELSE tbl_company.logo
              END AS profile_image_url`;
 
       // Additional fields if current_user is not null
       if (current_user !== null) {
         baseQuery += `,
-             tbl_company.mobile,
-             tbl_company.email,
+             tbl_users.mobile,
+             tbl_users.email,
              ARRAY(
                  SELECT json_build_object(
                      'reviewed_by', tbl_vendor_reviews.reviewed_by,
@@ -835,9 +831,7 @@ user_book_demo: async (mobile) => {
                      'rating', tbl_vendor_reviews.rating,
                      'description', tbl_vendor_reviews.description,
                      'buyer', BU.name,
-                     'buyer_email', BU.email,
-                     'original_profile_image', BU.original_profile_image,
-                     'new_profile_image', BU.new_profile_image
+                     'buyer_email', BU.email
                  )
                  FROM tbl_vendor_reviews
                  LEFT JOIN tbl_users BU ON BU.id = tbl_vendor_reviews.reviewed_by
@@ -848,7 +842,7 @@ user_book_demo: async (mobile) => {
       // Completing the query with the FROM clause
       baseQuery += `
       FROM tbl_users
-      LEFT JOIN tbl_company ON tbl_users.id = tbl_company.user_id
+      LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
       LEFT JOIN tbl_location_cities cl ON cl.id = tbl_users.city
       LEFT JOIN tbl_location_states sl ON sl.id = tbl_users.state     
       WHERE tbl_users.id = $1`;
