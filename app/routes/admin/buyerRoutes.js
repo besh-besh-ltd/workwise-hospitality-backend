@@ -1,6 +1,7 @@
 import { Router } from 'express';
 
 import buyerController from '../../controllers/admin/buyerController.js';
+import usersController from '../../controllers/users/usersController.js';
 
 import { validateDbBody } from '../../validations/dbValidation/buyerDbValidation.js';
 import {
@@ -92,7 +93,7 @@ buyerRoutes.post(
   '/company-registration',
   passportSignIn,
   schema_posts.add_buyer,
-  buyerController.companyRegistration
+  usersController.company_registration
 );
 
 export default buyerRoutes;
