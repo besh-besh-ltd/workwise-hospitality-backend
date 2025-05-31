@@ -698,9 +698,8 @@ user_book_demo: async (mobile) => {
             tbl_company.turnover,
             tbl_company.no_of_employess,
             tbl_company.import_export_code,
-            tbl_company.certifications,
             tbl_company.location,
-            tbl_company.mobile as company_mobile,
+            tbl_users.mobile AS company_mobile,
             tbl_company.gstin,
             tbl_company.cin,
             tbl_company.website,
@@ -708,7 +707,7 @@ user_book_demo: async (mobile) => {
             tbl_location_states.state_name, 
             tbl_location_cities.city_name  
         FROM tbl_users 
-        LEFT JOIN tbl_company ON tbl_users.id = tbl_company.user_id  
+        LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
         LEFT JOIN tbl_location_states ON tbl_users.state = tbl_location_states.id
         LEFT JOIN tbl_location_cities ON tbl_users.city = tbl_location_cities.id
         WHERE tbl_users.id = $1`,
@@ -718,6 +717,7 @@ user_book_demo: async (mobile) => {
           resolve(data);
         })
         .catch(function (err) {
+          console.log(err)
           let error = new Error(err);
           reject(error);
         });
