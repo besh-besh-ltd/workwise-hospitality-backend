@@ -2640,9 +2640,9 @@ WHERE row_num_by_name_category = 1
         ls.state_name,
         lcn.country_name,
         CASE
-          WHEN tu.new_profile_image IS NULL THEN NULL
-          ELSE tu.new_profile_image
-        END AS image_url,
+         WHEN tc.logo IS NULL THEN NULL
+         ELSE tc.logo
+         END AS image_url,
         CASE
           WHEN bvm.vendor_id IS NOT NULL THEN 1
           ELSE 0
@@ -2661,7 +2661,7 @@ WHERE row_num_by_name_category = 1
       JOIN tbl_product_categories pc ON p.id = pc.product_id
       JOIN tbl_category c ON pc.category_id = c.id
       JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
-      LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
       LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
       LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
       LEFT JOIN tbl_location_states ls ON tu.state = ls.id
