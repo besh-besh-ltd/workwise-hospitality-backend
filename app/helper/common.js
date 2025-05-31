@@ -369,22 +369,6 @@ async function deleteFileFromS3(s3Client, fileUrl) {
   }
 }
 
-function withTransaction(model, transaction) {    // Wraps the model methods to automatically pass the transaction
-    // This function creates a proxy around the model to intercept method calls
-    return new Proxy(model, {
-        get(target, propKey) {
-            const originalMethod = target[propKey];
-            if (typeof originalMethod === 'function') {
-                return function(...args) {
-                    // Add transaction as last argument
-                    return originalMethod.apply(target, [...args, transaction]);
-                };
-            }
-            return originalMethod;
-        }
-    });
-}
-
 
 
 
@@ -410,5 +394,4 @@ export {
   getDateRange,
   deleteFileFromS3,
   buildProductFilters,
-  withTransaction
 };
