@@ -5671,8 +5671,13 @@ const rfqController = {
 
       if (processedUrl.startsWith('http:')) {
         processedUrl = processedUrl.replace('http:', 'https:');
+
       }
+
+       console.log(" line 4762 rfqcontroller  aiProcessedBoqJson =>>>>>> ", aiProcessedBoqJson)
+
   
+
       const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
 
       const termList = await rfqModel.getAllTerms();
@@ -5694,6 +5699,9 @@ const rfqController = {
   
       const vendorCache = {};
   
+      console.log(" 4781 =>>>>> rfq controller boq ", boqDataJson)
+
+
       for (const item of boqDataJson) {
         if (item.is_product == "No") {
           continue
@@ -5752,7 +5760,7 @@ const rfqController = {
             { title: "Unit", value: item.unit || "NA" },
           ],
           vendors: vendorResult,
-          comment: item.full_product_description || "",
+          comment: item.summary_of_product_description || "",
           defaultSelectedVAB: "",
           datasheet: "0",
           datasheet_file: [],
