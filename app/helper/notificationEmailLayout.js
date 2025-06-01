@@ -25,5 +25,59 @@ function generateEmailTemplate(headerContent, containerContent) {
     `;
 }
 
+function getRfqEmailContent({ vendor_name, rfq_no, buyer_name, rfq_id, token, emailType }) {
+  const baseUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}`;
 
-export { generateEmailTemplate }
+  switch (emailType) {
+    case RFQ_EMAIL_TYPE.NEW_PRODUCT:
+    case RFQ_EMAIL_TYPE.NEW_VENDOR:
+      return {
+        subject: `New RFQ Opportunity #${rfq_no} from ${buyer_name}`,
+        header: `<h2>Hello ${vendor_name},</h2>`,
+        content: `
+          <p style="font-size: 15px;">
+            A new RFQ #${rfq_no} has been created by ${buyer_name}. You are invited to participate.
+          </p>
+          <a href="${baseUrl}"
+             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+            View RFQ
+          </a>
+        `
+      };
+
+    case RFQ_EMAIL_TYPE.REMOVED_VENDOR:
+      return {
+        subject: `Update on RFQ #${rfq_no}`,
+        header: `<h2>Hello ${vendor_name},</h2>`,
+        content: `
+          <p style="font-size: 15px;">
+            You are no longer a participant in RFQ #${rfq_no} created by ${buyer_name}.
+          </p>
+        `
+      };
+
+    case RFQ_EMAIL_TYPE.UPDATED_RFQ:
+    default:
+      return {
+        subject: `RFQ #${rfq_no} has been updated by ${buyer_name}`,
+        header: `<h2>Hello ${vendor_name},</h2>`,
+        content: `
+          <p style="font-size: 15px;">
+            RFQ #${rfq_no} has been updated by ${buyer_name}. Please review the latest details.
+          </p>
+          <a href="${baseUrl}"
+             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+            View RFQ
+          </a>
+        `
+      };
+  }
+}
+const RFQ_EMAIL_TYPE = {
+  NEW_PRODUCT: 'NEW_PRODUCT',
+  REMOVED_VENDOR: 'REMOVED_VENDOR',
+  UPDATED_RFQ: 'UPDATED_RFQ',
+  NEW_VENDOR: 'NEW_VENDOR'
+};
+
+export { generateEmailTemplate ,getRfqEmailContent , RFQ_EMAIL_TYPE}

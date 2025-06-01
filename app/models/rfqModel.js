@@ -5801,6 +5801,106 @@ searchVariantVendors: async (product_id, variant_id) => {
     return [];
   }
 },
+getAllDraftRfqs: async (limit, offset, user_id, project_id, sort, reverse_auction, rfq_type, rfq_no) => {
+  return new Promise(function (resolve, reject) {
+    let q = `
+      SELECT
+        RFQ.*,
+        P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
+        (SELECT COUNT(*)
+        FROM tbl_query_messages TQM
+        WHERE TQM.receiver_id = ${user_id}
+        AND TQM.rfq_id = RFQ.id
+        AND TQM.is_seen = false
+        ) AS "unseen_query_count",
+        ARRAY(
+            SELECT json_build_object(
+                'id', RFQ_P.id, 
+                'product_id', RFQ_P.product_variant_id,
+                'product_specs', (
+                    SELECT json_agg(json_build_object(
+                        'title', RFQ_P_SPEC.title, 
+                        'value', RFQ_P_SPEC.value, 
+                        'id', RFQ_P_SPEC.id, 
+                        'product_id', RFQ_P_SPEC.product_variant_id, 
+                        'rfq_id', RFQ_P_SPEC.rfq_id))
+                    FROM tbl_rfq_products_specs RFQ_P_SPEC
+                    WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id 
+                      AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
+                      AND RFQ_P.variant = RFQ_P_SPEC.variant
+                  ),
+                  'product_details', (
+                      SELECT json_agg(json_build_object(
+                          'id', T_P.id,
+                          'name', T_P.name))
+                      FROM tbl_product_variant T_P
+                      WHERE RFQ_P.product_variant_id = T_P.id
+                  )
+              )
+              FROM tbl_rfq_products RFQ_P
+              WHERE RFQ.id = RFQ_P.rfq_id
+          ) AS "products"
+      FROM tbl_rfq RFQ
+      LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
+      WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 0
+      ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
+      ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
+      ${reverse_auction == '-1' ? '' : ` AND RFQ.reverse_auction = ${reverse_auction}`}
+      ${rfq_no == null ? '' : ` AND CAST(RFQ.rfq_no AS TEXT) LIKE '%${rfq_no}%'`}
+      ORDER BY RFQ.id ${sort ? sort : 'ASC'} LIMIT ${limit} OFFSET ${offset}`;
+      
+      const countQuery = `
+        SELECT COUNT(*) AS total_count
+        FROM tbl_rfq RFQ
+        WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 0
+        ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
+        ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
+        ${reverse_auction == '-1' ? '' : ` AND RFQ.reverse_auction = ${reverse_auction}`}
+        ${rfq_no == null ? '' : ` AND CAST(RFQ.rfq_no AS TEXT) LIKE '%${rfq_no}%'`}
+      `;
+
+      db.tx(t => {
+        return t.batch([
+          db.query(q),
+          db.query(countQuery)
+        ]);
+      })
+      .then(([data, countResult]) => {
+        resolve({
+          data: data,
+          total_count: countResult[0].total_count
+        });
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+    //New Model added By Ayush For Fetching Vendors Associated with a particular product in an RFQ
+searchEmailAndNameForVendor: async (rfq_id , product_id) => {
+  const query = `
+    SELECT 
+      tbu.id AS vendor_id,
+      tbu.name, 
+      tbu.email,
+      tpv.name AS product_name
+    FROM tbl_rfq_product_vendors trpv
+    JOIN tbl_rfq_products trp 
+      ON trp.product_variant_id = trpv.product_variant_id 
+      AND trp.variant = trpv.variant
+    JOIN tbl_product_variant tpv 
+      ON trp.product_variant_id = tpv.id 
+    JOIN tbl_users tbu 
+      ON tbu.id = trpv.user_id
+    WHERE trpv.rfq_id = $1 AND trp.id = $2
+  `;
+
+  const result = await db.query(query, [rfq_id, product_id]);
+
+
+  return result || [];
+}
 
 }
 export default rfqModel;
