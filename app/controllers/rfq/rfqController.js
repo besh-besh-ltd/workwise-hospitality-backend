@@ -1109,10 +1109,8 @@ const sendQuoteNotificationEmail = async (req) => {
         if (validSpocEmails.length > 0) {
           mail.to = validSpocEmails;
           mail.cc = vendor_email || '';
-          mail.bcc = "mukuljatav1010+if@gmail.com";
         } else {
           mail.to = vendor_email || '';
-          mail.bcc = "mukuljatav1010+else@gmail.com";
         }
 
          sendMail(mail);
