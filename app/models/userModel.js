@@ -3508,8 +3508,26 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     });
   } */
 
+  updateUserAccount: async (userId, userObj) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `UPDATE tbl_users SET 
+         name = $2,
+         email = $3,
+         mobile = $4,
+         updated_at = $5
+         WHERE id = $1`,
+        [userId, userObj.name, userObj.email, userObj.mobile, userObj.updated_at]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          reject(err);
+        });
+    });
+  }
 
-
-  };
+};
 
 export default userModel;

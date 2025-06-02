@@ -506,6 +506,16 @@ const schemas = {
       )
       .min(7) // Minimum 10 digits if non-empty
       .max(15) // Maximum 15 digits if non-empty
+  }),
+  id: Joi.object().keys({
+    id: Joi.string()
+      .required()
+      .regex(/^[0-9]*$/, 'Please send proper id')
+  }),
+  admin_update_user_account: Joi.object().keys({
+    name: Joi.string().required(),
+    email: Joi.string().required().email().max(100),
+    mobile: Joi.string().min(8).max(15).required().label('Mobile')
   })
 };
 
