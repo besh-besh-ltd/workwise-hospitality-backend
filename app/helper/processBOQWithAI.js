@@ -139,10 +139,8 @@ ${pdfText}
   processBOQWithAI: async (aiProcessedBoqJson) => {
     try {
 
-      console.log("142 aiProcessedBoqJson ", aiProcessedBoqJson)
        // download the file from ai server
         const downloadResponse = await axios.get(aiProcessedBoqJson);
-
 
       return downloadResponse?.data || [] ;
     } catch (error) {
