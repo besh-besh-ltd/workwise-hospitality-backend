@@ -3768,12 +3768,12 @@ const productController = {
       const fetchedMakeList = await rfqModel.checkIfExists(tblProductMake, `variant_vendor_map_id = ${mapping_id}`);
   
       // Prepare clean lists
-      const existingMakes = fetchedMakeList.map(m => m.make_name?.toLowerCase().trim());
-      const newMakes = (make_list || []).filter(m => m && m.trim()).map(m => m.toLowerCase().trim());
+      const existingMakes = fetchedMakeList.map(m => m.make_name?.trim());
+      const newMakes = (make_list || []).filter(m => m && m.trim()).map(m => m?.trim());
   
       // Identify makes to delete
       const makesToDelete = fetchedMakeList
-        .filter(m => !newMakes.includes(m.make_name?.toLowerCase().trim()))
+        .filter(m => !newMakes.includes(m.make_name?.trim()))
         .map(m => m.id); // Collect the IDs to delete
   
       // Identify makes to insert
