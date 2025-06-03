@@ -3078,8 +3078,9 @@ const rfqController = {
   },
   getVendorsForProduct: async (req, res) => {
     let {productId, excludeIds} = req.body;
+    let userId = req.user.id;
     try {
-      const vendorsList = await rfqModel.getVendorsForProduct(productId, excludeIds);
+      const vendorsList = await rfqModel.getVendorsForProduct(productId, excludeIds, userId);
 
       res
         .status(200)
