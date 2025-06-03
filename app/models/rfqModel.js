@@ -1805,7 +1805,9 @@ LIMIT 1;`;
           ) AS "products"
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
-      WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 1
+      WHERE (RFQ.created_by = ${user_id} OR EXISTS (
+      SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+      )) AND RFQ.is_published = 1
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -1829,7 +1831,9 @@ LIMIT 1;`;
     return new Promise(function (resolve, reject) {
       db.any(`SELECT COUNT(*) from tbl_rfq RFQ
         LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
-        WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 1
+        WHERE (RFQ.created_by = ${user_id} OR EXISTS (
+        SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+        )) AND RFQ.is_published = 1
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -2198,7 +2202,7 @@ LIMIT 1;`;
                       'organization_name', TUU.organization_name
                     )
                     FROM tbl_users TUU
-                    JOIN tbl_company TC ON TUU.id = TC.user_id
+                    JOIN tbl_company TC ON TUU.company_id = TC.id
                     WHERE TUU.id = TQF.vendor_id
                   )
                 )

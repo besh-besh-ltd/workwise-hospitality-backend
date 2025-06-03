@@ -3666,52 +3666,6 @@ const rfqController = {
         product.quotations = updatedQuotations;
     });
     
-      
-      
-      // rfQItem = processQuotCompare(rfQItem);
-
-      // let rfqDATA = [];
-      // if (rfQItem.length > 0) {
-      //   rfqDATA = rfQItem.map((item) => {
-      //     let base = item.all_vendors;
-      //     let data = item.quotations;
-      //     let quotes_unavailable_vendors = base.filter(
-      //       (baseitem) => !data.find((d) => d.created_by == baseitem.id)
-      //     );
-      //     item.quotes_unavailable_vendors = quotes_unavailable_vendors;
-
-      //     if (quotes_unavailable_vendors.length > 0) {
-      //       quotes_unavailable_vendors.map((q_item) => {
-      //         item.quotations.push({
-      //           id: null,
-      //           timestamp: null,
-      //           status: 1,
-      //           created_by: q_item.id,
-      //           is_regret: null,
-      //           quote_details: [],
-      //           vendor_details: [q_item]
-      //         });
-      //       });
-      //     }
-      //     item.quotations.sort((a, b) => a.created_by - b.created_by);
-      //     if (quotes_unavailable_vendors.length > 0) {
-      //       quotes_unavailable_vendors.map((q_item) => {
-      //         item.quotations.push({
-      //           id: null,
-      //           timestamp: null,
-      //           status: 1,
-      //           created_by: q_item.id,
-      //           is_regret: null,
-      //           quote_details: [],
-      //           vendor_details: [q_item]
-      //         });
-      //       });
-      //     }
-      //     item.quotations.sort((a, b) => a.created_by - b.created_by);
-
-      //     return item;
-      //   });
-      // }
       res
         .status(200)
         .json({
@@ -3719,22 +3673,6 @@ const rfqController = {
           data: rfQItem
         })
         .end();
-      //const rfQItem = await rfqModel.getQuotesByRfqById(rfq_id, id);
-      // Get all RFQs
-      // const listRfq = await rfqModel.getAllBuyerRfq(100000, 0, id);
-      // Promise.all(listRfq.map((item) => getQUOTES(item, id)))
-      //   .then((results) => {
-      //     res
-      //       .status(200)
-      //       .json({
-      //         status: 1,
-      //         data: results
-      //       })
-      //       .end();
-      //   })
-      //   .catch((error) => {
-      //     console.error('Error inserting data:', error);
-      //   });
     } catch (error) {
       logError(error);
       res

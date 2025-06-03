@@ -68,7 +68,7 @@ projectRoutes.put(
 projectRoutes.get(
     '/name/list',
     passportSignIn,
-    acl([2, 7]),
+    // acl([2, 7]),
     projectController.getIdAndNameOfProjects
 )
 
