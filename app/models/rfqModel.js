@@ -71,10 +71,14 @@ const rfqModel = {
       `
 
       let qualifiedQ = `
-        SELECT DISTINCT(product_variant_id) 
+        SELECT s.product_variant_id
           FROM tbl_rfq_products_specs s
-          WHERE s.rfq_id = $1 AND s.title IN ('Quantity', 'Unit') AND TRIM(s.value) != ''
-            AND TRIM(s.value) != 'NA';
+          WHERE s.rfq_id = $1
+            AND s.title IN ('Quantity', 'Unit')
+            AND TRIM(s.value) != ''
+            AND TRIM(s.value) != 'NA'
+        GROUP BY s.product_variant_id
+        HAVING COUNT(DISTINCT s.title) = 2;
       `;
 
       const totalRes = await db.any(totalQ, [rfq_id]);
@@ -1904,6 +1908,7 @@ LIMIT 1;`;
   },
   checkIfExists: async (table_name, parameter, db_con = db) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
+    console.log("QUERY -> ", query)
     return new Promise(function (resolve, reject) {
       db_con.any(query,[table_name])
         .then(function (data) {

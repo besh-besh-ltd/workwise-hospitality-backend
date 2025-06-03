@@ -1465,6 +1465,8 @@ const rfqController = {
 
       const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id);
 
+      console.log("IS RFQ COMPLETE -> ", isRFQComplete);
+
       if(!isRFQComplete) {
         return res.status(400).json({
           status: 2,
@@ -1473,6 +1475,13 @@ const rfqController = {
           }
         }).end();
       }
+
+      return res.status(400).json({
+          status: 2,
+          errors: {
+            rfq_specs: 'After RFQ Complete, it will create now!'
+          }
+        }).end();
 
       const responseUpdate = await rfqModel.update(
         'tbl_rfq',
@@ -2318,6 +2327,7 @@ const rfqController = {
 
         let rfq_id;
         let rfqData;
+        let isNew = false;
 
         const sheet_id = req.body.sheet_id;
 
@@ -2366,6 +2376,7 @@ const rfqController = {
 
             const response = await rfqModel.insert('tbl_rfq', rfqData);
             rfq_id = response[0].id;
+            isNew = true
 
             const rfqTerms = [];
             for(let i=1; i<9; i++){
@@ -2415,7 +2426,8 @@ const rfqController = {
             status: 1,
             message: 'RFQ draft created/updated successfully',
             data: {
-                rfq_id
+                rfq_id,
+                isNew
             }
         });
 
@@ -5681,7 +5693,7 @@ const rfqController = {
       const sheetNameList = new Set();
       const globalVariantCount = {};
   
-      const allProductIds = boqDataJson.map(item => item.variant_id);
+      const allProductIds = boqDataJson.map(item => item.variant_id).filter(item => typeof item == 'number' || typeof item == 'string');
   
       const uniqueProductIds = [...new Set(allProductIds)];
       const existingProducts = await rfqModel.checkIfExists(
