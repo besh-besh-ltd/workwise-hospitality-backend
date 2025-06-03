@@ -252,13 +252,7 @@ const projectController = {
           
           let projects;
           
-          if (user_type === 7) {
-            // Admin query: fetch all projects' names and IDs
-            projects = await projectModel.getAllProjectNamesForAdmin();
-          } else {
-            // Regular user query: fetch only their projects
             projects = await projectModel.getIdAndNameOfProjects(user_id);
-          }
           
           res
           .status(200)

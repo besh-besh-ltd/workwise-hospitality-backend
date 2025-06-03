@@ -217,19 +217,21 @@ const projectModel = {
             });
       })
   },
-
-  getIdAndNameOfProjects: async (user_id) => {
+// mukul 03--06-2025 retuen project list for user team
+getIdAndNameOfProjects: async (user_id) => {
     return new Promise(function (resolve, reject) {
         db.any(
             `SELECT 
                 p.id,
                 p.name 
             FROM 
-                tbl_projects p 
+                tbl_projects p
+            LEFT JOIN tbl_project_team pt ON p.id = pt.project_id
             WHERE 
-                p.user_id = ${user_id}`
+                p.user_id = $1 OR pt.user_id = $1`,
+            [user_id]
         )
-            .then(function (data) {
+        .then(function (data) {
             resolve(data);
           })
            .catch(function (err) {
@@ -590,26 +592,6 @@ const projectModel = {
     });
   },
 
-  getAllProjectNamesForAdmin: async () => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT 
-          p.id,
-          p.name 
-        FROM 
-          tbl_projects p
-        ORDER BY 
-          p.name ASC`
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
 }
 
 export default projectModel;
