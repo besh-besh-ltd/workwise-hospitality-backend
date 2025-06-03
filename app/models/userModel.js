@@ -240,7 +240,7 @@ user_book_demo: async (mobile) => {
 
   user_profile_detail: async (user_id) => {
     return new Promise(function (resolve, reject) {
-      db.any('select tu.*, tc.company_name from tbl_users tu join tbl_company tc ON tc.user_id = tu.id where tu.id = $1', [user_id])
+      db.any('select tu.*, tc.company_name from tbl_users tu join tbl_company tc ON tc.id = tu.company_id where tu.id = $1', [user_id])
         .then(function (data) {
           resolve(data);
         })

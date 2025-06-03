@@ -44,7 +44,7 @@ const rfqModel = {
                                 ))
                 FROM tbl_rfq_product_vendors rpv
                         JOIN tbl_users u ON rpv.user_id = u.id
-                        JOIN tbl_company c ON u.id = c.user_id
+                        JOIN tbl_company c ON u.company_id = c.id
                 WHERE rpv.rfq_id = rfq.id
                   AND rpv.product_variant_id = rp.product_variant_id
                   AND rpv.variant = rp.variant) AS vendors
