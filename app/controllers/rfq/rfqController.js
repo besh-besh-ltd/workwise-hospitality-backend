@@ -1474,13 +1474,6 @@ const rfqController = {
         }).end();
       }
 
-      return res.status(400).json({
-          status: 2,
-          errors: {
-            rfq_specs: 'After RFQ Complete, it will create now!'
-          }
-        }).end();
-
       const responseUpdate = await rfqModel.update(
         'tbl_rfq',
         { is_published: 1 },
