@@ -5264,14 +5264,15 @@ project_access_checker: async (project_id, user_id) => {
 },
 getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
   return new Promise(async (resolve, reject) => {
-    // console.log("Fetching RFQ details...");
+    // console.log("--------------    Fetching RFQ details    ----------------", user_id);
 
     try {
       // Step 1: Fetch rfq_ids for the given user_id
       const fetchRFQIdsQuery = `
-        SELECT id AS rfq_id, rfq_no
-        FROM tbl_rfq
-        WHERE created_by = $1;
+        SELECT  r.id AS rfq_id, r.rfq_no
+        FROM tbl_rfq r
+        LEFT JOIN tbl_project_team pt ON pt.project_id = r.project_id
+        WHERE r.created_by = $1 OR pt.user_id = $1;
       `;
       const rfqResult = await db.query(fetchRFQIdsQuery, [user_id]);
 
@@ -5364,7 +5365,11 @@ getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
           ON TP.id = RFQ.project_id
         JOIN tbl_rfq_product_tech_evaluation RFQ_T_E
           ON RFQ.id = RFQ_T_E.rfq_id
-        WHERE RFQ.created_by = $1
+          WHERE (RFQ.created_by = $1 OR EXISTS (
+            SELECT 1
+            FROM tbl_project_team PT
+            WHERE PT.project_id = RFQ.project_id AND PT.user_id = $1
+          ))
           AND RFQ.is_published = 1
           AND RFQ.id = ANY($2)
           ${filtersQuery==='' ? `` : filtersQuery }
