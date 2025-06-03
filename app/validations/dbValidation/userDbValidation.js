@@ -463,42 +463,6 @@ const validateDbBody = {
         .end();
     }
   },
-  /*   otp_exists: async (req, res, next) => {
-    try {
-      let errors = {};
-      let err = 0;
-      let { otp } = req.body;
-
-      if (otp) {
-        const userOtpExists = await userModel.user_otp_exists(otp);
-        if (userOtpExists.length < 1) {
-          err++;
-          errors.otp = 'OTP invalid';
-        }
-      }
-
-      if (err > 0) {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            errors
-          })
-          .end();
-      } else {
-        next();
-      }
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  }, */
 
   user_id_exists: async (req, res, next) => {
     console.log("req recived");
