@@ -71,10 +71,14 @@ const rfqModel = {
       `
 
       let qualifiedQ = `
-        SELECT DISTINCT(product_variant_id) 
+        SELECT s.product_variant_id
           FROM tbl_rfq_products_specs s
-          WHERE s.rfq_id = $1 AND s.title IN ('Quantity', 'Unit') AND TRIM(s.value) != ''
-            AND TRIM(s.value) != 'NA';
+          WHERE s.rfq_id = $1
+            AND s.title IN ('Quantity', 'Unit')
+            AND TRIM(s.value) != ''
+            AND TRIM(s.value) != 'NA'
+        GROUP BY s.product_variant_id
+        HAVING COUNT(DISTINCT s.title) = 2;
       `;
 
       const totalRes = await db.any(totalQ, [rfq_id]);
@@ -1870,25 +1874,36 @@ LIMIT 1;`;
         });
     });
   },
-  getVendorsForProduct: async (productId, excludeArray = null) => {
+  getVendorsForProduct: async (productId, excludeArray = null, buyerId) => {
     try {
       let q = `
       SELECT 
+      DISTINCT
         U.id,
         U.name,
         U.email,
         U.mobile,
         U.address,
         U.organization_name,
-        C.company_name
+        C.company_name,
+        CASE
+          WHEN bvm.vendor_id IS NOT NULL THEN 1
+          ELSE 0
+        END AS is_linked_with_buyer
   
         FROM tbl_product_variant_vendor_mapping PVVM
         JOIN tbl_product_variant PV ON PVVM.product_variant_id = PV.id
         JOIN tbl_users U ON PVVM.vendor_id = U.id
         JOIN tbl_company C ON C.user_id = U.id
+        LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.buyer_id = ${buyerId}
   
         WHERE PVVM.product_variant_id = $1
+        AND U.status = 1
+        AND (PVVM.is_approved OR BVM.vendor_id IS NOT NULL)
+        AND (C.is_private = 0 OR (C.is_private = 1 AND BVM.vendor_id IS NOT NULL))
         ${excludeArray && excludeArray.length > 0 ? ` AND U.id NOT IN ($2:csv)` : ``}
+
+        ORDER BY is_linked_with_buyer DESC, C.company_name
       `
 
 
@@ -1904,6 +1919,7 @@ LIMIT 1;`;
   },
   checkIfExists: async (table_name, parameter, db_con = db) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
+    console.log("QUERY -> ", query)
     return new Promise(function (resolve, reject) {
       db_con.any(query,[table_name])
         .then(function (data) {
