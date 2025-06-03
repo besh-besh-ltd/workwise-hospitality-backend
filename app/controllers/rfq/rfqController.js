@@ -5667,7 +5667,7 @@ const rfqController = {
         }
       }
 
-      if (processedUrl.startsWith('http:')) {
+      if (process.env.NODE_ENV=='uat' &&  processedUrl.startsWith('http:')) {
         processedUrl = processedUrl.replace('http:', 'https:');
       }
   
