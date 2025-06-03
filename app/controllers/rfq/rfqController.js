@@ -1465,8 +1465,6 @@ const rfqController = {
 
       const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id);
 
-      console.log("IS RFQ COMPLETE -> ", isRFQComplete);
-
       if(!isRFQComplete) {
         return res.status(400).json({
           status: 2,
