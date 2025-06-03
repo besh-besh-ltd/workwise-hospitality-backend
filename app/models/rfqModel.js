@@ -5102,7 +5102,7 @@ project_access_checker: async (project_id, user_id) => {
         COALESCE(c.company_name, '') AS company_name,
         COALESCE(u.organization_name, '') AS organization_name
       FROM tbl_users u
-      LEFT JOIN tbl_company c ON u.id = c.user_id
+      LEFT JOIN tbl_company c ON u.company_id = c.id
       WHERE u.id = $1;
     `;
 
