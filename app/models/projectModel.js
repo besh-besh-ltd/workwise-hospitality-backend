@@ -152,34 +152,33 @@ const projectModel = {
     },
     getAllProjects: async (user_id) => {
         return new Promise(function (resolve, reject) {
-            db.any(
+      const query = 
                 `SELECT 
                     p.*, 
                     COUNT(r.id) AS total_rfqs,
-
                     COUNT(CASE WHEN r.status = 2 THEN 1 END) AS closed_rfqs,
-
                     COUNT(CASE WHEN r.status = 1 THEN 1 END) AS open_rfqs
                 FROM 
                     tbl_projects p
                 LEFT JOIN 
                     tbl_rfq r ON r.project_id = p.id 
                 WHERE 
-                    p.user_id = ${user_id}
-                GROUP BY 
-                    p.id
-                ORDER BY 
-                    p.created_at DESC`,
-            )
-                .then(function (data) {
-                resolve(data);
-              })
-               .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-              });
-        })
-    },
+                    p.user_id = $1 OR EXISTS (
+          SELECT 1 FROM tbl_project_team pt
+          WHERE pt.project_id = p.id AND pt.user_id = $1
+        )
+      GROUP BY 
+        p.id
+      ORDER BY 
+        p.created_at DESC;`;
+
+        console.log(" query ", query)
+
+    db.any(query, [user_id])
+      .then(data => resolve(data))
+      .catch(err => reject(new Error(err)));
+                });
+},
 
     updateProject: async (projectObj) => {
       return new Promise(function (resolve, reject) {

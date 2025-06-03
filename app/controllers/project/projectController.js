@@ -147,17 +147,7 @@ const projectController = {
           
           let projects = [];
           
-          if (user_type === 7) {
-            // Changes by Agnij 31 January 2025 [Use model function instead of direct SQL query]
-            // Admin users should only see their own projects
-            projects = await projectModel.getAllProjectsForAdmin(user_id);
-          } else {
-            // Regular user query: fetch only their projects
             projects = await projectModel.getAllProjects(user_id);
-          }
-          // Sort projects with newest first
-          projects.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-          
           // IMPORTANT: Ensure the response format is consistent
           const responseData = {
             status: true,

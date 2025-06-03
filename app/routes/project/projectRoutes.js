@@ -50,7 +50,7 @@ projectRoutes.get(
 projectRoutes.get(
     '/',
     passportSignIn,
-    acl([2, 7]),
+    // acl([2, 7]),
     projectController.getAllProjects
 )
 
