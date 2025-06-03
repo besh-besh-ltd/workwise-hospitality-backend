@@ -1541,7 +1541,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                     'mobile', U.mobile
                   )
                   FROM tbl_users U
-                  JOIN tbl_company C ON U.id = C.user_id
+                  JOIN tbl_company C ON U.company_id = C.id
                   WHERE RFQ_P_V.user_id = U.id
                 )
               ))
@@ -3952,24 +3952,25 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     });
   },
 
-rfq_project_exist: async (project_id,user_id) => {
+project_access_checker: async (project_id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT 1
-        FROM tbl_projects
-        WHERE id = $1
-        AND user_id = $2;`,
-        [project_id,user_id]
+        FROM tbl_projects p
+        LEFT JOIN tbl_project_team t ON p.id = t.project_id
+        WHERE p.id = $1
+        AND (p.user_id = $2 OR t.user_id = $2)`,
+        [project_id, user_id]
       )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    })
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        reject(new Error(err));
+      });
+    });
   },
+
   getVendorRfqCount: async(user_id)=>{
     return new Promise((resolve, reject) => {
       db.one(

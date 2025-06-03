@@ -752,7 +752,7 @@ const validateDbBody = {
         .end();
     }
   },
-  rfq_project_exist: async (req, res, next) => {
+  project_access_check: async (req, res, next) => {
     try {
 
       if (!req.user.subscription_plan_id) {
@@ -772,7 +772,7 @@ const validateDbBody = {
       const user_id = req.user.id;
 
       if (project_id && project_id != -1) {
-        const rfqProjectExists = await rfqModel.rfq_project_exist(project_id, user_id);
+        const rfqProjectExists = await rfqModel.project_access_checker(project_id, user_id);
         if (rfqProjectExists.length < 1) {
           err++;
           errors.unauthorized_project = 'Project does not exist';
