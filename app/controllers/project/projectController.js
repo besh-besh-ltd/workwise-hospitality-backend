@@ -77,13 +77,13 @@ const projectController = {
         
         let projectDetails;
         
-        if (user_type === 7) {
-          // Admin can access any project
-          projectDetails = await projectModel.getProjectByIdForAdmin(project_id, limit, offset);
-        } else {
+        // if (user_type === 7) {
+        //   // Admin can access any project
+        //   projectDetails = await projectModel.getProjectByIdForAdmin(project_id, limit, offset);
+        // } else {
           // Regular user can only access their own projects
           projectDetails = await projectModel.getProjectById(project_id, user_id, limit, offset);
-        }
+        // }
         res
         .status(200)
         .json({
