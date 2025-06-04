@@ -1317,13 +1317,16 @@ const saveRfqDraft = async (user_id, reqBody) => {
       await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
   }
 
-  if (termFilesChanged && term_and_condition_files && term_and_condition_files.length > 0) {
+  if (termFilesChanged && term_and_condition_files) {
     // First delete existing term files only if term files have changed
-      const rfqFiles = term_and_condition_files.map(url => ({
-          rfq_id,
-          file_type: 'term_and_condition',
-          file_url: url
-      }));
+    await rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' })
+
+    const rfqFiles = term_and_condition_files.map(url => ({
+        rfq_id,
+        file_type: 'term_and_condition',
+        file_url: url
+    }));
+    if(term_and_condition_files.length > 0)
       await rfqModel.insertArray(rfqFiles, ['rfq_id', 'file_type', 'file_url'], 'tbl_rfq_files');
   }
 
