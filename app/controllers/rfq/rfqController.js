@@ -2580,7 +2580,7 @@ const rfqController = {
     try {
         // Add products to the RFQ
         const product = req.body;
-        const rfq_id = product.rfq_id;
+        const rfq_id = product.rfq_id || product.rfqId;
 
         if (!product || !product.variant_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
           return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
