@@ -65,25 +65,29 @@ const rfqModel = {
   checkRFQCompletion: async (rfq_id) => {
     try {
       let totalQ = `
-        SELECT DISTINCT(product_variant_id) 
+        SELECT DISTINCT product_variant_id, variant
           FROM tbl_rfq_products rp
           WHERE rp.rfq_id = $1;
       `
 
       let qualifiedQ = `
-        SELECT s.product_variant_id
+        SELECT s.product_variant_id, s.variant
           FROM tbl_rfq_products_specs s
           WHERE s.rfq_id = $1
             AND s.title IN ('Quantity', 'Unit')
             AND TRIM(s.value) != ''
             AND TRIM(s.value) != 'NA'
-        GROUP BY s.product_variant_id
+        GROUP BY s.product_variant_id, s.variant
         HAVING COUNT(DISTINCT s.title) = 2;
       `;
 
       const totalRes = await db.any(totalQ, [rfq_id]);
       const qualifiedRes = await db.any(qualifiedQ, [rfq_id]);
-      return ((totalRes ?? []).length == (qualifiedRes ?? []).length);
+
+      console.log("TOTAL RES -> ", totalRes);
+      console.log("QUALIFIED RES -> ", qualifiedRes)
+
+      return ((totalRes ?? []).length === (qualifiedRes ?? []).length);
     } catch (error) {
       throw error;
     }
