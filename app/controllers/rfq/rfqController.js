@@ -1338,7 +1338,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
     if (products && products?.updatable) {
       if (products.updatable?.specs)
-        Object.keys(products.updatable.specs).forEach((rfqProductId) => {
+        for (const rfqProductId of Object.keys(products.updatable.specs)) {
           const productId = products.updatable.specs[rfqProductId].product_id;
           const variant = products.updatable.specs[rfqProductId].variant;
           delete products.updatable.specs[rfqProductId].variant;
@@ -1348,8 +1348,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
             variant ?? '0'
           })::INT`;
 
-          Object.keys(products.updatable.specs[rfqProductId]).forEach(
-            async (spec) => {
+          for (const spec of Object.keys(products.updatable.specs[rfqProductId])) {
               const data = {
                 value: products.updatable.specs[rfqProductId][spec]
               };
@@ -1378,18 +1377,16 @@ const saveRfqDraft = async (user_id, reqBody) => {
                 );
               }
             }
-          );
-        });
+        };
 
       if (products.updatable?.files)
-        Object.keys(products.updatable.files).forEach((rfqProductId) => {
+        for (const rfqProductId of Object.keys(products.updatable.files)) {
           delete products.updatable.files[rfqProductId].variant;
           delete products.updatable.files[rfqProductId].product_id;
 
           let whereClause = `rfq_product_id = (${rfqProductId})::INT`;
 
-          Object.keys(products.updatable.files[rfqProductId]).forEach(
-            async (fileType) => {
+          for (const fileType of Object.keys(products.updatable.files[rfqProductId])) {
               const transformedFileType =
                 fileType == 'qap_file'
                   ? 'QAP'
@@ -1435,12 +1432,10 @@ const saveRfqDraft = async (user_id, reqBody) => {
                 );
               }
             }
-          );
-        });
+        };
 
       if (products.updatable?.comment)
-        Object.keys(products.updatable.comment).forEach(
-          async (rfqProductId) => {
+        for (const rfqProductId of Object.keys(products.updatable.comment)) {
             const productId =
               products.updatable.comment[rfqProductId].product_id;
             const variant = products.updatable.comment[rfqProductId].variant;
@@ -1457,7 +1452,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
               whereClause
             );
           }
-        );
     }
 
     if (products && products?.deletable && products.deletable.length > 0) {
@@ -5854,7 +5848,7 @@ const rfqController = {
   
         if (!cleanId) {
           validationErrors.push({
-            errors: { product: `${item.fetched_product_name} - Product Not Found` },
+            errors: { product: `${item.core_product_name || item.fetched_product_name} - Product not found` }
           });
           continue;
         }
@@ -5863,7 +5857,7 @@ const rfqController = {
   
         if (!validProductId) {
           validationErrors.push({
-            errors: { product: `${item.fetched_product_name} - Product Not Found` },
+            errors: { product: `${item.core_product_name || item.fetched_product_name} - Product not found` }
           });
           continue;
         }
