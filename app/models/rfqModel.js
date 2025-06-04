@@ -327,8 +327,6 @@ const rfqModel = {
 
         const rfqResult = await t.one(rfqQuery, rfqQueryValues);
 
-        console.log("RFQ INSERTION RESULT -> ", rfqResult)
-
         if(!rfqResult) throw Error("RFQ does not exist or is no longer in draft!")
 
         const { id: rfq_id } = rfqResult;
@@ -351,7 +349,6 @@ const rfqModel = {
               parameters.processed_url = processedUrl
             }
             const sheetInsertionResult = await rfqModel.insert('tbl_rfq_draft_sheets', parameters, t)
-            console.log(`INSERTED ${sheet?.sheet_name ?? sheet} AS ${sheetInsertionResult}`)
           }
 
         // Map all the terms to this rfq, defaults to all the terms map
@@ -406,10 +403,11 @@ const rfqModel = {
 
           const productInsertionResult = await t.one(productQuery, productValues);
 
-          console.log("PRODUCT INSERTION RESULT -> ", productInsertionResult);
-
           // Insert into tbl_rfq_products_specs
           for (const spec of product.spec || []) {
+            if(spec.title == 'Quantity')
+              spec.value = parseInt(spec.value)
+            
             await t.none(
               `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, variant, title, value, sheet_id)
               VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -430,8 +428,6 @@ const rfqModel = {
               VALUES ($1, $2, $3, $4, $5)`,
               [rfq_id, product.product_id, product.variant, userId, sheet.id]
             );
-
-            console.log("VENDOR INSERTION RESULT -> ", vendorInsertionResult)
           }
         }
 
