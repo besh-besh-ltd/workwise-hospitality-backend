@@ -65,25 +65,29 @@ const rfqModel = {
   checkRFQCompletion: async (rfq_id) => {
     try {
       let totalQ = `
-        SELECT DISTINCT(product_variant_id) 
+        SELECT DISTINCT product_variant_id, variant
           FROM tbl_rfq_products rp
           WHERE rp.rfq_id = $1;
       `
 
       let qualifiedQ = `
-        SELECT s.product_variant_id
+        SELECT s.product_variant_id, s.variant
           FROM tbl_rfq_products_specs s
           WHERE s.rfq_id = $1
             AND s.title IN ('Quantity', 'Unit')
             AND TRIM(s.value) != ''
             AND TRIM(s.value) != 'NA'
-        GROUP BY s.product_variant_id
+        GROUP BY s.product_variant_id, s.variant
         HAVING COUNT(DISTINCT s.title) = 2;
       `;
 
       const totalRes = await db.any(totalQ, [rfq_id]);
       const qualifiedRes = await db.any(qualifiedQ, [rfq_id]);
-      return ((totalRes ?? []).length == (qualifiedRes ?? []).length);
+
+      console.log("TOTAL RES -> ", totalRes);
+      console.log("QUALIFIED RES -> ", qualifiedRes)
+
+      return ((totalRes ?? []).length === (qualifiedRes ?? []).length);
     } catch (error) {
       throw error;
     }
@@ -323,8 +327,6 @@ const rfqModel = {
 
         const rfqResult = await t.one(rfqQuery, rfqQueryValues);
 
-        console.log("RFQ INSERTION RESULT -> ", rfqResult)
-
         if(!rfqResult) throw Error("RFQ does not exist or is no longer in draft!")
 
         const { id: rfq_id } = rfqResult;
@@ -347,7 +349,6 @@ const rfqModel = {
               parameters.processed_url = processedUrl
             }
             const sheetInsertionResult = await rfqModel.insert('tbl_rfq_draft_sheets', parameters, t)
-            console.log(`INSERTED ${sheet?.sheet_name ?? sheet} AS ${sheetInsertionResult}`)
           }
 
         // Map all the terms to this rfq, defaults to all the terms map
@@ -402,10 +403,11 @@ const rfqModel = {
 
           const productInsertionResult = await t.one(productQuery, productValues);
 
-          console.log("PRODUCT INSERTION RESULT -> ", productInsertionResult);
-
           // Insert into tbl_rfq_products_specs
           for (const spec of product.spec || []) {
+            if(spec.title == 'Quantity')
+              spec.value = parseInt(spec.value)
+            
             await t.none(
               `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, variant, title, value, sheet_id)
               VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -426,8 +428,6 @@ const rfqModel = {
               VALUES ($1, $2, $3, $4, $5)`,
               [rfq_id, product.product_id, product.variant, userId, sheet.id]
             );
-
-            console.log("VENDOR INSERTION RESULT -> ", vendorInsertionResult)
           }
         }
 
