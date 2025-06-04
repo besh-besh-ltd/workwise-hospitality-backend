@@ -5848,7 +5848,7 @@ const rfqController = {
   
         if (!cleanId) {
           validationErrors.push({
-            errors: { product: `${item.fetched_product_name} - Product Not Found` },
+            errors: { product: `${item.core_product_name || item.fetched_product_name} - Product not found` }
           });
           continue;
         }
@@ -5857,7 +5857,7 @@ const rfqController = {
   
         if (!validProductId) {
           validationErrors.push({
-            errors: { product: `${item.fetched_product_name} - Product Not Found` },
+            errors: { product: `${item.core_product_name || item.fetched_product_name} - Product not found` }
           });
           continue;
         }
