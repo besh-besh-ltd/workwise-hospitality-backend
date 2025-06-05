@@ -53,12 +53,33 @@ const rfqModel = {
                 JOIN tbl_rfq_products rp ON rp.rfq_id = rfq.id
                 JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
 
-        WHERE rfq.id = 712;
+        WHERE rfq.id = $1;
       `
 
       return await db.any(q, [rfqId])
     } catch (error) {
       throw error;
+    }
+  },
+
+  getVariantsCountForRFQ: async (rfqId) => {
+    if(!rfqId) return [];
+
+    try {
+      let q = `
+      SELECT product_variant_id, MAX(variant) AS max_variant
+        FROM tbl_rfq_products
+        WHERE rfq_id = $1
+        GROUP BY product_variant_id;
+      `;  
+
+      const res = await db.any(q, [rfqId]);
+      console.log("[getVariantsCountForRFQ] res => ", res)
+
+      return res;
+
+    } catch (error) {
+      throw error
     }
   },
 
@@ -364,14 +385,15 @@ const rfqModel = {
           }
 
         // Insert into tbl_rfq_products and get back their IDs
-        for (const product of data.products) {
-          let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${sheetToProcess.sheet_name}'`;
-          let sheet = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', parameter, t)
+        let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${sheetToProcess.sheet_name}'`;
+        let sheet = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', parameter, t)
 
-          if(!sheet)
-            sheet = null;
-          else 
-           sheet = sheet[0];
+        if(sheet)
+         sheet = sheet[0];
+        else
+          throw new Error("Sheet to be processed does not exist!")
+
+        for (const product of data.products) {
 
           const productQuery = `
             INSERT INTO tbl_rfq_products (
@@ -431,18 +453,11 @@ const rfqModel = {
           }
         }
 
-        let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${sheetToProcess.sheet_name}'`;
-        let sheet = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', parameter, t)
-
-        console.log("SHEET ----- ", sheet);
-        if(sheet && sheet.length > 0) {
-          sheet = sheet[0];
-          const updatableData = {
-            is_processed: true,
-            processed_at: new Date().toISOString(),
-          }
-          await rfqModel.update('tbl_rfq_draft_sheets', updatableData, sheet.id, t);
+        const updatableData = {
+          is_processed: true,
+          processed_at: new Date().toISOString(),
         }
+        await rfqModel.update('tbl_rfq_draft_sheets', updatableData, sheet.id, t);
 
         return rfq_id;
       });
