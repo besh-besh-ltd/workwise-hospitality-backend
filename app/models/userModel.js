@@ -667,15 +667,16 @@ user_book_demo: async (mobile) => {
     });
   },
 
-  update_profile_image: async (user_id, filename, original_filename) => {
+  // mukul - 05-06-2025, update company logo by user id
+    update_profile_image: async (user_id, filename) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `update 
-				tbl_users set 
-				new_profile_image = $2,
-				original_profile_image = $3
-       	where id= $1`,
-        [user_id, filename, original_filename]
+        `UPDATE tbl_company
+         SET logo = $2
+         WHERE id = (
+         SELECT company_id FROM tbl_users WHERE id = $1
+       )`,
+        [user_id, filename]
       )
         .then(function (data) {
           resolve(data);
