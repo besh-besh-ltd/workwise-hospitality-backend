@@ -5819,7 +5819,9 @@ const rfqController = {
         }
       }
 
+      if (process.env.NODE_ENV=='uat' &&  processedUrl.startsWith('http:')) {
         processedUrl = processedUrl.replace('http:', 'https:');
+      }
   
       const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
 
