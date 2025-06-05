@@ -86,8 +86,8 @@ const rfqModel = {
   checkRFQCompletion: async (rfq_id) => {
     try {
       let totalQ = `
-        SELECT DISTINCT product_variant_id, variant
-          FROM tbl_rfq_products rp
+      SELECT DISTINCT product_variant_id, variant
+      FROM tbl_rfq_products rp
           WHERE rp.rfq_id = $1;
       `
 
@@ -98,8 +98,15 @@ const rfqModel = {
             AND s.title IN ('Quantity', 'Unit')
             AND TRIM(s.value) != ''
             AND TRIM(s.value) != 'NA'
-        GROUP BY s.product_variant_id, s.variant
-        HAVING COUNT(DISTINCT s.title) = 2;
+            AND (
+              (s.title = 'Quantity' AND
+              TRIM(s.value) ~ '^\\d+$' AND  -- Regex to check it's all digits
+              CAST(TRIM(s.value) AS INTEGER) > 0)
+                  OR
+              (s.title = 'Unit' AND LENGTH(TRIM(s.value)) >= 2)
+              )
+          GROUP BY s.product_variant_id, s.variant
+          HAVING COUNT(DISTINCT s.title) = 2;
       `;
 
       const totalRes = await db.any(totalQ, [rfq_id]);
