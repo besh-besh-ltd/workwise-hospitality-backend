@@ -2015,10 +2015,12 @@ LIMIT 1;`;
                         JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
                         WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
                         ${TA_Vendors === "TA" ? vendorCondition : ''}
-                    )
+                    ),
+                    'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END)
                 )
                 FROM tbl_quotes TQ
                 JOIN tbl_users TU ON TU.id = TQ.created_by
+                LEFT JOIN tbl_quote_finalization _TQF ON _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
                 WHERE TQ.rfq_id = TRP.rfq_id
                 ${TA_Vendors === "TA" ? vendorCondition : ''}
                 ORDER BY TU.id ASC
@@ -2039,9 +2041,11 @@ LIMIT 1;`;
                             'email', TU.email,
                             'mobile', TU.mobile,
                             'address', TU.address,
-                            'organization_name', TU.organization_name
+                            'organization_name', TU.organization_name,
+                            'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END)
                         ))
                         FROM tbl_users TU
+                        LEFT JOIN tbl_quote_finalization _TQF ON _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
                         WHERE TU.id = TQ.created_by
                         ${TA_Vendors === "TA" ? vendorCondition : ''}
                     ),
