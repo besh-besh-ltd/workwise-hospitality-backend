@@ -68,7 +68,7 @@ user_book_demo: async (mobile) => {
           const company_id = companyInsert.id;
 
           // Step 2: Insert into tbl_users
-          await t.none(
+          const user_insert = await t.one(
             `INSERT INTO tbl_users (
               name, email, mobile, status, user_type, password, address,
               created_by, country, whatsapp, token,
@@ -77,7 +77,7 @@ user_book_demo: async (mobile) => {
               $1, $2, $3, $4, $5, $6,
               $7, $8, $9, $10,
               $11, $12, $13, $14, $15
-            )`,
+            ) RETURNING id`,
             [
               user_data.name,
               user_data.email,
@@ -97,7 +97,7 @@ user_book_demo: async (mobile) => {
             ]
           );
 
-          resolve({ success: true, company_id });
+          resolve({ success: true, company_id, user_id:user_insert.id });
         } catch (error) {
           reject(error);
         }

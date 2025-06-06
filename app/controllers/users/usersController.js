@@ -3,14 +3,11 @@ import subscriptionModel from '../../models/subscriptionModel.js';
 import notificationModel from '../../models/notificationModel.js';
 import couponModel from '../../models/couponModel.js';
 import Config from '../../config/app.config.js';
-import db from '../../config/dbConn.js';
 import {
   logError,
   currentDateTime,
-  titleToSlug,
   generateOTPRandomNo,
   generateRandomString,
-  createPay,
   sendMail,
   notificationMail,
   convertSixDigit,
@@ -28,23 +25,10 @@ import Moment from 'moment';
 import puppeteer from 'puppeteer';
 import fs from 'fs';
 import { v4 } from 'uuid';
-import admin from 'firebase-admin';
-// var serviceAccount = require('../config/privateKey.json');
-import serviceAccount from '../../config/privateKey.json' assert { type: 'json' };
-const certPath = admin.credential.cert(serviceAccount);
 import JWT from 'jsonwebtoken';
-import excelJS from 'exceljs';
 import xlsx from 'xlsx';
 //var FCM = new fcm(certPath);
-import child_process from 'child_process';
-import {
-  schemas,
-  validateBodyController
-} from '../../validations/paramValidation/userValidation.js';
 import webpush from 'web-push';
-import { sendNotification } from '../../services/notificationService.js';
-import { v4 as uuidv4 } from 'uuid';
-import { log } from 'console';
 import rfqModel from '../../models/rfqModel.js';
 import vendorModel from '../../models/vendorModel.js';
 import productModel from '../../models/productModel.js';
@@ -68,6 +52,84 @@ webpush.setVapidDetails(
 const cryptr = new Cryptr(Config.cryptR.secret);
 
 var global_subscription = '';
+
+
+/**
+this function will continue buyer company registration, 
+save max account limit for buyer company, and send email to registered user email
+ */
+const continueBuyerCompanyRegistration = async (inputData, company_id)=>{
+
+  const buyer_company_max_account_data = {
+        max_top_management: parseInt(inputData.max_top_management) || 0,
+        max_procurement: parseInt(inputData.max_procurement) || 0,
+        max_engineering: parseInt(inputData.max_engineering) || 0,
+        max_finance: parseInt(inputData.max_finance) || 0
+      };
+
+      const accountLimitSaved = await userModel.insertBuyerAccountLimits(buyer_company_max_account_data, company_id)
+
+
+          const emailHeaderContent = `<h2>Hello ${inputData.name || ''},</h2>`
+          const emailContainerContent = `
+          <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
+           <p>Welcome to WorkWise, Your admin account for <strong ${inputData.organization_name} </strong> has been successfully registered.</p>
+            <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
+            <ul>
+            <li> <strong> Email: </strong> ${inputData.email} </li>
+            <li> <strong>Password: </strong> ${inputData.password} </li>
+            </ul>
+            <p>You can log in to your account using this link: <a href="https://letsworkwise.com/?user_registered=1" >Click Here</a></p>
+            <p style="font-size: 14px; color: #777;"><em>For security reasons, we recommend changing your password after your first login.</em></p>    
+          </div>`
+
+        const dynamic_html = generateEmailTemplate(emailHeaderContent, emailContainerContent)
+        
+        const mailRecipients = {
+          from: Config.webmasterMail,
+          to: inputData.email,
+          subject: `Welcome to WorkWise - Account Created`,
+          html: dynamic_html
+        };
+
+        sendMail(mailRecipients);
+
+        return accountLimitSaved
+}
+
+
+/**
+ send email to vendor emaill,
+ created this saprate function so that for vendor if we need to perform any operation saprately we can do here, currently only email is not of them
+ */
+const continueVendorCompanyRegistration = async (inputData, company_id)=>{
+      const emailHeader = ` <h2>Dear ${inputData.organization_name || inputData.name } </h2>`
+          
+      const emailContent = `
+           <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+             <p>Thank you for registering with us! Your login credentials are as follows:</p>
+                <ul style="list-style-type: none; padding: 0;">
+                 <li><strong>Email:</strong> ${inputData.email}</li>
+                 <li><strong>Password:</strong> ${inputData.password}</li>
+             </ul>
+             <p>Your account is currently under review. We will notify you as soon as it is approved.</p>
+             <p>Meanwhile, please save this email securely as it contains your login credentials.</p>
+             <p>We appreciate your patience and look forward to having you on board!</p>
+           </div>
+            `
+           const dunamicHtmlTemplate = generateEmailTemplate(emailHeader, emailContent)
+
+          let mailRecipients = {
+            from: Config.webmasterMail,
+            subject: `Work Wise | Registration`,
+            html: dunamicHtmlTemplate,
+            to: inputData.email
+        }
+
+        sendMail(mailRecipients);
+}
+
+
 
 const add_vendor_product = async (productDetails, vendorId) => {
   try {
@@ -168,175 +230,68 @@ const UsersController = {
 
   company_registration: async (req, res, next) => {
     try {
-      let cleanedMobile = req.body.mobile || null;
-      
-      // Handle mobile number formatting
-      if (cleanedMobile) {
-        cleanedMobile = cleanedMobile.toString().replace(/^\+\d+\-\+\d+/, '+91');
-        cleanedMobile = cleanedMobile.substring(0, 15);
-      }
-      
-      const cleanedOrgName = req.body.organization_name ? req.body.organization_name.toString().substring(0, 100) : null;
-      
-      const company_data_cleaned = {
-        company_name: cleanedOrgName,
-        profile: req.body.profile || null,
-        nature_of_business: req.body.nature_of_business || null,
-        type_of_business: req.body.type_of_business || null,
-        turnover: req.body.turnover || null,
-        no_of_employess: req.body.no_of_employess || null,
-        import_export_code: req.body.import_export_code || null,
-        gstin: req.body.gstin || null,
-        cin: req.body.cin || null,
-        logo: req.body.logo || null,
-        established_year: req.body.established_year || null,
-        website: req.body.website || null,
-        location: req.body.location || null,
-        is_private: req.body.is_private || 0
-      };
-      
-      const user_data_cleaned = {
-        name: req.body.name,
-        email: req.body.email?.toLowerCase(),
-        mobile: cleanedMobile,
-        status: req.body.status || 0,
-        user_type: req.body.user_type || 3,
-        password: req.body.password,
-        address: req.body.address || null,
-        created_by: req.body.created_by || null,
-        country: req.body.country || null,
-        whatsapp: req.body.whatsapp || null,
-        token: req.body.token || null,
-        state: req.body.state || null,
-        city: req.body.city || null,
-        postal_code: req.body.postal_code || null
-      };
-
-      const finalUserType = user_data_cleaned.user_type || 3; // Default to vendor (3) if not specified
-      
-      const defaultPassword = user_data_cleaned.password || `${(cleanedOrgName || user_data_cleaned.name)?.substring(0, 4) || 'Work'}@123`;
-      
-      // Convert state and city names to IDs if provided
-      let state_id = null;
-      let city_id = null;
-
-      if (user_data_cleaned.state && user_data_cleaned.state.trim()) {
-        try {
-          const stateResult = await db.oneOrNone(
-            'SELECT id FROM tbl_location_states WHERE LOWER(state_name) = LOWER($1) LIMIT 1',
-            [user_data_cleaned.state.trim()]
-          );
-          if (stateResult) {
-            state_id = stateResult.id;
-          }
-        } catch (err) {
-        }
-      }
-
-      if (user_data_cleaned.city && user_data_cleaned.city.trim()) {
-        try {
-          const cityResult = await db.oneOrNone(
-            'SELECT id FROM tbl_location_cities WHERE LOWER(city_name) = LOWER($1) LIMIT 1',
-            [user_data_cleaned.city.trim()]
-          );
-          if (cityResult) {
-            city_id = cityResult.id;
-          }
-        } catch (err) {
-          console.error('Error looking up city:', err);
-        }
-      }
+       const { name, email, mobile, organization_name, user_type, password, address, created_by, country, whatsapp, 
+        state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
+       import_export_code,established_year,website, is_private} = req.body;
+       const current_user = req.user || null
 
       const user_data = {
-        name: user_data_cleaned.name || null,
-        email: user_data_cleaned.email || null,
-        mobile: user_data_cleaned.mobile || null,
-        user_type: finalUserType,
-        status: finalUserType == 7 ? 1 : 0, // Auto-approve buyers (7), require approval for vendors (3)
-        password: generatePassword(defaultPassword),
-        address: user_data_cleaned.address || null,
-        created_by: user_data_cleaned.created_by || (req.user ? req.user.id : null),
-        country: user_data_cleaned.country || null,
-        whatsapp: user_data_cleaned.whatsapp || null,
-        token: user_data_cleaned.token || null,
-        state: state_id,
-        city: city_id,
-        postal_code: user_data_cleaned.postal_code || null
+        name: name || null,
+        email: email?.toLowerCase() || null,
+        mobile: mobile || null,
+        user_type: user_type || null,
+        status: user_type == 7 ? 1 : 0,
+        created_by:current_user?.id || null,
+        updated_by:current_user?.id || null,
+        password: generatePassword(password), 
+        address: address || null,
+        created_by: created_by || null,
+        country: country || null,
+        whatsapp: whatsapp || null,
+        token: null,
+        state: state || null,
+        city: city || null,
+        postal_code: postal_code || null
       };
 
       const company_data = {
-        company_name: company_data_cleaned.company_name || null,
-        profile: req.file?.location || company_data_cleaned.profile || null,
-        nature_of_business: company_data_cleaned.nature_of_business || null,
-        type_of_business: company_data_cleaned.type_of_business || null,
-        turnover: company_data_cleaned.turnover || null,
-        no_of_employess: company_data_cleaned.no_of_employess || null,
-        import_export_code: company_data_cleaned.import_export_code || null,
-        gstin: company_data_cleaned.gstin || null,
-        cin: company_data_cleaned.cin || null,
-        logo: req.file?.location || company_data_cleaned.logo || null, 
-        established_year: company_data_cleaned.established_year || null,
-        website: company_data_cleaned.website || null,
-        location: user_data_cleaned.address || company_data_cleaned.location || null,
-        is_private: company_data_cleaned.is_private || 0
-      };
+        company_name: organization_name || null,
+        profile: profile || null,
+        nature_of_business: nature_of_business || null,
+        type_of_business: type_of_business || null,
+        turnover: turnover || null,
+        no_of_employess: no_of_employess || null,
+        import_export_code: import_export_code || null,
+        gstin: gstin || null,
+        cin: cin || null,
+        created_by:current_user?.id || null,
+        updated_by:current_user?.id || null,
+        logo:  req.file?.location || null, 
+        established_year: established_year || null,
+        website: website || null,
+        location: address || null,
+        is_private: is_private || null,
+       };
 
-      const buyer_company_max_account_data = {
-        // Changes by Agnij 30 May 2025 [Fixed to use actual form values instead of hardcoded 0s]
-        max_top_management: parseInt(req.body.max_top_management) || 0,
-        max_procurement: parseInt(req.body.max_procurement) || 0,
-        max_engineering: parseInt(req.body.max_engineering) || 0,
-        max_finance: parseInt(req.body.max_finance) || 0
-      };
-        const {company_id} = await userModel.company_registration(user_data, company_data)
-        
-        let accountLimitSaved = null
-        if (finalUserType == 7 && company_id) {
-          accountLimitSaved = await userModel.insertBuyerAccountLimits(buyer_company_max_account_data, company_id)
+      //  Register company, this model register detail in both tables tbl_user and tbl_company
+       const {company_id} = await userModel.company_registration(user_data, company_data)
+          
+       console.log("line 282")
+
+      // user_type 7 is for buyer company registration, 3 is for vendor registration
+        if (user_type == 7 && company_id) {
+           await  continueBuyerCompanyRegistration(req.body, company_id)
         }
-
-        // Generate appropriate email content based on user type
-        const userTypeLabel = finalUserType == 3 ? 'Vendor' : finalUserType == 7 ? 'Buyer' : 'User';
-        const loginUrl = finalUserType == 3 ? 'https://letsworkwise.com/?user_registered=1' : 
-                        finalUserType == 7 ? 'https://letsworkwise.com/?user_registered=1' : 
-                        'https://letsworkwise.com/?user_registered=1';
-
-        const emailHeaderContent = `<h2>Hello ${user_data.name || ''},</h2>`
-        const emailContainerContent = `
-        <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
-         <p>Welcome to WorkWise, Your ${userTypeLabel.toLowerCase()} account for <strong>${user_data.organization_name}</strong> has been successfully registered.</p>
-          <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
-          <ul>
-          <li> <strong> Email: </strong> ${user_data.email} </li>
-          <li> <strong>Password: </strong> ${defaultPassword} </li>
-          <li> <strong>Account Type: </strong> ${userTypeLabel} </li>
-          </ul>
-          <p>You can log in to your account using this link: <a href="${loginUrl}" >Click Here</a></p>
-          <p style="font-size: 14px; color: #777;"><em>For security reasons, we recommend changing your password after your first login.</em></p>    
-        </div>`
-
-        const dynamic_html = generateEmailTemplate(emailHeaderContent, emailContainerContent)
-        
-        const mailRecipients = {
-          to: user_data.email,
-          subject: `Welcome to WorkWise - ${userTypeLabel} Account Created`,
-          html: dynamic_html
-        };
-
-        console.log('Sending email to:', user_data.email);
-        console.log('Email HTML:', dynamic_html);
-
-        sendMail(mailRecipients);
-
+       else if (user_type == 3 && company_id) {
+           await  continueVendorCompanyRegistration(req.body, company_id)
+        }
 
         res
           .status(200)
           .json({
             status: 1,
-            message: `${userTypeLabel} registered successfully`,
+            message: `Registered ${ user_type == 3? "Buyer" : "Vendor" } successfully`,
             company_id: company_id,
-            accountLimitSaved : accountLimitSaved ? "account limit saved" : "Not able to save account limit",
-            userType: finalUserType
           })
           .end();
 
@@ -350,7 +305,6 @@ const UsersController = {
         })
         .end();
     }
-
   },
 
 create_buyer_company_users: async (req, res, next) => {

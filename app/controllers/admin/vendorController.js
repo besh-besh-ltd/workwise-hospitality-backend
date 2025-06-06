@@ -147,13 +147,10 @@ const vendorController = {
         state: state || null,
         country: country || 1,
         mobile: cleanedMobile || null,
-        website: website || null,
         postal_code: postal_code || null,
         user_type: '3',
         password: generatePassword(password),
         status: '0',
-        new_profile_image: req.files.logo?.[0]?.location || null,
-        original_profile_image: req.files.logo?.[0]?.location || null,
         created_by: createdBy,
         organization_name: organization_name || null
       };
@@ -161,8 +158,6 @@ const vendorController = {
       let companyObj = {
         profile: about_vendor_company || null,
         logo: req.files.logo?.[0]?.location || null,
-        email: email || null,
-        mobile: cleanedMobile || null,
         company_name: organization_name || null,
         nature_of_business: nature_business || null,
         established_year: estd_year || null,
@@ -171,14 +166,15 @@ const vendorController = {
         cin: cin || null,
         turnover: turn_over || null,
         no_of_employess: total_employees || null,
-        project_name: null,
-        project_description: null,
-        project_start_date: null,
-        project_end_date: null
+        website: website || null,
       };
 
 
-      let vendor = await productModel.vendor_register(vendorObj);
+      const registrationResult = await userModel.company_registration(vendorObj, companyObj);
+      const vendorId = registrationResult.user_id;
+      const companyId = registrationResult.company_id;
+
+      // let vendor = await productModel.vendor_register(vendorObj);
 
     // Check if spocs array is provided and has valid objects
 if (Array.isArray(spocs) && spocs.length > 0) {
@@ -187,15 +183,13 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     // Validate if at least one field in the SPOC is not empty
     if (spoc.spoc_email || spoc.spoc_name) {
       // Add vendor ID to the SPOC object
-      spoc.user_id = vendor[0].id;
+      spoc.user_id = vendorId;
       // Insert the SPOC details into the table
       await userModel.add_user_spoc(spoc);
     }
   }
 }
 
-      companyObj.user_id = vendor[0].id;
-      await productModel.addCompany(companyObj);
 
       if (req.files?.ptr_track && req.files?.ptr_track.length > 0) {
         const pathname = req.files.ptr_track[0].location;
@@ -203,48 +197,16 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           file_path: pathname,
           file_name: req.files.ptr_track[0].originalname || null,
           doc_type: 'ptr',
-          user_id: vendor[0].id
+          user_id: vendorId
         };
         await productModel.addFile(filesObj);
       }
       
-      if (req.files?.certifications && req.files?.certifications.length > 0) {
-        const pathname = req.files.certifications[0].location;
-        let filesObj = {
-          file_path: pathname,
-          file_name: req.files.certifications[0].originalname || null,
-          doc_type: 'crt',
-          user_id: vendor[0].id
-        };
-        await productModel.addFile(filesObj);
-      }
-      if (req.files?.brochure && req.files?.brochure.length > 0) {
-        const pathname = `${Config.download_url}/user_image/${req.files.brochure[0].filename}`;
-        let filesObj = {
-          file_path: pathname,
-          file_name: req.files.brochure[0].originalname || null,
-          doc_type: 'brochure',
-          user_id: vendor[0].id
-        };
-        await productModel.addFile(filesObj);
-      }
 
-      addDefaultNotifications(vendor[0].id);
 
-      if (vendor[0].id) {
-        let html_variables = [{ name: name }];
+      addDefaultNotifications(vendorId);
 
-        
-        const spocList = await vendorModel.getSpocDetails(vendor[0]?.id)
-
-        // console.log(" vendor contoller 229 spoc console ", vendor[0].id, spocList)
-
-              
-      //   let mailRecipients = {
-      //     from: Config.webmasterMail,
-      //     subject: `Work Wise | Registration`,
-      //    html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
-      // };
+      if (vendorId) {        
 
       const emailHeader = ` <h2>Dear ${name} </h2>`
           
@@ -265,74 +227,11 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           let mailRecipients = {
             from: Config.webmasterMail,
             subject: `Work Wise | Registration`,
-            html: dunamicHtmlTemplate
+            html: dunamicHtmlTemplate,
+            to: email
         };
-  
-        if (spocList && spocList.length > 0) {
-          mailRecipients.to = spocList.map(spoc => spoc.email);
-          mailRecipients.cc = email;
-        } else {
-          mailRecipients.to = email;
-        }
 
         sendMail(mailRecipients);
-
-
-        let checkFreeSubscription =
-          await subscriptionModel.checkFreeSubscription();
-        if (checkFreeSubscription.length > 0) {
-          const startDate = moment(); // Replace with the actual start date
-
-          const billingCycleMonths = checkFreeSubscription[0].duration;
-
-          // Calculate the end date by adding the billing cycle and subtracting one day
-          const endDate = startDate
-            .clone()
-            .add(billingCycleMonths, 'months')
-            .subtract(1, 'day');
-          const renewDate = startDate.clone().add(billingCycleMonths, 'months');
-
-          let UserSubscriptionObj = {
-            user_id: vendor[0].id,
-            plan_id: checkFreeSubscription[0].id,
-            status: 1, //By default payment done
-            start_date: startDate.format('YYYY-MM-DD'),
-            end_date: endDate.format('YYYY-MM-DD'),
-            renew_date: renewDate.format('YYYY-MM-DD')
-          };
-
-          let createUserSubscription =
-            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
-
-          await subscriptionModel.updateUserSubscriptionId(
-            checkFreeSubscription[0].id,
-            vendor[0].id
-          );
-          let subscriptionMappingDetails =
-            await subscriptionModel.getSubscriptionMappingDetails(
-              checkFreeSubscription[0].id
-            );
-          // console.log(
-          //   'subscriptionMappingDetails==>>>>',
-          //   subscriptionMappingDetails
-          // );
-          for await (const {
-            allocated_feature,
-            feature_id
-          } of subscriptionMappingDetails) {
-            let userSubscriptionFeatureObj = {
-              user_subscriptions_id: createUserSubscription.id,
-              feature_id: feature_id,
-              plan_id: checkFreeSubscription[0].id,
-              used_feature_count: 0,
-              allocated_feature: allocated_feature,
-              user_id: vendor[0].id
-            };
-            await subscriptionModel.createUserSubscriptionFeature(
-              userSubscriptionFeatureObj
-            );
-          }
-        }
 
         res
           .status(200)
