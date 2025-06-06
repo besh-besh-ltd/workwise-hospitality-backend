@@ -277,13 +277,6 @@ if (Array.isArray(spocs) && spocs.length > 0) {
 
         sendMail(mailRecipients);
 
-        // sendMail({
-        //   from: Config.webmasterMail, // sender address
-        //   to: email, // list of receivers
-        //   subject: `Work wise | Registration`, // Subject line
-        //   // html: dynamic_html // plain text body
-        //   html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
-        // });
 
         let checkFreeSubscription =
           await subscriptionModel.checkFreeSubscription();
@@ -298,10 +291,6 @@ if (Array.isArray(spocs) && spocs.length > 0) {
             .add(billingCycleMonths, 'months')
             .subtract(1, 'day');
           const renewDate = startDate.clone().add(billingCycleMonths, 'months');
-
-          // console.log('Start Date:', startDate.format('YYYY-MM-DD'));
-          // console.log('End Date:', endDate.format('YYYY-MM-DD'));
-          // console.log('Renew Date:', renewDate.format('YYYY-MM-DD'));
 
           let UserSubscriptionObj = {
             user_id: vendor[0].id,
@@ -535,10 +524,6 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           nature_of_business:
             nature_business || companyDetails[0].nature_of_business,
           established_year: estd_year || companyDetails[0].established_year,
-          // spoc_name: sales_spoc_name || companyDetails[0].spoc_name,
-          // spoc_role: sales_spoc_position || companyDetails[0].spoc_role,
-          // spoc_email: sales_spoc_business_email || companyDetails[0].spoc_email,
-          // spoc_mobile: sales_spoc_mobile || companyDetails[0].spoc_mobile,
           gstin: gstin || companyDetails[0].gstin,
           import_export_code:
             import_export_code || companyDetails[0].import_export_code,
@@ -565,10 +550,6 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           company_name: organization_name || null,
           nature_of_business: nature_business || null,
           established_year: estd_year || null,
-          // spoc_name: sales_spoc_name || null,
-          // spoc_role: sales_spoc_position || null,
-          // spoc_email: sales_spoc_business_email || null,
-          // spoc_mobile: sales_spoc_mobile || null,
           gstin: gstin || null,
           import_export_code: import_export_code || null,
           cin: cin || null,
@@ -614,17 +595,6 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         await productModel.addFile(filesObj);
       }
 
-      /* if (fileName) {
-        if (vendorDetails[0].new_profile_image) {
-          const file_link = `${Config.upload.user_image}/${vendorDetails[0].new_profile_image}`;
-          fs.unlink(file_link, (err) => {
-            if (err) console.log(err);
-            else {
-              //   console.log(file_link);
-            }
-          });
-        }
-      } */
       res
         .status(200)
         .json({

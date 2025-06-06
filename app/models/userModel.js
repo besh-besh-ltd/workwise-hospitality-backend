@@ -20,7 +20,15 @@ user_book_demo: async (mobile) => {
   });
 },
 
+/**
+ * 
+ * @param {*} user_data 
+ * @param {*} company_data 
+ * @returns company id, only if data successfully saved in tbl_company and tbl_user
+ */
+
  company_registration: async (user_data, company_data) => {
+
     return new Promise(function (resolve, reject) {
       db.tx(async t => {
         try {

@@ -131,19 +131,6 @@ const vendorController = {
       if (vendorId) {
         let html_variables = [{ name: name }];
 
-        /*  let dynamic_html = fs
-          .readFileSync(`${Config.template_path}/user_register_template.txt`)
-          .toString();
-        for (let index = 0; index < html_variables.length; index++) {
-          const element = html_variables[index];
-          let dynamic_key = Object.keys(element)[0];
-          let replace_char = html_variables[index][dynamic_key];
-          let replace_var = `[${dynamic_key.toLowerCase()}]`;
-
-          dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
-        } */
-
-          
 
           const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
 
@@ -164,13 +151,6 @@ const vendorController = {
     
           sendMail(mailRecipients);
 
-        // sendMail({
-        //   from: Config.webmasterMail, // sender address
-        //   to: email, // list of receivers
-        //   subject: `Work wise | Registration`, // Subject line
-        //   // html: dynamic_html // plain text body
-        //   html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
-        // });
 
         res
           .status(200)
@@ -283,17 +263,7 @@ const vendorController = {
       };
       await vendorModel.updateVendor(vendorId, vendorObj);
 
-      /* if (fileName) {
-        if (vendorDetails[0].new_profile_image) {
-          const file_link = `${Config.upload.user_image}/${vendorDetails[0].new_profile_image}`;
-          fs.unlink(file_link, (err) => {
-            if (err) console.log(err);
-            else {
-              //   console.log(file_link);
-            }
-          });
-        }
-      } */
+
       res
         .status(200)
         .json({
@@ -444,30 +414,6 @@ const vendorController = {
         vendorApproveID
       );
 
-      /*  if (req?.files?.qap_file?.length > 0) {
-        const file_link = `${Config.upload.vendor_approve}/${checkVendorApproveID[0].qap_file}`;
-        fs.unlink(file_link, (err) => {
-          if (err) console.log(err);
-          else {
-          }
-        });
-      }
-      if (req?.files?.datasheet_file?.length > 0) {
-        const file_link = `${Config.upload.vendor_approve}/${checkVendorApproveID[0].datasheet_file}`;
-        fs.unlink(file_link, (err) => {
-          if (err) console.log(err);
-          else {
-          }
-        });
-      }
-      if (req?.files?.vendor_logo?.length > 0) {
-        const file_link = `${Config.upload.vendor_approve}/${checkVendorApproveID[0].vendor_logo}`;
-        fs.unlink(file_link, (err) => {
-          if (err) console.log(err);
-          else {
-          }
-        });
-      } */
       res
         .status(200)
         .json({
