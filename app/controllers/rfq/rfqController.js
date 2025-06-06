@@ -553,7 +553,6 @@ const sendMailtoVendors = async (req, rfqNumber) => {
     const products = await rfqModel.getProductsByRfqId(rfqNumber);
 
     products.forEach((item) => {
-      console.log("ITEM -> ", item)
       item.vendors.forEach((vendor) => {
         if (!vendorProductMap[vendor.user_id]) {
           vendorProductMap[vendor.user_id] = {
@@ -1355,7 +1354,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
             let value = products.updatable.specs[rfqProductId][spec]
             if(spec == 'Quantity')
               value = parseInt(value);
-            
+
               const data = {
                 value
               };
@@ -2443,7 +2442,6 @@ const rfqController = {
         data: draftData[0]
       });
     } catch (error) {
-      console.error(`[getDraftById] Error:`, error);
       
       // Changes by Agnij 2025-05-24 [Fixed error handling to properly use logError]
       const err = new Error("Error fetching draft RFQ by ID");
@@ -5772,6 +5770,16 @@ const rfqController = {
       const products = [];
       const sheetNameList = new Set();
       const globalVariantCount = {};
+
+      const allVariantsCount = await rfqModel.getVariantsCountForRFQ(rfqId);
+      if(allVariantsCount && allVariantsCount.length > 0) {
+        allVariantsCount.forEach(variantCount => {
+          const productId = variantCount.product_variant_id;
+          const maxVariant = variantCount.max_variant;
+
+          globalVariantCount[productId] = maxVariant + 1;
+        })
+      }
   
       const allProductIds = boqDataJson.map(item => item.variant_id).filter(item => typeof item == 'number' || typeof item == 'string');
   
@@ -6013,7 +6021,6 @@ const rfqController = {
       let sheetData = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', `rfq_id = ${rfqId} AND id = ${sheetId}`);
       
       if(!sheetData || !sheetData.length > 0) {
-        console.log(`[getDraftRfqSheetWise] Sheet ${sheetId} does not exist for RFQ ${rfqId}`);
         return res.status(400).json({
           status: 0,
           success: false,
