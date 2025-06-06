@@ -198,7 +198,10 @@ user_book_demo: async (mobile) => {
   },
   getCompanyDetail: async (user_id) => {
     return new Promise(function (resolve, reject) {
-      db.any('select * from tbl_company where user_id = $1', [user_id])
+      db.any(`SELECT c.*
+   FROM tbl_users u
+   JOIN tbl_company c ON u.company_id = c.id
+   WHERE u.id = $1`, [user_id])
         .then(function (data) {
           resolve(data);
         })
@@ -703,6 +706,7 @@ user_book_demo: async (mobile) => {
             tbl_users.mobile AS company_mobile,
             tbl_company.gstin,
             tbl_company.cin,
+            tbl_company.logo,
             tbl_company.website,
             tbl_company.established_year,
             tbl_location_states.state_name, 

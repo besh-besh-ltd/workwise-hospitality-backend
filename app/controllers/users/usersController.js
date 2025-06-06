@@ -1207,11 +1207,7 @@ get_company_users: async (req, res, next) => {
     try {
       var user_id = req.user.id;
       let user_type = req.user.user_type;
-      // console.log('user_type--->', user_type);
-      // return false;
-      // let user_id = req.params.user_id;
-      // console.log('User detail-->', req.user);
-      // return false;
+
       const now = currentDateTime();
       const created_at = dateFormat(now, 'yyyy-mm-dd HH:MM:ss');
 
@@ -1241,26 +1237,9 @@ get_company_users: async (req, res, next) => {
         city
       } = req.body;
 
-      /*  let companyVendorObj = {
-        company_name,
-        nature_of_business,
-        type_of_business,
-        turnover,
-        no_of_employess,
-        certifications,
-        import_export_code
-      };
-
-      let cmpVendorObj = Object.fromEntries(
-        Object.entries(companyVendorObj).filter(
-          ([key, value]) => value !== undefined
-        )
-      ); */
-
       let companyObj = {
         company_name,
         location,
-        // email,
         mobile,
         gstin,
         cin,
@@ -1302,16 +1281,8 @@ get_company_users: async (req, res, next) => {
 
       if (Object.keys(companyDetail).length < 1) {
         company = await userModel.companyProfileCreate(cmpObj, user_id);
-        /* companyVendor = await userModel.companyProfileVendorCreate(
-          cmpVendorObj,
-          user_id
-        ); */
       } else {
         company = await userModel.companyProfileUpdate(cmpObj, user_id);
-        /* companyVendor = await userModel.companyProfileVendorUpdate(
-          cmpVendorObj,
-          user_id
-        ); */
       }
       let vendorObj = {
         vendor_approve,
@@ -1321,14 +1292,12 @@ get_company_users: async (req, res, next) => {
       let vndObj = Object.fromEntries(
         Object.entries(vendorObj).filter(([key, value]) => value !== undefined)
       );
-      // console.log('vndObj-->', vndObj);
-      // return false;
       if (vendor_approve && vendor_approve.length > 0) {
         let vendorApproveDetail = await userModel.getVendorApproveDetail(
           user_id
         );
-        //console.log('vendorApproveDetail-->', vendorApproveDetail);
-        // return false;
+
+        
         if (vendorApproveDetail.length > 0) {
           await userModel.deleteVendorApproveDetail(user_id);
         }
@@ -1337,14 +1306,7 @@ get_company_users: async (req, res, next) => {
           let vendorApproveMap = userModel.vendorApproveUserMap(user_id, item);
         });
       }
-      // return false;
-      /* let vendorApproveUserMap = await userModel.vendorApproveUserMap(
-        cmpObj,
-        user_id
-      ); */
 
-      // console.log('user--', user);
-      // return false;
       res
         .status(200)
         .json({
