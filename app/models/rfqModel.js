@@ -2037,10 +2037,17 @@ LIMIT 1;`;
                         JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
                         WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
                         ${TA_Vendors === "TA" ? vendorCondition : ''}
-                    )
+                    ),
+                    'global_document_files', (
+                        SELECT json_agg(json_build_object('file_type', QF.file_type, 'file_url', QF.file_url))
+                        FROM tbl_quotes_files QF
+                        WHERE QF.quote_id = TQ.id
+                    ),
+                    'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END)
                 )
                 FROM tbl_quotes TQ
                 JOIN tbl_users TU ON TU.id = TQ.created_by
+                LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
                 WHERE TQ.rfq_id = TRP.rfq_id
                 ${TA_Vendors === "TA" ? vendorCondition : ''}
                 ORDER BY TU.id ASC
@@ -2061,9 +2068,11 @@ LIMIT 1;`;
                             'email', TU.email,
                             'mobile', TU.mobile,
                             'address', TU.address,
-                            'organization_name', TU.organization_name
+                            'organization_name', TU.organization_name,
+                            'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END)
                         ))
                         FROM tbl_users TU
+                        LEFT JOIN tbl_quote_finalization _TQF ON _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
                         WHERE TU.id = TQ.created_by
                         ${TA_Vendors === "TA" ? vendorCondition : ''}
                     ),
@@ -2262,6 +2271,8 @@ LIMIT 1;`;
                 FROM tbl_quotes_files TF
                 WHERE TF.quote_id = TQI.quote_id
               ),
+              'global_payment_term', TQ.global_payment_term,
+              'global_comment', TQ.global_comment,
               'previous_quotes', (
                 SELECT json_agg(
                   json_build_object(
@@ -2287,6 +2298,7 @@ LIMIT 1;`;
               )
             )
             FROM tbl_quote_items TQI
+            JOIN tbl_quotes TQ ON TQI.quote_id = TQ.id
             WHERE TQI.rfq_id = $1
               AND TQI.product_variant_id = TRF.product_variant_id
               AND TQI.variant = TRF.variant              
