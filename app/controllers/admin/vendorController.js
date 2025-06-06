@@ -281,7 +281,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       let resObj = {};
       let vendorId = req.params.id;
       let vendorDetails = await vendorModel.getVendoreditDetails(vendorId);
-      let companyDetails = await vendorModel.getCompanyDetails(vendorId);
+      let companyDetails = await userModel.getCompanyDetail(vendorId);
       let files = await vendorModel.getFiles(vendorId);
       let spocDetails = await vendorModel.getSpocDetails(vendorId);
       resObj.spocDetails = spocDetails;
@@ -371,19 +371,11 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         website,
         nature_business,
         estd_year,
-        // sales_spoc_name,
-        // sales_spoc_position,
-        // sales_spoc_business_email,
-        // sales_spoc_mobile,
         gstin,
         import_export_code,
         cin,
         turn_over,
         total_employees,
-        // ptr_project_name,
-        // ptr_project_description,
-        // ptr_project_start_date,
-        // ptr_project_end_date,
         about_vendor_company
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
@@ -398,17 +390,14 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         state: state || vendorDetails[0].state,
         country: country || vendorDetails[0].country,
         mobile: mobile || vendorDetails[0].mobile,
-        website: website || vendorDetails[0].website,
         postal_code: postal_code || vendorDetails[0].postal_code,
-        new_profile_image: req.files.logo?.[0]?.location,
-        original_profile_image: vendorDetails[0].original_profile_image,
         updated_by: updatedBy,
         organization_name:
           organization_name || vendorDetails[0].organization_name
       };
       await productModel.updateVendorDetail(vendorObj, vendorId);
 
-      let companyDetails = await vendorModel.getCompanyDetails(vendorId);
+      let companyDetails = await userModel.getCompanyDetail(vendorId);
 
       if (companyDetails.length > 0) {
         let companyObj = {
@@ -417,8 +406,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
             req.files?.logo
               ? req.files?.logo[0].location
               : companyDetails[0].logo,
-          email: email || companyDetails[0].email,
-          mobile: mobile || companyDetails[0].mobile,
+          website: website || vendorDetails[0].website,
           company_name: organization_name || companyDetails[0].company_name,
           nature_of_business:
             nature_business || companyDetails[0].nature_of_business,
@@ -429,13 +417,8 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           cin: cin || companyDetails[0].cin,
           turnover: turn_over || companyDetails[0].turnover,
           no_of_employess: total_employees || companyDetails[0].no_of_employess,
-          project_name: null,
-          project_description: null,
-          project_start_date: null,
-          project_end_date: null
         };
 
-        companyObj.user_id = vendorId;
         await productModel.updateCompany(companyObj);
       } else {
         let companyObj = {
@@ -448,16 +431,13 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           mobile: mobile || null,
           company_name: organization_name || null,
           nature_of_business: nature_business || null,
+          website: website || vendorDetails[0].website,
           established_year: estd_year || null,
           gstin: gstin || null,
           import_export_code: import_export_code || null,
           cin: cin || null,
           turnover: turn_over || null,
           no_of_employess: total_employees || null,
-          project_name: null,
-          project_description: null,
-          project_start_date: null,
-          project_end_date: null
         };
         companyObj.user_id = vendorId;
         await productModel.addCompany(companyObj);
@@ -469,26 +449,6 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           file_path: pathname,
           file_name: req.files.ptr_track[0].originalname || null,
           doc_type: 'ptr',
-          user_id: vendorId
-        };
-        await productModel.addFile(filesObj);
-      }
-      if (req.files?.certifications && req.files?.certifications.length > 0) {
-        const pathname = req.files.certifications[0].location;
-        let filesObj = {
-          file_path: pathname,
-          file_name: req.files.certifications[0].originalname || null,
-          doc_type: 'crt',
-          user_id: vendorId
-        };
-        await productModel.addFile(filesObj);
-      }
-      if (req.files?.brochure && req.files?.brochure.length > 0) {
-        const pathname = req.files.brochure[0].location;
-        let filesObj = {
-          file_path: pathname,
-          file_name: req.files.brochure[0].originalname || null,
-          doc_type: 'brochure',
           user_id: vendorId
         };
         await productModel.addFile(filesObj);

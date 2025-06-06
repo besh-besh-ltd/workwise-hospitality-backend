@@ -210,28 +210,10 @@ const schema_posts = {
             organization_name: Joi.string().required(),
             user_type: Joi.number().optional().default(7),
             password: Joi.string().optional().allow(''),
-            address: Joi.string().required(),
-            country: Joi.string().required(),
-            whatsapp: Joi.string().optional().allow(''),
-            state: Joi.string().optional().allow(''),
-            city: Joi.string().optional().allow(''),
-            postal_code: Joi.string().optional().allow(''),
-            gstin: Joi.string().optional().allow(''),
-            cin: Joi.string().optional().allow(''),
-            nature_of_business: Joi.string().required(),
-            type_of_business: Joi.string().required(),
-            turnover: Joi.string().optional().allow(''),
-            no_of_employess: Joi.number().optional(),
-            import_export_code: Joi.string().optional().allow(''),
-            established_year: Joi.string().optional().allow(''),
-            website: Joi.string().uri().optional().allow(''),
             max_top_management: Joi.number().min(1).required(),
             max_procurement: Joi.number().min(1).required(),
             max_engineering: Joi.number().min(1).required(),
             max_finance: Joi.number().min(1).required(),
-            created_by: Joi.number().optional(),
-            token: Joi.string().optional().allow(''),
-            is_private: Joi.number().optional().default(1)
           });
 
           const result = addBuyerSchema.validate(req.body, { abortEarly: false });

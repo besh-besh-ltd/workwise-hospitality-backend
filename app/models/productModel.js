@@ -2160,7 +2160,7 @@ FROM (
   },
   updateCompany: async (companyObj) => {
     return new Promise(function (resolve, reject) {
-      const condition = ` WHERE user_id = $1 RETURNING id`;
+      const condition = ` WHERE id = $1 RETURNING id`;
       const values = [companyObj.user_id];
       let query =
         pgp().helpers.update(companyObj, null, 'tbl_company') + condition;

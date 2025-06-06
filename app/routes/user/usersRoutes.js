@@ -28,7 +28,9 @@ UsersRoutes.post(
 // can be user to register buyer and vendor company
 UsersRoutes.post(
   '/company-registration',
+  passportSignIn,
   validateDbBody.user_exists,
+  schema_posts.add_user_profile_image,
   UsersController.company_registration
 );
 
