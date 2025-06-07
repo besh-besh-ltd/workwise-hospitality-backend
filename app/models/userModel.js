@@ -27,85 +27,73 @@ user_book_demo: async (mobile) => {
  * @returns company id, only if data successfully saved in tbl_company and tbl_user
  */
 
- company_registration: async (user_data, company_data) => {
-
-    return new Promise(function (resolve, reject) {
-      db.tx(async t => {
-        try {
-          if (user_data.mobile) {
-            user_data.mobile = user_data.mobile.toString().substring(0, 15);
-          }
-          
-          // Step 1: Insert into tbl_company
-          const companyInsert = await t.one(
-            `INSERT INTO tbl_company (
-              company_name, profile, nature_of_business, type_of_business,
-              turnover, no_of_employess, import_export_code, gstin, cin, logo,
-              established_year, website, location, is_private
-            ) VALUES (
-              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-              $11, $12, $13, $14
-            ) RETURNING id`,
-            [
-              company_data.company_name,
-              company_data.profile,
-              company_data.nature_of_business,
-              company_data.type_of_business,
-              company_data.turnover,
-              company_data.no_of_employess,
-              company_data.import_export_code,
-              company_data.gstin,
-              company_data.cin,
-              company_data.logo,
-              company_data.established_year,
-              company_data.website,
-              company_data.location,
-              company_data.is_private,
-              company_data.createdAt
-            ]
-          );
-
-          const company_id = companyInsert.id;
-
-          // Step 2: Insert into tbl_users
-          const user_insert = await t.one(
-            `INSERT INTO tbl_users (
-              name, email, mobile, created_by, updated_by, status, user_type, password, address,
-               country, whatsapp,  state, city, postal_code, company_id
-            ) VALUES (
-              $1, $2, $3, $4, $5, $6,
-              $7, $8, $9, $10,
-              $11, $12, $13, $14, $15
-            ) RETURNING id`,
-            [
-              user_data.name,
-              user_data.email,
-              user_data.mobile,
-              user_data.created_by,
-              user_data.updated_by,
-              user_data.status,
-              user_data.user_type,
-              user_data.password,
-              user_data.address,
-              user_data.country,
-              user_data.whatsapp,
-              user_data.state,
-              user_data.city,
-              user_data.postal_code,
-              company_id
-            ]
-          );
-
-          resolve({ success: true, company_id, user_id:user_insert.id });
-        } catch (error) {
-          reject(error);
+company_registration: async (user_data, company_data) => {
+  return new Promise((resolve, reject) => {
+    db.tx(async t => {
+      try {
+        if (user_data.mobile) {
+          user_data.mobile = user_data.mobile.toString().substring(0, 15);
         }
-      }).catch(function (err) {
-        console.error('Transaction error:', err);
-        reject(new Error(err));
-      });
+
+        // ------------------------------
+        // Step 1: Insert Company
+        // ------------------------------
+        const companyFields = [
+          "company_name", "profile", "nature_of_business", "type_of_business",
+          "turnover", "no_of_employess", "import_export_code", "gstin", "cin", "logo",
+          "established_year", "website", "location", "is_private"
+        ];
+
+        const companyValues = companyFields.map(field => company_data?.[field] ?? null);
+        const companyPlaceholders = companyFields.map((_, i) => `$${i + 1}`).join(', ');
+
+        const insertCompanyQuery = `
+          INSERT INTO tbl_company (${companyFields.join(', ')})
+          VALUES (${companyPlaceholders})
+          RETURNING id
+        `;
+
+        const companyResult = await t.one(insertCompanyQuery, companyValues);
+        const company_id = companyResult.id;
+
+        // ------------------------------
+        // Step 2: Insert User
+        // ------------------------------
+        const userFields = [
+          "name", "email", "mobile", "created_by", "updated_by",
+          "status", "user_type", "password", "address", "country",
+          "whatsapp", "state", "city", "postal_code"
+        ];
+        const userValues = userFields.map(f => user_data?.[f] ?? null);
+        userFields.push("company_id");
+        userValues.push(company_id);
+
+        const userPlaceholders = userFields.map((_, i) => `$${i + 1}`).join(', ');
+
+        const insertUserQuery = `
+          INSERT INTO tbl_users (${userFields.join(', ')})
+          VALUES (${userPlaceholders})
+          RETURNING id
+        `;
+
+        const userResult = await t.one(insertUserQuery, userValues);
+
+        resolve({
+          success: true,
+          company_id,
+          user_id: userResult.id
+        });
+
+      } catch (error) {
+        reject(error);
+      }
+    }).catch(err => {
+      console.error("Transaction error:", err);
+      reject(new Error(err));
     });
-  },
+  });
+},
+
 
   insertBuyerAccountLimits: async (limitsData, company_id) => {
   return new Promise(function (resolve, reject) {
