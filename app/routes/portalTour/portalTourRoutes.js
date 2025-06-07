@@ -4,6 +4,8 @@ import passport from '../../middleware/passport.js';
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 import portalTourController from '../../controllers/portalTour/portalTourController.js';
 
+// mukul 07-06-2025 ,  not in use but functional, these api's is for portal tour, backend isready for this functionlity need to create frontend
+
 const portalTourRoutes = Router();
 
 // get tour coontent by page id

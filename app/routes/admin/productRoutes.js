@@ -139,6 +139,8 @@ productRoutes.post(
   productController.adminProductAcceptReview
 );
 
+
+// mukul - 06-06-2025  not in use cross check and remopve 
 productRoutes.post(
   '/bulk-product-upload-preview',
   passportSignIn,

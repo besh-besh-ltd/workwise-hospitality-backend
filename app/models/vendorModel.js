@@ -312,14 +312,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
   getVendorDetails: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT tbl_users.*,tbl_company.profile,tbl_company.nature_of_business,tbl_company.no_of_employess,tbl_company.gstin,tbl_company.import_export_code,tbl_company.certifications,
-        ARRAY
-        (SELECT json_build_object('brochure',tbl_files.new_file_name,'brochure_url', CASE
-        WHEN tbl_files.file_name IS NULL THEN
-        NULL
-        ELSE tbl_files.new_file_name
-        END  )
-          FROM tbl_files  WHERE  tbl_files.user_id = tbl_users.id AND tbl_files.doc_type = 'brochure') AS "brochure",
+        `SELECT tbl_users.*,tbl_company.profile,tbl_company.nature_of_business,tbl_company.no_of_employess,tbl_company.gstin,tbl_company.import_export_code,
        ARRAY
           (SELECT json_build_object('ptr',tbl_files.new_file_name,'ptr_url', CASE
           WHEN tbl_files.new_file_name IS NULL THEN
@@ -369,18 +362,6 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         NULL AS profile_image  FROM tbl_users left join tbl_company on tbl_users.company_id = tbl_company.id  WHERE is_deleted = 0 AND user_type = 3 AND tbl_users.id = $1`,
         [vendorId]
       )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  getCompanyDetails: async (vendorId) => {
-    return new Promise(function (resolve, reject) {
-      db.any('SELECT * FROM tbl_company WHERE user_id = $1', [vendorId])
         .then(function (data) {
           resolve(data);
         })

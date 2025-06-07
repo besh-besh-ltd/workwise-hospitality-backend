@@ -21,6 +21,8 @@ import {
 import passport from '../../middleware/passport.js';
 const passportSignIn = passport.authenticate('jwtAdm', { session: false });
 
+
+// mukul 07-06-2025 ,  not in use, cross check and delete this file
 const otheruserRoutes = Router();
 
 otheruserRoutes.get(

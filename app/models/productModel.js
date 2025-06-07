@@ -2069,25 +2069,6 @@ FROM (
           reject(error);
         });
 
-      /*  db.any(
-        `insert into tbl_users(name, email,address, user_type, password, status) 
-        values($1, $2,$3,$4,$5,$6) returning id`,
-        [
-          usrobj.name,
-          usrobj.email,
-          usrobj.address,
-          usrobj.user_type,
-          usrobj.password,
-          usrobj.status
-        ]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        }); */
     });
   },
   addCompany: async (companyObj) => {
@@ -2179,7 +2160,7 @@ FROM (
   },
   updateCompany: async (companyObj) => {
     return new Promise(function (resolve, reject) {
-      const condition = ` WHERE user_id = $1 RETURNING id`;
+      const condition = ` WHERE id = $1 RETURNING id`;
       const values = [companyObj.user_id];
       let query =
         pgp().helpers.update(companyObj, null, 'tbl_company') + condition;

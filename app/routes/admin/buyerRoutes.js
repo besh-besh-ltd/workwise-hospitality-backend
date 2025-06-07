@@ -61,6 +61,7 @@ buyerRoutes.put(
   buyerController.updateBuyer
 );
 
+// mukul 07-06-2025 ,  not in use, cross check and remove
 buyerRoutes.put(
   '/accept-buyer/:id',
   passportSignIn,
@@ -70,6 +71,8 @@ buyerRoutes.put(
   buyerController.approveBuyer
 );
 
+
+// mukul 07-06-2025 ,  not in use, but functionlion and we can use this by adding a delete button on buyer list in admin buyer management so that admin can make a buyer as deleted, 
 buyerRoutes.delete(
   '/delete-buyer/:id',
   passportSignIn,

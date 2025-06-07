@@ -3814,6 +3814,7 @@ const rfqController = {
         product.quotations = updatedQuotations;
     });
     
+      
       res
         .status(200)
         .json({
@@ -3821,6 +3822,7 @@ const rfqController = {
           data: rfQItem
         })
         .end();
+      
     } catch (error) {
       logError(error);
       res
