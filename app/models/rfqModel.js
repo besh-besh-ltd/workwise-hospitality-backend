@@ -2222,6 +2222,17 @@ LIMIT 1;`;
                   'id', TQF.id,
                   'product_id', TQF.product_variant_id,
                   'timestamp', TQF.timestamp,
+
+                  'finilized_by', (
+                      SELECT json_build_object(
+                        'name', TU.name,
+                        'email', TU.email,
+                        'mobile', TU.mobile
+                      )
+                      FROM tbl_users TU
+                      WHERE TU.id = TQF.created_by
+                    ),
+
                   'winning_vendor', (
                     SELECT json_build_object(
                       'id', TUU.id,
@@ -5044,7 +5055,7 @@ project_access_checker: async (project_id, user_id) => {
     });
   },
 
-  addtechEvaluationClearedVendors: (vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message) => {
+  addtechEvaluationClearedVendors: (vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message, user_id) => {
     // console.log("Entered addClearedVendor =", vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message);
 
     const validateVendorQuery = `
@@ -5061,8 +5072,8 @@ project_access_checker: async (project_id, user_id) => {
 
     const insertClearedVendorQuery = `
       INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors
-      (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, timestamp)
-      VALUES ($1, $2, $3, $4, NOW());
+      (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, timestamp, created_by)
+      VALUES ($1, $2, $3, $4, NOW(), $5);
     `;
 
     return new Promise((resolve, reject) => {
@@ -5096,7 +5107,7 @@ project_access_checker: async (project_id, user_id) => {
           }
 
           // Insert Cleared Vendor
-          return db.query(insertClearedVendorQuery, [tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message]);
+          return db.query(insertClearedVendorQuery, [tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, user_id]);
         })
         .then(() => {
           // console.log("Vendor successfully added to cleared vendors.");
@@ -5547,11 +5558,17 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
       WHERE tbl_rfq_product_id = $1;
   `;
 
-  const fetchClearedVendorDetailsQuery = `
-      SELECT id, status, reject_message
-      FROM tbl_rfq_product_tech_evaluation_cleared_vendors
-      WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2;
-  `;
+const fetchClearedVendorDetailsQuery = `
+  SELECT 
+    RC.id, 
+    RC.status, 
+    RC.reject_message,
+    U.name AS evaluated_by
+  FROM tbl_rfq_product_tech_evaluation_cleared_vendors RC
+  LEFT JOIN tbl_users U ON RC.created_by = U.id
+  WHERE RC.tbl_rfq_product_tech_evaluation_id = $1 
+    AND RC.vendor_id = $2;
+`;
 
   return new Promise((resolve, reject) => {
       // console.log("Validating Vendor ID in tbl_users...");

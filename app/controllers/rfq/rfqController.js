@@ -6839,6 +6839,7 @@ addtechEvaluationClearedVendors: async (req, res) => {
   try {
     const {vendor_id, rfq_product_tech_evaluation_id,status, reject_message} = req.body;
     // console.log("API Input: ", vendor_id,rfq_product_tech_evaluation_id,status,reject_message);
+    const user_id = req.user.id
 
     // Validate input
     if (!vendor_id || !rfq_product_tech_evaluation_id ) {
@@ -6848,7 +6849,7 @@ addtechEvaluationClearedVendors: async (req, res) => {
       });
     }
 
-    const response = await rfqModel.addtechEvaluationClearedVendors(vendor_id, rfq_product_tech_evaluation_id,status, reject_message);
+    const response = await rfqModel.addtechEvaluationClearedVendors(vendor_id, rfq_product_tech_evaluation_id,status, reject_message, user_id);
 
     res
       .status(200)
