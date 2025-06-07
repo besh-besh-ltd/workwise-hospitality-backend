@@ -230,9 +230,10 @@ const UsersController = {
 
   company_registration: async (req, res, next) => {
     try {
-       const { name, email, mobile, organization_name, user_type, password, address, created_by, country, whatsapp, 
+       const { name, email, mobile, organization_name, user_type, password, address, country, whatsapp, 
         state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
        import_export_code,established_year,website, is_private} = req.body;
+
        const current_user = req.user || null
 
       const user_data = {
@@ -241,11 +242,10 @@ const UsersController = {
         mobile: mobile || null,
         user_type: user_type || null,
         status: user_type == 7 ? 1 : 0,
-        created_by:current_user?.id || null,
-        updated_by:current_user?.id || null,
         password: generatePassword(password), 
         address: address || null,
-        created_by: created_by || null,
+        created_by:current_user?.id || null,
+        updated_by:current_user?.id || null,
         country: country || null,
         whatsapp: whatsapp || null,
         token: null,
@@ -264,8 +264,6 @@ const UsersController = {
         import_export_code: import_export_code || null,
         gstin: gstin || null,
         cin: cin || null,
-        created_by:current_user?.id || null,
-        updated_by:current_user?.id || null,
         logo:  req.file?.location || null, 
         established_year: established_year || null,
         website: website || null,
@@ -274,10 +272,7 @@ const UsersController = {
        };
 
       //  Register company, this model register detail in both tables tbl_user and tbl_company
-       const {company_id} = await userModel.company_registration(user_data, company_data)
-          
-       console.log("line 282")
-
+       const {company_id} = await userModel.company_registration(user_data, company_data)         
       // user_type 7 is for buyer company registration, 3 is for vendor registration
         if (user_type == 7 && company_id) {
            await  continueBuyerCompanyRegistration(req.body, company_id)

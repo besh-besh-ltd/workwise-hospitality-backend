@@ -70,9 +70,8 @@ user_book_demo: async (mobile) => {
           // Step 2: Insert into tbl_users
           const user_insert = await t.one(
             `INSERT INTO tbl_users (
-              name, email, mobile, status, user_type, password, address,
-              created_by, country, whatsapp, token,
-              state, city, postal_code, company_id
+              name, email, mobile, created_by, updated_by, status, user_type, password, address,
+               country, whatsapp,  state, city, postal_code, company_id
             ) VALUES (
               $1, $2, $3, $4, $5, $6,
               $7, $8, $9, $10,
@@ -82,14 +81,14 @@ user_book_demo: async (mobile) => {
               user_data.name,
               user_data.email,
               user_data.mobile,
+              user_data.created_by,
+              user_data.updated_by,
               user_data.status,
               user_data.user_type,
               user_data.password,
               user_data.address,
-              user_data.created_by,
               user_data.country,
               user_data.whatsapp,
-              user_data.token,
               user_data.state,
               user_data.city,
               user_data.postal_code,
