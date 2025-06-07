@@ -1237,6 +1237,8 @@ get_company_users: async (req, res, next) => {
         city
       } = req.body;
 
+      console.log('user_id-->', req.body);;
+
       let companyObj = {
         company_name,
         location,

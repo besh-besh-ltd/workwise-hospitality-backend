@@ -294,6 +294,7 @@ const schemas = {
 
   update_profile: Joi.object().keys({
     company_name: Joi.string().optional().allow(null).allow(''),
+    about : Joi.string().optional().allow(null).allow(''),
     name: Joi.string().optional().allow(null).allow(''),
     location: Joi.object({
       country: Joi.string().optional().allow(null, ''),
@@ -321,7 +322,9 @@ const schemas = {
     import_export_code: Joi.string().optional().allow(null).allow(''),
     country: Joi.string().optional().allow(null, ''),
     state: Joi.string().optional().allow(null, ''),
-    city: Joi.string().optional().allow(null, '')
+    city: Joi.string().optional().allow(null, ''),
+    website : Joi.string().optional().allow(null).allow(''),
+    established_year: Joi.string().optional().allow(null).allow(''),
   }),
   enquiry: Joi.object().keys({
     first_name: Joi.string().required(),

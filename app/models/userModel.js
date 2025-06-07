@@ -608,7 +608,7 @@ user_book_demo: async (mobile) => {
   companyProfileUpdate: async (cmpObj, user_id) => {
     Object.entries(cmpObj).forEach((ele) => {
       db.any(
-        `UPDATE tbl_company SET ${ele[0]} = $1 WHERE user_id = $2`,
+        `UPDATE tbl_company SET ${ele[0]} = $1 WHERE id = $2`,
         [ele[1], user_id],
         (err) => {
           if (err) {
