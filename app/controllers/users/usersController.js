@@ -3277,7 +3277,7 @@ get_company_users: async (req, res, next) => {
         userEmailExists = await userModel.user_exist(email.toLowerCase(), phoneWithoutCode);
         if (userEmailExists.length > 0 && userEmailExists[0].user_type == 3) {
           vendorId = userEmailExists[0].id;
-          companyExists = await vendorModel.getCompanyDetails(vendorId);
+          companyExists = await userModel.getCompanyDetail(vendorId);
         }
       }
 
@@ -3321,12 +3321,10 @@ get_company_users: async (req, res, next) => {
           is_private: userDetails[0].is_private,
         };
 
-        let vendor = await productModel.vendor_register(vendorObj);
+        const {company_id, user_id} = await userModel.company_registration(vendorObj, companyObj);
 
-        companyObj.user_id = vendor[0].id;
-        await productModel.addCompany(companyObj);
 
-        await userModel.mapBuyerToVendor(userDetails[0].buyer_id, vendor[0].id);
+        await userModel.mapBuyerToVendor(userDetails[0].buyer_id, user_id);
 
 
         // send whatsapp notification
@@ -3339,42 +3337,37 @@ get_company_users: async (req, res, next) => {
         }
         await whatsappNotificationFluxChat.buyerAddedVendorNotificationToVendor(payload)
 
-        vendorId = vendor[0].id;
+        vendorId = user_id;
 
-        addDefaultNotifications(vendor[0].id);
+        addDefaultNotifications(user_id);
 
-        if (vendor[0].id) {
+        if (user_id) {
 
-          const spocList = await vendorModel.getSpocDetails(vendor[0].id);
+          const spocList = await vendorModel.getSpocDetails(user_id);
 
           const headerContent = `<h2>Hello ${userDetails[0].vendor_name || 'Vendor'},</h2>`;
 
 
-                         // Email body content
+          // Email body content
                const containerContent = `
                <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
                  <p>
                    We are pleased to inform you that <strong>${buyerName}</strong> has added you as a preferred vendor on the Workwise platform.
                    Going forward, <strong>${buyerName}</strong> will manage their procurement activities through Workwise.
                  </p>
-                 
                  <p>
                    To ensure you receive all enquiries promptly, Login to your account.
                    Your login credentials are provided below:
                  </p>
-             
                  <p><strong>Email:</strong> ${userDetails[0]?.email || '[Vendor Email]'}</p>
                  <p><strong>Password:</strong> ${password || '[Temporary Password]'}</p>
-             
                  <p>
                    We recommend changing your password after your first login for security reasons.
                  </p>
-             
                  <a href="https://letsworkwise.com"
                    style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                     Login
                  </a>    
-             
                  <p style="margin-top:20px; text-align:center;">
                    We look forward to supporting your business growth.
                  </p>

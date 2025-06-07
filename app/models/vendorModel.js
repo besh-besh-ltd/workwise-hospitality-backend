@@ -371,18 +371,6 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         });
     });
   },
-  getCompanyDetails: async (vendorId) => {
-    return new Promise(function (resolve, reject) {
-      db.any('SELECT * FROM tbl_company WHERE user_id = $1', [vendorId])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
   getVendoreditDetails: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.any('SELECT * FROM tbl_users WHERE id = $1', [vendorId])
