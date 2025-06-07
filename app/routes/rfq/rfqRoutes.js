@@ -61,12 +61,6 @@ RfqRoutes.put(
   rfqController.update
 );
 
-// RfqRoutes.get(
-//   '/all',
-//   // passportSignIn,
-//   //validateDbBody.user_id_profileexists,
-//   rfqController.listAll
-// );
 
 RfqRoutes.post(
   '/get-details',
@@ -96,6 +90,7 @@ RfqRoutes.post(
 );
 
 // RFQ Chart Data
+// mukul 07-06-2025 ,  not in use, cross check and remove
 RfqRoutes.get(
   '/rfq-chart-data',
   passportSignIn,
@@ -199,6 +194,8 @@ RfqRoutes.post(
   rfqController.searchVendor
 );
 
+
+// mukul 07-06-2025 ,  not in use but functional 
 RfqRoutes.post(
   '/product-price-stats',
   noLogin.customer_auth,
@@ -215,9 +212,11 @@ RfqRoutes.get(
 
 RfqRoutes.post('/rfq-list', passportSignIn, rfqController.rfqList);
 
+// mukul 07-06-2025 ,  not in use, cross check and remove even if this is wokrong move this to another roue folder as this file belongs to rfq only
 RfqRoutes.get('/save-state-cities', rfqController.saveStateCities);
 
 // to show the available units
+// mukul 07-06-2025 ,  not in use but functioanl not remove this one
 RfqRoutes.get('/units',
   // passportSignIn,
   rfqController.getUnits
@@ -297,15 +296,6 @@ RfqRoutes.post('/magic-search-rfq-create',
   validateBody(rfqSchemas.create),
   rfqController.create  
 )
-
-// technical eveluation modules
-
-// route not used
-// RfqRoutes.post('/add-technical-eveluation',
-//   passportSignIn,
-//   rfqController.addTechnicalEveluation 
-// )
-// create simple boq from upoaded boq - AI functionality
 
 RfqRoutes.post(
   '/boq/process-and-download',
