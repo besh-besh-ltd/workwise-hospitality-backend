@@ -661,7 +661,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
   let mailRecipients = {
     from: Config.webmasterMail,
     to: buyerDetails[0]?.email,
-    cc:"mukul@letsworkwise.com",
+    // cc:"mukul@letsworkwise.com",
     subject: `Work Wise | New Quotation Received for Your RFQ`,
     html: dynamicHTML
   };
@@ -1061,10 +1061,10 @@ const sendQuoteNotificationEmail = async (req) => {
        if (validSpocEmails.length > 0) {
          mail.to = validSpocEmails;
          mail.cc = email || '';
-         mail.bcc = 'ayush@letsworkwise.com';
+        //  mail.bcc = 'ayush@letsworkwise.com';
        } else {
          mail.to = email || '';
-         mail.bcc = 'ayush@letsworkwise.com';
+        //  mail.bcc = 'ayush@letsworkwise.com';
        }
 
        sendMail(mail);
