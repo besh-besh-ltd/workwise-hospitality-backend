@@ -293,38 +293,29 @@ const schemas = {
   }),
 
   update_profile: Joi.object().keys({
+    email: Joi.string().optional().not(null),
+    name: Joi.string().optional().not(null), // user name
+    mobile: Joi.string().optional().not(null),
+  }),
+
+  // mukul 09-06-2025, just saprate this from update_profile
+  company_profile: Joi.object().keys({
     company_name: Joi.string().optional().allow(null).allow(''),
-    about : Joi.string().optional().allow(null).allow(''),
-    name: Joi.string().optional().allow(null).allow(''),
-    location: Joi.object({
-      country: Joi.string().optional().allow(null, ''),
-      state: Joi.string().optional().allow(null, ''),
-      city: Joi.string().optional().allow(null, '')
-    })
-      .optional()
-      .allow(null),
-    email: Joi.string().optional().allow(null).allow(''),
-    mobile: Joi.string().optional().allow(null).allow(''),
+    established_year: Joi.number().optional().allow(null).allow(''),
+    about_company : Joi.string().optional().allow(null).allow(''), // in tbl_company this is we have as profile
     gstin: Joi.string().optional().allow(null).allow(''),
-    cin: Joi.string().optional().allow(null).allow(''),
-    profile: Joi.string().optional().allow(null).allow(''),
-    linkedin: Joi.string().optional().allow(null).allow(''),
-    facebook: Joi.string().optional().allow(null).allow(''),
-    whatsapp: Joi.string().optional().allow(null).allow(''),
-    skype: Joi.string().optional().allow(null).allow(''),
-    vendor_approve: Joi.array().items(Joi.number()).allow(null),
+    website : Joi.string().optional().allow(null).allow(''),
+    street_address: Joi.string().optional().allow(null).allow(''),
+    postal_code: Joi.number().optional().allow(null),
+    country: Joi.number().optional().allow(null),
+    state: Joi.number().optional().allow(null),
+    city: Joi.number().optional().allow(null),
     nature_of_business: Joi.string().optional().allow(null).allow(''),
     type_of_business: Joi.string().optional().allow(null).allow(''),
-    turnover: Joi.string().optional().allow(null).allow(''),
+    turnover: Joi.string().optional().allow(null),
     no_of_employess: Joi.string().optional().allow(null).allow(''),
-    certifications: Joi.string().optional().allow(null).allow(''),
-    address: Joi.string().optional().allow(null).allow(''),
     import_export_code: Joi.string().optional().allow(null).allow(''),
-    country: Joi.string().optional().allow(null, ''),
-    state: Joi.string().optional().allow(null, ''),
-    city: Joi.string().optional().allow(null, ''),
-    website : Joi.string().optional().allow(null).allow(''),
-    established_year: Joi.string().optional().allow(null).allow(''),
+    cin: Joi.string().optional().allow(null).allow(''),
   }),
   enquiry: Joi.object().keys({
     first_name: Joi.string().required(),

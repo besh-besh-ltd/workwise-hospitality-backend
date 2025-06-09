@@ -302,6 +302,63 @@ const UsersController = {
     }
   },
 
+
+/**
+ * mukul - 09-06-2025 created
+ * - Update company details and location (for company admin only).
+ * - Updates `tbl_company` with company info and Updates `tbl_users` with location info (assuming each spoc handel saprate office linked to SPOC user, main office we assume with admin only).
+ * - Two separate queries used since it's an infrequent operation.
+ * - Can be refactored later to separate location table if needed and for a more optmize controller logic.
+ */
+  update_company_detail: async (req, res, next) => {
+  try {
+    const { company_id } = req.user;
+    const user_id = req.user.id
+    const reqData = req.body;
+
+    const reqCompanyData = {
+      company_name: reqData?.company_name?.trim(),
+      profile: reqData?.about_company?.trim(),
+      website: reqData?.website?.trim(),
+      gstin: reqData?.gstin?.trim(),
+      established_year: reqData?.established_year,
+    };
+
+    //  this data stpred in tbl_user but belongs to company, we are storing it here because one comapny may have mulriple location and tehy always has one spoc for each location, ( if this is not work we move this to the tbl_ocmpany )
+    const reqLocationData = {
+      state: reqData?.state,
+      city: reqData?.city,
+      country: reqData?.country,
+      address: reqData?.street_address?.trim(),
+      postal_code:reqData?.postal_code,
+      updated_at: new Date(), // this value  depends on server date and time
+    }
+
+    await rfqModel.updateWhere(
+      "tbl_company",
+      reqCompanyData,
+      `id = ${company_id}`
+    );
+
+    await rfqModel.updateWhere(
+      "tbl_users",
+      reqLocationData,
+      `id = ${user_id}`
+    );
+
+    return res.status(200).json({
+      status: 1,
+      message: "Company profile updated successfully",
+    });
+  } catch (err) {
+    logError(err);
+    return res.status(400).json({
+      status: false,
+      message: Config.errorText.value,
+    });
+  }
+},
+
 create_buyer_company_users: async (req, res, next) => {
   try {
     const { name, email, mobile, user_type, password } = req.body;
@@ -1152,130 +1209,38 @@ get_company_users: async (req, res, next) => {
     }
   },
 
-  update_user_detail: async (req, res, next) => {
-    try {
-      var user_id = req.user.id;
-      let user_type = req.user.user_type;
+update_user_detail: async (req, res, next) => {
+  try {
+    const { id: user_id } = req.user;
+    const reqData = req.body;
 
-      const now = currentDateTime();
-      const created_at = dateFormat(now, 'yyyy-mm-dd HH:MM:ss');
+    const reqUserData = {
+      name: reqData.name?.trim(),
+      email: reqData.email.trim().toLowerCase(),
+      mobile: reqData.mobile.trim(),
+      updated_at: new Date(), // this value  depends on server date and time
+    };
 
-      const {
-        company_name,
-        name,
-        location,
-        email,
-        mobile,
-        gstin,
-        cin,
-        profile,
-        linkedin,
-        facebook,
-        whatsapp,
-        skype,
-        vendor_approve,
-        nature_of_business,
-        type_of_business,
-        turnover,
-        no_of_employess,
-        certifications,
-        address,
-        import_export_code,
-        country,
-        state,
-        city
-      } = req.body;
+    const updatedUser = await rfqModel.updateWhere(
+      "tbl_users",
+      reqUserData,
+      `id = ${user_id}`
+    );
 
-      console.log('user_id-->', req.body);;
+    return res.status(200).json({
+      status: 1,
+      message: "Profile updated successfully",
+    });
+  } catch (err) {
+    logError(err);
+    return res.status(400).json({
+      status: false,
+      message: Config.errorText.value,
+    });
+  }
+},
 
-      let companyObj = {
-        company_name,
-        location,
-        mobile,
-        gstin,
-        cin,
-        profile,
-        nature_of_business,
-        type_of_business,
-        turnover,
-        no_of_employess,
-        certifications,
-        import_export_code
-      };
 
-      let cmpObj = Object.fromEntries(
-        Object.entries(companyObj).filter(([key, value]) => value !== undefined)
-      );
-      let organization_name = company_name;
-      let userObj = {
-        organization_name,
-        linkedin,
-        facebook,
-        whatsapp,
-        skype,
-        name,
-        address,
-        mobile,
-        country,
-        state,
-        city
-      };
-
-      let usrObj = Object.fromEntries(
-        Object.entries(userObj).filter(([key, value]) => value !== undefined)
-      );
-
-      let user = await userModel.userDetailUpdate(usrObj, user_id);
-      let company = '';
-      let companyVendor = '';
-      let companyDetail = await userModel.getCompanyDetail(user_id);
-
-      if (Object.keys(companyDetail).length < 1) {
-        company = await userModel.companyProfileCreate(cmpObj, user_id);
-      } else {
-        company = await userModel.companyProfileUpdate(cmpObj, user_id);
-      }
-      let vendorObj = {
-        vendor_approve,
-        user_id
-      };
-
-      let vndObj = Object.fromEntries(
-        Object.entries(vendorObj).filter(([key, value]) => value !== undefined)
-      );
-      if (vendor_approve && vendor_approve.length > 0) {
-        let vendorApproveDetail = await userModel.getVendorApproveDetail(
-          user_id
-        );
-
-        
-        if (vendorApproveDetail.length > 0) {
-          await userModel.deleteVendorApproveDetail(user_id);
-        }
-
-        vendor_approve.forEach((item) => {
-          let vendorApproveMap = userModel.vendorApproveUserMap(user_id, item);
-        });
-      }
-
-      res
-        .status(200)
-        .json({
-          status: 1,
-          message: 'Profile updated successfully'
-        })
-        .end();
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: false,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
   update_profile_image: async (req, res, next) => {
     try {
       var user_id = req.user.id;

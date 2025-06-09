@@ -27,13 +27,13 @@ UsersRoutes.post(
 
 // can be user to register buyer and vendor company
 // mukul 07-06-2025 ,  not in use
-UsersRoutes.post(
-  '/company-registration',
-  passportSignIn,
-  validateDbBody.user_exists,
-  schema_posts.add_user_profile_image,
-  UsersController.company_registration
-);
+// UsersRoutes.post(
+//   '/company-registration',
+//   passportSignIn,
+//   validateDbBody.user_exists,
+//   schema_posts.add_user_profile_image,
+//   UsersController.company_registration
+// );
 
 // use to create dufferent type of buyer company users,
 // like procurment, management, finance, engineering
@@ -42,6 +42,21 @@ UsersRoutes.post(
   passportSignIn,
   validateDbBody.user_exists,
   UsersController.create_buyer_company_users
+);
+
+
+/**
+ * mukul 09-06-2025
+ * to update conpany details and head office location
+ * API' is only accessabel for company admin
+ * this api can be use for admin side as well
+ * */
+UsersRoutes.put(
+  '/update-company-detail',
+  passportSignIn,
+  acl([3, 7]),
+  validateBody(schemas.company_profile),
+  UsersController.update_company_detail
 );
 
 UsersRoutes.get(
