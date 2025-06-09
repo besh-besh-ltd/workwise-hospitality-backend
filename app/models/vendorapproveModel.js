@@ -152,11 +152,7 @@ const vendorapproveModel = {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT tbl_users.*,
-        CASE
-        WHEN new_profile_image IS NULL THEN
-        NULL
-        ELSE new_profile_image
-        END AS profile_image  FROM tbl_users WHERE is_deleted = 0 AND user_type = 3 AND id = $1`,
+        NULL AS profile_image  FROM tbl_users WHERE is_deleted = 0 AND user_type = 3 AND id = $1`,
         [vendorId]
       )
         .then(function (data) {
@@ -186,8 +182,8 @@ const vendorapproveModel = {
     return new Promise(function (resolve, reject) {
       db.any(
         `INSERT INTO tbl_users(name, email, mobile, organization_name, user_type, password,
-           status,created_by,new_profile_image,original_profile_image) 
-        VALUES($1, $2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+           status,created_by,original_profile_image) 
+        VALUES($1, $2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
         [
           vendorObj.name,
           vendorObj.email,
@@ -197,7 +193,6 @@ const vendorapproveModel = {
           vendorObj.password,
           vendorObj.status,
           vendorObj.created_by,
-          vendorObj.fileName || null,
           vendorObj.originalFilename || null
         ]
       )
@@ -282,7 +277,7 @@ const vendorapproveModel = {
     return new Promise(function (resolve, reject) {
       let dynamicUpdate = ``;
       if (vendorObj.originalFilename) {
-        dynamicUpdate = `,new_profile_image = '${vendorObj.fileName}',original_profile_image = '${vendorObj.originalFilename}'`;
+        dynamicUpdate = `,original_profile_image = '${vendorObj.originalFilename}'`;
       }
       db.one(
         `UPDATE 

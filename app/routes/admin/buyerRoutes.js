@@ -1,6 +1,7 @@
 import { Router } from 'express';
 
 import buyerController from '../../controllers/admin/buyerController.js';
+import usersController from '../../controllers/users/usersController.js';
 
 import { validateDbBody } from '../../validations/dbValidation/buyerDbValidation.js';
 import {
@@ -60,6 +61,7 @@ buyerRoutes.put(
   buyerController.updateBuyer
 );
 
+// mukul 07-06-2025 ,  not in use, cross check and remove
 buyerRoutes.put(
   '/accept-buyer/:id',
   passportSignIn,
@@ -69,6 +71,8 @@ buyerRoutes.put(
   buyerController.approveBuyer
 );
 
+
+// mukul 07-06-2025 ,  not in use, but functionlion and we can use this by adding a delete button on buyer list in admin buyer management so that admin can make a buyer as deleted, 
 buyerRoutes.delete(
   '/delete-buyer/:id',
   passportSignIn,
@@ -86,5 +90,13 @@ buyerRoutes.put(
 
 //  get the list of vendor to review.
 buyerRoutes.get('/buyer-private-vendor-list', passportSignIn, buyerController.getBuyerPrivateVendorList);
+
+// Changes by Agnij 2025-05-27 [Added admin company registration endpoint]
+buyerRoutes.post(
+  '/company-registration',
+  passportSignIn,
+  schema_posts.add_buyer,
+  usersController.company_registration
+);
 
 export default buyerRoutes;

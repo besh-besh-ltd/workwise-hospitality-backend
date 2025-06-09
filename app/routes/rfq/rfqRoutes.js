@@ -18,7 +18,7 @@ RfqRoutes.post(
   '/create',
   passportSignIn,
   validateDbBody.user_id_profileexists,
-  validateDbBody.rfq_project_exist,
+  validateDbBody.project_access_check,
   validateBody(rfqSchemas.create),
   rfqController.create
 );
@@ -61,12 +61,6 @@ RfqRoutes.put(
   rfqController.update
 );
 
-// RfqRoutes.get(
-//   '/all',
-//   // passportSignIn,
-//   //validateDbBody.user_id_profileexists,
-//   rfqController.listAll
-// );
 
 RfqRoutes.post(
   '/get-details',
@@ -96,6 +90,7 @@ RfqRoutes.post(
 );
 
 // RFQ Chart Data
+// mukul 07-06-2025 ,  not in use, cross check and remove
 RfqRoutes.get(
   '/rfq-chart-data',
   passportSignIn,
@@ -199,6 +194,8 @@ RfqRoutes.post(
   rfqController.searchVendor
 );
 
+
+// mukul 07-06-2025 ,  not in use but functional 
 RfqRoutes.post(
   '/product-price-stats',
   noLogin.customer_auth,
@@ -215,9 +212,11 @@ RfqRoutes.get(
 
 RfqRoutes.post('/rfq-list', passportSignIn, rfqController.rfqList);
 
+// mukul 07-06-2025 ,  not in use, cross check and remove even if this is wokrong move this to another roue folder as this file belongs to rfq only
 RfqRoutes.get('/save-state-cities', rfqController.saveStateCities);
 
 // to show the available units
+// mukul 07-06-2025 ,  not in use but functioanl not remove this one
 RfqRoutes.get('/units',
   // passportSignIn,
   rfqController.getUnits
@@ -228,7 +227,7 @@ RfqRoutes.post('/magic-search-rfq-preview',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
   acl([2]),
-  validateDbBody.rfq_project_exist,
+  validateDbBody.project_access_check,
   // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
   rfqController.magicSearchRfqCreate
 );
@@ -237,7 +236,7 @@ RfqRoutes.get('/process-magic-search-draft',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
   acl([2]),
-  validateDbBody.rfq_project_exist,
+  validateDbBody.project_access_check,
   // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
   rfqController.processMagicSearchDraft
 );
@@ -246,7 +245,7 @@ RfqRoutes.get('/draft-sheets',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
   acl([2]),
-  validateDbBody.rfq_project_exist,
+  validateDbBody.project_access_check,
   // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
   rfqController.getRfqDraftSheets
 );
@@ -255,7 +254,7 @@ RfqRoutes.get('/draft-sheet-wise',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
   acl([2]),
-  validateDbBody.rfq_project_exist,
+  validateDbBody.project_access_check,
   // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
   rfqController.getDraftRfqSheetWise
 );
@@ -293,19 +292,10 @@ RfqRoutes.post('/magic-search-rfq-create',
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2]),
-  validateDbBody.rfq_project_exist,
+  validateDbBody.project_access_check,
   validateBody(rfqSchemas.create),
   rfqController.create  
 )
-
-// technical eveluation modules
-
-// route not used
-// RfqRoutes.post('/add-technical-eveluation',
-//   passportSignIn,
-//   rfqController.addTechnicalEveluation 
-// )
-// create simple boq from upoaded boq - AI functionality
 
 RfqRoutes.post(
   '/boq/process-and-download',

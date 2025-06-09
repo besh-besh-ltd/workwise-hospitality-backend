@@ -196,18 +196,6 @@ const notificationModel = {
         });
     });
   },
-  getCompanyDetail: async (user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.any('select * from tbl_company where user_id = $1', [user_id])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
   getVendorApproveDetail: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(

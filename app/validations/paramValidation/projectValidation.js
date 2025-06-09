@@ -136,5 +136,21 @@ export const projectSchemas = {
           .allow(null)
       }),
 
+    // Changes by Agnij 14-01-2025 [Added validation schemas for project team operations]
+    
+    // Schema for adding a team member
+    addTeamMember: Joi.object().keys({
+        user_id: Joi.number().required(),
+        role: Joi.number().required()
+    }),
+    
+    // Schema for removing a team member
+    removeTeamMember: Joi.object().keys({
+        user_id: Joi.number().required()
+    }),
+    
+    user_id: Joi.object().keys({
+        user_id: Joi.number().integer().required()
+    })
 }
 

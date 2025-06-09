@@ -428,18 +428,6 @@ const rolesModel = {
         });
     });
   },
-  getCompanyDetail: async (user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.any('select * from tbl_company where user_id = $1', [user_id])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
   getVendorApproveDetail: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -664,6 +652,37 @@ const rolesModel = {
         .catch(function (err) {
           let error = new Error(err);
           reject(error);
+        });
+    });
+  },
+  userIDExist: async (userId) => {
+    return new Promise(function (resolve, reject) {
+      db.any('SELECT * FROM tbl_users WHERE id = $1 AND is_deleted = 0', [userId])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  updateUserAccount: async (userId, userObj) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `UPDATE tbl_users SET 
+         name = $2,
+         email = $3,
+         mobile = $4,
+         updated_at = $5
+         WHERE id = $1`,
+        [userId, userObj.name, userObj.email, userObj.mobile, userObj.updated_at]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          reject(err);
         });
     });
   }
