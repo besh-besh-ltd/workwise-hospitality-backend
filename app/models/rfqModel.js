@@ -2037,6 +2037,7 @@ LIMIT 1;`;
                     'status', TQ.status,
                     'created_by', TQ.created_by,
                     'is_regret', TQ.is_regret,
+                    'regret_reason', TQ.regret_reason,
                     'global_payment_term', TQ.global_payment_term,
                     'global_comment', TQ.global_comment,
                     'vendor_details', (
