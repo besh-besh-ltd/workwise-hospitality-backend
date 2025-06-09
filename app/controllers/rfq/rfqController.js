@@ -3,7 +3,8 @@ import {
   logError,
   sendMail,
   getDateRange,
-  withTransaction
+  withTransaction,
+  validateNumber
 } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
 import userModel from '../../models/userModel.js';
@@ -19,10 +20,22 @@ import fs from 'fs';
 import productModel from '../../models/productModel.js';
 import generativeAI from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
+import generalModel from '../../models/generalModel.js';
 
 
 
-
+const VENDORS_FILTER_KEYS = [
+  'approved_by_id',
+  'state',
+  'city',
+  'country',
+  'turnOver',
+  'vendorType',
+  'prev_worked_with',
+  'vendor_name',
+  'vendor_info',
+  'productMakes'
+];
 
 
 const getNextRfQNumber = async () => {
@@ -2451,6 +2464,47 @@ const rfqController = {
       res.status(500).json({
         status: 3,
         message: "An error occurred while fetching the draft RFQ"
+      });
+    }
+  },
+
+  getDraftProductVendors: async (req, res) => {
+    try {
+      const { draftId } = req.params;
+      const { rfqProductId } = req.query;
+      const buyerId = req.user.id;
+
+      if(!validateNumber(rfqProductId))
+        return res.status(400).json({ 
+          status: 2, 
+          message: "`rfqProductId` is required to fetch vendors." 
+        });
+      
+      const draftData = rfqModel.checkIfExists('tbl_rfq', `id = ${draftId} AND is_published = 0`)
+      if(!draftData || draftData.length <= 0)
+        return res.status(400).json({ 
+          status: 2, 
+          message: "Draft either does not exist or is already published." 
+        });
+
+      const filters = generalModel.generateFilters(req.body, VENDORS_FILTER_KEYS);
+
+      const vendors = await rfqModel.getDraftProductVendors(draftId, rfqProductId, buyerId, filters)
+
+      return res.json({ 
+          status: 1, 
+          message: `Vendors fetched for ${rfqProductId}`,
+          data: vendors ?? [],
+        });
+
+    } catch (error) {
+      const err = new Error("Error fetching vendors");
+      err.original = error;
+      logError(err);
+      
+      res.status(500).json({
+        status: 3,
+        message: "An error occurred while fetching the vendors for this product."
       });
     }
   },
