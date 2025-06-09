@@ -6,10 +6,8 @@ import Config from '../../config/app.config.js';
 import {
   logError,
   currentDateTime,
-  titleToSlug,
   generateOTPRandomNo,
   generateRandomString,
-  createPay,
   sendMail,
   notificationMail,
   convertSixDigit,
@@ -27,23 +25,10 @@ import Moment from 'moment';
 import puppeteer from 'puppeteer';
 import fs from 'fs';
 import { v4 } from 'uuid';
-import admin from 'firebase-admin';
-// var serviceAccount = require('../config/privateKey.json');
-import serviceAccount from '../../config/privateKey.json' assert { type: 'json' };
-const certPath = admin.credential.cert(serviceAccount);
 import JWT from 'jsonwebtoken';
-import excelJS from 'exceljs';
 import xlsx from 'xlsx';
 //var FCM = new fcm(certPath);
-import child_process from 'child_process';
-import {
-  schemas,
-  validateBodyController
-} from '../../validations/paramValidation/userValidation.js';
 import webpush from 'web-push';
-import { sendNotification } from '../../services/notificationService.js';
-import { v4 as uuidv4 } from 'uuid';
-import { log } from 'console';
 import rfqModel from '../../models/rfqModel.js';
 import vendorModel from '../../models/vendorModel.js';
 import productModel from '../../models/productModel.js';
@@ -67,6 +52,84 @@ webpush.setVapidDetails(
 const cryptr = new Cryptr(Config.cryptR.secret);
 
 var global_subscription = '';
+
+
+/**
+this function will continue buyer company registration, 
+save max account limit for buyer company, and send email to registered user email
+ */
+const continueBuyerCompanyRegistration = async (inputData, company_id)=>{
+
+  const buyer_company_max_account_data = {
+        max_top_management: parseInt(inputData.max_top_management) || 0,
+        max_procurement: parseInt(inputData.max_procurement) || 0,
+        max_engineering: parseInt(inputData.max_engineering) || 0,
+        max_finance: parseInt(inputData.max_finance) || 0
+      };
+
+      const accountLimitSaved = await userModel.insertBuyerAccountLimits(buyer_company_max_account_data, company_id)
+
+
+          const emailHeaderContent = `<h2>Hello ${inputData.name || ''},</h2>`
+          const emailContainerContent = `
+          <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
+           <p>Welcome to WorkWise, Your admin account for <strong ${inputData.organization_name} </strong> has been successfully registered.</p>
+            <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
+            <ul>
+            <li> <strong> Email: </strong> ${inputData.email} </li>
+            <li> <strong>Password: </strong> ${inputData.password} </li>
+            </ul>
+            <p>You can log in to your account using this link: <a href="https://letsworkwise.com/?user_registered=1" >Click Here</a></p>
+            <p style="font-size: 14px; color: #777;"><em>For security reasons, we recommend changing your password after your first login.</em></p>    
+          </div>`
+
+        const dynamic_html = generateEmailTemplate(emailHeaderContent, emailContainerContent)
+        
+        const mailRecipients = {
+          from: Config.webmasterMail,
+          to: inputData.email,
+          subject: `Welcome to WorkWise - Account Created`,
+          html: dynamic_html
+        };
+
+        sendMail(mailRecipients);
+
+        return accountLimitSaved
+}
+
+
+/**
+ send email to vendor emaill,
+ created this saprate function so that for vendor if we need to perform any operation saprately we can do here, currently only email is not of them
+ */
+const continueVendorCompanyRegistration = async (inputData, company_id)=>{
+      const emailHeader = ` <h2>Dear ${inputData.organization_name || inputData.name } </h2>`
+          
+      const emailContent = `
+           <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+             <p>Thank you for registering with us! Your login credentials are as follows:</p>
+                <ul style="list-style-type: none; padding: 0;">
+                 <li><strong>Email:</strong> ${inputData.email}</li>
+                 <li><strong>Password:</strong> ${inputData.password}</li>
+             </ul>
+             <p>Your account is currently under review. We will notify you as soon as it is approved.</p>
+             <p>Meanwhile, please save this email securely as it contains your login credentials.</p>
+             <p>We appreciate your patience and look forward to having you on board!</p>
+           </div>
+            `
+           const dunamicHtmlTemplate = generateEmailTemplate(emailHeader, emailContent)
+
+          let mailRecipients = {
+            from: Config.webmasterMail,
+            subject: `Work Wise | Registration`,
+            html: dunamicHtmlTemplate,
+            to: inputData.email
+        }
+
+        sendMail(mailRecipients);
+}
+
+
 
 const add_vendor_product = async (productDetails, vendorId) => {
   try {
@@ -96,15 +159,6 @@ const add_vendor_product = async (productDetails, vendorId) => {
       err++;
       errors.name = 'Product is already mapped with vendor';
     }
-    // if (is_approve != 1) {
-    //   let checkMasterNameExist = await productModel.checkMasterNameExist(
-    //     name
-    //   );
-    //   if (checkMasterNameExist.length > 0) {
-    //     err++;
-    //     errors.name = 'This product is available in master product';
-    //   }
-    // } else 
 
     if (master_id) {
       let findProduct = await productModel.check_product(master_id);
@@ -123,6 +177,7 @@ const add_vendor_product = async (productDetails, vendorId) => {
     return err;
   }
 }
+
 
 const UsersController = {
   userBookDemo: async (req, res, next) => {
@@ -172,6 +227,339 @@ const UsersController = {
         .end();
     }
   },
+
+  company_registration: async (req, res, next) => {
+    try {
+       const { name, email, mobile, organization_name, user_type, password, address, country, whatsapp, 
+        state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
+       import_export_code,established_year,website, is_private} = req.body;
+
+       const current_user = req.user || null
+
+      const user_data = {
+        name: name || null,
+        email: email?.toLowerCase() || null,
+        mobile: mobile || null,
+        user_type: user_type || null,
+        status: user_type == 7 ? 1 : 0,
+        password: generatePassword(password), 
+        address: address || null,
+        created_by:current_user?.id || null,
+        updated_by:current_user?.id || null,
+        country: country || null,
+        whatsapp: whatsapp || null,
+        token: null,
+        state: state || null,
+        city: city || null,
+        postal_code: postal_code || null
+      };
+
+      const company_data = {
+        company_name: organization_name || null,
+        profile: profile || null,
+        nature_of_business: nature_of_business || null,
+        type_of_business: type_of_business || null,
+        turnover: turnover || null,
+        no_of_employess: no_of_employess || null,
+        import_export_code: import_export_code || null,
+        gstin: gstin || null,
+        cin: cin || null,
+        logo:  req.file?.location || null, 
+        established_year: established_year || null,
+        website: website || null,
+        location: address || null,
+        is_private: is_private || null,
+       };
+
+      //  Register company, this model register detail in both tables tbl_user and tbl_company
+       const {company_id} = await userModel.company_registration(user_data, company_data)         
+      // user_type 7 is for buyer company registration, 3 is for vendor registration
+        if (user_type == 7 && company_id) {
+           await  continueBuyerCompanyRegistration(req.body, company_id)
+        }
+       else if (user_type == 3 && company_id) {
+           await  continueVendorCompanyRegistration(req.body, company_id)
+        }
+
+        res
+          .status(200)
+          .json({
+            status: 1,
+            message: `Registered ${ user_type == 3? "Buyer" : "Vendor" } successfully`,
+            company_id: company_id,
+          })
+          .end();
+
+    } catch (err) {
+       logError(err);
+      res
+        .status(400)
+        .json({
+          status: false,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
+
+/**
+ * mukul - 09-06-2025 created
+ * - Update company details and location (for company admin only).
+ * - Updates `tbl_company` with company info and Updates `tbl_users` with location info (assuming each spoc handel saprate office linked to SPOC user, main office we assume with admin only).
+ * - Two separate queries used since it's an infrequent operation.
+ * - Can be refactored later to separate location table if needed and for a more optmize controller logic.
+ */
+  update_company_detail: async (req, res, next) => {
+  try {
+    const { company_id } = req.user;
+    const user_id = req.user.id
+    const reqData = req.body;
+
+    const reqCompanyData = {
+      company_name: reqData?.company_name?.trim(),
+      profile: reqData?.about_company?.trim(),
+      website: reqData?.website?.trim(),
+      gstin: reqData?.gstin?.trim(),
+      established_year: reqData?.established_year,
+    };
+
+    //  this data stpred in tbl_user but belongs to company, we are storing it here because one comapny may have mulriple location and tehy always has one spoc for each location, ( if this is not work we move this to the tbl_ocmpany )
+    const reqLocationData = {
+      state: reqData?.state,
+      city: reqData?.city,
+      country: reqData?.country,
+      address: reqData?.street_address?.trim(),
+      postal_code:reqData?.postal_code,
+      updated_at: new Date(), // this value  depends on server date and time
+    }
+
+    await rfqModel.updateWhere(
+      "tbl_company",
+      reqCompanyData,
+      `id = ${company_id}`
+    );
+
+    await rfqModel.updateWhere(
+      "tbl_users",
+      reqLocationData,
+      `id = ${user_id}`
+    );
+
+    return res.status(200).json({
+      status: 1,
+      message: "Company profile updated successfully",
+    });
+  } catch (err) {
+    logError(err);
+    return res.status(400).json({
+      status: false,
+      message: Config.errorText.value,
+    });
+  }
+},
+
+create_buyer_company_users: async (req, res, next) => {
+  try {
+    const { name, email, mobile, user_type, password } = req.body;
+    const { company_id: companyID, id: loginUserID } = req.user;
+
+    // Prepare user details
+    const userDetails = {
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      mobile: mobile.trim(),
+      user_type,
+      status: 1,
+      password: generatePassword(password),
+      created_by: loginUserID,
+      company_id: companyID
+    };
+
+    // Fetch company limits and current active user count concurrently
+    const [companyLimits, activeUsers] = await Promise.all([
+      rfqModel.checkIfExists("tbl_company_buyer_account_limit", `company_id = ${companyID}`),
+      rfqModel.checkIfExists("tbl_users", `company_id = ${companyID} AND user_type = ${user_type} AND is_deleted = 0`)
+    ]);
+
+    if (!companyLimits.length) {
+      return res.status(400).json({ status: false, message: "Company account limits not set." }).end();
+    }
+
+    const limits = companyLimits[0];
+    const maxMap = {
+      8: limits.max_top_management,
+      2: limits.max_procurement,
+      9: limits.max_engineering,
+      10: limits.max_finance
+    };
+    const maxAllowed = maxMap[user_type];
+    const currentCount = activeUsers.length;
+
+    if (maxAllowed === undefined) {
+      return res.status(400).json({ status: false, message: "Invalid user_type." }).end();
+    }
+
+    if (currentCount >= maxAllowed) {
+      return res.status(400).json({
+        status: false,
+        message: `Limit reached: Only ${maxAllowed} account(s) of this type allowed.`
+      }).end();
+    }
+
+    // Insert user
+    const insertResult = await rfqModel.insert("tbl_users", userDetails);
+    const createdUser = insertResult[0];
+
+            //activate default subscription
+        let checkFreeSubscription =
+          await subscriptionModel.checkFreeSubscription();
+          const startDate = Moment(); // Replace with the actual start date
+
+          const billingCycleMonths = checkFreeSubscription[0].duration;
+
+          // Calculate the end date by adding the billing cycle and subtracting one day
+          const endDate = startDate
+            .clone()
+            .add(billingCycleMonths, 'months')
+            .subtract(1, 'day');
+          const renewDate = startDate.clone().add(billingCycleMonths, 'months');
+
+
+          let UserSubscriptionObj = {
+            user_id: createdUser.id,
+            plan_id: checkFreeSubscription[0].id,
+            status: 1, //By default payment done
+            start_date: startDate.format('YYYY-MM-DD'),
+            end_date: endDate.format('YYYY-MM-DD'),
+            renew_date: renewDate.format('YYYY-MM-DD')
+          };
+
+          let createUserSubscription =
+            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
+
+          await subscriptionModel.updateUserSubscriptionId(
+            checkFreeSubscription[0].id,
+            createdUser.id
+          );
+
+          let subscriptionMappingDetails =
+            await subscriptionModel.getSubscriptionMappingDetails(
+              checkFreeSubscription[0].id
+            );
+          for await (const {
+            allocated_feature,
+            feature_id
+          } of subscriptionMappingDetails) {
+            let userSubscriptionFeatureObj = {
+              user_subscriptions_id: createUserSubscription.id,
+              feature_id: feature_id,
+              plan_id: checkFreeSubscription[0].id,
+              used_feature_count: 0,
+              allocated_feature: allocated_feature,
+              user_id: createdUser.id
+            };
+            await subscriptionModel.createUserSubscriptionFeature(
+              userSubscriptionFeatureObj
+            );
+          }
+
+
+    // Build account type label
+    const accountTypeMap = {
+      8: "Management",
+      2: "Procurement",
+      9: "Engineering",
+      10: "Finance"
+    };
+    const accountTypeLabel = accountTypeMap[user_type] || "User";
+
+    // Compose and send email
+    const emailHeader = `<h2>Hello ${name},</h2>`;
+    const emailContent = `
+      <div style="font-size:16px; font-family:'Roboto',sans-serif;">
+        <p>Welcome to WorkWise, your account has been successfully registered.</p>
+        <p><strong>Login Details:</strong></p>
+        <ul>
+          <li><strong>Email:</strong> ${email}</li>
+          <li><strong>Password:</strong> ${password}</li>
+          <li><strong>Mobile:</strong> ${mobile}</li>
+          <li><strong>Account Type:</strong> ${accountTypeLabel}</li>
+        </ul>
+        <p>Login here: <a href="https://letsworkwise.com/?user_registered=1">Click Here</a></p>
+        <p style="font-size:14px;color:#777;"><em>Please change your password after first login for security.</em></p>
+      </div>`;
+
+    const emailHTML = generateEmailTemplate(emailHeader, emailContent);
+    const mailRecipients = {
+      to: email,
+      subject: "Welcome to WorkWise - Account Created",
+      html: emailHTML
+    };
+
+    console.log('Sending email to:', email);
+    console.log('Email HTML:', emailHTML);
+
+    sendMail(mailRecipients);
+
+    return res.status(200).json({
+      status: true,
+      message: "User account created successfully",
+    }).end();
+
+  } catch (err) {
+    console.error("create_buyer_company_users error:", err);
+    return res.status(500).json({
+      status: false,
+      message: "Error creating buyer company user.",
+      error: err.message
+    }).end();
+  }
+},
+
+// Changes by Agnij 14-01-2025 [Added controller method to get company users]
+get_company_users: async (req, res, next) => {
+  try {
+    const { company_id: companyID } = req.user;
+    
+    // Get all users for this company
+    const users = await userModel.getCompanyUsers(companyID);
+    
+    // Map user_type to role names for better readability
+    const userTypeMap = {
+      7: "Admin",
+      8: "Top Management",
+      2: "Procurement",
+      9: "Engineering",
+      10: "Finance"
+    };
+    
+    const formattedUsers = users.map(user => ({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      mobile: user.mobile,
+      role: user.user_type,
+      role_name: userTypeMap[user.user_type] || "Unknown",
+      status: user.status === 1 ? "active" : "inactive",
+      created_at: user.created_at
+    }));
+    
+    res.status(200).json({
+      status: true,
+      message: "Company users retrieved successfully",
+      data: formattedUsers
+    }).end();
+    
+  } catch (err) {
+    logError(err);
+    res.status(400).json({
+      status: false,
+      message: err.message || Config.errorText.value
+    }).end();
+  }
+},
+
   user_registration: async (req, res, next) => {
     try {
       const now = currentDateTime();
@@ -192,11 +580,10 @@ const UsersController = {
         password: generatePassword(password),
         status
       };
-      // console.log('userObj', userObj);
-      // return false;
+      
       let user_id = await userModel.user_register(userObj);
-      // console.log('test user id', user_id);
 
+      
       // create company profile if user type is vendor 
       if (user_id && register_as == '3') {
         const cmpObj = {
@@ -288,34 +675,9 @@ const UsersController = {
           sendMail(mailRecipients);
 
 
-          // sendMail({
-          //   from: Config.webmasterMail, // sender address
-          //   to: email, // list of receivers
-          //   subject: `Work wise | Registration`, // Subject line
-          //   html: dynamic_html // plain text body
-          // });
         }
 
         addDefaultNotifications(user_id[0].id);
-
-        let user_type_as = '';
-        if (register_as == '2') {
-          user_type_as = 'Buyer';
-        } else if (register_as == '3') {
-          user_type_as = 'Vendor';
-        } else {
-          user_type_as = 'Other User';
-        }
-        const notificationData = {
-          type: 'Registration',
-          title: `${user_type_as} Registered`,
-          message: `${user_type_as} Registered successfully`,
-          additional_data: {
-            user_type: user_type_as
-          }
-        };
-        // const receiverUserIds = [req.params.id];
-        // await sendNotification(user_id[0].id, '', notificationData);
 
         //activate default subscription
         let checkFreeSubscription =
@@ -334,9 +696,6 @@ const UsersController = {
             .subtract(1, 'day');
           const renewDate = startDate.clone().add(billingCycleMonths, 'months');
 
-          // console.log('Start Date:', startDate.format('YYYY-MM-DD'));
-          // console.log('End Date:', endDate.format('YYYY-MM-DD'));
-          // console.log('Renew Date:', renewDate.format('YYYY-MM-DD'));
 
           let UserSubscriptionObj = {
             user_id: user_id[0].id,
@@ -355,20 +714,10 @@ const UsersController = {
             user_id[0].id
           );
 
-          // let userDetails = await userModel.user_profile_detail(
-          //   user_id[0].id
-          // );
-          // let planDetails = await subscriptionModel.getSubscriptionDetails(
-          //   userSubscription[0].plan_id
-          // );
           let subscriptionMappingDetails =
             await subscriptionModel.getSubscriptionMappingDetails(
               checkFreeSubscription[0].id
             );
-          // console.log(
-          //   'subscriptionMappingDetails==>>>>',
-          //   subscriptionMappingDetails
-          // );
           for await (const {
             allocated_feature,
             feature_id
@@ -416,23 +765,7 @@ const UsersController = {
         .end();
     }
   },
-  /*   subscribe: async (req, res, next) => {
-    const subscription = req.body;
-    global_subscription = subscription;
-    console.log(subscription);
 
-    const payload = JSON.stringify({
-      title: 'Welcome to Workwise!',
-      body: 'It works.'
-    });
-
-    webpush
-      .sendNotification(subscription, payload)
-      .then((result) => console.log(result))
-      .catch((e) => console.log(e.stack));
-
-    res.status(200).json({ success: true });
-  }, */
   subscribe: async (req, res, next) => {
     // const subscription = req.body;
 
@@ -876,166 +1209,38 @@ const UsersController = {
     }
   },
 
-  update_user_detail: async (req, res, next) => {
-    try {
-      var user_id = req.user.id;
-      let user_type = req.user.user_type;
-      // console.log('user_type--->', user_type);
-      // return false;
-      // let user_id = req.params.user_id;
-      // console.log('User detail-->', req.user);
-      // return false;
-      const now = currentDateTime();
-      const created_at = dateFormat(now, 'yyyy-mm-dd HH:MM:ss');
+update_user_detail: async (req, res, next) => {
+  try {
+    const { id: user_id } = req.user;
+    const reqData = req.body;
 
-      const {
-        company_name,
-        name,
-        location,
-        email,
-        mobile,
-        gstin,
-        cin,
-        profile,
-        linkedin,
-        facebook,
-        whatsapp,
-        skype,
-        vendor_approve,
-        nature_of_business,
-        type_of_business,
-        turnover,
-        no_of_employess,
-        certifications,
-        address,
-        import_export_code,
-        country,
-        state,
-        city
-      } = req.body;
+    const reqUserData = {
+      name: reqData.name?.trim(),
+      email: reqData.email.trim().toLowerCase(),
+      mobile: reqData.mobile.trim(),
+      updated_at: new Date(), // this value  depends on server date and time
+    };
 
-      /*  let companyVendorObj = {
-        company_name,
-        nature_of_business,
-        type_of_business,
-        turnover,
-        no_of_employess,
-        certifications,
-        import_export_code
-      };
+    const updatedUser = await rfqModel.updateWhere(
+      "tbl_users",
+      reqUserData,
+      `id = ${user_id}`
+    );
 
-      let cmpVendorObj = Object.fromEntries(
-        Object.entries(companyVendorObj).filter(
-          ([key, value]) => value !== undefined
-        )
-      ); */
+    return res.status(200).json({
+      status: 1,
+      message: "Profile updated successfully",
+    });
+  } catch (err) {
+    logError(err);
+    return res.status(400).json({
+      status: false,
+      message: Config.errorText.value,
+    });
+  }
+},
 
-      let companyObj = {
-        company_name,
-        location,
-        // email,
-        mobile,
-        gstin,
-        cin,
-        profile,
-        nature_of_business,
-        type_of_business,
-        turnover,
-        no_of_employess,
-        certifications,
-        import_export_code
-      };
 
-      let cmpObj = Object.fromEntries(
-        Object.entries(companyObj).filter(([key, value]) => value !== undefined)
-      );
-      let organization_name = company_name;
-      let userObj = {
-        organization_name,
-        linkedin,
-        facebook,
-        whatsapp,
-        skype,
-        name,
-        address,
-        mobile,
-        country,
-        state,
-        city
-      };
-
-      let usrObj = Object.fromEntries(
-        Object.entries(userObj).filter(([key, value]) => value !== undefined)
-      );
-
-      let user = await userModel.userDetailUpdate(usrObj, user_id);
-      let company = '';
-      let companyVendor = '';
-      let companyDetail = await userModel.getCompanyDetail(user_id);
-
-      if (Object.keys(companyDetail).length < 1) {
-        company = await userModel.companyProfileCreate(cmpObj, user_id);
-        /* companyVendor = await userModel.companyProfileVendorCreate(
-          cmpVendorObj,
-          user_id
-        ); */
-      } else {
-        company = await userModel.companyProfileUpdate(cmpObj, user_id);
-        /* companyVendor = await userModel.companyProfileVendorUpdate(
-          cmpVendorObj,
-          user_id
-        ); */
-      }
-      let vendorObj = {
-        vendor_approve,
-        user_id
-      };
-
-      let vndObj = Object.fromEntries(
-        Object.entries(vendorObj).filter(([key, value]) => value !== undefined)
-      );
-      // console.log('vndObj-->', vndObj);
-      // return false;
-      if (vendor_approve && vendor_approve.length > 0) {
-        let vendorApproveDetail = await userModel.getVendorApproveDetail(
-          user_id
-        );
-        //console.log('vendorApproveDetail-->', vendorApproveDetail);
-        // return false;
-        if (vendorApproveDetail.length > 0) {
-          await userModel.deleteVendorApproveDetail(user_id);
-        }
-
-        vendor_approve.forEach((item) => {
-          let vendorApproveMap = userModel.vendorApproveUserMap(user_id, item);
-        });
-      }
-      // return false;
-      /* let vendorApproveUserMap = await userModel.vendorApproveUserMap(
-        cmpObj,
-        user_id
-      ); */
-
-      // console.log('user--', user);
-      // return false;
-      res
-        .status(200)
-        .json({
-          status: 1,
-          message: 'Profile updated successfully'
-        })
-        .end();
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: false,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
   update_profile_image: async (req, res, next) => {
     try {
       var user_id = req.user.id;
@@ -3039,7 +3244,7 @@ const UsersController = {
         userEmailExists = await userModel.user_exist(email.toLowerCase(), phoneWithoutCode);
         if (userEmailExists.length > 0 && userEmailExists[0].user_type == 3) {
           vendorId = userEmailExists[0].id;
-          companyExists = await vendorModel.getCompanyDetails(vendorId);
+          companyExists = await userModel.getCompanyDetail(vendorId);
         }
       }
 
@@ -3083,12 +3288,10 @@ const UsersController = {
           is_private: userDetails[0].is_private,
         };
 
-        let vendor = await productModel.vendor_register(vendorObj);
+        const {company_id, user_id} = await userModel.company_registration(vendorObj, companyObj);
 
-        companyObj.user_id = vendor[0].id;
-        await productModel.addCompany(companyObj);
 
-        await userModel.mapBuyerToVendor(userDetails[0].buyer_id, vendor[0].id);
+        await userModel.mapBuyerToVendor(userDetails[0].buyer_id, user_id);
 
 
         // send whatsapp notification
@@ -3101,42 +3304,37 @@ const UsersController = {
         }
         await whatsappNotificationFluxChat.buyerAddedVendorNotificationToVendor(payload)
 
-        vendorId = vendor[0].id;
+        vendorId = user_id;
 
-        addDefaultNotifications(vendor[0].id);
+        addDefaultNotifications(user_id);
 
-        if (vendor[0].id) {
+        if (user_id) {
 
-          const spocList = await vendorModel.getSpocDetails(vendor[0].id);
+          const spocList = await vendorModel.getSpocDetails(user_id);
 
           const headerContent = `<h2>Hello ${userDetails[0].vendor_name || 'Vendor'},</h2>`;
 
 
-                         // Email body content
+          // Email body content
                const containerContent = `
                <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
                  <p>
                    We are pleased to inform you that <strong>${buyerName}</strong> has added you as a preferred vendor on the Workwise platform.
                    Going forward, <strong>${buyerName}</strong> will manage their procurement activities through Workwise.
                  </p>
-                 
                  <p>
                    To ensure you receive all enquiries promptly, Login to your account.
                    Your login credentials are provided below:
                  </p>
-             
                  <p><strong>Email:</strong> ${userDetails[0]?.email || '[Vendor Email]'}</p>
                  <p><strong>Password:</strong> ${password || '[Temporary Password]'}</p>
-             
                  <p>
                    We recommend changing your password after your first login for security reasons.
                  </p>
-             
                  <a href="https://letsworkwise.com"
                    style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                     Login
                  </a>    
-             
                  <p style="margin-top:20px; text-align:center;">
                    We look forward to supporting your business growth.
                  </p>
@@ -3375,7 +3573,8 @@ const UsersController = {
         // trim all inputs
         const vendorName = (value["Vendor Name"] || "").trim();
         const email = (value["Vendor Email"]?.toLowerCase() || "").trim();
-        const mobile = (value["Vendor company owner/hr/official contact number"] || "").toString();
+        const rawMobile = (value["Vendor company owner/hr/official contact number"] || "").toString();
+        const mobile = rawMobile.replace(/^\+91-\+91/, '+91').substring(0, 15);
         const productList = (value["Product List (ex-pipe,valve)"] || "").trim();
 
         // now check validation for vendor name number and email
@@ -3785,6 +3984,39 @@ const UsersController = {
     }
   },
 
+  admin_update_user_account: async (req, res, next) => {
+    try {
+      let userId = req.params.id;
+      let updatedBy = req.user.id;
+      const { name, email, mobile } = req.body;
+      
+      let userObj = {
+        name,
+        email,
+        mobile,
+        updated_at: currentDateTime()
+      };
+      
+      await userModel.updateUserAccount(userId, userObj);
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          message: 'User account updated successfully'
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  }
 
 };
 

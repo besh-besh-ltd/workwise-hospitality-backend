@@ -1,9 +1,14 @@
 import projectModel from '../../models/projectModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import Config from '../../config/app.config.js';
 
 const validateDbBody = {
     project_exist: async ( req, res, next) => {
         try {
+            // Skip validation for admin users
+            if (req.user.user_type === 7) {
+                return next();
+            }
             let errors = {};
             let err = 0;
             const user_id = req.user.id;

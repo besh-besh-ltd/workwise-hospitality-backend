@@ -44,7 +44,7 @@ const rfqModel = {
                                 ))
                 FROM tbl_rfq_product_vendors rpv
                         JOIN tbl_users u ON rpv.user_id = u.id
-                        JOIN tbl_company c ON u.id = c.user_id
+                        JOIN tbl_company c ON u.company_id = c.id
                 WHERE rpv.rfq_id = rfq.id
                   AND rpv.product_variant_id = rp.product_variant_id
                   AND rpv.variant = rp.variant) AS vendors
@@ -1567,7 +1567,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                     'mobile', U.mobile
                   )
                   FROM tbl_users U
-                  JOIN tbl_company C ON U.id = C.user_id
+                  JOIN tbl_company C ON U.company_id = C.id
                   WHERE RFQ_P_V.user_id = U.id
                 )
               ))
@@ -1827,7 +1827,9 @@ LIMIT 1;`;
           ) AS "products"
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
-      WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 1
+      WHERE (RFQ.created_by = ${user_id} OR EXISTS (
+      SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+      )) AND RFQ.is_published = 1
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -1851,7 +1853,9 @@ LIMIT 1;`;
     return new Promise(function (resolve, reject) {
       db.any(`SELECT COUNT(*) from tbl_rfq RFQ
         LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
-        WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 1
+        WHERE (RFQ.created_by = ${user_id} OR EXISTS (
+        SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+        )) AND RFQ.is_published = 1
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -1883,7 +1887,7 @@ LIMIT 1;`;
         WHERE PVVM.vendor_id = TU.id
       ) AS "products"
       FROM tbl_users TU
-      JOIN tbl_company TC ON TU.id = TC.user_id
+      JOIN tbl_company TC ON TU.company_id = TC.id
       WHERE TU.id IN (${placeholders})`;
     return new Promise(function (resolve, reject) {
       db.any(query, vendors)
@@ -2219,6 +2223,17 @@ LIMIT 1;`;
                   'id', TQF.id,
                   'product_id', TQF.product_variant_id,
                   'timestamp', TQF.timestamp,
+
+                  'finilized_by', (
+                      SELECT json_build_object(
+                        'name', TU.name,
+                        'email', TU.email,
+                        'mobile', TU.mobile
+                      )
+                      FROM tbl_users TU
+                      WHERE TU.id = TQF.created_by
+                    ),
+
                   'winning_vendor', (
                     SELECT json_build_object(
                       'id', TUU.id,
@@ -2230,7 +2245,7 @@ LIMIT 1;`;
                       'organization_name', TUU.organization_name
                     )
                     FROM tbl_users TUU
-                    JOIN tbl_company TC ON TUU.id = TC.user_id
+                    JOIN tbl_company TC ON TUU.company_id = TC.id
                     WHERE TUU.id = TQF.vendor_id
                   )
                 )
@@ -2815,9 +2830,9 @@ WHERE row_num_by_name_category = 1
         ls.state_name,
         lcn.country_name,
         CASE
-          WHEN tu.new_profile_image IS NULL THEN NULL
-          ELSE tu.new_profile_image
-        END AS image_url,
+         WHEN tc.logo IS NULL THEN NULL
+         ELSE tc.logo
+         END AS image_url,
         CASE
           WHEN bvm.vendor_id IS NOT NULL THEN 1
           ELSE 0
@@ -2836,7 +2851,7 @@ WHERE row_num_by_name_category = 1
       JOIN tbl_product_categories pc ON p.id = pc.product_id
       JOIN tbl_category c ON pc.category_id = c.id
       JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
-      LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
       LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
       LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
       LEFT JOIN tbl_location_states ls ON tu.state = ls.id
@@ -4003,24 +4018,25 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     });
   },
 
-rfq_project_exist: async (project_id,user_id) => {
+project_access_checker: async (project_id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT 1
-        FROM tbl_projects
-        WHERE id = $1
-        AND user_id = $2;`,
-        [project_id,user_id]
+        FROM tbl_projects p
+        LEFT JOIN tbl_project_team t ON p.id = t.project_id
+        WHERE p.id = $1
+        AND (p.user_id = $2 OR t.user_id = $2)`,
+        [project_id, user_id]
       )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    })
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        reject(new Error(err));
+      });
+    });
   },
+
   getVendorRfqCount: async(user_id)=>{
     return new Promise((resolve, reject) => {
       db.one(
@@ -5040,7 +5056,7 @@ rfq_project_exist: async (project_id,user_id) => {
     });
   },
 
-  addtechEvaluationClearedVendors: (vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message) => {
+  addtechEvaluationClearedVendors: (vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message, user_id) => {
     // console.log("Entered addClearedVendor =", vendor_id, tbl_rfq_product_tech_evaluation_id,status, reject_message);
 
     const validateVendorQuery = `
@@ -5057,8 +5073,8 @@ rfq_project_exist: async (project_id,user_id) => {
 
     const insertClearedVendorQuery = `
       INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors
-      (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, timestamp)
-      VALUES ($1, $2, $3, $4, NOW());
+      (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, timestamp, created_by)
+      VALUES ($1, $2, $3, $4, NOW(), $5);
     `;
 
     return new Promise((resolve, reject) => {
@@ -5092,7 +5108,7 @@ rfq_project_exist: async (project_id,user_id) => {
           }
 
           // Insert Cleared Vendor
-          return db.query(insertClearedVendorQuery, [tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message]);
+          return db.query(insertClearedVendorQuery, [tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, user_id]);
         })
         .then(() => {
           // console.log("Vendor successfully added to cleared vendors.");
@@ -5136,7 +5152,7 @@ rfq_project_exist: async (project_id,user_id) => {
         COALESCE(c.company_name, '') AS company_name,
         COALESCE(u.organization_name, '') AS organization_name
       FROM tbl_users u
-      LEFT JOIN tbl_company c ON u.id = c.user_id
+      LEFT JOIN tbl_company c ON u.company_id = c.id
       WHERE u.id = $1;
     `;
 
@@ -5298,14 +5314,15 @@ rfq_project_exist: async (project_id,user_id) => {
 },
 getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
   return new Promise(async (resolve, reject) => {
-    // console.log("Fetching RFQ details...");
+    // console.log("--------------    Fetching RFQ details    ----------------", user_id);
 
     try {
       // Step 1: Fetch rfq_ids for the given user_id
       const fetchRFQIdsQuery = `
-        SELECT id AS rfq_id, rfq_no
-        FROM tbl_rfq
-        WHERE created_by = $1;
+        SELECT  r.id AS rfq_id, r.rfq_no
+        FROM tbl_rfq r
+        LEFT JOIN tbl_project_team pt ON pt.project_id = r.project_id
+        WHERE r.created_by = $1 OR pt.user_id = $1;
       `;
       const rfqResult = await db.query(fetchRFQIdsQuery, [user_id]);
 
@@ -5398,7 +5415,11 @@ getTechEvaluationRFQDetails: (user_id,rfq_no, project_id) => {
           ON TP.id = RFQ.project_id
         JOIN tbl_rfq_product_tech_evaluation RFQ_T_E
           ON RFQ.id = RFQ_T_E.rfq_id
-        WHERE RFQ.created_by = $1
+          WHERE (RFQ.created_by = $1 OR EXISTS (
+            SELECT 1
+            FROM tbl_project_team PT
+            WHERE PT.project_id = RFQ.project_id AND PT.user_id = $1
+          ))
           AND RFQ.is_published = 1
           AND RFQ.id = ANY($2)
           ${filtersQuery==='' ? `` : filtersQuery }
@@ -5538,11 +5559,17 @@ getTechEvaluationResult: (tbl_rfq_product_id, vendor_id) =>  {
       WHERE tbl_rfq_product_id = $1;
   `;
 
-  const fetchClearedVendorDetailsQuery = `
-      SELECT id, status, reject_message
-      FROM tbl_rfq_product_tech_evaluation_cleared_vendors
-      WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2;
-  `;
+const fetchClearedVendorDetailsQuery = `
+  SELECT 
+    RC.id, 
+    RC.status, 
+    RC.reject_message,
+    U.name AS evaluated_by
+  FROM tbl_rfq_product_tech_evaluation_cleared_vendors RC
+  LEFT JOIN tbl_users U ON RC.created_by = U.id
+  WHERE RC.tbl_rfq_product_tech_evaluation_id = $1 
+    AND RC.vendor_id = $2;
+`;
 
   return new Promise((resolve, reject) => {
       // console.log("Validating Vendor ID in tbl_users...");
