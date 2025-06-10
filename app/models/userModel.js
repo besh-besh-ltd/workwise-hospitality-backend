@@ -3528,55 +3528,40 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     });
   },
 
-  getBuyerAccountLimits: async (company_id) => {
-    return new Promise(function (resolve, reject) {
-      // First, log the count of users by user_type for debugging
-      db.any(
-        `SELECT 
-          user_type, 
-          COUNT(*) as count 
-        FROM 
-          tbl_users 
-        WHERE 
-          company_id = $1 AND is_deleted = '0'
-        GROUP BY 
-          user_type`,
-        [company_id]
-      )
-      .then((countData) => {
-        
-        // Now get the actual account limits
-        db.any(
-          `SELECT 
-            cl.max_top_management, 
-            cl.max_procurement, 
-            cl.max_engineering, 
-            cl.max_finance,
-            (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND (user_type = '2' OR user_type = '7') AND is_deleted = '0') as used_top_management,
-            (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND (user_type = '3' OR user_type = '8') AND is_deleted = '0') as used_procurement,
-            (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND (user_type = '4' OR user_type = '9') AND is_deleted = '0') as used_engineering,
-            (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND (user_type = '5' OR user_type = '10') AND is_deleted = '0') as used_finance
-          FROM 
-            tbl_company_buyer_account_limit cl
-          WHERE 
-            cl.company_id = $1`,
-          [company_id]
-        )
-        .then((data) => {
-          console.log('Account limits data:', JSON.stringify(data));
-          resolve(data);
-        })
-        .catch(err => {
-          console.error('Error getting buyer account limits:', err);
-          reject(new Error(err));
-        });
+getBuyerAccountLimits: async (company_id) => {
+  return new Promise((resolve, reject) => {
+    db.any(
+      `
+      SELECT 
+        cl.max_top_management, 
+        cl.max_procurement, 
+        cl.max_engineering, 
+        cl.max_finance,
+        COUNT(CASE WHEN u.user_type = 8 THEN 1 END) AS used_top_management,
+        COUNT(CASE WHEN u.user_type = 2 THEN 1 END) AS used_procurement,
+        COUNT(CASE WHEN u.user_type = 9 THEN 1 END) AS used_engineering,
+        COUNT(CASE WHEN u.user_type = 10 THEN 1 END) AS used_finance
+      FROM 
+        tbl_company_buyer_account_limit cl
+      LEFT JOIN 
+        tbl_users u ON u.company_id = cl.company_id AND u.is_deleted = 0
+      WHERE 
+        cl.company_id = $1
+      GROUP BY 
+        cl.max_top_management, cl.max_procurement, cl.max_engineering, cl.max_finance;
+      `,
+      [company_id]
+    )
+      .then((data) => {
+        resolve(data); 
       })
-      .catch(err => {
-        console.error('Error counting users by user_type:', err);
+      .catch((err) => {
+        console.error('Error fetching buyer account limits:', err);
         reject(new Error(err));
       });
-    });
-  },
+  });
+}
+
 
 };
 
