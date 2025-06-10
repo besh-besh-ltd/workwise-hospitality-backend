@@ -140,6 +140,20 @@ UsersRoutes.get(
   validateDbBody.user_id_profileexists,
   UsersController.get_profile_documents
 );
+
+
+/**
+ * @creared_by - mukul 10-06-2025
+ * @last_changes_by - mukul 10-06-2025
+ * @acces - only buyer comany admin
+ * @return -  total purchased accounts limit and acount of active accounts
+ */
+UsersRoutes.get(
+  '/buyer-account-limits',
+  passportSignIn,
+    acl([7]),
+  UsersController.getBuyerAccountLimits
+);
 UsersRoutes.post(
   '/change-password',
   passportSignIn,
