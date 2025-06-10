@@ -4016,7 +4016,34 @@ update_user_detail: async (req, res, next) => {
         })
         .end();
     }
-  }
+  },
+  // Changes by Agnij 10-06-2025 [Added function to get buyer account limits]
+  getBuyerAccountLimits: async (req, res) => {
+    try {
+      const user = req.user;
+      const accountLimits = await userModel.getBuyerAccountLimits(user.company_id);
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: accountLimits[0],
+          message: "Account limits retrieved successfully",
+        })
+        .end();
+
+    } catch (error) {
+      console.error("Error getting buyer account limits:", error);
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
 
 };
 
@@ -4072,5 +4099,6 @@ const validateBulkVendorInputs = (vendorName, email, mobile, productList) => {
   return errors;
 
 }
+
 
 export default UsersController;
