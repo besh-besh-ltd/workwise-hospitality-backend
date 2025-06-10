@@ -3526,7 +3526,35 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
           reject(err);
         });
     });
-  }
+  },
+
+  getBuyerAccountLimits: async (company_id) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT 
+          cl.max_top_management, 
+          cl.max_procurement, 
+          cl.max_engineering, 
+          cl.max_finance,
+          (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND user_type = '2' AND is_deleted = '0') as used_top_management,
+          (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND user_type = '3' AND is_deleted = '0') as used_procurement,
+          (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND user_type = '4' AND is_deleted = '0') as used_engineering,
+          (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND user_type = '5' AND is_deleted = '0') as used_finance
+        FROM 
+          tbl_company_buyer_account_limit cl
+        WHERE 
+          cl.company_id = $1`,
+        [company_id]
+      )
+      .then((data) => {
+        resolve(data);
+      })
+      .catch(err => {
+        console.error('Error getting buyer account limits:', err);
+        reject(new Error(err));
+      });
+    });
+  },
 
 };
 

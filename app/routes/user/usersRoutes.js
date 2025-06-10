@@ -140,6 +140,11 @@ UsersRoutes.get(
   validateDbBody.user_id_profileexists,
   UsersController.get_profile_documents
 );
+UsersRoutes.get(
+  '/buyer-account-limits',
+  passportSignIn,
+  UsersController.getBuyerAccountLimits
+);
 UsersRoutes.post(
   '/change-password',
   passportSignIn,
