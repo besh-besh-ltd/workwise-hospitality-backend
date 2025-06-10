@@ -4105,4 +4105,36 @@ const validateBulkVendorInputs = (vendorName, email, mobile, productList) => {
 
 }
 
+// Add getBuyerAccountLimits to the UsersController object
+UsersController.getBuyerAccountLimits = async (req, res) => {
+  try {
+    const user = req.user;
+    if (!user || !user.company_id) {
+      return res.status(400).json({
+        status: false,
+        message: "Company ID not found",
+      });
+    }
+    const accountLimits = await userModel.getBuyerAccountLimits(user.company_id);
+    
+    if (accountLimits && accountLimits.length > 0) {
+      return res.status(200).json({
+        status: true,
+        data: accountLimits[0],
+        message: "Account limits retrieved successfully",
+      });
+    } else {
+      return res.status(404).json({
+        status: false,
+        message: "Account limits not found",
+      });
+    }
+  } catch (error) {
+    return res.status(500).json({
+      status: false,
+      message: "Internal server error",
+    });
+  }
+};
+
 export default UsersController;

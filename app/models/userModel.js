@@ -1746,7 +1746,7 @@ company_registration: async (user_data, company_data) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				temp_users set 
+				tbl_users set 
 				otp = '${updateOtp.otp}'
        	where id= '${updateOtp.user_id}'`,
         function (error, results, fields) {
@@ -1760,7 +1760,7 @@ company_registration: async (user_data, company_data) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				temp_users set 
+				tbl_users set 
 				otp = '${updateOtp.otp}'
        	where email= '${updateOtp.email}'`,
         function (error, results, fields) {
@@ -1775,7 +1775,7 @@ company_registration: async (user_data, company_data) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				temp_users set 
+				tbl_users set 
 				status = '1'
        	where email= '${email}' AND token = '${token}' AND status= '0'`,
         function (error, results, fields) {
@@ -1789,7 +1789,7 @@ company_registration: async (user_data, company_data) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
+				tbl_users set 
 				otp = '${updateOtp.otp}'
        	where id= '${updateOtp.user_id}'`,
         function (error, results, fields) {
@@ -1815,7 +1815,7 @@ company_registration: async (user_data, company_data) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
+				tbl_users set 
 				session_id = '${session_id}'
        	where id= '${user_id}'`,
         function (error, results, fields) {
@@ -1829,7 +1829,7 @@ company_registration: async (user_data, company_data) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				temp_users set 
+				tbl_users set 
 				status = '1'
        	where id= '${user_id}'`,
         function (error, results, fields) {
@@ -1843,7 +1843,7 @@ company_registration: async (user_data, company_data) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
+				tbl_users set 
 				status = '1'
        	where id= '${user_id}'`,
         function (error, results, fields) {
@@ -1858,7 +1858,7 @@ company_registration: async (user_data, company_data) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
+				tbl_users set 
 				qualification_id = '${userObj.qualification_id}',
 				area_of_interest = '${userObj.area_of_interest}'
        	where id= '${userObj.user_id}'`,
@@ -1873,7 +1873,7 @@ company_registration: async (user_data, company_data) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
+				tbl_users set 
 				profile_status = 'C'
        	where id= '${user_id}'`,
         function (error, results, fields) {
@@ -2196,7 +2196,7 @@ company_registration: async (user_data, company_data) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				temp_users set 
+				tbl_users set 
 				otp = ''
        	where otp= '${otp}'`,
         function (error, results, fields) {
@@ -3530,27 +3530,49 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
 
   getBuyerAccountLimits: async (company_id) => {
     return new Promise(function (resolve, reject) {
+      // First, log the count of users by user_type for debugging
       db.any(
         `SELECT 
-          cl.max_top_management, 
-          cl.max_procurement, 
-          cl.max_engineering, 
-          cl.max_finance,
-          (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND user_type = '2' AND is_deleted = '0') as used_top_management,
-          (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND user_type = '3' AND is_deleted = '0') as used_procurement,
-          (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND user_type = '4' AND is_deleted = '0') as used_engineering,
-          (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND user_type = '5' AND is_deleted = '0') as used_finance
+          user_type, 
+          COUNT(*) as count 
         FROM 
-          tbl_company_buyer_account_limit cl
+          tbl_users 
         WHERE 
-          cl.company_id = $1`,
+          company_id = $1 AND is_deleted = '0'
+        GROUP BY 
+          user_type`,
         [company_id]
       )
-      .then((data) => {
-        resolve(data);
+      .then((countData) => {
+        
+        // Now get the actual account limits
+        db.any(
+          `SELECT 
+            cl.max_top_management, 
+            cl.max_procurement, 
+            cl.max_engineering, 
+            cl.max_finance,
+            (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND (user_type = '2' OR user_type = '7') AND is_deleted = '0') as used_top_management,
+            (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND (user_type = '3' OR user_type = '8') AND is_deleted = '0') as used_procurement,
+            (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND (user_type = '4' OR user_type = '9') AND is_deleted = '0') as used_engineering,
+            (SELECT COUNT(*) FROM tbl_users WHERE company_id = $1 AND (user_type = '5' OR user_type = '10') AND is_deleted = '0') as used_finance
+          FROM 
+            tbl_company_buyer_account_limit cl
+          WHERE 
+            cl.company_id = $1`,
+          [company_id]
+        )
+        .then((data) => {
+          console.log('Account limits data:', JSON.stringify(data));
+          resolve(data);
+        })
+        .catch(err => {
+          console.error('Error getting buyer account limits:', err);
+          reject(new Error(err));
+        });
       })
       .catch(err => {
-        console.error('Error getting buyer account limits:', err);
+        console.error('Error counting users by user_type:', err);
         reject(new Error(err));
       });
     });
