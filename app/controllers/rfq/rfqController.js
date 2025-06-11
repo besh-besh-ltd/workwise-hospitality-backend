@@ -878,7 +878,7 @@ const sendQuoteNotificationToVendor = async (req) => {
 };
 
 
-const sendReminderRFQMAIL = async (vendoritem, remainingProducts, org_name,rfq_id, rfqBasicDetails) => {
+const sendReminderRFQMAIL = async (vendoritem, remainingProducts, org_name,rfq_id, rfqBasicDetails, buyer_id, buyer_email) => {
   let user_details = await userModel.user_profile_detail(vendoritem.user_id);
   const token = await rfqModel.getVendorRfqToken(vendoritem.user_id, rfq_id);
   const vendorName =  user_details[0].organization_name || user_details[0].name
@@ -913,7 +913,7 @@ const containerContent = `
 
   // console.log(containerContent)
   
-  const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
+  const dynamicHTML = generateEmailTemplate(headerContent, containerContent, buyer_id)
 
     const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
 
@@ -925,9 +925,10 @@ const containerContent = `
     };
     if (spocList && spocList.length > 0) {
       mailRecipients.to = spocList.map(spoc => spoc.email);
-      mailRecipients.cc = user_details[0].email;
+      mailRecipients.cc = [user_details[0].email, buyer_email];
     } else {
       mailRecipients.to = user_details[0].email;
+      mailRecipients.cc = buyer_email
     }
     sendMail(mailRecipients);
 
@@ -3958,7 +3959,7 @@ const rfqController = {
   },
   sendReminder: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { organization_name, name, id } = req.user;
+    const { organization_name, name, id, email } = req.user;
 
     try {
 
@@ -4017,7 +4018,7 @@ const rfqController = {
       vendors = unmatchedVendors;
       let org_name = organization_name ? organization_name : name;
 
-      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item.vendor, item.remainingProducts, org_name, rfq_id,rfqBasicDetails)))
+      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item.vendor, item.remainingProducts, org_name, rfq_id,rfqBasicDetails, buyer_id = id,buyer_email= email  )))
         .then(async () => {
           try {
             await rfqModel.insertRFQActivity(rfq_id, id);
