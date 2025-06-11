@@ -1,31 +1,101 @@
-function generateEmailTemplate(headerContent, containerContent) {
-    return `
-        <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background-color: #ffe4e4eb; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
-            <div>
-                <img style="width: 200px; mix-blend-mode: multiply; margin-left: -18px;" src="https://api.letsworkwise.com/user_document/1738825197968-2d5fea6d-0266-451e-96d0-025781f2a119.png" alt="workwise-Logo" />
-                <p style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; font-size: 16px; font-weight: 600; color: #333333; margin-top: -7px;">
-                    Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
-                    Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063
-                </p>
-            </div>
+/**
+ * @Note few company requested to send email with there template ( color and name etc) so creating this object for each
+ *
+ */
+const companyObj = [
+  {
+    companyID: 6729, // RS group prassana email id
+    userID: 6729,
+    logo: 'https://workwise-static-s3.s3.ap-south-1.amazonaws.com/user_document/1749634855405-e8d5a49f-cacc-4fa0-9ce4-8f3df7a4732a.jpg', //  mix-blend-mode: multiply; removed this from company logo
+    primaryColor: '#29577b',
+    primaryTextColor: '#FFFFFF',
+    seconderyColor: '#013861',
+    seconderyTextColor: '#FFFFFF',
+    address: '',
+    displayAddress: false
+  },
+  {
+    companyID: 10335, // vineet buyer 
+    userID: 10335,
+    logo: 'https://workwise-static-s3.s3.ap-south-1.amazonaws.com/user_document/1749634855405-e8d5a49f-cacc-4fa0-9ce4-8f3df7a4732a.jpg', //  mix-blend-mode: multiply; removed this from company logo
+    primaryColor: '#29577b',
+    primaryTextColor: '#FFFFFF',
+    seconderyColor: '#013861',
+    seconderyTextColor: '#FFFFFF',
+    address: 'this text display to workwis eonly, vineet castomized this email template',
+    displayAddress: true
+  }
+];
 
-            <hr />
+const defaultEmailTemplate = {
+  logo: 'https://api.letsworkwise.com/user_document/1738825197968-2d5fea6d-0266-451e-96d0-025781f2a119.png',
+  address: `Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
+      Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063`,
+  displayAddress: true,
+  primaryColor: '#ffe4e4eb',
+  primaryTextColor: '#000000',
+  seconderyColor: '#ffffff',
+  seconderyTextColor: '#000000'
+};
 
-            ${headerContent}
-            
-            <div style="border-radius: 24px; padding: 32px 16px; margin-bottom: 24px; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-                ${containerContent}
-            </div>
-            
-            <hr />
-            
-            <p style="font-size: 16px;">If you need assistance, contact us at <a href="mailto:hello@letsworkwise.com">hello@letsworkwise.com</a></p>
-            <p style="font-size: 16px;">© WorkWise. All Rights Reserved.</p>
+/**
+ * @param {*} email header ( this is not email subject - in header we have sender name like Hello Mukul) - text only
+ * @param {*} main this is main content of email - text only
+ * @param {*} company_id - optional - if company_id is provided then it will use company specific template otherwise it will use default template
+ * @returns - return html email template
+ * @created_by - mukul
+ * @last_modified - 2023-11-01 - mukul, for company specific email template
+ */
+function generateEmailTemplate(headerContent, containerContent, userID = null) {
+  const {
+    logo,
+    address,
+    displayAddress,
+    primaryColor,
+    primaryTextColor,
+    seconderyColor,
+    seconderyTextColor
+  } = userID
+    ? {
+        ...defaultEmailTemplate,
+        ...(companyObj.find((c) => c.userID === userID) || {})
+      }
+    : defaultEmailTemplate;
+
+  return `
+    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background-color: ${primaryColor}; color: ${primaryTextColor}; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
+        <div>
+        
+            <img style="width: 200px;  margin-left: -18px;" src="${logo}" alt="Company Logo" />
+            ${
+              displayAddress
+                ? `<p style="font-size: 16px; font-weight: 600; color: ${primaryTextColor}; margin-top: -7px;">${address}</p>`
+                : ''
+            }
         </div>
+        <hr style="border-color: ${seconderyColor}" />
+        ${headerContent}
+            
+        <div style="border-radius: 24px; padding: 32px 16px; margin-bottom: 24px; background-color: ${seconderyColor}; color: ${seconderyTextColor}; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+            ${containerContent}
+            </div>
+            
+
+        <hr style="border-color: ${seconderyColor}" />
+        <p style="font-size: 16px; color: ${primaryTextColor};">If you need assistance, contact us at <a href="mailto:hello@letsworkwise.com" style="color: ${primaryTextColor};">hello@letsworkwise.com</a></p>
+        <p style="font-size: 16px; color: ${primaryTextColor};">© WorkWise. All Rights Reserved.</p>
+    </div>
     `;
 }
 
-function getRfqEmailContent({ vendor_name, rfq_no, buyer_name, rfq_id, token, emailType }) {
+function getRfqEmailContent({
+  vendor_name,
+  rfq_no,
+  buyer_name,
+  rfq_id,
+  token,
+  emailType
+}) {
   const baseUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}`;
 
   switch (emailType) {
@@ -80,4 +150,4 @@ const RFQ_EMAIL_TYPE = {
   NEW_VENDOR: 'NEW_VENDOR'
 };
 
-export { generateEmailTemplate ,getRfqEmailContent , RFQ_EMAIL_TYPE}
+export { generateEmailTemplate, getRfqEmailContent, RFQ_EMAIL_TYPE };

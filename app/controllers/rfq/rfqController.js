@@ -366,9 +366,20 @@ const getQUOTES = async ({ id }, user_id) => {
   }
 };
 
+
+/**
+ * 
+ * @param {*} vendor 
+ * @param {*} user 
+ * @param {*} rfqNumber 
+ * @param {*} products - array 
+ * @last_update by mukul on 2023-11-01, for company wise email template
+ */
 const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
   try {
     let organization_name = user?.organization_name || user?.name;
+    const buyerUserId = user?.company_id || null // 
+    const buyerEmail = user?.email || ""
 
     // Fetch user details of the vendor
     const user_details = await userModel.user_profile_detail(vendor.user_id);
@@ -438,7 +449,8 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
 
         </div>`;
 
-        const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
+      const dynamicHTML = generateEmailTemplate(headerContent, containerContent, buyerUserId)
+
         const org_name = user_details[0].organization_name || user_details[0].name || ""
        let mailRecipients = {
         from: `${organization_name} ${Config.masterEmail}`,
@@ -448,9 +460,10 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
 
       if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
-        mailRecipients.cc = user_details[0].email;
+        mailRecipients.cc = [user_details[0].email, buyerEmail];
       } else {
         mailRecipients.to = user_details[0].email;
+        mailRecipients.cc = buyerEmail
       }
 
       // console.log(" rfq contoller 377 spoc console ", user_details[0]?.id, spocList)
