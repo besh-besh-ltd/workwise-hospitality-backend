@@ -4018,7 +4018,7 @@ const rfqController = {
       vendors = unmatchedVendors;
       let org_name = organization_name ? organization_name : name;
 
-      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item.vendor, item.remainingProducts, org_name, rfq_id,rfqBasicDetails, buyer_id = id,buyer_email= email  )))
+      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item.vendor, item.remainingProducts, org_name, rfq_id,rfqBasicDetails, id,email  )))
         .then(async () => {
           try {
             await rfqModel.insertRFQActivity(rfq_id, id);
