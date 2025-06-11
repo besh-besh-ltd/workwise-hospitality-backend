@@ -378,7 +378,7 @@ const getQUOTES = async ({ id }, user_id) => {
 const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
   try {
     let organization_name = user?.organization_name || user?.name;
-    const buyerUserId = user?.company_id || null // 
+    const buyerUserId = user?.id || null // 
     const buyerEmail = user?.email || ""
 
     // Fetch user details of the vendor
