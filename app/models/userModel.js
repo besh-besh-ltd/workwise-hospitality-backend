@@ -3510,21 +3510,28 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
 
   updateUserAccount: async (userId, userObj) => {
     return new Promise(function (resolve, reject) {
-      db.any(
-        `UPDATE tbl_users SET 
-         name = $2,
-         email = $3,
-         mobile = $4,
-         updated_at = $5
-         WHERE id = $1`,
-        [userId, userObj.name, userObj.email, userObj.mobile, userObj.updated_at]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          reject(err);
-        });
+      const updateFields = [];
+      const queryParams = [userId];
+      let paramCounter = 2;
+      
+      Object.entries(userObj).forEach(([key, value]) => {
+        if (value !== undefined) {
+          updateFields.push(`${key} = $${paramCounter++}`);
+          queryParams.push(value);
+        }
+      });
+      
+      if (updateFields.length === 0) return resolve([]);
+      
+      const query = `
+        UPDATE tbl_users SET ${updateFields.join(', ')}
+        WHERE id = $1
+        RETURNING id, name, email, mobile, status, updated_at, updated_by
+      `;
+      
+      db.any(query, queryParams)
+        .then(data => resolve(data))
+        .catch(err => reject(err));
     });
   },
 
