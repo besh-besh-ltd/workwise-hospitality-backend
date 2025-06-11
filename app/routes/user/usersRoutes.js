@@ -335,14 +335,5 @@ UsersRoutes.post(
   UsersController.searchVendorsByName
 )
 
-UsersRoutes.put(
-  '/admin-update-user-account/:id',
-  passportSignIn,
-  acl([7]), // Only admin (role 7) can update other users
-  validateParam(schemas.id),
-  validateBody(schemas.admin_update_user_account),
-  validateDbBody.user_id_exists,
-  UsersController.admin_update_user_account
-);
 
 export default UsersRoutes;

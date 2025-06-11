@@ -1211,33 +1211,64 @@ get_company_users: async (req, res, next) => {
 
 update_user_detail: async (req, res, next) => {
   try {
-    const { id: user_id } = req.user;
+    const loggedInUser = req.user;
     const reqData = req.body;
-
-    const reqUserData = {
-      name: reqData.name?.trim(),
-      email: reqData.email.trim().toLowerCase(),
-      mobile: reqData.mobile.trim(),
-      updated_at: new Date(), // this value  depends on server date and time
+    const isAdmin = loggedInUser.user_type === 7;
+    
+    // Determine target user ID
+    let targetUserId = reqData.user_id && isAdmin ? reqData.user_id : loggedInUser.id;
+    
+    // Check permissions
+    if (reqData.user_id && !isAdmin) {
+      return res.status(403).json({
+        status: false,
+        message: "Only company administrators can update other users"
+      });
+    }
+    
+    // Build update data
+    const updateData = {
+      updated_at: currentDateTime(),
+      updated_by: loggedInUser.id
     };
-
-    const updatedUser = await rfqModel.updateWhere(
+    
+    // Add fields to update
+    if (reqData.name !== undefined) updateData.name = reqData.name?.trim();
+    if (reqData.email !== undefined) updateData.email = reqData.email?.trim().toLowerCase();
+    if (reqData.mobile !== undefined) updateData.mobile = reqData.mobile?.trim();
+    if (isAdmin && reqData.status !== undefined) updateData.status = reqData.status;
+    if (isAdmin && reqData.user_type !== undefined) updateData.user_type = reqData.user_type;
+    
+    // Execute update
+    let result;
+    if (isAdmin && targetUserId !== loggedInUser.id) {
+      result = await rfqModel.updateWhere(
       "tbl_users",
-      reqUserData,
-      `id = ${user_id}`
+        updateData,
+        `id = ${targetUserId} AND company_id = ${loggedInUser.company_id}`
     );
+    } else { // we can use updateWhere insted of updateUserAccount
+      result = await userModel.updateUserAccount(targetUserId, updateData);
+    }
 
-    return res.status(200).json({
-      status: 1,
-      message: "Profile updated successfully",
-    });
-  } catch (err) {
-    logError(err);
-    return res.status(400).json({
-      status: false,
-      message: Config.errorText.value,
-    });
-  }
+
+        res
+          .status(200)
+          .json({
+            status: 1,
+            message: 'User profile updated successfully'
+          })
+          .end();
+  } catch (error) {
+    logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
 },
 
 
@@ -3984,39 +4015,7 @@ update_user_detail: async (req, res, next) => {
     }
   },
 
-  admin_update_user_account: async (req, res, next) => {
-    try {
-      let userId = req.params.id;
-      let updatedBy = req.user.id;
-      const { name, email, mobile } = req.body;
-      
-      let userObj = {
-        name,
-        email,
-        mobile,
-        updated_at: currentDateTime()
-      };
-      
-      await userModel.updateUserAccount(userId, userObj);
 
-      res
-        .status(200)
-        .json({
-          status: 1,
-          message: 'User account updated successfully'
-        })
-        .end();
-    } catch (error) {
-      logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
   // Changes by Agnij 10-06-2025 [Added function to get buyer account limits]
   getBuyerAccountLimits: async (req, res) => {
     try {
