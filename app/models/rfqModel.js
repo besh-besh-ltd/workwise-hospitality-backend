@@ -604,6 +604,9 @@ const rfqModel = {
         if (key === 'user_ids') {
             conditionClauses.push(`user_id IN (${value.map(() => `$${index++}`).join(', ')})`);
             conditionValues.push(...value);
+        } else if (key === '-user_ids') {
+          conditionClauses.push(`user_id NOT IN (${value.map(() => `$${index++}`).join(', ')})`);
+          conditionValues.push(...value);
         } else {
             conditionClauses.push(`${key} = $${index++}`);
             conditionValues.push(value);
@@ -1194,15 +1197,14 @@ deleteProductFilesByIds: async (rfqProductIds) => {
   },
 
   getDraftProductVendors: async (draftId, rfqProductId, buyerId, filters) => {
-    console.log("FILTERS INSIDE `getDraftProductVendors` FUNC => ", filters)
     try {
       let {
-        approved_by_id,
+        vendor_approved_by,
         state,
         city,
         country,
         turnOver,
-        vendorType,
+        vendor_type,
         prev_worked_with,
         vendor_name,
         vendor_info,
@@ -1236,7 +1238,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       let dynamicWhere = '';
 
       // JOINS
-      if (approved_by_id?.length > 0) {
+      if (vendor_approved_by || (Array.isArray(vendor_approved_by) && vendor_approved_by?.length > 0)) {
         dynamicJoin += `
           JOIN tbl_vendorapprove_product_mapping vum 
             ON vum.variant_vendor_mapping_id = pvvm.id
@@ -1309,28 +1311,28 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         dynamicWhere += ` ${turnoverCondition}`;
       }
 
-      if (vendorType && Array.isArray(vendorType) && vendorType.length > 0) {
+      if (vendor_type && Array.isArray(vendor_type) && vendor_type.length > 0) {
         dynamicWhere += `
           AND EXISTS (
             SELECT 1
             FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
-            WHERE TRIM(nb) IN (${vendorType.join(",")})
+            WHERE TRIM(nb) IN (${vendor_type.map(type => `'${type}'`).join(",")})
           )
         `;
-      } else if (typeof vendorType == 'string' || typeof vendorType == 'number') {
+      } else if (typeof vendor_type == 'string' || typeof vendor_type == 'number') {
         dynamicWhere += `
           AND EXISTS (
             SELECT 1
             FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
-            WHERE TRIM(nb) IN ('${vendorType}')
+            WHERE TRIM(nb) IN ('${vendor_type}')
           )
         `;
       }
 
-      if (approved_by_id && Array.isArray(approved_by_id) && approved_by_id.length > 0) {
-        dynamicWhere += ` AND vum.vendor_approve_id IN (${approved_by_id.join(",")})`;
-      } else if (typeof approved_by_id == 'string' || typeof approved_by_id == 'number') {
-        dynamicWhere += ` AND vum.vendor_approve_id IN ('${approved_by_id}')`;
+      if (vendor_approved_by && Array.isArray(vendor_approved_by) && vendor_approved_by.length > 0) {
+        dynamicWhere += ` AND vum.vendor_approve_id IN (${vendor_approved_by.join(",")})`;
+      } else if (typeof vendor_approved_by == 'string' || typeof vendor_approved_by == 'number') {
+        dynamicWhere += ` AND vum.vendor_approve_id IN ('${vendor_approved_by}')`;
       }
 
       if (vendor_info === 'is_private') {
@@ -1379,7 +1381,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 
       let q = `
       SELECT 
-        tu.id AS user_id, 
+        DISTINCT ON (tu.name) tu.id AS user_id, 
         tu.name, 
         ${vendor_name ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $3) AS similarity_score,' : ''} 
         JSON_BUILD_OBJECT(
@@ -1396,8 +1398,10 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           ON trpv.rfq_id = trp.rfq_id 
             AND trpv.product_variant_id = trp.product_variant_id 
             AND trpv.variant = trp.variant
+        JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
         JOIN tbl_users tu ON trpv.user_id = tu.id
-        JOIN tbl_company tc ON tc.user_id = tu.id
+        JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id
+        JOIN tbl_company tc ON tu.company_id = tc.id
 
         ${dynamicJoin}
 
@@ -1405,10 +1409,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             AND trp.id = $2
             ${dynamicWhere}
           
-        ORDER BY ${vendor_name ? 'similarity_score DESC, tu.name' : 'tu.name'}
+        ORDER BY ${vendor_name ? 'tu.name, similarity_score DESC' : 'tu.name'}
       `;
-
-      console.log("QUERY => ", q)
 
       return db.any(q, [draftId, rfqProductId, vendor_name])
 
@@ -2136,7 +2138,7 @@ LIMIT 1;`;
         FROM tbl_product_variant_vendor_mapping PVVM
         JOIN tbl_product_variant PV ON PVVM.product_variant_id = PV.id
         JOIN tbl_users U ON PVVM.vendor_id = U.id
-        JOIN tbl_company C ON C.user_id = U.id
+        JOIN tbl_company C ON C.id = U.company_id
         LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.buyer_id = ${buyerId}
   
         WHERE PVVM.product_variant_id = $1

@@ -239,7 +239,7 @@ const generalModel = {
     keys.forEach((key) => {
       let value = data[key];
 
-      if (value === undefined || value === null) {
+      if (value === undefined || value === null || (Array.isArray(value) && value.length <= 0)) {
         filters[key] = null;
         return;
       }

@@ -25,12 +25,12 @@ import generalModel from '../../models/generalModel.js';
 
 
 const VENDORS_FILTER_KEYS = [
-  'approved_by_id',
+  'vendor_approved_by',
   'state',
   'city',
   'country',
   'turnOver',
-  'vendorType',
+  'vendor_type',
   'prev_worked_with',
   'vendor_name',
   'vendor_info',
@@ -1270,6 +1270,7 @@ const deleteRelatedRecords = async (rfq_id) => {
 const saveRfqDraft = async (user_id, reqBody) => {
   const {
       rfq_id,
+      sheet_id,
       comment,
       company_name,
       contact_name,
@@ -1277,6 +1278,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       bid_end_date,
       location,
       updatableData,
+      filters,
       terms,
       rfq_type,
       reverse_auction,
@@ -1348,8 +1350,9 @@ const saveRfqDraft = async (user_id, reqBody) => {
       userModel: withTransaction(userModel, t),
       vendorModel: withTransaction(vendorModel, t)
     };
-
+    
     const products = updatableData?.products;
+    const updatableVendors = updatableData?.vendors;
 
     if (products && products?.updatable) {
       if (products.updatable?.specs)
@@ -1591,6 +1594,120 @@ const saveRfqDraft = async (user_id, reqBody) => {
               }
             }
           }
+        }
+      }
+    }
+
+    if (updatableVendors && Object.keys(updatableVendors).length > 0) {
+      for (const rfqProductId of Object.keys(updatableVendors)) {
+        const productId = updatableVendors[rfqProductId].product_id;
+        const variant = updatableVendors[rfqProductId].variant;
+
+        const addable = updatableVendors[rfqProductId]?.addable ?? [];
+        const deletable = updatableVendors[rfqProductId]?.deletable ?? [];
+
+        // Insert new vendors
+        if (addable.length > 0) {
+          const addableData = addable.map((vendor) => ({
+            rfq_id,
+            product_variant_id: productId,
+            user_id: vendor,
+            variant
+          }));
+
+          await transactingModels.rfqModel.insertArray(
+            addableData,
+            Object.keys(addableData[0]),
+            'tbl_rfq_product_vendors'
+          );
+        }
+
+        // Delete existing vendors
+        if (deletable.length > 0) {
+          for (const vendor of deletable) {
+            let productDetails = await transactingModels.rfqModel.checkIfExists(
+              'tbl_product_variant',
+              `id = ${productId}`
+            );
+            if (!productDetails || productDetails.length === 0) continue;
+
+            productDetails = productDetails[0];
+
+            const conditions = {
+              rfq_id,
+              product_variant_id: productId,
+              user_id: vendor,
+              variant
+            };
+
+            await transactingModels.rfqModel.delete(
+              'tbl_rfq_product_vendors',
+              conditions
+            );
+          }
+        }
+      }
+    }
+
+    if (
+      (filters.global && Object.keys(filters.global).length > 0) ||
+      (filters.local &&
+        Object.keys(filters.local).length > 0 &&
+        Object.keys(filters.local).some(
+          (localFilter) =>
+            Object.keys(filters.local?.[localFilter] ?? {}).length > 0
+        ))
+    ) {
+
+      let applicableFilters = generalModel.generateFilters(
+        filters.global,
+        VENDORS_FILTER_KEYS
+      );
+
+      const rfqProducts = await rfqModel.checkIfExists(
+        'tbl_rfq_products',
+        `rfq_id = ${rfq_id} AND sheet_id = ${sheet_id}`,
+        t
+      );
+
+      if (rfqProducts && Array.isArray(rfqProducts) && rfqProducts.length > 0) {
+        for (let product of rfqProducts) {
+          const rfqProductId = product.id;
+          const doesLocalExist =
+            filters.local?.[rfqProductId] &&
+            Object.keys(filters.local?.[rfqProductId] ?? {}).length > 0;
+
+          if (doesLocalExist) {
+            applicableFilters = generalModel.generateFilters(
+              filters.local[rfqProductId],
+              VENDORS_FILTER_KEYS
+            );
+          }
+
+          const remainingVendors = await rfqModel.getDraftProductVendors(
+            rfq_id,
+            rfqProductId,
+            user_id,
+            applicableFilters
+          );
+
+
+          const deletingCondition = {
+            rfq_id,
+            product_variant_id: product.product_variant_id,
+            variant: product.variant,
+            '-user_ids': remainingVendors.map((vendor) => vendor.user_id).filter(Boolean)
+          };
+
+
+          if (deletingCondition['-user_ids'].length > 0) {
+            const deleteResult = await transactingModels.rfqModel.delete(
+              'tbl_rfq_product_vendors',
+              deletingCondition
+            );
+
+          }
+          // await rfqModel.delete(deletingCondition);
         }
       }
     }

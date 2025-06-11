@@ -1253,7 +1253,7 @@ const ProductsController = {
      const makeList = await productModel.getMakeListByVariantId(variant_id);
 
      if (!makeList || makeList.length === 0) {
-     return res.status(204).end(); // No Content, no body
+      return res.status(200).json({ status: 1, data: [] }).end();
      }
 
       return res.status(200).json({ status: 1, data: makeList }).end();
