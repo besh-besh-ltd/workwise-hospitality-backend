@@ -1021,10 +1021,20 @@ const sendQuoteNotificationEmail = async (req) => {
       let mailRecipients = {
         from: `${organization_name || name} ${Config.masterEmail}`, // sender address
         //  organization_name : Config.webmasterMail,
-        to: buyer.email,
+        // to: buyer.email,
         subject: `New Quotation Received for Your RFQ ${rfq_no}`,
         html: dynamicHTML
       };
+
+      // fetch spoc for buyer
+       const spocList = await vendorModel.getSpocDetails(buyer?.id)
+
+      if (spocList && spocList.length > 0) {
+        mailRecipients.to = spocList.map(spoc => spoc.email);
+        mailRecipients.cc = buyer.email;
+      } else {
+        mailRecipients.to = buyer.email;
+      }
 
       // Sending the email to the buyer
       sendMail(mailRecipients);
