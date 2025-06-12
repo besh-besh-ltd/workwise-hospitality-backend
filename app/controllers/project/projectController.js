@@ -140,14 +140,26 @@ const projectController = {
           }
     },
 
+    /**
+     * @description This function will return project list, all project to admin user_type 7, and project in which user added as member by admin for non admin users of org.
+     * 
+     * @lastUpdated 12-06-2025 mukul - to return all project by company id
+     */
     getAllProjects: async (req, res, next) => {
       try {
-          const user_id = req.user.id;
-          const user_type = req.user.user_type;
+          const {id:user_id, company_id,  user_type} = req.user;
           
           let projects = [];
-          
+
+          // get all proejct created by anyone in the company, this is only for company admin
+          if(user_type == 7) {
+            projects = await projectModel.getAllProjectsByCompany(company_id);
+          } 
+          else { // users can only access their own projects or projects they are a member of
             projects = await projectModel.getAllProjects(user_id);
+            
+          }
+
           // IMPORTANT: Ensure the response format is consistent
           const responseData = {
             status: true,
