@@ -208,6 +208,7 @@ export const rfqSchemas = {
     reverse_auction: Joi.valid(0, 1).allow(''),
     sheet_id: Joi.number().optional().allow(null),
     updatableData: Joi.object().optional(),
+    filters: Joi.object().optional(),
     termsChanged: Joi.boolean().optional(),
     termFilesChanged: Joi.boolean().optional(),
     terms: Joi.array().items(termsItems).allow(null).allow(''),
