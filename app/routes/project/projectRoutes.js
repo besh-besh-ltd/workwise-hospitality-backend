@@ -13,7 +13,7 @@ const projectRoutes = Router();
 projectRoutes.post(
     '/create',
     passportSignIn,
-    acl([2, 7]),
+    acl([2, 7, 8]),
     validateBody(projectSchemas.create),
     validateDbBody.project_exist,
     projectController.create
@@ -22,7 +22,7 @@ projectRoutes.post(
 projectRoutes.post(
     '/upload-file',
     passportSignIn,
-    acl([2, 7]),
+    acl([2, 7, 8]),
     projectSchemas.projectFileUploadHandler, 
     validateBody(projectSchemas.saveFiles),
     projectController.saveProjectFiles
@@ -32,7 +32,7 @@ projectRoutes.post(
 projectRoutes.post(
     '/:project_id',
     passportSignIn,
-    acl([2, 7]),
+    acl([2, 7, 8]),
     validateParam(projectSchemas.project_id),
     projectController.getProjectById
 )
@@ -41,7 +41,7 @@ projectRoutes.post(
 projectRoutes.get(
     '/:project_id',
     passportSignIn,
-    acl([2, 7]),
+    acl([2, 7, 8]),
     validateParam(projectSchemas.project_id),
     projectController.getProjectTableDataById
 )
@@ -58,7 +58,7 @@ projectRoutes.get(
 projectRoutes.put(
     '/update/:project_id',
     passportSignIn,
-    acl([2, 7]),
+    acl([2, 7, 8]),
     validateBody(projectSchemas.update),
     validateParam(projectSchemas.project_id), 
     projectController.update
@@ -78,7 +78,7 @@ projectRoutes.get(
 projectRoutes.get(
     '/:project_id/team',
     passportSignIn,
-    acl([2, 7]),
+    acl([2, 7, 8]),
     validateParam(projectSchemas.project_id),
     projectController.getProjectTeamMembers
 )
@@ -87,7 +87,7 @@ projectRoutes.get(
 projectRoutes.post(
     '/:project_id/team',
     passportSignIn,
-    acl([2, 7]),
+    acl([2, 7, 8]),
     validateParam(projectSchemas.project_id),
     validateBody(projectSchemas.addTeamMember),
     projectController.addTeamMember
@@ -97,7 +97,7 @@ projectRoutes.post(
 projectRoutes.delete(
     '/:project_id/team',
     passportSignIn,
-    acl([2, 7]),
+    acl([2, 7, 8]),
     validateParam(projectSchemas.project_id),
     validateBody(projectSchemas.removeTeamMember),
     projectController.removeTeamMember
@@ -113,7 +113,7 @@ projectRoutes.get(
 projectRoutes.get(
     '/user/:user_id/projects',
     passportSignIn,
-    acl([2, 7]),
+    acl([2, 7, 8]),
     validateParam(projectSchemas.user_id),
     projectController.getUserProjectsByUserId
 )
