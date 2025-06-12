@@ -208,13 +208,13 @@ LEFT JOIN
 WHERE 
   p.user_id IN (
     SELECT id FROM tbl_users 
-    WHERE company_id = 8806 
+    WHERE company_id = $1 
   )
   OR p.id IN (
     SELECT pt.project_id 
     FROM tbl_project_team pt
     JOIN tbl_users tu ON pt.user_id = tu.id
-    WHERE tu.company_id = 8806 
+    WHERE tu.company_id = $1 
   )
 GROUP BY 
   p.id, u.name

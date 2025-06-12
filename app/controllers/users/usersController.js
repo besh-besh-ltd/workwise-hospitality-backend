@@ -403,7 +403,7 @@ create_buyer_company_users: async (req, res, next) => {
     if (currentCount >= maxAllowed) {
       return res.status(400).json({
         status: false,
-        message: `Limit reached: Only ${maxAllowed} account(s) of this type allowed.`
+        message: `You have reached the maximum number of allowed accounts for this role`
       }).end();
     }
 
@@ -528,7 +528,7 @@ get_company_users: async (req, res, next) => {
     // Map user_type to role names for better readability
     const userTypeMap = {
       7: "Admin",
-      8: "Top Management",
+      8: "Management",
       2: "Procurement",
       9: "Engineering",
       10: "Finance"
