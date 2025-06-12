@@ -432,6 +432,11 @@ RfqRoutes.get(
   rfqController.getDraftById
 );
 
+RfqRoutes.post('/get-draft-vendors/:draftId',
+  passportSignIn,
+  rfqController.getDraftProductVendors
+)
+
 RfqRoutes.post(
   '/draft-product-vendors',
   passportSignIn,

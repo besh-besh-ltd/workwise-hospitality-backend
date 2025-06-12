@@ -1,5 +1,6 @@
 import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
+import generalModel from './generalModel.js';
 
 const rfqModel = {
   insert: async (table_name, data, db_con = db) => {
@@ -603,6 +604,9 @@ const rfqModel = {
         if (key === 'user_ids') {
             conditionClauses.push(`user_id IN (${value.map(() => `$${index++}`).join(', ')})`);
             conditionValues.push(...value);
+        } else if (key === '-user_ids') {
+          conditionClauses.push(`user_id NOT IN (${value.map(() => `$${index++}`).join(', ')})`);
+          conditionValues.push(...value);
         } else {
             conditionClauses.push(`${key} = $${index++}`);
             conditionValues.push(value);
@@ -1083,6 +1087,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
   },
 
   getRfqDraftById: async (id, oldestSheet) => {
+
     const q = `SELECT
       RFQ.id AS rfq_id,
       RFQ.rfq_no,
@@ -1146,17 +1151,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                     AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
                     AND RFQ_P.variant = RFQ_P_SPEC.variant
               ),
-              'vendors', (
-                  SELECT json_agg(json_build_object(
-                      'user_id', RFQ_P_V.user_id,
-                      'name', U.name
-                  ))
-                  FROM tbl_rfq_product_vendors RFQ_P_V
-                  LEFT JOIN tbl_users U ON RFQ_P_V.user_id = U.id
-                  WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
-                    AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
-                    AND RFQ_P.variant = RFQ_P_V.variant
-              ),
               'comment', RFQ_P.comment,
               'datasheet', (RFQ_P.datasheet::TEXT),
               'datasheet_file', (
@@ -1198,6 +1192,230 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       const result = await db.many(q, values);
       return result;
     } catch (error) {
+      throw error;
+    }
+  },
+
+  getDraftProductVendors: async (draftId, rfqProductId, buyerId, filters) => {
+    try {
+      let {
+        vendor_approved_by,
+        state,
+        city,
+        country,
+        turnOver,
+        vendor_type,
+        prev_worked_with,
+        vendor_name,
+        vendor_info,
+        productMakes,
+      } = filters;
+
+      let turnoverCondition = '';
+
+      turnOver = {
+        from: parseInt(turnOver?.from ?? 0),
+        to: parseInt(turnOver?.to ?? 0),
+      }
+
+      if (turnOver && (turnOver.from > 0 || turnOver.to > 0)) {
+          turnoverCondition = `AND tc.turnover IS NOT NULL AND TRIM(tc.turnover) != '' AND (`;
+
+          const turnoverField = `NULLIF(TRIM(tc.turnover), '')::bigint`;
+
+          if (turnOver.from > 0 && turnOver.to > 0) {
+              turnoverCondition += `${turnoverField} BETWEEN ${turnOver.from } AND ${turnOver.to }`;
+          } else if (turnOver.from > 0) {
+              turnoverCondition += `${turnoverField} >= ${turnOver.from }`;
+          } else if (turnOver.to > 0) {
+              turnoverCondition += `${turnoverField} <= ${turnOver.to }`;
+          }
+
+          turnoverCondition += ")";
+      }
+
+      let dynamicJoin = '';
+      let dynamicWhere = '';
+
+      // JOINS
+      if (vendor_approved_by || (Array.isArray(vendor_approved_by) && vendor_approved_by?.length > 0)) {
+        dynamicJoin += `
+          JOIN tbl_vendorapprove_product_mapping vum 
+            ON vum.variant_vendor_mapping_id = pvvm.id
+        `;
+      }
+
+      if(vendor_info) {
+        dynamicJoin += `
+          LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
+            ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+        `;
+      }
+
+      if(city) {
+        dynamicJoin += `
+          LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
+        `;
+      }
+
+      if(state) {
+        dynamicJoin += `
+          LEFT JOIN tbl_location_states ls ON tu.state = ls.id
+        `;
+      }
+
+      if(country) {
+        dynamicJoin += `
+          LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
+        `;
+      }
+
+      if (prev_worked_with === 'prev_finalized') {
+        dynamicJoin += `
+          LEFT JOIN tbl_quote_finalization qf 
+            ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
+        `;
+      }
+
+      if (prev_worked_with === 'rfq_sent') {
+        dynamicJoin += `
+          LEFT JOIN (
+            SELECT DISTINCT rpv.user_id
+            FROM tbl_rfq_product_vendors rpv
+            JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
+            WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
+          ) rfqv ON rfqv.user_id = tu.id
+        `;
+      }
+
+      // WHERE CLAUSES
+      if (city && Array.isArray(city) && city.length > 0) {
+        dynamicWhere += ` AND tu.city::int IN (${city.join(",")})`;
+      } else if (typeof city == 'string' || typeof city == 'number') {
+        dynamicWhere += ` AND tu.city = '${city}'`;
+      }
+
+      if (state && Array.isArray(state) && state.length > 0) {
+        dynamicWhere += ` AND tu.state::int IN (${state.join(",")})`;
+      } else if (typeof state == 'string' || typeof state == 'number') {
+        dynamicWhere += ` AND tu.state = '${state}'`;
+      }
+
+      if (country && Array.isArray(country) && country.length > 0) {
+        dynamicWhere += ` AND COALESCE(tu.country, '1')::int IN (${country.join(",")})`;
+      } else if (typeof country == 'string' || typeof country == 'number') {
+        dynamicWhere += ` AND COALESCE(tu.country, '1') = '${country}'`;
+      }
+
+      if (turnoverCondition) {
+        dynamicWhere += ` ${turnoverCondition}`;
+      }
+
+      if (vendor_type && Array.isArray(vendor_type) && vendor_type.length > 0) {
+        dynamicWhere += `
+          AND EXISTS (
+            SELECT 1
+            FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
+            WHERE TRIM(nb) IN (${vendor_type.map(type => `'${type}'`).join(",")})
+          )
+        `;
+      } else if (typeof vendor_type == 'string' || typeof vendor_type == 'number') {
+        dynamicWhere += `
+          AND EXISTS (
+            SELECT 1
+            FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
+            WHERE TRIM(nb) IN ('${vendor_type}')
+          )
+        `;
+      }
+
+      if (vendor_approved_by && Array.isArray(vendor_approved_by) && vendor_approved_by.length > 0) {
+        dynamicWhere += ` AND vum.vendor_approve_id IN (${vendor_approved_by.join(",")})`;
+      } else if (typeof vendor_approved_by == 'string' || typeof vendor_approved_by == 'number') {
+        dynamicWhere += ` AND vum.vendor_approve_id IN ('${vendor_approved_by}')`;
+      }
+
+      if (vendor_info === 'is_private') {
+        dynamicWhere += ` AND tc.is_private = 1 AND bvm.vendor_id IS NOT NULL`;
+      } else if (vendor_info === 'is_public') {
+        dynamicWhere += ` AND tc.is_private = 0 AND bvm.vendor_id IS NOT NULL`;
+      } else if (vendor_info === 'both') {
+        dynamicWhere += ` AND bvm.vendor_id IS NOT NULL`;
+      }
+
+      if (prev_worked_with === 'prev_finalized') {
+        dynamicWhere += ` AND qf.id IS NOT NULL`;
+      } else if (prev_worked_with === 'rfq_sent') {
+        dynamicWhere += ` AND rfqv.user_id IS NOT NULL`;
+      }
+
+      if (productMakes && Array.isArray(productMakes) && productMakes.length > 0) {
+        dynamicWhere += `
+          AND EXISTS (
+            SELECT 1
+            FROM tbl_product_variant_vendor_make pvmm
+            WHERE pvmm.variant_vendor_map_id = pvvm.id
+            AND LOWER(pvmm.make_name) IN (${productMakes.join(", ")})
+          )
+        `;
+      } else if (typeof productMakes == 'string' || typeof productMakes == 'number') {
+        dynamicWhere += `
+          AND EXISTS (
+            SELECT 1
+            FROM tbl_product_variant_vendor_make pvmm
+            WHERE pvmm.variant_vendor_map_id = pvvm.id
+            AND LOWER(pvmm.make_name) = '${productMakes}'
+          )
+        `;
+      }
+
+      if (vendor_name?.trim()) {
+        dynamicWhere += `
+          AND (
+            to_tsvector('english', COALESCE(tc.company_name, tu.organization_name)) @@ plainto_tsquery('english', $3)
+            OR (char_length($3) = 1 AND similarity(COALESCE(tc.company_name, tu.organization_name), $3) > 0)
+            OR (char_length($3) > 1 AND similarity(COALESCE(tc.company_name, tu.organization_name), $3) > 0.1)
+          )
+        `;
+      }
+
+      let q = `
+      SELECT 
+        DISTINCT ON (tu.name) tu.id AS user_id, 
+        tu.name, 
+        ${vendor_name ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $3) AS similarity_score,' : ''} 
+        JSON_BUILD_OBJECT(
+          'id', tu.id,
+          'name', tu.name,
+          'company_name', COALESCE(tc.company_name, tu.organization_name, tu.name),
+          'email', tu.email,
+          'address', tu.address,
+          'mobile', tu.mobile
+        ) AS user_details
+
+        FROM tbl_rfq_products trp
+        JOIN tbl_rfq_product_vendors trpv 
+          ON trpv.rfq_id = trp.rfq_id 
+            AND trpv.product_variant_id = trp.product_variant_id 
+            AND trpv.variant = trp.variant
+        JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
+        JOIN tbl_users tu ON trpv.user_id = tu.id
+        JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id
+        JOIN tbl_company tc ON tu.company_id = tc.id
+
+        ${dynamicJoin}
+
+        WHERE trp.rfq_id = $1
+            AND trp.id = $2
+            ${dynamicWhere}
+          
+        ORDER BY ${vendor_name ? 'tu.name, similarity_score DESC' : 'tu.name'}
+      `;
+
+      return db.any(q, [draftId, rfqProductId, vendor_name])
+
+    } catch (error) {
+      console.log("ERROR -> ", error)
       throw error;
     }
   },
@@ -1920,7 +2138,7 @@ LIMIT 1;`;
         FROM tbl_product_variant_vendor_mapping PVVM
         JOIN tbl_product_variant PV ON PVVM.product_variant_id = PV.id
         JOIN tbl_users U ON PVVM.vendor_id = U.id
-        JOIN tbl_company C ON C.user_id = U.id
+        JOIN tbl_company C ON C.id = U.company_id
         LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.buyer_id = ${buyerId}
   
         WHERE PVVM.product_variant_id = $1
@@ -1945,7 +2163,6 @@ LIMIT 1;`;
   },
   checkIfExists: async (table_name, parameter, db_con = db) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
-    console.log("QUERY -> ", query)
     return new Promise(function (resolve, reject) {
       db_con.any(query,[table_name])
         .then(function (data) {
