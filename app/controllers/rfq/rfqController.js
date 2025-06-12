@@ -108,57 +108,7 @@ function filterQuotations(data) {
     .map((entry) => entry.item);
 }
 
-/* function processQuotations(data) {
-  // Group by product_id
-  const grouped = data.reduce((acc, item) => {
-    if (!acc[item.product_id]) {
-      acc[item.product_id] = [];
-    }
-    acc[item.product_id].push(item);
-    return acc;
-  }, {});
 
-  // Filter quotations
-  Object.keys(grouped).forEach((product_id) => {
-    const items = grouped[product_id];
-    if (items.length === 2) {
-      items.forEach((item, idx) => {
-        if (idx === 0) {
-          item.quotations = item.quotations.filter((_, i) => i % 2 === 0);
-        } else {
-          item.quotations = item.quotations.filter((_, i) => i % 2 !== 0);
-        }
-      });
-    }
-  });
-
-  return data;
-} */
-
-/* function processQuotations(data) {
-  const grouped = data.reduce((acc, item) => {
-    if (!acc[item.product_id]) {
-      acc[item.product_id] = [];
-    }
-    acc[item.product_id].push(item);
-    return acc;
-  }, {});
-
-  Object.values(grouped).forEach((items) => {
-    items.forEach((item, idx) => {
-      if (items.length > 1) {
-        if (idx === 0) {
-          item.quotations = item.quotations.filter((_, i) => i % 2 === 0);
-        } else if (idx === 1) {
-          item.quotations = item.quotations.filter((_, i) => i % 2 !== 0);
-        }
-        // For idx > 1, keep all quotations
-      }
-    });
-  });
-
-  return data;
-} */
 
 function processQuotations(data) {
   const grouped = data.reduce((acc, item) => {
@@ -6771,29 +6721,6 @@ listQueries: async (req, res) => {
   }
 },
 
-// addTechnicalEveluation: async (req, res) => {
-//   try {
-//     const { rfq_ID, rfq_product_id } = req.body;
-
-//     const result = rfqModel.addTechnicalEveluation(rfq_ID, rfq_product_id);
-
-//     res
-//       .status(200)
-//       .json({
-//         status: 1,
-//         // data:result,
-//         data: "product successfully added to technical eveluation"
-//       })
-//       .end();
-//   } catch (error) {
-//     logError(error);
-//     res.status(500).json({
-//         success: false,
-//         message: 'Error in adding product in technical eveluation',
-//         error: error.message
-//     });
-//   }
-// },
 
 
 addClauseUsingFile : async (req, res) => {

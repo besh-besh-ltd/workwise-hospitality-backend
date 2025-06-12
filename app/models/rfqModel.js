@@ -4514,7 +4514,7 @@ project_access_checker: async (project_id, user_id) => {
           COALESCE(latest_message_data.last_message, '') AS "last_message",
           COALESCE(latest_message_data.last_message_timestamp, NULL) AS "last_message_timestamp"
       FROM
-          (SELECT tu.id AS user_id, tu.name AS user_name, tc.company_name FROM tbl_users tu JOIN tbl_company tc ON tc.user_id = tu.id WHERE tu.id = $3) AS user_data
+          (SELECT tu.id AS user_id, tu.name AS user_name, tc.company_name FROM tbl_users tu JOIN tbl_company tc ON tc.id = tu.company_id WHERE tu.id = $3) AS user_data
       LEFT JOIN
           (SELECT COUNT(*) AS unseen_count
            FROM tbl_query_messages

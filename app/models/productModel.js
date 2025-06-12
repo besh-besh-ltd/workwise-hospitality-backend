@@ -1980,23 +1980,7 @@ FROM (
       throw new Error("Failed to fetch products by category");
     }
   },
-  /* getUserDetail: async (user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT U.name,U.email,U.address,U.new_profile_image,TC.website, TC.profile FROM tbl_users U
-        LEFT JOIN tbl_company TC ON U.id = TC.user_id
-        WHERE id = $1`,
-        [user_id]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  }, */
+
   getUserDetail: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
