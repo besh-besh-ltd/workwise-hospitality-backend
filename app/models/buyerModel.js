@@ -23,8 +23,11 @@ const buyerModel = {
       }
       
       db.any(
-        `SELECT tbl_users.*,
-        NULL AS profile_image FROM tbl_users WHERE (user_type = 2 OR user_type = 7 OR user_type = 8 OR user_type = 9 OR user_type = 10) ${dynamicQuery}
+        `SELECT u.*, tc.company_name as company_name
+        FROM tbl_users u
+        LEFT JOIN tbl_company tc ON u.company_id = tc.id
+        WHERE (u.user_type = 2 OR u.user_type = 7 OR u.user_type = 8 OR u.user_type = 9 OR u.user_type = 10) 
+        AND u.is_deleted = 0 ${dynamicQuery}
         ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
         [limit, offset]
       )
@@ -57,7 +60,10 @@ const buyerModel = {
       }
       
       db.one(
-        `SELECT count(id) from tbl_users WHERE is_deleted = 0 AND (user_type = 2 OR user_type = 7 OR user_type = 8 OR user_type = 9 OR user_type = 10) ${dynamicQuery}`
+        `SELECT count(id) 
+        FROM tbl_users 
+        WHERE is_deleted = 0 
+        AND (user_type = 2 OR user_type = 7 OR user_type = 8 OR user_type = 9 OR user_type = 10) ${dynamicQuery}`
       )
         .then(function (data) {
           resolve(data);
