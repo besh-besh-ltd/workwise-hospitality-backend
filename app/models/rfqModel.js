@@ -3245,7 +3245,7 @@ WHERE row_num_by_name_category = 1
             tu.name AS vendor_name,
             tu.email,
             tu.mobile,
-            tu.organization_name AS company_name,
+            tc.company_name AS company_name,
             tu.address,
             ${vendor_name ? "ts_rank_cd(to_tsvector('english', tc.company_name), plainto_tsquery('english', $2)) AS rank," : ''}
             ${vendor_name ? 'word_similarity(lower(tc.company_name), lower($2)) as similarity_score,' : ''}
@@ -3268,7 +3268,7 @@ WHERE row_num_by_name_category = 1
         FROM
             tbl_users tu
         LEFT JOIN
-            tbl_company tc ON tc.user_id = tu.id
+            tbl_company tc ON tc.id = tu.company_id
         LEFT JOIN
             tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = $1
         LEFT JOIN
