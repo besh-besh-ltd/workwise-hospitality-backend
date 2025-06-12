@@ -1236,8 +1236,15 @@ update_user_detail: async (req, res, next) => {
     if (reqData.name !== undefined) updateData.name = reqData.name?.trim();
     if (reqData.email !== undefined) updateData.email = reqData.email?.trim().toLowerCase();
     if (reqData.mobile !== undefined) updateData.mobile = reqData.mobile?.trim();
-    if (isAdmin && reqData.status !== undefined) updateData.status = reqData.status;
-    if (isAdmin && reqData.user_type !== undefined) updateData.user_type = reqData.user_type;
+    
+    // Only allow status updates for non-admin users
+    if (reqData.status !== undefined && targetUserId !== loggedInUser.id) {
+      // Check if target user is not an admin (user_type 7)
+      const targetUser = await userModel.userExistsById(targetUserId);
+      if (targetUser && targetUser.user_type !== 7) {
+        updateData.status = reqData.status;
+      }
+    }
     
     // Execute update
     let result;
@@ -1247,28 +1254,21 @@ update_user_detail: async (req, res, next) => {
         updateData,
         `id = ${targetUserId} AND company_id = ${loggedInUser.company_id}`
     );
-    } else { // we can use updateWhere insted of updateUserAccount
+    } else {
       result = await userModel.updateUserAccount(targetUserId, updateData);
     }
 
-
-        res
-          .status(200)
-          .json({
-            status: 1,
-            message: 'User profile updated successfully'
-          })
-          .end();
-  } catch (error) {
-    logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
+    return res.status(200).json({
+      status: 1,
+      message: "User profile updated successfully"
+    });
+  } catch (err) {
+    logError(err);
+    return res.status(400).json({
+      status: false,
+      message: Config.errorText.value
+    });
+  }
 },
 
 

@@ -298,7 +298,6 @@ const schemas = {
     mobile: Joi.string().optional(),
     status: Joi.number().valid(0, 1).optional(),
     user_id: Joi.number().optional(),
-    user_type: Joi.number().optional(),
   }),
 
   // mukul 09-06-2025, just saprate this from update_profile
