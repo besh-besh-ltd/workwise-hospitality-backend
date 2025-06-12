@@ -1209,6 +1209,23 @@ get_company_users: async (req, res, next) => {
     }
   },
 
+/**
+ * Updates user profile details with permission-based access control
+ * 
+ * This function handles updating user profile information with the following features:
+ * - Permission-based access: Company admins (user_type 7) can update other users within their company
+ * - Self-update: All users can update their own profile information
+ * - Status updates: Only allowed for non-admin users and only by admins
+ * - Field validation: Trims and formats input data
+ * - Tracking: Records who made the update and when
+ * 
+ * @param {Object} req - Express request object containing:
+ *   - user: The authenticated user making the request (from passport middleware)
+ *   - body: Request payload with fields to update (name, email, mobile, status, user_id)
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next middleware function
+ * @returns {Object} JSON response with status and message
+ */
 update_user_detail: async (req, res, next) => {
   try {
     const loggedInUser = req.user;
@@ -1218,7 +1235,7 @@ update_user_detail: async (req, res, next) => {
     // Determine target user ID
     let targetUserId = reqData.user_id && isAdmin ? reqData.user_id : loggedInUser.id;
     
-    // Check permissions
+    // Check permissions - only admins can update other users
     if (reqData.user_id && !isAdmin) {
       return res.status(403).json({
         status: false,
@@ -1226,18 +1243,18 @@ update_user_detail: async (req, res, next) => {
       });
     }
     
-    // Build update data
+    // Build update data with tracking information
     const updateData = {
       updated_at: currentDateTime(),
       updated_by: loggedInUser.id
     };
     
-    // Add fields to update
+    // Add user-provided fields to update data with proper formatting
     if (reqData.name !== undefined) updateData.name = reqData.name?.trim();
     if (reqData.email !== undefined) updateData.email = reqData.email?.trim().toLowerCase();
     if (reqData.mobile !== undefined) updateData.mobile = reqData.mobile?.trim();
     
-    // Only allow status updates for non-admin users
+    // Status updates: Only for non-admin users and only by admins
     if (reqData.status !== undefined && targetUserId !== loggedInUser.id) {
       // Check if target user is not an admin (user_type 7)
       const targetUser = await userModel.userExistsById(targetUserId);
@@ -1246,17 +1263,18 @@ update_user_detail: async (req, res, next) => {
       }
     }
     
-    // Execute update
-    let result;
-    if (isAdmin && targetUserId !== loggedInUser.id) {
-      result = await rfqModel.updateWhere(
+    // Execute update using updateWhere for all cases
+    // For admin updating another user: Ensure company_id matches
+    // For self-update: Only filter by user's own ID
+    const whereClause = isAdmin && targetUserId !== loggedInUser.id
+      ? `id = ${targetUserId} AND company_id = ${loggedInUser.company_id}`
+      : `id = ${targetUserId}`;
+      
+    await rfqModel.updateWhere(
       "tbl_users",
-        updateData,
-        `id = ${targetUserId} AND company_id = ${loggedInUser.company_id}`
+      updateData,
+      whereClause
     );
-    } else {
-      result = await userModel.updateUserAccount(targetUserId, updateData);
-    }
 
     return res.status(200).json({
       status: 1,
