@@ -52,9 +52,9 @@ const projectModel = {
                 db.any(`
                     SELECT t.* 
                     FROM tbl_projects t
-                    WHERE t.id = $1 AND t.user_id = $2;
+                    WHERE t.id = $1;
                 `,
-              [project_id, user_id]
+              [project_id]
             )
                 .then(function (data) {
                 resolve(data);
@@ -66,7 +66,7 @@ const projectModel = {
         })
     },
 
-    getProjectById: async (project_id,user_id,limit,offset) => {
+    getProjectById: async (project_id, user_id, limit, offset) => {
         return new Promise(function (resolve, reject) {
                 db.any(
                     `SELECT 
@@ -134,7 +134,6 @@ const projectModel = {
                 tbl_project_files f ON f.project_id = p.id    
             WHERE 
                 p.id = $1
-                AND p.user_id = $2
             GROUP BY 
                 p.id;
               `,
