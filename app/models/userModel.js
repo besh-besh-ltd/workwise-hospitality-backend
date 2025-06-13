@@ -3403,11 +3403,16 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     user_id = parseInt(user_id, 10); // Ensure user_id is an integer
     user_type = parseInt(user_type, 10); // Ensure user_type is an integer
     // Construct the parameterized query based on user type
-    if (user_type === 2) {
-      query = `SELECT 1
-               FROM tbl_rfq
-               WHERE id = $1
-               AND created_by = $2;`;
+    if (user_type === 2 || user_type === 8 ) {
+        query = `
+            SELECT 1 FROM tbl_rfq
+            WHERE id = $1 AND created_by = $2
+            UNION
+            SELECT 1 FROM tbl_project_team
+            WHERE project_id = (
+              SELECT project_id FROM tbl_rfq WHERE id = $1
+            ) AND user_id = $2;
+          `;
       values = [rfq_id, user_id]; // Use parameterized values
     } else if (user_type === 3) {
       query = `SELECT 1
