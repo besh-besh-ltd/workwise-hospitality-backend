@@ -841,7 +841,7 @@ const sendQuoteNotificationToVendor = async (req) => {
 };
 
 
-const sendReminderRFQMAIL = async (vendoritem, remainingProducts, org_name,rfq_id, rfqBasicDetails, buyer_id, buyer_email) => {
+const sendReminderRFQMAIL = async (vendoritem, remainingProducts, org_name,rfq_id, rfqBasicDetails) => {
   let user_details = await userModel.user_profile_detail(vendoritem.user_id);
   const token = await rfqModel.getVendorRfqToken(vendoritem.user_id, rfq_id);
   const vendorName =  user_details[0].organization_name || user_details[0].name
@@ -876,7 +876,7 @@ const containerContent = `
 
   // console.log(containerContent)
   
-  const dynamicHTML = generateEmailTemplate(headerContent, containerContent, buyer_id)
+  const dynamicHTML = generateEmailTemplate(headerContent, containerContent, rfqBasicDetails.created_by)
 
     const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
 
@@ -888,10 +888,10 @@ const containerContent = `
     };
     if (spocList && spocList.length > 0) {
       mailRecipients.to = spocList.map(spoc => spoc.email);
-      mailRecipients.cc = [user_details[0].email, buyer_email];
+      mailRecipients.cc = [user_details[0].email, rfqBasicDetails.response_email];
     } else {
       mailRecipients.to = user_details[0].email;
-      mailRecipients.cc = buyer_email
+      mailRecipients.cc = rfqBasicDetails.response_email
     }
     sendMail(mailRecipients);
 
@@ -4088,17 +4088,25 @@ const rfqController = {
         .end();
     }
   },
+
+  /**
+   * @description This function sends a reminder to vendors for a specific RFQ. who have not submited the quote for all products.
+   * @users can send max 3 reminder in a day, foradmin there are no limit, 1 - admin, 5 subadmin - 6 data entry 
+   */
   sendReminder: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { organization_name, name, id, email } = req.user;
+    const isCurrentUserAdmin = [1,5,6].includes(req.user.user_type);
+
 
     try {
 
       // const date = new Date('2024-11-28').toISOString().slice(0, 10);  // Format, YYYY-MM-DD
       const date = new Date().toISOString().slice(0, 10); 
-  
-      const lastActivity = await rfqModel.getRFQActivity(rfq_id, id, date);
 
+      //  if admin then skip this check
+      if(!isCurrentUserAdmin){
+      const lastActivity = await rfqModel.getRFQActivity(rfq_id, id, date);
       if ( lastActivity?.length > 2) {
           return res
             .status(403)
@@ -4108,23 +4116,13 @@ const rfqController = {
             })
             .end();
       }
+      }
 
       const rfqBasicDetails = await rfqModel.getRfqDetailsById(rfq_id)
       let vendors = await rfqModel.gerRFQVendors(rfq_id);
       const quote_vendor = await rfqModel.quoteVendor(rfq_id);
 
       const createdByIds = new Set(quote_vendor.map((item) => item.created_by));
-
-      // const unmatchedVendors = vendors.filter(
-      //   async (vendor) => {
-      //     const vendorProducts = await rfqModel.getVendorProductsCount(rfq_id, vendor.user_id)
-      //     const vendorProductsQuoted = await rfqModel.getVendorProductsQuoted(rfq_id, vendor.user_id)
-      //     if(vendorProducts) {
-      //       const productsCount = vendorProducts[0].count
-      //     }
-      //     return !createdByIds.has(vendor.user_id)
-      //   }
-      // );
 
       const unmatchedVendors = (
         await Promise.all(
@@ -4149,7 +4147,8 @@ const rfqController = {
       vendors = unmatchedVendors;
       let org_name = organization_name ? organization_name : name;
 
-      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item.vendor, item.remainingProducts, org_name, rfq_id,rfqBasicDetails, id,email  )))
+      console.log(" vendors ", vendors)
+      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item.vendor, item.remainingProducts, org_name, rfq_id,rfqBasicDetails  )))
         .then(async () => {
           try {
             await rfqModel.insertRFQActivity(rfq_id, id);
