@@ -3021,6 +3021,7 @@ const rfqController = {
   },
   getRfqById: async (req, res, next) => {
     let id = req.params.id;
+    const { user_type, id:user_id } = req.user;
     // Determine the user ID to check based on the verification status
     const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
 
@@ -3061,16 +3062,16 @@ const rfqController = {
 
 
     try {
-      if (req.user.user_type == 2) {
+      if (user_type == 2 || user_type == 8) {
         // for buyer
-        // check if the buyer created the rfq
-        let created_by = await rfqModel.getRFQCreatedBy(id);
-        if (created_by.length > 0 && created_by[0].email == req.user.email) {
-        } else {
+        // check if the user is part of the team
+        let allowBuyerViewAccess = await userModel.user_rfq_access_review(id, user_id, user_type);
+        if (!allowBuyerViewAccess) {
           res
             .status(200)
             .json({
               status: 1,
+              message: 'You are not authorized to view this RFQ',
               data: []
             })
             .end();
@@ -3141,6 +3142,7 @@ const rfqController = {
         
       }
 
+      // this block is for vendor, to show only those products which are assigned to the vendor
       if (req.user.user_type != 2) {
         const userProducts = await rfqModel.getUserProducts(id, req.user.id);
         if (

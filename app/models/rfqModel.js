@@ -5949,7 +5949,13 @@ rfqProductReport: async (userId, productId, productName, startDate, endDate) => 
         ON TRPV.rfq_id = T.id AND TRPV.product_variant_id = TRP.product_variant_id
     LEFT JOIN tbl_users TU ON TU.id = TRPV.user_id
 
-    WHERE T.created_by = $1
+     WHERE (
+     T.created_by = $1
+     OR T.project_id IN (
+     SELECT project_id FROM tbl_project_team WHERE user_id = $1
+     )
+    )
+
         AND PV.id = $2
         AND ($3::date IS NULL OR T.timestamp::date >= $3::date)
         AND ($4::date IS NULL OR T.timestamp::date <= $4::date)
@@ -6260,7 +6266,12 @@ getAllDraftRfqs: async (limit, offset, user_id, project_id, sort, reverse_auctio
           ) AS "products"
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
-      WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 0
+      WHERE (
+        RFQ.created_by = ${user_id}
+        OR RFQ.project_id IN (
+          SELECT project_id FROM tbl_project_team WHERE user_id = ${user_id}
+        )
+      ) AND RFQ.is_published = 0
       ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
       ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
       ${reverse_auction == '-1' ? '' : ` AND RFQ.reverse_auction = ${reverse_auction}`}
@@ -6318,7 +6329,7 @@ searchEmailAndNameForVendor: async (rfq_id , product_id) => {
 
 
   return result || [];
-}
+},
 
 }
 export default rfqModel;
