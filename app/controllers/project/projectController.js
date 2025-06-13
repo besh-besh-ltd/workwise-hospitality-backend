@@ -252,7 +252,7 @@ const projectController = {
 
       let udpatedProject;
       
-      if (user_type === 7) {
+      if (user_type === 7 || user_type === 8 || user_type === 2) {
         // Admin can update any project
         const tbl_project_data = {
           description,
