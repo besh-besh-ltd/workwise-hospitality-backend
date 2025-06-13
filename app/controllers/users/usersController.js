@@ -534,16 +534,19 @@ get_company_users: async (req, res, next) => {
       10: "Finance"
     };
     
-    const formattedUsers = users.map(user => ({
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      mobile: user.mobile,
-      role: user.user_type,
-      role_name: userTypeMap[user.user_type] || "Unknown",
-      status: user.status === 1 ? "active" : "inactive",
-      created_at: user.created_at
-    }));
+    const formattedUsers = users
+      .filter(user => user.user_type !== 7)
+      .map(user => ({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        mobile: user.mobile,
+        role: user.user_type,
+        role_name: userTypeMap[user.user_type] || "Unknown",
+        status: user.status === 1 ? "active" : "inactive",
+        created_at: user.created_at
+      }));
+
     
     res.status(200).json({
       status: true,
