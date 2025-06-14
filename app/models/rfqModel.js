@@ -580,12 +580,12 @@ const rfqModel = {
         });
     });
   },
-  insertArray: async (dataArray, keys, table_name) => {
+  insertArray: async (dataArray, keys, table_name, db_con = db) => {
     const insertQuery =
       pgp.helpers.insert(dataArray, keys, table_name) + ' RETURNING *';
 
     return new Promise(function (resolve, reject) {
-      db.manyOrNone(insertQuery)
+      db_con.manyOrNone(insertQuery)
         .then(function (data) {
           resolve(data);
         })
@@ -595,19 +595,19 @@ const rfqModel = {
         });
     });
   },
-  delete: async (table, conditions) => {
+  delete: async (table, conditions, db_con = db) => {
     const conditionClauses = [];
     const conditionValues = [];
     let index = 1;
 
     for (const [key, value] of Object.entries(conditions)) {
-        if (key === 'user_ids') {
+        if (key === 'user_ids' && (value?.length ?? []) > 0) {
             conditionClauses.push(`user_id IN (${value.map(() => `$${index++}`).join(', ')})`);
             conditionValues.push(...value);
-        } else if (key === '-user_ids') {
+        } else if (key === '-user_ids' && (value?.length ?? []) > 0) {
           conditionClauses.push(`user_id NOT IN (${value.map(() => `$${index++}`).join(', ')})`);
           conditionValues.push(...value);
-        } else {
+        } else if ((!Array.isArray(value) && typeof value != 'object')) {
             conditionClauses.push(`${key} = $${index++}`);
             conditionValues.push(value);
         }
@@ -617,7 +617,7 @@ const rfqModel = {
     const query = `DELETE FROM ${table} WHERE ${conditionString} RETURNING *`;
 
     try {
-        const result = await db.query(query, conditionValues);
+        const result = await db_con.query(query, conditionValues);
         return result; // Number of rows deleted
     } catch (error) {
         console.error(`Error deleting from ${table}:`, error);
@@ -625,7 +625,7 @@ const rfqModel = {
     }
   },
 
-  deleteWithReturnIds: async (table, conditions, includeMeta, excludeMeta) => {
+  deleteWithReturnIds: async (table, conditions, includeMeta, excludeMeta, db_con = db) => {
     const conditionKeys = Object.keys(conditions);
     const conditionString = conditionKeys.map((key, index) => `${key} = $${index + 1}`).join(' AND ');
     const conditionValues = conditionKeys.map(key => conditions[key]);
@@ -645,10 +645,10 @@ const rfqModel = {
     const deleteQuery = `DELETE FROM ${table} WHERE ${conditionString} ${includeCondition} ${excludeCondition}`;
 
     return new Promise((resolve, reject) => {
-        db.query(idQuery, conditionValues)
+        db_con.query(idQuery, conditionValues)
             .then(async (idResult) => {
                 const ids = idResult.map(row => row.id);
-                return db.query(deleteQuery, conditionValues).then(() => resolve(ids));
+                return db_con.query(deleteQuery, conditionValues).then(() => resolve(ids));
             })
             .catch((error) => {
                 console.error(`Error deleting from ${table}:`, error);
@@ -808,7 +808,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         });
     });
   },
-  updateWhere: async (table_name, data, where_clause) => {
+  updateWhere: async (table_name, data, where_clause, db_con = db) => {
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
       .join(', ');
@@ -820,7 +820,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       RETURNING *`;
 
     return new Promise(function (resolve, reject) {
-      db.query(updateQuery, values)
+      db_con.query(updateQuery, values)
         .then(function (data) {
           resolve(data);
         })
@@ -1211,6 +1211,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         productMakes,
       } = filters;
 
+      const isAnyFilterActive = Object.keys(filters).filter(key => !!filters[key]).length > 0
+
       let turnoverCondition = '';
 
       turnOver = {
@@ -1242,13 +1244,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         dynamicJoin += `
           JOIN tbl_vendorapprove_product_mapping vum 
             ON vum.variant_vendor_mapping_id = pvvm.id
-        `;
-      }
-
-      if(vendor_info) {
-        dynamicJoin += `
-          LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
-            ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
         `;
       }
 
@@ -1379,38 +1374,72 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         `;
       }
 
-      let q = `
-      SELECT 
-        DISTINCT ON (tu.name, tu.id) tu.id AS user_id, 
-        tu.name, 
-        ${vendor_name ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $3) AS similarity_score,' : ''} 
-        JSON_BUILD_OBJECT(
-          'id', tu.id,
-          'name', tu.name,
-          'company_name', COALESCE(tc.company_name, tu.organization_name, tu.name),
-          'email', tu.email,
-          'address', tu.address,
-          'mobile', tu.mobile
-        ) AS user_details
+      let q = null;
 
-        FROM tbl_rfq_products trp
-        JOIN tbl_rfq_product_vendors trpv 
-          ON trpv.rfq_id = trp.rfq_id 
-            AND trpv.product_variant_id = trp.product_variant_id 
-            AND trpv.variant = trp.variant
-        JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
-        JOIN tbl_users tu ON trpv.user_id = tu.id
-        JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id
-        JOIN tbl_company tc ON tu.company_id = tc.id
-
-        ${dynamicJoin}
-
-        WHERE trp.rfq_id = $1
-            AND trp.id = $2
-            ${dynamicWhere}
-          
-        ORDER BY ${vendor_name ? 'tu.name, similarity_score DESC' : 'tu.name'}
-      `;
+      if(isAnyFilterActive) {
+        q = `
+          SELECT 
+            DISTINCT ON (tu.name, tu.id) tu.id AS user_id, 
+            tu.name, 
+            ${vendor_name ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $3) AS similarity_score,' : ''} 
+            JSON_BUILD_OBJECT(
+              'id', tu.id,
+              'name', tu.name,
+              'company_name', COALESCE(tc.company_name, tu.organization_name, tu.name),
+              'email', tu.email,
+              'address', tu.address,
+              'mobile', tu.mobile
+            ) AS user_details
+    
+            FROM tbl_rfq_products trp
+            JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
+            JOIN tbl_product tp ON tpv.product_id = tp.id
+            JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id
+            JOIN tbl_users tu ON tu.id = pvvm.vendor_id
+            LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
+              ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+            JOIN tbl_company tc ON tu.company_id = tc.id
+    
+            ${dynamicJoin}
+    
+            WHERE trp.rfq_id = $1
+                AND trp.id = $2
+                AND tp.status = 1 AND tpv.status = 1 AND tp.is_deleted = 0 AND tp.is_review = 0 AND tp.is_approve = 1 AND tpv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
+                AND tu.is_deleted = 0 AND tu.status = 1
+                ${dynamicWhere}
+              
+            ORDER BY ${vendor_name ? 'tu.name, similarity_score DESC' : 'tu.name'}
+        `;
+      } else {
+        q = `
+          SELECT 
+            DISTINCT ON (tu.name, tu.id) tu.id AS user_id, 
+            tu.name, 
+            JSON_BUILD_OBJECT(
+              'id', tu.id,
+              'name', tu.name,
+              'company_name', COALESCE(tc.company_name, tu.organization_name, tu.name),
+              'email', tu.email,
+              'address', tu.address,
+              'mobile', tu.mobile
+            ) AS user_details
+    
+            FROM tbl_rfq_products trp
+            JOIN tbl_rfq_product_vendors trpv 
+              ON trpv.rfq_id = trp.rfq_id 
+                AND trpv.product_variant_id = trp.product_variant_id 
+                AND trpv.variant = trp.variant
+            JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
+            JOIN tbl_users tu ON trpv.user_id = tu.id
+            JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id
+            JOIN tbl_company tc ON tu.company_id = tc.id
+    
+            WHERE trp.rfq_id = $1
+                AND trp.id = $2
+              
+            ORDER BY tu.name
+        `;
+      }
 
       return db.any(q, [draftId, rfqProductId, vendor_name])
 
