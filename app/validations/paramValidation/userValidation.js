@@ -237,12 +237,12 @@ const schemas = {
     organization_name: Joi.string().optional().allow(null).allow(''),
     register_as: Joi.string()
       .required()
-      .regex(/^[2|3|4]$/, 'status should be 2 or 3 or 4'),
+      .regex(/^[2|3|7|8|9|10]$/, 'status should be 2 / 3/ 7 / 8 / 9 / 10'), // 2 productemnt, 3 vendor, 7 buyer company account, 8 top management, 9 eng account, 10 finance account
 
     password: Joi.string().min(3).max(15).required().label('Password'),
     confirm_password: Joi.any().valid(Joi.ref('password')).required().messages({
       'any.only': 'Password and Confirm password not matched'
-    })
+    }),
   }),
   vendor_review: Joi.object().keys({
     reviewed_to: Joi.string()
@@ -293,35 +293,31 @@ const schemas = {
   }),
 
   update_profile: Joi.object().keys({
+    email: Joi.string().email().optional(),
+    name: Joi.string().optional(),
+    mobile: Joi.string().optional(),
+    status: Joi.number().valid(0, 1).optional(),
+    user_id: Joi.number().optional(),
+  }),
+
+  // mukul 09-06-2025, just saprate this from update_profile
+  company_profile: Joi.object().keys({
     company_name: Joi.string().optional().allow(null).allow(''),
-    name: Joi.string().optional().allow(null).allow(''),
-    location: Joi.object({
-      country: Joi.string().optional().allow(null, ''),
-      state: Joi.string().optional().allow(null, ''),
-      city: Joi.string().optional().allow(null, '')
-    })
-      .optional()
-      .allow(null),
-    email: Joi.string().optional().allow(null).allow(''),
-    mobile: Joi.string().optional().allow(null).allow(''),
+    established_year: Joi.number().optional().allow(null).allow(''),
+    about_company : Joi.string().optional().allow(null).allow(''), // in tbl_company this is we have as profile
     gstin: Joi.string().optional().allow(null).allow(''),
-    cin: Joi.string().optional().allow(null).allow(''),
-    profile: Joi.string().optional().allow(null).allow(''),
-    linkedin: Joi.string().optional().allow(null).allow(''),
-    facebook: Joi.string().optional().allow(null).allow(''),
-    whatsapp: Joi.string().optional().allow(null).allow(''),
-    skype: Joi.string().optional().allow(null).allow(''),
-    vendor_approve: Joi.array().items(Joi.number()).allow(null),
+    website : Joi.string().optional().allow(null).allow(''),
+    street_address: Joi.string().optional().allow(null).allow(''),
+    postal_code: Joi.number().optional().allow(null),
+    country: Joi.number().optional().allow(null),
+    state: Joi.number().optional().allow(null),
+    city: Joi.number().optional().allow(null),
     nature_of_business: Joi.string().optional().allow(null).allow(''),
     type_of_business: Joi.string().optional().allow(null).allow(''),
-    turnover: Joi.string().optional().allow(null).allow(''),
+    turnover: Joi.string().optional().allow(null),
     no_of_employess: Joi.string().optional().allow(null).allow(''),
-    certifications: Joi.string().optional().allow(null).allow(''),
-    address: Joi.string().optional().allow(null).allow(''),
     import_export_code: Joi.string().optional().allow(null).allow(''),
-    country: Joi.string().optional().allow(null, ''),
-    state: Joi.string().optional().allow(null, ''),
-    city: Joi.string().optional().allow(null, '')
+    cin: Joi.string().optional().allow(null).allow(''),
   }),
   enquiry: Joi.object().keys({
     first_name: Joi.string().required(),
@@ -506,7 +502,12 @@ const schemas = {
       )
       .min(7) // Minimum 10 digits if non-empty
       .max(15) // Maximum 15 digits if non-empty
-  })
+  }),
+  id: Joi.object().keys({
+    id: Joi.string()
+      .required()
+      .regex(/^[0-9]*$/, 'Please send proper id')
+  }),
 };
 
 let store_buyer_excel_upload_vendor_file = multer.diskStorage({

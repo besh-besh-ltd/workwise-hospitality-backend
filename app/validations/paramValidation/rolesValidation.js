@@ -122,6 +122,11 @@ const schemas = {
   update_subadmins: Joi.object().keys({
     name: Joi.string().required(),
     mobile: Joi.string().min(10).max(15).required().label('Mobile')
+  }),
+  update_user_account: Joi.object().keys({
+    name: Joi.string().required(),
+    email: Joi.string().required().email().max(100),
+    mobile: Joi.string().min(8).max(15).required().label('Mobile')
   })
 };
 

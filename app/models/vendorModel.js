@@ -23,15 +23,15 @@ const vendorModel = {
           AND (
             to_tsvector('english', tbl_users.name) @@ plainto_tsquery('english', '${escapedName}')
             OR similarity(tbl_users.name, '${escapedName}') > 0.1
-            OR to_tsvector('english', tbl_users.organization_name) @@ plainto_tsquery('english', '${escapedName}')
-            OR similarity(tbl_users.organization_name, '${escapedName}') > 0.1
+            OR to_tsvector('english', COALESCE(tbl_company.company_name, tbl_users.organization_name)) @@ plainto_tsquery('english', '${escapedName}')
+            OR similarity(COALESCE(tbl_company.company_name, tbl_users.organization_name), '${escapedName}') > 0.1
           )`;
       }
       if (organization) {
         dynamicQuery += `
           AND (
-            to_tsvector('english', tbl_users.organization_name) @@ plainto_tsquery('english', '${escapedOrganization}')
-            OR similarity(tbl_users.organization_name, '${escapedOrganization}') > 0.1
+            to_tsvector('english', COALESCE(tbl_company.company_name, tbl_users.organization_name)) @@ plainto_tsquery('english', '${escapedOrganization}')
+            OR similarity(COALESCE(tbl_company.company_name, tbl_users.organization_name), '${escapedOrganization}') > 0.1
             OR to_tsvector('english', tbl_users.name) @@ plainto_tsquery('english', '${escapedOrganization}')
             OR similarity(tbl_users.name, '${escapedOrganization}') > 0.1
           )`;
@@ -66,26 +66,26 @@ const vendorModel = {
           ORDER BY
             CASE
               WHEN LOWER(tbl_users.name) = LOWER('${searchTerm}') THEN 10
-              WHEN LOWER(tbl_users.organization_name) = LOWER('${searchTerm}') THEN 10
+              WHEN LOWER(COALESCE(tbl_company.company_name, tbl_users.organization_name)) = LOWER('${searchTerm}') THEN 10
               ELSE 0
             END DESC,
             CASE
               WHEN LOWER(tbl_users.name) ILIKE LOWER('${searchTerm}%') THEN 8
-              WHEN LOWER(tbl_users.organization_name) ILIKE LOWER('${searchTerm}%') THEN 8
+              WHEN LOWER(COALESCE(tbl_company.company_name, tbl_users.organization_name)) ILIKE LOWER('${searchTerm}%') THEN 8
               ELSE 0
             END DESC,
             CASE
               WHEN LOWER(tbl_users.name) ILIKE LOWER('%${searchTerm}%') THEN 6
-              WHEN LOWER(tbl_users.organization_name) ILIKE LOWER('%${searchTerm}%') THEN 6
+              WHEN LOWER(COALESCE(tbl_company.company_name, tbl_users.organization_name)) ILIKE LOWER('%${searchTerm}%') THEN 6
               ELSE 0
             END DESC,
             GREATEST(
               COALESCE(ts_rank_cd(to_tsvector('english', tbl_users.name), plainto_tsquery('english', '${searchTerm}')), 0),
-              COALESCE(ts_rank_cd(to_tsvector('english', tbl_users.organization_name), plainto_tsquery('english', '${searchTerm}')), 0)
+              COALESCE(ts_rank_cd(to_tsvector('english', COALESCE(tbl_company.company_name, tbl_users.organization_name)), plainto_tsquery('english', '${searchTerm}')), 0)
             ) DESC,
             GREATEST(
               COALESCE(similarity(tbl_users.name, '${searchTerm}'), 0),
-              COALESCE(similarity(tbl_users.organization_name, '${searchTerm}'), 0)
+              COALESCE(similarity(COALESCE(tbl_company.company_name, tbl_users.organization_name), '${searchTerm}'), 0)
             ) DESC,
             tbl_users.created_at DESC
         `;
@@ -97,10 +97,8 @@ const vendorModel = {
           tbl_users.name,
           tbl_users.email,
           tbl_users.mobile,
-          tbl_users.organization_name,
+          COALESCE(tbl_company.company_name, tbl_users.organization_name) AS organization_name,
           tbl_users.status,
-          tbl_users.new_profile_image,
-          tbl_users.original_profile_image,
           tbl_users.created_at,
           tbl_users.updated_at,
           creator.name AS created_by_name,
@@ -109,27 +107,25 @@ const vendorModel = {
           ${(name || organization) ? `
           CASE
             WHEN LOWER(tbl_users.name) = LOWER('${escapedName || escapedOrganization}') THEN 10
-            WHEN LOWER(tbl_users.organization_name) = LOWER('${escapedName || escapedOrganization}') THEN 10
+            WHEN LOWER(COALESCE(tbl_company.company_name, tbl_users.organization_name)) = LOWER('${escapedName || escapedOrganization}') THEN 10
             WHEN LOWER(tbl_users.name) ILIKE LOWER('${escapedName || escapedOrganization}%') THEN 8
-            WHEN LOWER(tbl_users.organization_name) ILIKE LOWER('${escapedName || escapedOrganization}%') THEN 8
+            WHEN LOWER(COALESCE(tbl_company.company_name, tbl_users.organization_name)) ILIKE LOWER('${escapedName || escapedOrganization}%') THEN 8
             WHEN LOWER(tbl_users.name) ILIKE LOWER('%${escapedName || escapedOrganization}%') THEN 6
-            WHEN LOWER(tbl_users.organization_name) ILIKE LOWER('%${escapedName || escapedOrganization}%') THEN 6
+            WHEN LOWER(COALESCE(tbl_company.company_name, tbl_users.organization_name)) ILIKE LOWER('%${escapedName || escapedOrganization}%') THEN 6
             ELSE 0
           END AS exact_match_score,
           GREATEST(
             COALESCE(ts_rank_cd(to_tsvector('english', tbl_users.name), plainto_tsquery('english', '${escapedName || escapedOrganization}')), 0),
-            COALESCE(ts_rank_cd(to_tsvector('english', tbl_users.organization_name), plainto_tsquery('english', '${escapedName || escapedOrganization}')), 0)
+            COALESCE(ts_rank_cd(to_tsvector('english', COALESCE(tbl_company.company_name, tbl_users.organization_name)), plainto_tsquery('english', '${escapedName || escapedOrganization}')), 0)
           ) AS rank,
           GREATEST(
             COALESCE(similarity(tbl_users.name, '${escapedName || escapedOrganization}'), 0),
-            COALESCE(similarity(tbl_users.organization_name, '${escapedName || escapedOrganization}'), 0)
+            COALESCE(similarity(COALESCE(tbl_company.company_name, tbl_users.organization_name), '${escapedName || escapedOrganization}'), 0)
           ) AS similarity_score,
           ` : ''}
-          CASE
-            WHEN tbl_users.new_profile_image IS NULL THEN NULL
-            ELSE tbl_users.new_profile_image
-          END AS profile_image  
+          NULL AS profile_image  
         FROM tbl_users 
+        LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
         LEFT JOIN tbl_reject_reason trr ON tbl_users.reject_reason_id = trr.id
         LEFT JOIN tbl_users creator ON tbl_users.created_by = creator.id
         LEFT JOIN tbl_users updater ON tbl_users.updated_by = updater.id
@@ -155,53 +151,54 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     const escapedOrganization = organization ? vendorModel._escapeSqlString(organization) : null;
     const escapedEmail = email ? vendorModel._escapeSqlString(email) : null;
     
-    let dynamicQuery = 'AND user_type = 3 ';
+    let dynamicQuery = 'AND tbl_users.user_type = 3 ';
     if (name) {
       dynamicQuery += `
         AND (
-          to_tsvector('english', name) @@ plainto_tsquery('english', '${escapedName}')
-          OR similarity(name, '${escapedName}') > 0.1
-          OR to_tsvector('english', organization_name) @@ plainto_tsquery('english', '${escapedName}')
-          OR similarity(organization_name, '${escapedName}') > 0.1
+          to_tsvector('english', tbl_users.name) @@ plainto_tsquery('english', '${escapedName}')
+          OR similarity(tbl_users.name, '${escapedName}') > 0.1
+          OR to_tsvector('english', COALESCE(tbl_company.company_name, tbl_users.organization_name)) @@ plainto_tsquery('english', '${escapedName}')
+          OR similarity(COALESCE(tbl_company.company_name, tbl_users.organization_name), '${escapedName}') > 0.1
         )`;
     }
     if (organization) {
       dynamicQuery += `
         AND (
-          to_tsvector('english', organization_name) @@ plainto_tsquery('english', '${escapedOrganization}')
-          OR similarity(organization_name, '${escapedOrganization}') > 0.1
-          OR to_tsvector('english', name) @@ plainto_tsquery('english', '${escapedOrganization}')
-          OR similarity(name, '${escapedOrganization}') > 0.1
+          to_tsvector('english', COALESCE(tbl_company.company_name, tbl_users.organization_name)) @@ plainto_tsquery('english', '${escapedOrganization}')
+          OR similarity(COALESCE(tbl_company.company_name, tbl_users.organization_name), '${escapedOrganization}') > 0.1
+          OR to_tsvector('english', tbl_users.name) @@ plainto_tsquery('english', '${escapedOrganization}')
+          OR similarity(tbl_users.name, '${escapedOrganization}') > 0.1
         )`;
     }
     if (verified == 't') {
-      dynamicQuery += `AND status = 1 `;
+      dynamicQuery += `AND tbl_users.status = 1 `;
     } else if (verified == 'f') {
-      dynamicQuery += `AND status = 0 `;
+      dynamicQuery += `AND tbl_users.status = 0 `;
     }
     if (email) {
-      dynamicQuery += `AND email ILIKE '%${escapedEmail}%'`;
+      dynamicQuery += `AND tbl_users.email ILIKE '%${escapedEmail}%'`;
     }
     if (status !== undefined && status !== null) {
-      dynamicQuery += `AND status = ${status}`;
+      dynamicQuery += `AND tbl_users.status = ${status}`;
     }
     if (dateFrom) {
-      dynamicQuery += `AND created_at >= '${dateFrom}'`;
+      dynamicQuery += `AND tbl_users.created_at >= '${dateFrom}'`;
     }
     if (dateTo) {
-      dynamicQuery += `AND created_at <= '${dateTo} 23:59:59'`;
+      dynamicQuery += `AND tbl_users.created_at <= '${dateTo} 23:59:59'`;
     }
     if (created_by) {
-      dynamicQuery += `AND created_by = ${created_by}`;
+      dynamicQuery += `AND tbl_users.created_by = ${created_by}`;
     }
 
     const query = `
     SELECT
-      COUNT(*) FILTER (WHERE is_deleted = 0 ${dynamicQuery}) AS total_vendors,
-      COUNT(*) FILTER (WHERE is_deleted = 1 ${dynamicQuery}) AS deleted_vendors,
-      COUNT(*) FILTER (WHERE is_deleted = 0 AND status = 1 ${dynamicQuery}) AS active_vendors,
-      COUNT(*) FILTER (WHERE is_deleted = 0 AND status = 0 ${dynamicQuery}) AS deactivated_vendors
+      COUNT(*) FILTER (WHERE tbl_users.is_deleted = 0 ${dynamicQuery}) AS total_vendors,
+      COUNT(*) FILTER (WHERE tbl_users.is_deleted = 1 ${dynamicQuery}) AS deleted_vendors,
+      COUNT(*) FILTER (WHERE tbl_users.is_deleted = 0 AND tbl_users.status = 1 ${dynamicQuery}) AS active_vendors,
+      COUNT(*) FILTER (WHERE tbl_users.is_deleted = 0 AND tbl_users.status = 0 ${dynamicQuery}) AS deactivated_vendors
     FROM tbl_users
+    LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
   `;
 
     db.one(query)
@@ -315,14 +312,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
   getVendorDetails: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT tbl_users.*,tbl_company.profile,tbl_company.nature_of_business,tbl_company.no_of_employess,tbl_company.gstin,tbl_company.import_export_code,tbl_company.certifications,
-        ARRAY
-        (SELECT json_build_object('brochure',tbl_files.new_file_name,'brochure_url', CASE
-        WHEN tbl_files.file_name IS NULL THEN
-        NULL
-        ELSE tbl_files.new_file_name
-        END  )
-          FROM tbl_files  WHERE  tbl_files.user_id = tbl_users.id AND tbl_files.doc_type = 'brochure') AS "brochure",
+        `SELECT tbl_users.*,tbl_company.profile,tbl_company.nature_of_business,tbl_company.no_of_employess,tbl_company.gstin,tbl_company.import_export_code,
        ARRAY
           (SELECT json_build_object('ptr',tbl_files.new_file_name,'ptr_url', CASE
           WHEN tbl_files.new_file_name IS NULL THEN
@@ -369,25 +359,9 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
               ELSE 0
             END DESC
         ) AS "vendor_approve",
-        CASE
-        WHEN new_profile_image IS NULL THEN
-        NULL
-        ELSE new_profile_image
-        END AS profile_image  FROM tbl_users left join tbl_company on tbl_users.id = tbl_company.user_id  WHERE is_deleted = 0 AND user_type = 3 AND tbl_users.id = $1`,
+        NULL AS profile_image  FROM tbl_users left join tbl_company on tbl_users.company_id = tbl_company.id  WHERE is_deleted = 0 AND user_type = 3 AND tbl_users.id = $1`,
         [vendorId]
       )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  getCompanyDetails: async (vendorId) => {
-    return new Promise(function (resolve, reject) {
-      db.any('SELECT * FROM tbl_company WHERE user_id = $1', [vendorId])
         .then(function (data) {
           resolve(data);
         })
@@ -439,8 +413,8 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     return new Promise(function (resolve, reject) {
       db.any(
         `INSERT INTO tbl_users(name, email, mobile, organization_name, user_type, password,
-           status,created_by,new_profile_image,original_profile_image) 
-        VALUES($1, $2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+           status,created_by) 
+        VALUES($1, $2,$3,$4,$5,$6,$7,$8) RETURNING id`,
         [
           vendorObj.name,
           vendorObj.email,
@@ -449,9 +423,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
           vendorObj.register_as,
           vendorObj.password,
           vendorObj.status,
-          vendorObj.created_by,
-          vendorObj.fileName || null,
-          vendorObj.originalFilename || null
+          vendorObj.created_by
         ]
       )
         .then(function (data) {
@@ -535,7 +507,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     return new Promise(function (resolve, reject) {
       let dynamicUpdate = ``;
       if (vendorObj.originalFilename) {
-        dynamicUpdate = `,new_profile_image = '${vendorObj.fileName}',original_profile_image = '${vendorObj.originalFilename}'`;
+        dynamicUpdate = ``;
       }
       db.one(
         `UPDATE 
@@ -666,7 +638,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
             ELSE 0
           END AS partial_word_match` : ''}
          FROM tbl_users tu
-         LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+         LEFT JOIN tbl_company tc ON tu.company_id = tc.id
          WHERE tc.id IS NOT NULL AND tu.is_deleted = 0 AND (tu.user_type = 3 OR tu.user_type = 4) 
          ${search ? ` AND (
           to_tsvector('english', tc.company_name) @@ plainto_tsquery('english', $1)
@@ -789,7 +761,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
           JOIN tbl_users TU
               ON TU.id = TRPV.user_id
           LEFT JOIN tbl_company TUC
-              ON TUC.user_id = TU.id 
+              ON TU.company_id = TUC.id 
           WHERE TR.created_by = $1
               AND TU.is_deleted = 0 
               AND TU.status = 1 
@@ -925,7 +897,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
           ) AS spocs
         FROM tbl_users u
         LEFT JOIN tbl_users_spoc s ON s.user_id = u.id AND s.is_deleted = 0
-        LEFT JOIN tbl_company c ON c.user_id = u.id
+        LEFT JOIN tbl_company c ON u.company_id = c.id
         WHERE u.id = ANY($1)
         GROUP BY u.id, c.company_name
       `;

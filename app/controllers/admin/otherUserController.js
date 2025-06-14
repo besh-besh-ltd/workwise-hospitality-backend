@@ -13,6 +13,8 @@ import subscriptionModel from '../../models/subscriptionModel.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
+// mukul 06-06-2025 , this complete file is not in use, cross check and remove
+
 const otherUserController = {
   otheruserList: async (req, res, next) => {
     try {

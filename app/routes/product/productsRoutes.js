@@ -81,6 +81,7 @@ ProductsRoutes.put(
   ProductsController.vendorProductUpdate
 );
 
+// mukul 07-06-2025 ,  not in use, cross check and remove
 ProductsRoutes.post(
   '/bulk-product-create',
   passportSignIn,
@@ -131,6 +132,7 @@ ProductsRoutes.get(
    ProductsController.searchProductsByCategory
   );
 
+  // mukul 07-06-2025 ,  not in use, cross check and remove
   ProductsRoutes.get(
     '/products-by-name-category-slug',
      ProductsController.getProductBySlugAndCategorySlug

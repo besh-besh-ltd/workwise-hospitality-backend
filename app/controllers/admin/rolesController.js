@@ -384,6 +384,39 @@ const rolesController = {
         })
         .end();
     }
+  },
+  updateUserAccount: async (req, res, next) => {
+    try {
+      let userId = req.params.id;
+      let updatedBy = req.user.id;
+      const { name, email, mobile } = req.body;
+      
+      let userObj = {
+        name,
+        email,
+        mobile,
+        updated_at: currentDateTime()
+      };
+      
+      await rolesModel.updateUserAccount(userId, userObj);
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          message: 'User account updated successfully'
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
   }
 };
 export default rolesController;

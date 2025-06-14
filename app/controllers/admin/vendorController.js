@@ -115,14 +115,18 @@ const vendorController = {
         cin,
         turn_over,
         total_employees,
-        ptr_project_name,
-        ptr_project_description,
-        ptr_project_start_date,
-        ptr_project_end_date,
         about_vendor_company,
         spocs
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
+      
+      let cleanedMobile = mobile || null;
+      if (cleanedMobile) {
+        cleanedMobile = cleanedMobile.toString().replace(/^\+\d+\-\+\d+/, '+91');
+        // Ensure it fits within the database limit
+        cleanedMobile = cleanedMobile.substring(0, 15);
+      }
+      
       let orgChar = organization_name
         .match(/[a-zA-Z]/g)
         .join('')
@@ -130,7 +134,7 @@ const vendorController = {
       let capitalizeFourOrganizationLetter = `${orgChar
         .charAt(0)
         .toUpperCase()}${orgChar.substring(1, 4)}`;
-      let password = `${capitalizeFourOrganizationLetter}@${mobile.substring(
+      let password = `${capitalizeFourOrganizationLetter}@${cleanedMobile.substring(
         6,
         10
       )}`;
@@ -142,14 +146,11 @@ const vendorController = {
         city: city || null,
         state: state || null,
         country: country || 1,
-        mobile: mobile || null,
-        website: website || null,
+        mobile: cleanedMobile || null,
         postal_code: postal_code || null,
         user_type: '3',
         password: generatePassword(password),
         status: '0',
-        new_profile_image: req.files.logo?.[0]?.location || null,
-        original_profile_image: req.files.logo?.[0]?.location || null,
         created_by: createdBy,
         organization_name: organization_name || null
       };
@@ -157,8 +158,6 @@ const vendorController = {
       let companyObj = {
         profile: about_vendor_company || null,
         logo: req.files.logo?.[0]?.location || null,
-        email: email || null,
-        mobile: mobile || null,
         company_name: organization_name || null,
         nature_of_business: nature_business || null,
         established_year: estd_year || null,
@@ -167,14 +166,15 @@ const vendorController = {
         cin: cin || null,
         turnover: turn_over || null,
         no_of_employess: total_employees || null,
-        project_name: ptr_project_name || null,
-        project_description: ptr_project_description || null,
-        project_start_date: ptr_project_start_date || null,
-        project_end_date: ptr_project_end_date || null
+        website: website || null,
       };
 
 
-      let vendor = await productModel.vendor_register(vendorObj);
+      const registrationResult = await userModel.company_registration(vendorObj, companyObj);
+      const vendorId = registrationResult.user_id;
+      const companyId = registrationResult.company_id;
+
+      // let vendor = await productModel.vendor_register(vendorObj);
 
     // Check if spocs array is provided and has valid objects
 if (Array.isArray(spocs) && spocs.length > 0) {
@@ -183,15 +183,13 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     // Validate if at least one field in the SPOC is not empty
     if (spoc.spoc_email || spoc.spoc_name) {
       // Add vendor ID to the SPOC object
-      spoc.user_id = vendor[0].id;
+      spoc.user_id = vendorId;
       // Insert the SPOC details into the table
       await userModel.add_user_spoc(spoc);
     }
   }
 }
 
-      companyObj.user_id = vendor[0].id;
-      await productModel.addCompany(companyObj);
 
       if (req.files?.ptr_track && req.files?.ptr_track.length > 0) {
         const pathname = req.files.ptr_track[0].location;
@@ -199,48 +197,16 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           file_path: pathname,
           file_name: req.files.ptr_track[0].originalname || null,
           doc_type: 'ptr',
-          user_id: vendor[0].id
+          user_id: vendorId
         };
         await productModel.addFile(filesObj);
       }
       
-      if (req.files?.certifications && req.files?.certifications.length > 0) {
-        const pathname = req.files.certifications[0].location;
-        let filesObj = {
-          file_path: pathname,
-          file_name: req.files.certifications[0].originalname || null,
-          doc_type: 'crt',
-          user_id: vendor[0].id
-        };
-        await productModel.addFile(filesObj);
-      }
-      if (req.files?.brochure && req.files?.brochure.length > 0) {
-        const pathname = `${Config.download_url}/user_image/${req.files.brochure[0].filename}`;
-        let filesObj = {
-          file_path: pathname,
-          file_name: req.files.brochure[0].originalname || null,
-          doc_type: 'brochure',
-          user_id: vendor[0].id
-        };
-        await productModel.addFile(filesObj);
-      }
 
-      addDefaultNotifications(vendor[0].id);
 
-      if (vendor[0].id) {
-        let html_variables = [{ name: name }];
+      addDefaultNotifications(vendorId);
 
-        
-        const spocList = await vendorModel.getSpocDetails(vendor[0]?.id)
-
-        // console.log(" vendor contoller 229 spoc console ", vendor[0].id, spocList)
-
-              
-      //   let mailRecipients = {
-      //     from: Config.webmasterMail,
-      //     subject: `Work Wise | Registration`,
-      //    html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
-      // };
+      if (vendorId) {        
 
       const emailHeader = ` <h2>Dear ${name} </h2>`
           
@@ -261,85 +227,11 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           let mailRecipients = {
             from: Config.webmasterMail,
             subject: `Work Wise | Registration`,
-            html: dunamicHtmlTemplate
+            html: dunamicHtmlTemplate,
+            to: email
         };
-  
-        if (spocList && spocList.length > 0) {
-          mailRecipients.to = spocList.map(spoc => spoc.email);
-          mailRecipients.cc = email;
-        } else {
-          mailRecipients.to = email;
-        }
 
         sendMail(mailRecipients);
-
-        // sendMail({
-        //   from: Config.webmasterMail, // sender address
-        //   to: email, // list of receivers
-        //   subject: `Work wise | Registration`, // Subject line
-        //   // html: dynamic_html // plain text body
-        //   html: `Dear ${name}, Your login credential userid:${email} and password ${password}`
-        // });
-
-        let checkFreeSubscription =
-          await subscriptionModel.checkFreeSubscription();
-        if (checkFreeSubscription.length > 0) {
-          const startDate = moment(); // Replace with the actual start date
-
-          const billingCycleMonths = checkFreeSubscription[0].duration;
-
-          // Calculate the end date by adding the billing cycle and subtracting one day
-          const endDate = startDate
-            .clone()
-            .add(billingCycleMonths, 'months')
-            .subtract(1, 'day');
-          const renewDate = startDate.clone().add(billingCycleMonths, 'months');
-
-          // console.log('Start Date:', startDate.format('YYYY-MM-DD'));
-          // console.log('End Date:', endDate.format('YYYY-MM-DD'));
-          // console.log('Renew Date:', renewDate.format('YYYY-MM-DD'));
-
-          let UserSubscriptionObj = {
-            user_id: vendor[0].id,
-            plan_id: checkFreeSubscription[0].id,
-            status: 1, //By default payment done
-            start_date: startDate.format('YYYY-MM-DD'),
-            end_date: endDate.format('YYYY-MM-DD'),
-            renew_date: renewDate.format('YYYY-MM-DD')
-          };
-
-          let createUserSubscription =
-            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
-
-          await subscriptionModel.updateUserSubscriptionId(
-            checkFreeSubscription[0].id,
-            vendor[0].id
-          );
-          let subscriptionMappingDetails =
-            await subscriptionModel.getSubscriptionMappingDetails(
-              checkFreeSubscription[0].id
-            );
-          // console.log(
-          //   'subscriptionMappingDetails==>>>>',
-          //   subscriptionMappingDetails
-          // );
-          for await (const {
-            allocated_feature,
-            feature_id
-          } of subscriptionMappingDetails) {
-            let userSubscriptionFeatureObj = {
-              user_subscriptions_id: createUserSubscription.id,
-              feature_id: feature_id,
-              plan_id: checkFreeSubscription[0].id,
-              used_feature_count: 0,
-              allocated_feature: allocated_feature,
-              user_id: vendor[0].id
-            };
-            await subscriptionModel.createUserSubscriptionFeature(
-              userSubscriptionFeatureObj
-            );
-          }
-        }
 
         res
           .status(200)
@@ -389,7 +281,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       let resObj = {};
       let vendorId = req.params.id;
       let vendorDetails = await vendorModel.getVendoreditDetails(vendorId);
-      let companyDetails = await vendorModel.getCompanyDetails(vendorId);
+      let companyDetails = await userModel.getCompanyDetail(vendorId);
       let files = await vendorModel.getFiles(vendorId);
       let spocDetails = await vendorModel.getSpocDetails(vendorId);
       resObj.spocDetails = spocDetails;
@@ -479,19 +371,11 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         website,
         nature_business,
         estd_year,
-        // sales_spoc_name,
-        // sales_spoc_position,
-        // sales_spoc_business_email,
-        // sales_spoc_mobile,
         gstin,
         import_export_code,
         cin,
         turn_over,
         total_employees,
-        ptr_project_name,
-        ptr_project_description,
-        ptr_project_start_date,
-        ptr_project_end_date,
         about_vendor_company
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
@@ -506,17 +390,14 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         state: state || vendorDetails[0].state,
         country: country || vendorDetails[0].country,
         mobile: mobile || vendorDetails[0].mobile,
-        website: website || vendorDetails[0].website,
         postal_code: postal_code || vendorDetails[0].postal_code,
-        new_profile_image: req.files.logo?.[0]?.location,
-        original_profile_image: vendorDetails[0].original_profile_image,
         updated_by: updatedBy,
         organization_name:
           organization_name || vendorDetails[0].organization_name
       };
       await productModel.updateVendorDetail(vendorObj, vendorId);
 
-      let companyDetails = await vendorModel.getCompanyDetails(vendorId);
+      let companyDetails = await userModel.getCompanyDetail(vendorId);
 
       if (companyDetails.length > 0) {
         let companyObj = {
@@ -525,32 +406,19 @@ if (Array.isArray(spocs) && spocs.length > 0) {
             req.files?.logo
               ? req.files?.logo[0].location
               : companyDetails[0].logo,
-          email: email || companyDetails[0].email,
-          mobile: mobile || companyDetails[0].mobile,
+          website: website || vendorDetails[0].website,
           company_name: organization_name || companyDetails[0].company_name,
           nature_of_business:
             nature_business || companyDetails[0].nature_of_business,
           established_year: estd_year || companyDetails[0].established_year,
-          // spoc_name: sales_spoc_name || companyDetails[0].spoc_name,
-          // spoc_role: sales_spoc_position || companyDetails[0].spoc_role,
-          // spoc_email: sales_spoc_business_email || companyDetails[0].spoc_email,
-          // spoc_mobile: sales_spoc_mobile || companyDetails[0].spoc_mobile,
           gstin: gstin || companyDetails[0].gstin,
           import_export_code:
             import_export_code || companyDetails[0].import_export_code,
           cin: cin || companyDetails[0].cin,
           turnover: turn_over || companyDetails[0].turnover,
           no_of_employess: total_employees || companyDetails[0].no_of_employess,
-          project_name: ptr_project_name || companyDetails[0].project_name,
-          project_description:
-            ptr_project_description || companyDetails[0].project_description,
-          project_start_date:
-            ptr_project_start_date || companyDetails[0].project_start_date,
-          project_end_date:
-            ptr_project_end_date || companyDetails[0].project_end_date
         };
 
-        companyObj.user_id = vendorId;
         await productModel.updateCompany(companyObj);
       } else {
         let companyObj = {
@@ -563,20 +431,13 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           mobile: mobile || null,
           company_name: organization_name || null,
           nature_of_business: nature_business || null,
+          website: website || vendorDetails[0].website,
           established_year: estd_year || null,
-          // spoc_name: sales_spoc_name || null,
-          // spoc_role: sales_spoc_position || null,
-          // spoc_email: sales_spoc_business_email || null,
-          // spoc_mobile: sales_spoc_mobile || null,
           gstin: gstin || null,
           import_export_code: import_export_code || null,
           cin: cin || null,
           turnover: turn_over || null,
           no_of_employess: total_employees || null,
-          project_name: ptr_project_name || null,
-          project_description: ptr_project_description || null,
-          project_start_date: ptr_project_start_date || null,
-          project_end_date: ptr_project_end_date || null
         };
         companyObj.user_id = vendorId;
         await productModel.addCompany(companyObj);
@@ -592,38 +453,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         };
         await productModel.addFile(filesObj);
       }
-      if (req.files?.certifications && req.files?.certifications.length > 0) {
-        const pathname = req.files.certifications[0].location;
-        let filesObj = {
-          file_path: pathname,
-          file_name: req.files.certifications[0].originalname || null,
-          doc_type: 'crt',
-          user_id: vendorId
-        };
-        await productModel.addFile(filesObj);
-      }
-      if (req.files?.brochure && req.files?.brochure.length > 0) {
-        const pathname = req.files.brochure[0].location;
-        let filesObj = {
-          file_path: pathname,
-          file_name: req.files.brochure[0].originalname || null,
-          doc_type: 'brochure',
-          user_id: vendorId
-        };
-        await productModel.addFile(filesObj);
-      }
 
-      /* if (fileName) {
-        if (vendorDetails[0].new_profile_image) {
-          const file_link = `${Config.upload.user_image}/${vendorDetails[0].new_profile_image}`;
-          fs.unlink(file_link, (err) => {
-            if (err) console.log(err);
-            else {
-              //   console.log(file_link);
-            }
-          });
-        }
-      } */
       res
         .status(200)
         .json({

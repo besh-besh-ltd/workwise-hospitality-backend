@@ -76,4 +76,13 @@ rolesRoutes.put(
   rolesController.updateRolePermission
 );
 
+rolesRoutes.put(
+  '/update-user-account/:id',
+  passportSignIn,
+  validateParam(schemas.id),
+  validateBody(schemas.update_user_account),
+  validateDbBody.user_id_exists,
+  rolesController.updateUserAccount
+);
+
 export default rolesRoutes;

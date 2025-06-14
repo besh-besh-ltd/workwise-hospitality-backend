@@ -19,6 +19,112 @@ user_book_demo: async (mobile) => {
       });
   });
 },
+
+/**
+ * 
+ * @param {*} user_data 
+ * @param {*} company_data 
+ * @returns company id, only if data successfully saved in tbl_company and tbl_user
+ */
+
+company_registration: async (user_data, company_data) => {
+  return new Promise((resolve, reject) => {
+    db.tx(async t => {
+      try {
+        if (user_data.mobile) {
+          user_data.mobile = user_data.mobile.toString().substring(0, 15);
+        }
+
+        // ------------------------------
+        // Step 1: Insert Company
+        // ------------------------------
+        const companyFields = [
+          "company_name", "profile", "nature_of_business", "type_of_business",
+          "turnover", "no_of_employess", "import_export_code", "gstin", "cin", "logo",
+          "established_year", "website", "location", "is_private"
+        ];
+
+        const companyValues = companyFields.map(field => company_data?.[field] ?? null);
+        const companyPlaceholders = companyFields.map((_, i) => `$${i + 1}`).join(', ');
+
+        const insertCompanyQuery = `
+          INSERT INTO tbl_company (${companyFields.join(', ')})
+          VALUES (${companyPlaceholders})
+          RETURNING id
+        `;
+
+        const companyResult = await t.one(insertCompanyQuery, companyValues);
+        const company_id = companyResult.id;
+
+        // ------------------------------
+        // Step 2: Insert User
+        // ------------------------------
+        const userFields = [
+          "name", "email", "mobile", "created_by", "updated_by",
+          "status", "user_type", "password", "address", "country",
+          "whatsapp", "state", "city", "postal_code"
+        ];
+        const userValues = userFields.map(f => user_data?.[f] ?? null);
+        userFields.push("company_id");
+        userValues.push(company_id);
+
+        const userPlaceholders = userFields.map((_, i) => `$${i + 1}`).join(', ');
+
+        const insertUserQuery = `
+          INSERT INTO tbl_users (${userFields.join(', ')})
+          VALUES (${userPlaceholders})
+          RETURNING id
+        `;
+
+        const userResult = await t.one(insertUserQuery, userValues);
+
+        resolve({
+          success: true,
+          company_id,
+          user_id: userResult.id
+        });
+
+      } catch (error) {
+        reject(error);
+      }
+    }).catch(err => {
+      console.error("Transaction error:", err);
+      reject(new Error(err));
+    });
+  });
+},
+
+
+  insertBuyerAccountLimits: async (limitsData, company_id) => {
+  return new Promise(function (resolve, reject) {
+    db.none(
+      `INSERT INTO tbl_company_buyer_account_limit (
+         company_id,
+         max_top_management,
+         max_procurement,
+         max_engineering,
+         max_finance
+       ) VALUES (
+         $1, $2, $3, $4, $5
+       )`,
+      [
+        company_id,
+        limitsData.max_top_management || 0,
+        limitsData.max_procurement || 0,
+        limitsData.max_engineering || 0,
+        limitsData.max_finance || 0
+      ]
+    )
+    .then(() => {
+      resolve({ success: true });
+    })
+    .catch(err => {
+      console.error('Error inserting into tbl_company_buyer_account_limit:', err);
+      reject(new Error(err));
+    });
+  });
+},
+
   user_register: async (usrobj) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -87,7 +193,10 @@ user_book_demo: async (mobile) => {
   },
   getCompanyDetail: async (user_id) => {
     return new Promise(function (resolve, reject) {
-      db.any('select * from tbl_company where user_id = $1', [user_id])
+      db.any(`SELECT c.*
+   FROM tbl_users u
+   JOIN tbl_company c ON u.company_id = c.id
+   WHERE u.id = $1`, [user_id])
         .then(function (data) {
           resolve(data);
         })
@@ -129,7 +238,7 @@ user_book_demo: async (mobile) => {
 
   user_profile_detail: async (user_id) => {
     return new Promise(function (resolve, reject) {
-      db.any('select tu.*, tc.company_name from tbl_users tu join tbl_company tc ON tc.user_id = tu.id where tu.id = $1', [user_id])
+      db.any('select tu.*, tc.company_name from tbl_users tu join tbl_company tc ON tc.id = tu.company_id where tu.id = $1', [user_id])
         .then(function (data) {
           resolve(data);
         })
@@ -494,7 +603,7 @@ user_book_demo: async (mobile) => {
   companyProfileUpdate: async (cmpObj, user_id) => {
     Object.entries(cmpObj).forEach((ele) => {
       db.any(
-        `UPDATE tbl_company SET ${ele[0]} = $1 WHERE user_id = $2`,
+        `UPDATE tbl_company SET ${ele[0]} = $1 WHERE id = $2`,
         [ele[1], user_id],
         (err) => {
           if (err) {
@@ -556,15 +665,16 @@ user_book_demo: async (mobile) => {
     });
   },
 
-  update_profile_image: async (user_id, filename, original_filename) => {
+  // mukul - 05-06-2025, update company logo by user id
+    update_profile_image: async (user_id, filename) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `update 
-				tbl_users set 
-				new_profile_image = $2,
-				original_profile_image = $3
-       	where id= $1`,
-        [user_id, filename, original_filename]
+        `UPDATE tbl_company
+         SET logo = $2
+         WHERE id = (
+         SELECT company_id FROM tbl_users WHERE id = $1
+       )`,
+        [user_id, filename]
       )
         .then(function (data) {
           resolve(data);
@@ -587,17 +697,17 @@ user_book_demo: async (mobile) => {
             tbl_company.turnover,
             tbl_company.no_of_employess,
             tbl_company.import_export_code,
-            tbl_company.certifications,
             tbl_company.location,
-            tbl_company.mobile as company_mobile,
+            tbl_users.mobile AS company_mobile,
             tbl_company.gstin,
             tbl_company.cin,
+            tbl_company.logo,
             tbl_company.website,
             tbl_company.established_year,
             tbl_location_states.state_name, 
             tbl_location_cities.city_name  
         FROM tbl_users 
-        LEFT JOIN tbl_company ON tbl_users.id = tbl_company.user_id  
+        LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
         LEFT JOIN tbl_location_states ON tbl_users.state = tbl_location_states.id
         LEFT JOIN tbl_location_cities ON tbl_users.city = tbl_location_cities.id
         WHERE tbl_users.id = $1`,
@@ -607,6 +717,7 @@ user_book_demo: async (mobile) => {
           resolve(data);
         })
         .catch(function (err) {
+          console.log(err)
           let error = new Error(err);
           reject(error);
         });
@@ -650,19 +761,16 @@ user_book_demo: async (mobile) => {
 
       // query changes by Mukul Jatav 13-09-2024, added product_list with approved vendor list for each product in /vendor-profile/id API, this model returning product list but it's variant not changing product_name to variant_name or product_list to variant_list as this is quick fix for now
 
+      // mukul 31-05-2025 changes as per the top management flow requerment
+
       // Base query with common fields
       let baseQuery = `
       SELECT tbl_users.id as user_id,
              tbl_users.name as vendor_name,
-             tbl_users.new_profile_image as profile_image,
+             tbl_company.logo as profile_image,
              tbl_users.address,
-             tbl_users.dob,
-             tbl_users.nationality,
              tbl_users.status,
-             tbl_users.linkedin,
-             tbl_users.facebook,
              tbl_users.whatsapp,
-             tbl_users.skype,
              tbl_company.id as company_id,
              tbl_company.gstin,
              tbl_company.cin,
@@ -672,7 +780,6 @@ user_book_demo: async (mobile) => {
              tbl_company.turnover,
              tbl_company.no_of_employess,
              tbl_company.import_export_code,
-             tbl_company.certifications,
              tbl_company.company_name,
              tbl_company.profile,
              tbl_company.location,
@@ -707,16 +814,16 @@ user_book_demo: async (mobile) => {
            WHERE M.vendor_id = tbl_users.id
        ) AS "product_list",
              CASE
-                 WHEN tbl_users.new_profile_image IS NULL THEN
+                 WHEN tbl_company.logo IS NULL THEN
                      NULL
-                 ELSE tbl_users.new_profile_image
+                 ELSE tbl_company.logo
              END AS profile_image_url`;
 
       // Additional fields if current_user is not null
       if (current_user !== null) {
         baseQuery += `,
-             tbl_company.mobile,
-             tbl_company.email,
+             tbl_users.mobile,
+             tbl_users.email,
              ARRAY(
                  SELECT json_build_object(
                      'reviewed_by', tbl_vendor_reviews.reviewed_by,
@@ -724,9 +831,7 @@ user_book_demo: async (mobile) => {
                      'rating', tbl_vendor_reviews.rating,
                      'description', tbl_vendor_reviews.description,
                      'buyer', BU.name,
-                     'buyer_email', BU.email,
-                     'original_profile_image', BU.original_profile_image,
-                     'new_profile_image', BU.new_profile_image
+                     'buyer_email', BU.email
                  )
                  FROM tbl_vendor_reviews
                  LEFT JOIN tbl_users BU ON BU.id = tbl_vendor_reviews.reviewed_by
@@ -737,7 +842,7 @@ user_book_demo: async (mobile) => {
       // Completing the query with the FROM clause
       baseQuery += `
       FROM tbl_users
-      LEFT JOIN tbl_company ON tbl_users.id = tbl_company.user_id
+      LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
       LEFT JOIN tbl_location_cities cl ON cl.id = tbl_users.city
       LEFT JOIN tbl_location_states sl ON sl.id = tbl_users.state     
       WHERE tbl_users.id = $1`;
@@ -1641,7 +1746,7 @@ user_book_demo: async (mobile) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				temp_users set 
+				tbl_users set 
 				otp = '${updateOtp.otp}'
        	where id= '${updateOtp.user_id}'`,
         function (error, results, fields) {
@@ -1655,7 +1760,7 @@ user_book_demo: async (mobile) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				temp_users set 
+				tbl_users set 
 				otp = '${updateOtp.otp}'
        	where email= '${updateOtp.email}'`,
         function (error, results, fields) {
@@ -1670,7 +1775,7 @@ user_book_demo: async (mobile) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				temp_users set 
+				tbl_users set 
 				status = '1'
        	where email= '${email}' AND token = '${token}' AND status= '0'`,
         function (error, results, fields) {
@@ -1684,7 +1789,7 @@ user_book_demo: async (mobile) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
+				tbl_users set 
 				otp = '${updateOtp.otp}'
        	where id= '${updateOtp.user_id}'`,
         function (error, results, fields) {
@@ -1710,7 +1815,7 @@ user_book_demo: async (mobile) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
+				tbl_users set 
 				session_id = '${session_id}'
        	where id= '${user_id}'`,
         function (error, results, fields) {
@@ -1724,7 +1829,7 @@ user_book_demo: async (mobile) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				temp_users set 
+				tbl_users set 
 				status = '1'
        	where id= '${user_id}'`,
         function (error, results, fields) {
@@ -1738,7 +1843,7 @@ user_book_demo: async (mobile) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
+				tbl_users set 
 				status = '1'
        	where id= '${user_id}'`,
         function (error, results, fields) {
@@ -1753,7 +1858,7 @@ user_book_demo: async (mobile) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
+				tbl_users set 
 				qualification_id = '${userObj.qualification_id}',
 				area_of_interest = '${userObj.area_of_interest}'
        	where id= '${userObj.user_id}'`,
@@ -1768,7 +1873,7 @@ user_book_demo: async (mobile) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				Users set 
+				tbl_users set 
 				profile_status = 'C'
        	where id= '${user_id}'`,
         function (error, results, fields) {
@@ -2091,7 +2196,7 @@ user_book_demo: async (mobile) => {
     return new Promise(function (resolve, reject) {
       db.query(
         `update 
-				temp_users set 
+				tbl_users set 
 				otp = ''
        	where otp= '${otp}'`,
         function (error, results, fields) {
@@ -3298,11 +3403,16 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     user_id = parseInt(user_id, 10); // Ensure user_id is an integer
     user_type = parseInt(user_type, 10); // Ensure user_type is an integer
     // Construct the parameterized query based on user type
-    if (user_type === 2) {
-      query = `SELECT 1
-               FROM tbl_rfq
-               WHERE id = $1
-               AND created_by = $2;`;
+    if (user_type === 2 || user_type === 8 ) {
+        query = `
+            SELECT 1 FROM tbl_rfq
+            WHERE id = $1 AND created_by = $2
+            UNION
+            SELECT 1 FROM tbl_project_team
+            WHERE project_id = (
+              SELECT project_id FROM tbl_rfq WHERE id = $1
+            ) AND user_id = $2;
+          `;
       values = [rfq_id, user_id]; // Use parameterized values
     } else if (user_type === 3) {
       query = `SELECT 1
@@ -3326,7 +3436,42 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
           reject(error);
         });
     });
-  }
+  },
+
+  // Changes by Agnij 28-05-2025 [Added function to get users by company ID]
+  getCompanyUsers: async (company_id) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT tu.id, tu.name, tu.email, tu.mobile, tu.user_type, tu.status, tu.created_at
+         FROM tbl_users tu
+         WHERE tu.company_id = $1 AND tu.is_deleted = 0
+         ORDER BY tu.created_at DESC`,
+        [company_id]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  userExistsById: async (user_id) => {
+    return new Promise(function (resolve, reject) {
+      db.oneOrNone(
+        `SELECT 1 FROM tbl_users WHERE id = $1`,
+        [user_id]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
 
   /*  uploadFiles: async (files, user_id, doc_type) => {
     let dataArray = [];
@@ -3368,8 +3513,70 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     });
   } */
 
+  updateUserAccount: async (userId, userObj) => {
+    return new Promise(function (resolve, reject) {
+      const updateFields = [];
+      const queryParams = [userId];
+      let paramCounter = 2;
+      
+      Object.entries(userObj).forEach(([key, value]) => {
+        if (value !== undefined) {
+          updateFields.push(`${key} = $${paramCounter++}`);
+          queryParams.push(value);
+        }
+      });
+      
+      if (updateFields.length === 0) return resolve([]);
+      
+      const query = `
+        UPDATE tbl_users SET ${updateFields.join(', ')}
+        WHERE id = $1
+        RETURNING id, name, email, mobile, status, updated_at, updated_by
+      `;
+      
+      db.any(query, queryParams)
+        .then(data => resolve(data))
+        .catch(err => reject(err));
+    });
+  },
+
+getBuyerAccountLimits: async (company_id) => {
+  return new Promise((resolve, reject) => {
+    db.any(
+      `
+      SELECT 
+        cl.max_top_management, 
+        cl.max_procurement, 
+        cl.max_engineering, 
+        cl.max_finance,
+        COUNT(CASE WHEN u.user_type = 8 THEN 1 END) AS used_top_management,
+        COUNT(CASE WHEN u.user_type = 2 THEN 1 END) AS used_procurement,
+        COUNT(CASE WHEN u.user_type = 9 THEN 1 END) AS used_engineering,
+        COUNT(CASE WHEN u.user_type = 10 THEN 1 END) AS used_finance
+      FROM 
+        tbl_company_buyer_account_limit cl
+      LEFT JOIN 
+        tbl_users u ON u.company_id = cl.company_id AND u.is_deleted = 0
+      WHERE 
+        cl.company_id = $1
+      GROUP BY 
+        cl.max_top_management, cl.max_procurement, cl.max_engineering, cl.max_finance;
+      `,
+      [company_id]
+    )
+      .then((data) => {
+        resolve(data); 
+      })
+      .catch((err) => {
+        console.error('Error fetching buyer account limits:', err);
+        reject(new Error(err));
+      });
+  });
+},
 
 
-  };
+
+
+};
 
 export default userModel;

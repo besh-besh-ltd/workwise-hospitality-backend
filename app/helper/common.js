@@ -392,7 +392,7 @@ function withTransaction(model, transaction) {
   });
 }
 
-
+const validateNumber = (value) => value && !isNaN(parseInt(value))
 
 
 export {
@@ -417,5 +417,6 @@ export {
   getDateRange,
   deleteFileFromS3,
   buildProductFilters,
-  withTransaction
+  withTransaction,
+  validateNumber
 };
