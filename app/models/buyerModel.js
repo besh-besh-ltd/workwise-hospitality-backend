@@ -76,7 +76,7 @@ const buyerModel = {
   },
   buyerIdExist: async (buyerId) => {
     return new Promise(function (resolve, reject) {
-      db.any('SELECT * FROM tbl_users WHERE id = $1  AND user_type = 2', [
+      db.any('SELECT * FROM tbl_users WHERE id = $1 AND (user_type = 2 OR user_type = 7 OR user_type = 8 OR user_type = 9 OR user_type = 10)', [
         buyerId
       ])
         .then(function (data) {
@@ -91,8 +91,8 @@ const buyerModel = {
   getBuyerDetails: async (buyerId) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT tbl_users.*,tbl_company.profile,tbl_company.nature_of_business,
-        NULL AS profile_image  FROM tbl_users left join tbl_company ON tbl_users.id = tbl_company.user_id  WHERE tbl_users.is_deleted = 0 AND tbl_users.user_type = 2 AND tbl_users.id = $1`,
+        `SELECT tbl_users.*,tbl_company.profile,tbl_company.nature_of_business,tbl_company.company_name,
+        NULL AS profile_image  FROM tbl_users left join tbl_company ON tbl_users.company_id = tbl_company.id  WHERE tbl_users.is_deleted = 0 AND (tbl_users.user_type = 2 OR tbl_users.user_type = 7 OR tbl_users.user_type = 8 OR tbl_users.user_type = 9 OR tbl_users.user_type = 10) AND tbl_users.id = $1`,
         [buyerId]
       )
         .then(function (data) {
@@ -168,13 +168,7 @@ const buyerModel = {
         email = $4 ,
         mobile = $5,
         organization_name = $6,
-        address = $7,
-        dob= $8,
-        country= $9,
-        linkedin= $10,
-        facebook= $11,
-        whatsapp= $12,
-        skype= $13
+        address = $7
         ${dynamicUpdate}
 	      WHERE id= $2 RETURNING id`,
         [
@@ -184,13 +178,7 @@ const buyerModel = {
           buyerObj.email,
           buyerObj.mobile,
           buyerObj.organization_name,
-          buyerObj.address,
-          buyerObj.dob,
-          buyerObj.country,
-          buyerObj.linkedin,
-          buyerObj.facebook,
-          buyerObj.whatsapp,
-          buyerObj.skype
+          buyerObj.address
         ]
       )
         .then(function (data) {
