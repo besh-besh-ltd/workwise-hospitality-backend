@@ -1381,7 +1381,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 
       let q = `
       SELECT 
-        DISTINCT ON (tu.name) tu.id AS user_id, 
+        DISTINCT ON (tu.name, tu.id) tu.id AS user_id, 
         tu.name, 
         ${vendor_name ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $3) AS similarity_score,' : ''} 
         JSON_BUILD_OBJECT(
@@ -3199,7 +3199,7 @@ WHERE row_num_by_name_category = 1
       JOIN tbl_product_categories pc ON p.id = pc.product_id
       JOIN tbl_category c ON pc.category_id = c.id
       JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
-      LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
       LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
       LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
       LEFT JOIN (
