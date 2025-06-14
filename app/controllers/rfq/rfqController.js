@@ -1379,56 +1379,60 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
           let whereClause = `rfq_product_id = (${rfqProductId})::INT`;
 
-          for (const fileType of Object.keys(products.updatable.files[rfqProductId])) {
-              const transformedFileType =
-                fileType == 'qap_file'
-                  ? 'QAP'
-                  : fileType == 'spec_file'
-                  ? 'SPEC'
-                  : 'TDS';
+          for (const fileType of Object.keys(
+            products.updatable.files[rfqProductId]
+          )) {
+            const transformedFileType =
+              fileType == 'qap_file'
+                ? 'QAP'
+                : fileType == 'spec_file'
+                ? 'SPEC'
+                : 'TDS';
 
-              const data = {
-                file_url: products.updatable.files[rfqProductId][fileType]
+            const currentWhereClause =
+              whereClause + ` AND file_type = '${transformedFileType}'`;
+            const doesExist = await rfqModel.checkIfExists(
+              'tbl_rfq_product_files',
+              currentWhereClause,
+              t
+            );
+            const data = products.updatable.files[rfqProductId][fileType];
+
+            if (doesExist && doesExist.length > 0) {
+              const isRemovable = !Array.isArray(data) && data == 'rm';
+
+              const conditions = {
+                rfq_product_id: rfqProductId,
+                file_type: transformedFileType
               };
-              const currentWhereClause =
-                whereClause + ` AND file_type = '${transformedFileType}'`;
-              const doesExist = await rfqModel.checkIfExists(
-                'tbl_rfq_product_files',
-                currentWhereClause,
-                t
-              );
-              if (doesExist && doesExist.length > 0) {
-                if (data.file_url == 'rm') {
-                  const conditions = {
-                    rfq_product_id: rfqProductId,
-                    file_type: transformedFileType
-                  };
-                  await rfqModel.delete(
-                    'tbl_rfq_product_files',
-                    conditions,
-                    t
-                  );
-                } else {
-                  await rfqModel.updateWhere(
-                    'tbl_rfq_product_files',
-                    data,
-                    currentWhereClause,
-                    t
-                  );
-                }
-              } else {
-                const insertData = {
-                  ...data,
+              await rfqModel.delete('tbl_rfq_product_files', conditions, t);
+              if (!isRemovable) {
+                const insertableData = data.map((file_url) => ({
                   rfq_product_id: rfqProductId,
-                  file_type: transformedFileType
-                };
-                await rfqModel.insert(
+                  file_type: transformedFileType,
+                  file_url
+                }));
+                await rfqModel.insertArray(
+                  insertableData,
+                  Object.keys(insertableData[0]),
                   'tbl_rfq_product_files',
-                  insertData,
                   t
                 );
               }
+            } else {
+              const insertableData = data.map((file_url) => ({
+                rfq_product_id: rfqProductId,
+                file_type: transformedFileType,
+                file_url
+              }));
+              await rfqModel.insertArray(
+                insertableData,
+                Object.keys(insertableData[0]),
+                'tbl_rfq_product_files',
+                t
+              );
             }
+          }
         };
 
       if (products.updatable?.comment)
@@ -1987,36 +1991,45 @@ const rfqController = {
                     ? 'SPEC'
                     : 'TDS';
 
-                const data = {
-                  file_url: products.updatable.files[rfqProductId][fileType]
-                };
                 const currentWhereClause =
                   whereClause + ` AND file_type = '${transformedFileType}'`;
                 const doesExist = await transactingModels.rfqModel.checkIfExists(
                   'tbl_rfq_product_files',
-                  currentWhereClause
+                  currentWhereClause,
                 );
+                const data = products.updatable.files[rfqProductId][fileType];
+
                 if (doesExist && doesExist.length > 0) {
-                  if (data.file_url == 'rm') {
-                    const conditions = {
-                      rfq_product_id: rfqProductId,
-                      file_type: transformedFileType
-                    };
-                    await transactingModels.rfqModel.delete('tbl_rfq_product_files', conditions);
-                  } else {
-                    await transactingModels.rfqModel.updateWhere(
-                      'tbl_rfq_product_files',
-                      data,
-                      currentWhereClause
-                    );
-                  }
-                } else {
-                  const insertData = {
-                    ...data,
+                  const isRemovable = !Array.isArray(data) && data == 'rm';
+
+                  const conditions = {
                     rfq_product_id: rfqProductId,
                     file_type: transformedFileType
                   };
-                  await transactingModels.rfqModel.insert('tbl_rfq_product_files', insertData);
+                  await transactingModels.rfqModel.delete('tbl_rfq_product_files', conditions, t);
+                  if (!isRemovable) {
+                    const insertableData = data.map((file_url) => ({
+                      rfq_product_id: rfqProductId,
+                      file_type: transformedFileType,
+                      file_url
+                    }));
+                    await rfqModel.insertArray(
+                      insertableData,
+                      Object.keys(insertableData[0]),
+                      'tbl_rfq_product_files',
+                    );
+                  }
+                } else {
+                  const insertableData = data.map((file_url) => ({
+                    rfq_product_id: rfqProductId,
+                    file_type: transformedFileType,
+                    file_url
+                  }));
+                  await transactingModels.rfqModel.insertArray(
+                    insertableData,
+                    Object.keys(insertableData[0]),
+                    'tbl_rfq_product_files',
+                  );
                 }
               }
             );
