@@ -61,6 +61,18 @@ buyerRoutes.put(
   buyerController.updateBuyer
 );
 
+buyerRoutes.get(
+  '/account-limits/:company_id',
+  passportSignIn,
+  buyerController.getBuyerAccountLimits
+);
+
+buyerRoutes.put(
+  '/update-account-limits/:company_id',
+  passportSignIn,
+  buyerController.updateBuyerAccountLimits
+);
+
 // mukul 07-06-2025 ,  not in use, cross check and remove
 buyerRoutes.put(
   '/accept-buyer/:id',
