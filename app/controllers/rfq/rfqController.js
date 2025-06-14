@@ -3106,7 +3106,6 @@ const rfqController = {
   },
   getRfqById: async (req, res, next) => {
     let id = req.params.id;
-    const { user_type, id:user_id } = req.user;
     // Determine the user ID to check based on the verification status
     const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
 
@@ -3145,6 +3144,7 @@ const rfqController = {
 
     }
 
+        const { user_type, id:user_id } = req.user;
 
     try {
       if (user_type == 2 || user_type == 8) {
@@ -6349,7 +6349,54 @@ const rfqController = {
       globalComment,
       term_and_condition_files
     } = req.body;
-    const user = req.user
+
+       // Determine the user ID to check based on the verification status
+    const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
+
+    if (withoutLoginUserToken) {
+      // Check if the token exists
+      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+
+      if (!tokenData || tokenData.length === 0) {
+        // Token is not valid
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'Invalid or expired token!'
+          })
+          .end();
+      }
+
+      // Retrieve user data associated with the token
+      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+
+      if (!userData || userData.length === 0) {
+        // User data is not valid
+        return res
+          .status(404)
+          .json({
+            status: 0,
+            message: 'User not found!'
+          })
+          .end();
+      }
+      // Remove password from user data
+      const { password, ...userWithoutPassword } = userData[0];
+      // Assign the user data to req.user
+      req.user = userWithoutPassword;
+    }
+    else{
+         return res
+          .status(500)
+          .json({
+            status: 0,
+            message: 'You dont have permission to access this rfq'
+          })
+          .end();
+    }
+
+    const user = req.user;
 
     // Check if all required fields are present in each product
     if (
