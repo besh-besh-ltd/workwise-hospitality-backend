@@ -1244,7 +1244,7 @@ const deleteRelatedRecords = async (rfq_id) => {
 const saveRfqDraft = async (user_id, reqBody) => {
   const {
       rfq_id,
-      sheet_id,
+      sheet_id = null,
       comment,
       company_name,
       contact_name,
@@ -1319,12 +1319,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
   }
 
   await db.tx(async (t) => {
-    const transactingModels = {
-      rfqModel: withTransaction(rfqModel, t),
-      userModel: withTransaction(userModel, t),
-      vendorModel: withTransaction(vendorModel, t)
-    };
-    
     const products = updatableData?.products;
     const updatableVendors = updatableData?.vendors;
 
@@ -1351,13 +1345,15 @@ const saveRfqDraft = async (user_id, reqBody) => {
               const currentWhereClause = whereClause + ` AND title = '${spec}'`;
               const doesExist = await rfqModel.checkIfExists(
                 'tbl_rfq_products_specs',
-                currentWhereClause
+                currentWhereClause,
+                t,
               );
               if (doesExist && doesExist.length > 0) {
-                await transactingModels.rfqModel.updateWhere(
+                await rfqModel.updateWhere(
                   'tbl_rfq_products_specs',
                   data,
-                  currentWhereClause
+                  currentWhereClause,
+                  t
                 );
               } else {
                 const insertData = {
@@ -1367,9 +1363,10 @@ const saveRfqDraft = async (user_id, reqBody) => {
                   title: spec,
                   variant: parseInt(variant ?? '0')
                 };
-                await transactingModels.rfqModel.insert(
+                await rfqModel.insert(
                   'tbl_rfq_products_specs',
-                  insertData
+                  insertData,
+                  t
                 );
               }
             }
@@ -1395,9 +1392,10 @@ const saveRfqDraft = async (user_id, reqBody) => {
               };
               const currentWhereClause =
                 whereClause + ` AND file_type = '${transformedFileType}'`;
-              const doesExist = await transactingModels.rfqModel.checkIfExists(
+              const doesExist = await rfqModel.checkIfExists(
                 'tbl_rfq_product_files',
-                currentWhereClause
+                currentWhereClause,
+                t
               );
               if (doesExist && doesExist.length > 0) {
                 if (data.file_url == 'rm') {
@@ -1405,15 +1403,17 @@ const saveRfqDraft = async (user_id, reqBody) => {
                     rfq_product_id: rfqProductId,
                     file_type: transformedFileType
                   };
-                  await transactingModels.rfqModel.delete(
+                  await rfqModel.delete(
                     'tbl_rfq_product_files',
-                    conditions
+                    conditions,
+                    t
                   );
                 } else {
-                  await transactingModels.rfqModel.updateWhere(
+                  await rfqModel.updateWhere(
                     'tbl_rfq_product_files',
                     data,
-                    currentWhereClause
+                    currentWhereClause,
+                    t
                   );
                 }
               } else {
@@ -1422,9 +1422,10 @@ const saveRfqDraft = async (user_id, reqBody) => {
                   rfq_product_id: rfqProductId,
                   file_type: transformedFileType
                 };
-                await transactingModels.rfqModel.insert(
+                await rfqModel.insert(
                   'tbl_rfq_product_files',
-                  insertData
+                  insertData,
+                  t
                 );
               }
             }
@@ -1442,10 +1443,11 @@ const saveRfqDraft = async (user_id, reqBody) => {
             const data = {
               comment
             };
-            await transactingModels.rfqModel.updateWhere(
+            await rfqModel.updateWhere(
               'tbl_rfq_products',
               data,
-              whereClause
+              whereClause,
+              t
             );
           }
     }
@@ -1453,11 +1455,12 @@ const saveRfqDraft = async (user_id, reqBody) => {
     if (products && products?.deletable && products.deletable.length > 0) {
       for (const rfqProductId of products.deletable) {
         // Delete records from tbl_rfq_products
-        let deletedRecord = await transactingModels.rfqModel.delete(
+        let deletedRecord = await rfqModel.delete(
           'tbl_rfq_products',
           {
             id: rfqProductId
-          }
+          },
+          t
         );
         if (!deletedRecord || deletedRecord.length === 0) continue;
 
@@ -1469,30 +1472,36 @@ const saveRfqDraft = async (user_id, reqBody) => {
           product_variant_id: deletedRecord.product_variant_id,
           variant: deletedRecord.variant
         };
-        await transactingModels.rfqModel.delete(
+        await rfqModel.delete(
           'tbl_rfq_product_vendors',
-          vendorConditions
+          vendorConditions,
+          t
         );
 
         // Directly deleting specs
-        await transactingModels.rfqModel.delete(
+        await rfqModel.delete(
           'tbl_rfq_products_specs',
-          vendorConditions
+          vendorConditions,
+          t
         );
 
         // Delete associated files
         const directRfqProductConditions = { rfq_product_id: rfqProductId };
-        await transactingModels.rfqModel.delete(
+        await rfqModel.delete(
           'tbl_rfq_product_files',
-          directRfqProductConditions
+          directRfqProductConditions,
+          t
         );
 
         // Delete tech evaluations
         const techEvaluationCondition = { tbl_rfq_product_id: rfqProductId };
         const techEvaluationDeletedRecordsIds =
-          await transactingModels.rfqModel.deleteWithReturnIds(
+          await rfqModel.deleteWithReturnIds(
             'tbl_rfq_product_tech_evaluation',
-            techEvaluationCondition
+            techEvaluationCondition,
+            null,
+            null,
+            t
           );
 
         // Delete tech evaluation clauses and other nested data
@@ -1503,15 +1512,21 @@ const saveRfqDraft = async (user_id, reqBody) => {
             };
 
             const techEvaluationClausesDeletedRecordsIds =
-              await transactingModels.rfqModel.deleteWithReturnIds(
+              await rfqModel.deleteWithReturnIds(
                 'tbl_rfq_product_tech_evaluation_clauses',
-                techEvaluationClauseCondition
+                techEvaluationClauseCondition,
+                null,
+                null,
+                t
               );
 
             // Delete cleared vendors
-            await transactingModels.rfqModel.deleteWithReturnIds(
+            await rfqModel.deleteWithReturnIds(
               'tbl_rfq_product_tech_evaluation_cleared_vendors',
-              techEvaluationClauseCondition
+              techEvaluationClauseCondition,
+              null,
+              null,
+              t
             );
 
             if (techEvaluationClausesDeletedRecordsIds?.length > 0) {
@@ -1521,15 +1536,19 @@ const saveRfqDraft = async (user_id, reqBody) => {
                     techEvaluationClauseId
                 };
 
-                await transactingModels.rfqModel.delete(
+                await rfqModel.delete(
                   'tbl_rfq_product_tech_evaluation_clauses_files',
-                  clauseCondition
+                  clauseCondition,
+                  t
                 );
 
                 const techEvaluationVendorResponseDeletedRecords =
-                  await transactingModels.rfqModel.deleteWithReturnIds(
+                  await rfqModel.deleteWithReturnIds(
                     'tbl_rfq_product_tech_evaluation_vendors_response',
-                    clauseCondition
+                    clauseCondition,
+                    null,
+                    null,
+                    t
                   );
 
                 if (techEvaluationVendorResponseDeletedRecords?.length > 0) {
@@ -1539,17 +1558,21 @@ const saveRfqDraft = async (user_id, reqBody) => {
                         vendorResponse
                     };
 
-                    await transactingModels.rfqModel.delete(
+                    await rfqModel.delete(
                       'tbl_rfq_product_tech_evaluation_vendors_response_files',
-                      vendorResponseCondition
+                      vendorResponseCondition,
+                      t
                     );
                   }
                 }
 
                 const techEvaluationCommentsDeletedRecords =
-                  await transactingModels.rfqModel.deleteWithReturnIds(
+                  await rfqModel.deleteWithReturnIds(
                     'tbl_rfq_product_tech_evaluation_comments',
-                    clauseCondition
+                    clauseCondition,
+                    null,
+                    null,
+                    t
                   );
 
                 if (techEvaluationCommentsDeletedRecords?.length > 0) {
@@ -1559,9 +1582,12 @@ const saveRfqDraft = async (user_id, reqBody) => {
                         evaluationComment
                     };
 
-                    await transactingModels.rfqModel.deleteWithReturnIds(
+                    await rfqModel.deleteWithReturnIds(
                       'tbl_rfq_product_tech_evaluation_comments_files',
-                      commentFilesCondition
+                      commentFilesCondition,
+                      null,
+                      null,
+                      t
                     );
                   }
                 }
@@ -1589,19 +1615,21 @@ const saveRfqDraft = async (user_id, reqBody) => {
             variant
           }));
 
-          await transactingModels.rfqModel.insertArray(
+          await rfqModel.insertArray(
             addableData,
             Object.keys(addableData[0]),
-            'tbl_rfq_product_vendors'
+            'tbl_rfq_product_vendors',
+            t
           );
         }
 
         // Delete existing vendors
         if (deletable.length > 0) {
           for (const vendor of deletable) {
-            let productDetails = await transactingModels.rfqModel.checkIfExists(
+            let productDetails = await rfqModel.checkIfExists(
               'tbl_product_variant',
-              `id = ${productId}`
+              `id = ${productId}`,
+              t
             );
             if (!productDetails || productDetails.length === 0) continue;
 
@@ -1614,9 +1642,10 @@ const saveRfqDraft = async (user_id, reqBody) => {
               variant
             };
 
-            await transactingModels.rfqModel.delete(
+            await rfqModel.delete(
               'tbl_rfq_product_vendors',
-              conditions
+              conditions,
+              t
             );
           }
         }
@@ -1640,17 +1669,26 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
       const rfqProducts = await rfqModel.checkIfExists(
         'tbl_rfq_products',
-        `rfq_id = ${rfq_id} AND sheet_id = ${sheet_id}`,
+        `id IN (${Object.keys(filters.local)
+          .map((key) => parseInt(key))
+          .filter(Boolean)
+          .join(',')}) ${
+          sheet_id
+            ? `AND rfq_id = ${rfq_id} AND sheet_id = ${sheet_id}`
+            : `AND rfq_id = ${rfq_id} AND sheet_id IS NULL`
+        }`,
         t
       );
+
+      console.log("RFQ PRODUCTS => ", rfqProducts)
 
       if (rfqProducts && Array.isArray(rfqProducts) && rfqProducts.length > 0) {
         for (let product of rfqProducts) {
           const rfqProductId = product.id;
-          const doesLocalExist =
-            filters.local?.[rfqProductId] &&
-            Object.keys(filters.local?.[rfqProductId] ?? {}).length > 0;
+          if(!filters.local?.[rfqProductId]) continue;
 
+          const doesLocalExist = Object.keys(filters.local?.[rfqProductId] ?? {}).length > 0;
+          
           if (doesLocalExist) {
             applicableFilters = generalModel.generateFilters(
               filters.local[rfqProductId],
@@ -1673,15 +1711,48 @@ const saveRfqDraft = async (user_id, reqBody) => {
             '-user_ids': remainingVendors.map((vendor) => vendor.user_id).filter(Boolean)
           };
 
-
-          if (deletingCondition['-user_ids'].length > 0) {
-            const deleteResult = await transactingModels.rfqModel.delete(
-              'tbl_rfq_product_vendors',
-              deletingCondition
-            );
-
+          if (deletingCondition['-user_ids'].length <= 0 && (updatableVendors[rfqProductId]?.addable ?? []).length <= 0) {
+            throw new Error('Some products contain No Vendors, Please delete the products with no vendors!')
           }
-          // await rfqModel.delete(deletingCondition);
+
+          await rfqModel.delete(
+            'tbl_rfq_product_vendors',
+            deletingCondition,
+            t,
+          );
+
+          // Step 1: Evaluate all checks in parallel
+          const vendorChecks = await Promise.all(
+            remainingVendors.map(async (vendor) => {
+              const exists = await rfqModel.checkIfExists(
+                'tbl_rfq_product_vendors',
+                `rfq_id = ${rfq_id} AND product_variant_id = ${product.product_variant_id} AND variant = '${product.variant}' AND user_id = ${vendor.user_id} AND sheet_id = ${sheet_id}`
+              );
+              return {
+                vendor,
+                shouldInsert: (exists ?? []).length === 0,
+              };
+            })
+          );
+
+          // Step 2: Filter based on result
+          const filteredVendors = vendorChecks
+            .filter(v => v.shouldInsert)
+            .map(v => v.vendor);
+
+          // Step 3: Prepare for insertion
+          const insertVendors = filteredVendors.map(vendor => ({
+            rfq_id,
+            product_variant_id: product.product_variant_id,
+            variant: product.variant,
+            user_id: vendor.user_id,
+            sheet_id,
+          }));
+
+          // Step 4: Insert
+          if (insertVendors.length > 0) {
+            await rfqModel.insertArray(insertVendors, Object.keys(insertVendors[0]), 'tbl_rfq_product_vendors', t);
+          }
         }
       }
     }
@@ -2381,7 +2452,8 @@ const rfqController = {
       logError(error);
       res.status(500).json({
         status: 3,
-        message: 'An error occurred while saving the draft'
+        message: 'An error occurred while saving the draft',
+        errors: {rfq: error.message ?? 'An error occurred while saving the draft'},
       });
     }
   },  
