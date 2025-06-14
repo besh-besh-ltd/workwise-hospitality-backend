@@ -73,7 +73,7 @@ const continueBuyerCompanyRegistration = async (inputData, company_id)=>{
           const emailHeaderContent = `<h2>Hello ${inputData.name || ''},</h2>`
           const emailContainerContent = `
           <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
-           <p>Welcome to WorkWise, Your admin account for <strong ${inputData.organization_name} </strong> has been successfully registered.</p>
+           <p>Welcome to WorkWise, Your admin account has been successfully registered.</p>
             <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
             <ul>
             <li> <strong> Email: </strong> ${inputData.email} </li>
