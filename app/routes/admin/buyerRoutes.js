@@ -64,7 +64,7 @@ buyerRoutes.put(
 buyerRoutes.get(
   '/account-limits/:company_id',
   passportSignIn,
-  buyerController.getBuyerAccountLimits
+  usersController.getBuyerAccountLimits
 );
 
 buyerRoutes.put(

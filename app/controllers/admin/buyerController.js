@@ -172,43 +172,6 @@ const buyerController = {
         .end();
     }
   },
-  getBuyerAccountLimits: async (req, res, next) => {
-    try {
-      const company_id = req.params.company_id;
-      
-      const accountLimits = await userModel.getBuyerAccountLimits(company_id);
-      
-      // Return the first object from the array, or default values if no data
-      const rawData = accountLimits.length > 0 ? accountLimits[0] : {};
-      const limitsData = {
-        max_top_management: parseInt(rawData.max_top_management) || 0,
-        max_procurement: parseInt(rawData.max_procurement) || 0,
-        max_engineering: parseInt(rawData.max_engineering) || 0,
-        max_finance: parseInt(rawData.max_finance) || 0,
-        used_top_management: parseInt(rawData.used_top_management) || 0,
-        used_procurement: parseInt(rawData.used_procurement) || 0,
-        used_engineering: parseInt(rawData.used_engineering) || 0,
-        used_finance: parseInt(rawData.used_finance) || 0
-      };
-
-      res
-        .status(200)
-        .json({
-          status: 1,
-          data: limitsData
-        })
-        .end();
-    } catch (error) {
-      logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
   updateBuyerAccountLimits: async (req, res, next) => {
     try {
       const company_id = req.params.company_id;
@@ -221,7 +184,12 @@ const buyerController = {
         max_finance: parseInt(max_finance) || 0
       };
 
-      await userModel.updateBuyerAccountLimits(company_id, limitsData);
+      // Use general updateWhere function
+      await rfqModel.updateWhere(
+        'tbl_company_buyer_account_limit',
+        limitsData,
+        `company_id = ${company_id}`
+      );
 
       res
         .status(200)

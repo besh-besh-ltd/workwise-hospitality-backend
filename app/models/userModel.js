@@ -3574,32 +3574,7 @@ getBuyerAccountLimits: async (company_id) => {
   });
 },
 
-updateBuyerAccountLimits: async (company_id, limitsData) => {
-  return new Promise((resolve, reject) => {
-    db.none(
-      `UPDATE tbl_company_buyer_account_limit 
-       SET max_top_management = $2, 
-           max_procurement = $3, 
-           max_engineering = $4, 
-           max_finance = $5
-       WHERE company_id = $1`,
-      [
-        company_id,
-        limitsData.max_top_management || 0,
-        limitsData.max_procurement || 0,
-        limitsData.max_engineering || 0,
-        limitsData.max_finance || 0
-      ]
-    )
-    .then(() => {
-      resolve({ success: true });
-    })
-    .catch(err => {
-      console.error('Error updating buyer account limits:', err);
-      reject(new Error(err));
-    });
-  });
-}
+
 
 
 };
