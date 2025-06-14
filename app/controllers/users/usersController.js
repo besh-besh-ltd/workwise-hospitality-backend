@@ -4040,14 +4040,28 @@ update_user_detail: async (req, res, next) => {
   // Changes by Agnij 10-06-2025 [Added function to get buyer account limits]
   getBuyerAccountLimits: async (req, res) => {
     try {
-      const user = req.user;
-      const accountLimits = await userModel.getBuyerAccountLimits(user.company_id);
+      const company_id = req.params?.company_id || req.user?.company_id;
+      
+      const accountLimits = await userModel.getBuyerAccountLimits(company_id);
+      
+      // Return the first object from the array, or default values if no data
+      const rawData = accountLimits.length > 0 ? accountLimits[0] : {};
+      const limitsData = {
+        max_top_management: parseInt(rawData.max_top_management) || 0,
+        max_procurement: parseInt(rawData.max_procurement) || 0,
+        max_engineering: parseInt(rawData.max_engineering) || 0,
+        max_finance: parseInt(rawData.max_finance) || 0,
+        used_top_management: parseInt(rawData.used_top_management) || 0,
+        used_procurement: parseInt(rawData.used_procurement) || 0,
+        used_engineering: parseInt(rawData.used_engineering) || 0,
+        used_finance: parseInt(rawData.used_finance) || 0
+      };
 
       res
         .status(200)
         .json({
           status: 1,
-          data: accountLimits[0],
+          data: limitsData,
           message: "Account limits retrieved successfully",
         })
         .end();
