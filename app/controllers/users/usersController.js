@@ -73,7 +73,7 @@ const continueBuyerCompanyRegistration = async (inputData, company_id)=>{
           const emailHeaderContent = `<h2>Hello ${inputData.name || ''},</h2>`
           const emailContainerContent = `
           <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
-           <p>Welcome to WorkWise, Your admin account for <strong ${inputData.organization_name} </strong> has been successfully registered.</p>
+           <p>Welcome to WorkWise! Your admin account has been created successfully. </p>
             <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
             <ul>
             <li> <strong> Email: </strong> ${inputData.email} </li>
@@ -492,6 +492,7 @@ create_buyer_company_users: async (req, res, next) => {
 
     const emailHTML = generateEmailTemplate(emailHeader, emailContent);
     const mailRecipients = {
+      from: Config.webmasterMail,
       to: email,
       subject: "Welcome to WorkWise - Account Created",
       html: emailHTML
@@ -616,7 +617,7 @@ get_company_users: async (req, res, next) => {
           const emailHeaderContent = `<h2>Hello ${name || ''},</h2>`
           const emailContainerContent = `
           <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
-           <p>Welcome to WorkWise, Your account has been successfully registered.</p>
+           <p> Welcome to WorkWise! Your admin account has been created successfully. </p>
             <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
             <ul>
             <li> <strong> Email: </strong> ${email} </li>
