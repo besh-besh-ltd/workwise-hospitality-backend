@@ -268,7 +268,7 @@ const UsersController = {
         established_year: established_year || null,
         website: website || null,
         location: address || null,
-        is_private: is_private || null,
+        is_private: is_private || 0,
        };
 
       //  Register company, this model register detail in both tables tbl_user and tbl_company
