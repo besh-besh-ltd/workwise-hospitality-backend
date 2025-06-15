@@ -6386,15 +6386,6 @@ const rfqController = {
       // Assign the user data to req.user
       req.user = userWithoutPassword;
     }
-    else{
-         return res
-          .status(500)
-          .json({
-            status: 0,
-            message: 'You dont have permission to access this rfq'
-          })
-          .end();
-    }
 
     const user = req.user;
 
