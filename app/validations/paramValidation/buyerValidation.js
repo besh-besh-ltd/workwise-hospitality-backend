@@ -210,10 +210,10 @@ const schema_posts = {
             organization_name: Joi.string().required(),
             user_type: Joi.number().optional().default(7),
             password: Joi.string().optional().allow(''),
-            max_top_management: Joi.number().min(1).required(),
-            max_procurement: Joi.number().min(1).required(),
-            max_engineering: Joi.number().min(1).required(),
-            max_finance: Joi.number().min(1).required(),
+            max_top_management: Joi.number().min(0).required(),
+            max_procurement: Joi.number().min(0).required(),
+            max_engineering: Joi.number().min(0).required(),
+            max_finance: Joi.number().min(0).required(),
           });
 
           const result = addBuyerSchema.validate(req.body, { abortEarly: false });
