@@ -6798,7 +6798,8 @@ listQueries: async (req, res) => {
 
   try {
       let users;
-      if (user_type === 2) {
+      
+      if ([2, 8, 9, 10].includes(user_type)) {
           const vendorResult = await rfqModel.getVendorsForRfq(rfq_id, user_name);
           users = vendorResult.map(row => row.user_id);
       } else if (user_type === 3) {

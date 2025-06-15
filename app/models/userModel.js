@@ -3403,7 +3403,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     user_id = parseInt(user_id, 10); // Ensure user_id is an integer
     user_type = parseInt(user_type, 10); // Ensure user_type is an integer
     // Construct the parameterized query based on user type
-    if (user_type === 2 || user_type === 8 ) {
+    if ([2, 8, 9, 10].includes(user_type) ) {
         query = `
             SELECT 1 FROM tbl_rfq
             WHERE id = $1 AND created_by = $2
