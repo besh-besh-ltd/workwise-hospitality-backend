@@ -97,7 +97,6 @@ const vendorController = {
   addVendor: async (req, res, next) => {
     try {
       let createdBy = req.user.id;
-      console.log(req.files);
       const {
         name,
         mobile,
@@ -167,6 +166,7 @@ const vendorController = {
         turnover: turn_over || null,
         no_of_employess: total_employees || null,
         website: website || null,
+        is_private:0
       };
 
 
