@@ -1350,7 +1350,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             SELECT 1
             FROM tbl_product_variant_vendor_make pvmm
             WHERE pvmm.variant_vendor_map_id = pvvm.id
-            AND LOWER(pvmm.make_name) IN (${productMakes.join(", ")})
+            AND pvmm.id IN (${productMakes.join(", ")})
           )
         `;
       } else if (typeof productMakes == 'string' || typeof productMakes == 'number') {
@@ -1359,7 +1359,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             SELECT 1
             FROM tbl_product_variant_vendor_make pvmm
             WHERE pvmm.variant_vendor_map_id = pvvm.id
-            AND LOWER(pvmm.make_name) = '${productMakes}'
+            AND pvmm.id = '${productMakes}'::INT
           )
         `;
       }
@@ -1440,6 +1440,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             ORDER BY tu.name
         `;
       }
+
+      console.log("QUERY => ", q);
 
       return db.any(q, [draftId, rfqProductId, vendor_name])
 
