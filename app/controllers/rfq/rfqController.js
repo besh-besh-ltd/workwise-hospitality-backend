@@ -50,6 +50,14 @@ const getNextRfQNumber = async () => {
   });
 };
 
+const hasValidValue = (value) =>
+  (Array.isArray(value) && value.length > 0) ||
+  typeof value === 'string' ||
+  typeof value === 'number';
+
+const hasValidFilters = (obj) =>
+  obj && Object.keys(obj).length > 0 && Object.values(obj).some(hasValidValue);
+
 const removeSpecsDynamically = (data) => {
   // modified my mukul on 23-AUG
   // No longer use of this function
@@ -1656,16 +1664,14 @@ const saveRfqDraft = async (user_id, reqBody) => {
       }
     }
 
-    if (
-      (filters.global && Object.keys(filters.global).length > 0) ||
+    const hasGlobalOrLocalFilters =
+      hasValidFilters(filters.global) ||
       (filters.local &&
-        Object.keys(filters.local).length > 0 &&
-        Object.keys(filters.local).some(
-          (localFilter) =>
-            Object.keys(filters.local?.[localFilter] ?? {}).length > 0
-        ))
-    ) {
+        Object.values(filters.local).some((rfqProductFilter) =>
+          hasValidFilters(rfqProductFilter)
+        ));
 
+    if (hasGlobalOrLocalFilters) {
       let applicableFilters = generalModel.generateFilters(
         filters.global,
         VENDORS_FILTER_KEYS
@@ -1673,18 +1679,17 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
       const rfqProducts = await rfqModel.checkIfExists(
         'tbl_rfq_products',
-        `id IN (${Object.keys(filters.local)
+        `rfq_id = ${rfq_id} AND id IN (${Object.keys(filters.local)
           .map((key) => parseInt(key))
           .filter(Boolean)
           .join(',')}) ${
           sheet_id
-            ? `AND rfq_id = ${rfq_id} AND sheet_id = ${sheet_id}`
-            : `AND rfq_id = ${rfq_id} AND sheet_id IS NULL`
+            ? ` AND sheet_id = ${sheet_id}`
+            : ` AND sheet_id IS NULL`
         }`,
         t
       );
 
-      console.log("RFQ PRODUCTS => ", rfqProducts)
 
       if (rfqProducts && Array.isArray(rfqProducts) && rfqProducts.length > 0) {
         for (let product of rfqProducts) {
@@ -1692,7 +1697,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
           if(!filters.local?.[rfqProductId]) continue;
 
           const doesLocalExist = Object.keys(filters.local?.[rfqProductId] ?? {}).length > 0;
-          
+
           if (doesLocalExist) {
             applicableFilters = generalModel.generateFilters(
               filters.local[rfqProductId],
@@ -1712,11 +1717,18 @@ const saveRfqDraft = async (user_id, reqBody) => {
             rfq_id,
             product_variant_id: product.product_variant_id,
             variant: product.variant,
-            '-user_ids': remainingVendors.map((vendor) => vendor.user_id).filter(Boolean)
+            '-user_ids': remainingVendors
+              .map((vendor) => vendor.user_id)
+              .filter(Boolean)
           };
 
-          if (deletingCondition['-user_ids'].length <= 0 && (updatableVendors[rfqProductId]?.addable ?? []).length <= 0) {
-            throw new Error('Some products contain No Vendors, Please delete the products with no vendors!')
+          if (
+            deletingCondition['-user_ids'].length <= 0 &&
+            (updatableVendors[rfqProductId]?.addable ?? []).length <= 0
+          ) {
+            throw new Error(
+              'Some products contain No Vendors, Please delete the products with no vendors!'
+            );
           }
 
           await rfqModel.delete(
@@ -1730,7 +1742,15 @@ const saveRfqDraft = async (user_id, reqBody) => {
             remainingVendors.map(async (vendor) => {
               const exists = await rfqModel.checkIfExists(
                 'tbl_rfq_product_vendors',
-                `rfq_id = ${rfq_id} AND product_variant_id = ${product.product_variant_id} AND variant = '${product.variant}' AND user_id = ${vendor.user_id} AND sheet_id = ${sheet_id}`
+                `rfq_id = ${rfq_id} AND product_variant_id = ${
+                  product.product_variant_id
+                } AND variant = '${product.variant}' AND user_id = ${
+                  vendor.user_id
+                } ${
+                  sheet_id
+                    ? ` AND sheet_id = ${sheet_id}`
+                    : ` AND sheet_id IS NULL`
+                }`
               );
               return {
                 vendor,
@@ -1755,7 +1775,12 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
           // Step 4: Insert
           if (insertVendors.length > 0) {
-            await rfqModel.insertArray(insertVendors, Object.keys(insertVendors[0]), 'tbl_rfq_product_vendors', t);
+            await rfqModel.insertArray(
+              insertVendors,
+              Object.keys(insertVendors[0]),
+              'tbl_rfq_product_vendors',
+              t
+            );
           }
         }
       }
