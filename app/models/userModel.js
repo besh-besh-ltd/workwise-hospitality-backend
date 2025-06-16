@@ -689,32 +689,96 @@ company_registration: async (user_data, company_data) => {
   userinfo: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.one(
-        `SELECT tbl_users.*,
-            tbl_company.company_name,
-            tbl_company.profile,
-            tbl_company.nature_of_business,
-            tbl_company.type_of_business,
-            tbl_company.turnover,
-            tbl_company.no_of_employess,
-            tbl_company.import_export_code,
-            tbl_company.location,
-            tbl_users.mobile AS company_mobile,
-            tbl_company.gstin,
-            tbl_company.cin,
-            tbl_company.logo,
-            tbl_company.website,
-            tbl_company.established_year,
-            tbl_location_states.state_name, 
-            tbl_location_cities.city_name  
-        FROM tbl_users 
-        LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
-        LEFT JOIN tbl_location_states ON tbl_users.state = tbl_location_states.id
-        LEFT JOIN tbl_location_cities ON tbl_users.city = tbl_location_cities.id
-        WHERE tbl_users.id = $1`,
+        'SELECT user_type, company_id FROM tbl_users WHERE id = $1',
         [user_id]
       )
-        .then(function (data) {
-          resolve(data);
+        .then(function (userBasicInfo) {
+          const { user_type, company_id } = userBasicInfo;
+          
+          // For company admin (user_type 7) or vendor (user_type 3), show their own company details
+          // For other company users (user_type 2, 8, 9, 10), fetch company details from company admin
+          let queryToExecute;
+          let queryParams;
+          
+          if (user_type === 7 || user_type === 3) {
+            // Company admin or vendor - show their own company details
+            queryToExecute = `
+              SELECT tbl_users.*,
+                  tbl_company.company_name,
+                  tbl_company.profile,
+                  tbl_company.nature_of_business,
+                  tbl_company.type_of_business,
+                  tbl_company.turnover,
+                  tbl_company.no_of_employess,
+                  tbl_company.import_export_code,
+                  tbl_company.location,
+                  tbl_users.mobile AS company_mobile,
+                  tbl_company.gstin,
+                  tbl_company.cin,
+                  tbl_company.logo,
+                  tbl_company.website,
+                  tbl_company.established_year,
+                  tbl_location_states.state_name, 
+                  tbl_location_cities.city_name  
+              FROM tbl_users 
+              LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
+              LEFT JOIN tbl_location_states ON tbl_users.state = tbl_location_states.id
+              LEFT JOIN tbl_location_cities ON tbl_users.city = tbl_location_cities.id
+              WHERE tbl_users.id = $1`;
+            queryParams = [user_id];
+          } else {
+            // Other company users - fetch company details from company admin (user_type 7)
+            queryToExecute = `
+              SELECT cu.*,
+                  tbl_company.company_name,
+                  tbl_company.profile,
+                  tbl_company.nature_of_business,
+                  tbl_company.type_of_business,
+                  tbl_company.turnover,
+                  tbl_company.no_of_employess,
+                  tbl_company.import_export_code,
+                  tbl_company.location,
+                  admin_user.mobile AS company_mobile,
+                  tbl_company.gstin,
+                  tbl_company.cin,
+                  tbl_company.logo,
+                  tbl_company.website,
+                  tbl_company.established_year,
+                  admin_states.state_name, 
+                  admin_cities.city_name,
+                  admin_user.address,
+                  admin_user.postal_code,
+                  admin_user.country,
+                  admin_user.state,
+                  admin_user.city,
+                  admin_countries.country_name
+              FROM (
+                SELECT tbl_users.*,
+                    tbl_location_states.state_name as current_user_state_name, 
+                    tbl_location_cities.city_name as current_user_city_name
+                FROM tbl_users 
+                LEFT JOIN tbl_location_states ON tbl_users.state = tbl_location_states.id
+                LEFT JOIN tbl_location_cities ON tbl_users.city = tbl_location_cities.id
+                WHERE tbl_users.id = $1
+              ) cu
+              LEFT JOIN tbl_users admin_user ON (admin_user.company_id = $2 AND admin_user.user_type = 7)
+              LEFT JOIN tbl_company ON cu.company_id = tbl_company.id
+              LEFT JOIN tbl_location_states admin_states ON admin_user.state = admin_states.id
+              LEFT JOIN tbl_location_cities admin_cities ON admin_user.city = admin_cities.id
+              LEFT JOIN tbl_location_country admin_countries ON admin_user.country IS NOT NULL AND admin_user.country = admin_countries.id::text`;
+            queryParams = [user_id, company_id];
+          }
+
+          // Execute the determined query
+          db.one(queryToExecute, queryParams)
+            .then(function (data) {
+              resolve(data);
+            })
+            .catch(function (err) {
+              console.log(err)
+              let error = new Error(err);
+              reject(error);
+            });
         })
         .catch(function (err) {
           console.log(err)
