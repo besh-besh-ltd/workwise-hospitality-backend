@@ -4500,21 +4500,52 @@ project_access_checker: async (project_id, user_id) => {
         });
     });
   },
+
+  /**
+   * @param {*} rfq_id 
+   * @param {*} sender_id 
+   * @param {*} receiver_id 
+   * @description this function get message from tbl_query_messages, and mark then by sent or received company wise
+   * @last_updated by mukul - 16-06-2025
+  */
   getQueryMessages: async (rfq_id, sender_id, receiver_id) => {
-    const query = `
-      SELECT m.id AS message_id,
+    const query = `SELECT 
+       m.id AS message_id,
             m.message_text,
             m.created_at,
             m.sender_id,
             m.sender_type,
             m.receiver_id,
-            COALESCE(JSON_AGG(JSON_BUILD_OBJECT('file_name', f.file_name, 'file_url', f.file_url)) FILTER (WHERE f.file_url IS NOT NULL), '[]') AS files
-      FROM tbl_query_messages m
-      LEFT JOIN tbl_query_message_files f ON m.id = f.message_id
-      WHERE m.rfq_id = $1 AND
-            ((m.sender_id = $2 AND m.receiver_id = $3) OR (m.sender_id = $3 AND m.receiver_id = $2))
-      GROUP BY m.id, m.message_text, m.created_at, m.sender_id, m.sender_type
-      ORDER BY m.created_at;
+       sender_u.name AS sender_name,
+       CASE 
+         WHEN sender_u.company_id = current_u.company_id THEN 'sent'
+         ELSE 'received'
+       END AS direction,
+                COALESCE(
+         JSON_AGG(
+           JSON_BUILD_OBJECT('file_name', f.file_name, 'file_url', f.file_url)
+         ) FILTER (WHERE f.file_url IS NOT NULL), '[]') AS files
+     FROM tbl_query_messages m
+     LEFT JOIN tbl_query_message_files f ON m.id = f.message_id
+     LEFT JOIN tbl_users sender_u ON sender_u.id = m.sender_id
+     JOIN tbl_users current_u ON current_u.id = $2
+     WHERE m.rfq_id = $1
+       AND (
+         m.sender_id IN (
+           SELECT user_id FROM tbl_project_team WHERE project_id = (
+             SELECT project_id FROM tbl_rfq WHERE id = $1
+           )
+         )
+         OR
+         m.receiver_id IN (
+           SELECT user_id FROM tbl_project_team WHERE project_id = (
+             SELECT project_id FROM tbl_rfq WHERE id = $1
+           )
+         )
+       )
+     GROUP BY m.id, m.message_text, m.created_at, m.sender_id, m.sender_type, 
+       m.receiver_id, sender_u.name, sender_u.company_id, current_u.company_id
+     ORDER BY m.created_at;
     `;
 
     const updateQuery = `
