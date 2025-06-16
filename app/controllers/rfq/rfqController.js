@@ -1610,60 +1610,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
       }
     }
 
-    if (updatableVendors && Object.keys(updatableVendors).length > 0) {
-      for (const rfqProductId of Object.keys(updatableVendors)) {
-        const productId = updatableVendors[rfqProductId].product_id;
-        const variant = updatableVendors[rfqProductId].variant;
-
-        const addable = updatableVendors[rfqProductId]?.addable ?? [];
-        const deletable = updatableVendors[rfqProductId]?.deletable ?? [];
-
-        // Insert new vendors
-        if (addable.length > 0) {
-          const addableData = addable.map((vendor) => ({
-            rfq_id,
-            product_variant_id: productId,
-            user_id: vendor,
-            variant
-          }));
-
-          await rfqModel.insertArray(
-            addableData,
-            Object.keys(addableData[0]),
-            'tbl_rfq_product_vendors',
-            t
-          );
-        }
-
-        // Delete existing vendors
-        if (deletable.length > 0) {
-          for (const vendor of deletable) {
-            let productDetails = await rfqModel.checkIfExists(
-              'tbl_product_variant',
-              `id = ${productId}`,
-              t
-            );
-            if (!productDetails || productDetails.length === 0) continue;
-
-            productDetails = productDetails[0];
-
-            const conditions = {
-              rfq_id,
-              product_variant_id: productId,
-              user_id: vendor,
-              variant
-            };
-
-            await rfqModel.delete(
-              'tbl_rfq_product_vendors',
-              conditions,
-              t
-            );
-          }
-        }
-      }
-    }
-
     const hasGlobalOrLocalFilters =
       hasValidFilters(filters.global) ||
       (filters.local &&
@@ -1779,6 +1725,60 @@ const saveRfqDraft = async (user_id, reqBody) => {
               insertVendors,
               Object.keys(insertVendors[0]),
               'tbl_rfq_product_vendors',
+              t
+            );
+          }
+        }
+      }
+    }
+
+    if (updatableVendors && Object.keys(updatableVendors).length > 0) {
+      for (const rfqProductId of Object.keys(updatableVendors)) {
+        const productId = updatableVendors[rfqProductId].product_id;
+        const variant = updatableVendors[rfqProductId].variant;
+
+        const addable = updatableVendors[rfqProductId]?.addable ?? [];
+        const deletable = updatableVendors[rfqProductId]?.deletable ?? [];
+
+        // Insert new vendors
+        if (!hasGlobalOrLocalFilters && addable.length > 0) {
+          const addableData = addable.map((vendor) => ({
+            rfq_id,
+            product_variant_id: productId,
+            user_id: vendor,
+            variant
+          }));
+
+          await rfqModel.insertArray(
+            addableData,
+            Object.keys(addableData[0]),
+            'tbl_rfq_product_vendors',
+            t
+          );
+        }
+
+        // Delete existing vendors
+        if (deletable.length > 0) {
+          for (const vendor of deletable) {
+            let productDetails = await rfqModel.checkIfExists(
+              'tbl_product_variant',
+              `id = ${productId}`,
+              t
+            );
+            if (!productDetails || productDetails.length === 0) continue;
+
+            productDetails = productDetails[0];
+
+            const conditions = {
+              rfq_id,
+              product_variant_id: productId,
+              user_id: vendor,
+              variant
+            };
+
+            await rfqModel.delete(
+              'tbl_rfq_product_vendors',
+              conditions,
               t
             );
           }
