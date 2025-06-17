@@ -3745,7 +3745,7 @@ ARRAY(
 
   TU.name AS vendor_name,
   TU.email AS vendor_email,
-  TU.organization_name AS vendor_organization,
+  COALESCE(TC.company_name, TU.organization_name, TU.name) AS vendor_organization,
   TU.id AS vendor_id,
 
   m.status,
@@ -3779,6 +3779,7 @@ ARRAY(
 FROM tbl_product_variant_vendor_mapping m
 
 LEFT JOIN tbl_users TU ON TU.id = m.vendor_id
+LEFT JOIN tbl_company TC ON TC.id = TU.company_id
 LEFT JOIN tbl_product_variant v ON v.id = m.product_variant_id
 LEFT JOIN tbl_product p ON p.id = v.product_id
 LEFT JOIN tbl_reject_reason trr ON v.reject_reason_id = trr.id
