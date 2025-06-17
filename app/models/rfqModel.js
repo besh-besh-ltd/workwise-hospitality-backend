@@ -1556,7 +1556,10 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       SELECT json_build_object('id', TQF.id,'product_id',TQF.product_variant_id, 'timestamp', TQF.timestamp,'variant', TQF.variant,
         'winning_vendor', 
           (
-            SELECT json_build_object( 'id', TUU.id, 'name', TUU.name, 'email', TUU.email, 'mobile', TUU.mobile, 'address', TUU.address, 'organization_name', TUU.organization_name ) FROM tbl_users TUU WHERE TUU.id = TQF.vendor_id
+            SELECT json_build_object( 'id', TUU.id, 'name', TUU.name, 'email', TUU.email, 'mobile', TUU.mobile, 'address', TUU.address, 'organization_name', COALESCE(TCC.company_name, TUU.organization_name, TUU.name) ) 
+            FROM tbl_users TUU 
+            LEFT JOIN tbl_company TCC ON TCC.id = TUU.company_id 
+            WHERE TUU.id = TQF.vendor_id
           ),
         'product_details', (
           SELECT json_build_object( 'id', TV.id, 'name', TV.name, 'description', TPP.description ) FROM tbl_product_variant TV JOIN tbl_product TPP ON TPP.id = TV.product_id WHERE TV.id = TQF.product_variant_id
@@ -1914,8 +1917,8 @@ LIMIT 1;`;
 
     let dataQuery = `
     WITH vendor_data AS (
-      SELECT DISTINCT tu.id, tu.name as vendor_name, tu.organization_name as company_name,
-      tu.address, tc.profile as about, tc.website, tc.company_name, lc.city_name, ls.state_name,
+      SELECT DISTINCT tu.id, tu.name as vendor_name, COALESCE(tc.company_name, tu.organization_name, tu.name) as company_name,
+      tu.address, tc.profile as about, tc.website, tc.company_name as original_company_name, lc.city_name, ls.state_name,
       CASE
           WHEN tu.new_profile_image IS NULL THEN
           NULL
@@ -2212,7 +2215,10 @@ LIMIT 1;`;
           ARRAY(
             SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,
                 'vendor_details', (
-                    SELECT json_agg(json_build_object('id', TU.id, 'name' , TU.name, 'email', TU.email,'mobile' , TU.mobile,'address' , TU.address,'organization_name' , TU.organization_name)) FROM tbl_users TU WHERE TU.id = TQ.created_by
+                    SELECT json_agg(json_build_object('id', TU.id, 'name' , TU.name, 'email', TU.email,'mobile' , TU.mobile,'address' , TU.address,'organization_name' , COALESCE(TCC.company_name, TU.organization_name, TU.name))) 
+                    FROM tbl_users TU 
+                    LEFT JOIN tbl_company TCC ON TCC.id = TU.company_id 
+                    WHERE TU.id = TQ.created_by
                 ),
                 'products', (
                     SELECT json_agg(json_build_object('product_id', TQI.product_id,'product_name', TQI.product_name, 'unit_price', TQI.unit_price, 'package_price', TQI.package_price, 'tax', TQI.tax, 'freight_price', TQI.freight_price, 'total_price', TQI.total_price, 'comment', TQI.comment, 'delivery_period', TQI.delivery_period,
@@ -2282,7 +2288,7 @@ LIMIT 1;`;
                     'email', TU.email,
                     'mobile', TU.mobile,
                     'address', TU.address,
-                    'organization_name', TU.organization_name,
+                    'organization_name', COALESCE(TCC.company_name, TU.organization_name, TU.name),
                     'global_payment_term', (
                         SELECT json_agg(json_build_object('details', TQ_inner.global_payment_term,'comment', TQ_inner.global_comment))
                         FROM tbl_quotes TQ_inner
@@ -2299,6 +2305,7 @@ LIMIT 1;`;
                 )
                 FROM tbl_quotes TQ
                 JOIN tbl_users TU ON TU.id = TQ.created_by
+                LEFT JOIN tbl_company TCC ON TCC.id = TU.company_id
                 LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
                 WHERE TQ.rfq_id = TRP.rfq_id
                 ${TA_Vendors === "TA" ? vendorCondition : ''}
@@ -2321,10 +2328,11 @@ LIMIT 1;`;
                             'email', TU.email,
                             'mobile', TU.mobile,
                             'address', TU.address,
-                            'organization_name', TU.organization_name,
+                            'organization_name', COALESCE(TCC2.company_name, TU.organization_name, TU.name),
                             'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END)
                         ))
                         FROM tbl_users TU
+                        LEFT JOIN tbl_company TCC2 ON TCC2.id = TU.company_id
                         LEFT JOIN tbl_quote_finalization _TQF ON _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
                         WHERE TU.id = TQ.created_by
                         ${TA_Vendors === "TA" ? vendorCondition : ''}
@@ -2515,9 +2523,10 @@ LIMIT 1;`;
                       'email', TU.email,
                       'mobile', TU.mobile,
                       'address', TU.address,
-                      'organization_name', TU.organization_name
+                      'organization_name', COALESCE(TCC3.company_name, TU.organization_name, TU.name)
                     )
                     FROM tbl_users TU
+                    LEFT JOIN tbl_company TCC3 ON TCC3.id = TU.company_id
                     WHERE TU.id = TQ.created_by
                   )
                 )
@@ -3876,9 +3885,10 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
   getRecentQuotes: async (user_id, status) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT  tr.id, tr.rfq_no , tq.timestamp as timestamp, tq.created_by, tu.organization_name, tu.name as vendor_name FROM "tbl_rfq" tr
+        `SELECT  tr.id, tr.rfq_no , tq.timestamp as timestamp, tq.created_by, COALESCE(tc.company_name, tu.organization_name, tu.name) as organization_name, tu.name as vendor_name FROM "tbl_rfq" tr
       LEFT JOIN "tbl_quotes" tq ON tr.id = tq.rfq_id
       LEFT JOIN "tbl_users" tu ON tq.created_by = tu.id
+      LEFT JOIN "tbl_company" tc ON tc.id = tu.company_id
       WHERE tr.created_by = $1 AND tr.status = '1' AND tr.is_published = 1 ORDER BY "id" DESC LIMIT 50`,
         [user_id]
       )
@@ -5941,7 +5951,7 @@ rfqProductReport: async (userId, productId, productName, startDate, endDate) => 
             'vendor_name', TU.name,
             'vendor_email', TU.email,
             'vendor_mobile', TU.mobile,
-            'organization_name', TU.organization_name,
+            'organization_name', COALESCE(TCC4.company_name, TU.organization_name, TU.name),
             'variant', TRPV.variant,
             'quote_details', COALESCE(
                 (
@@ -6012,6 +6022,7 @@ rfqProductReport: async (userId, productId, productName, startDate, endDate) => 
     LEFT JOIN tbl_rfq_product_vendors TRPV 
         ON TRPV.rfq_id = T.id AND TRPV.product_variant_id = TRP.product_variant_id
     LEFT JOIN tbl_users TU ON TU.id = TRPV.user_id
+    LEFT JOIN tbl_company TCC4 ON TCC4.id = TU.company_id
 
      WHERE (
      T.created_by = $1
@@ -6255,8 +6266,8 @@ searchVariantVendors: async (product_id, variant_id) => {
   const q = `
     SELECT 
       u.id AS vendor_id,
-      u.organization_name AS vendor_name,
-      CONCAT(u.organization_name, ' (', u.name, ')') AS vendor_display_name,
+      COALESCE(c.company_name, u.organization_name, u.name) AS vendor_name,
+      CONCAT(COALESCE(c.company_name, u.organization_name, u.name), ' (', u.name, ')') AS vendor_display_name,
       u.email AS vendor_email,
       u.city,
       u.state,
@@ -6266,6 +6277,8 @@ searchVariantVendors: async (product_id, variant_id) => {
       tbl_product_variant_vendor_mapping pvvm
     JOIN 
       tbl_users u ON pvvm.vendor_id = u.id
+    LEFT JOIN 
+      tbl_company c ON c.id = u.company_id
     JOIN 
       tbl_product_variant pv ON pvvm.product_variant_id = pv.id
     WHERE 
@@ -6274,7 +6287,7 @@ searchVariantVendors: async (product_id, variant_id) => {
       AND u.is_deleted = 0
       AND ${variant_id ? 'pvvm.product_variant_id = $1' : 'pv.product_id = $1'}
     ORDER BY 
-      u.organization_name ASC;
+      COALESCE(c.company_name, u.organization_name, u.name) ASC;
   `;
   
   try {

@@ -3581,8 +3581,8 @@ getProductTechSpecByID: async (productId) => {
             u.id AS vendor_user_id,
             u.name AS vendor_name,
             u.email AS vendor_email,
-            u.organization_name AS vendor_organization,
-            COALESCE(u.organization_name, u.name, 'Unknown Vendor') AS vendor_display_name,
+            COALESCE(c.company_name, u.organization_name, u.name) AS vendor_organization,
+            COALESCE(c.company_name, u.organization_name, u.name, 'Unknown Vendor') AS vendor_display_name,
             ${searchTerm ? `
               similarity(v.name, '${searchTerm}') AS v_similarity_score,
               similarity(p.name, '${searchTerm}') AS p_similarity_score,
@@ -3605,6 +3605,7 @@ getProductTechSpecByID: async (productId) => {
           LEFT JOIN tbl_users TU ON m.updated_by = TU.id
           LEFT JOIN tbl_users TA ON m.approved_by = TA.id
           LEFT JOIN tbl_users u ON u.id = m.vendor_id
+          LEFT JOIN tbl_company c ON c.id = u.company_id
           LEFT JOIN tbl_reject_reason rr ON rr.id = v.reject_reason_id
           ${whereClause}
           ORDER BY
