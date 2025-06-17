@@ -2953,7 +2953,7 @@ const productController = {
         const result = await productModel.updateVariantMappingByData(variantObj, mappingId);
           
             let html_variables = [
-              { name: mappingDetails?.vendor_organization || mappingDetails?.name },
+              { name: mappingDetails?.vendor_organization || mappingDetails?.vendor_name },
               {
                 message:
                   status == 1
