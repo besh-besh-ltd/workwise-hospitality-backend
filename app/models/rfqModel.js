@@ -1350,7 +1350,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             SELECT 1
             FROM tbl_product_variant_vendor_make pvmm
             WHERE pvmm.variant_vendor_map_id = pvvm.id
-            AND LOWER(pvmm.make_name) IN (${productMakes.join(", ")})
+            AND pvmm.id IN (${productMakes.join(", ")})
           )
         `;
       } else if (typeof productMakes == 'string' || typeof productMakes == 'number') {
@@ -1359,7 +1359,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             SELECT 1
             FROM tbl_product_variant_vendor_make pvmm
             WHERE pvmm.variant_vendor_map_id = pvvm.id
-            AND LOWER(pvmm.make_name) = '${productMakes}'
+            AND pvmm.id = '${productMakes}'::INT
           )
         `;
       }
@@ -1440,6 +1440,8 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             ORDER BY tu.name
         `;
       }
+
+      console.log("QUERY => ", q);
 
       return db.any(q, [draftId, rfqProductId, vendor_name])
 
@@ -4498,22 +4500,55 @@ project_access_checker: async (project_id, user_id) => {
         });
     });
   },
+
+  /**
+   * @param {*} rfq_id 
+   * @param {*} sender_id 
+   * @param {*} receiver_id 
+   * @description this function get message from tbl_query_messages, and mark then by sent or received company wise
+   * @last_updated by mukul - 16-06-2025
+  */
   getQueryMessages: async (rfq_id, sender_id, receiver_id) => {
-    const query = `
-      SELECT m.id AS message_id,
-            m.message_text,
-            m.created_at,
-            m.sender_id,
-            m.sender_type,
-            m.receiver_id,
-            COALESCE(JSON_AGG(JSON_BUILD_OBJECT('file_name', f.file_name, 'file_url', f.file_url)) FILTER (WHERE f.file_url IS NOT NULL), '[]') AS files
-      FROM tbl_query_messages m
-      LEFT JOIN tbl_query_message_files f ON m.id = f.message_id
-      WHERE m.rfq_id = $1 AND
-            ((m.sender_id = $2 AND m.receiver_id = $3) OR (m.sender_id = $3 AND m.receiver_id = $2))
-      GROUP BY m.id, m.message_text, m.created_at, m.sender_id, m.sender_type
-      ORDER BY m.created_at;
-    `;
+    const query = `WITH viewer AS (
+  SELECT id, company_id FROM tbl_users WHERE id = $2
+),
+target AS (
+  SELECT id, company_id FROM tbl_users WHERE id = $3
+)
+
+SELECT 
+  m.id AS message_id,
+  m.message_text,
+  m.created_at,
+  m.sender_id,
+  m.sender_type,
+  m.receiver_id,
+  sender.name AS sender_name,
+  CASE 
+    WHEN sender.company_id = viewer.company_id THEN 'sent'
+    ELSE 'received'
+  END AS direction,
+  COALESCE(
+    JSON_AGG(
+      JSON_BUILD_OBJECT('file_name', f.file_name, 'file_url', f.file_url)
+    ) FILTER (WHERE f.file_url IS NOT NULL), 
+    '[]'
+  ) AS files
+FROM tbl_query_messages m
+LEFT JOIN tbl_query_message_files f ON m.id = f.message_id
+JOIN tbl_users sender ON sender.id = m.sender_id
+JOIN tbl_users receiver ON receiver.id = m.receiver_id
+JOIN viewer ON true
+JOIN target ON true
+WHERE m.rfq_id = $1
+  AND (
+    (sender.company_id = viewer.company_id AND receiver.company_id = target.company_id) OR
+    (sender.company_id = target.company_id AND receiver.company_id = viewer.company_id)
+  )
+GROUP BY 
+  m.id, m.message_text, m.created_at, m.sender_id, m.sender_type, m.receiver_id, sender.name, sender.company_id, viewer.company_id
+ORDER BY m.created_at;
+`;
 
     const updateQuery = `
         UPDATE tbl_query_messages

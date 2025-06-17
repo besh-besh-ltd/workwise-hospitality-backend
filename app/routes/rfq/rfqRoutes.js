@@ -199,7 +199,7 @@ RfqRoutes.post(
 RfqRoutes.post(
   '/product-price-stats',
   noLogin.customer_auth,
-  acl([2]),
+  acl([2, 8]),
   rfqController.productPriceStats
 );
 
@@ -226,7 +226,7 @@ RfqRoutes.get('/units',
 RfqRoutes.post('/magic-search-rfq-preview',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
-  acl([2]),
+  acl([2, 8]),
   validateDbBody.project_access_check,
   // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
   rfqController.magicSearchRfqCreate
@@ -235,7 +235,7 @@ RfqRoutes.post('/magic-search-rfq-preview',
 RfqRoutes.get('/process-magic-search-draft',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
-  acl([2]),
+  acl([2, 8]),
   validateDbBody.project_access_check,
   // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
   rfqController.processMagicSearchDraft
@@ -244,7 +244,7 @@ RfqRoutes.get('/process-magic-search-draft',
 RfqRoutes.get('/draft-sheets',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
-  acl([2]),
+  acl([2, 8]),
   validateDbBody.project_access_check,
   // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
   rfqController.getRfqDraftSheets
@@ -253,7 +253,7 @@ RfqRoutes.get('/draft-sheets',
 RfqRoutes.get('/draft-sheet-wise',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
-  acl([2]),
+  acl([2, 8]),
   validateDbBody.project_access_check,
   // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
   rfqController.getDraftRfqSheetWise
@@ -291,7 +291,7 @@ RfqRoutes.get(
 RfqRoutes.post('/magic-search-rfq-create',
   passportSignIn,
   validateDbBody.user_id_profileexists,
-  acl([2]),
+  acl([2, 8]),
   validateDbBody.project_access_check,
   validateBody(rfqSchemas.create),
   rfqController.create  

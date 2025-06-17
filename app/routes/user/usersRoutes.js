@@ -234,7 +234,7 @@ UsersRoutes.get(
 UsersRoutes.post(
   '/buyer-private-vendor',
   passportSignIn,
-  acl([2]),
+  acl([2,8]),
   validateBody(schemas.buyer_private_vendor_approved),
   // validateDbBody.vendor_exist,
   // UsersController.addPrivateVendor
@@ -251,7 +251,7 @@ UsersRoutes.get(
 UsersRoutes.post(
   '/buyer-excel-add-vendor',
   passportSignIn,
-  acl([2]),
+  acl([2, 8]),
   schema_posts.buyerExcelUploadVendorFileHandler, 
   UsersController.buyerExcelUploadVendor,
 )
