@@ -299,24 +299,6 @@ const validateDbBody = {
         err++;
         errors.name = 'Product is already mapped with vendor';
       }
-      if (req.method == 'PUT' && req.findProduct.is_approve != 1) {
-        let checkMasterNameExist = await productModel.checkMasterNameExist(
-          name,
-          req.params?.id
-        );
-        if (checkMasterNameExist.length > 0) {
-          err++;
-          errors.name = 'This product is available in master product';
-        }
-      } else if (req.method != 'PUT' && !master_id) {
-        let checkMasterNameExist = await productModel.checkMasterNameExist(
-          name
-        );
-        if (checkMasterNameExist.length > 0) {
-          err++;
-          errors.name = 'This product is available in master product';
-        }
-      }
 
       if (master_id) {
         let findProduct = await productModel.checkVariantById(master_id);
