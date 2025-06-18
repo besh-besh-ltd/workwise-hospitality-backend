@@ -265,4 +265,17 @@ productRoutes.post(
   productController.updateVariantVendorMapping
 )
 
+// Variant Specification Routes
+productRoutes.get(
+  '/variant-specifications/:variant_id',
+  passportSignIn,
+  productController.getVariantSpecifications
+);
+
+productRoutes.put(
+  '/variant-specifications/:variant_id',
+  passportSignIn,
+  productController.updateVariantSpecifications
+);
+
 export default productRoutes;
