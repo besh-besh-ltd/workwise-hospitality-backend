@@ -877,7 +877,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
           u.name AS vendor_name,
           u.email AS vendor_email,
           u.mobile AS vendor_mobile,
-          u.organization_name AS vendor_organization,
+          COALESCE(c.company_name, u.organization_name, u.name) AS vendor_organization,
           c.company_name,
           -- Pick only ONE token using subquery (latest or earliest)
           (
