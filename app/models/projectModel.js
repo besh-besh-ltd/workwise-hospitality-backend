@@ -52,9 +52,9 @@ const projectModel = {
                 db.any(`
                     SELECT t.* 
                     FROM tbl_projects t
-                    WHERE t.id = $1 AND t.user_id = $2;
+                    WHERE t.id = $1;
                 `,
-              [project_id, user_id]
+              [project_id]
             )
                 .then(function (data) {
                 resolve(data);
@@ -66,7 +66,7 @@ const projectModel = {
         })
     },
 
-    getProjectById: async (project_id,user_id,limit,offset) => {
+    getProjectById: async (project_id, user_id, limit, offset) => {
         return new Promise(function (resolve, reject) {
                 db.any(
                     `SELECT 
@@ -134,7 +134,6 @@ const projectModel = {
                 tbl_project_files f ON f.project_id = p.id    
             WHERE 
                 p.id = $1
-                AND p.user_id = $2
             GROUP BY 
                 p.id;
               `,
@@ -150,35 +149,85 @@ const projectModel = {
               });
         })
     },
-    getAllProjects: async (user_id) => {
-        return new Promise(function (resolve, reject) {
-      const query = 
-                `SELECT 
-                    p.*, 
-                    COUNT(r.id) AS total_rfqs,
-                    COUNT(CASE WHEN r.status = 2 THEN 1 END) AS closed_rfqs,
-                    COUNT(CASE WHEN r.status = 1 THEN 1 END) AS open_rfqs
-                FROM 
-                    tbl_projects p
-                LEFT JOIN 
-                    tbl_rfq r ON r.project_id = p.id 
-                WHERE 
-                    p.user_id = $1 OR EXISTS (
+  /**
+   * 
+   * @param {*} user_id 
+   * @returns list of project in which user is creator or team member
+   */
+  getAllProjects: async (user_id) => {
+    return new Promise(function (resolve, reject) {
+      const query =
+        `SELECT 
+        p.*, 
+        u.name AS created_by_name,
+        COUNT(r.id) AS total_rfqs,
+        COUNT(CASE WHEN r.status = 2 THEN 1 END) AS closed_rfqs,
+        COUNT(CASE WHEN r.status = 1 THEN 1 END) AS open_rfqs
+      FROM 
+        tbl_projects p
+      LEFT JOIN 
+        tbl_users u ON u.id = p.user_id
+      LEFT JOIN 
+        tbl_rfq r ON r.project_id = p.id 
+      WHERE 
+        p.user_id = $1 OR EXISTS (
           SELECT 1 FROM tbl_project_team pt
           WHERE pt.project_id = p.id AND pt.user_id = $1
         )
       GROUP BY 
-        p.id
+        p.id, u.name
       ORDER BY 
         p.created_at DESC;`;
 
-        console.log(" query ", query)
+      console.log(" query ", query)
 
-    db.any(query, [user_id])
-      .then(data => resolve(data))
-      .catch(err => reject(new Error(err)));
-                });
-},
+      db.any(query, [user_id])
+        .then(data => resolve(data))
+        .catch(err => reject(new Error(err)));
+    });
+  },
+
+  /**
+   * @param {*} company_id 
+   * @returns return list of project created in a company, 
+   */
+  getAllProjectsByCompany: async (company_id) => {
+    return new Promise((resolve, reject) => {
+      const query = `SELECT 
+  p.*, 
+  u.name AS created_by_name,
+  COALESCE(COUNT(r.id), 0) AS total_rfqs,
+  COALESCE(COUNT(CASE WHEN r.status = 2 THEN 1 END), 0) AS closed_rfqs,
+  COALESCE(COUNT(CASE WHEN r.status = 1 THEN 1 END), 0) AS open_rfqs
+FROM 
+  tbl_projects p
+LEFT JOIN 
+  tbl_users u ON u.id = p.user_id  -- fetch creator name
+LEFT JOIN 
+  tbl_rfq r ON r.project_id = p.id
+WHERE 
+  p.user_id IN (
+    SELECT id FROM tbl_users 
+    WHERE company_id = $1 
+  )
+  OR p.id IN (
+    SELECT pt.project_id 
+    FROM tbl_project_team pt
+    JOIN tbl_users tu ON pt.user_id = tu.id
+    WHERE tu.company_id = $1 
+  )
+GROUP BY 
+  p.id, u.name
+ORDER BY 
+  p.created_at DESC;
+`;
+
+      db.any(query, [company_id])
+        .then(data => resolve(data))
+        .catch(err => reject(new Error(err)));
+    });
+  },
+
 
     updateProject: async (projectObj) => {
       return new Promise(function (resolve, reject) {

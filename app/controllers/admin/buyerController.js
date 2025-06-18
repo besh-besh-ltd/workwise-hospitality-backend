@@ -172,6 +172,43 @@ const buyerController = {
         .end();
     }
   },
+  updateBuyerAccountLimits: async (req, res, next) => {
+    try {
+      const company_id = req.params.company_id;
+      const { max_top_management, max_procurement, max_engineering, max_finance } = req.body;
+      
+      const limitsData = {
+        max_top_management: parseInt(max_top_management) || 0,
+        max_procurement: parseInt(max_procurement) || 0,
+        max_engineering: parseInt(max_engineering) || 0,
+        max_finance: parseInt(max_finance) || 0
+      };
+
+      // Use general updateWhere function
+      await rfqModel.updateWhere(
+        'tbl_company_buyer_account_limit',
+        limitsData,
+        `company_id = ${company_id}`
+      );
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          message: 'Account limits updated successfully'
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   updateBuyer: async (req, res, next) => {
     try {
       let buyerId = req.params.id;
@@ -180,13 +217,7 @@ const buyerController = {
         name,
         mobile,
         organization_name,
-        address,
-        dob,
-        country,
-        linkedin,
-        facebook,
-        whatsapp,
-        skype
+        address
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
       let fileName = req?.file?.location;   //get file url from s3 bucket
@@ -200,13 +231,7 @@ const buyerController = {
         updatedBy,
         fileName,
         originalFilename,
-        address: address || null,
-        dob: dateFormat(dob, 'yyyy-mm-dd'),
-        country: country || null,
-        linkedin: linkedin || null,
-        facebook: facebook || null,
-        whatsapp: whatsapp || null,
-        skype: skype || null
+        address: address || null
       };
       
       await buyerModel.updateBuyer(buyerId, buyerObj);

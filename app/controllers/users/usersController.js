@@ -73,7 +73,7 @@ const continueBuyerCompanyRegistration = async (inputData, company_id)=>{
           const emailHeaderContent = `<h2>Hello ${inputData.name || ''},</h2>`
           const emailContainerContent = `
           <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
-           <p>Welcome to WorkWise, Your admin account for <strong ${inputData.organization_name} </strong> has been successfully registered.</p>
+           <p>Welcome to WorkWise! Your admin account has been created successfully. </p>
             <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
             <ul>
             <li> <strong> Email: </strong> ${inputData.email} </li>
@@ -268,7 +268,7 @@ const UsersController = {
         established_year: established_year || null,
         website: website || null,
         location: address || null,
-        is_private: is_private || null,
+        is_private: is_private || 0,
        };
 
       //  Register company, this model register detail in both tables tbl_user and tbl_company
@@ -403,7 +403,7 @@ create_buyer_company_users: async (req, res, next) => {
     if (currentCount >= maxAllowed) {
       return res.status(400).json({
         status: false,
-        message: `Limit reached: Only ${maxAllowed} account(s) of this type allowed.`
+        message: `You have reached the maximum number of allowed accounts for this role`
       }).end();
     }
 
@@ -492,6 +492,7 @@ create_buyer_company_users: async (req, res, next) => {
 
     const emailHTML = generateEmailTemplate(emailHeader, emailContent);
     const mailRecipients = {
+      from: Config.webmasterMail,
       to: email,
       subject: "Welcome to WorkWise - Account Created",
       html: emailHTML
@@ -528,22 +529,25 @@ get_company_users: async (req, res, next) => {
     // Map user_type to role names for better readability
     const userTypeMap = {
       7: "Admin",
-      8: "Top Management",
+      8: "Management",
       2: "Procurement",
       9: "Engineering",
       10: "Finance"
     };
     
-    const formattedUsers = users.map(user => ({
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      mobile: user.mobile,
-      role: user.user_type,
-      role_name: userTypeMap[user.user_type] || "Unknown",
-      status: user.status === 1 ? "active" : "inactive",
-      created_at: user.created_at
-    }));
+    const formattedUsers = users
+      .filter(user => user.user_type !== 7)
+      .map(user => ({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        mobile: user.mobile,
+        role: user.user_type,
+        role_name: userTypeMap[user.user_type] || "Unknown",
+        status: user.status === 1 ? "active" : "inactive",
+        created_at: user.created_at
+      }));
+
     
     res.status(200).json({
       status: true,
@@ -613,7 +617,7 @@ get_company_users: async (req, res, next) => {
           const emailHeaderContent = `<h2>Hello ${name || ''},</h2>`
           const emailContainerContent = `
           <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
-           <p>Welcome to WorkWise, Your account has been successfully registered.</p>
+           <p> Welcome to WorkWise! Your admin account has been created successfully. </p>
             <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
             <ul>
             <li> <strong> Email: </strong> ${email} </li>
@@ -1209,33 +1213,82 @@ get_company_users: async (req, res, next) => {
     }
   },
 
+/**
+ * Updates user profile details with permission-based access control
+ * 
+ * This function handles updating user profile information with the following features:
+ * - Permission-based access: Company admins (user_type 7) can update other users within their company
+ * - Self-update: All users can update their own profile information
+ * - Status updates: Only allowed for non-admin users and only by admins
+ * - Field validation: Trims and formats input data
+ * - Tracking: Records who made the update and when
+ * 
+ * @param {Object} req - Express request object containing:
+ *   - user: The authenticated user making the request (from passport middleware)
+ *   - body: Request payload with fields to update (name, email, mobile, status, user_id)
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next middleware function
+ * @returns {Object} JSON response with status and message
+ */
 update_user_detail: async (req, res, next) => {
   try {
-    const { id: user_id } = req.user;
+    const loggedInUser = req.user;
     const reqData = req.body;
-
-    const reqUserData = {
-      name: reqData.name?.trim(),
-      email: reqData.email.trim().toLowerCase(),
-      mobile: reqData.mobile.trim(),
-      updated_at: new Date(), // this value  depends on server date and time
+    const isAdmin = loggedInUser.user_type === 7;
+    
+    // Determine target user ID
+    let targetUserId = reqData.user_id && isAdmin ? reqData.user_id : loggedInUser.id;
+    
+    // Check permissions - only admins can update other users
+    if (reqData.user_id && !isAdmin) {
+      return res.status(403).json({
+        status: false,
+        message: "Only company administrators can update other users"
+      });
+    }
+    
+    // Build update data with tracking information
+    const updateData = {
+      updated_at: currentDateTime(),
+      updated_by: loggedInUser.id
     };
-
-    const updatedUser = await rfqModel.updateWhere(
+    
+    // Add user-provided fields to update data with proper formatting
+    if (reqData.name !== undefined) updateData.name = reqData.name?.trim();
+    if (reqData.email !== undefined) updateData.email = reqData.email?.trim().toLowerCase();
+    if (reqData.mobile !== undefined) updateData.mobile = reqData.mobile?.trim();
+    
+    // Status updates: Only for non-admin users and only by admins
+    if (reqData.status !== undefined && targetUserId !== loggedInUser.id) {
+      // Check if target user is not an admin (user_type 7)
+      const targetUser = await userModel.userExistsById(targetUserId);
+      if (targetUser && targetUser.user_type !== 7) {
+        updateData.status = reqData.status;
+      }
+    }
+    
+    // Execute update using updateWhere for all cases
+    // For admin updating another user: Ensure company_id matches
+    // For self-update: Only filter by user's own ID
+    const whereClause = isAdmin && targetUserId !== loggedInUser.id
+      ? `id = ${targetUserId} AND company_id = ${loggedInUser.company_id}`
+      : `id = ${targetUserId}`;
+      
+    await rfqModel.updateWhere(
       "tbl_users",
-      reqUserData,
-      `id = ${user_id}`
+      updateData,
+      whereClause
     );
 
     return res.status(200).json({
       status: 1,
-      message: "Profile updated successfully",
+      message: "User profile updated successfully"
     });
   } catch (err) {
     logError(err);
     return res.status(400).json({
       status: false,
-      message: Config.errorText.value,
+      message: Config.errorText.value
     });
   }
 },
@@ -3984,50 +4037,32 @@ update_user_detail: async (req, res, next) => {
     }
   },
 
-  admin_update_user_account: async (req, res, next) => {
-    try {
-      let userId = req.params.id;
-      let updatedBy = req.user.id;
-      const { name, email, mobile } = req.body;
-      
-      let userObj = {
-        name,
-        email,
-        mobile,
-        updated_at: currentDateTime()
-      };
-      
-      await userModel.updateUserAccount(userId, userObj);
 
-      res
-        .status(200)
-        .json({
-          status: 1,
-          message: 'User account updated successfully'
-        })
-        .end();
-    } catch (error) {
-      logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
   // Changes by Agnij 10-06-2025 [Added function to get buyer account limits]
   getBuyerAccountLimits: async (req, res) => {
     try {
-      const user = req.user;
-      const accountLimits = await userModel.getBuyerAccountLimits(user.company_id);
+      const company_id = req.params?.company_id || req.user?.company_id;
+      
+      const accountLimits = await userModel.getBuyerAccountLimits(company_id);
+      
+      // Return the first object from the array, or default values if no data
+      const rawData = accountLimits.length > 0 ? accountLimits[0] : {};
+      const limitsData = {
+        max_top_management: parseInt(rawData.max_top_management) || 0,
+        max_procurement: parseInt(rawData.max_procurement) || 0,
+        max_engineering: parseInt(rawData.max_engineering) || 0,
+        max_finance: parseInt(rawData.max_finance) || 0,
+        used_top_management: parseInt(rawData.used_top_management) || 0,
+        used_procurement: parseInt(rawData.used_procurement) || 0,
+        used_engineering: parseInt(rawData.used_engineering) || 0,
+        used_finance: parseInt(rawData.used_finance) || 0
+      };
 
       res
         .status(200)
         .json({
           status: 1,
-          data: accountLimits[0],
+          data: limitsData,
           message: "Account limits retrieved successfully",
         })
         .end();

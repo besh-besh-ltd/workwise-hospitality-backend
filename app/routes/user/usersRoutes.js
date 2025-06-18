@@ -25,15 +25,6 @@ UsersRoutes.post(
   UsersController.userBookDemo
 );
 
-// can be user to register buyer and vendor company
-// mukul 07-06-2025 ,  not in use
-// UsersRoutes.post(
-//   '/company-registration',
-//   passportSignIn,
-//   validateDbBody.user_exists,
-//   schema_posts.add_user_profile_image,
-//   UsersController.company_registration
-// );
 
 // use to create dufferent type of buyer company users,
 // like procurment, management, finance, engineering
@@ -243,7 +234,7 @@ UsersRoutes.get(
 UsersRoutes.post(
   '/buyer-private-vendor',
   passportSignIn,
-  acl([2]),
+  acl([2,8]),
   validateBody(schemas.buyer_private_vendor_approved),
   // validateDbBody.vendor_exist,
   // UsersController.addPrivateVendor
@@ -260,7 +251,7 @@ UsersRoutes.get(
 UsersRoutes.post(
   '/buyer-excel-add-vendor',
   passportSignIn,
-  acl([2]),
+  acl([2, 8]),
   schema_posts.buyerExcelUploadVendorFileHandler, 
   UsersController.buyerExcelUploadVendor,
 )
@@ -335,14 +326,5 @@ UsersRoutes.post(
   UsersController.searchVendorsByName
 )
 
-UsersRoutes.put(
-  '/admin-update-user-account/:id',
-  passportSignIn,
-  acl([7]), // Only admin (role 7) can update other users
-  validateParam(schemas.id),
-  validateBody(schemas.admin_update_user_account),
-  validateDbBody.user_id_exists,
-  UsersController.admin_update_user_account
-);
 
 export default UsersRoutes;

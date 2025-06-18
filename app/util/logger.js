@@ -29,49 +29,80 @@ const logger = createLogger({
   exitOnError: false
 });
 
-// Normal errors and warnings will be logged
+/**
+ * @lastUpdated 13-06-2025 mukul jatav
+ * @description use to create dynamic meta, not not able to create then throw error and create static meta
+ */
+// Safe and resilient express-winston logger configuration
 const winstonLogger = expressWinston.logger({
   winstonInstance: logger,
   statusLevels: true,
   dynamicMeta: (req, res) => {
-    const httpRequest = {};
     const meta = {};
-    if (req) {
-      meta.httpRequest = httpRequest;
-      httpRequest.requestMethod = req.method;
-      httpRequest.requestUrl = `${req.protocol}://${req.get('host')}${
-        req.originalUrl
-      }`;
-      httpRequest.body = req.body;
-      httpRequest.protocol = `HTTP/${req.httpVersion}`;
-      // httpRequest.remoteIp = req.ip // this includes both ipv6 and ipv4 addresses separated by ':'
-      httpRequest.remoteIp =
-        req.ip.indexOf(':') >= 0
-          ? req.ip.substring(req.ip.lastIndexOf(':') + 1)
-          : req.ip; // just ipv4
-      httpRequest.requestSize = req.socket.bytesRead;
-      httpRequest.userAgent = req.get('User-Agent');
-      httpRequest.referrer = req.get('Referrer');
-    }
+    const httpRequest = {};
 
-    if (res) {
-      meta.httpRequest = httpRequest;
-      httpRequest.status = res.statusCode;
-      httpRequest.latency = {
-        seconds: Math.floor(res.responseTime / 1000),
-        nanos: (res.responseTime % 1000) * 1000000
-      };
-      if (res.body) {
-        httpRequest.body = res.body;
-        if (typeof res.body === 'object') {
-          httpRequest.responseSize = JSON.stringify(res.body).length;
-        } else if (typeof res.body === 'string') {
-          httpRequest.responseSize = res.body.length;
+    try {
+      if (req && typeof req === 'object') {
+        meta.httpRequest = httpRequest;
+
+        httpRequest.requestMethod = req.method || 'UNKNOWN';
+
+        try {
+          const host = req.get?.('host') || 'unknown-host';
+          const url = req.originalUrl || '';
+          const protocol = req.protocol || 'http';
+          httpRequest.requestUrl = `${protocol}://${host}${url}`;
+        } catch {
+          httpRequest.requestUrl = 'unknown';
+        }
+
+        httpRequest.body = req.body || {};
+        httpRequest.protocol = `HTTP/${req.httpVersion || '1.1'}`;
+
+        if (typeof req.ip === 'string') {
+          httpRequest.remoteIp = req.ip.includes(':')
+            ? req.ip.substring(req.ip.lastIndexOf(':') + 1)
+            : req.ip;
+        } else {
+          httpRequest.remoteIp = 'unknown';
+        }
+
+        httpRequest.requestSize = req?.socket?.bytesRead || 0;
+        httpRequest.userAgent = req.get?.('User-Agent') || 'unknown';
+        httpRequest.referrer = req.get?.('Referrer') || 'unknown';
+      }
+
+      if (res && typeof res === 'object') {
+        meta.httpRequest = httpRequest;
+        httpRequest.status = res.statusCode || 500;
+
+        if (typeof res.responseTime === 'number') {
+          httpRequest.latency = {
+            seconds: Math.floor(res.responseTime / 1000),
+            nanos: (res.responseTime % 1000) * 1_000_000,
+          };
+        }
+
+        if (res.body) {
+          httpRequest.body = res.body;
+          try {
+            httpRequest.responseSize =
+              typeof res.body === 'object'
+                ? JSON.stringify(res.body).length
+                : String(res.body).length;
+          } catch {
+            httpRequest.responseSize = 0;
+          }
         }
       }
+    } catch (err) {
+      meta.error = 'Failed to generate dynamicMeta';
+      meta.errorMessage = err.message;
+      meta.stack = err.stack;
     }
+
     return meta;
-  }
+  },
 });
 
 // Internal errors will be logged

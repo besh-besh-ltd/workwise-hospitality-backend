@@ -293,9 +293,11 @@ const schemas = {
   }),
 
   update_profile: Joi.object().keys({
-    email: Joi.string().optional().not(null),
-    name: Joi.string().optional().not(null), // user name
-    mobile: Joi.string().optional().not(null),
+    email: Joi.string().email().optional(),
+    name: Joi.string().optional(),
+    mobile: Joi.string().optional(),
+    status: Joi.number().valid(0, 1).optional(),
+    user_id: Joi.number().optional(),
   }),
 
   // mukul 09-06-2025, just saprate this from update_profile
@@ -506,11 +508,6 @@ const schemas = {
       .required()
       .regex(/^[0-9]*$/, 'Please send proper id')
   }),
-  admin_update_user_account: Joi.object().keys({
-    name: Joi.string().required(),
-    email: Joi.string().required().email().max(100),
-    mobile: Joi.string().min(8).max(15).required().label('Mobile')
-  })
 };
 
 let store_buyer_excel_upload_vendor_file = multer.diskStorage({

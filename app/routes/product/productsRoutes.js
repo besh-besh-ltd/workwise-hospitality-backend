@@ -121,7 +121,7 @@ ProductsRoutes.delete(
 ProductsRoutes.get(
   '/approved-product-list',
   passportSignIn,
-  acl([2, 3, 4]),
+  acl([2, 3, 8]),
   ProductsController.approvedProductList
 );
 
