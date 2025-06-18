@@ -2336,7 +2336,7 @@ const productController = {
       // Changes by Agnij May 01, 2025 [Removed debug console logs]
       
       // Get input parameters, supporting both name and variant_name
-      const { product_id, variant_name, name } = req.body;
+      const { product_id, variant_name, name, specifications } = req.body;
       const variantNameValue = variant_name || name;
       
       // Validate input
@@ -2389,6 +2389,22 @@ const productController = {
             status: 3,
             message: 'Failed to create product variant: No ID returned from database',
           });
+        }
+
+        // Handle variant specifications if provided
+        if (specifications && Array.isArray(specifications) && specifications.length > 0) {
+          const specsData = specifications
+            .filter(spec => spec.key && spec.value)
+            .map(spec => ({
+              variant_id: result.id,
+              key: spec.key.trim(),
+              value: spec.value.trim(),
+              created_at: new Date()
+            }));
+          
+          if (specsData.length > 0) {
+            await generalModel.insertMany('tbl_product_variant_spec', specsData);
+          }
         }
         
         return res.status(201).json({
@@ -3125,6 +3141,61 @@ const productController = {
         .end();
     }
    
+  },
+
+  // Variant Specification functions
+  getVariantSpecifications: async (req, res) => {
+    try {
+      const { variant_id } = req.params;
+
+      const specifications = await rfqModel.findAll('tbl_product_variant_spec', { variant_id: variant_id });
+      
+      return res.status(200).json({
+        status: 1,
+        data: specifications || []
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong'
+      });
+    }
+  },
+
+  updateVariantSpecifications: async (req, res) => {
+    try {
+      const { variant_id } = req.params;
+      const { specifications } = req.body;
+
+      // Delete existing specifications
+      await generalModel.deleteFromTable('tbl_product_variant_spec', 'variant_id', variant_id);
+
+      // Add new specifications using batch insert
+      const specsData = specifications
+        .filter(spec => spec.key && spec.value)
+        .map(spec => ({
+          variant_id: variant_id,
+          key: spec.key.trim(),
+          value: spec.value.trim(),
+          created_at: new Date()
+        }));
+      
+      if (specsData.length > 0) {
+        await generalModel.insertMany('tbl_product_variant_spec', specsData);
+      }
+      
+      return res.status(200).json({
+        status: 1,
+        message: 'Variant specifications updated successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong'
+      });
+    }
   }
 };
 export default productController;

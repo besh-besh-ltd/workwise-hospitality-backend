@@ -425,12 +425,15 @@ company_registration: async (user_data, company_data) => {
   get_vendorreview_list: async (user_id, limit, offset) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `select tbl_vendor_reviews.*,tbl_users.name as buyer_name, tbl_users.email as buyer_email,
-        CASE
-        WHEN tbl_users.new_profile_image IS NULL THEN
-        NULL
-        ELSE tbl_users.new_profile_image
-        END AS image_url  from tbl_vendor_reviews LEFT JOIN tbl_users ON tbl_vendor_reviews.reviewed_by = tbl_users.id  where reviewed_to = $1 ORDER BY id DESC LIMIT $2 OFFSET $3`,
+        `select 
+          tbl_vendor_reviews.*,
+          tbl_users.name as buyer_name, 
+          tbl_users.email as buyer_email,
+          tc.logo AS image_url 
+        from tbl_vendor_reviews 
+        LEFT JOIN tbl_users ON tbl_vendor_reviews.reviewed_by = tbl_users.id 
+        JOIN tbl_company tc ON company_id = tc.id
+          where reviewed_to = $1 ORDER BY id DESC LIMIT $2 OFFSET $3`,
         [user_id, limit, offset]
       )
         .then(function (data) {

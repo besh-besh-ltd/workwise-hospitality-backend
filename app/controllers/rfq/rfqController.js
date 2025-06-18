@@ -20,6 +20,7 @@ import fs from 'fs';
 import productModel from '../../models/productModel.js';
 import generativeAI from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
+import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel from '../../models/generalModel.js';
 
 
@@ -532,9 +533,38 @@ const validateEmailAddresses = (emails) => {
 // Update the sendMailtoVendors function
 const sendMailtoVendors = async (req, rfqNumber) => {
   try {
+    const {reverse_auction} = req.body;
     const vendorProductMap = {};
 
     const products = await rfqModel.getProductsByRfqId(rfqNumber);
+
+    if(reverse_auction){
+      raSchedulerForBuyer(rfqNumber, req , products);
+    }
+    
+
+    const vendorProductMAP = {};  // This is different variable check the  spelling.
+    
+    //Creating  A New product vendor map
+    products.map((product) => {
+    const { name,  vendors } = product;
+
+    vendors.map((vendor) => {
+      const { user_id } = vendor;
+
+      if (!vendorProductMAP[user_id]) {
+        vendorProductMAP[user_id] = {
+          vendorDetails: { ...vendor },
+          products: []
+        };
+      }
+
+      vendorProductMAP[user_id].products.push({ product_name : name });
+    });
+  });
+
+
+
 
     products.forEach((item) => {
       item.vendors.forEach((vendor) => {
@@ -547,7 +577,7 @@ const sendMailtoVendors = async (req, rfqNumber) => {
         vendorProductMap[vendor.user_id].products.push(item);
       });
     });
-
+ 
     const emailPromises = Object.keys(vendorProductMap).map(async (vendorId) => {
       const vendorInfo = vendorProductMap[vendorId];
       try {
@@ -558,8 +588,11 @@ const sendMailtoVendors = async (req, rfqNumber) => {
         throw error;
       }
     });
-
+   
     await Promise.all(emailPromises);
+     if(reverse_auction){
+      await raSchedulerForVendor(req,rfqNumber , vendorProductMAP);
+    }
     return true;
   } catch (error) {
     console.error('Error in sendMailtoVendors:', error);
@@ -1800,7 +1833,7 @@ const rfqController = {
     }
 
     try {
-      let { rfq_id } = req.body;
+      let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction} = req.body;
       const user_id = req.user.id;
 
       if (!rfq_id) {
@@ -1811,7 +1844,34 @@ const rfqController = {
           }
         }).end();
       }
-
+      // check if RA is true
+      if(reverse_auction){
+        if(!ra_start_date || !ra_end_date){
+          return res.status(400).json({
+            status: 3,
+            errors: {
+              ra_start_date: 'RA Start Date is required',
+              ra_end_date: 'RA End Date is required'
+            }
+          }).end();
+        }
+        if(new Date(ra_start_date) >= new Date(ra_end_date)){
+          return res.status(400).json({
+            status: 3,
+            errors: {
+              ra_start_date: 'RA Start Date should be before RA End Date'
+            }
+          }).end();
+        }
+        if(new Date(ra_start_date) <= new Date(bid_end_date)){
+          return res.status(400).json({
+            status: 3,
+            errors: {
+              ra_start_date: 'RA Start Date should be after Bid End Date'
+            }
+          }).end();
+        }
+      }
       await saveRfqDraft(user_id, req.body);
 
       const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id);
@@ -1824,6 +1884,10 @@ const rfqController = {
           }
         }).end();
       }
+      const products = await rfqModel.getProductsByRfqId(rfq_id);
+
+      console.log("products in create rfq controller", JSON.stringify(products));
+      
 
       const responseUpdate = await rfqModel.update(
         'tbl_rfq',
