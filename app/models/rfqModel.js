@@ -41,7 +41,9 @@ const rfqModel = {
               (SELECT JSON_AGG(JSON_BUILD_OBJECT(
                       'user_id', u.id,
                       'name', u.name,
-                      'organization_name', COALESCE(c.company_name, u.organization_name, u.name)
+                      'email', u.email,
+                      'mobile', u.mobile,
+                      'organization_name', COALESCE(c.company_name, u.organization_name, u.name, u.email, u.mobile)
                                 ))
                 FROM tbl_rfq_product_vendors rpv
                         JOIN tbl_users u ON rpv.user_id = u.id
