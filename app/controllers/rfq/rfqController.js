@@ -3134,7 +3134,7 @@ const rfqController = {
 
     try {
       const { startDate, endDate } = getDateRange(chartFilter);
-      const rfq_data = await rfqModel.getRfqChartData(user_id, chartFilter, startDate, endDate, project_id);        
+      const rfq_data = await rfqModel.getRfqChartData(user_id, chartFilter, startDate, endDate, project_id);         
 
       res
         .status(200)
