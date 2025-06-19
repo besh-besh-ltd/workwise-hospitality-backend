@@ -6,8 +6,8 @@ const rolesModel = {
     // console.log('usrobj-->', usrobj);
     return new Promise(function (resolve, reject) {
       db.any(
-        `insert into tbl_users(name,email, mobile, user_type, status, password, created_by, new_profile_image, original_profile_image) 
-        values($1, $2, $3, $4, $5, $6, $7, $8, $9) returning id`,
+        `insert into tbl_users(name,email, mobile, user_type, status, password, created_by, original_profile_image) 
+        values($1, $2, $3, $4, $5, $6, $7, $8) returning id`,
         [
           usrobj.name,
           usrobj.email,
@@ -16,7 +16,6 @@ const rolesModel = {
           usrobj.status,
           usrobj.password,
           usrobj.created_by,
-          usrobj.fileName,
           usrobj.originalFilename
         ]
       )
@@ -72,12 +71,7 @@ const rolesModel = {
         dynamicQuery += `AND status = 0 `;
       } */
       db.any(
-        `SELECT tbl_users.*,
-        CASE
-        WHEN new_profile_image IS NULL THEN
-        NULL
-        ELSE new_profile_image
-        END AS profile_image  FROM tbl_users WHERE is_deleted = 0 AND user_type = any($3)
+        `SELECT tbl_users.*  FROM tbl_users WHERE is_deleted = 0 AND user_type = any($3)
         ${dynamicQuery}
         ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
         [limit, offset, [5, 6]]
@@ -162,11 +156,7 @@ const rolesModel = {
   getSubadminDetails: async (subadminId) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT *,CASE
-      WHEN tbl_users.	new_profile_image IS NULL THEN
-      NULL
-      ELSE tbl_users.new_profile_image
-      END AS image_url FROM tbl_users WHERE id = $1`,
+        `SELECT * FROM tbl_users WHERE id = $1`,
         [subadminId]
       )
         .then(function (data) {
@@ -199,9 +189,7 @@ const rolesModel = {
         `update 
 				tbl_users set 
 				name = '${subadminObj.name}',
-			
 				mobile = '${subadminObj.mobile}',
-				new_profile_image = '${subadminObj.fileName}',
 				original_profile_image = '${subadminObj.originalFilename}',
 				updated_by = '${subadminObj.updatedBy}'
        	where id=($1)`,
@@ -473,7 +461,7 @@ const rolesModel = {
   user_profile_social_login: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.one(
-        'select id,name,email,user_type,social_login_id, social_login_type, social_login_profile_image from tbl_users where id = $1',
+        'select id,name,email,user_type,social_login_id, social_login_type from tbl_users where id = $1',
         [user_id]
       )
         .then(function (data) {
