@@ -1442,7 +1442,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             ORDER BY tu.name
         `;
       }
-
       return db.any(q, [draftId, rfqProductId, vendor_name])
 
     } catch (error) {
@@ -2122,9 +2121,10 @@ LIMIT 1;`;
         });
     });
   },
-  getVendors: async (vendors) => {
+  getVendors: async (vendors, rfq_id = null) => {
     const placeholders = vendors.map((_, index) => `$${index + 1}`).join(', ');
-    const query = `SELECT
+    
+    let query = `SELECT
       TU.id,
       TU.name,
       TU.email,
@@ -2132,6 +2132,7 @@ LIMIT 1;`;
       TU.address,
       TU.organization_name,
       TC.company_name,
+      ${rfq_id ? `COALESCE(MAX(TRPV.is_rfq_viewed), 0) AS is_rfq_viewed,` : ''}
       ARRAY(
         SELECT json_build_object('id', TPV.id, 'name', TPV.name)
         FROM tbl_product_variant_vendor_mapping PVVM
@@ -2140,7 +2141,10 @@ LIMIT 1;`;
       ) AS "products"
       FROM tbl_users TU
       JOIN tbl_company TC ON TU.company_id = TC.id
-      WHERE TU.id IN (${placeholders})`;
+      ${rfq_id ? 'LEFT JOIN tbl_rfq_product_vendors TRPV ON TU.id = TRPV.user_id AND TRPV.rfq_id = ' + rfq_id : ''}
+      WHERE TU.id IN (${placeholders})
+      ${rfq_id ? 'GROUP BY TU.id, TU.name, TU.email, TU.mobile, TU.address, TU.organization_name, TC.company_name' : ''}`;
+    
     return new Promise(function (resolve, reject) {
       db.any(query, vendors)
         .then(function (data) {
@@ -2336,7 +2340,7 @@ LIMIT 1;`;
                                               WHERE rfq.id != $1 AND rfq.created_by = ${user_id} AND rfq.is_published = 1
                                                 AND rpv.user_id = TU.id
                                               LIMIT 1
-                                            )
+                                            )                            
                         ))
                         FROM tbl_users TU
                         LEFT JOIN tbl_company TCC2 ON TCC2.id = TU.company_id
@@ -6528,6 +6532,8 @@ searchEmailAndNameForVendor: async (rfq_id , product_id) => {
 
   return result || [];
 },
+
+
 
 }
 export default rfqModel;
