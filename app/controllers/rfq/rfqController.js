@@ -3258,6 +3258,15 @@ const rfqController = {
           req.user.id
         );
         if (availability.length > 0) {
+          // Update is_rfq_viewed status for vendor when they view RFQ
+          try {
+            await rfqModel.updateWhere('tbl_rfq_product_vendors', 
+              { is_rfq_viewed: 1 }, 
+              `rfq_id = ${id} AND user_id = ${req.user.id} AND is_rfq_viewed = 0`
+            );
+          } catch (error) {
+            console.error('Error updating RFQ viewed status:', error);
+          }
         } else {
           res
             .status(200)
@@ -3514,10 +3523,10 @@ const rfqController = {
     }
   },
   getVendors: async (req, res, next) => {
-    let { vendors } = req.body;
+    let { vendors, rfq_id } = req.body;
     console.log(vendors);
     try {
-      const vendorsList = await rfqModel.getVendors(vendors);
+      const vendorsList = await rfqModel.getVendors(vendors, rfq_id);
       res
         .status(200)
         .json({
