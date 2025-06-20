@@ -2528,6 +2528,7 @@ LIMIT 1;`;
                   'created_by', TQ.created_by,
                   'is_regret', TQ.is_regret,
                   'regret_reason', TQ.regret_reason,
+                  'timestamp', TQ.timestamp,
                   'vendor_details', (
                     SELECT json_build_object(
                       'id', TU.id,
@@ -2535,7 +2536,14 @@ LIMIT 1;`;
                       'email', TU.email,
                       'mobile', TU.mobile,
                       'address', TU.address,
-                      'organization_name', COALESCE(TCC3.company_name, TU.organization_name, TU.name)
+                      'organization_name', COALESCE(TCC3.company_name, TU.organization_name, TU.name),
+                      'prev_worked', (SELECT 1
+                                        FROM tbl_rfq_product_vendors rpv
+                                        JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
+                                        WHERE rfq.id != $1 AND rfq.created_by = $2 AND rfq.is_published = 1
+                                          AND rpv.user_id = TU.id
+                                        LIMIT 1
+                                      )
                     )
                     FROM tbl_users TU
                     LEFT JOIN tbl_company TCC3 ON TCC3.id = TU.company_id
@@ -6533,6 +6541,68 @@ searchEmailAndNameForVendor: async (rfq_id , product_id) => {
   return result || [];
 },
 
+
+getLprLqrByVariantId : async (user_id, variant_id, type) => {
+    const validTypes = ['lpr', 'lqr'];
+    if (!validTypes.includes(type)) {
+        throw new Error(`Invalid type "${type}" - must be one of: ${validTypes.join(', ')}`);
+    }
+
+    const queries = {
+      lpr: `
+              SELECT 
+                  TQI.package_price,
+                  TQI.tax,
+                  TQI.freight_price,
+                  TQI.total_price,
+                  TQI.quantity,
+                  TQI.product_name,
+                  TU.name AS vendor_name,
+                  TU.email AS vendor_email,
+                  TQF.timestamp AS quote_date,
+                  TQI.unit_price
+                  FROM tbl_quote_items TQI
+                  JOIN tbl_quote_finalization TQF USING (quote_id)
+                  JOIN tbl_quotes TQ ON TQ.id = TQF.quote_id
+                  JOIN tbl_users TU ON TQ.created_by = TU.id
+                  WHERE TQF.created_by = $1
+                    AND TQI.product_variant_id = $2
+                  ORDER BY TQF.timestamp DESC;
+        `,
+      lqr: `
+            SELECT 
+                TQI.unit_price,
+                TQI.package_price,
+                TQI.tax,
+                TQI.freight_price,
+                TQI.total_price,
+                TQI.quantity,
+                TQI.product_name,
+                TQ.timestamp AS quote_date,
+                U.name AS vendor_name,       -- ✅ User's name
+                U.email AS vendor_email      -- ✅ User's email
+            FROM tbl_rfq RFQ
+            JOIN tbl_quotes TQ ON RFQ.id = TQ.rfq_id
+            JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
+            JOIN tbl_users U ON TQ.created_by = U.id    -- ✅ Join with tbl_user
+            WHERE RFQ.created_by = $1
+              AND TQI.product_variant_id = $2
+              AND TQI.unit_price > 0
+            ORDER BY TQ.timestamp DESC;
+
+        `
+    };
+    try {
+       const result = await db.query(queries[type], [user_id, variant_id]);
+       if(result.length>0)
+        return result;
+      else
+      return [];
+    } catch (error) {
+        console.error(`[MODEL ERROR] Failed to execute ${type} query:`, error);
+        throw error;
+    }
+}
 
 
 }
