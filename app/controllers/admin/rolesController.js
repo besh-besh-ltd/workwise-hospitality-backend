@@ -20,8 +20,6 @@ const rolesController = {
       let createdBy = req.user.id;
       const { name, mobile, password, userType } = req.body;
       const email = req.body.email?.toLowerCase() || '';
-      let fileName = req?.file?.location;
-      let originalFilename = req?.file?.location;
 
       let admObj = {
         name,
@@ -30,9 +28,7 @@ const rolesController = {
         register_as: userType,
         status: 1,
         password: generatePassword(password),
-        createdBy,
-        fileName,
-        originalFilename
+        createdBy
       };
       // console.log('notificationObj', notificationObj);
       // return false;
