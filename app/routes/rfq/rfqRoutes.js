@@ -148,6 +148,12 @@ RfqRoutes.get(
   rfqController.downloadQuoteResultsProductWise
 );
 RfqRoutes.get(
+  '/get-lpr-lqr',
+   passportSignIn,
+   validateDbBody.user_id_profileexists,
+   rfqController.getLprLqrByVariantId
+)
+RfqRoutes.get(
   '/close-rfq/:id',
   passportSignIn,
   validateDbBody.user_id_profileexists,
