@@ -1376,39 +1376,72 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         `;
       }
 
-      let q = `
-      SELECT 
-        DISTINCT ON (tu.name) tu.id AS user_id, 
-        tu.name, 
-        ${vendor_name ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $3) AS similarity_score,' : ''} 
-        JSON_BUILD_OBJECT(
-          'id', tu.id,
-          'name', tu.name,
-          'company_name', COALESCE(tc.company_name, tu.organization_name, tu.name),
-          'email', tu.email,
-          'address', tu.address,
-          'mobile', tu.mobile
-        ) AS user_details
+      let q = null;
 
-        FROM tbl_rfq_products trp
-        JOIN tbl_rfq_product_vendors trpv 
-          ON trpv.rfq_id = trp.rfq_id 
-            AND trpv.product_variant_id = trp.product_variant_id 
-            AND trpv.variant = trp.variant
-        JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
-        JOIN tbl_users tu ON trpv.user_id = tu.id
-        JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id
-        JOIN tbl_company tc ON tu.company_id = tc.id
-
-        ${dynamicJoin}
-
-        WHERE trp.rfq_id = $1
-            AND trp.id = $2
-            ${dynamicWhere}
-          
-        ORDER BY ${vendor_name ? 'tu.name, similarity_score DESC' : 'tu.name'}
-      `;
-
+      if(isAnyFilterActive) {
+        q = `
+          SELECT 
+            DISTINCT ON (tu.name, tu.id) tu.id AS user_id, 
+            tu.name, 
+            ${vendor_name ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $3) AS similarity_score,' : ''} 
+            JSON_BUILD_OBJECT(
+              'id', tu.id,
+              'name', tu.name,
+              'company_name', COALESCE(tc.company_name, tu.organization_name, tu.name),
+              'email', tu.email,
+              'address', tu.address,
+              'mobile', tu.mobile
+            ) AS user_details
+    
+            FROM tbl_rfq_products trp
+            JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
+            JOIN tbl_product tp ON tpv.product_id = tp.id
+            JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id
+            JOIN tbl_users tu ON tu.id = pvvm.vendor_id
+            LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
+              ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+            JOIN tbl_company tc ON tu.company_id = tc.id
+    
+            ${dynamicJoin}
+    
+            WHERE trp.rfq_id = $1
+                AND trp.id = $2
+                AND tp.status = 1 AND tpv.status = 1 AND tp.is_deleted = 0 AND tp.is_review = 0 AND tp.is_approve = 1 AND tpv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
+                AND tu.is_deleted = 0 AND tu.status = 1
+                ${dynamicWhere}
+              
+            ORDER BY ${vendor_name ? 'tu.name, similarity_score DESC' : 'tu.name'}
+        `;
+      } else {
+        q = `
+          SELECT 
+            DISTINCT ON (tu.name, tu.id) tu.id AS user_id, 
+            tu.name, 
+            JSON_BUILD_OBJECT(
+              'id', tu.id,
+              'name', tu.name,
+              'company_name', COALESCE(tc.company_name, tu.organization_name, tu.name),
+              'email', tu.email,
+              'address', tu.address,
+              'mobile', tu.mobile
+            ) AS user_details
+    
+            FROM tbl_rfq_products trp
+            JOIN tbl_rfq_product_vendors trpv 
+              ON trpv.rfq_id = trp.rfq_id 
+                AND trpv.product_variant_id = trp.product_variant_id 
+                AND trpv.variant = trp.variant
+            JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
+            JOIN tbl_users tu ON trpv.user_id = tu.id
+            JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id
+            JOIN tbl_company tc ON tu.company_id = tc.id
+    
+            WHERE trp.rfq_id = $1
+                AND trp.id = $2
+              
+            ORDER BY tu.name
+        `;
+      }
       return db.any(q, [draftId, rfqProductId, vendor_name])
 
     } catch (error) {
@@ -2088,9 +2121,10 @@ LIMIT 1;`;
         });
     });
   },
-  getVendors: async (vendors) => {
+  getVendors: async (vendors, rfq_id = null) => {
     const placeholders = vendors.map((_, index) => `$${index + 1}`).join(', ');
-    const query = `SELECT
+    
+    let query = `SELECT
       TU.id,
       TU.name,
       TU.email,
@@ -2098,6 +2132,7 @@ LIMIT 1;`;
       TU.address,
       TU.organization_name,
       TC.company_name,
+      ${rfq_id ? `COALESCE(MAX(TRPV.is_rfq_viewed), 0) AS is_rfq_viewed,` : ''}
       ARRAY(
         SELECT json_build_object('id', TPV.id, 'name', TPV.name)
         FROM tbl_product_variant_vendor_mapping PVVM
@@ -2106,7 +2141,10 @@ LIMIT 1;`;
       ) AS "products"
       FROM tbl_users TU
       JOIN tbl_company TC ON TU.company_id = TC.id
-      WHERE TU.id IN (${placeholders})`;
+      ${rfq_id ? 'LEFT JOIN tbl_rfq_product_vendors TRPV ON TU.id = TRPV.user_id AND TRPV.rfq_id = ' + rfq_id : ''}
+      WHERE TU.id IN (${placeholders})
+      ${rfq_id ? 'GROUP BY TU.id, TU.name, TU.email, TU.mobile, TU.address, TU.organization_name, TC.company_name' : ''}`;
+    
     return new Promise(function (resolve, reject) {
       db.any(query, vendors)
         .then(function (data) {
@@ -2295,7 +2333,14 @@ LIMIT 1;`;
                             'mobile', TU.mobile,
                             'address', TU.address,
                             'organization_name', COALESCE(TCC2.company_name, TU.organization_name, TU.name),
-                            'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END)
+                            'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END),
+                            'prev_worked', (SELECT 1
+                                              FROM tbl_rfq_product_vendors rpv
+                                              JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
+                                              WHERE rfq.id != $1 AND rfq.created_by = ${user_id} AND rfq.is_published = 1
+                                                AND rpv.user_id = TU.id
+                                              LIMIT 1
+                                            )                            
                         ))
                         FROM tbl_users TU
                         LEFT JOIN tbl_company TCC2 ON TCC2.id = TU.company_id
@@ -2316,6 +2361,7 @@ LIMIT 1;`;
                             'tax', TQI.tax,
                             'freight_price', TQI.freight_price,
                             'quantity', TQI.quantity,
+                            'timestamp', TQ_inner.timestamp,
                             'document_files', (
                                 SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
                                 FROM tbl_quotes_files TF
@@ -6487,6 +6533,7 @@ searchEmailAndNameForVendor: async (rfq_id , product_id) => {
   return result || [];
 },
 
+
 getLprLqrByVariantId : async (user_id, variant_id, type) => {
     const validTypes = ['lpr', 'lqr'];
     if (!validTypes.includes(type)) {
@@ -6548,6 +6595,7 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
         throw error;
     }
 }
+
 
 }
 export default rfqModel;
