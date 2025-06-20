@@ -14,10 +14,10 @@ const passportSignIn = passport.authenticate('jwtAdm', { session: false });
 
 const rolesRoutes = Router();
 
+
 rolesRoutes.post(
   '/create-sub-admin',
   passportSignIn,
-  schema_posts.add_subadmin,
   validateDbBody.subadmin_exists,
   rolesController.createSubadmin
 );
