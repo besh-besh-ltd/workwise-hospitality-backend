@@ -131,6 +131,8 @@ const schemas = {
 };
 
 const schema_posts = {
+
+  //  not in use as now we dont store admin profile image.
   add_subadmin: async (req, res, next) => {
     try {
       let upload = multer({

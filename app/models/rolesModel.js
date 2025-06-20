@@ -6,8 +6,8 @@ const rolesModel = {
     // console.log('usrobj-->', usrobj);
     return new Promise(function (resolve, reject) {
       db.any(
-        `insert into tbl_users(name,email, mobile, user_type, status, password, created_by, original_profile_image) 
-        values($1, $2, $3, $4, $5, $6, $7, $8) returning id`,
+        `insert into tbl_users(name,email, mobile, user_type, status, password, created_by) 
+        values($1, $2, $3, $4, $5, $6, $7) returning id`,
         [
           usrobj.name,
           usrobj.email,
