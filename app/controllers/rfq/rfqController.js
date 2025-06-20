@@ -4164,6 +4164,40 @@ const rfqController = {
         .end();
     }
   },
+  getLprLqrByVariantId : async (  req , res ,next) => {
+   
+   const { variant_id, type } = req.query; 
+    const {id} = req.user;
+    console.log("req recieved", variant_id, type, id);
+    try {
+         
+      if(variant_id){
+         const data =  await rfqModel.getLprLqrByVariantId(id, variant_id, type);
+
+       res
+            .status(200)
+            .json({
+              status: 1,
+              data: data
+            })
+            .end();
+       
+      }
+      
+
+      
+    } catch (error) {
+       logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+      
+    }
+  },
   closeRFQ: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { id , organization_name , name} = req.user;
