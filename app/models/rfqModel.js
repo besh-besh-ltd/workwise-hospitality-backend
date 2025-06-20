@@ -2528,6 +2528,7 @@ LIMIT 1;`;
                   'created_by', TQ.created_by,
                   'is_regret', TQ.is_regret,
                   'regret_reason', TQ.regret_reason,
+                  'timestamp', TQ.timestamp,
                   'vendor_details', (
                     SELECT json_build_object(
                       'id', TU.id,
@@ -2535,7 +2536,14 @@ LIMIT 1;`;
                       'email', TU.email,
                       'mobile', TU.mobile,
                       'address', TU.address,
-                      'organization_name', COALESCE(TCC3.company_name, TU.organization_name, TU.name)
+                      'organization_name', COALESCE(TCC3.company_name, TU.organization_name, TU.name),
+                      'prev_worked', (SELECT 1
+                                        FROM tbl_rfq_product_vendors rpv
+                                        JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
+                                        WHERE rfq.id != $1 AND rfq.created_by = $2 AND rfq.is_published = 1
+                                          AND rpv.user_id = TU.id
+                                        LIMIT 1
+                                      )
                     )
                     FROM tbl_users TU
                     LEFT JOIN tbl_company TCC3 ON TCC3.id = TU.company_id
