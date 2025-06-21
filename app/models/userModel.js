@@ -833,58 +833,62 @@ company_registration: async (user_data, company_data) => {
       // Base query with common fields
       let baseQuery = `
       SELECT tbl_users.id as user_id,
-             tbl_users.name as vendor_name,
-             tbl_company.logo as profile_image,
-             tbl_users.address,
-             tbl_users.status,
-             tbl_users.whatsapp,
-             tbl_company.id as company_id,
-             tbl_company.gstin,
-             tbl_company.cin,
-             tbl_company.website,
-             tbl_company.nature_of_business,
-             tbl_company.type_of_business,
-             tbl_company.turnover,
-             tbl_company.no_of_employess,
-             tbl_company.import_export_code,
-             tbl_company.company_name,
-             tbl_company.profile,
-             tbl_company.location,
-             cl.city_name,  
-             sl.state_name,
-               
-             ARRAY(
-                 SELECT json_build_object(
-                     'brochure', tbl_files.file_name,
-                     'brochure_url', tbl_files.file_path
-                 )
-                 FROM tbl_files
-                 WHERE tbl_files.user_id = tbl_users.id
-             ) AS "brochure",
-            ARRAY(
-           SELECT json_build_object(
-               'product_name', V.name,
-               'product_id', V.id,
-               'approved_by', ARRAY(
-                   SELECT json_build_object(
-                       'vendor_approve_id', VA.id,
-                       'vendor_name', VA.vendor_approve,
-                       'approved_at', VM.created_at
-                   )
-                   FROM tbl_vendorapprove_product_mapping VM
-                   LEFT JOIN tbl_vendor_approve VA ON VA.id = VM.vendor_approve_id
-                   WHERE VM.variant_vendor_mapping_id = M.id
-               )
-           )
-           FROM tbl_product_variant_vendor_mapping M
-           JOIN tbl_product_variant V ON V.id = M.product_variant_id
-           WHERE M.vendor_id = tbl_users.id
+       tbl_users.name as vendor_name,
+       tbl_company.logo as profile_image,
+       tbl_users.address,
+       tbl_users.status,
+       tbl_users.whatsapp,
+       tbl_company.id as company_id,
+       tbl_company.gstin,
+       tbl_company.cin,
+       tbl_company.website,
+       tbl_company.nature_of_business,
+       tbl_company.type_of_business,
+       tbl_company.turnover,
+       tbl_company.no_of_employess,
+       tbl_company.import_export_code,
+       tbl_company.company_name,
+       tbl_company.profile,
+       tbl_company.location,
+       cl.city_name,
+       sl.state_name,
+
+       ARRAY(
+               SELECT json_build_object(
+                              'brochure', tbl_files.file_name,
+                              'brochure_url', tbl_files.file_path
+                      )
+               FROM tbl_files
+               WHERE tbl_files.user_id = tbl_users.id
+       ) AS "brochure",
+       ARRAY(
+               SELECT json_build_object(
+                              'product_name', V.name,
+                              'product_id', V.id,
+                              'approved_by', (
+                                  SELECT ARRAY(
+                                                 SELECT DISTINCT ON (VA.id)
+                                                     json_build_object(
+                                                             'vendor_approve_id', VA.id,
+                                                             'vendor_name', VA.vendor_approve,
+                                                             'approved_at', VM.created_at
+                                                     )
+                                                 FROM tbl_vendorapprove_product_mapping VM
+                                                          LEFT JOIN tbl_vendor_approve VA ON VA.id = VM.vendor_approve_id
+                                                 WHERE VM.variant_vendor_mapping_id = M.id
+                                                 ORDER BY VA.id, VM.created_at DESC
+                                         )
+                              )
+                      )
+               FROM tbl_product_variant_vendor_mapping M
+                        JOIN tbl_product_variant V ON V.id = M.product_variant_id
+               WHERE M.vendor_id = tbl_users.id
        ) AS "product_list",
-             CASE
-                 WHEN tbl_company.logo IS NULL THEN
-                     NULL
-                 ELSE tbl_company.logo
-             END AS profile_image_url`;
+       CASE
+           WHEN tbl_company.logo IS NULL THEN
+               NULL
+           ELSE tbl_company.logo
+           END AS profile_image_url`;
 
       // Additional fields if current_user is not null
       if (current_user !== null) {

@@ -103,6 +103,10 @@ export const raSchedulerForBuyer = async (rfqNumber,req, products) => {
   
     const { ra_start_date, ra_end_date ,contact_number , response_email,contact_name,project_id} = req.body;
 
+    const startDate = parseISTDate(ra_start_date);
+
+    const endDate = parseISTDate(ra_end_date);
+    
         // Adjust the dates to avoid weekend triggers
     const adjustedStartDate = adjustDateForWeekend(startDate, 'start');
     const adjustedEndDate = adjustDateForWeekend(endDate, 'end');
@@ -111,9 +115,6 @@ export const raSchedulerForBuyer = async (rfqNumber,req, products) => {
         product_name: product.name,
     })
 )
-    const startDate = parseISTDate(ra_start_date);
-
-    const endDate = parseISTDate(ra_end_date);
 
     let project_name = '';
     let whereClause = ' where id = ?';
