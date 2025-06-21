@@ -1736,7 +1736,6 @@ company_registration: async (user_data, company_data) => {
         Universities.status = '1'
         ${query_string};
     `;
-    console.log(query);
     return new Promise(function (resolve, reject) {
       // let qq = `select Universities.*, Countries.countryname from Universities
       // LEFT JOIN Countries ON Universities.country_code = Countries.countrycode

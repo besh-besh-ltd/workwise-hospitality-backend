@@ -2459,8 +2459,6 @@ WHERE tbl_product.name = $1`,
 
         WHERE PV.status = 1 AND PV.id = $1 ${dynamicWhere}`
 
-      console.log(q)
-
       db.any(
         q,
         [productId]

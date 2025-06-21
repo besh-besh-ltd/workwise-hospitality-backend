@@ -653,8 +653,6 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
           `tu.created_at`
         }`
 
-      console.log(q)
-
       db.any(q, [escapedSearch]
       )
         .then(function (data) {
