@@ -1325,6 +1325,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
   if (project_id && project_id !== -1) {
       rfqData.project_id = project_id;
+  } else if (!project_id || project_id == '') {
+    rfqData.project_id = null;
   }
 
   let rfqDetail = await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id);
