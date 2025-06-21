@@ -1888,9 +1888,6 @@ const rfqController = {
       }
       const products = await rfqModel.getProductsByRfqId(rfq_id);
 
-      console.log("products in create rfq controller", JSON.stringify(products));
-      
-
       const responseUpdate = await rfqModel.update(
         'tbl_rfq',
         { is_published: 1 },
@@ -3769,112 +3766,168 @@ const rfqController = {
             }
           }
 
-          const tbl_quotes_data = {
-            rfq_id,
-            rfq_no,
-            status,
-            created_by: user.id,
-            updated_by: user.id,
-            is_regret: req.body.is_regret ? req.body.is_regret : 0,
-            global_payment_term: globalPaymentTerms,
-            global_comment: globalComment,
-            regret_reason
-          };
+          return await db.tx(async t => {
 
-          // check quote is already exists or not
-          // console.log("mukul 1870")
-          let alreadyExists = await rfqModel.checkIfExists(
-            'tbl_quotes',
-            `rfq_id=${rfq_id} AND created_by=${user.id} LIMIT 1`
-          );
-          if (alreadyExists.length > 0) {
-            res
-              .status(400)
-              .json({
-                status: 3,
-                message: 'Quote is alredy present for this RFQ!'
-              })
-              .end();
-            return;
-          }
-
-          var quote_items_data = [];
-            products.map(
-              ({
-                product_id,
-                product_name,
-                unit_price,
-                package_price,
-                tax,
-                freight_price,
-                total_price,
-                comment,
-                delivery_period,
-                quantity,
-                variant,
-                document_files
-              }) => {
-                if(unit_price!=""){
-                  quote_items_data.push({
-                    rfq_id,
-                    rfq_no,
-                    product_variant_id: product_id,
-                    product_name,
-                    unit_price,
-                    package_price,
-                    tax,
-                    freight_price,
-                    total_price,
-                    comment,
-                    delivery_period,
-                    quantity,
-                    variant
-                  });
-                }else if(comment!="" || document_files?.length>0){
-                  quote_items_data.push({
-                    rfq_id,
-                    rfq_no,
-                    product_variant_id: product_id,
-                    product_name,
-                    unit_price:0,
-                    package_price,
-                    tax,
-                    freight_price,
-                    total_price,
-                    comment,
-                    delivery_period,
-                    quantity,
-                    variant
-                  });
-                } else if(is_regret){
-                  quote_items_data.push({
-                    rfq_id,
-                    rfq_no,
-                    product_variant_id: product_id,
-                    product_name,
-                    unit_price:0,
-                    package_price,
-                    tax,
-                    freight_price,
-                    total_price,
-                    comment,
-                    delivery_period,
-                    quantity,
-                    variant
+            const tbl_quotes_data = {
+              rfq_id,
+              rfq_no,
+              status,
+              created_by: user.id,
+              updated_by: user.id,
+              is_regret: req.body.is_regret ? req.body.is_regret : 0,
+              global_payment_term: globalPaymentTerms,
+              global_comment: globalComment,
+              regret_reason
+            };
+  
+            // check quote is already exists or not
+            // console.log("mukul 1870")
+            let alreadyExists = await rfqModel.checkIfExists(
+              'tbl_quotes',
+              `rfq_id=${rfq_id} AND created_by=${user.id} LIMIT 1`,
+              t
+            );
+            if (alreadyExists.length > 0) {
+              throw new Error('Quote is alredy present for this RFQ!')
+            }
+  
+            var quote_items_data = [];
+              products.map(
+                ({
+                  product_id,
+                  product_name,
+                  unit_price,
+                  package_price,
+                  tax,
+                  freight_price,
+                  total_price,
+                  comment,
+                  delivery_period,
+                  quantity,
+                  variant,
+                  document_files
+                }) => {
+                  if(unit_price!=""){
+                    quote_items_data.push({
+                      rfq_id,
+                      rfq_no,
+                      product_variant_id: product_id,
+                      product_name,
+                      unit_price,
+                      package_price,
+                      tax,
+                      freight_price,
+                      total_price,
+                      comment,
+                      delivery_period,
+                      quantity,
+                      variant
+                    });
+                  }else if(comment!="" || document_files?.length>0){
+                    quote_items_data.push({
+                      rfq_id,
+                      rfq_no,
+                      product_variant_id: product_id,
+                      product_name,
+                      unit_price:0,
+                      package_price,
+                      tax,
+                      freight_price,
+                      total_price,
+                      comment,
+                      delivery_period,
+                      quantity,
+                      variant
+                    });
+                  } else if(is_regret){
+                    quote_items_data.push({
+                      rfq_id,
+                      rfq_no,
+                      product_variant_id: product_id,
+                      product_name,
+                      unit_price:0,
+                      package_price,
+                      tax,
+                      freight_price,
+                      total_price,
+                      comment,
+                      delivery_period,
+                      quantity,
+                      variant
+                    })
+                  }
+                }
+              );
+  
+              if(is_regret){
+                let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data, t);
+                const created_quote_id = quote_rsp[0].id;
+  
+                // adding the quote_id
+                quote_items_data.map((item)=> item.quote_id=created_quote_id);
+  
+                // console.log("mukul 1959")
+  
+                const quote_items_keys = [
+                  'rfq_id',
+                  'rfq_no',
+                  'quote_id',
+                  'product_variant_id',
+                  'product_name',
+                  'unit_price',
+                  'package_price',
+                  'tax',
+                  'freight_price',
+                  'total_price',
+                  'comment',
+                  'delivery_period',
+                  'quantity',
+                  'variant'
+                ];
+                await rfqModel.insertArray(
+                  quote_items_data,
+                  quote_items_keys,
+                  'tbl_quote_items',
+                  t
+                );
+                return res
+                  .status(200)
+                  .json({
+                    status: 3,
+                    message: 'Your quote is regretted.',
+                    regret_reason: regret_reason,
+                    data: quote_rsp
                   })
+                  .end();
+              }
+  
+              // if quote item data is empty because of errors
+              if(quote_items_data.length < 1){
+                throw new Error('Not able to send the Quote')
+              }
+  
+            // Insertion of the quote
+            let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data, t);
+            if (quote_rsp.length > 0) {
+  
+              const created_quote_id = quote_rsp[0].id;
+  
+              if (term_and_condition_files && term_and_condition_files.length > 0) {
+                const quote_files = term_and_condition_files.map(url => ({
+                  quote_id:created_quote_id,
+                  file_type: 'term_and_condition',
+                  file_url: url
+                }));
+                for (const fileData of quote_files) {
+                  await rfqModel.insert('tbl_quotes_files', fileData, t);
                 }
               }
-            );
-
-            if(is_regret){
-              let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
-              const created_quote_id = quote_rsp[0].id;
-
+  
               // adding the quote_id
               quote_items_data.map((item)=> item.quote_id=created_quote_id);
-
+  
               // console.log("mukul 1959")
-
+  
               const quote_items_keys = [
                 'rfq_id',
                 'rfq_no',
@@ -3891,135 +3944,70 @@ const rfqController = {
                 'quantity',
                 'variant'
               ];
-              await rfqModel.insertArray(
+              let quotes_items = await rfqModel.insertArray(
                 quote_items_data,
                 quote_items_keys,
-                'tbl_quote_items'
+                'tbl_quote_items',
+                t
               );
-              res
-              .status(200)
-              .json({
-                status: 3,
-                message: 'Your quote is regretted.',
-                regret_reason: regret_reason,
-                data: quote_rsp
-              })
-              .end();
-              return;
-
-            }
-
-            // if quote item data is empty because of errors
-            if(quote_items_data.length < 1){
-              res
-              .status(200)
-              .json({
-                status: 3,
-                message: 'Not able to send the Quote'
-              })
-              .end();
-              return;
-            }
-
-          // Insertion of the quote
-          let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data);
-          if (quote_rsp.length > 0) {
-
-            const created_quote_id = quote_rsp[0].id;
-
-            if (term_and_condition_files && term_and_condition_files.length > 0) {
-              const quote_files = term_and_condition_files.map(url => ({
-                quote_id:created_quote_id,
-                file_type: 'term_and_condition',
-                file_url: url
-              }));
-              for (const fileData of quote_files) {
-                await rfqModel.insert('tbl_quotes_files', fileData);
+  
+              // New code to insert file links into tbl_quote_item_files
+              if (quotes_items.length > 0) {
+                quotes_items.forEach(async (item, index) => {
+                  const file_links = products[index].document_files;
+                  if (file_links && file_links.length > 0) {
+                    const file_records = file_links.map(link => ({
+                      quote_item_id: item.id,
+                      file_type: "DOC",
+                      file_url: link,
+                      created_at: new Date()
+                    }));
+                    await rfqModel.insertArray( file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files', t
+                    );
+                  }
+                });
               }
+  
+              await sendQuoteNotificationEmail(req);
+              await sendQuoteNotificationToVendor(req);
+  
+              //  send whatsapp notification
+              const buyerDetails = await rfqModel.getRFQCreatedBy(rfq_id);
+              const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id)
+              const projectID = rfqDetails[0]?.project_id
+              const projectDetails = await projectModel.getProjectTableDataById(projectID, buyerDetails[0]?.id)
+  
+              
+              const payload = {
+                mobile:buyerDetails[0]?.mobile,
+                rfqNumber:rfq_no,
+                rfqID:rfq_id,
+                projectName:projectDetails[0]?.name || "-",
+                vendorName:req?.user?.name,
+                buyerName:buyerDetails[0]?.name
+              }
+       
+              await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(payload);
+  
+  
+              return res
+                .status(200)
+                .json({
+                  status: 1,
+                  data: quotes_items[0],
+                })
+                .end();
+            } else {
+              return res
+                .status(400)
+                .json({
+                  status: 3,
+                  message: Config.errorText.value
+                })
+                .end();
             }
+          })
 
-            // adding the quote_id
-            quote_items_data.map((item)=> item.quote_id=created_quote_id);
-
-            // console.log("mukul 1959")
-
-            const quote_items_keys = [
-              'rfq_id',
-              'rfq_no',
-              'quote_id',
-              'product_variant_id',
-              'product_name',
-              'unit_price',
-              'package_price',
-              'tax',
-              'freight_price',
-              'total_price',
-              'comment',
-              'delivery_period',
-              'quantity',
-              'variant'
-            ];
-            let quotes_items = await rfqModel.insertArray(
-              quote_items_data,
-              quote_items_keys,
-              'tbl_quote_items'
-            );
-
-            // New code to insert file links into tbl_quote_item_files
-            if (quotes_items.length > 0) {
-              quotes_items.forEach(async (item, index) => {
-                const file_links = products[index].document_files;
-                if (file_links && file_links.length > 0) {
-                  const file_records = file_links.map(link => ({
-                    quote_item_id: item.id,
-                    file_type: "DOC",
-                    file_url: link,
-                    created_at: new Date()
-                  }));
-                  await rfqModel.insertArray( file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files'
-                  );
-                }
-              });
-            }
-
-            await sendQuoteNotificationEmail(req);
-            await sendQuoteNotificationToVendor(req);
-
-            //  send whatsapp notification
-            const buyerDetails = await rfqModel.getRFQCreatedBy(rfq_id);
-            const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id)
-            const projectID = rfqDetails[0]?.project_id
-            const projectDetails = await projectModel.getProjectTableDataById(projectID, buyerDetails[0]?.id)
-
-            
-            const payload = {
-              mobile:buyerDetails[0]?.mobile,
-              rfqNumber:rfq_no,
-              rfqID:rfq_id,
-              projectName:projectDetails[0]?.name || "-",
-              vendorName:req?.user?.name,
-              buyerName:buyerDetails[0]?.name
-            }
-     
-            await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(payload);
-
-
-            res
-              .status(200)
-              .json({
-                status: 1,
-                data: quotes_items[0],
-              })
-              .end();
-          } else {
-            res
-              .status(400)
-              .json({
-                status: 3,
-                message: Config.errorText.value
-              })
-              .end();
-          }
         } else {
           res
             .status(400)
@@ -4046,7 +4034,8 @@ const rfqController = {
         .status(400)
         .json({
           status: 3,
-          message: Config.errorText.value
+          message: error.message ?? Config.errorText.value,
+          error,
         })
         .end();
     }
