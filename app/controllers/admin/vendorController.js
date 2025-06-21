@@ -70,8 +70,6 @@ const vendorController = {
         created_by
       );
 
-      console.log('Filters:', { organization, verified, name, email, status, dateFrom, dateTo, created_by });
-
       res
         .status(200)
         .json({
