@@ -3,8 +3,8 @@
     <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:12px; color:#fff; font-weight:normal; padding:0px; background:#203367; line-height:30px;'><table border="0" width="100%">
           <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:18px; color:#fff; font-weight:bold; padding:10px 5px; text-align:left' width="200"><img style="width: 200px; mix-blend-mode: multiply;" src="https://api.letsworkwise.com/user_document/1738825197968-2d5fea6d-0266-451e-96d0-025781f2a119.png" alt="workwise-Logo" />  </td>
           <td style='background-color:#203367; font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; padding:10px 5px; text-align:right; line-height:1.5;'>
-          <p>Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
-          Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063</p></td>
+          <p> 1st Floor, 271 Business Park, Model Industrial Estate, near Virwani Industrial Estate <br/>
+          off Western Express Highway, Vishveshwar Nagar, Goregaon, Mumbai, Maharashtra 400063 </p></td>
       </table></td>
   </tr>
   <tr>

@@ -29,8 +29,8 @@ const companyObj = [
 
 const defaultEmailTemplate = {
   logo: 'https://api.letsworkwise.com/user_document/1738825197968-2d5fea6d-0266-451e-96d0-025781f2a119.png',
-  address: `Suite no. 801, Synergy Business Park, ITT Bhatti, <br/>
-      Hanuman Tekdi, Goregaon, Mumbai, Maharashtra 400063`,
+  address: `1st Floor, 271 Business Park, Model Industrial Estate, near Virwani Industrial Estate <br/>
+      off Western Express Highway, Vishveshwar Nagar, Goregaon, Mumbai, Maharashtra 400063`,
   displayAddress: true,
   primaryColor: '#ffe4e4eb',
   primaryTextColor: '#000000',

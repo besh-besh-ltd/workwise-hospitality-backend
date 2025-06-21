@@ -4343,6 +4343,9 @@ const rfqController = {
       let vendors = await rfqModel.gerRFQVendors(rfq_id);
       const quote_vendor = await rfqModel.quoteVendor(rfq_id);
 
+      //  buyer org name, the company name he used in create rfq field
+      let org_name = rfqBasicDetails?.company_name || '';
+
       const createdByIds = new Set(quote_vendor.map((item) => item.created_by));
 
       const unmatchedVendors = (
@@ -4366,9 +4369,7 @@ const rfqController = {
       ).filter(Boolean);
       
       vendors = unmatchedVendors;
-      let org_name = organization_name ? organization_name : name;
 
-      console.log(" vendors ", vendors)
       Promise.all(vendors.map((item) => sendReminderRFQMAIL(item.vendor, item.remainingProducts, org_name, rfq_id,rfqBasicDetails  )))
         .then(async () => {
           try {
