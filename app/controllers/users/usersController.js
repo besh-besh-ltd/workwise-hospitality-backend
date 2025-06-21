@@ -2369,10 +2369,10 @@ update_user_detail: async (req, res, next) => {
       <td style="padding:10px 0 0;font-size: 14px;font-weight: bold; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;"> Work Wise <table width="100%" border="0" cellspacing="0" cellpadding="0" align="center">
           <tbody>
             <tr>
-              <td style="padding: 10px 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Suite no. 801, Synergy Business Park,</td>
+              <td style="padding: 10px 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;"> 1st Floor, 271 Business Park, Model Industrial Estate, near Virwani Industrial Estate </td>
             </tr>
             <tr>
-              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">ITT Bhatti, Hanuman Tekdi, </td>
+              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">off Western Express Highway, Vishveshwar Nagar </td>
             </tr>
             <tr>
               <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Goregaon, Mumbai, Maharashtra 400063</td>
