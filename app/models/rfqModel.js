@@ -6560,6 +6560,7 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                   TU.name AS vendor_name,
                   TU.email AS vendor_email,
                   TQF.timestamp AS quote_date,
+                  TQI.rfq_no,
                   TQI.unit_price
                   FROM tbl_quote_items TQI
                   JOIN tbl_quote_finalization TQF USING (quote_id)
@@ -6578,6 +6579,7 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                 TQI.total_price,
                 TQI.quantity,
                 TQI.product_name,
+                TQI.rfq_no,
                 TQ.timestamp AS quote_date,
                 U.name AS vendor_name,       -- ✅ User's name
                 U.email AS vendor_email      -- ✅ User's email
