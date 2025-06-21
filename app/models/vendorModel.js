@@ -91,8 +91,7 @@ const vendorModel = {
         `;
       }
 
-      db.any(
-        `SELECT 
+      let q = `SELECT 
           tbl_users.id,
           tbl_users.name,
           tbl_users.email,
@@ -131,7 +130,10 @@ const vendorModel = {
         LEFT JOIN tbl_users updater ON tbl_users.updated_by = updater.id
         WHERE tbl_users.is_deleted = 0 AND tbl_users.user_type = 3 ${dynamicQuery}
         ${orderByClause}
-        LIMIT $1 OFFSET $2`,
+        LIMIT $1 OFFSET $2`
+
+      db.any(
+        q,
         [limit, offset]
       )
         .then(function (data) {
@@ -615,14 +617,12 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
       
       const escapedSearch = search ? vendorModel._escapeSqlString(search) : '';
       
-      db.any(
-        `SELECT 
+      const q = `SELECT 
           tu.id,
           tu.name,
           tu.mobile, 
           tu.email,
           COALESCE(tc.company_name, tu.organization_name) AS organization_name,
-          tu.user_type,
           ${escapedSearch ? "ts_rank_cd(to_tsvector('english', tc.company_name), plainto_tsquery('english', $1)) AS rank," : ''}
           ${escapedSearch ? 'word_similarity(lower(tc.company_name), lower($1)) as similarity_score,' : ''}
           ${escapedSearch ? `CASE
@@ -636,7 +636,8 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
           ${escapedSearch ? `CASE
             WHEN position(lower($1) in lower(tc.company_name)) > 0 THEN 1
             ELSE 0
-          END AS partial_word_match` : ''}
+          END AS partial_word_match,` : ''}
+          tu.user_type
          FROM tbl_users tu
          LEFT JOIN tbl_company tc ON tu.company_id = tc.id
          WHERE tc.id IS NOT NULL AND tu.is_deleted = 0 AND (tu.user_type = 3 OR tu.user_type = 4) 
@@ -650,7 +651,9 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         ${search ? 
           `rank DESC, starts_with_input DESC, exact_word_match DESC, partial_word_match DESC, similarity_score DESC, tu.created_at` : 
           `tu.created_at`
-        }`, [escapedSearch]
+        }`
+
+      db.any(q, [escapedSearch]
       )
         .then(function (data) {
           resolve(data);

@@ -2088,8 +2088,6 @@ LIMIT 1;`;
       ORDER BY RFQ.timestamp ${sort ?? ""}
       LIMIT $5 OFFSET $4;`;
 
-      console.log(q)
-
       db.any(q, [project_id,rfq_type,reverse_auction,offset,limit,rfq_no])
         .then(function (data) {
           resolve(data);
