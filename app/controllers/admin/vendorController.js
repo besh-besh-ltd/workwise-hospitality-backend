@@ -381,67 +381,106 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       const email = req.body.email?.toLowerCase() || '';
       // let fileName = req?.file?.filename;
       // let originalFilename = req?.file?.originalname;
+
+      console.log("checking the data vendor ",req.body.email);
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
+      // let vendorObj = {
+      //   name: name || vendorDetails[0].name,
+      //   email: email || vendorDetails[0].email,
+      //   address: address || vendorDetails[0].address,
+      //   city: city || vendorDetails[0].city,
+      //   state: state || vendorDetails[0].state,
+      //   country: country || vendorDetails[0].country,
+      //   mobile: mobile || vendorDetails[0].mobile,
+      //   postal_code: postal_code || vendorDetails[0].postal_code,
+      //   updated_by: updatedBy,
+      //   organization_name:
+      //     organization_name || vendorDetails[0].organization_name
+      // };
       let vendorObj = {
-        name: name || vendorDetails[0].name,
-        email: email || vendorDetails[0].email,
-        address: address || vendorDetails[0].address,
-        city: city || vendorDetails[0].city,
-        state: state || vendorDetails[0].state,
-        country: country || vendorDetails[0].country,
-        mobile: mobile || vendorDetails[0].mobile,
-        postal_code: postal_code || vendorDetails[0].postal_code,
-        updated_by: updatedBy,
-        organization_name:
-          organization_name || vendorDetails[0].organization_name
-      };
-      await productModel.updateVendorDetail(vendorObj, vendorId);
-
-      let companyDetails = await userModel.getCompanyDetail(vendorId);
-
-      if (companyDetails.length > 0) {
-        let companyObj = {
-          profile: about_vendor_company || companyDetails[0].profile,
-          logo:
-            req.files?.logo
-              ? req.files?.logo[0].location
-              : companyDetails[0].logo,
-          website: website || vendorDetails[0].website,
-          company_name: organization_name || companyDetails[0].company_name,
-          nature_of_business:
-            nature_business || companyDetails[0].nature_of_business,
-          established_year: estd_year || companyDetails[0].established_year,
-          gstin: gstin || companyDetails[0].gstin,
-          import_export_code:
-            import_export_code || companyDetails[0].import_export_code,
-          cin: cin || companyDetails[0].cin,
-          turnover: turn_over || companyDetails[0].turnover,
-          no_of_employess: total_employees || companyDetails[0].no_of_employess,
-        };
-
-        await productModel.updateCompany(companyObj);
-      } else {
-        let companyObj = {
-          profile: about_vendor_company || null,
-          logo:
-            req.files?.logo && req.files?.logo.length > 0
-              ? `${Config.download_url}/user_image/${req.files.logo[0].filename}`
-              : null,
-          email: email || null,
-          mobile: mobile || null,
-          company_name: organization_name || null,
-          nature_of_business: nature_business || null,
-          website: website || vendorDetails[0].website,
-          established_year: estd_year || null,
-          gstin: gstin || null,
-          import_export_code: import_export_code || null,
-          cin: cin || null,
-          turnover: turn_over || null,
-          no_of_employess: total_employees || null,
-        };
-        companyObj.user_id = vendorId;
-        await productModel.addCompany(companyObj);
+        id: parseInt(vendorId) || null,
+        name : name || null,
+        email : email || null,
+        address : address || null,
+        city : city || null ,
+        state : state || null,
+        country : country || null ,
+        mobile : mobile || null,
+        postal_code: postal_code || null ,
+        organization_name: organization_name || null,
+        updated_by : updatedBy || null
       }
+      let companyObj = {
+        profile: about_vendor_company || null,
+        logo: req.files.logo?.[0]?.location || null,
+        company_name: organization_name || null,
+        nature_of_business: nature_business || [],
+        established_year: estd_year || null,
+        gstin: gstin || null,
+        import_export_code: import_export_code || null,
+        cin: cin || null,
+        turnover: turn_over || null,
+        no_of_employess: total_employees || null,
+        website: website || null,
+        is_private:0
+      };
+
+      console.log("avhcdgvc---->",vendorObj);
+
+
+      console.log("kjdjchbhwebjfwjfbhwevfew",companyObj);
+
+      const result = await userModel.update_companyDetails(vendorObj,companyObj );
+
+      console.log("chekcing result", result);
+
+      // await productModel.updateVendorDetail(vendorObj, vendorId);
+
+      // let companyDetails = await userModel.getCompanyDetail(vendorId);
+
+      // if (companyDetails.length > 0) {
+      //   let companyObj = {
+      //     profile: about_vendor_company || companyDetails[0].profile,
+      //     logo:
+      //       req.files?.logo
+      //         ? req.files?.logo[0].location
+      //         : companyDetails[0].logo,
+      //     website: website || vendorDetails[0].website,
+      //     company_name: organization_name || companyDetails[0].company_name,
+      //     nature_of_business:
+      //       nature_business || companyDetails[0].nature_of_business,
+      //     established_year: estd_year || companyDetails[0].established_year,
+      //     gstin: gstin || companyDetails[0].gstin,
+      //     import_export_code:
+      //       import_export_code || companyDetails[0].import_export_code,
+      //     cin: cin || companyDetails[0].cin,
+      //     turnover: turn_over || companyDetails[0].turnover,
+      //     no_of_employess: total_employees || companyDetails[0].no_of_employess,
+      //   };
+
+      //   await productModel.updateCompany(companyObj);
+      // } else {
+      //   let companyObj = {
+      //     profile: about_vendor_company || null,
+      //     logo:
+      //       req.files?.logo && req.files?.logo.length > 0
+      //         ? `${Config.download_url}/user_image/${req.files.logo[0].filename}`
+      //         : null,
+      //     email: email || null,
+      //     mobile: mobile || null,
+      //     company_name: organization_name || null,
+      //     nature_of_business: nature_business || null,
+      //     website: website || vendorDetails[0].website,
+      //     established_year: estd_year || null,
+      //     gstin: gstin || null,
+      //     import_export_code: import_export_code || null,
+      //     cin: cin || null,
+      //     turnover: turn_over || null,
+      //     no_of_employess: total_employees || null,
+      //   };
+      //   companyObj.user_id = vendorId;
+      //   await productModel.addCompany(companyObj);
+      // }
 
       if (req.files?.ptr_track && req.files?.ptr_track.length > 0) {
         const pathname = req.files.ptr_track[0].location;
@@ -453,14 +492,16 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         };
         await productModel.addFile(filesObj);
       }
-
-      res
+      if(result)
+      {
+         res
         .status(200)
         .json({
           status: 1,
           message: 'Vendor successfully updated'
         })
         .end();
+     }
     } catch (error) {
       logError(error);
       res
