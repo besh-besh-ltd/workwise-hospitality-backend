@@ -6203,7 +6203,7 @@ const rfqController = {
           spec: [
             { title: "Size", value: item.size || "" },
             { title: "Spec", value: item.feature_or_specifications || "" },
-            { title: "Quantity", value: item.quantity || "" },
+            { title: "Quantity", value: item.quantity || 0 },
             { title: "Unit", value: item.unit || "NA" },
           ],
           vendors: vendorResult,
