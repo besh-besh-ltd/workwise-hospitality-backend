@@ -438,7 +438,7 @@ const rfqModel = {
           // Insert into tbl_rfq_products_specs
           for (const spec of product.spec || []) {
             if(spec.title == 'Quantity')
-              spec.value = parseInt(spec.value)
+              spec.value = parseInt(spec.value) ?? 0
             
             await t.none(
               `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, variant, title, value, sheet_id)
