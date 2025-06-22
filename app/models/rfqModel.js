@@ -1840,6 +1840,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         FROM tbl_rfq_products RFQ_P
         JOIN tbl_product_variant _TPV ON _TPV.id = RFQ_P.product_variant_id
         WHERE RFQ.id = RFQ_P.rfq_id
+        ORDER BY RFQ_P.id
 
     ) AS "products"
 

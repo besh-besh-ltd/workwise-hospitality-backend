@@ -1971,6 +1971,7 @@ const rfqController = {
         if (products?.addable?.length > 0) {
           await Promise.all(
             products.addable.map(async (productId) => {
+              if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(productId))) return null;
               const vendors = await transactingModels.rfqModel.searchEmailAndNameForVendor(
                 rfq_id,
                 productId
@@ -2005,13 +2006,15 @@ const rfqController = {
                   await transactingModels.rfqModel.insertVendorRfqToken(vendor_id, rfq_id);
                 }
               }
-            })
+            }).filter(Boolean)
           );
         }
 
         // Handling Specs insert and/or update
         if (products.updatable?.specs)
           Object.keys(products.updatable.specs).forEach((rfqProductId) => {
+            if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) return;
+
             const productId = products.updatable.specs[rfqProductId].product_id;
             const variant = products.updatable.specs[rfqProductId].variant;
             delete products.updatable.specs[rfqProductId].variant;
@@ -2061,6 +2064,8 @@ const rfqController = {
         // Handling Files insert and/or update
         if (products.updatable?.files)
           Object.keys(products.updatable.files).forEach((rfqProductId) => {
+            if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) return;
+
             delete products.updatable.files[rfqProductId].variant;
             delete products.updatable.files[rfqProductId].product_id;
 
@@ -2126,6 +2131,8 @@ const rfqController = {
         if (products.updatable?.comment)
           Object.keys(products.updatable.comment).forEach(
             async (rfqProductId) => {
+              if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(rfqProductId)) return;
+
               const productId =
                 products.updatable.comment[rfqProductId].product_id;
               const variant = products.updatable.comment[rfqProductId].variant;
