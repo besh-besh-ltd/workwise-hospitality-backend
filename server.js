@@ -20,6 +20,12 @@ const app = express();
 app.use(express.static(path.join(__dirname, '/app/uploads')));
 util(app);
 
+
+// Add this near the top
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
+
 // Create server
 const server = http.createServer(app);
 
