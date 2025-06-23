@@ -2246,7 +2246,7 @@ LIMIT 1;`;
         });
     });
   },
-  getQuotesByRfqByIdByProduct: async (id, user_id, TA_Vendors) => {
+  getQuotesByRfqByIdByProduct: async (id, user_id, TA_Vendors, no_freight) => {
     return new Promise(function (resolve, reject) {
         const vendorCondition = `
         AND EXISTS (
@@ -2265,8 +2265,10 @@ LIMIT 1;`;
                 'unit_price', TQI1.unit_price,
                 'package_price', TQI1.package_price,
                 'tax', TQI1.tax,
-                'freight_price', TQI1.freight_price,
-                'total_price', TQI1.total_price,
+                'freight_price', ${no_freight === 'true' ? '0' : 'TQI1.freight_price'},
+                'total_price', ${no_freight === 'true' ? 
+                  'ROUND((TQI1.unit_price * CAST(TQI1.quantity AS NUMERIC)) + ((TQI1.unit_price * CAST(TQI1.quantity AS NUMERIC)) * COALESCE(TQI1.package_price, 0) / 100) + (((TQI1.unit_price * CAST(TQI1.quantity AS NUMERIC)) + ((TQI1.unit_price * CAST(TQI1.quantity AS NUMERIC)) * COALESCE(TQI1.package_price, 0) / 100)) * COALESCE(TQI1.tax, 0) / 100))' 
+                  : 'TQI1.total_price'},
                 'quantity', TQI1.quantity,
                 'timestamp', TQF1.timestamp
                 )
@@ -2353,12 +2355,14 @@ LIMIT 1;`;
                             'variant', TQI.variant,
                             'product_name', TQI.product_name,
                             'unit_price', TQI.unit_price,
-                            'total_price', TQI.total_price,
+                            'total_price', ${no_freight === 'true' ? 
+                              'ROUND((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100) + (((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100)) * COALESCE(TQI.tax, 0) / 100))' 
+                              : 'TQI.total_price'},
                             'comment', TQI.comment,
                             'delivery_period', TQI.delivery_period,
                             'package_price', TQI.package_price,
                             'tax', TQI.tax,
-                            'freight_price', TQI.freight_price,
+                            'freight_price', ${no_freight === 'true' ? '0' : 'TQI.freight_price'},
                             'quantity', TQI.quantity,
                             'timestamp', TQ_inner.timestamp,
                             'document_files', (
@@ -2408,7 +2412,7 @@ LIMIT 1;`;
 
 
 
-  getQuotesByRfqById2: async (id, user_id, TA_Vendors) => {
+  getQuotesByRfqById2: async (id, user_id, TA_Vendors, no_freight) => {
     return new Promise(function (resolve, reject) {
 
       const vendorCondition = `
@@ -2480,8 +2484,10 @@ LIMIT 1;`;
               'unit_price', TQI.unit_price,
               'package_price', TQI.package_price,
               'tax', TQI.tax,
-              'freight_price', TQI.freight_price,
-              'total_price', TQI.total_price,
+              'freight_price', ${no_freight === 'true' ? '0' : 'TQI.freight_price'},
+              'total_price', ${no_freight === 'true' ? 
+                'ROUND((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100) + (((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100)) * COALESCE(TQI.tax, 0) / 100))' 
+                : 'TQI.total_price'},
               'comment', TQI.comment,
               'delivery_period', TQI.delivery_period,
               'quantity', TQI.quantity,
@@ -2575,8 +2581,10 @@ LIMIT 1;`;
                     'unit_price', TH.unit_price,
                     'package_price', TH.package_price,
                     'tax', TH.tax,
-                    'freight_price', TH.freight_price,
-                    'total_price', TH.total_price,
+                    'freight_price', ${no_freight === 'true' ? '0' : 'TH.freight_price'},
+                    'total_price', ${no_freight === 'true' ? 
+                      'ROUND((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100) + (((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100)) * COALESCE(TH.tax, 0) / 100))' 
+                      : 'TH.total_price'},
                     'comment', TH.comment,
                     'delivery_period', TH.delivery_period,
                     'quantity', TH.quantity,

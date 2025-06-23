@@ -4049,11 +4049,11 @@ const rfqController = {
   },
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const {TA_Vendors} =req.query 
+    const {TA_Vendors, no_freight} = req.query;
     const { id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqById2(rfq_id, id, TA_Vendors);
+      let rfQItem = await rfqModel.getQuotesByRfqById2(rfq_id, id, TA_Vendors, no_freight);
       // rfQItem = filterQuotations(rfQItem);
       // rfQItem = processQuotations(rfQItem);
       res
@@ -4108,12 +4108,12 @@ const rfqController = {
   },
   downloadQuoteResultsProductWise: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const {TA_Vendors} = req.query 
+    const {TA_Vendors, no_freight} = req.query;
 
     const { id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, TA_Vendors);
+      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, TA_Vendors, no_freight);
       
       rfQItem.forEach(product => {
         const vendorMap = new Map();
