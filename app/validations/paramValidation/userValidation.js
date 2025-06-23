@@ -244,6 +244,42 @@ const schemas = {
       'any.only': 'Password and Confirm password not matched'
     }),
   }),
+  
+  company_registration: Joi.object().keys({
+    name: Joi.string().required(),
+    email: Joi.string().required().email().max(100),
+    mobile: Joi.string().min(8).max(15).required().label('Mobile'),
+    organization_name: Joi.string().required(),
+    register_as: Joi.string()
+      .optional()
+      .regex(/^[3|7]$/, 'register_as should be 3 (vendor) or 7 (buyer)'),
+    user_type: Joi.string()
+      .required()
+      .regex(/^[3|7]$/, 'user_type should be 3 (vendor) or 7 (buyer)'),
+    password: Joi.string().min(3).max(15).required().label('Password'),
+    address: Joi.string().optional().allow(null).allow(''),
+    country: Joi.string().optional().allow(null).allow(''),
+    whatsapp: Joi.string().optional().allow(null).allow(''),
+    state: Joi.string().optional().allow(null).allow(''),
+    city: Joi.string().optional().allow(null).allow(''),
+    postal_code: Joi.string().optional().allow(null).allow(''),
+    gstin: Joi.string().optional().allow(null).allow(''),
+    cin: Joi.string().optional().allow(null).allow(''),
+    profile: Joi.string().optional().allow(null).allow(''),
+    nature_of_business: Joi.string().optional().allow(null).allow(''),
+    type_of_business: Joi.string().optional().allow(null).allow(''),
+    turnover: Joi.string().optional().allow(null).allow(''),
+    no_of_employess: Joi.string().optional().allow(null).allow(''),
+    import_export_code: Joi.string().optional().allow(null).allow(''),
+    established_year: Joi.number().optional().allow(null).allow(''),
+    website: Joi.string().optional().allow(null).allow(''),
+    is_private: Joi.number().optional().allow(null),
+    // Additional fields for buyer registration
+    max_top_management: Joi.number().optional().allow(null),
+    max_procurement: Joi.number().optional().allow(null),
+    max_engineering: Joi.number().optional().allow(null),
+    max_finance: Joi.number().optional().allow(null),
+  }),
   vendor_review: Joi.object().keys({
     reviewed_to: Joi.string()
       .required()
