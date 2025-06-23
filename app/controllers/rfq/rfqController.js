@@ -1368,6 +1368,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
     if (products && products?.updatable) {
       if (products.updatable?.specs)
         for (const rfqProductId of Object.keys(products.updatable.specs)) {
+          if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) continue;
           const productId = products.updatable.specs[rfqProductId].product_id;
           const variant = products.updatable.specs[rfqProductId].variant;
           delete products.updatable.specs[rfqProductId].variant;
@@ -1417,6 +1418,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
       if (products.updatable?.files)
         for (const rfqProductId of Object.keys(products.updatable.files)) {
+          if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) continue;
           delete products.updatable.files[rfqProductId].variant;
           delete products.updatable.files[rfqProductId].product_id;
 
@@ -1440,10 +1442,9 @@ const saveRfqDraft = async (user_id, reqBody) => {
               t
             );
             const data = products.updatable.files[rfqProductId][fileType];
+            const isRemovable = !Array.isArray(data) && data == 'rm';
 
             if (doesExist && doesExist.length > 0) {
-              const isRemovable = !Array.isArray(data) && data == 'rm';
-
               const conditions = {
                 rfq_product_id: rfqProductId,
                 file_type: transformedFileType
@@ -1462,7 +1463,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
                   t
                 );
               }
-            } else {
+            } else if (!isRemovable) {
               const insertableData = data.map((file_url) => ({
                 rfq_product_id: rfqProductId,
                 file_type: transformedFileType,
@@ -1480,6 +1481,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
       if (products.updatable?.comment)
         for (const rfqProductId of Object.keys(products.updatable.comment)) {
+            if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) continue;
             const productId =
               products.updatable.comment[rfqProductId].product_id;
             const variant = products.updatable.comment[rfqProductId].variant;
@@ -2091,10 +2093,9 @@ const rfqController = {
                   currentWhereClause,
                 );
                 const data = products.updatable.files[rfqProductId][fileType];
+                const isRemovable = !Array.isArray(data) && data == 'rm';
 
                 if (doesExist && doesExist.length > 0) {
-                  const isRemovable = !Array.isArray(data) && data == 'rm';
-
                   const conditions = {
                     rfq_product_id: rfqProductId,
                     file_type: transformedFileType
@@ -2112,7 +2113,7 @@ const rfqController = {
                       'tbl_rfq_product_files',
                     );
                   }
-                } else {
+                } else if (!isRemovable) {
                   const insertableData = data.map((file_url) => ({
                     rfq_product_id: rfqProductId,
                     file_type: transformedFileType,
