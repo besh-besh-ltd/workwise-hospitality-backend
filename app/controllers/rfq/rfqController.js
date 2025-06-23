@@ -1381,7 +1381,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
           for (const spec of Object.keys(products.updatable.specs[rfqProductId])) {
             let value = products.updatable.specs[rfqProductId][spec]
             if(spec == 'Quantity')
-              value = parseInt(value);
+              value = parseInt(value) || '';
 
               const data = {
                 value
