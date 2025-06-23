@@ -5124,7 +5124,8 @@ ORDER BY m.created_at;
                                       LEFT JOIN tbl_rfq_product_tech_evaluation_clauses_files AS TE_F
                                                 ON TE_C.id = TE_F.tbl_rfq_product_tech_evaluation_clauses_id
                               WHERE TE.rfq_id = $1
-                              GROUP BY TE.id, TE_C.id, TE_C.clause_text, TE.rfq_id, TE.tbl_rfq_product_id),
+                              GROUP BY TE.id, TE_C.id, TE_C.clause_text, TE.rfq_id, TE.tbl_rfq_product_id
+                              ),
 
             vendor_response_files AS (SELECT vr.id                                                          AS vendor_response_id,
                                               JSON_AGG(vrf.file_url) FILTER (WHERE vrf.file_url IS NOT NULL) AS files
@@ -5152,20 +5153,27 @@ ORDER BY m.created_at;
                                             FROM vendor_responses_raw
                                             GROUP BY clause_id),
 
-            clauses_data AS (SELECT cf.rfq_id,
-                                    cf.rfq_product_id,
-                                    JSON_AGG(
-                                            JSON_BUILD_OBJECT(
-                                                    'clause_id', cf.clause_id,
-                                                    'clause_text', cf.clause_text,
-                                                    'files', cf.files,
-                                                    'vendor_responses', COALESCE(vra.vendor_responses, '[]')
-                                            )
-                                    ) AS clauses
-                              FROM clause_files cf
-                                      LEFT JOIN vendor_responses_aggregated vra
-                                                ON cf.clause_id = vra.clause_id
-                              GROUP BY cf.rfq_id, cf.rfq_product_id),
+            clauses_data AS (
+                SELECT
+                    ordered_clauses.rfq_id,
+                    ordered_clauses.rfq_product_id,
+                    JSON_AGG(clause_entry ORDER BY clause_entry->>'clause_id') AS clauses
+                FROM (
+                          SELECT
+                              cf.rfq_id,
+                              cf.rfq_product_id,
+                              JSON_BUILD_OBJECT(
+                                      'clause_id', cf.clause_id,
+                                      'clause_text', cf.clause_text,
+                                      'files', cf.files,
+                                      'vendor_responses', COALESCE(vra.vendor_responses, '[]')
+                              ) AS clause_entry
+                          FROM clause_files cf
+                                  LEFT JOIN vendor_responses_aggregated vra
+                                            ON cf.clause_id = vra.clause_id
+                      ) AS ordered_clauses
+                GROUP BY rfq_id, rfq_product_id
+            ),
 
             vendors_list AS (
                 SELECT
@@ -5217,7 +5225,7 @@ ORDER BY m.created_at;
               vl.vendors
         FROM clauses_data cd
                 LEFT JOIN vendors_list vl
-                      ON cd.rfq_id = vl.rfq_id AND cd.rfq_product_id = vl.rfq_product_id;
+                          ON cd.rfq_id = vl.rfq_id AND cd.rfq_product_id = vl.rfq_product_id;
     `;
 
     return new Promise((resolve, reject) => {
