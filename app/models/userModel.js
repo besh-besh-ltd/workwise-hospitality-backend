@@ -27,72 +27,168 @@ user_book_demo: async (mobile) => {
  * @returns company id, only if data successfully saved in tbl_company and tbl_user
  */
 
-company_registration: async (user_data, company_data) => {
-  return new Promise((resolve, reject) => {
-    db.tx(async t => {
-      try {
-        if (user_data.mobile) {
-          user_data.mobile = user_data.mobile.toString().substring(0, 15);
+  company_registration: async (user_data, company_data) => {
+    return new Promise((resolve, reject) => {
+      db.tx(async t => {
+        try {
+          if (user_data.mobile) {
+            user_data.mobile = user_data.mobile.toString().substring(0, 15);
+          }
+
+          // ------------------------------
+          // Step 1: Insert Company
+          // ------------------------------
+          const companyFields = [
+            "company_name", "profile", "nature_of_business", "type_of_business",
+            "turnover", "no_of_employess", "import_export_code", "gstin", "cin", "logo",
+            "established_year", "website", "location", "is_private"
+          ];
+
+          const companyValues = companyFields.map(field => company_data?.[field] ?? null);
+          const companyPlaceholders = companyFields.map((_, i) => `$${i + 1}`).join(', ');
+
+          const insertCompanyQuery = `
+            INSERT INTO tbl_company (${companyFields.join(', ')})
+            VALUES (${companyPlaceholders})
+            RETURNING id
+          `;
+
+          const companyResult = await t.one(insertCompanyQuery, companyValues);
+          const company_id = companyResult.id;
+
+          // ------------------------------
+          // Step 2: Insert User
+          // ------------------------------
+          const userFields = [
+            "name", "email", "mobile", "created_by", "updated_by",
+            "status", "user_type", "password", "address", "country",
+            "whatsapp", "state", "city", "postal_code"
+          ];
+          const userValues = userFields.map(f => user_data?.[f] ?? null);
+          userFields.push("company_id");
+          userValues.push(company_id);
+
+          const userPlaceholders = userFields.map((_, i) => `$${i + 1}`).join(', ');
+
+          const insertUserQuery = `
+            INSERT INTO tbl_users (${userFields.join(', ')})
+            VALUES (${userPlaceholders})
+            RETURNING id
+          `;
+
+          const userResult = await t.one(insertUserQuery, userValues);
+
+          resolve({
+            success: true,
+            company_id,
+            user_id: userResult.id
+          });
+
+        } catch (error) {
+          reject(error);
         }
-
-        // ------------------------------
-        // Step 1: Insert Company
-        // ------------------------------
-        const companyFields = [
-          "company_name", "profile", "nature_of_business", "type_of_business",
-          "turnover", "no_of_employess", "import_export_code", "gstin", "cin", "logo",
-          "established_year", "website", "location", "is_private"
-        ];
-
-        const companyValues = companyFields.map(field => company_data?.[field] ?? null);
-        const companyPlaceholders = companyFields.map((_, i) => `$${i + 1}`).join(', ');
-
-        const insertCompanyQuery = `
-          INSERT INTO tbl_company (${companyFields.join(', ')})
-          VALUES (${companyPlaceholders})
-          RETURNING id
-        `;
-
-        const companyResult = await t.one(insertCompanyQuery, companyValues);
-        const company_id = companyResult.id;
-
-        // ------------------------------
-        // Step 2: Insert User
-        // ------------------------------
-        const userFields = [
-          "name", "email", "mobile", "created_by", "updated_by",
-          "status", "user_type", "password", "address", "country",
-          "whatsapp", "state", "city", "postal_code"
-        ];
-        const userValues = userFields.map(f => user_data?.[f] ?? null);
-        userFields.push("company_id");
-        userValues.push(company_id);
-
-        const userPlaceholders = userFields.map((_, i) => `$${i + 1}`).join(', ');
-
-        const insertUserQuery = `
-          INSERT INTO tbl_users (${userFields.join(', ')})
-          VALUES (${userPlaceholders})
-          RETURNING id
-        `;
-
-        const userResult = await t.one(insertUserQuery, userValues);
-
-        resolve({
-          success: true,
-          company_id,
-          user_id: userResult.id
-        });
-
-      } catch (error) {
-        reject(error);
-      }
-    }).catch(err => {
-      console.error("Transaction error:", err);
-      reject(new Error(err));
+      }).catch(err => {
+        console.error("Transaction error:", err);
+        reject(new Error(err));
+      });
     });
+  },
+  update_companyDetails: async (userObj, companyObj) => {
+  return db.tx(async t => {
+    try {
+      // 1. COMPANY UPDATE
+      const companyUpdates = [];
+      const companyValues = [];
+      let index = 1;
+
+      // Build company update fields
+      for (const key in companyObj) {
+        // Skip company_name as it's used in WHERE clause
+        // if (key === 'company_name') continue;
+        
+        if (companyObj[key] !== null && companyObj[key] !== undefined) {
+          companyUpdates.push(`${key} = $${index}`);
+          companyValues.push(companyObj[key]);
+          index++;
+        }
+      }
+
+      if (companyValues.length === 0) {
+        throw new Error("No company fields to update");
+      }
+
+      // Add company_name to the end for WHERE clause
+      companyValues.push(userObj.id);
+      const companyWhereIndex = companyValues.length;
+
+      const updateCompanyQuery = `
+        UPDATE tbl_company c
+          SET ${companyUpdates.join(', ')}
+          FROM tbl_users tu
+          WHERE tu.id = $${companyWhereIndex}
+            AND c.id = tu.company_id;
+      `;
+
+      console.log("UPDATE COMPANY QUERY => ", updateCompanyQuery);
+
+      // 2. USER UPDATE
+      const userUpdates = [];
+      const userValues = [];
+      index = 1;  // Reset index for user parameters
+
+      // Build user update fields
+      for (const key in userObj) {
+        // Skip email as it's used in WHERE clause
+        if (key === 'id') continue;
+        
+        if (userObj[key] !== null && userObj[key] !== undefined) {
+          userUpdates.push(`${key} = $${index}`);
+          userValues.push(userObj[key]);
+          index++;
+        }
+      }
+
+      let userQuery = null;
+      if (userValues.length > 0) {
+        // Add email to the end for WHERE clause
+        userValues.push(userObj.id);
+        const userWhereIndex = userValues.length;
+
+        userQuery = `
+          UPDATE tbl_users
+          SET ${userUpdates.join(', ')}
+          WHERE id = $${userWhereIndex}
+
+        `;
+      }
+
+      console.log("USER QUERY => ", userQuery)
+
+      // 3. EXECUTE QUERIES
+      const queries = [t.any(updateCompanyQuery, companyValues)];
+      if (userQuery) {
+        queries.push(t.any(userQuery, userValues));
+      }
+
+      console.log("Batch Result", await t.batch(queries));
+
+      return {
+        success: true,
+        message: "Company and user details updated successfully"
+      };
+
+    } catch (error) {
+      // Enhanced error logging
+      console.error("Update error details:", {
+        error: error.message,
+        companyObj,
+        userObj
+      });
+      throw error; // Re-throw for transaction rollback
+    }
   });
-},
+  },
+
 
 
   insertBuyerAccountLimits: async (limitsData, company_id) => {
@@ -425,12 +521,15 @@ company_registration: async (user_data, company_data) => {
   get_vendorreview_list: async (user_id, limit, offset) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `select tbl_vendor_reviews.*,tbl_users.name as buyer_name, tbl_users.email as buyer_email,
-        CASE
-        WHEN tbl_users.new_profile_image IS NULL THEN
-        NULL
-        ELSE tbl_users.new_profile_image
-        END AS image_url  from tbl_vendor_reviews LEFT JOIN tbl_users ON tbl_vendor_reviews.reviewed_by = tbl_users.id  where reviewed_to = $1 ORDER BY id DESC LIMIT $2 OFFSET $3`,
+        `select 
+          tbl_vendor_reviews.*,
+          tbl_users.name as buyer_name, 
+          tbl_users.email as buyer_email,
+          tc.logo AS image_url 
+        from tbl_vendor_reviews 
+        LEFT JOIN tbl_users ON tbl_vendor_reviews.reviewed_by = tbl_users.id 
+        JOIN tbl_company tc ON company_id = tc.id
+          where reviewed_to = $1 ORDER BY id DESC LIMIT $2 OFFSET $3`,
         [user_id, limit, offset]
       )
         .then(function (data) {
@@ -830,58 +929,62 @@ company_registration: async (user_data, company_data) => {
       // Base query with common fields
       let baseQuery = `
       SELECT tbl_users.id as user_id,
-             tbl_users.name as vendor_name,
-             tbl_company.logo as profile_image,
-             tbl_users.address,
-             tbl_users.status,
-             tbl_users.whatsapp,
-             tbl_company.id as company_id,
-             tbl_company.gstin,
-             tbl_company.cin,
-             tbl_company.website,
-             tbl_company.nature_of_business,
-             tbl_company.type_of_business,
-             tbl_company.turnover,
-             tbl_company.no_of_employess,
-             tbl_company.import_export_code,
-             tbl_company.company_name,
-             tbl_company.profile,
-             tbl_company.location,
-             cl.city_name,  
-             sl.state_name,
-               
-             ARRAY(
-                 SELECT json_build_object(
-                     'brochure', tbl_files.file_name,
-                     'brochure_url', tbl_files.file_path
-                 )
-                 FROM tbl_files
-                 WHERE tbl_files.user_id = tbl_users.id
-             ) AS "brochure",
-            ARRAY(
-           SELECT json_build_object(
-               'product_name', V.name,
-               'product_id', V.id,
-               'approved_by', ARRAY(
-                   SELECT json_build_object(
-                       'vendor_approve_id', VA.id,
-                       'vendor_name', VA.vendor_approve,
-                       'approved_at', VM.created_at
-                   )
-                   FROM tbl_vendorapprove_product_mapping VM
-                   LEFT JOIN tbl_vendor_approve VA ON VA.id = VM.vendor_approve_id
-                   WHERE VM.variant_vendor_mapping_id = M.id
-               )
-           )
-           FROM tbl_product_variant_vendor_mapping M
-           JOIN tbl_product_variant V ON V.id = M.product_variant_id
-           WHERE M.vendor_id = tbl_users.id
+       tbl_users.name as vendor_name,
+       tbl_company.logo as profile_image,
+       tbl_users.address,
+       tbl_users.status,
+       tbl_users.whatsapp,
+       tbl_company.id as company_id,
+       tbl_company.gstin,
+       tbl_company.cin,
+       tbl_company.website,
+       tbl_company.nature_of_business,
+       tbl_company.type_of_business,
+       tbl_company.turnover,
+       tbl_company.no_of_employess,
+       tbl_company.import_export_code,
+       tbl_company.company_name,
+       tbl_company.profile,
+       tbl_company.location,
+       cl.city_name,
+       sl.state_name,
+
+       ARRAY(
+               SELECT json_build_object(
+                              'brochure', tbl_files.file_name,
+                              'brochure_url', tbl_files.file_path
+                      )
+               FROM tbl_files
+               WHERE tbl_files.user_id = tbl_users.id
+       ) AS "brochure",
+       ARRAY(
+               SELECT json_build_object(
+                              'product_name', V.name,
+                              'product_id', V.id,
+                              'approved_by', (
+                                  SELECT ARRAY(
+                                                 SELECT DISTINCT ON (VA.id)
+                                                     json_build_object(
+                                                             'vendor_approve_id', VA.id,
+                                                             'vendor_name', VA.vendor_approve,
+                                                             'approved_at', VM.created_at
+                                                     )
+                                                 FROM tbl_vendorapprove_product_mapping VM
+                                                          LEFT JOIN tbl_vendor_approve VA ON VA.id = VM.vendor_approve_id
+                                                 WHERE VM.variant_vendor_mapping_id = M.id
+                                                 ORDER BY VA.id, VM.created_at DESC
+                                         )
+                              )
+                      )
+               FROM tbl_product_variant_vendor_mapping M
+                        JOIN tbl_product_variant V ON V.id = M.product_variant_id
+               WHERE M.vendor_id = tbl_users.id
        ) AS "product_list",
-             CASE
-                 WHEN tbl_company.logo IS NULL THEN
-                     NULL
-                 ELSE tbl_company.logo
-             END AS profile_image_url`;
+       CASE
+           WHEN tbl_company.logo IS NULL THEN
+               NULL
+           ELSE tbl_company.logo
+           END AS profile_image_url`;
 
       // Additional fields if current_user is not null
       if (current_user !== null) {
@@ -1729,7 +1832,6 @@ company_registration: async (user_data, company_data) => {
         Universities.status = '1'
         ${query_string};
     `;
-    console.log(query);
     return new Promise(function (resolve, reject) {
       // let qq = `select Universities.*, Countries.countryname from Universities
       // LEFT JOIN Countries ON Universities.country_code = Countries.countrycode

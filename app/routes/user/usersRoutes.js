@@ -63,6 +63,12 @@ UsersRoutes.post(
   UsersController.user_registration
 );
 UsersRoutes.post(
+  '/company-registration',
+  validateBody(schemas.company_registration),
+  validateDbBody.user_exists,
+  UsersController.company_registration
+);
+UsersRoutes.post(
   '/notifications/subscribe',
 
   UsersController.subscribe

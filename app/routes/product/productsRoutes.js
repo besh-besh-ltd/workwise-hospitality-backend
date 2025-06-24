@@ -75,7 +75,7 @@ ProductsRoutes.put(
   passportSignIn,
   acl([3, 4]),
   validateParam(schemas.id),
-  validateDbBody.check_product,
+  validateDbBody.checkVariant,
   // schema_posts.add_vendor_product,
   validateDbBody.add_vendor_product,
   ProductsController.vendorProductUpdate
