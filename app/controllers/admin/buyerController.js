@@ -398,116 +398,171 @@ const buyerController = {
   bulkBuyerVendorMapping: async (req, res, next) => {
     try {
       let file = req.file;
-      
       if (!file) {
         return res.status(400).json({
           status: 2,
           message: 'File is required'
         }).end();
       }
-
       let jsonData = [];
-      
-      // Parse file
-      if (file.path.endsWith('.xlsx')) {
-        const workbook = xlsx.readFile(file.path);
-        const sheetName = workbook.SheetNames[0];
-        const sheet = workbook.Sheets[sheetName];
-        jsonData = xlsx.utils.sheet_to_json(sheet);
-      } else if (file.path.endsWith('.csv')) {
-        const csvData = fs.readFileSync(file.path, 'utf8');
-        const lines = csvData.split('\n').filter(line => line.trim());
-        const headers = lines[0].split(',').map(h => h.trim());
-        
-        for (let i = 1; i < lines.length; i++) {
-          const values = lines[i].split(',').map(v => v.trim());
-          const row = {};
-          headers.forEach((header, index) => {
-            row[header] = values[index] || '';
+      try {
+        // Parse file
+        if (file.path.endsWith('.xlsx')) {
+          const workbook = xlsx.readFile(file.path);
+          const sheetName = workbook.SheetNames[0];
+          const sheet = workbook.Sheets[sheetName];
+          jsonData = xlsx.utils.sheet_to_json(sheet);
+        } else if (file.path.endsWith('.csv')) {
+          const csvData = fs.readFileSync(file.path, 'utf8');
+          const lines = csvData.trim().split('\n').filter(line => line.trim());
+          if (lines.length === 0) {
+            throw new Error('Empty file');
+          }
+          // Simple CSV parser that handles quoted values
+          const parseCSVLine = (line) => {
+            const result = [];
+            let current = '';
+            let inQuotes = false;
+            for (let i = 0; i < line.length; i++) {
+              const char = line[i];
+              if (char === '"') {
+                inQuotes = !inQuotes;
+              } else if (char === ',' && !inQuotes) {
+                result.push(current.trim());
+                current = '';
+              } else {
+                current += char;
+              }
+            }
+            result.push(current.trim());
+            return result;
+          };
+          const headers = parseCSVLine(lines[0]).map(h => h.replace(/"/g, '').trim());
+          jsonData = lines.slice(1).map((line) => {
+            const values = parseCSVLine(line).map(v => v.replace(/"/g, '').trim());
+            const row = {};
+            headers.forEach((header, i) => {
+              row[header] = values[i] || '';
+            });
+            return row;
           });
-          jsonData.push(row);
         }
+      } catch (parseError) {
+        // Clean file on parse error
+        if (fs.existsSync(file.path)) {
+          fs.unlinkSync(file.path);
+        }
+        return res.status(400).json({
+          status: 2,
+          message: 'Error parsing file: ' + parseError.message
+        }).end();
       }
-
-      // Clean file
-      fs.unlinkSync(file.path);
-
+      // Clean file after successful parsing
+      if (fs.existsSync(file.path)) {
+        fs.unlinkSync(file.path);
+      }
       if (!jsonData.length) {
         return res.status(400).json({
           status: 2,
           message: 'No data found in file'
         }).end();
       }
-
-      let validMappings = [];
-      let unmappedEntries = [];
-
-      // Process data
-      for (let i = 0; i < jsonData.length; i++) {
-        const row = jsonData[i];
-        const buyerEmail = row['Buyer Email']?.trim();
-        const vendorEmail = row['Vendor Email']?.trim();
-        
-        // Skip if both emails missing
-        if (!buyerEmail && !vendorEmail) continue;
-
-        if (!buyerEmail || !vendorEmail) {
-          unmappedEntries.push({
-            row: i + 1,
-            buyerEmail: buyerEmail || '',
-            vendorEmail: vendorEmail || '',
-            reason: 'Missing email'
-          });
+      // Extract and validate emails in bulk
+      const emailData = jsonData
+        .map((row, index) => ({
+          row: index + 1,
+          buyerEmail: row['buyer_email']?.trim(),
+          vendorEmail: row['vendor_email']?.trim()
+        }))
+        .filter(item => item.buyerEmail || item.vendorEmail); // Skip rows with both emails missing
+      // Separate valid and invalid entries
+      const validEmailEntries = emailData.filter(item => item.buyerEmail && item.vendorEmail);
+      const invalidEntries = emailData.filter(item => !item.buyerEmail || !item.vendorEmail)
+        .map(item => ({
+          row: item.row,
+          buyerEmail: item.buyerEmail || '',
+          vendorEmail: item.vendorEmail || '',
+          reason: 'Missing email'
+        }));
+      if (!validEmailEntries.length) {
+        return res.status(200).json({
+          status: 1,
+          message: 'Bulk mapping completed',
+          data: {
+            totalProcessed: 0,
+            successfulMappings: 0,
+            failedMappings: 0,
+            mappedEntries: [],
+            unmappedEntries: []
+          }
+        }).end();
+      }
+      // Get all unique emails for batch processing
+      const allBuyerEmails = [...new Set(validEmailEntries.map(item => item.buyerEmail.toLowerCase()))];
+      const allVendorEmails = [...new Set(validEmailEntries.map(item => item.vendorEmail.toLowerCase()))];
+      // Batch fetch all users
+      const [buyerResults, vendorResults] = await Promise.all([
+        Promise.all(allBuyerEmails.map(email => userModel.user_email_exist(email))),
+        Promise.all(allVendorEmails.map(email => userModel.user_email_exist(email)))
+      ]);
+      // Create lookup maps for O(1) access
+      const buyerMap = new Map();
+      const vendorMap = new Map();
+      buyerResults.forEach((result, index) => {
+        const email = allBuyerEmails[index];
+        const validBuyers = result.filter(user => [2, 8].includes(user.user_type) && user.is_deleted === 0);
+        if (validBuyers.length > 0) {
+          buyerMap.set(email, validBuyers[0]);
+        }
+      });
+      vendorResults.forEach((result, index) => {
+        const email = allVendorEmails[index];
+        const validVendors = result.filter(user => user.user_type === 3 && user.is_deleted === 0);
+        if (validVendors.length > 0) {
+          vendorMap.set(email, validVendors[0]);
+        }
+      });
+      // Process all entries and separate valid/invalid
+      const processedRows = [];
+      const unmappedEntries = [];
+      const validMappings = [];
+      for (const item of validEmailEntries) {
+        const buyerData = buyerMap.get(item.buyerEmail.toLowerCase());
+        const vendorData = vendorMap.get(item.vendorEmail.toLowerCase());
+        // Skip if both buyer and vendor are not found
+        if (!buyerData && !vendorData) {
           continue;
         }
-
-        // Check buyer exists
-        const buyerResult = await userModel.user_email_exist(buyerEmail.toLowerCase());
-        const buyerData = buyerResult.filter(user => 
-          [2, 8].includes(user.user_type) && user.is_deleted === 0
-        );
-        
-        if (!buyerData.length) {
+        processedRows.push(item.row);
+        if (!buyerData) {
           unmappedEntries.push({
-            row: i + 1,
-            buyerEmail,
-            vendorEmail,
+            row: item.row,
+            buyerEmail: item.buyerEmail,
+            vendorEmail: item.vendorEmail,
             reason: 'Buyer not found'
           });
-          continue;
-        }
-
-        // Check vendor exists
-        const vendorResult = await userModel.user_email_exist(vendorEmail.toLowerCase());
-        const vendorData = vendorResult.filter(user => 
-          user.user_type === 3 && user.is_deleted === 0
-        );
-        
-        if (!vendorData.length) {
+        } else if (!vendorData) {
           unmappedEntries.push({
-            row: i + 1,
-            buyerEmail,
-            vendorEmail,
+            row: item.row,
+            buyerEmail: item.buyerEmail,
+            vendorEmail: item.vendorEmail,
             reason: 'Vendor not found'
           });
-          continue;
+        } else {
+          validMappings.push({
+            buyer_id: buyerData.id,
+            vendor_id: vendorData.id,
+            buyerEmail: item.buyerEmail,
+            vendorEmail: item.vendorEmail,
+            row: item.row
+          });
         }
-
-        validMappings.push({
-          buyer_id: buyerData[0].id,
-          vendor_id: vendorData[0].id,
-          buyerEmail,
-          vendorEmail,
-          row: i + 1
-        });
       }
-
       let mappedEntries = [];
-      
       // Bulk insert valid mappings
       if (validMappings.length > 0) {
         try {
-          const bulkResult = await userModel.bulkMapBuyersToVendors(validMappings);
+          await userModel.bulkMapBuyersToVendors(validMappings);
           mappedEntries = validMappings.map(mapping => ({
             row: mapping.row,
             buyerEmail: mapping.buyerEmail,
@@ -526,20 +581,22 @@ const buyerController = {
           });
         }
       }
-
       res.status(200).json({
         status: 1,
         message: 'Bulk mapping completed',
         data: {
-          totalProcessed: jsonData.length,
+          totalProcessed: processedRows.length,
           successfulMappings: mappedEntries.length,
           failedMappings: unmappedEntries.length,
           mappedEntries,
           unmappedEntries
         }
       }).end();
-
     } catch (error) {
+      // Clean file on any error
+      if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
       logError(error);
       res.status(400).json({
         status: 3,

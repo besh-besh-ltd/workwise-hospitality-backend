@@ -3419,33 +3419,58 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     })
   },
   bulkMapBuyersToVendors: async (mappingData) => {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
       if (!mappingData || mappingData.length === 0) {
         resolve([]);
         return;
       }
 
-      // Create values array for bulk insert
-      const values = mappingData.map((item, index) => 
-        `($${index * 2 + 1}, $${index * 2 + 2}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-      ).join(', ');
-      
-      const params = mappingData.flatMap(item => [item.buyerId, item.vendorId]);
-      
-      const query = `
-        INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, created_date, updated_date)
-        VALUES ${values}
-        ON CONFLICT (buyer_id, vendor_id) DO NOTHING
-        RETURNING buyer_id, vendor_id
-      `;
+      try {
+        // Create a temporary values string for checking existing mappings
+        const checkValues = mappingData.map(item => `(${item.buyer_id}, ${item.vendor_id})`).join(', ');
+        
+        // Get existing mappings in a single query
+        const existingMappingsQuery = `
+          SELECT buyer_id, vendor_id
+          FROM tbl_buyer_private_vendors_mapping
+          WHERE (buyer_id, vendor_id) IN (VALUES ${checkValues})
+        `;
+        
+        const existingMappings = await db.any(existingMappingsQuery);
+        
+        // Create a set of existing mappings for quick lookup
+        const existingSet = new Set(
+          existingMappings.map(item => `${item.buyer_id}-${item.vendor_id}`)
+        );
+        
+        // Filter out mappings that already exist
+        const newMappings = mappingData.filter(item => 
+          !existingSet.has(`${item.buyer_id}-${item.vendor_id}`)
+        );
 
-      db.any(query, params)
-        .then((result) => {
-          resolve(result);
-        })
-        .catch((err) => {
-          reject(err);
-        });
+        if (newMappings.length === 0) {
+          resolve([]);
+          return;
+        }
+
+        // Create values array for bulk insert
+        const values = newMappings.map((item, index) => 
+          `($${index * 2 + 1}, $${index * 2 + 2}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+        ).join(', ');
+        
+        const params = newMappings.flatMap(item => [item.buyer_id, item.vendor_id]);
+        
+        const query = `
+          INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, created_date, updated_date)
+          VALUES ${values}
+          RETURNING buyer_id, vendor_id
+        `;
+
+        const result = await db.any(query, params);
+        resolve(result);
+      } catch (err) {
+        reject(err);
+      }
     });
   },
   getVendorsWithBuyerNames: async () => {
