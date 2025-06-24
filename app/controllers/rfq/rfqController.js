@@ -2911,6 +2911,7 @@ const rfqController = {
         // Add products to the RFQ
         const product = req.body;
         const rfq_id = product.rfq_id || product.rfqId;
+        const specs = product.specs;
 
         if (!product || !product.variant_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
           return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
@@ -2940,6 +2941,23 @@ const rfqController = {
         }
 
         addedRfqProduct = addedRfqProduct[0]
+
+        if(specs && specs.Quantity && specs.Unit) {
+          Object.entries(specs).forEach(async ([title, value]) => {
+            const specsData = {
+              rfq_id,
+              product_variant_id: product.variant_id,
+              variant,
+              title: title,
+              value: value
+            };
+  
+            await rfqModel.insert(
+              'tbl_rfq_products_specs',
+              specsData
+            );
+          })
+        }
 
         const vendorPromises = product.vendors.map(async (vendor) => {
             const vendorData = {
