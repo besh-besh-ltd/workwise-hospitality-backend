@@ -5184,7 +5184,8 @@ ORDER BY m.created_at;
                                     'vendor_id', vendor_id,
                                     'vendor_name', vendor_name,
                                     'vendor_email', vendor_email,
-                                    'is_cleared', is_cleared
+                                    'is_cleared', is_cleared,
+                                    'evaluated_by', evaluated_by
                             )
                     ) AS vendors
                 FROM (
@@ -5197,6 +5198,7 @@ ORDER BY m.created_at;
                                       COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name,
                                       tu.email AS vendor_email,
                                       rc.status AS is_cleared,
+                                      _TU.name AS evaluated_by,
                                       ROW_NUMBER() OVER (
                                           PARTITION BY te.rfq_id, te.tbl_rfq_product_id, tu.id
                                           ORDER BY te.id
@@ -5213,6 +5215,7 @@ ORDER BY m.created_at;
                                             LEFT JOIN tbl_rfq_product_tech_evaluation_cleared_vendors rc
                                                       ON rc.tbl_rfq_product_tech_evaluation_id = te.id
                                                           AND rc.vendor_id = tu.id
+                                            LEFT JOIN tbl_users _TU ON _TU.id = rc.created_by
                               ) ranked
                           WHERE row_num = 1  -- ✅ This removes all duplicates
                       ) deduped
