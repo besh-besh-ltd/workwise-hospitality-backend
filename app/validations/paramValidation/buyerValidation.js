@@ -4,6 +4,7 @@ import multerS3 from 'multer-s3';
 import s3Client from '../../config/s3config.js';
 import multer from 'multer';
 import path from 'path';
+import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import Config from '../../config/app.config.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
@@ -347,6 +348,49 @@ const schema_posts = {
               next();
             }
           }
+        }
+      });
+    } catch (err) {
+      logError(err);
+      res.status(400).json({
+        status: 3,
+        message: 'server error'
+      });
+    }
+  },
+
+  buyerVendorMappingFileHandler: async (req, res, next) => {
+    try {
+      let upload = multer({
+        storage: store_document,
+        limits: {
+          fileSize: 2000000 // 2MB limit
+        },
+        fileFilter: (req, file, cb) => {
+          let ext = path.extname(file.originalname).toLowerCase();
+
+          if (ext === '.xlsx' || ext === '.csv') {
+            cb(null, true);
+          } else {
+            cb(null, false);
+            return cb('Only .xlsx and .csv formats allowed!', null);
+          }
+        }
+      }).single('file');
+      
+      upload(req, res, async function (err) {
+        if (err) {
+          let data = {};
+          data.file = err;
+          res
+            .status(400)
+            .json({
+              status: 2,
+              errors: data
+            })
+            .end();
+        } else {
+          next();
         }
       });
     } catch (err) {

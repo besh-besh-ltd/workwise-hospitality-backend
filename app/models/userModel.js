@@ -3418,6 +3418,36 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     })
   },
+  bulkMapBuyersToVendors: async (mappingData) => {
+    return new Promise((resolve, reject) => {
+      if (!mappingData || mappingData.length === 0) {
+        resolve([]);
+        return;
+      }
+
+      // Create values array for bulk insert
+      const values = mappingData.map((item, index) => 
+        `($${index * 2 + 1}, $${index * 2 + 2}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      ).join(', ');
+      
+      const params = mappingData.flatMap(item => [item.buyerId, item.vendorId]);
+      
+      const query = `
+        INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, created_date, updated_date)
+        VALUES ${values}
+        ON CONFLICT (buyer_id, vendor_id) DO NOTHING
+        RETURNING buyer_id, vendor_id
+      `;
+
+      db.any(query, params)
+        .then((result) => {
+          resolve(result);
+        })
+        .catch((err) => {
+          reject(err);
+        });
+    });
+  },
   getVendorsWithBuyerNames: async () => {
     //  this query will get list of buyers vendor for review and with buyer id it will also return buyer name
     const query = `

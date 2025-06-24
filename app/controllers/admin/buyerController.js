@@ -6,6 +6,8 @@ import { logError } from '../../helper/common.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
 import userModel from '../../models/userModel.js';
+import xlsx from 'xlsx';
+import fs from 'fs';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -391,6 +393,158 @@ const buyerController = {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+  bulkBuyerVendorMapping: async (req, res, next) => {
+    try {
+      let file = req.file;
+      
+      if (!file) {
+        return res.status(400).json({
+          status: 2,
+          message: 'File is required'
+        }).end();
+      }
+
+      let jsonData = [];
+      
+      // Parse file
+      if (file.path.endsWith('.xlsx')) {
+        const workbook = xlsx.readFile(file.path);
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        jsonData = xlsx.utils.sheet_to_json(sheet);
+      } else if (file.path.endsWith('.csv')) {
+        const csvData = fs.readFileSync(file.path, 'utf8');
+        const lines = csvData.split('\n').filter(line => line.trim());
+        const headers = lines[0].split(',').map(h => h.trim());
+        
+        for (let i = 1; i < lines.length; i++) {
+          const values = lines[i].split(',').map(v => v.trim());
+          const row = {};
+          headers.forEach((header, index) => {
+            row[header] = values[index] || '';
+          });
+          jsonData.push(row);
+        }
+      }
+
+      // Clean file
+      fs.unlinkSync(file.path);
+
+      if (!jsonData.length) {
+        return res.status(400).json({
+          status: 2,
+          message: 'No data found in file'
+        }).end();
+      }
+
+      let validMappings = [];
+      let unmappedEntries = [];
+
+      // Process data
+      for (let i = 0; i < jsonData.length; i++) {
+        const row = jsonData[i];
+        const buyerEmail = row['Buyer Email']?.trim();
+        const vendorEmail = row['Vendor Email']?.trim();
+        
+        // Skip if both emails missing
+        if (!buyerEmail && !vendorEmail) continue;
+
+        if (!buyerEmail || !vendorEmail) {
+          unmappedEntries.push({
+            row: i + 1,
+            buyerEmail: buyerEmail || '',
+            vendorEmail: vendorEmail || '',
+            reason: 'Missing email'
+          });
+          continue;
+        }
+
+        // Check buyer exists
+        const buyerResult = await userModel.user_email_exist(buyerEmail.toLowerCase());
+        const buyerData = buyerResult.filter(user => 
+          [2, 8].includes(user.user_type) && user.is_deleted === 0
+        );
+        
+        if (!buyerData.length) {
+          unmappedEntries.push({
+            row: i + 1,
+            buyerEmail,
+            vendorEmail,
+            reason: 'Buyer not found'
+          });
+          continue;
+        }
+
+        // Check vendor exists
+        const vendorResult = await userModel.user_email_exist(vendorEmail.toLowerCase());
+        const vendorData = vendorResult.filter(user => 
+          user.user_type === 3 && user.is_deleted === 0
+        );
+        
+        if (!vendorData.length) {
+          unmappedEntries.push({
+            row: i + 1,
+            buyerEmail,
+            vendorEmail,
+            reason: 'Vendor not found'
+          });
+          continue;
+        }
+
+        validMappings.push({
+          buyer_id: buyerData[0].id,
+          vendor_id: vendorData[0].id,
+          buyerEmail,
+          vendorEmail,
+          row: i + 1
+        });
+      }
+
+      let mappedEntries = [];
+      
+      // Bulk insert valid mappings
+      if (validMappings.length > 0) {
+        try {
+          const bulkResult = await userModel.bulkMapBuyersToVendors(validMappings);
+          mappedEntries = validMappings.map(mapping => ({
+            row: mapping.row,
+            buyerEmail: mapping.buyerEmail,
+            vendorEmail: mapping.vendorEmail,
+            status: 'Mapped successfully'
+          }));
+        } catch (error) {
+          // If bulk insert fails, add all to unmapped
+          validMappings.forEach(mapping => {
+            unmappedEntries.push({
+              row: mapping.row,
+              buyerEmail: mapping.buyerEmail,
+              vendorEmail: mapping.vendorEmail,
+              reason: 'Database error'
+            });
+          });
+        }
+      }
+
+      res.status(200).json({
+        status: 1,
+        message: 'Bulk mapping completed',
+        data: {
+          totalProcessed: jsonData.length,
+          successfulMappings: mappedEntries.length,
+          failedMappings: unmappedEntries.length,
+          mappedEntries,
+          unmappedEntries
+        }
+      }).end();
+
+    } catch (error) {
+      logError(error);
+      res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      }).end();
     }
   }
 
