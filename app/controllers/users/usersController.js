@@ -285,7 +285,7 @@ const UsersController = {
           .status(200)
           .json({
             status: 1,
-            message: `Registered ${ user_type == 3? "Buyer" : "Vendor" } successfully`,
+            message: `Registered ${ user_type == 3? "Vendor" : "Buyer" } successfully`,
             company_id: company_id,
           })
           .end();
