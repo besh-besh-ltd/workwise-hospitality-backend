@@ -369,9 +369,6 @@ const schema_posts = {
 
   buyerVendorMappingFileHandler: async (req, res, next) => {
     try {
-      console.log('=== Multer Middleware Started ===');
-      console.log('Request headers:', req.headers);
-      console.log('Content-Type:', req.headers['content-type']);
       
       let upload = multer({
         storage: store_document,
@@ -379,37 +376,21 @@ const schema_posts = {
           fileSize: 2000000 // 2MB limit
         },
         fileFilter: (req, file, cb) => {
-          console.log('=== File Filter Called ===');
-          console.log('File details:', {
-            fieldname: file.fieldname,
-            originalname: file.originalname,
-            mimetype: file.mimetype,
-            size: file.size
-          });
+          
           
           let ext = path.extname(file.originalname).toLowerCase();
-          console.log('File extension:', ext);
 
           if (ext === '.xlsx' || ext === '.csv') {
-            console.log('File accepted - valid extension');
             cb(null, true);
           } else {
-            console.log('File rejected - invalid extension');
             cb(null, false);
             return cb('Only .xlsx and .csv formats allowed!', null);
           }
         }
       }).single('file');
       
-      console.log('Starting multer upload...');
       upload(req, res, async function (err) {
-        console.log('=== Multer Upload Callback ===');
         if (err) {
-          console.error('Multer error occurred:', err);
-          console.error('Error type:', err.constructor.name);
-          console.error('Error message:', err.message);
-          console.error('Error code:', err.code);
-          console.error('Error stack:', err.stack);
           
           let data = {};
           data.file = err.message || err;
@@ -421,16 +402,10 @@ const schema_posts = {
             })
             .end();
         } else {
-          console.log('Multer upload successful');
-          console.log('Request file:', req.file);
-          console.log('Request body:', req.body);
           next();
         }
       });
     } catch (err) {
-      console.error('=== Multer Middleware Error ===');
-      console.error('Catch error:', err);
-      console.error('Error stack:', err.stack);
       logError(err);
       res.status(400).json({
         status: 3,
