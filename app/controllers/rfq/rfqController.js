@@ -1771,6 +1771,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
     if (updatableVendors && Object.keys(updatableVendors).length > 0) {
       for (const rfqProductId of Object.keys(updatableVendors)) {
+        if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) continue;
+        
         const productId = updatableVendors[rfqProductId].product_id;
         const variant = updatableVendors[rfqProductId].variant;
 
