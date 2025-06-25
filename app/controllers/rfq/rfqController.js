@@ -1381,7 +1381,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
           for (const spec of Object.keys(products.updatable.specs[rfqProductId])) {
             let value = products.updatable.specs[rfqProductId][spec]
             if(spec == 'Quantity')
-              value = parseInt(value);
+              value = parseInt(value) || '';
 
               const data = {
                 value
@@ -1771,6 +1771,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
     if (updatableVendors && Object.keys(updatableVendors).length > 0) {
       for (const rfqProductId of Object.keys(updatableVendors)) {
+        if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) continue;
+        
         const productId = updatableVendors[rfqProductId].product_id;
         const variant = updatableVendors[rfqProductId].variant;
 
@@ -2909,6 +2911,7 @@ const rfqController = {
         // Add products to the RFQ
         const product = req.body;
         const rfq_id = product.rfq_id || product.rfqId;
+        const specs = product.specs;
 
         if (!product || !product.variant_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
           return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
@@ -2938,6 +2941,23 @@ const rfqController = {
         }
 
         addedRfqProduct = addedRfqProduct[0]
+
+        if(specs && specs.Quantity && specs.Unit) {
+          Object.entries(specs).forEach(async ([title, value]) => {
+            const specsData = {
+              rfq_id,
+              product_variant_id: product.variant_id,
+              variant,
+              title: title,
+              value: value
+            };
+  
+            await rfqModel.insert(
+              'tbl_rfq_products_specs',
+              specsData
+            );
+          })
+        }
 
         const vendorPromises = product.vendors.map(async (vendor) => {
             const vendorData = {
