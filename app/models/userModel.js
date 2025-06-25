@@ -3449,27 +3449,27 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         );
 
         if (newMappings.length === 0) {
-          resolve([]);
-          return;
-        }
+        resolve([]);
+        return;
+      }
 
-        // Create values array for bulk insert
+      // Create values array for bulk insert
         const values = newMappings.map((item, index) => 
-          `($${index * 2 + 1}, $${index * 2 + 2}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-        ).join(', ');
-        
+        `($${index * 2 + 1}, $${index * 2 + 2}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      ).join(', ');
+      
         const params = newMappings.flatMap(item => [item.buyer_id, item.vendor_id]);
-        
-        const query = `
-          INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, created_date, updated_date)
-          VALUES ${values}
-          RETURNING buyer_id, vendor_id
-        `;
+      
+      const query = `
+        INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, created_date, updated_date)
+        VALUES ${values}
+        RETURNING buyer_id, vendor_id
+      `;
 
         const result = await db.any(query, params);
-        resolve(result);
+          resolve(result);
       } catch (err) {
-        reject(err);
+          reject(err);
       }
     });
   },
