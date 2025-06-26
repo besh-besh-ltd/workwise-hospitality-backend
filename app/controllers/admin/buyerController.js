@@ -6,6 +6,8 @@ import { logError } from '../../helper/common.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
 import userModel from '../../models/userModel.js';
+import xlsx from 'xlsx';
+import fs from 'fs';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -391,6 +393,75 @@ const buyerController = {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+  bulkBuyerVendorMapping: async (req, res, next) => {
+    try {
+      let jsonData = [];
+      try {
+        const workbook = xlsx.readFile(req.file.path);
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        jsonData = xlsx.utils.sheet_to_json(sheet);
+      } catch (parseError) {
+        if (fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+        return res.status(400).json({
+          status: 2,
+          message: 'Error parsing file: ' + parseError.message
+        }).end();
+      }
+
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+
+      if (!jsonData.length) {
+        return res.status(400).json({
+          status: 2,
+          message: 'No data found in file'
+        }).end();
+      }
+
+      const emailPairs = jsonData
+        .map((row, index) => ({
+          row: index + 1,
+          buyerEmail: row['buyer_email']?.trim()?.toLowerCase(),
+          vendorEmail: row['vendor_email']?.trim()?.toLowerCase()
+        }))
+        .filter(item => item.buyerEmail && item.vendorEmail);
+
+      if (!emailPairs.length) {
+        return res.status(200).json({
+          status: 1,
+          message: 'Bulk mapping completed',
+          data: {
+            totalProcessed: 0,
+            successfulMappings: 0,
+            failedMappings: 0,
+            mappedEntries: [],
+            unmappedEntries: []
+          }
+        }).end();
+      }
+
+      const result = await userModel.bulkMapBuyersToVendors(emailPairs);
+
+      res.status(200).json({
+        status: 1,
+        message: 'Bulk mapping completed',
+        data: result
+      }).end();
+    } catch (error) {
+      if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+      logError(error);
+      res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      }).end();
     }
   }
 
