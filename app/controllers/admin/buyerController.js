@@ -397,94 +397,42 @@ const buyerController = {
   },
   bulkBuyerVendorMapping: async (req, res, next) => {
     try {
-      let file = req.file;
-      if (!file) {
-        return res.status(400).json({
-          status: 2,
-          message: 'File is required'
-        }).end();
-      }
       let jsonData = [];
       try {
-        // Parse file
-        if (file.path.endsWith('.xlsx')) {
-          const workbook = xlsx.readFile(file.path);
-          const sheetName = workbook.SheetNames[0];
-          const sheet = workbook.Sheets[sheetName];
-          jsonData = xlsx.utils.sheet_to_json(sheet);
-        } else if (file.path.endsWith('.csv')) {
-          const csvData = fs.readFileSync(file.path, 'utf8');
-          const lines = csvData.trim().split('\n').filter(line => line.trim());
-          if (lines.length === 0) {
-            throw new Error('Empty file');
-          }
-          // Simple CSV parser that handles quoted values
-          const parseCSVLine = (line) => {
-            const result = [];
-            let current = '';
-            let inQuotes = false;
-            for (let i = 0; i < line.length; i++) {
-              const char = line[i];
-              if (char === '"') {
-                inQuotes = !inQuotes;
-              } else if (char === ',' && !inQuotes) {
-                result.push(current.trim());
-                current = '';
-              } else {
-                current += char;
-              }
-            }
-            result.push(current.trim());
-            return result;
-          };
-          const headers = parseCSVLine(lines[0]).map(h => h.replace(/"/g, '').trim());
-          jsonData = lines.slice(1).map((line) => {
-            const values = parseCSVLine(line).map(v => v.replace(/"/g, '').trim());
-            const row = {};
-            headers.forEach((header, i) => {
-              row[header] = values[i] || '';
-            });
-            return row;
-          });
-        }
+        const workbook = xlsx.readFile(req.file.path);
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        jsonData = xlsx.utils.sheet_to_json(sheet);
       } catch (parseError) {
-        // Clean file on parse error
-        if (fs.existsSync(file.path)) {
-          fs.unlinkSync(file.path);
+        if (fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
         }
         return res.status(400).json({
           status: 2,
           message: 'Error parsing file: ' + parseError.message
         }).end();
       }
-      // Clean file after successful parsing
-      if (fs.existsSync(file.path)) {
-        fs.unlinkSync(file.path);
+
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
       }
+
       if (!jsonData.length) {
         return res.status(400).json({
           status: 2,
           message: 'No data found in file'
         }).end();
       }
-      // Extract and validate emails in bulk
-      const emailData = jsonData
+
+      const emailPairs = jsonData
         .map((row, index) => ({
           row: index + 1,
-          buyerEmail: row['buyer_email']?.trim(),
-          vendorEmail: row['vendor_email']?.trim()
+          buyerEmail: row['buyer_email']?.trim()?.toLowerCase(),
+          vendorEmail: row['vendor_email']?.trim()?.toLowerCase()
         }))
-        .filter(item => item.buyerEmail || item.vendorEmail); // Skip rows with both emails missing
-      // Separate valid and invalid entries
-      const validEmailEntries = emailData.filter(item => item.buyerEmail && item.vendorEmail);
-      const invalidEntries = emailData.filter(item => !item.buyerEmail || !item.vendorEmail)
-        .map(item => ({
-          row: item.row,
-          buyerEmail: item.buyerEmail || '',
-          vendorEmail: item.vendorEmail || '',
-          reason: 'Missing email'
-        }));
-      if (!validEmailEntries.length) {
+        .filter(item => item.buyerEmail && item.vendorEmail);
+
+      if (!emailPairs.length) {
         return res.status(200).json({
           status: 1,
           message: 'Bulk mapping completed',
@@ -497,103 +445,15 @@ const buyerController = {
           }
         }).end();
       }
-      // Get all unique emails for batch processing
-      const allBuyerEmails = [...new Set(validEmailEntries.map(item => item.buyerEmail.toLowerCase()))];
-      const allVendorEmails = [...new Set(validEmailEntries.map(item => item.vendorEmail.toLowerCase()))];
-      // Batch fetch all users
-      const [buyerResults, vendorResults] = await Promise.all([
-        Promise.all(allBuyerEmails.map(email => userModel.user_email_exist(email))),
-        Promise.all(allVendorEmails.map(email => userModel.user_email_exist(email)))
-      ]);
-      // Create lookup maps for O(1) access
-      const buyerMap = new Map();
-      const vendorMap = new Map();
-      buyerResults.forEach((result, index) => {
-        const email = allBuyerEmails[index];
-        const validBuyers = result.filter(user => [2, 8].includes(user.user_type) && user.is_deleted === 0);
-        if (validBuyers.length > 0) {
-          buyerMap.set(email, validBuyers[0]);
-        }
-      });
-      vendorResults.forEach((result, index) => {
-        const email = allVendorEmails[index];
-        const validVendors = result.filter(user => user.user_type === 3 && user.is_deleted === 0);
-        if (validVendors.length > 0) {
-          vendorMap.set(email, validVendors[0]);
-        }
-      });
-      // Process all entries and separate valid/invalid
-      const processedRows = [];
-      const unmappedEntries = [];
-      const validMappings = [];
-      for (const item of validEmailEntries) {
-        const buyerData = buyerMap.get(item.buyerEmail.toLowerCase());
-        const vendorData = vendorMap.get(item.vendorEmail.toLowerCase());
-        // Skip if both buyer and vendor are not found
-        if (!buyerData && !vendorData) {
-          continue;
-        }
-        processedRows.push(item.row);
-        if (!buyerData) {
-          unmappedEntries.push({
-            row: item.row,
-            buyerEmail: item.buyerEmail,
-            vendorEmail: item.vendorEmail,
-            reason: 'Buyer not found'
-          });
-        } else if (!vendorData) {
-          unmappedEntries.push({
-            row: item.row,
-            buyerEmail: item.buyerEmail,
-            vendorEmail: item.vendorEmail,
-            reason: 'Vendor not found'
-          });
-        } else {
-          validMappings.push({
-            buyer_id: buyerData.id,
-            vendor_id: vendorData.id,
-            buyerEmail: item.buyerEmail,
-            vendorEmail: item.vendorEmail,
-            row: item.row
-          });
-        }
-      }
-      let mappedEntries = [];
-      // Bulk insert valid mappings
-      if (validMappings.length > 0) {
-        try {
-          await userModel.bulkMapBuyersToVendors(validMappings);
-          mappedEntries = validMappings.map(mapping => ({
-            row: mapping.row,
-            buyerEmail: mapping.buyerEmail,
-            vendorEmail: mapping.vendorEmail,
-            status: 'Mapped successfully'
-          }));
-        } catch (error) {
-          // If bulk insert fails, add all to unmapped
-          validMappings.forEach(mapping => {
-            unmappedEntries.push({
-              row: mapping.row,
-              buyerEmail: mapping.buyerEmail,
-              vendorEmail: mapping.vendorEmail,
-              reason: 'Database error'
-            });
-          });
-        }
-      }
+
+      const result = await userModel.bulkMapBuyersToVendors(emailPairs);
+
       res.status(200).json({
         status: 1,
         message: 'Bulk mapping completed',
-        data: {
-          totalProcessed: processedRows.length,
-          successfulMappings: mappedEntries.length,
-          failedMappings: unmappedEntries.length,
-          mappedEntries,
-          unmappedEntries
-        }
+        data: result
       }).end();
     } catch (error) {
-      // Clean file on any error
       if (req.file && req.file.path && fs.existsSync(req.file.path)) {
         fs.unlinkSync(req.file.path);
       }

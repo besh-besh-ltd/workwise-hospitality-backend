@@ -379,12 +379,11 @@ const schema_posts = {
           
           
           let ext = path.extname(file.originalname).toLowerCase();
-
-          if (ext === '.xlsx' || ext === '.csv') {
+          if (ext === '.xlsx') {
             cb(null, true);
           } else {
             cb(null, false);
-            return cb('Only .xlsx and .csv formats allowed!', null);
+            return cb('Only .xlsx format allowed!', null);
           }
         }
       }).single('file');
