@@ -3418,6 +3418,132 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     })
   },
+  bulkMapBuyersToVendors: async (emailPairs) => {
+    return new Promise(async (resolve, reject) => {
+      if (!emailPairs || emailPairs.length === 0) {
+        resolve({
+          totalProcessed: 0,
+          successfulMappings: 0,
+          failedMappings: 0,
+          mappedEntries: [],
+          unmappedEntries: []
+        });
+        return;
+      }
+
+      try {
+        const buyerEmails = [...new Set(emailPairs.map(item => item.buyerEmail))];
+        const vendorEmails = [...new Set(emailPairs.map(item => item.vendorEmail))];
+        
+        const query = `
+          WITH email_pairs AS (
+            SELECT unnest($1::text[]) AS buyer_email, 
+                   unnest($2::text[]) AS vendor_email,
+                   unnest($3::int[]) AS row_num
+          ),
+          buyers AS (
+            SELECT id AS buyer_id, email AS buyer_email
+            FROM tbl_users 
+            WHERE email = ANY($4) 
+            AND user_type IN (2, 8) 
+            AND is_deleted = 0
+          ),
+          vendors AS (
+            SELECT id AS vendor_id, email AS vendor_email
+            FROM tbl_users 
+            WHERE email = ANY($5) 
+            AND user_type = 3 
+            AND is_deleted = 0
+          ),
+          valid_pairs AS (
+            SELECT ep.row_num, ep.buyer_email, ep.vendor_email, 
+                   b.buyer_id, v.vendor_id,
+                   CASE 
+                     WHEN b.buyer_id IS NULL THEN 'Buyer not found'
+                     WHEN v.vendor_id IS NULL THEN 'Vendor not found'
+                     ELSE NULL
+                   END AS error_reason
+            FROM email_pairs ep
+            LEFT JOIN buyers b ON ep.buyer_email = b.buyer_email
+            LEFT JOIN vendors v ON ep.vendor_email = v.vendor_email
+          ),
+          existing_mappings AS (
+            SELECT vp.buyer_id, vp.vendor_id
+            FROM valid_pairs vp
+            INNER JOIN tbl_buyer_private_vendors_mapping bpvm 
+            ON vp.buyer_id = bpvm.buyer_id AND vp.vendor_id = bpvm.vendor_id
+            WHERE vp.buyer_id IS NOT NULL AND vp.vendor_id IS NOT NULL
+          ),
+          new_mappings AS (
+            INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, created_date, updated_date)
+            SELECT vp.buyer_id, vp.vendor_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            FROM valid_pairs vp
+            WHERE vp.buyer_id IS NOT NULL 
+            AND vp.vendor_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM tbl_buyer_private_vendors_mapping bpvm 
+              WHERE bpvm.buyer_id = vp.buyer_id AND bpvm.vendor_id = vp.vendor_id
+            )
+            RETURNING buyer_id, vendor_id
+          )
+          SELECT 
+            vp.row_num,
+            vp.buyer_email,
+            vp.vendor_email,
+            CASE 
+              WHEN vp.error_reason IS NOT NULL THEN vp.error_reason
+              WHEN em.buyer_id IS NOT NULL THEN 'Already mapped'
+              WHEN nm.buyer_id IS NOT NULL THEN 'Mapped successfully'
+              ELSE 'Unknown error'
+            END AS status,
+            CASE 
+              WHEN vp.error_reason IS NOT NULL OR em.buyer_id IS NOT NULL THEN false
+              ELSE true
+            END AS is_success
+          FROM valid_pairs vp
+          LEFT JOIN existing_mappings em ON vp.buyer_id = em.buyer_id AND vp.vendor_id = em.vendor_id
+          LEFT JOIN new_mappings nm ON vp.buyer_id = nm.buyer_id AND vp.vendor_id = nm.vendor_id
+          ORDER BY vp.row_num
+        `;
+
+        const emailPairArrays = emailPairs.map(item => [item.buyerEmail, item.vendorEmail, item.row]);
+        const buyerEmailArray = emailPairArrays.map(arr => arr[0]);
+        const vendorEmailArray = emailPairArrays.map(arr => arr[1]);
+        const rowArray = emailPairArrays.map(arr => arr[2]);
+
+        const results = await db.any(query, [
+          buyerEmailArray,
+          vendorEmailArray, 
+          rowArray,
+          buyerEmails,
+          vendorEmails
+        ]);
+
+        const mappedEntries = results.filter(r => r.is_success);
+        const unmappedEntries = results.filter(r => !r.is_success);
+
+        resolve({
+          totalProcessed: results.length,
+          successfulMappings: mappedEntries.length,
+          failedMappings: unmappedEntries.length,
+          mappedEntries: mappedEntries.map(entry => ({
+            row: entry.row_num,
+            buyerEmail: entry.buyer_email,
+            vendorEmail: entry.vendor_email,
+            status: entry.status
+          })),
+          unmappedEntries: unmappedEntries.map(entry => ({
+            row: entry.row_num,
+            buyerEmail: entry.buyer_email,
+            vendorEmail: entry.vendor_email,
+            reason: entry.status
+          }))
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  },
   getVendorsWithBuyerNames: async () => {
     //  this query will get list of buyers vendor for review and with buyer id it will also return buyer name
     const query = `
