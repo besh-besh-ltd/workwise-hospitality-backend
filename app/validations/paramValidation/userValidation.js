@@ -789,71 +789,7 @@ const schema_posts = {
   },
   upload_user_document: async (req, res, next) => {
     try {
-      /*       var upload = multer({
-        storage: store_document,
-        limits: {
-          fileSize: 200000000 // Compliant: 8MB
-        },
-        fileFilter: (req, file, cb) => {
-          var ext = path.extname(file.originalname).toLowerCase();
-
-          if (
-            ext == '.pdf' ||
-            ext == '.doc' ||
-            ext == '.docx' ||
-            ext == '.xlsx'
-          ) {
-            var validateImage = validatingImage(schemas.user_document);
-            if (validateImage) {
-              cb(null, true);
-            }
-          } else {
-            cb(null, false);
-            return cb('Only .pdf, .doc, .docx, .xlsx format allowed!', null);
-          }
-        }
-      }).single('file'); */
-
-      /* var upload = multer({
-        storage: store_document,
-        limits: {
-          fileSize: 200000000 // Compliant: 8MB
-        },
-        fileFilter: (req, file, cb) => {
-          var ext = path.extname(file.originalname).toLowerCase();
-
-          if (
-            ext == '.pdf' ||
-            ext == '.doc' ||
-            ext == '.docx' ||
-            ext == '.xlsx'
-          ) {
-            var validateImage = validatingImage(schemas.user_document);
-            if (validateImage) {
-              cb(null, true);
-            }
-          } else {
-            cb(null, false);
-            return cb('Only .pdf, .doc, .docx, .xlsx format allowed!', null);
-          }
-        }
-      }).fields([{ name: 'file', maxCount: 8 }]);
-
-      upload(req, res, async function (err) {
-        if (err) {
-          let data = {};
-          data.file = err;
-          res
-            .status(400)
-            .json({
-              status: 2,
-              errors: data
-            })
-            .end();
-        } else {
-          next();
-        }
-      }); */
+      
 
       var upload = multer({
         storage: store_document,
@@ -861,31 +797,7 @@ const schema_posts = {
           // fileSize: 2000000 // Compliant: 8MB
           fileSize: 26214400 // Compliant: 25MB, changes by mukul, 27-11-2024
         },
-        // fileFilter: (req, file, cb) => {
-        //   var ext = path.extname(file.originalname).toLowerCase();
-        //   console.log('File extension:===============================================', ext);
-        //   if (
-        //     ext == '.png' ||
-        //     ext == '.jpg' ||
-        //     ext == '.jpeg' ||
-        //     ext == '.pdf' ||
-        //     ext == '.doc' ||
-        //     ext == '.docx' ||
-        //     ext == '.xlsx'
-        //   ) 
-        //   {
-        //     // var validateImage = validatingImage(schemas.user_document);
-
-        //     console.log('Validation result:==========>');
-        //     // if (validateImage) {
-        //     //   cb(null, true);
-        //     // }
-        //   } else {
-        //     cb(null, false);
-        //     console.log('File rejected:==============================', file.originalname);
-        //     return cb('File format not allowed!', null);
-        //   }
-        // }
+       
       }).fields([{ name: 'file', maxCount: 8 }]);
       upload(req, res, async function (err) {
       

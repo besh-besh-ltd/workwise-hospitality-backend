@@ -1801,7 +1801,7 @@ update_user_detail: async (req, res, next) => {
     }
   },
   upload_documents: async (req, res, next) => {
-    console.log('FILES======', req.files.file);
+    
     try {
       let user_id;
 
@@ -1896,7 +1896,7 @@ update_user_detail: async (req, res, next) => {
   },
   // uploading the documents for the users without authenticatiion
   upload_document_without_auth: async (req, res, next) => {
-    console.log('FILES======', req.files.file);
+   
     try {
 
       // we havfe successfully saved to the server, 
