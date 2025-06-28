@@ -2316,13 +2316,8 @@ update_user_detail: async (req, res, next) => {
         receivedSignature,
         Config.razorpay.razorpay_signature
       );
-      console.log("TRIGGERED RZPAY Webhook => ", valid);
-
-      console.log("OUTSIDE IF => ", req.body.event);
-
       // console.error(valid);
       if (valid && req.body.event == 'order.paid') {
-        console.log("INSIDE IF => ", req.body.event)
         let paymentEntity = req.body.payload.payment.entity;
         let orderEntity = req.body.payload.order.entity;
         let subscriptionPaymentObj = {
@@ -2334,11 +2329,10 @@ update_user_detail: async (req, res, next) => {
           receipt: orderEntity.receipt,
           date: Moment().format('YYYY-MM-DD')
         };
-
-        console.log(
-          'subscriptionPaymentObj ==>>>>>>>>>',
-          subscriptionPaymentObj
-        );
+        // console.log(
+        //   'subscriptionPaymentObj ==>>>>>>>>>',
+        //   subscriptionPaymentObj
+        // );
         let paymentUpdate = await subscriptionModel.updateSubscriptionPayment(
           subscriptionPaymentObj
         );
@@ -2348,10 +2342,10 @@ update_user_detail: async (req, res, next) => {
             paymentUpdate[0].user_subscriptions_id,
             paymentUpdate[0].user_id
           );
-          console.log(
-            '🚀 ~ razorpay_webhook: ~ userSubscription:',
-            userSubscription
-          );
+          // console.log(
+          //   '🚀 ~ razorpay_webhook: ~ userSubscription:',
+          //   userSubscription
+          // );
           await subscriptionModel.updateUserSubscriptionId(
             userSubscription[0].plan_id,
             paymentUpdate[0].user_id
