@@ -8,7 +8,9 @@ import excelJS from 'exceljs';
 const subscriptionController = {
   subscriptionList: async (req, res, next) => {
     try {
-      let subscriptionList = await subscriptionModel.getSubscriptionList();
+      const {user_type} = req.query;
+
+      let subscriptionList = await subscriptionModel.getSubscriptionList(user_type);
       res
         .status(200)
         .json({
@@ -58,6 +60,7 @@ const subscriptionController = {
         price: values.price || 0.0,
         duration: values.duration,
         plan_type: values.type,
+        user_type: values.user_type,
         status: values.status || 1, // default is active
         created_by: req.user.id
       };
@@ -94,8 +97,10 @@ const subscriptionController = {
   },
   subscriptionFeatureList: async (req, res, next) => {
     try {
+      const {user_type} = req.query;
+
       let subscriptionFeatureList =
-        await subscriptionModel.getSubscriptionFeatureList();
+        await subscriptionModel.getSubscriptionFeatureList(user_type);
       res
         .status(200)
         .json({
@@ -210,8 +215,10 @@ const subscriptionController = {
   buyerSubscriptionList: async (req, res, next) => {
     try {
       let today = dateFormat(new Date(), 'yyyy-mm-dd');
+      const userType = req.user.user_type;
       let subscriptionList = await subscriptionModel.getBuyerSubscriptionList(
-        today
+        today,
+        userType
       );
 
       let buyerSubscriptionIdCheck =

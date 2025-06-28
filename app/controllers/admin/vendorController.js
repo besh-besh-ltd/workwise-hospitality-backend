@@ -113,6 +113,7 @@ const vendorController = {
         turn_over,
         total_employees,
         about_vendor_company,
+        subscription,
         spocs
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
@@ -200,7 +201,31 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         await productModel.addFile(filesObj);
       }
       
+      if(subscription && subscription != '-1') {
+        const doesSubscriptionExist = await subscriptionModel.subscriptionIdExist(subscription, '3');
+        if(doesSubscriptionExist && doesSubscriptionExist.length > 0) {
+          const x = doesSubscriptionExist[0].duration;
 
+          let today = dateFormat(new Date(), 'yyyy-mm-dd');
+          const todayInMoment = moment(today);
+          const endDate = todayInMoment.clone().add(x, 'months').subtract(1, 'day').format('YYYY-MM-DD');
+          const renewDate = todayInMoment.clone().add(x, 'months').format('YYYY-MM-DD');
+
+          let UserSubscriptionObj = {
+            user_id: vendorId,
+            plan_id: doesSubscriptionExist[0].id,
+            status: 1, // payment pending
+            start_date: today,
+            end_date: endDate,
+            renew_date: renewDate
+          };
+
+          let createUserSubscription =
+            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
+          
+          await userModel.updateUserAccount(vendorId, { subscription_plan_id: doesSubscriptionExist[0].id })
+        }
+      }
 
       addDefaultNotifications(vendorId);
 

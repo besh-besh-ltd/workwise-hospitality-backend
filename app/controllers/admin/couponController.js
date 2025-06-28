@@ -155,17 +155,19 @@ const couponController = {
         subscription_plan_id,
         start_date,
         end_date,
+        user_type,
         status
       } = req.body;
 
       let offerObj = {
-        is_percentage: is_percentage,
-        text: text,
-        price: price,
+        is_percentage,
+        text,
+        price,
         start_date: dateFormat(start_date, 'yyyy-mm-dd'),
         end_date: dateFormat(end_date, 'yyyy-mm-dd'),
         created_by: user_id,
-        status: status
+        status,
+        user_type
       };
 
       let addOffer = await couponModel.addOffer(offerObj);
@@ -199,7 +201,9 @@ const couponController = {
   },
   offerList: async (req, res, next) => {
     try {
-      let offerList = await couponModel.offerList();
+      const {user_type} = req.query;
+
+      let offerList = await couponModel.offerList(user_type);
       res
         .status(200)
         .json({

@@ -187,22 +187,23 @@ UsersRoutes.get(
   UsersController.vendor_profile
 );
 UsersRoutes.post(
-  '/buyer-coupon-check',
+  '/coupon-check',
   passportSignIn,
-  acl([2, 4]),
-  validateBody(schemas.buyer_coupon_check),
-  validateDbBody.buyer_subscription_and_coupon_id_exists,
-  UsersController.buyerSubscriptionDetails
+  acl([2, 3, 4]),
+  validateBody(schemas.coupon_check),
+  validateDbBody.subscription_and_coupon_id_exists,
+  UsersController.subscriptionDetails
 );
 UsersRoutes.post(
-  '/buyer-subscription-payment',
+  '/subscription-payment',
   passportSignIn,
-  acl([2, 4]),
-  validateBody(schemas.buyer_subscription_payment),
-  validateDbBody.buyer_subscription_id_exists,
-  UsersController.buyerSubscriptionPayment
+  acl([2, 3, 4]),
+  validateBody(schemas.subscription_payment),
+  validateDbBody.subscription_and_coupon_id_exists,
+  UsersController.subscriptionPayment
 );
 UsersRoutes.post('/razorpay-webhook', UsersController.razorpay_webhook);
+UsersRoutes.post('/test-razorpay-webhook', UsersController.test_razorpay_webhook);
 UsersRoutes.post(
   '/create-vendor-review',
   passportSignIn,

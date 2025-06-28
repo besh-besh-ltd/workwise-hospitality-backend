@@ -163,7 +163,8 @@ const schemas = {
     logo: Joi.string().optional().allow(null).allow(''),
     ptr_track: Joi.string().optional().allow(null).allow(''),
     certifications: Joi.string().optional().allow(null).allow(''),
-    brochure: Joi.string().optional().allow(null).allow('')
+    brochure: Joi.string().optional().allow(null).allow(''),
+    subscription: Joi.string().optional().allow(null).allow('')
   }),
   id: Joi.object().keys({
     id: Joi.string()
