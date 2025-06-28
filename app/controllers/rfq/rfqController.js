@@ -3597,6 +3597,41 @@ const rfqController = {
         .end();
     }
   },
+  getVendorsByRfqProduct: async (req, res) => {
+    let {rfq_product_id} = req.query;
+    
+    try {
+      if (!rfq_product_id) {
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'rfq_product_id is required'
+          })
+          .end();
+      }
+
+      const vendorsList = await rfqModel.getVendorsByRfqProduct(rfq_product_id);
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: vendorsList
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value,
+          error: error
+        })
+        .end();
+    }
+  },
   createQuote: async (req, res, next) => {
     let {
       rfq_id,
