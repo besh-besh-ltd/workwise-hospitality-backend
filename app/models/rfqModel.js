@@ -2367,8 +2367,8 @@ LIMIT 1;`;
                             'timestamp', TQ_inner.timestamp,
                             'document_files', (
                                 SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
-                                FROM tbl_quotes_files TF
-                                WHERE TF.quote_id = TQ.id
+                                FROM tbl_quote_item_files TF
+                                WHERE TF.quote_item_id = TQI.id
                             ),
                             'rfq_details', (
                                 SELECT json_agg(json_build_object('title', TPS.title, 'value', TPS.value))
