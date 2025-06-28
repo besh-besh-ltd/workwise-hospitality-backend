@@ -122,6 +122,13 @@ RfqRoutes.post(
   rfqController.getVendorsForProduct
 )
 
+RfqRoutes.get(
+  '/get-vendors-by-rfq-product',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  rfqController.getVendorsByRfqProduct
+)
+
 RfqRoutes.post(
   '/quote/create',
   noLogin.customer_auth,
