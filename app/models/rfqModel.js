@@ -2198,6 +2198,33 @@ LIMIT 1;`;
       throw error;
     }
   },
+  getVendorsByRfqProduct: async (rfq_product_id) => {
+    try {
+      let q = `
+        SELECT 
+          U.id,
+          U.name,
+          U.email,
+          U.mobile,
+          U.address,
+          C.company_name,
+          COALESCE(RPV.is_rfq_viewed, 0) AS is_rfq_viewed
+        FROM tbl_rfq_products RP
+        JOIN tbl_rfq_product_vendors RPV ON RP.rfq_id = RPV.rfq_id 
+          AND RP.product_variant_id = RPV.product_variant_id 
+          AND RP.variant = RPV.variant
+        JOIN tbl_users U ON RPV.user_id = U.id
+        JOIN tbl_company C ON U.company_id = C.id
+        WHERE RP.id = $1
+          AND U.status = 1
+        ORDER BY C.company_name
+      `;
+
+      return await db.any(q, [rfq_product_id]);
+    } catch (error) {
+      throw error;
+    }
+  },
   checkIfExists: async (table_name, parameter, db_con = db) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
     return new Promise(function (resolve, reject) {
