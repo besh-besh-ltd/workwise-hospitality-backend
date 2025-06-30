@@ -338,6 +338,44 @@ const getQUOTES = async ({ id }, user_id) => {
   }
 };
 
+const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret_reason) => {
+  try {
+    const { name, email } = buyer;
+    const { name: vendor_name } = vendor;
+
+    // Validate email addresses
+    const allEmails = [email];
+    if (!validateEmailAddresses(allEmails)) {
+      throw new Error('Invalid email address format');
+    }
+
+    const headerContent = `<h2> Dear ${name},</h2>`;
+    const containerContent = `<div>
+      <p style="font-size: 15px; padding-bottom: 3px;">
+      Vendor <strong>${vendor_name}</strong> has regretted the quote for RFQ ${rfqNumber} </p>
+
+      <p style="font-size: 15px; padding-bottom: 3px;">Reason: ${regret_reason}</p>
+      
+      <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
+        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+       Click here to view
+      </a>      
+    </div>`;
+
+    const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      to: email,
+      subject: `Work Wise | RFQ Regret Notification`,
+      html: dynamicHTML
+    };
+
+    await sendMailWithRetry(mailRecipients);
+  } catch (error) {
+    throw error;
+  }
+};
 
 /**
  * 
@@ -3924,42 +3962,59 @@ const rfqController = {
   
               if(is_regret){
                 let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data, t);
-                const created_quote_id = quote_rsp[0].id;
-  
-                // adding the quote_id
-                quote_items_data.map((item)=> item.quote_id=created_quote_id);
-  
-                // console.log("mukul 1959")
-  
-                const quote_items_keys = [
-                  'rfq_id',
-                  'rfq_no',
-                  'quote_id',
-                  'product_variant_id',
-                  'product_name',
-                  'unit_price',
-                  'package_price',
-                  'tax',
-                  'freight_price',
-                  'total_price',
-                  'comment',
-                  'delivery_period',
-                  'quantity',
-                  'variant'
-                ];
-                await rfqModel.insertArray(
-                  quote_items_data,
-                  quote_items_keys,
-                  'tbl_quote_items',
-                  t
-                );
-                return res
+                const created_quote_id = quote_rsp?.[0]?.id;
+
+                if(created_quote_id) {
+                  const buyer = await userModel.getUserById(rfqDetails[0].created_by);
+                  
+                  // adding the quote_id
+                  quote_items_data.map((item)=> item.quote_id=created_quote_id);
+                  
+                  const quote_items_keys = [
+                    'rfq_id',
+                    'rfq_no',
+                    'quote_id',
+                    'product_variant_id',
+                    'product_name',
+                    'unit_price',
+                    'package_price',
+                    'tax',
+                    'freight_price',
+                    'total_price',
+                    'comment',
+                    'delivery_period',
+                    'quantity',
+                    'variant'
+                  ];
+                  await rfqModel.insertArray(
+                    quote_items_data,
+                    quote_items_keys,
+                    'tbl_quote_items',
+                    t
+                  );
+
+                  await sendMailToBuyerForRegret(buyer[0], rfqDetails[0].rfq_no, req.user, rfq_id, regret_reason);
+
+                  return res
                   .status(200)
                   .json({
                     status: 3,
                     message: 'Your quote is regretted.',
                     regret_reason: regret_reason,
                     data: quote_rsp
+                  })
+                  .end();
+                }
+  
+
+                return res
+                  .status(400)
+                  .json({
+                    status: 3,
+                    message: 'Something went wrong!',
+                    regret_reason: regret_reason,
+                    data: null,
+                    error: 'Entry in table quote didn\'t exexuted as expected!'
                   })
                   .end();
               }
@@ -4403,6 +4458,11 @@ const rfqController = {
       const unmatchedVendors = (
         await Promise.all(
           vendors.map(async (vendor) => {
+            let q = `rfq_id = ${rfq_id} AND created_by = ${vendor.user_id} AND is_regret = 1`;
+            const isRegret = await rfqModel.checkIfExists('tbl_quotes', q)
+
+            if(isRegret && isRegret.length > 0) return null;
+
             const vendorProducts = await rfqModel.getVendorProductsCount(rfq_id, vendor.user_id);
             const vendorProductsQuoted = await rfqModel.getVendorProductsQuoted(rfq_id, vendor.user_id);
       
