@@ -1883,7 +1883,7 @@ LIMIT 1;`;
         FROM tbl_product_variant pvt
         JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
                 JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
-        LEFT JOIN tbl_company tc ON tc.user_id = tu.id AND tc.is_private = 0
+        LEFT JOIN tbl_company tc ON tc.id = tu.company_id AND tc.is_private = 0
         ${approved_by_id != '' ? `
           JOIN tbl_vendorapprove_product_mapping vum 
             ON vum.variant_vendor_mapping_id = pvm.id
@@ -1918,16 +1918,12 @@ LIMIT 1;`;
     let dataQuery = `
     WITH vendor_data AS (
       SELECT DISTINCT tu.id, tu.name as vendor_name, COALESCE(tc.company_name, tu.organization_name, tu.name) as company_name,
-      tu.address, tc.profile as about, tc.website, tc.company_name as original_company_name, lc.city_name, ls.state_name,
-      CASE
-          WHEN tu.new_profile_image IS NULL THEN
-          NULL
-          ELSE tu.new_profile_image
-      END AS image_url
+      tu.address, tc.profile as about, tc.website, tc.company_name as original_company_name, lc.city_name, ls.state_name
+      
       FROM tbl_product_variant pvt
       JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
         JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
-      LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
       LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
       LEFT JOIN tbl_location_states ls ON tu.state = ls.id
       ${approved_by_id != '' ? `
@@ -2018,7 +2014,7 @@ LIMIT 1;`;
                     ON trpv.product_variant_id = qi.product_variant_id 
                     AND trpv.rfq_id = qi.rfq_id 
                     AND qi.quote_id = tq.id
-                    AND qi.unit_price != 0
+                    AND (qi.unit_price != 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
                   WHERE
                     trpv.rfq_id = rfq.id
                   GROUP BY
@@ -2770,7 +2766,7 @@ LIMIT 1;`;
         WHERE
           qi.rfq_id = $1
           AND q.created_by = $2
-          AND qi.unit_price != 0
+          AND (qi.unit_price != 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
         GROUP BY
           qi.product_variant_id, p.name, pv.name, qi.unit_price;
     `;

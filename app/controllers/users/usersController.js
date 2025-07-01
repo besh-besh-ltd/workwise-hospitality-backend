@@ -322,6 +322,11 @@ const UsersController = {
       website: reqData?.website?.trim(),
       gstin: reqData?.gstin?.trim(),
       established_year: reqData?.established_year,
+      nature_of_business: reqData?.nature_of_business,
+      turnover: reqData?.turnover,
+      no_of_employess: reqData?.no_of_employess,
+      import_export_code: reqData?.import_export_code,
+      cin: reqData?.cin,
     };
 
     //  this data stpred in tbl_user but belongs to company, we are storing it here because one comapny may have mulriple location and tehy always has one spoc for each location, ( if this is not work we move this to the tbl_ocmpany )
