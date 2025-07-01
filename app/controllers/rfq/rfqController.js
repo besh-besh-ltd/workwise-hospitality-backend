@@ -6214,7 +6214,7 @@ const rfqController = {
     }
   },
 
-  processRfqDraftSheetWise: async (processedUrl, user, rfqId = null, sheetId = null, availableSheets) => {
+  processRfqDraftSheetWise: async (processedUrl, user, rfqId = null, sheetId = null, availableSheets, customInstructions = '') => {
     try {
       
       if (rfqId && !isNaN(parseInt(rfqId)) && sheetId && !isNaN(parseInt(sheetId))) {
@@ -6252,6 +6252,7 @@ const rfqController = {
       const products = [];
       const sheetNameList = new Set();
       const globalVariantCount = {};
+      const notFoundProducts = []; // Track products not found
 
       const allVariantsCount = await rfqModel.getVariantsCountForRFQ(rfqId);
       if(allVariantsCount && allVariantsCount.length > 0) {
@@ -6280,10 +6281,20 @@ const rfqController = {
        }
 
         const cleanId = item?.variant_id;
+        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
   
-        if (!cleanId) {
+        if (!cleanId || item.fetched_product_name === 'Product not found') {
           validationErrors.push({
-            errors: { product: `${item.core_product_name || item.fetched_product_name} - Product not found` }
+            errors: { product: `${productName} - Product not found` }
+          });
+          notFoundProducts.push({
+            name: productName,
+            originalName: item.core_product_name || item.fetched_product_name,
+            description: item.full_product_description || '',
+            size: item.size || '',
+            quantity: item.quantity || '',
+            unit: item.unit || '',
+            sheet_name: item.sheet_name || ''
           });
           continue;
         }
@@ -6292,12 +6303,21 @@ const rfqController = {
   
         if (!validProductId) {
           validationErrors.push({
-            errors: { product: `${item.core_product_name || item.fetched_product_name} - Product not found` }
+            errors: { product: `${productName} - Product not found` }
+          });
+          notFoundProducts.push({
+            name: productName,
+            originalName: item.core_product_name || item.fetched_product_name,
+            description: item.full_product_description || '',
+            size: item.size || '',
+            quantity: item.quantity || '',
+            unit: item.unit || '',
+            sheet_name: item.sheet_name || ''
           });
           continue;
         }
   
-        const productName = item.fetched_product_name || item.core_product_name;
+        const finalProductName = item.fetched_product_name || item.core_product_name;
 
         if (!vendorCache[validProductId]) {
           const vendors = await rfqModel.genericSearchVendors(
@@ -6314,7 +6334,7 @@ const rfqController = {
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             errors: {
-              vendor: `${productName} - No Vendors Found` }
+              vendor: `${finalProductName} - No Vendors Found` }
           });
           continue;
         }
@@ -6323,7 +6343,7 @@ const rfqController = {
   
         products.push({
           product_id: validProductId,
-          name: productName || "Unnamed Product",
+          name: finalProductName || "Unnamed Product",
           variant: variantCount,
           spec: [
             { title: "Size", value: item.size || "" },
@@ -6361,6 +6381,64 @@ const rfqController = {
         availableSheets,
       };
 
+      // Send email notification for products not found
+      if (notFoundProducts.length > 0) {
+        try {
+          let emailContent = `
+            <h2>Products Not Found in WorkWise RFQ Processing</h2>
+            <p><strong>User:</strong> ${user.name} (${user.email})</p>
+            <p><strong>Organization:</strong> ${user.organization_name || 'N/A'}</p>
+            <p><strong>Total Products Not Found:</strong> ${notFoundProducts.length}</p>
+            
+            <h3>Products List:</h3>
+            <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; width: 100%;">
+              <thead>
+                <tr style="background-color: #f0f0f0;">
+                  <th>Product Name</th>
+                  <th>Description</th>
+                  <th>Size</th>
+                  <th>Quantity</th>
+                  <th>Unit</th>
+                  <th>Sheet Name</th>
+                </tr>
+              </thead>
+              <tbody>
+          `;
+          
+          notFoundProducts.forEach(product => {
+            emailContent += `
+              <tr>
+                <td>${product.name || 'N/A'}</td>
+                <td>${product.description || 'N/A'}</td>
+                <td>${product.size || 'N/A'}</td>
+                <td>${product.quantity || 'N/A'}</td>
+                <td>${product.unit || 'N/A'}</td>
+                <td>${product.sheet_name || 'N/A'}</td>
+              </tr>
+            `;
+          });
+          
+          emailContent += `
+              </tbody>
+            </table>
+            
+            <p><strong>Custom Instructions:</strong> ${customInstructions || 'None provided'}</p>
+            <p><em>This email was automatically generated by WorkWise RFQ processing system.</em></p>
+          `;
+
+          const mailOptions = {
+            from: Config.fromMail,
+            to: 'sayankaworkwise@gmail.com',
+            subject: `WorkWise RFQ: ${notFoundProducts.length} Products Not Found - ${user.organization_name || user.name}`,
+            html: emailContent
+          };
+
+          sendMail(mailOptions);
+        } catch (emailError) {
+          logError('Error sending product not found email:', emailError);
+        }
+      }
+
       return [validationErrors, finalObject];
     }
     catch (error) {
@@ -6381,7 +6459,8 @@ const rfqController = {
   magicSearchRfqCreate: async (req, res, next) => {
     try {
       let aiProcessedBoqJson = req.body.jsonFileUrl;
-      let availableSheets = req.body.availableSheets
+      let availableSheets = req.body.availableSheets;
+      let customInstructions = req.body.customInstructions || '';
       const user = req.user;
 
       if(availableSheets && availableSheets.length > 0) {
@@ -6390,7 +6469,7 @@ const rfqController = {
   
 
 
-      const [validationErrors, processedData] = await rfqController.processRfqDraftSheetWise(aiProcessedBoqJson, user, null, null, availableSheets)
+      const [validationErrors, processedData] = await rfqController.processRfqDraftSheetWise(aiProcessedBoqJson, user, null, null, availableSheets, customInstructions)
 
       const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, aiProcessedBoqJson)
       const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq)
