@@ -169,6 +169,8 @@ function processQuotCompare(data) {
 
 const saveMagicSearchInDraft = async (data, createdBy, processedUrl, rfqId, sheetId) => {
   try {
+
+   
     const nextRfqNumber = await getNextRfQNumber()
     return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy, processedUrl, rfqId, sheetId);
   } catch (error) {
@@ -6386,6 +6388,8 @@ const rfqController = {
         aiProcessedBoqJson = availableSheets[0]?.download_url ?? aiProcessedBoqJson
       }
   
+
+
       const [validationErrors, processedData] = await rfqController.processRfqDraftSheetWise(aiProcessedBoqJson, user, null, null, availableSheets)
 
       const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, aiProcessedBoqJson)
@@ -6416,7 +6420,7 @@ const rfqController = {
 
 
       if(!rfqId || isNaN(parseInt(rfqId))) {
-        console.log(`[processMagicSearchDraft] Invalid RFQ ID: ${rfqId}`);
+        
         return res.status(400).json({
           status: 0,
           success: false,
@@ -6425,7 +6429,7 @@ const rfqController = {
       }
       
       if(!sheetId || isNaN(parseInt(sheetId))) {
-        console.log(`[processMagicSearchDraft] Invalid Sheet ID: ${sheetId}`);
+        
         return res.status(400).json({
           status: 0,
           success: false,
