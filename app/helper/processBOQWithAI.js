@@ -139,8 +139,14 @@ ${pdfText}
   processBOQWithAI: async (aiProcessedBoqJson) => {
     try {
 
-       // download the file from ai server
-        const downloadResponse = await axios.get(aiProcessedBoqJson);
+
+     // download the file from ai server
+      const secureUrl = aiProcessedBoqJson.startsWith('http://')
+        ? aiProcessedBoqJson.replace('http://', 'https://')
+        : aiProcessedBoqJson;
+      
+
+      const downloadResponse = await axios.get(secureUrl);
 
       return downloadResponse?.data || [] ;
     } catch (error) {
