@@ -14,237 +14,226 @@ import { projectSchemas } from '../../validations/paramValidation/projectValidat
 const RfqRoutes = Router();
 
 RfqRoutes.post(
-'/create',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-acl([2, 8]),
-validateDbBody.project_access_check,
-validateBody(rfqSchemas.create),
-rfqController.create
+  '/create',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.project_access_check,
+  validateBody(rfqSchemas.create),
+  rfqController.create
 );
 
 RfqRoutes.post(
-'/save-draft',
-passportSignIn,
-acl([2, 8]),
-rfqController.saveDraft
+  '/save-draft',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.saveDraft
 );
 
 RfqRoutes.get(
-'/draft',
-passportSignIn,
-acl([2, 8]),
-rfqController.getRFQDraftData
+  '/draft',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.getRFQDraftData
 );
 
 RfqRoutes.post(
-'/add-product-to-draft',
-passportSignIn,
-acl([2, 8]),
-rfqController.createOrUpdateRfqDraftWithProductVendors
+  '/add-product-to-draft',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.createOrUpdateRfqDraftWithProductVendors
 );
 
 RfqRoutes.post(
-'/remove-vendor-from-draft',
-passportSignIn,
-acl([2, 8]),
-rfqController.removeVendorFromDraft
+  '/remove-vendor-from-draft',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.removeVendorFromDraft
 );
 
 RfqRoutes.post(
-'/add-product-to-rfq',
-passportSignIn,
-acl([2, 8]),
-validateDbBody.rfq_access_check,
-rfqController.addProductVendorsInEditRfq
+  '/add-product-to-rfq',
+  passportSignIn,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  rfqController.addProductVendorsInEditRfq
 );
 
 RfqRoutes.put(
-'/update',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-acl([2, 8]),
-validateDbBody.rfq_access_check,
-validateBody(rfqSchemas.update),
-rfqController.update
+  '/update',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  validateBody(rfqSchemas.update),
+  rfqController.update
 );
 
-
 RfqRoutes.post(
-'/get-details',
-noLogin.customer_auth,
-validateDbBody.rfq_access_check,
-rfqController.getRfqDetailsById
+  '/get-details',
+  noLogin.customer_auth,
+  validateDbBody.rfq_access_check,
+  rfqController.getRfqDetailsById
 );
 
 RfqRoutes.get(
-'/getRfqById/:id',
-noLogin.customer_auth,
-validateDbBody.rfq_access_check_req_body,
-rfqController.getRfqById
+  '/getRfqById/:id',
+  noLogin.customer_auth,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.getRfqById
 );
 
 RfqRoutes.post(
-'/getMyRfq',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-rfqController.getRfqByUser
+  '/getMyRfq',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  rfqController.getRfqByUser
 );
 
 RfqRoutes.post(
-'/rfq-report',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-rfqController.getRfqReport
+  '/rfq-report',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  rfqController.getRfqReport
 );
 
 // RFQ Chart Data
 // mukul 07-06-2025 ,  not in use, cross check and remove
 RfqRoutes.get(
-'/rfq-chart-data',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-rfqController.getRfqChartData
+  '/rfq-chart-data',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  rfqController.getRfqChartData
 );
 
 RfqRoutes.post(
-'/getBuyerRfq',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-validateBody(projectSchemas.get_buyer_body_validation),
-rfqController.getBuyerRfq
+  '/getBuyerRfq',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  validateBody(projectSchemas.get_buyer_body_validation),
+  rfqController.getBuyerRfq
 );
 
 RfqRoutes.get('/get-terms', rfqController.getTerms);
 
 RfqRoutes.post(
-'/get-vendors',
-passportSignIn,
-acl([2, 8]),
-validateDbBody.rfq_access_check,
-validateDbBody.user_id_profileexists,
-rfqController.getVendors
+  '/get-vendors',
+  passportSignIn,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  validateDbBody.user_id_profileexists,
+  rfqController.getVendors
 );
 
 RfqRoutes.post(
-'/get-vendors-for-product',
-passportSignIn,
-acl([2, 8]),
-validateDbBody.user_id_profileexists,
-rfqController.getVendorsForProduct
-)
+  '/get-vendors-for-product',
+  passportSignIn,
+  acl([2, 8]),
+  validateDbBody.user_id_profileexists,
+  rfqController.getVendorsForProduct
+);
 
 RfqRoutes.get(
-'/get-vendors-by-rfq-product',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-rfqController.getVendorsByRfqProduct
-)
+  '/get-vendors-by-rfq-product',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  rfqController.getVendorsByRfqProduct
+);
 
 RfqRoutes.post(
-'/quote/create',
-noLogin.customer_auth,
-validateDbBody.rfq_access_check_req_body,
-rfqController.createQuote
+  '/quote/create',
+  noLogin.customer_auth,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.createQuote
 );
 
 RfqRoutes.put(
-'/quote/update/:quoteId',
-noLogin.customer_auth,
-validateDbBody.rfq_access_check_req_body,
-rfqController.updateQuoteItems
+  '/quote/update/:quoteId',
+  noLogin.customer_auth,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.updateQuoteItems
 );
 
 RfqRoutes.get(
-'/get-quotes/:id',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-acl([2, 8, 10]),
-validateDbBody.rfq_access_check,
-rfqController.getQuotesByRfqById
+  '/get-quotes/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8, 10]),
+  validateDbBody.rfq_access_check,
+  rfqController.getQuotesByRfqById
 );
 RfqRoutes.get(
-'/download-quote-results/:id',
-passportSignIn,
-acl([2, 8, 10]),
-validateDbBody.user_id_profileexists,
-validateDbBody.rfq_access_check,
-// rfqController.downloadQuoteResults
-rfqController.downloadQuoteResultsProductWise
+  '/download-quote-results/:id',
+  passportSignIn,
+  acl([2, 8, 10]),
+  validateDbBody.user_id_profileexists,
+  validateDbBody.rfq_access_check,
+  // rfqController.downloadQuoteResults
+  rfqController.downloadQuoteResultsProductWise
 );
 RfqRoutes.get(
-'/get-lpr-lqr',
-passportSignIn,
-acl([2, 8, 10]),
-validateDbBody.user_id_profileexists,
-rfqController.getLprLqrByVariantId
-)
-RfqRoutes.get(
-'/close-rfq/:id',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-acl([2, 8]),
-validateDbBody.rfq_access_check,
-rfqController.closeRFQ
+  '/get-lpr-lqr',
+  passportSignIn,
+  acl([2, 8, 10]),
+  validateDbBody.user_id_profileexists,
+  rfqController.getLprLqrByVariantId
 );
 RfqRoutes.get(
-'/send-reminder/:id',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-acl([2, 8]),
-validateDbBody.rfq_access_check,
-rfqController.sendReminder
+  '/close-rfq/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  rfqController.closeRFQ
+);
+RfqRoutes.get(
+  '/send-reminder/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  rfqController.sendReminder
 );
 RfqRoutes.post(
-'/finalize',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-acl([2, 8]),
-validateDbBody.rfq_access_check,
-validateBody(rfqSchemas.finalize),
-rfqController.finalize
+  '/finalize',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  validateBody(rfqSchemas.finalize),
+  rfqController.finalize
+);
+
+RfqRoutes.post('/search-product', rfqController.searchProduct);
+
+RfqRoutes.post('/search-variant-products', rfqController.searchVariantProducts);
+
+RfqRoutes.post('/search-variant-vendors', rfqController.searchVariantVendors);
+
+RfqRoutes.post(
+  '/search-product-by-category',
+  rfqController.searchProductByCategory
 );
 
 RfqRoutes.post(
-'/search-product',
-rfqController.searchProduct
+  '/search-vendor',
+  noLogin.customer_auth,
+  rfqController.searchVendor
 );
-
-RfqRoutes.post(
-'/search-variant-products',
-rfqController.searchVariantProducts
-);
-
-RfqRoutes.post(
-'/search-variant-vendors',
-rfqController.searchVariantVendors
-);
-
-RfqRoutes.post(
-'/search-product-by-category',
-rfqController.searchProductByCategory
-);
-
-RfqRoutes.post(
-'/search-vendor',
-noLogin.customer_auth,
-rfqController.searchVendor
-);
-
 
 // mukul 07-06-2025 , not in use but functional
 RfqRoutes.post(
-'/product-price-stats',
-noLogin.customer_auth,
-acl([2, 8]),
-rfqController.productPriceStats
+  '/product-price-stats',
+  noLogin.customer_auth,
+  acl([2, 8]),
+  rfqController.productPriceStats
 );
 
 RfqRoutes.get(
-'/get-past-rfqs/:id',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-rfqController.getPastRFQs
+  '/get-past-rfqs/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  rfqController.getPastRFQs
 );
 
 RfqRoutes.post('/rfq-list', passportSignIn, rfqController.rfqList);
@@ -254,246 +243,265 @@ RfqRoutes.get('/save-state-cities', rfqController.saveStateCities);
 
 // to show the available units
 // mukul 07-06-2025 ,  not in use but functioanl not remove this one
-RfqRoutes.get('/units',
-// passportSignIn,
-rfqController.getUnits
-)
+RfqRoutes.get(
+  '/units',
+  // passportSignIn,
+  rfqController.getUnits
+);
 
 // to show the preview of the final data for the creation of the rfq
-RfqRoutes.post('/magic-search-rfq-preview',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-acl([2, 8]),
-validateDbBody.project_access_check,
-  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
-rfqController.magicSearchRfqCreate
-);
-
-RfqRoutes.get('/process-magic-search-draft',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-acl([2, 8]),
-validateDbBody.project_access_check,
-  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
-rfqController.processMagicSearchDraft
-);
-
-RfqRoutes.get('/draft-sheets',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-acl([2, 8]),
-validateDbBody.project_access_check,
-  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
-rfqController.getRfqDraftSheets
-);
-
-RfqRoutes.get('/draft-sheet-wise',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-acl([2, 8]),
-validateDbBody.project_access_check,
-  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
-rfqController.getDraftRfqSheetWise
-);
-
 RfqRoutes.post(
-'/send-query-message',
-noLogin.customer_auth,
-rfqSchemas.queryMessageFileUploadHandler,
-validateDbBody.rfq_access_check_req_body,
-validateBody(rfqSchemas.sendMessage),
-rfqController.sendQueryMessage
-);
-
-RfqRoutes.post(
-'/list-query-messages',
-noLogin.customer_auth,
-validateDbBody.rfq_access_check_req_body,
-rfqController.listQueryMessages
-);
-
-RfqRoutes.post(
-'/list-queries',
-noLogin.customer_auth,
-validateDbBody.rfq_access_check_req_body,
-rfqController.listQueries
+  '/magic-search-rfq-preview',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.project_access_check,
+  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely
+  rfqController.magicSearchRfqCreate
 );
 
 RfqRoutes.get(
-'/vendor-types',
-rfqController.vendorTypes
+  '/process-magic-search-draft',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.project_access_check,
+  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely
+  rfqController.processMagicSearchDraft
 );
+
+RfqRoutes.get(
+  '/draft-sheets',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.project_access_check,
+  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely
+  rfqController.getRfqDraftSheets
+);
+
+RfqRoutes.get(
+  '/draft-sheet-wise',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.project_access_check,
+  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely
+  rfqController.getDraftRfqSheetWise
+);
+
+RfqRoutes.post(
+  '/send-query-message',
+  noLogin.customer_auth,
+  rfqSchemas.queryMessageFileUploadHandler,
+  validateDbBody.rfq_access_check_req_body,
+  validateBody(rfqSchemas.sendMessage),
+  rfqController.sendQueryMessage
+);
+
+RfqRoutes.post(
+  '/list-query-messages',
+  noLogin.customer_auth,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.listQueryMessages
+);
+
+RfqRoutes.post(
+  '/list-queries',
+  noLogin.customer_auth,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.listQueries
+);
+
+RfqRoutes.get('/vendor-types', rfqController.vendorTypes);
 
 // to create the rfq using magic search rfq feature
-RfqRoutes.post('/magic-search-rfq-create',
-passportSignIn,
-validateDbBody.user_id_profileexists,
-acl([2, 8]),
-validateDbBody.project_access_check,
-validateBody(rfqSchemas.create),
-rfqController.create
-)
-
 RfqRoutes.post(
-'/boq/process-and-download',
-passportSignIn,
-acl([2, 8]),
-schema_posts.magicSearchExcelUpload,
-rfqController.processBoqAndDownload
-);
-
-RfqRoutes.post('/add-clause-using-file',
-passportSignIn,
-acl([2, 8]),
-schema_posts.clauseFileUpload,
-validateDbBody.rfq_access_check,
-validateBody(rfqSchemas.addClauseUsingFile),
-rfqController.addClauseUsingFile
-)
-
-RfqRoutes.post('/add-clause',
-passportSignIn,
-acl([2, 8]),
-validateDbBody.rfq_access_check,
-validateBody(rfqSchemas.addClause),
-rfqController.addClause
-)
-
-RfqRoutes.put('/update-clause',
-passportSignIn,
-acl([2, 8]),
-validateBody(rfqSchemas.updateClause),
-rfqController.updateClause
-)
-
-RfqRoutes.delete('/remove-clause/:id',
-passportSignIn,
-acl([2, 8]),
-validateParam(rfqSchemas.id),
-rfqController.removeClause
-)
-
-RfqRoutes.get('/get-clauses/:id',
-noLogin.customer_auth,
-validateDbBody.rfq_access_check_req_body,
-rfqController.getClauses
-)
-
-
-// vendor side
-RfqRoutes.post('/add-tech-comment',
-noLogin.customer_auth,
-validateBody(rfqSchemas.addTechComment),
-rfqController.addTechComment
-)
-
-// vendor side
-RfqRoutes.post('/get-tech-comments',
-noLogin.customer_auth,
-validateBody(rfqSchemas.getTechComments),
-rfqController.getTechComments
-)
-
-RfqRoutes.post('/get-vendor-names',
-passportSignIn,
-validateBody(rfqSchemas.getVendorNames),
-validateDbBody.rfq_access_check,
-rfqController.getVendorNames
-)
-
-// vendor side
-RfqRoutes.post('/get-vendor-responses',
-noLogin.customer_auth,
-validateBody(rfqSchemas.getVendorResponses),
-validateDbBody.rfq_access_check,
-rfqController.getVendorResponses
-)
-
-// vendor side
-RfqRoutes.post('/add-vendor-response',
-noLogin.customer_auth,
-validateBody(rfqSchemas.addVendorResponse),
-rfqController.addVendorResponse
-)
-
-RfqRoutes.post('/tech-evaluation-cleared-vendors',
-passportSignIn,
-validateDbBody.rfq_access_check,
-validateBody(rfqSchemas.addtechEvaluationClearedVendors),
-rfqController.addtechEvaluationClearedVendors
-)
-
-RfqRoutes.post('/get-tech-evaluation-rfqs',
-passportSignIn,
-rfqController.getTechEvaluationRFQDetails
-)
-
-// vendor side
-RfqRoutes.post('/get-clauses-of-product',
-noLogin.customer_auth,
-validateBody(rfqSchemas.getClausesOfProduct),
-rfqController.getClausesOfProduct
-)
-
-// vendor side
-RfqRoutes.post('/get-tech-evaluation-result',
-noLogin.customer_auth,
-validateBody(rfqSchemas.getTechEvaluationResult),
-rfqController.getTechEvaluationResult
-)
-
-//  product wise audit report
-RfqRoutes.get('/report/rfq-product-wise',
-passportSignIn,
-rfqController.rfqProductWiseReport
-)
-
-//  product wise audit report
-RfqRoutes.get('/report/rfq-project-wise',
-passportSignIn,
-rfqController.projectWiseReport
-)
-
-
-//  product wise audit report
-RfqRoutes.post('/report/send-on-email',
-passportSignIn,
-schema_posts.reportZipFileUpload,
-rfqController.sendReportOnEmail
-)
-
-RfqRoutes.get(
-'/rfq-draft-data',
-passportSignIn,
-acl([2, 8]),
-rfqController.getRFQDraftData
+  '/magic-search-rfq-create',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.project_access_check,
+  validateBody(rfqSchemas.create),
+  rfqController.create
 );
 
 RfqRoutes.post(
-'/get-draft-rfqs',
-passportSignIn,
-acl([2, 8]),
-rfqController.getDraftRFQs
+  '/boq/process-and-download',
+  passportSignIn,
+  acl([2, 8]),
+  schema_posts.magicSearchExcelUpload,
+  rfqController.processBoqAndDownload
+);
+
+RfqRoutes.post(
+  '/add-clause-using-file',
+  passportSignIn,
+  acl([2, 8]),
+  schema_posts.clauseFileUpload,
+  validateDbBody.rfq_access_check,
+  validateBody(rfqSchemas.addClauseUsingFile),
+  rfqController.addClauseUsingFile
+);
+
+RfqRoutes.post(
+  '/add-clause',
+  passportSignIn,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  validateBody(rfqSchemas.addClause),
+  rfqController.addClause
+);
+
+RfqRoutes.put(
+  '/update-clause',
+  passportSignIn,
+  acl([2, 8]),
+  validateBody(rfqSchemas.updateClause),
+  rfqController.updateClause
+);
+
+RfqRoutes.delete(
+  '/remove-clause/:id',
+  passportSignIn,
+  acl([2, 8]),
+  validateParam(rfqSchemas.id),
+  rfqController.removeClause
 );
 
 RfqRoutes.get(
-'/get-draft-by-id/:id',
-passportSignIn,
-acl([2, 8]),
-rfqController.getDraftById
+  '/get-clauses/:id',
+  noLogin.customer_auth,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.getClauses
 );
 
-RfqRoutes.post('/get-draft-vendors/:draftId',
-passportSignIn,
-acl([2, 8]),
-rfqController.getDraftProductVendors
-)
+// vendor side
+RfqRoutes.post(
+  '/add-tech-comment',
+  noLogin.customer_auth,
+  validateBody(rfqSchemas.addTechComment),
+  rfqController.addTechComment
+);
+
+// vendor side
+RfqRoutes.post(
+  '/get-tech-comments',
+  noLogin.customer_auth,
+  validateBody(rfqSchemas.getTechComments),
+  rfqController.getTechComments
+);
 
 RfqRoutes.post(
-'/draft-product-vendors',
-passportSignIn,
-acl([2, 8]),
-rfqController.createOrUpdateRfqDraftWithProductVendors
+  '/get-vendor-names',
+  passportSignIn,
+  validateBody(rfqSchemas.getVendorNames),
+  validateDbBody.rfq_access_check,
+  rfqController.getVendorNames
+);
+
+// vendor side
+RfqRoutes.post(
+  '/get-vendor-responses',
+  noLogin.customer_auth,
+  validateBody(rfqSchemas.getVendorResponses),
+  validateDbBody.rfq_access_check,
+  rfqController.getVendorResponses
+);
+
+// vendor side
+RfqRoutes.post(
+  '/add-vendor-response',
+  noLogin.customer_auth,
+  validateBody(rfqSchemas.addVendorResponse),
+  rfqController.addVendorResponse
+);
+
+RfqRoutes.post(
+  '/tech-evaluation-cleared-vendors',
+  passportSignIn,
+  validateDbBody.rfq_access_check,
+  validateBody(rfqSchemas.addtechEvaluationClearedVendors),
+  rfqController.addtechEvaluationClearedVendors
+);
+
+RfqRoutes.post(
+  '/get-tech-evaluation-rfqs',
+  passportSignIn,
+  rfqController.getTechEvaluationRFQDetails
+);
+
+// vendor side
+RfqRoutes.post(
+  '/get-clauses-of-product',
+  noLogin.customer_auth,
+  validateBody(rfqSchemas.getClausesOfProduct),
+  rfqController.getClausesOfProduct
+);
+
+// vendor side
+RfqRoutes.post(
+  '/get-tech-evaluation-result',
+  noLogin.customer_auth,
+  validateBody(rfqSchemas.getTechEvaluationResult),
+  rfqController.getTechEvaluationResult
+);
+
+//  product wise audit report
+RfqRoutes.get(
+  '/report/rfq-product-wise',
+  passportSignIn,
+  rfqController.rfqProductWiseReport
+);
+
+//  product wise audit report
+RfqRoutes.get(
+  '/report/rfq-project-wise',
+  passportSignIn,
+  rfqController.projectWiseReport
+);
+
+//  product wise audit report
+RfqRoutes.post(
+  '/report/send-on-email',
+  passportSignIn,
+  schema_posts.reportZipFileUpload,
+  rfqController.sendReportOnEmail
+);
+
+RfqRoutes.get(
+  '/rfq-draft-data',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.getRFQDraftData
+);
+
+RfqRoutes.post(
+  '/get-draft-rfqs',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.getDraftRFQs
+);
+
+RfqRoutes.get(
+  '/get-draft-by-id/:id',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.getDraftById
+);
+
+RfqRoutes.post(
+  '/get-draft-vendors/:draftId',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.getDraftProductVendors
+);
+
+RfqRoutes.post(
+  '/draft-product-vendors',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.createOrUpdateRfqDraftWithProductVendors
 );
 
 export default RfqRoutes;
