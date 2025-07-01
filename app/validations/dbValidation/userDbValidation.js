@@ -806,7 +806,7 @@ const validateDbBody = {
 
   rfq_access_check: async (req, res, next) => {
     try {
-      const rfq_id  = req.params.id;
+      const rfq_id  = req.body.rfq_id || req.body.rfqId || req.query.rfq_id || req.query.rfqId || req.params.rfq_id || req.params.rfqId || req.params.id || req.body.id || req.query.id;
       const user_id = req.user.id;
       const user_type = req.user.user_type;
 
@@ -837,7 +837,7 @@ const validateDbBody = {
   rfq_access_check_req_body: async (req, res, next) => {
   
     try {
-      const { rfq_id } = req.body;
+      const rfq_id = req.body.rfq_id || req.body.rfqId || req.query.rfq_id || req.query.rfqId || req.params.rfq_id || req.params.rfqId || req.params.id || req.body.id
 
       // if vendor is not login then we use token from query.
       // if req.is_verified is true then there must be token in the query
