@@ -170,7 +170,7 @@ function processQuotCompare(data) {
 const saveMagicSearchInDraft = async (data, createdBy, processedUrl, rfqId, sheetId) => {
   try {
 
-    console.log(" saveMagicSearchInDraft = processedData, req.user.id, aiProcessedBoqJson  173 =>>>>>>>>>>   ",  data, createdBy, processedUrl, rfqId, sheetId)
+   
     const nextRfqNumber = await getNextRfQNumber()
     return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy, processedUrl, rfqId, sheetId);
   } catch (error) {
@@ -6384,19 +6384,13 @@ const rfqController = {
       let availableSheets = req.body.availableSheets
       const user = req.user;
 
-      console.log( "7270 aiProcessedBoqJson   ->>>>>>>>>>    ",  aiProcessedBoqJson)
-
       if(availableSheets && availableSheets.length > 0) {
         aiProcessedBoqJson = availableSheets[0]?.download_url ?? aiProcessedBoqJson
       }
   
-      console.log( "6276 aiProcessedBoqJson  ->>>>>>>>>>    ",  aiProcessedBoqJson)
-      console.log( "6276 availableSheets  ->>>>>>>>>>    ",  availableSheets)
 
 
       const [validationErrors, processedData] = await rfqController.processRfqDraftSheetWise(aiProcessedBoqJson, user, null, null, availableSheets)
-
-          console.log(" 6284 processedData, req.user.id, aiProcessedBoqJson  =>>>>>>>>>>   ",  processedData, req.user.id, aiProcessedBoqJson)
 
       const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, aiProcessedBoqJson)
       const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq)
@@ -6426,7 +6420,7 @@ const rfqController = {
 
 
       if(!rfqId || isNaN(parseInt(rfqId))) {
-        console.log(`[processMagicSearchDraft] Invalid RFQ ID: ${rfqId}`);
+        
         return res.status(400).json({
           status: 0,
           success: false,
@@ -6435,7 +6429,7 @@ const rfqController = {
       }
       
       if(!sheetId || isNaN(parseInt(sheetId))) {
-        console.log(`[processMagicSearchDraft] Invalid Sheet ID: ${sheetId}`);
+        
         return res.status(400).json({
           status: 0,
           success: false,

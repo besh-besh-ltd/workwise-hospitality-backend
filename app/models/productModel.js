@@ -4261,7 +4261,6 @@ WHERE m.id = $1;
           OFFSET $${paramIndex + 1}
         `;
 
-       console.log("Data Query:", dataQuery);
         
         // Add limit and offset parameters for data query
         const dataParams = [...params, limit, offset];
@@ -4285,7 +4284,6 @@ WHERE m.id = $1;
         });
 
       } catch (error) {
-        console.error("Error in searchProductVariantsPaginated:", error);
         // Return empty result on error to avoid breaking frontend
         resolve({
           data: [],
