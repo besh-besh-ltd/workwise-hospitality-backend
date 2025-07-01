@@ -1313,7 +1313,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           AND EXISTS (
             SELECT 1
             FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
-            WHERE TRIM(nb) IN (${vendor_type.map(type => `'${type}'`).join(",")})
+            WHERE TRIM(nb) IN (${vendor_type.map(type => `'${type.toLowerCase()}'`).join(",")})
           )
         `;
       } else if (typeof vendor_type == 'string' || typeof vendor_type == 'number') {
@@ -1919,7 +1919,7 @@ LIMIT 1;`;
     WITH vendor_data AS (
       SELECT DISTINCT tu.id, tu.name as vendor_name, COALESCE(tc.company_name, tu.organization_name, tu.name) as company_name,
       tu.address, tc.profile as about, tc.website, tc.company_name as original_company_name, lc.city_name, ls.state_name
-      
+
       FROM tbl_product_variant pvt
       JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
         JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
