@@ -417,7 +417,6 @@ RfqRoutes.post('/add-vendor-response',
 
 RfqRoutes.post('/tech-evaluation-cleared-vendors',
   passportSignIn,
-  validateDbBody.rfq_access_check,
   validateBody(rfqSchemas.addtechEvaluationClearedVendors),
   rfqController.addtechEvaluationClearedVendors
 )
