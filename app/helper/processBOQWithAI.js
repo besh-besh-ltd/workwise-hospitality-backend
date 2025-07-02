@@ -141,7 +141,7 @@ ${pdfText}
 
 
      // download the file from ai server
-      const secureUrl = aiProcessedBoqJson.startsWith('http://')
+      const secureUrl = aiProcessedBoqJson.startsWith('http://test')
         ? aiProcessedBoqJson.replace('http://', 'https://')
         : aiProcessedBoqJson;
       
