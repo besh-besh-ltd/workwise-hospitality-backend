@@ -4448,7 +4448,28 @@ const rfqController = {
       }
       }
 
-      const rfqBasicDetails = await rfqModel.getRfqDetailsById(rfq_id)
+      const rfqBasicDetails = await rfqModel.getRfqDetailsById(rfq_id);
+
+      if(!rfqBasicDetails) {
+        return res
+            .status(400)
+            .json({
+              status: 1,
+              message: "RFQ not found, or is no longer available!"
+            })
+            .end(); 
+      }
+
+      if(rfqBasicDetails.status == '2') {
+        return res
+            .status(400)
+            .json({
+              status: 1,
+              message: "Cannot send reminder for a closed RFQ!"
+            })
+            .end(); 
+      }
+
       let vendors = await rfqModel.gerRFQVendors(rfq_id);
       const quote_vendor = await rfqModel.quoteVendor(rfq_id);
 
