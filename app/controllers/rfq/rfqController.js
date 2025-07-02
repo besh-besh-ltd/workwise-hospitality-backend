@@ -4383,7 +4383,7 @@ const rfqController = {
           const spocList = vendor.spocs;
         
             let mailRecipients ={
-              from: `${organization_name} ${Config.masterEmail}`,
+              from: `${organization_name ?? name} ${Config.masterEmail}`,
               subject: `RFQ Marked as Closed for #${rfQItem[0]?.rfq_no}`,
               html: dynamicHTMLVendor,
             }
