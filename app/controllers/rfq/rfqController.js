@@ -2608,6 +2608,104 @@ const rfqController = {
       });
     }
   },  
+deleteDraft: async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user_id = req.user.id;
+
+    
+
+    const rfqDraft = await rfqModel.checkIfExists(
+      'tbl_rfq',
+      `id = ${id} AND is_published = 0 AND created_by = ${user_id}`
+    );
+   
+    if (!rfqDraft || rfqDraft.length === 0) {
+      return res.status(404).json({
+        status: 2,
+        message: "Draft RFQ not found or does not belong to the user!",
+      });
+    }
+    db.tx(async (t)=>{
+      // Delete main RFQ
+    await rfqModel.delete('tbl_rfq', { id });
+
+    // Delete RFQ-related records
+    const rfqProductIdList = await rfqModel.deleteWithReturnIds(
+      'tbl_rfq_products',
+      { rfq_id: id },
+      t
+    );
+
+    await rfqModel.delete('tbl_rfq_product_vendors', { rfq_id: id });
+    await rfqModel.delete('tbl_rfq_products_specs', { rfq_id: id });
+    await rfqModel.delete('tbl_rfq_product_files', { rfq_product_id: id });
+
+    await rfqModel.delete('tbl_rfq_draft_sheets', {rfq_id:id})
+
+    // Delete tech evaluations and associated data
+    const techEvaluationCondition = { rfq_id: id };
+    const techEvaluationDeletedRecordsIds = await rfqModel.deleteWithReturnIds(
+      'tbl_rfq_product_tech_evaluation',
+      techEvaluationCondition,
+      t
+    );
+
+    let techEvalClauseFilesId = [];
+
+    if (Array.isArray(techEvaluationDeletedRecordsIds) && techEvaluationDeletedRecordsIds.length > 0) {
+      for (const evaluationClauseId of techEvaluationDeletedRecordsIds) {
+        const clauseCondition = {
+          tbl_rfq_product_tech_evaluation_id: evaluationClauseId,
+        };
+
+        const clauseFiles = await rfqModel.deleteWithReturnIds(
+          'tbl_rfq_product_tech_evaluation_clauses',
+          clauseCondition,
+          t
+        );
+
+        if (Array.isArray(clauseFiles) && clauseFiles.length > 0) {
+          techEvalClauseFilesId.push(...clauseFiles);
+        }
+      }
+    }
+
+    // Delete clause files
+    if (techEvalClauseFilesId.length > 0) {
+      for (const techEvalClauseFileId of techEvalClauseFilesId) {
+        const clauseFileCondition = {
+          tbl_rfq_product_tech_evaluation_clauses_id: techEvalClauseFileId,
+        };
+
+        await rfqModel.delete(
+          'tbl_rfq_product_tech_evaluation_clauses_files',
+          clauseFileCondition,
+          t
+        );
+      }
+    }
+
+    // Delete terms and conditions
+    await rfqModel.delete('tbl_rfq_terms_map', { rfq_id: id },t);
+
+    return res.status(200).json({
+      status: 1,
+      message: "RFQ draft and all associated records deleted successfully",
+    });
+    })
+    
+  } catch (error) {
+    console.error("Error deleting RFQ draft:", error);
+    logError("Error deleting RFQ draft:", error);
+    return res.status(500).json({
+      status: 3,
+      message: "An error occurred while deleting the RFQ draft",
+    });
+  }
+},
+
+
 
   getRFQDraftData: async (req, res) => {
     try {

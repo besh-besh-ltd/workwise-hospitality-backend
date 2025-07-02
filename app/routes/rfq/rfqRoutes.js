@@ -34,6 +34,13 @@ RfqRoutes.get(
   passportSignIn,
   rfqController.getRFQDraftData
 );
+RfqRoutes.delete(
+  '/delete-draft/:id', 
+  passportSignIn,
+  validateParam(rfqSchemas.id),
+  rfqController.deleteDraft
+);  
+
 
 RfqRoutes.post(
   '/add-product-to-draft',
