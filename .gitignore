@@ -55,6 +55,9 @@ Thumbs.db
 .env
 
 
+newrelic.cjs
+
+
 #config
 app.config.js
 

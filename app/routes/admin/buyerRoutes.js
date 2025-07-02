@@ -111,4 +111,12 @@ buyerRoutes.post(
   usersController.company_registration
 );
 
+buyerRoutes.post(
+  '/buyer-vendor-mapping',
+  passportSignIn,
+  acl([1, 5]), // Admin and Subadmin only
+  schema_posts.buyerVendorMappingFileHandler,
+  buyerController.bulkBuyerVendorMapping
+);
+
 export default buyerRoutes;

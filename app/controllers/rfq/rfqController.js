@@ -170,7 +170,7 @@ function processQuotCompare(data) {
 const saveMagicSearchInDraft = async (data, createdBy, processedUrl, rfqId, sheetId) => {
   try {
 
-    console.log(" saveMagicSearchInDraft = processedData, req.user.id, aiProcessedBoqJson  173 =>>>>>>>>>>   ",  data, createdBy, processedUrl, rfqId, sheetId)
+   
     const nextRfqNumber = await getNextRfQNumber()
     return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy, processedUrl, rfqId, sheetId);
   } catch (error) {
@@ -340,6 +340,44 @@ const getQUOTES = async ({ id }, user_id) => {
   }
 };
 
+const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret_reason) => {
+  try {
+    const { name, email } = buyer;
+    const { name: vendor_name } = vendor;
+
+    // Validate email addresses
+    const allEmails = [email];
+    if (!validateEmailAddresses(allEmails)) {
+      throw new Error('Invalid email address format');
+    }
+
+    const headerContent = `<h2> Dear ${name},</h2>`;
+    const containerContent = `<div>
+      <p style="font-size: 15px; padding-bottom: 3px;">
+      Vendor <strong>${vendor_name}</strong> has regretted the quote for RFQ ${rfqNumber} </p>
+
+      <p style="font-size: 15px; padding-bottom: 3px;">Reason: ${regret_reason}</p>
+      
+      <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
+        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+       Click here to view
+      </a>      
+    </div>`;
+
+    const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      to: email,
+      subject: `Work Wise | RFQ Regret Notification`,
+      html: dynamicHTML
+    };
+
+    await sendMailWithRetry(mailRecipients);
+  } catch (error) {
+    throw error;
+  }
+};
 
 /**
  * 
@@ -3599,6 +3637,41 @@ const rfqController = {
         .end();
     }
   },
+  getVendorsByRfqProduct: async (req, res) => {
+    let {rfq_product_id} = req.query;
+    
+    try {
+      if (!rfq_product_id) {
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'rfq_product_id is required'
+          })
+          .end();
+      }
+
+      const vendorsList = await rfqModel.getVendorsByRfqProduct(rfq_product_id);
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: vendorsList
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value,
+          error: error
+        })
+        .end();
+    }
+  },
   createQuote: async (req, res, next) => {
     let {
       rfq_id,
@@ -3891,42 +3964,59 @@ const rfqController = {
   
               if(is_regret){
                 let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data, t);
-                const created_quote_id = quote_rsp[0].id;
-  
-                // adding the quote_id
-                quote_items_data.map((item)=> item.quote_id=created_quote_id);
-  
-                // console.log("mukul 1959")
-  
-                const quote_items_keys = [
-                  'rfq_id',
-                  'rfq_no',
-                  'quote_id',
-                  'product_variant_id',
-                  'product_name',
-                  'unit_price',
-                  'package_price',
-                  'tax',
-                  'freight_price',
-                  'total_price',
-                  'comment',
-                  'delivery_period',
-                  'quantity',
-                  'variant'
-                ];
-                await rfqModel.insertArray(
-                  quote_items_data,
-                  quote_items_keys,
-                  'tbl_quote_items',
-                  t
-                );
-                return res
+                const created_quote_id = quote_rsp?.[0]?.id;
+
+                if(created_quote_id) {
+                  const buyer = await userModel.getUserById(rfqDetails[0].created_by);
+                  
+                  // adding the quote_id
+                  quote_items_data.map((item)=> item.quote_id=created_quote_id);
+                  
+                  const quote_items_keys = [
+                    'rfq_id',
+                    'rfq_no',
+                    'quote_id',
+                    'product_variant_id',
+                    'product_name',
+                    'unit_price',
+                    'package_price',
+                    'tax',
+                    'freight_price',
+                    'total_price',
+                    'comment',
+                    'delivery_period',
+                    'quantity',
+                    'variant'
+                  ];
+                  await rfqModel.insertArray(
+                    quote_items_data,
+                    quote_items_keys,
+                    'tbl_quote_items',
+                    t
+                  );
+
+                  await sendMailToBuyerForRegret(buyer[0], rfqDetails[0].rfq_no, req.user, rfq_id, regret_reason);
+
+                  return res
                   .status(200)
                   .json({
                     status: 3,
                     message: 'Your quote is regretted.',
                     regret_reason: regret_reason,
                     data: quote_rsp
+                  })
+                  .end();
+                }
+  
+
+                return res
+                  .status(400)
+                  .json({
+                    status: 3,
+                    message: 'Something went wrong!',
+                    regret_reason: regret_reason,
+                    data: null,
+                    error: 'Entry in table quote didn\'t exexuted as expected!'
                   })
                   .end();
               }
@@ -4358,7 +4448,28 @@ const rfqController = {
       }
       }
 
-      const rfqBasicDetails = await rfqModel.getRfqDetailsById(rfq_id)
+      const rfqBasicDetails = await rfqModel.getRfqDetailsById(rfq_id);
+
+      if(!rfqBasicDetails) {
+        return res
+            .status(400)
+            .json({
+              status: 1,
+              message: "RFQ not found, or is no longer available!"
+            })
+            .end(); 
+      }
+
+      if(rfqBasicDetails.status == '2') {
+        return res
+            .status(400)
+            .json({
+              status: 1,
+              message: "Cannot send reminder for a closed RFQ!"
+            })
+            .end(); 
+      }
+
       let vendors = await rfqModel.gerRFQVendors(rfq_id);
       const quote_vendor = await rfqModel.quoteVendor(rfq_id);
 
@@ -4370,6 +4481,11 @@ const rfqController = {
       const unmatchedVendors = (
         await Promise.all(
           vendors.map(async (vendor) => {
+            let q = `rfq_id = ${rfq_id} AND created_by = ${vendor.user_id} AND is_regret = 1`;
+            const isRegret = await rfqModel.checkIfExists('tbl_quotes', q)
+
+            if(isRegret && isRegret.length > 0) return null;
+
             const vendorProducts = await rfqModel.getVendorProductsCount(rfq_id, vendor.user_id);
             const vendorProductsQuoted = await rfqModel.getVendorProductsQuoted(rfq_id, vendor.user_id);
       
@@ -6289,19 +6405,13 @@ const rfqController = {
       let availableSheets = req.body.availableSheets
       const user = req.user;
 
-      console.log( "7270 aiProcessedBoqJson   ->>>>>>>>>>    ",  aiProcessedBoqJson)
-
       if(availableSheets && availableSheets.length > 0) {
         aiProcessedBoqJson = availableSheets[0]?.download_url ?? aiProcessedBoqJson
       }
   
-      console.log( "6276 aiProcessedBoqJson  ->>>>>>>>>>    ",  aiProcessedBoqJson)
-      console.log( "6276 availableSheets  ->>>>>>>>>>    ",  availableSheets)
 
 
       const [validationErrors, processedData] = await rfqController.processRfqDraftSheetWise(aiProcessedBoqJson, user, null, null, availableSheets)
-
-          console.log(" 6284 processedData, req.user.id, aiProcessedBoqJson  =>>>>>>>>>>   ",  processedData, req.user.id, aiProcessedBoqJson)
 
       const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, aiProcessedBoqJson)
       const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq)
@@ -6331,7 +6441,7 @@ const rfqController = {
 
 
       if(!rfqId || isNaN(parseInt(rfqId))) {
-        console.log(`[processMagicSearchDraft] Invalid RFQ ID: ${rfqId}`);
+        
         return res.status(400).json({
           status: 0,
           success: false,
@@ -6340,7 +6450,7 @@ const rfqController = {
       }
       
       if(!sheetId || isNaN(parseInt(sheetId))) {
-        console.log(`[processMagicSearchDraft] Invalid Sheet ID: ${sheetId}`);
+        
         return res.status(400).json({
           status: 0,
           success: false,

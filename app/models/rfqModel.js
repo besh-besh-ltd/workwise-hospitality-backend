@@ -1313,7 +1313,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           AND EXISTS (
             SELECT 1
             FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
-            WHERE TRIM(nb) IN (${vendor_type.map(type => `'${type}'`).join(",")})
+            WHERE TRIM(nb) IN (${vendor_type.map(type => `'${type.toLowerCase()}'`).join(",")})
           )
         `;
       } else if (typeof vendor_type == 'string' || typeof vendor_type == 'number') {
@@ -1883,7 +1883,7 @@ LIMIT 1;`;
         FROM tbl_product_variant pvt
         JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
                 JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
-        LEFT JOIN tbl_company tc ON tc.user_id = tu.id AND tc.is_private = 0
+        LEFT JOIN tbl_company tc ON tc.id = tu.company_id AND tc.is_private = 0
         ${approved_by_id != '' ? `
           JOIN tbl_vendorapprove_product_mapping vum 
             ON vum.variant_vendor_mapping_id = pvm.id
@@ -1918,16 +1918,12 @@ LIMIT 1;`;
     let dataQuery = `
     WITH vendor_data AS (
       SELECT DISTINCT tu.id, tu.name as vendor_name, COALESCE(tc.company_name, tu.organization_name, tu.name) as company_name,
-      tu.address, tc.profile as about, tc.website, tc.company_name as original_company_name, lc.city_name, ls.state_name,
-      CASE
-          WHEN tu.new_profile_image IS NULL THEN
-          NULL
-          ELSE tu.new_profile_image
-      END AS image_url
+      tu.address, tc.profile as about, tc.website, tc.company_name as original_company_name, lc.city_name, ls.state_name
+
       FROM tbl_product_variant pvt
       JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
         JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
-      LEFT JOIN tbl_company tc ON tc.user_id = tu.id
+      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
       LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
       LEFT JOIN tbl_location_states ls ON tu.state = ls.id
       ${approved_by_id != '' ? `
@@ -2018,7 +2014,7 @@ LIMIT 1;`;
                     ON trpv.product_variant_id = qi.product_variant_id 
                     AND trpv.rfq_id = qi.rfq_id 
                     AND qi.quote_id = tq.id
-                    AND qi.unit_price != 0
+                    AND (qi.unit_price != 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
                   WHERE
                     trpv.rfq_id = rfq.id
                   GROUP BY
@@ -2198,6 +2194,33 @@ LIMIT 1;`;
       throw error;
     }
   },
+  getVendorsByRfqProduct: async (rfq_product_id) => {
+    try {
+      let q = `
+        SELECT 
+          U.id,
+          U.name,
+          U.email,
+          U.mobile,
+          U.address,
+          C.company_name,
+          COALESCE(RPV.is_rfq_viewed, 0) AS is_rfq_viewed
+        FROM tbl_rfq_products RP
+        JOIN tbl_rfq_product_vendors RPV ON RP.rfq_id = RPV.rfq_id 
+          AND RP.product_variant_id = RPV.product_variant_id 
+          AND RP.variant = RPV.variant
+        JOIN tbl_users U ON RPV.user_id = U.id
+        JOIN tbl_company C ON U.company_id = C.id
+        WHERE RP.id = $1
+          AND U.status = 1
+        ORDER BY C.company_name
+      `;
+
+      return await db.any(q, [rfq_product_id]);
+    } catch (error) {
+      throw error;
+    }
+  },
   checkIfExists: async (table_name, parameter, db_con = db) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
     return new Promise(function (resolve, reject) {
@@ -2367,8 +2390,8 @@ LIMIT 1;`;
                             'timestamp', TQ_inner.timestamp,
                             'document_files', (
                                 SELECT json_agg(json_build_object('file_type', TF.file_type, 'file_url', TF.file_url))
-                                FROM tbl_quotes_files TF
-                                WHERE TF.quote_id = TQ.id
+                                FROM tbl_quote_item_files TF
+                                WHERE TF.quote_item_id = TQI.id
                             ),
                             'rfq_details', (
                                 SELECT json_agg(json_build_object('title', TPS.title, 'value', TPS.value))
@@ -2743,7 +2766,7 @@ LIMIT 1;`;
         WHERE
           qi.rfq_id = $1
           AND q.created_by = $2
-          AND qi.unit_price != 0
+          AND (qi.unit_price != 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
         GROUP BY
           qi.product_variant_id, p.name, pv.name, qi.unit_price;
     `;
