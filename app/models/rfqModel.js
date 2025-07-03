@@ -2277,6 +2277,7 @@ LIMIT 1;`;
             FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
             JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
             WHERE TEC.rfq_id = $1
+                AND TEC.tbl_rfq_product_id = TRP.id
                 AND TECV.vendor_id = TQ.created_by
                 AND TECV.status = 1
         )`;
@@ -2322,7 +2323,6 @@ LIMIT 1;`;
                         FROM tbl_quotes TQ_inner
                         JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
                         WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
-                        ${TA_Vendors === "TA" ? vendorCondition : ''}
                     ),
                     'global_document_files', (
                         SELECT json_agg(json_build_object('file_type', QF.file_type, 'file_url', QF.file_url))
@@ -2336,7 +2336,6 @@ LIMIT 1;`;
                 LEFT JOIN tbl_company TCC ON TCC.id = TU.company_id
                 LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
                 WHERE TQ.rfq_id = TRP.rfq_id
-                ${TA_Vendors === "TA" ? vendorCondition : ''}
                 ORDER BY TU.id ASC
             ) AS "all_vendors",
             ARRAY(
@@ -2445,6 +2444,7 @@ LIMIT 1;`;
         JOIN tbl_rfq_product_tech_evaluation_cleared_vendors TECV ON TQ.created_by = TECV.vendor_id
         JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
         WHERE TEC.rfq_id = $1
+          AND TEC.tbl_rfq_product_id = TRF.id
           AND TQ.id = TQI.quote_id
           AND TECV.status = 1
       )`;
