@@ -7311,8 +7311,10 @@ addTechComment: async (req, res) => {
 getTechComments: async (req, res) => {
   try{
     const { clause_id, sender_id, receiver_id } = req.body;
+    const user_id = req.user.id;
+    const user_type = req.user.user_type;
 
-    const response = await rfqModel.getTechComments(clause_id, sender_id, receiver_id);
+    const response = await rfqModel.getTechComments(clause_id, sender_id, receiver_id, user_id, user_type);
     res
       .status(200)
       .json(response)
