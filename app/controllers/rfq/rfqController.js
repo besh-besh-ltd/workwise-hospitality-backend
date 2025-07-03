@@ -2499,7 +2499,7 @@ const rfqController = {
       }
 
       // Update rfq with latest data
-      const updatedData = await transactingModels.rfqModel.updateWithTimestamp(
+      const updatedData = await transactingModels.rfqModel.update(
         'tbl_rfq',
         data,
         rfq_id
