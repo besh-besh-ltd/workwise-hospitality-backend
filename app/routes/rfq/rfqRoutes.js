@@ -73,7 +73,7 @@ RfqRoutes.put(
 RfqRoutes.post(
   '/get-details',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check,
+  validateDbBody.rfq_access_check_req_body,
   rfqController.getRfqDetailsById
 );
 
@@ -375,7 +375,7 @@ RfqRoutes.delete('/remove-clause/:id',
 
 RfqRoutes.get('/get-clauses/:id',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check_req_body,
+  // validateDbBody.rfq_access_check_req_body,
   rfqController.getClauses
 )
 
@@ -404,7 +404,7 @@ RfqRoutes.post('/get-vendor-names',
 RfqRoutes.post('/get-vendor-responses',
   noLogin.customer_auth,
   validateBody(rfqSchemas.getVendorResponses),
-  validateDbBody.rfq_access_check,
+  // validateDbBody.rfq_access_check,
   rfqController.getVendorResponses
 )
 
