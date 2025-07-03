@@ -1,6 +1,7 @@
 import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 import generalModel from './generalModel.js';
+import userModel from './userModel.js';
 
 const rfqModel = {
   insert: async (table_name, data, db_con = db) => {
@@ -5336,10 +5337,17 @@ ORDER BY m.created_at;
     }
   },
 
-  getTechComments: async (clause_id, sender_id, receiver_id) => {
+  getTechComments: async (clause_id, sender_id, receiver_id, user_id, user_type) => {
     const validateClauseQuery = `
       SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
       WHERE id = $1) AS clause_exists;
+    `;
+
+    const getRfqIdFromClauseQuery = `
+      SELECT te.rfq_id
+      FROM tbl_rfq_product_tech_evaluation_clauses c
+      JOIN tbl_rfq_product_tech_evaluation te ON c.tbl_rfq_product_tech_evaluation_id = te.id
+      WHERE c.id = $1;
     `;
 
     const fetchCommentsQuery = `
@@ -5350,6 +5358,13 @@ ORDER BY m.created_at;
           (sender_id = $2 AND receiver_id = $3) OR  -- Buyer to Vendor
           (sender_id = $3 AND receiver_id = $2)    -- Vendor to Buyer
       )
+      ORDER BY timestamp ASC;
+    `;
+
+    const fetchAllCommentsQuery = `
+      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by
+      FROM tbl_rfq_product_tech_evaluation_comments
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
       ORDER BY timestamp ASC;
     `;
 
@@ -5371,8 +5386,30 @@ ORDER BY m.created_at;
         };
       }
 
-      // Fetch comments for the clause
-      const commentsResult = await db.query(fetchCommentsQuery, [clause_id, sender_id, receiver_id]);
+      // Get RFQ ID from clause to check access
+      const rfqResult = await db.query(getRfqIdFromClauseQuery, [clause_id]);
+      
+      if (rfqResult.length === 0) {
+        throw {
+          status: 0,
+          message: "Unable to find RFQ for this clause.",
+        };
+      }
+
+      const rfqId = rfqResult[0].rfq_id;
+
+      // Check if user has access to this RFQ (either as creator or team member)
+      const hasAccess = await userModel.user_rfq_access_review(rfqId, user_id, user_type);
+      let commentsResult;
+
+      if (hasAccess) {
+        // User has access to RFQ (creator or team member), show all comments
+        commentsResult = await db.query(fetchAllCommentsQuery, [clause_id]);
+      } else {
+        // User doesn't have general access, use original restricted logic
+        commentsResult = await db.query(fetchCommentsQuery, [clause_id, sender_id, receiver_id]);
+      }
+
       const data = [];
 
       for (const comment of commentsResult) {
