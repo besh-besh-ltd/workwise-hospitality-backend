@@ -65,4 +65,3 @@ app/uploads/
 app/storage/internal/*
 app/storage/logs/*
 ecosystem.config.js
-newrelic.cjs
