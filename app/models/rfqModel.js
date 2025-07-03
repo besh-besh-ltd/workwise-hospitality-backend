@@ -3113,118 +3113,136 @@ WHERE row_num_by_name_category = 1
 
   let q = `
     SELECT *,
-      json_build_object(
-        'is_private', is_private,
-        'is_linked_with_buyer', is_linked_with_buyer,
-        'prev_finalized', prev_finalized,
-        'rfq_added', rfq_added
-      ) AS vendor_info
-    FROM (
-      SELECT DISTINCT ON (tu.id)
-        tu.id AS ${responseKeys?.vendorId ?? 'id'},
-        tu.name AS ${responseKeys?.vendorName ?? 'vendor_name'},
-        ${vendor_name ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $1) AS similarity_score,' : ''}
-        tu.email,
-        tu.mobile,
-        COALESCE(tc.company_name, tu.organization_name) AS company_name,
-        tu.address,
-        tc.profile AS about,
-        tc.is_private,
-        tc.website,
-        tc.turnover,
-        tc.nature_of_business,
-        lc.city_name,
-        ls.state_name,
-        lcn.country_name,
-        CASE
-         WHEN tc.logo IS NULL THEN NULL
-         ELSE tc.logo
-         END AS image_url,
-        CASE
-          WHEN bvm.vendor_id IS NOT NULL THEN 1
-          ELSE 0
-        END AS is_linked_with_buyer,
-        CASE
-          WHEN qf.vendor_id IS NOT NULL THEN 1
-          ELSE 0
-        END AS prev_finalized,
-        CASE
-          WHEN rfqv.user_id IS NOT NULL THEN 1
-          ELSE 0
-        END AS rfq_added
-      FROM tbl_product_variant_vendor_mapping pvvm
-      JOIN tbl_product_variant pv ON pvvm.product_variant_id = pv.id 
-      JOIN tbl_product p ON p.id = pv.product_id
-      JOIN tbl_product_categories pc ON p.id = pc.product_id
-      JOIN tbl_category c ON pc.category_id = c.id
-      JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
-      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-      LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
-      LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-      LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-      LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
-      LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
-      LEFT JOIN (
-        SELECT DISTINCT rpv.user_id
-        FROM tbl_rfq_product_vendors rpv
-        JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
-        WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
-      ) rfqv ON rfqv.user_id = tu.id
-      
-      ${approved_by_id != '' ? `
-        JOIN tbl_vendorapprove_product_mapping vum 
-          ON vum.variant_vendor_mapping_id = pvvm.id
-      ` : ``}
+        json_build_object(
+          'is_private', is_private,
+          'is_linked_with_buyer', is_linked_with_buyer,
+          'prev_finalized', prev_finalized,
+          'rfq_added', rfq_added
+        ) AS vendor_info
+      FROM (
+        SELECT DISTINCT ON (tu.id)
+          tu.id AS ${responseKeys?.vendorId ?? 'id'},
+          tu.name AS ${responseKeys?.vendorName ?? 'vendor_name'},
+          ${vendor_name ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $1) AS similarity_score,' : ''}
+          tu.email,
+          tu.mobile,
+          COALESCE(tc.company_name, tu.organization_name) AS company_name,
+          tu.address,
+          tc.profile AS about,
+          tc.is_private,
+          tc.website,
+          tc.turnover,
+          tc.nature_of_business,
+          lc.city_name,
+          ls.state_name,
+          lcn.country_name,
+          CASE
+          WHEN tc.logo IS NULL THEN NULL
+          ELSE tc.logo
+          END AS image_url,
+          CASE
+            WHEN bvm.vendor_id IS NOT NULL THEN 1
+            ELSE 0
+          END AS is_linked_with_buyer,
+          CASE
+            WHEN qf.vendor_id IS NOT NULL THEN 1
+            ELSE 0
+          END AS prev_finalized,
+          CASE
+            WHEN rfqv.user_id IS NOT NULL THEN 1
+            ELSE 0
+          END AS rfq_added,
+          COALESCE(sub_info.is_premium, 0) AS is_premium,
+          RANDOM() AS group_rand
+        FROM tbl_product_variant_vendor_mapping pvvm
+        JOIN tbl_product_variant pv ON pvvm.product_variant_id = pv.id 
+        JOIN tbl_product p ON p.id = pv.product_id
+        JOIN tbl_product_categories pc ON p.id = pc.product_id
+        JOIN tbl_category c ON pc.category_id = c.id
+        JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
+        LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+        LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+        LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
+        LEFT JOIN tbl_location_states ls ON tu.state = ls.id
+        LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
+        LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
+        LEFT JOIN (
+          SELECT DISTINCT rpv.user_id
+          FROM tbl_rfq_product_vendors rpv
+          JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
+          WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
+        ) rfqv ON rfqv.user_id = tu.id
+        LEFT JOIN (
+          SELECT
+            tus.user_id,
+            MAX(tus.end_date) AS max_end_date,
+            MAX(
+              CASE
+                WHEN tus.plan_id IN (21, 22, 23)
+                AND tus.status = 1
+                AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                THEN 1
+                ELSE 0
+              END
+            ) AS is_premium
+          FROM tbl_user_subscriptions tus
+          GROUP BY tus.user_id
+        ) sub_info ON sub_info.user_id = tu.id
 
-      WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
-        AND tu.is_deleted = 0 AND tu.status = 1 
-        -- AND LOWER(pv.name) = LOWER('${search_key}')
-        AND pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER('${search_key}'))
-        AND tu.email IS NOT NULL
+        ${approved_by_id != '' ? `
+          JOIN tbl_vendorapprove_product_mapping vum 
+            ON vum.variant_vendor_mapping_id = pvvm.id
+        ` : ``}
 
-        ${vendor_name != '' ? `
-          AND (
-            to_tsvector('english', COALESCE(tc.company_name, tu.organization_name)) @@ plainto_tsquery('english', $1)
-            OR (char_length($1) = 1 AND similarity(COALESCE(tc.company_name, tu.organization_name), $1) > 0)
-            OR (char_length($1) > 1 AND similarity(COALESCE(tc.company_name, tu.organization_name), $1) > 0.1)
-          )
-        ` : ''}
+        WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
+          AND tu.is_deleted = 0 AND tu.status = 1 
+          AND pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER('${search_key}'))
+          AND tu.email IS NOT NULL
 
-        ${state != '' ? `AND tu.state::int IN (${state.map(s => s.id).join(",")})` : ``}
-        ${city != '' ? `AND tu.city::int IN (${city.map(c => c.id).join(",")})` : ``}
-        ${country != '' ? `AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(",")})` : ``}
-        ${turnoverCondition}
-        ${vendorType.length > 0 ? `
+          ${vendor_name != '' ? `
+            AND (
+              to_tsvector('english', COALESCE(tc.company_name, tu.organization_name)) @@ plainto_tsquery('english', $1)
+              OR (char_length($1) = 1 AND similarity(COALESCE(tc.company_name, tu.organization_name), $1) > 0)
+              OR (char_length($1) > 1 AND similarity(COALESCE(tc.company_name, tu.organization_name), $1) > 0.1)
+            )
+          ` : ''}
+
+          ${state != '' ? `AND tu.state::int IN (${state.map(s => s.id).join(",")})` : ``}
+          ${city != '' ? `AND tu.city::int IN (${city.map(c => c.id).join(",")})` : ``}
+          ${country != '' ? `AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(",")})` : ``}
+          ${turnoverCondition}
+          ${vendorType.length > 0 ? `
+            AND EXISTS (
+              SELECT 1
+              FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
+              WHERE TRIM(nb) IN (${vendorType.map(vt => `'${vt.value.toLowerCase().trim()}'`).join(", ")})
+            )
+          ` : ``}
+          ${approved_by_id != '' ? `
+            AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")})
+          ` : ``}
+
+          AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
+          ${myVendorType == 'is_private' ? `AND tc.is_private = 1 AND bvm.vendor_id IS NOT NULL` : ``}
+          ${myVendorType == 'is_public' ? `AND tc.is_private = 0 AND bvm.vendor_id IS NOT NULL` : ``}
+          ${myVendorType == 'both' ? `AND bvm.vendor_id IS NOT NULL` : ``}
+
+          ${prevWorkedWith === 'prev_finalized' ? `AND qf.id IS NOT NULL` : ``}
+          ${prevWorkedWith === 'rfq_sent' ? `AND rfqv.user_id IS NOT NULL` : ``}
+
+          ${productMakes && productMakes.length > 0 ? `
           AND EXISTS (
             SELECT 1
-            FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
-            WHERE TRIM(nb) IN (${vendorType.map(vt => `'${vt.value.toLowerCase().trim()}'`).join(", ")})
+            FROM tbl_product_variant_vendor_make pvmm
+            WHERE pvmm.variant_vendor_map_id = pvvm.id
+            AND LOWER(pvmm.make_name) IN (${productMakes.map(m => `'${m.toLowerCase().trim()}'`).join(", ")})
           )
         ` : ``}
-        ${approved_by_id != '' ? `
-          AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")})
-        ` : ``}
-
-        AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
-        ${myVendorType == 'is_private' ? `AND tc.is_private = 1 AND bvm.vendor_id IS NOT NULL` : ``}
-        ${myVendorType == 'is_public' ? `AND tc.is_private = 0 AND bvm.vendor_id IS NOT NULL` : ``}
-        ${myVendorType == 'both' ? `AND bvm.vendor_id IS NOT NULL` : ``}
-
-        ${prevWorkedWith === 'prev_finalized' ? `AND qf.id IS NOT NULL` : ``}
-        ${prevWorkedWith === 'rfq_sent' ? `AND rfqv.user_id IS NOT NULL` : ``}
-
-        ${productMakes && productMakes.length > 0 ? `
-         AND EXISTS (
-           SELECT 1
-           FROM tbl_product_variant_vendor_make pvmm
-           WHERE pvmm.variant_vendor_map_id = pvvm.id
-           AND LOWER(pvmm.make_name) IN (${productMakes.map(m => `'${m.toLowerCase().trim()}'`).join(", ")})
-         )
-       ` : ``}
-       
-    ) AS distinct_vendors
-    ORDER BY ${vendor_name ? 'similarity_score DESC, is_linked_with_buyer DESC' : 'is_linked_with_buyer DESC, RANDOM()'};
-`;
+        
+      ) AS distinct_vendors
+      ORDER BY is_premium DESC, 
+         ${vendor_name ? 'similarity_score DESC, group_rand' : 'group_rand'};
+  `;
 
 
     const values = vendor_name ? [vendor_name] : [];
