@@ -2223,8 +2223,8 @@ const productController = {
       let {
         name,
         description,
-        manufacturer,
-        availability,
+        // manufacturer,
+        // availability,
         categories,
         status,
       } = req.body;
@@ -2235,8 +2235,8 @@ const productController = {
       let productObj = {
         name: name,
         description: description || null,
-        manufacturer: manufacturer || null,
-        availability: availability || 0,
+        // manufacturer: manufacturer || null,
+        // availability: availability || 0,
         slug: titleToSlug(name),
         sku: name,
         updated_by: req.user.id,

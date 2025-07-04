@@ -1,6 +1,7 @@
 import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 import generalModel from './generalModel.js';
+import userModel from './userModel.js';
 
 const rfqModel = {
   insert: async (table_name, data, db_con = db) => {
@@ -2277,6 +2278,7 @@ LIMIT 1;`;
             FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
             JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
             WHERE TEC.rfq_id = $1
+                AND TEC.tbl_rfq_product_id = TRP.id
                 AND TECV.vendor_id = TQ.created_by
                 AND TECV.status = 1
         )`;
@@ -2322,7 +2324,6 @@ LIMIT 1;`;
                         FROM tbl_quotes TQ_inner
                         JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
                         WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
-                        ${TA_Vendors === "TA" ? vendorCondition : ''}
                     ),
                     'global_document_files', (
                         SELECT json_agg(json_build_object('file_type', QF.file_type, 'file_url', QF.file_url))
@@ -2336,7 +2337,6 @@ LIMIT 1;`;
                 LEFT JOIN tbl_company TCC ON TCC.id = TU.company_id
                 LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
                 WHERE TQ.rfq_id = TRP.rfq_id
-                ${TA_Vendors === "TA" ? vendorCondition : ''}
                 ORDER BY TU.id ASC
             ) AS "all_vendors",
             ARRAY(
@@ -2445,6 +2445,7 @@ LIMIT 1;`;
         JOIN tbl_rfq_product_tech_evaluation_cleared_vendors TECV ON TQ.created_by = TECV.vendor_id
         JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
         WHERE TEC.rfq_id = $1
+          AND TEC.tbl_rfq_product_id = TRF.id
           AND TQ.id = TQI.quote_id
           AND TECV.status = 1
       )`;
@@ -5336,10 +5337,17 @@ ORDER BY m.created_at;
     }
   },
 
-  getTechComments: async (clause_id, sender_id, receiver_id) => {
+  getTechComments: async (clause_id, sender_id, receiver_id, user_id, user_type) => {
     const validateClauseQuery = `
       SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
       WHERE id = $1) AS clause_exists;
+    `;
+
+    const getRfqIdFromClauseQuery = `
+      SELECT te.rfq_id
+      FROM tbl_rfq_product_tech_evaluation_clauses c
+      JOIN tbl_rfq_product_tech_evaluation te ON c.tbl_rfq_product_tech_evaluation_id = te.id
+      WHERE c.id = $1;
     `;
 
     const fetchCommentsQuery = `
@@ -5350,6 +5358,13 @@ ORDER BY m.created_at;
           (sender_id = $2 AND receiver_id = $3) OR  -- Buyer to Vendor
           (sender_id = $3 AND receiver_id = $2)    -- Vendor to Buyer
       )
+      ORDER BY timestamp ASC;
+    `;
+
+    const fetchAllCommentsQuery = `
+      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by
+      FROM tbl_rfq_product_tech_evaluation_comments
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
       ORDER BY timestamp ASC;
     `;
 
@@ -5371,8 +5386,30 @@ ORDER BY m.created_at;
         };
       }
 
-      // Fetch comments for the clause
-      const commentsResult = await db.query(fetchCommentsQuery, [clause_id, sender_id, receiver_id]);
+      // Get RFQ ID from clause to check access
+      const rfqResult = await db.query(getRfqIdFromClauseQuery, [clause_id]);
+      
+      if (rfqResult.length === 0) {
+        throw {
+          status: 0,
+          message: "Unable to find RFQ for this clause.",
+        };
+      }
+
+      const rfqId = rfqResult[0].rfq_id;
+
+      // Check if user has access to this RFQ (either as creator or team member)
+      const hasAccess = await userModel.user_rfq_access_review(rfqId, user_id, user_type);
+      let commentsResult;
+
+      if (hasAccess) {
+        // User has access to RFQ (creator or team member), show all comments
+        commentsResult = await db.query(fetchAllCommentsQuery, [clause_id]);
+      } else {
+        // User doesn't have general access, use original restricted logic
+        commentsResult = await db.query(fetchCommentsQuery, [clause_id, sender_id, receiver_id]);
+      }
+
       const data = [];
 
       for (const comment of commentsResult) {
