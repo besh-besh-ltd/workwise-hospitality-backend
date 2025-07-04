@@ -677,19 +677,10 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     });
   },
   
-  getSpocDetails: async (id, status = null) => {
+  getSpocDetails: async (id) => {
     return new Promise(function (resolve, reject) {
-      let query = 'SELECT * FROM tbl_users_spoc WHERE user_id = $1';
-      const params = [id];
-
-      if (status !== null) {
-        query += ' AND status = $2';
-        params.push(status);
-      }
-
-      query += ' AND (is_deleted = 0 OR is_deleted IS NULL)';
-
-      db.any(query, params)
+      const query = 'SELECT * FROM tbl_users_spoc WHERE user_id = $1 AND status = 1 AND (is_deleted = 0 OR is_deleted IS NULL)';
+      db.any(query, [id])
         .then(function (data) {
           resolve(data);
         })
