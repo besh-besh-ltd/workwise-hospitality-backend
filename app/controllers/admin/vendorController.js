@@ -919,12 +919,11 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       const offset = (page - 1) * limit;
 
       const spocs = await vendorModel.getAllSpocs(limit, offset);
-      // Calculate total from the paginated result length if needed, or set to 0 if not available
-      // If you want to show the real total, you should use a window function in the query
+      const total = spocs.length > 0 ? spocs[0].total_count : 0;
       res.status(200).json({
         status: 1,
         data: spocs,
-        total: 0, // Set to 0 or implement a window function for real total
+        total,
         page,
         limit
       });

@@ -987,7 +987,8 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
                 tus.role,
                 tus.status,
                 tu.organization_name AS vendor_name,
-                creator.name AS created_by_name
+                creator.name AS created_by_name,
+                COUNT(*) OVER() AS total_count
          FROM tbl_users_spoc tus
          JOIN tbl_users tu ON tu.id = tus.user_id
          LEFT JOIN tbl_users creator ON creator.id = tus.created_by
