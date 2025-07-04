@@ -2,7 +2,7 @@
 
 exports.config = {
   app_name: ['Workwise Backend'],
-  license_key: 'ae156cb0165d2bfbff1716f6667c1e60FFFFNRAL',
+  license_key: '-',
   logging: {
     level: 'info'
   },
