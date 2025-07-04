@@ -399,13 +399,13 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         cin,
         turn_over,
         total_employees,
-        about_vendor_company
+        about_vendor_company,
+        subscription,
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
       // let fileName = req?.file?.filename;
       // let originalFilename = req?.file?.originalname;
 
-      console.log("checking the data vendor ",req.body.email);
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
       // let vendorObj = {
       //   name: name || vendorDetails[0].name,
@@ -448,14 +448,58 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         is_private:0
       };
 
-      console.log("avhcdgvc---->",vendorObj);
+      const result = await userModel.update_companyDetails(vendorObj,companyObj);
 
+      if (subscription) {
+        const condition = `user_id = ${parseInt(
+          vendorId
+        )} AND status = 1 AND end_date > CURRENT_DATE ORDER BY end_date DESC LIMIT 1`;
+        let activeSubscripton = await rfqModel.checkIfExists(
+          'tbl_user_subscriptions',
+          condition
+        );
 
-      console.log("kjdjchbhwebjfwjfbhwevfew",companyObj);
+        if (activeSubscripton && activeSubscripton.length > 0) {
+          activeSubscripton = activeSubscripton[0];
 
-      const result = await userModel.update_companyDetails(vendorObj,companyObj );
+          const subscriptionObj = {
+            status: 3
+          };
+          await subscriptionModel.updateBuyerSubscription(
+            subscriptionObj,
+            activeSubscripton.id
+          );
 
-      console.log("chekcing result", result);
+          await userModel.updateUserAccount(vendorId, {
+            subscription_plan_id: null
+          });
+        }
+        
+        if (subscription != '-1') {
+          const doesSubscriptionExist = await subscriptionModel.subscriptionIdExist(subscription, '3');
+          if(doesSubscriptionExist && doesSubscriptionExist.length > 0) {
+            const x = doesSubscriptionExist[0].duration;
+
+            let today = dateFormat(new Date(), 'yyyy-mm-dd');
+            const todayInMoment = moment(today);
+            const endDate = todayInMoment.clone().add(x, 'months').subtract(1, 'day').format('YYYY-MM-DD');
+            const renewDate = todayInMoment.clone().add(x, 'months').format('YYYY-MM-DD');
+
+            let UserSubscriptionObj = {
+              user_id: vendorId,
+              plan_id: doesSubscriptionExist[0].id,
+              status: 1, // payment pending
+              start_date: today,
+              end_date: endDate,
+              renew_date: renewDate
+            };
+
+            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
+            
+            await userModel.updateUserAccount(vendorId, { subscription_plan_id: doesSubscriptionExist[0].id })
+          }
+        }
+      }
 
       // await productModel.updateVendorDetail(vendorObj, vendorId);
 

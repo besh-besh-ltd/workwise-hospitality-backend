@@ -602,7 +602,7 @@ const subscriptionModel = {
   },
   updateBuyerSubscription: async (userSubscriptionsObj, id) => {
     return new Promise(function (resolve, reject) {
-      const condition = `WHERE id = $1 RETURNING id`;
+      const condition = ` WHERE id = $1 RETURNING id`;
       const values = [id];
       let query =
         pgp().helpers.update(

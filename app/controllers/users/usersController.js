@@ -2257,8 +2257,33 @@ update_user_detail: async (req, res, next) => {
           subscriptionPaymentObj
         );
         console.log("PAYMENT UPDATE => ", paymentUpdate);
-        // console.log('paymentUpdate==>>>>>>>>>>', paymentUpdate);
+
+        
         if (paymentUpdate.length > 0) {
+          const condition = `user_id = ${parseInt(
+            paymentUpdate[0].user_id
+          )} AND status = 1 AND end_date > CURRENT_DATE ORDER BY end_date DESC LIMIT 1`;
+          let activeSubscripton = await rfqModel.checkIfExists(
+            'tbl_user_subscriptions',
+            condition
+          );
+  
+          if (activeSubscripton && activeSubscripton.length > 0) {
+            activeSubscripton = activeSubscripton[0];
+  
+            const subscriptionObj = {
+              status: 3
+            };
+            await subscriptionModel.updateBuyerSubscription(
+              subscriptionObj,
+              activeSubscripton.id
+            );
+  
+            await userModel.updateUserAccount(paymentUpdate[0].user_id, {
+              subscription_plan_id: null
+            });
+          }
+
           let userSubscription = await subscriptionModel.updateUserSubscription(
             paymentUpdate[0].user_subscriptions_id,
             paymentUpdate[0].user_id
