@@ -3608,11 +3608,13 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
   // Inserting the new spoc with user_id
   add_user_spoc: async (spocObj) => {
     return new Promise(function (resolve, reject) {
+      const status = spocObj.status ?? 1; // default approved
+      const createdBy = spocObj.created_by ?? null;
       db.any(
-        `INSERT INTO tbl_users_spoc (user_id, name, email, mobile, role, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        `INSERT INTO tbl_users_spoc (user_id, name, email, mobile, role, status, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
          RETURNING *;`,
-         [spocObj.user_id, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role]
+         [spocObj.user_id, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role, status, createdBy]
       )
         .then(function (data) {
           resolve(data);

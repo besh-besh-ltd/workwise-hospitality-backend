@@ -1959,8 +1959,8 @@ update_user_detail: async (req, res, next) => {
         user = await userModel.vendorinfo(user_id, req.user.id);
       }
 
-      // Get Spoc Details of the vendor
-      const spoc_details = await vendorModel.getSpocDetails(user_id);
+      // Get Spoc Details of the vendor - only approved ones for public view
+      const spoc_details = await vendorModel.getSpocDetails(user_id, 1); // 1 = approved status only
       user = {
         ...user,
         spoc_details
@@ -3773,7 +3773,8 @@ update_user_detail: async (req, res, next) => {
       let errors = {};
       let err = 0;
 
-      const user_id = req.user.id;
+      // If vendor_id is provided in body, add to that vendor; else, add to self
+      const user_id = req.body.vendor_id || req.user.id;
 
       let { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
 
@@ -3801,12 +3802,36 @@ update_user_detail: async (req, res, next) => {
       const spocExist = await userModel.check_exactly_same_spoc({ spoc_name, spoc_email, spoc_mobile, spoc_role, user_id });
 
       if (spocExist < 1) {
-        const response = await userModel.add_user_spoc({ spoc_name, spoc_email, spoc_mobile, spoc_role, user_id });
+        // Set initial status: if adding to self (vendor/admin), auto-approve; if adding to another vendor (buyer), pending
+        let initialStatus;
+        if (req.body.vendor_id && req.body.vendor_id !== req.user.id) {
+          // Buyer adding to vendor
+          initialStatus = req.user.role === 'admin' ? 1 : 2;
+        } else {
+          // Self (vendor/admin)
+          const creatorType = parseInt(req.user.user_type ?? req.user.register_as ?? 0, 10);
+          initialStatus = [1, 3].includes(creatorType) ? 1 : 2;
+        }
+        const response = await userModel.add_user_spoc({
+          spoc_name, 
+          spoc_email, 
+          spoc_mobile, 
+          spoc_role, 
+          user_id,
+          status: initialStatus,
+          created_by: req.user.id
+        });
+
+        // Log email sent to approved SPOCs
+        if (initialStatus === 1) {
+          console.log(`Email sent to auto-approved SPOC: ${spoc_email}`);
+        }
+
         res
           .status(200)
           .json({
             status: 1,
-            message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to your spoc`
+            message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to vendor SPOC list${initialStatus === 1 ? ' and auto-approved' : ''}`
           })
           .end();
       } else {
@@ -3818,7 +3843,6 @@ update_user_detail: async (req, res, next) => {
           })
           .end();
       }
-
 
     } catch (error) {
       logError(error);
@@ -4074,6 +4098,91 @@ update_user_detail: async (req, res, next) => {
 
     } catch (error) {
       console.error("Error getting buyer account limits:", error);
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
+  addVendorSpoc: async (req, res, next) => {
+    try {
+      let errors = {};
+      let err = 0;
+
+      const vendor_id = req.params.vendor_id;
+
+      let { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
+
+      spoc_name = spoc_name ?? null;
+      spoc_email = spoc_email?.toLowerCase() ?? null;
+      spoc_mobile = spoc_mobile ?? null;
+      spoc_role = spoc_role ?? null;
+
+      if (!spoc_name && !spoc_email && !spoc_mobile && !spoc_role) {
+        err++;
+        errors.empty_fields = 'All fields are empty or missing.';
+      }
+
+      if (err > 0) {
+        res
+          .status(400)
+          .json({
+            status: 2,
+            errors
+          })
+          .end();
+        return;
+      }
+
+      const spocExist = await userModel.check_exactly_same_spoc({ 
+        spoc_name, 
+        spoc_email, 
+        spoc_mobile, 
+        spoc_role, 
+        user_id: vendor_id 
+      });
+
+      if (spocExist < 1) {
+        // Set initial status - buyers adding SPOCs should require approval (status = 2)
+        const initialStatus = req.user.role === 'admin' ? 1 : 2; // 2 for pending (buyers)
+        const response = await userModel.add_user_spoc({
+          spoc_name, 
+          spoc_email, 
+          spoc_mobile, 
+          spoc_role, 
+          user_id: vendor_id,
+          status: initialStatus,
+          created_by: req.user.id
+        });
+
+        // Log email sent only to approved SPOCs
+        if (initialStatus === 1) {
+          console.log(`Email sent to approved SPOC: ${spoc_email}`);
+        }
+
+        res
+          .status(200)
+          .json({
+            status: 1,
+            message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to vendor SPOC list`
+          })
+          .end();
+      } else {
+        res
+          .status(200)
+          .json({
+            status: 1,
+            message: `SPOC already exists`
+          })
+          .end();
+      }
+
+    } catch (error) {
       logError(error);
       res
         .status(400)
