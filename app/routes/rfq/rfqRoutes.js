@@ -36,6 +36,13 @@ RfqRoutes.get(
   acl([2, 8]),
   rfqController.getRFQDraftData
 );
+RfqRoutes.delete(
+  '/delete-draft/:id', 
+  passportSignIn,
+  validateParam(rfqSchemas.id),
+  rfqController.deleteDraft
+);  
+
 
 RfqRoutes.post(
   '/add-product-to-draft',
