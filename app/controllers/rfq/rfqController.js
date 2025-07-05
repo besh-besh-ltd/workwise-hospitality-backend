@@ -4,7 +4,8 @@ import {
   sendMail,
   getDateRange,
   withTransaction,
-  validateNumber
+  validateNumber,
+  generateSignature
 } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
 import userModel from '../../models/userModel.js';
@@ -6951,6 +6952,30 @@ deleteDraft: async (req, res) => {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+
+  initiateMagicSearch: async (req, res) => {
+    try {
+      const { id } = req.user;
+      const { file_name } = req.body;
+
+      if(!file_name) return res.status(400).json({
+        status: 3,
+        message: 'File name is required for persistant processing.'
+      })
+
+      const secret = process.env.WEBHOOK_SECRET;
+      const signature = generateSignature(message, secret);
+      const expires = Math.floor(Date.now() / 1000) + (60 * 60);
+
+      const signedUrl = `https://yourapp.com/api/v1/rfq/magic-webhook?file_name=${encodeURIComponent(
+        file_name
+      )}&expires=${expires}&signature=${signature}`;
+
+
+    } catch (error) {
+      
     }
   },
 

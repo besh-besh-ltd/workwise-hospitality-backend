@@ -293,6 +293,13 @@ RfqRoutes.post('/magic-search-rfq-preview',
   rfqController.magicSearchRfqCreate
 );
 
+RfqRoutes.post('/initiate-magic-search',
+  passportSignIn,
+  validateBody.user_id_profileexists,
+  acl([2, 8]),
+  rfqController.initiateMagicSearch,
+);
+
 RfqRoutes.get('/process-magic-search-draft',
   passportSignIn, 
   validateDbBody.user_id_profileexists,

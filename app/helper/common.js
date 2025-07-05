@@ -9,6 +9,8 @@ import bcrypt from 'bcryptjs';
 import userModel from '../models/userModel.js';
 import { URL } from 'url';
 import { DeleteObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import crypto from 'crypto';
+
 /** Log data for debugging purpose
  * Only work when in DEV env
  */
@@ -280,6 +282,21 @@ const acl = function (role) {
     }
   };
 };
+
+/**
+ * Generate an HMAC SHA256 signature
+ * @param {string} message - The message you want to HASH
+ * @param {string} secret - Your secret key
+ * @returns {string} base64url-encoded signature
+ */
+export function generateSignature(message, secret) {
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(message);
+  const signature = hmac.digest('base64url');
+  
+  return signature;
+}
+
 const convertSixDigit = (id) => {
   try {
     let str = '' + id;
