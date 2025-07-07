@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import UsersController from '../../controllers/users/usersController.js';
+import vendorController from '../../controllers/admin/vendorController.js';
 import noLogin from '../../middleware/noLogin.js';
 import {
   validateBody,
@@ -267,7 +268,7 @@ UsersRoutes.post(
   '/add-spoc',
   passportSignIn,
   validateBody(schemas.user_spoc),
-  UsersController.addSpoc
+  vendorController.addSpoc
 )
 
 // to update the spoc of the user
@@ -276,14 +277,14 @@ UsersRoutes.put(
   passportSignIn,
   validateBody(schemas.user_spoc),
   validateDbBody.spoc_id_exists,
-  UsersController.updateSpoc
+  vendorController.updateSpoc
 )
 // to delete the spoc of the user
 UsersRoutes.delete(
   '/delete-spoc/:spoc_id',
   passportSignIn,
   validateDbBody.spoc_id_exists,
-  UsersController.deleteSpoc
+  vendorController.deleteSpoc
 )
 
 UsersRoutes.get(

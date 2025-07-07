@@ -128,4 +128,10 @@ vendorRoutes.get(
   vendorController.vendorDropdownList
 );
 
+vendorRoutes.get(
+  '/spoc-list',
+  passportSignIn,
+  vendorController.spocList
+);
+
 export default vendorRoutes;
