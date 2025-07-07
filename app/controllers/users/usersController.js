@@ -1396,7 +1396,7 @@ update_user_detail: async (req, res, next) => {
       let user_id = req.user.id;
       const user = await userModel.userinfo(user_id);
       // now getting spoc details of the user
-      const spoc = await vendorModel.getSpocDetails(user_id);
+      const spoc = await vendorModel.getSpocDetails(user_id, false);
       if (user) {
         user.password = null;
         if (user.new_profile_image == '') {
