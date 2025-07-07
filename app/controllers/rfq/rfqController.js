@@ -3711,10 +3711,10 @@ deleteDraft: async (req, res) => {
     }
   },
   getVendorsForProduct: async (req, res) => {
-    let {productId, excludeIds} = req.body;
+    let {productId, excludeIds, searchTerm} = req.body;
     let userId = req.user.id;
     try {
-      const vendorsList = await rfqModel.getVendorsForProduct(productId, excludeIds, userId);
+      const vendorsList = await rfqModel.getVendorsForProduct(productId, excludeIds, userId, searchTerm);
 
       res
         .status(200)
