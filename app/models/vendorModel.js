@@ -951,24 +951,12 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     });
   },
 
-  getApprovedSpocs: async (vendorId) => {
+  getAllSpocs: async (limit = 10, offset = 0, status = null) => {
     return new Promise(function (resolve, reject) {
-      db.any(
-        'SELECT * FROM tbl_users_spoc WHERE user_id = $1 AND status = 1 AND (is_deleted = 0 OR is_deleted IS NULL)',
-        [vendorId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-
-  getAllSpocs: async (limit = 10, offset = 0) => {
-    return new Promise(function (resolve, reject) {
+      let statusFilter = '';
+      if (status !== null && status !== undefined) {
+        statusFilter = ` AND tus.status = ${parseInt(status, 10)}`;
+      }
       db.any(
         `SELECT tus.id,
                 tus.user_id,
@@ -983,7 +971,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
          FROM tbl_users_spoc tus
          JOIN tbl_users tu ON tu.id = tus.user_id
          LEFT JOIN tbl_users creator ON creator.id = tus.created_by
-         WHERE (tus.is_deleted = 0 OR tus.is_deleted IS NULL)
+         WHERE (tus.is_deleted = 0 OR tus.is_deleted IS NULL)${statusFilter}
          ORDER BY tus.created_at DESC
          LIMIT $1 OFFSET $2;`,
         [limit, offset]
@@ -996,6 +984,52 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
           reject(error);
         });
     });
+  },
+
+  // Add SPOC for vendor - consolidated function
+  add_user_spoc: async (spocObj) => {
+    return new Promise(function (resolve, reject) {
+      const status = spocObj.status ?? 1; // default approved
+      const createdBy = spocObj.created_by ?? null;
+      db.any(
+        `INSERT INTO tbl_users_spoc (user_id, name, email, mobile, role, status, created_by, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         RETURNING *;`,
+         [spocObj.user_id, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role, status, createdBy]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  // Check if exactly same SPOC exists
+  check_exactly_same_spoc: async (spocObj) => {
+    return new Promise(function (resolve, reject) {
+      // Convert user_id to an integer if it's supposed to be a bigint
+      const userId = parseInt(spocObj.user_id, 10);
+
+      db.any(
+        `SELECT * FROM tbl_users_spoc
+          WHERE user_id = $1
+          AND name = $2
+          AND email = $3
+          AND mobile = $4
+          AND role = $5;`,
+         [userId, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role]
+        )
+          .then(function (data) {
+            resolve(data);
+          })
+          .catch(function (err) {
+            let error = new Error(err);
+            reject(error);
+          });
+      });
   },
 };
 

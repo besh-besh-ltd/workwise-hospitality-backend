@@ -183,7 +183,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       // Add vendor ID to the SPOC object
       spoc.user_id = vendorId;
       // Insert the SPOC details into the table
-      await userModel.add_user_spoc(spoc);
+      await vendorModel.add_user_spoc(spoc);
     }
   }
 }
@@ -843,7 +843,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         return;
       }
 
-      const spocExist = await userModel.check_exactly_same_spoc({spoc_name, spoc_email:spoc_email.toLowerCase(), spoc_mobile, spoc_role, user_id});
+      const spocExist = await vendorModel.check_exactly_same_spoc({spoc_name, spoc_email:spoc_email.toLowerCase(), spoc_mobile, spoc_role, user_id});
 
       if(spocExist<1){
         // Set initial status based on who's creating the SPOC
@@ -854,7 +854,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         const creatorType = parseInt(req.user.user_type ?? req.user.register_as ?? 0, 10);
         const initialStatus = [1, 3].includes(creatorType) ? 1 : 2;
 
-        const response = await userModel.add_user_spoc({
+        const response = await vendorModel.add_user_spoc({
           spoc_name, 
           spoc_email: email,
           spoc_mobile, 
