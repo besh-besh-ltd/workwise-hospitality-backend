@@ -677,9 +677,14 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     });
   },
   
-  getSpocDetails: async (id) => {
+  getSpocDetails: async (id, filterByStatus = true) => {
     return new Promise(function (resolve, reject) {
-      const query = 'SELECT * FROM tbl_users_spoc WHERE user_id = $1 AND status = 1 AND (is_deleted = 0 OR is_deleted IS NULL)';
+      let query = 'SELECT * FROM tbl_users_spoc WHERE user_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)';
+      if (filterByStatus) {
+        query += ' AND status = 1';
+      }
+      query += ' ORDER BY created_at DESC';
+      
       db.any(query, [id])
         .then(function (data) {
           resolve(data);

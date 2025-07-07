@@ -281,7 +281,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       let vendorDetails = await vendorModel.getVendoreditDetails(vendorId);
       let companyDetails = await userModel.getCompanyDetail(vendorId);
       let files = await vendorModel.getFiles(vendorId);
-      let spocDetails = await vendorModel.getSpocDetails(vendorId);
+      let spocDetails = await vendorModel.getSpocDetails(vendorId, false); // Show all SPOCs regardless of status
       resObj.spocDetails = spocDetails;
       resObj.vendorDetails = vendorDetails[0];
       resObj.companyDetails = companyDetails[0];
