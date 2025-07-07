@@ -219,6 +219,7 @@ export const rfqSchemas = {
     rfq_id: Joi.number().required(),
     response_email: Joi.string().required(),
     contact_name: Joi.string().required(),
+    status: Joi.number().allow(1, 2).optional(),
     contact_number: Joi.string()
       .trim()
       .min(6)

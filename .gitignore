@@ -55,6 +55,7 @@ Thumbs.db
 .env
 
 
+
 #config
 app.config.js
 
@@ -65,4 +66,3 @@ app/uploads/
 app/storage/internal/*
 app/storage/logs/*
 ecosystem.config.js
-

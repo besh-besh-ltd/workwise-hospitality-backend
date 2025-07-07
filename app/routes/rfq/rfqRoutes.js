@@ -36,6 +36,13 @@ RfqRoutes.get(
   acl([2, 8]),
   rfqController.getRFQDraftData
 );
+RfqRoutes.delete(
+  '/delete-draft/:id', 
+  passportSignIn,
+  validateParam(rfqSchemas.id),
+  rfqController.deleteDraft
+);  
+
 
 RfqRoutes.post(
   '/add-product-to-draft',
@@ -73,7 +80,7 @@ RfqRoutes.put(
 RfqRoutes.post(
   '/get-details',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check,
+  validateDbBody.rfq_access_check_req_body,
   rfqController.getRfqDetailsById
 );
 
@@ -144,7 +151,6 @@ RfqRoutes.get(
 RfqRoutes.post(
   '/quote/create',
   noLogin.customer_auth,
-  acl([3]),
   validateDbBody.rfq_access_check_req_body,
   rfqController.createQuote
 );
@@ -152,7 +158,6 @@ RfqRoutes.post(
 RfqRoutes.put(
   '/quote/update/:quoteId',
   noLogin.customer_auth,
-  acl([3]),
   validateDbBody.rfq_access_check_req_body,
   rfqController.updateQuoteItems
 );
@@ -161,14 +166,14 @@ RfqRoutes.get(
   '/get-quotes/:id',
   passportSignIn,
   validateDbBody.user_id_profileexists,
-  acl([2, 3, 8, 10]),
+  acl([2, 8, 10]),
   validateDbBody.rfq_access_check,
   rfqController.getQuotesByRfqById
 );
 RfqRoutes.get(
   '/download-quote-results/:id',
   passportSignIn,
-  acl([2, 3, 8, 10]),
+  acl([2, 8, 10]),
   validateDbBody.user_id_profileexists,
   validateDbBody.rfq_access_check,
   // rfqController.downloadQuoteResults
@@ -177,7 +182,7 @@ RfqRoutes.get(
 RfqRoutes.get(
   '/get-lpr-lqr',
    passportSignIn,
-   acl([2, 3, 8, 10]),
+   acl([2, 8, 10]),
    validateDbBody.user_id_profileexists,
    rfqController.getLprLqrByVariantId
 )
@@ -377,9 +382,9 @@ RfqRoutes.delete('/remove-clause/:id',
 
 RfqRoutes.get('/get-clauses/:id',
   noLogin.customer_auth,
+  // validateDbBody.rfq_access_check_req_body,
   rfqController.getClauses
 )
-
 
 // vendor side
 RfqRoutes.post('/add-tech-comment',
@@ -406,7 +411,7 @@ RfqRoutes.post('/get-vendor-names',
 RfqRoutes.post('/get-vendor-responses',
   noLogin.customer_auth,
   validateBody(rfqSchemas.getVendorResponses),
-  validateDbBody.rfq_access_check,
+  // validateDbBody.rfq_access_check,
   rfqController.getVendorResponses
 )
 

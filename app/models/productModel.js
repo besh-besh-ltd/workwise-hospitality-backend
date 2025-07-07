@@ -4255,7 +4255,7 @@ WHERE m.id = $1;
           ORDER BY ${
             search_term
               ? `exact_word_match DESC, partial_word_match DESC, rank DESC, starts_with_input DESC, similarity_score DESC, PV.created_at DESC`
-              : `ORDER BY PV.created_at DESC`
+              : `PV.created_at DESC`
           } 
           LIMIT $${paramIndex}
           OFFSET $${paramIndex + 1}
