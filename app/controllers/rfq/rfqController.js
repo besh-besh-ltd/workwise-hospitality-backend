@@ -2625,14 +2625,15 @@ const rfqController = {
         RFQ_EMAIL_TYPE.UPDATED_VENDOR
       );
 
-      await sendRfqUpdatedMailToVendors(
-        vendorData,
-        rfq_id,
-        rfqNo,
-        buyerName,
-        RFQ_EMAIL_TYPE.UPDATED_VENDOR_WITH_CHANGABLE,
-        changedDetails
-      );
+      if(changedDetails.length > 0)
+        await sendRfqUpdatedMailToVendors(
+          vendorData,
+          rfq_id,
+          rfqNo,
+          buyerName,
+          RFQ_EMAIL_TYPE.UPDATED_VENDOR_WITH_CHANGABLE,
+          changedDetails
+        );
 
       res.status(200).json({
         status: 1,
