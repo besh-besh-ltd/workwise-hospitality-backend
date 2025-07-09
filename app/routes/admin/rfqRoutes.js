@@ -32,6 +32,24 @@ rfqRoutes.get(
   usersRfqController.sendReminder
 );
 
+/**
+ * @description Get vendors who haven't submitted quotes for selective reminder
+ */
+rfqRoutes.get(
+  '/vendors-for-reminder/:id',
+  passportSignIn,
+  usersRfqController.getVendorsForReminder
+);
+
+/**
+ * @description Send selective reminder to chosen vendors
+ */
+rfqRoutes.post(
+  '/send-selective-reminder/:id',
+  passportSignIn,
+  usersRfqController.sendSelectiveReminder
+);
+
 rfqRoutes.get('/rfq-list/:id', passportSignIn, validateParam(schemas.id), rfqController.getRfqById);
 
 export default rfqRoutes;
