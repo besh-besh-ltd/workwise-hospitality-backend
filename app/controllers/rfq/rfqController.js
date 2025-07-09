@@ -6516,6 +6516,7 @@ deleteDraft: async (req, res) => {
           const rfqNumber = await getNextRfQNumber();
           let emailContent = `
             <h2>Products or Vendors Not Found in Workwise Magic Search</h2>
+            <p>Needs to work on these missing products or Vendors urgently.</p>
             <p><strong>RFQ Number:</strong> ${rfqNumber}</p>
             <p><strong>User:</strong> ${user.name} (${user.email})</p>
             <p><strong>Organization:</strong> ${user.organization_name || 'N/A'}</p> 
