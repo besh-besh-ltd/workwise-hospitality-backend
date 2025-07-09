@@ -5365,6 +5365,10 @@ ORDER BY m.created_at;
       SELECT id AS comment_id, text AS comment_text, sender_id AS created_by
       FROM tbl_rfq_product_tech_evaluation_comments
       WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
+      AND (
+          (sender_id = $2) OR  -- Buyer to Vendor
+          (receiver_id = $2)    -- Vendor to Buyer
+      )
       ORDER BY timestamp ASC;
     `;
 
@@ -5402,9 +5406,9 @@ ORDER BY m.created_at;
       const hasAccess = await userModel.user_rfq_access_review(rfqId, user_id, user_type);
       let commentsResult;
 
-      if (hasAccess) {
+      if (hasAccess && user_type != '3') {
         // User has access to RFQ (creator or team member), show all comments
-        commentsResult = await db.query(fetchAllCommentsQuery, [clause_id]);
+        commentsResult = await db.query(fetchAllCommentsQuery, [clause_id, receiver_id]);
       } else {
         // User doesn't have general access, use original restricted logic
         commentsResult = await db.query(fetchCommentsQuery, [clause_id, sender_id, receiver_id]);
