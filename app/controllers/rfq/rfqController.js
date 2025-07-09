@@ -472,10 +472,10 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
 
       if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
-        mailRecipients.cc = [user_details[0].email, buyerEmail];
+        // mailRecipients.cc = [user_details[0].email];
       } else {
         mailRecipients.to = user_details[0].email;
-        mailRecipients.cc = buyerEmail
+        // mailRecipients.cc = buyerEmail
       }
 
       // console.log(" rfq contoller 377 spoc console ", user_details[0]?.id, spocList)
@@ -717,17 +717,13 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
   // Preparing the email details
   let mailRecipients = {
     from: Config.webmasterMail,
-    to: buyerDetails[0]?.email,
-    // cc:"mukul@letsworkwise.com",
+    to: user.email,
     subject: `Work Wise | New Quotation Received for Your RFQ`,
     html: dynamicHTML
   };
 
   if (spocList && spocList.length > 0) {
     mailRecipients.to = spocList.map(spoc => spoc.email);
-    mailRecipients.cc = user.email;
-  } else {
-    mailRecipients.to = user.email;
   }
 
   // Sending the email
@@ -969,10 +965,11 @@ const containerContent = `
     };
     if (spocList && spocList.length > 0) {
       mailRecipients.to = spocList.map(spoc => spoc.email);
-      mailRecipients.cc = [user_details[0].email, rfqBasicDetails.response_email];
+      // mailRecipients.cc = [user_details[0].email, rfqBasicDetails.response_email];
+      mailRecipients.cc = [user_details[0].email];
     } else {
       mailRecipients.to = user_details[0].email;
-      mailRecipients.cc = rfqBasicDetails.response_email
+      // mailRecipients.cc = rfqBasicDetails.response_email
     }
     sendMail(mailRecipients);
 
@@ -1075,7 +1072,7 @@ const sendQuoteNotificationEmail = async (req) => {
 
       if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
-        mailRecipients.cc = buyer.email;
+        // mailRecipients.cc = buyer.email;
       } else {
         mailRecipients.to = buyer.email;
       }
@@ -1083,7 +1080,7 @@ const sendQuoteNotificationEmail = async (req) => {
       // Sending the email to the buyer
       sendMail(mailRecipients);
 
-      console.log(`Quotation update email sent to buyer: ${buyer.email}`);
+      // console.log(`Quotation update email sent to buyer: ${buyer.email}`);
     } 
   }
 
@@ -4488,7 +4485,6 @@ deleteDraft: async (req, res) => {
 
             if (spocList && spocList.length > 0) {
               mailRecipients.to = spocList.map(spoc => spoc.spoc_email);
-              mailRecipients.cc = vendor.user_email;
             } else {
               mailRecipients.to = vendor.user_email;
             }
@@ -4640,6 +4636,147 @@ deleteDraft: async (req, res) => {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+
+  /**
+   * @description Get vendors who haven't submitted quotes for a specific RFQ
+   */
+  getVendorsForReminder: async (req, res, next) => {
+    let rfq_id = req.params.id;
+
+    try {
+      const result = await rfqModel.getVendorsForReminder(rfq_id);
+
+      if (!result.rfq_details) {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "RFQ not found, or is no longer available!"
+          })
+          .end();
+      }
+
+      if (result.rfq_details.status == '2') {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "Cannot get vendors for a closed RFQ!"
+          })
+          .end();
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: result.vendors
+      }).end();
+
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      }).end();
+    }
+  },
+
+  /**
+   * @description Send reminder to selected vendors for a specific RFQ
+   */
+  sendSelectiveReminder: async (req, res, next) => {
+    let rfq_id = req.params.id;
+    const { vendor_ids } = req.body;
+    const { id } = req.user;
+
+    try {
+      if (!vendor_ids || !Array.isArray(vendor_ids) || vendor_ids.length === 0) {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "Please select at least one vendor!"
+          })
+          .end();
+      }
+
+      const result = await rfqModel.getVendorsForReminder(rfq_id);
+
+      if (!result.rfq_details) {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "RFQ not found, or is no longer available!"
+          })
+          .end();
+      }
+
+      if (result.rfq_details.status == '2') {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "Cannot send reminder for a closed RFQ!"
+          })
+          .end();
+      }
+
+      const selectedVendors = result.vendors.filter(vendor => 
+        vendor_ids.includes(vendor.user_id)
+      );
+
+      if (selectedVendors.length === 0) {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "No valid vendors found for the selected IDs!"
+          })
+          .end();
+      }
+
+      const org_name = result.rfq_details.company_name || '';
+
+      try {
+        for (const vendor of selectedVendors) {
+          await sendReminderRFQMAIL(
+            { user_id: vendor.user_id },
+            vendor.remainingProducts,
+            org_name,
+            rfq_id,
+            result.rfq_details
+          );
+        }
+
+        await rfqModel.insertRFQActivity(rfq_id, id);
+
+        res
+          .status(200)
+          .json({
+            status: 1,
+            message: 'Reminder has been sent successfully to selected vendors!'
+          })
+          .end();
+
+      } catch (error) {
+        logError(error);
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: Config.errorText.value
+          })
+          .end();
+      }
+
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      }).end();
     }
   },  
   

@@ -202,6 +202,22 @@ RfqRoutes.get(
   validateDbBody.rfq_access_check,
   rfqController.sendReminder
 );
+RfqRoutes.get(
+  '/vendors-for-reminder/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  rfqController.getVendorsForReminder
+);
+RfqRoutes.post(
+  '/send-selective-reminder/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  rfqController.sendSelectiveReminder
+);
 RfqRoutes.post(
   '/finalize',
   passportSignIn,
