@@ -88,7 +88,8 @@ const couponModel = {
     end_date,
     status,
     coupon_id,
-    updated_by
+    updated_by,
+    user_type,
   ) => {
     return new Promise(function (resolve, reject) {
       db.one(
@@ -100,7 +101,8 @@ const couponModel = {
         start_date = ($4),
         end_date = ($5),
         status = ($6),
-        updated_by = ($8)
+        updated_by = ($8),
+        user_type = ($9)
        	WHERE id=($7) returning id`,
         [
           coupon,
@@ -110,7 +112,8 @@ const couponModel = {
           end_date,
           status,
           coupon_id,
-          updated_by
+          updated_by,
+          user_type
         ]
       )
         .then(function (data) {
@@ -121,11 +124,14 @@ const couponModel = {
         });
     });
   },
-  getAllCoupon: async (limit, offset, coupon) => {
+  getAllCoupon: async (limit, offset, coupon, user_type = '2') => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = ``;
       if (coupon) {
         dynamicQuery += `AND coupon ILIKE '%${coupon}%'`;
+      }
+      if(!coupon && user_type) {
+        dynamicQuery += `AND user_type = '${user_type}'`;
       }
       db.any(
         `SELECT * 
@@ -142,11 +148,14 @@ const couponModel = {
         });
     });
   },
-  getAllCouponCount: async (coupon) => {
+  getAllCouponCount: async (coupon, user_type = '2') => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = ``;
       if (coupon) {
         dynamicQuery += `AND coupon ILIKE '%${coupon}%'`;
+      }
+      if (!coupon && user_type) {
+        dynamicQuery += `AND user_type = '${user_type}'`
       }
       db.one(
         `SELECT COUNT(id) FROM tbl_coupon WHERE status !=2 ${dynamicQuery}`

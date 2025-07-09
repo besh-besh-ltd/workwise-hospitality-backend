@@ -15,17 +15,19 @@ const couponController = {
         discount_amount,
         start_date,
         end_date,
-        status
+        status,
+        user_type
       } = req.body;
 
       let couponObj = {
-        coupon: coupon,
-        is_percentage: is_percentage,
+        coupon,
+        is_percentage,
         start_date: dateFormat(start_date, 'yyyy-mm-dd'),
         end_date: dateFormat(end_date, 'yyyy-mm-dd'),
-        discount_amount: discount_amount,
+        discount_amount,
         created_by: user_id,
-        status: status
+        status,
+        user_type,
       };
 
       await couponModel.addCoupon(couponObj);
@@ -57,7 +59,8 @@ const couponController = {
         discount_amount,
         start_date,
         end_date,
-        status
+        status,
+        user_type,
       } = req.body;
 
       await couponModel.updateCoupon(
@@ -68,7 +71,8 @@ const couponController = {
         dateFormat(end_date, 'yyyy-mm-dd'),
         status,
         coupon_id,
-        req.user.id
+        req.user.id,
+        user_type
       );
 
       res
@@ -101,9 +105,10 @@ const couponController = {
         offset = 0;
       }
       let coupon = req.query?.coupon;
+      let user_type = req.query?.user_type ?? '2';
 
-      let couponList = await couponModel.getAllCoupon(limit, offset, coupon);
-      let couponCount = await couponModel.getAllCouponCount(coupon);
+      let couponList = await couponModel.getAllCoupon(limit, offset, coupon, user_type);
+      let couponCount = await couponModel.getAllCouponCount(coupon, user_type);
       res
         .status(200)
         .json({

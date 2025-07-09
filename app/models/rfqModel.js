@@ -3178,14 +3178,19 @@ WHERE row_num_by_name_category = 1
             MAX(tus.end_date) AS max_end_date,
             MAX(
               CASE
-                WHEN tus.plan_id IN (21, 22, 23)
-                AND tus.status = 1
-                AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
-                THEN 1
+                WHEN tsp.plan_name ILIKE '%Enterprise%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 2
+                WHEN tsp.plan_name ILIKE '%Premium%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 1
                 ELSE 0
               END
             ) AS is_premium
           FROM tbl_user_subscriptions tus
+          LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
           GROUP BY tus.user_id
         ) sub_info ON sub_info.user_id = tu.id
 
