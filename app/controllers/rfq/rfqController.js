@@ -6403,7 +6403,13 @@ deleteDraft: async (req, res) => {
   
         if (!cleanId || item.fetched_product_name === 'Product not found') {
           validationErrors.push({
-            errors: { product: `${productName} - Product not found` }
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            size: item.size || '',
+            quantity: item.quantity || '',
+            unit: item.unit || '',
+            sheet_name: item.sheet_name || '',
+            description: item.full_product_description || ''
           });
           continue;
         }
@@ -6412,7 +6418,13 @@ deleteDraft: async (req, res) => {
   
         if (!validProductId) {
           validationErrors.push({
-            errors: { product: `${productName} - Product not found` }
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            size: item.size || '',
+            quantity: item.quantity || '',
+            unit: item.unit || '',
+            sheet_name: item.sheet_name || '',
+            description: item.full_product_description || ''
           });
           continue;
         }
@@ -6434,7 +6446,13 @@ deleteDraft: async (req, res) => {
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             errors: {
-              vendor: `${finalProductName} - No Vendors Found` }
+              vendor: `${finalProductName} - No Vendors Found` },
+            name: finalProductName,
+            size: item.size || '',
+            quantity: item.quantity || '',
+            unit: item.unit || '',
+            sheet_name: item.sheet_name || '',
+            description: item.full_product_description || ''
           });
           continue;
         }
@@ -6484,48 +6502,40 @@ deleteDraft: async (req, res) => {
       // Send email notification for products or vendors not found
       const hasProductNotFound = validationErrors.some(err => err.errors && err.errors.product);
       const hasVendorNotFound = validationErrors.some(err => err.errors && err.errors.vendor);
+
+      // Comment if not needed
+      const uniqueErrors = validationErrors.filter((err, index, self) => 
+        index === self.findIndex(e => 
+          (e.errors?.product === err.errors?.product) && 
+          (e.errors?.vendor === err.errors?.vendor) && 
+          ((e.name || e.productName || '') === (err.name || err.productName || ''))
+        )
+      );
       if (hasProductNotFound || hasVendorNotFound) {
         try {
+          const rfqNumber = await getNextRfQNumber();
           let emailContent = `
-            <h2>Products or Vendors Not Found in WorkWise RFQ Processing</h2>
+            <h2>Products or Vendors Not Found in Workwise Magic Search</h2>
+            <p><strong>RFQ Number:</strong> ${rfqNumber}</p>
             <p><strong>User:</strong> ${user.name} (${user.email})</p>
-            <p><strong>Organization:</strong> ${user.organization_name || 'N/A'}</p>
-            <p><strong>Total Errors:</strong> ${validationErrors.length}</p>
+            <p><strong>Organization:</strong> ${user.organization_name || 'N/A'}</p> 
             <h3>Details:</h3>
             <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; width: 100%;">
               <thead>
                 <tr style="background-color: #f0f0f0;">
                   <th>Error Type</th>
                   <th>Product Name</th>
-                  <th>Description</th>
-                  <th>Size</th>
-                  <th>Quantity</th>
-                  <th>Unit</th>
-                  <th>Sheet Name</th>
-                  <th>Error Message</th>
                 </tr>
               </thead>
               <tbody>
           `;
-          validationErrors.forEach(err => {
-            let errorType = err.errors.product ? 'Product Not Found' : (err.errors.vendor ? 'Vendor Not Found' : 'Other');
+          uniqueErrors.forEach(err => {
+            let errorType = err.errors && err.errors.product ? 'Product Not Found' : (err.errors && err.errors.vendor ? 'Vendor Not Found' : 'Other');
             let productName = err.name || err.productName || '';
-            let description = err.description || '';
-            let size = err.size || '';
-            let quantity = err.quantity || '';
-            let unit = err.unit || '';
-            let sheetName = err.sheet_name || '';
-            let errorMsg = err.errors.product || err.errors.vendor || '';
             emailContent += `
               <tr>
                 <td>${errorType}</td>
                 <td>${productName}</td>
-                <td>${description}</td>
-                <td>${size}</td>
-                <td>${quantity}</td>
-                <td>${unit}</td>
-                <td>${sheetName}</td>
-                <td>${errorMsg}</td>
               </tr>
             `;
           });
@@ -6534,11 +6544,12 @@ deleteDraft: async (req, res) => {
             </table>
             <p><em>This email was automatically generated by WorkWise RFQ processing system.</em></p>
           `;
+          
           const mailOptions = {
-            from: Config.fromMail,
-            to: 'siddharth@letsworkwise.com',
-            cc: ['sayankaworkwise@gmail.com', 'prashant@letsworkwise.com'],
-            subject: `WorkWise RFQ: ${validationErrors.length} Products or Vendors Not Found - ${user.organization_name || user.name}`,
+            from: Config.webmasterMail,
+            to: 'mukulsomukesh@gmail.com',
+            cc: ['mukulja tav1010@gmail.com', 'agnij@letsworkwise.com'],
+            subject: `Workwise Magic Search - Product And Vendor Not Found Error List`,
             html: emailContent
           };
           sendMail(mailOptions);
@@ -6547,7 +6558,7 @@ deleteDraft: async (req, res) => {
         }
       }
 
-      return [validationErrors, finalObject];
+      return [uniqueErrors, finalObject];
     }
     catch (error) {
       logError(error);
