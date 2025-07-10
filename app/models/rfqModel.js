@@ -1994,6 +1994,22 @@ LIMIT 1;`;
           AND TQM.rfq_id = RFQ.id
           AND TQM.is_seen = false
           ) AS "unseen_query_count",
+          (
+            SELECT
+              CASE
+                WHEN COUNT(*) = 0 THEN false
+                ELSE
+                  COUNT(*) = (
+                    SELECT COUNT(*)
+                    FROM tbl_quotes tq2
+                    INNER JOIN tbl_quote_finalization tqf2
+                      ON tq2.id = tqf2.quote_id
+                    WHERE tq2.rfq_id = RFQ.id
+                  )
+              END
+            FROM tbl_quotes tq
+            WHERE tq.rfq_id = RFQ.id
+          ) AS is_finalized,
           ARRAY(
               SELECT json_build_object('id', TQ.id)
               FROM tbl_quotes TQ
