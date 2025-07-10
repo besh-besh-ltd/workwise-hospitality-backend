@@ -6535,34 +6535,30 @@ searchVariantVendors: async (product_id, variant_id) => {
     return [];
   }
 },
+
+
+/**
+ * @mukul_jatav 11/07/2025
+ * Reason for Changes:
+ * - To optimize query performance and reduce payload size.
+ * - To remove unnecessary or heavy data from the RFQ draft listing view.
+ * Changes Made:
+ * - Removed: tbl_query_messages and tbl_rfq_products_specs (not needed for drafts).
+ * - Trimmed product_details: Only fetch basic product info (id, name) from tbl_product_variant.
+ * - Limited products array: Return only 2 products per RFQ to minimize response time and frontend load.
+ * 
+ * @PENDING injection protection 
+ */
 getAllDraftRfqs: async (limit, offset, user_id, project_id, sort, reverse_auction, rfq_type, rfq_no) => {
   return new Promise(function (resolve, reject) {
     let q = `
       SELECT
         RFQ.*,
         P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
-        (SELECT COUNT(*)
-        FROM tbl_query_messages TQM
-        WHERE TQM.receiver_id = ${user_id}
-        AND TQM.rfq_id = RFQ.id
-        AND TQM.is_seen = false
-        ) AS "unseen_query_count",
         ARRAY(
             SELECT json_build_object(
                 'id', RFQ_P.id, 
                 'product_id', RFQ_P.product_variant_id,
-                'product_specs', (
-                    SELECT json_agg(json_build_object(
-                        'title', RFQ_P_SPEC.title, 
-                        'value', RFQ_P_SPEC.value, 
-                        'id', RFQ_P_SPEC.id, 
-                        'product_id', RFQ_P_SPEC.product_variant_id, 
-                        'rfq_id', RFQ_P_SPEC.rfq_id))
-                    FROM tbl_rfq_products_specs RFQ_P_SPEC
-                    WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id 
-                      AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
-                      AND RFQ_P.variant = RFQ_P_SPEC.variant
-                  ),
                   'product_details', (
                       SELECT json_agg(json_build_object(
                           'id', T_P.id,
@@ -6573,6 +6569,7 @@ getAllDraftRfqs: async (limit, offset, user_id, project_id, sort, reverse_auctio
               )
               FROM tbl_rfq_products RFQ_P
               WHERE RFQ.id = RFQ_P.rfq_id
+              LIMIT 3
           ) AS "products"
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
