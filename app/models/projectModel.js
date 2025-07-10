@@ -276,7 +276,8 @@ getIdAndNameOfProjects: async (user_id) => {
                 tbl_projects p
             LEFT JOIN tbl_project_team pt ON p.id = pt.project_id
             WHERE 
-                p.user_id = $1 OR pt.user_id = $1`,
+                p.user_id = $1 OR pt.user_id = $1
+            GROUP BY p.id, p.name`,
             [user_id]
         )
         .then(function (data) {
