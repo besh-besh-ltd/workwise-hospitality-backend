@@ -1999,12 +1999,14 @@ LIMIT 1;`;
               CASE
                 WHEN COUNT(*) = 0 THEN false
                 ELSE
-                  COUNT(*) = (
+                  (
+                    SELECT COUNT(*) 
+                      FROM tbl_rfq_products _rpv 
+                      WHERE _rpv.rfq_id = RFQ.id
+                  ) = (
                     SELECT COUNT(*)
-                    FROM tbl_quotes tq2
-                    INNER JOIN tbl_quote_finalization tqf2
-                      ON tq2.id = tqf2.quote_id
-                    WHERE tq2.rfq_id = RFQ.id
+                      FROM tbl_quote_finalization tqf2
+                      WHERE tqf2.rfq_id = RFQ.id
                   )
               END
             FROM tbl_quotes tq
