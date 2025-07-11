@@ -408,7 +408,7 @@ const CmsController = {
           .status(400)
           .json({
             status: true,
-            message:"Testimonial not exist"
+            message:"Join 10,000+ PSU approved Vendors & get verified buyer leads"
           })
           .end();
 
