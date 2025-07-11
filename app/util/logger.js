@@ -107,7 +107,7 @@ const winstonLogger = expressWinston.logger({
 
 // Internal errors will be logged
 const myFormat = format.printf(({ level, meta, timestamp }) => {
-  return `${timestamp} ${level}: ${meta.message}`;
+  return `${timestamp} ${level}: ${meta?.message}`;
 });
 
 const winstonInternalErrorLogger = expressWinston.errorLogger({

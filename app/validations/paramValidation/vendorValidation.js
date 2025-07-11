@@ -113,13 +113,13 @@ const validateParam = (schema) => {
 // Define user_spoc schema separately
 const user_spoc = Joi.object().keys({
   spoc_name: Joi.string()
-    .required()
+    .optional()  // Make optional since we might only update status
     .trim(),
   spoc_role: Joi.string()
     .optional()
     .allow(null, ''),  // Allow null and empty string
   spoc_email: Joi.string()
-    .required()
+    .optional()  // Make optional since we might only update status
     .trim()
     .email({ tlds: { allow: false } }),  // Email validation only if non-empty
   spoc_mobile: Joi.string()
@@ -128,7 +128,10 @@ const user_spoc = Joi.object().keys({
     .trim()
     .regex(/^\+\d{1,4}-\d{6,15}$/, 'Invalid number format') // Only digits if non-empty
     .min(6)  // Minimum 10 digits if non-empty
-    .max(15)  // Maximum 15 digits if non-empty
+    .max(15),  // Maximum 15 digits if non-empty
+  status: Joi.string()
+    .optional()
+    .regex(/^[0-2]$/, 'Status must be 0, 1, or 2')  // Allow 0 (pending), 1 (approved), 2 (rejected)
 });
 
 const schemas = {

@@ -2608,6 +2608,104 @@ const rfqController = {
       });
     }
   },  
+deleteDraft: async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user_id = req.user.id;
+
+    
+
+    const rfqDraft = await rfqModel.checkIfExists(
+      'tbl_rfq',
+      `id = ${id} AND is_published = 0 AND created_by = ${user_id}`
+    );
+   
+    if (!rfqDraft || rfqDraft.length === 0) {
+      return res.status(404).json({
+        status: 2,
+        message: "Draft RFQ not found or does not belong to the user!",
+      });
+    }
+    db.tx(async (t)=>{
+      // Delete main RFQ
+    await rfqModel.delete('tbl_rfq', { id });
+
+    // Delete RFQ-related records
+    const rfqProductIdList = await rfqModel.deleteWithReturnIds(
+      'tbl_rfq_products',
+      { rfq_id: id },
+      t
+    );
+
+    await rfqModel.delete('tbl_rfq_product_vendors', { rfq_id: id });
+    await rfqModel.delete('tbl_rfq_products_specs', { rfq_id: id });
+    await rfqModel.delete('tbl_rfq_product_files', { rfq_product_id: id });
+
+    await rfqModel.delete('tbl_rfq_draft_sheets', {rfq_id:id})
+
+    // Delete tech evaluations and associated data
+    const techEvaluationCondition = { rfq_id: id };
+    const techEvaluationDeletedRecordsIds = await rfqModel.deleteWithReturnIds(
+      'tbl_rfq_product_tech_evaluation',
+      techEvaluationCondition,
+      t
+    );
+
+    let techEvalClauseFilesId = [];
+
+    if (Array.isArray(techEvaluationDeletedRecordsIds) && techEvaluationDeletedRecordsIds.length > 0) {
+      for (const evaluationClauseId of techEvaluationDeletedRecordsIds) {
+        const clauseCondition = {
+          tbl_rfq_product_tech_evaluation_id: evaluationClauseId,
+        };
+
+        const clauseFiles = await rfqModel.deleteWithReturnIds(
+          'tbl_rfq_product_tech_evaluation_clauses',
+          clauseCondition,
+          t
+        );
+
+        if (Array.isArray(clauseFiles) && clauseFiles.length > 0) {
+          techEvalClauseFilesId.push(...clauseFiles);
+        }
+      }
+    }
+
+    // Delete clause files
+    if (techEvalClauseFilesId.length > 0) {
+      for (const techEvalClauseFileId of techEvalClauseFilesId) {
+        const clauseFileCondition = {
+          tbl_rfq_product_tech_evaluation_clauses_id: techEvalClauseFileId,
+        };
+
+        await rfqModel.delete(
+          'tbl_rfq_product_tech_evaluation_clauses_files',
+          clauseFileCondition,
+          t
+        );
+      }
+    }
+
+    // Delete terms and conditions
+    await rfqModel.delete('tbl_rfq_terms_map', { rfq_id: id },t);
+
+    return res.status(200).json({
+      status: 1,
+      message: "RFQ draft and all associated records deleted successfully",
+    });
+    })
+    
+  } catch (error) {
+    console.error("Error deleting RFQ draft:", error);
+    logError("Error deleting RFQ draft:", error);
+    return res.status(500).json({
+      status: 3,
+      message: "An error occurred while deleting the RFQ draft",
+    });
+  }
+},
+
+
 
   getRFQDraftData: async (req, res) => {
     try {
@@ -6301,10 +6399,17 @@ const rfqController = {
        }
 
         const cleanId = item?.variant_id;
+        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
   
-        if (!cleanId) {
+        if (!cleanId || item.fetched_product_name === 'Product not found') {
           validationErrors.push({
-            errors: { product: `${item.core_product_name || item.fetched_product_name} - Product not found` }
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            size: item.size || '',
+            quantity: item.quantity || '',
+            unit: item.unit || '',
+            sheet_name: item.sheet_name || '',
+            description: item.full_product_description || ''
           });
           continue;
         }
@@ -6313,12 +6418,18 @@ const rfqController = {
   
         if (!validProductId) {
           validationErrors.push({
-            errors: { product: `${item.core_product_name || item.fetched_product_name} - Product not found` }
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            size: item.size || '',
+            quantity: item.quantity || '',
+            unit: item.unit || '',
+            sheet_name: item.sheet_name || '',
+            description: item.full_product_description || ''
           });
           continue;
         }
   
-        const productName = item.fetched_product_name || item.core_product_name;
+        const finalProductName = item.fetched_product_name || item.core_product_name;
 
         if (!vendorCache[validProductId]) {
           const vendors = await rfqModel.genericSearchVendors(
@@ -6335,7 +6446,13 @@ const rfqController = {
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             errors: {
-              vendor: `${productName} - No Vendors Found` }
+              vendor: `${finalProductName} - No Vendors Found` },
+            name: finalProductName,
+            size: item.size || '',
+            quantity: item.quantity || '',
+            unit: item.unit || '',
+            sheet_name: item.sheet_name || '',
+            description: item.full_product_description || ''
           });
           continue;
         }
@@ -6344,7 +6461,7 @@ const rfqController = {
   
         products.push({
           product_id: validProductId,
-          name: productName || "Unnamed Product",
+          name: finalProductName || "Unnamed Product",
           variant: variantCount,
           spec: [
             { title: "Size", value: item.size || "" },
@@ -6382,7 +6499,67 @@ const rfqController = {
         availableSheets,
       };
 
-      return [validationErrors, finalObject];
+      // Send email notification for products or vendors not found
+      const hasProductNotFound = validationErrors.some(err => err.errors && err.errors.product);
+      const hasVendorNotFound = validationErrors.some(err => err.errors && err.errors.vendor);
+
+      // Comment if not needed
+      const uniqueErrors = validationErrors.filter((err, index, self) => 
+        index === self.findIndex(e => 
+          (e.errors?.product === err.errors?.product) && 
+          (e.errors?.vendor === err.errors?.vendor) && 
+          ((e.name || e.productName || '') === (err.name || err.productName || ''))
+        )
+      );
+      if (hasProductNotFound || hasVendorNotFound) {
+        try {
+          const rfqNumber = await getNextRfQNumber();
+          let emailContent = `
+            <h2>Products or Vendors Not Found in Workwise Magic Search</h2>
+            <p>Needs to work on these missing products or Vendors urgently.</p>
+            <p><strong>RFQ Number:</strong> ${rfqNumber}</p>
+            <p><strong>User:</strong> ${user.name} (${user.email})</p>
+            <p><strong>Organization:</strong> ${user.organization_name || 'N/A'}</p> 
+            <h3>Details:</h3>
+            <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; width: 100%;">
+              <thead>
+                <tr style="background-color: #f0f0f0;">
+                  <th>Error Type</th>
+                  <th>Product Name</th>
+                </tr>
+              </thead>
+              <tbody>
+          `;
+          uniqueErrors.forEach(err => {
+            let errorType = err.errors && err.errors.product ? 'Product Not Found' : (err.errors && err.errors.vendor ? 'Vendor Not Found' : 'Other');
+            let productName = err.name || err.productName || '';
+            emailContent += `
+              <tr>
+                <td>${errorType}</td>
+                <td>${productName}</td>
+              </tr>
+            `;
+          });
+          emailContent += `
+              </tbody>
+            </table>
+            <p><em>This email was automatically generated by WorkWise RFQ processing system.</em></p>
+          `;
+          
+          const mailOptions = {
+            from: Config.webmasterMail,
+            to: 'siddharth@letsworkwise.com',
+            cc: ['sayankaworkwise@gmail.com', 'prashant@letsworkwise.com'],
+            subject: `Workwise Magic Search - Product And Vendor Not Found Error List`,
+            html: emailContent
+          };
+          sendMail(mailOptions);
+        } catch (emailError) {
+          logError('Error sending product/vendor not found email:', emailError);
+        }
+      }
+
+      return [uniqueErrors, finalObject];
     }
     catch (error) {
       logError(error);
@@ -6402,7 +6579,7 @@ const rfqController = {
   magicSearchRfqCreate: async (req, res, next) => {
     try {
       let aiProcessedBoqJson = req.body.jsonFileUrl;
-      let availableSheets = req.body.availableSheets
+      let availableSheets = req.body.availableSheets;
       const user = req.user;
 
       if(availableSheets && availableSheets.length > 0) {

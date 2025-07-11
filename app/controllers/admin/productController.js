@@ -1161,11 +1161,11 @@ const productController = {
               spocObj.spoc_mobile = spocObj.spoc_mobile?.toString();
 
               // check for exactly same input existence
-              const response = await userModel.check_exactly_same_spoc(spocObj);
+              const response = await vendorModel.check_exactly_same_spoc(spocObj);
 
               if (response.length < 1) {
                 // now inserting the details of the spocObj to the table
-                await userModel.add_user_spoc(spocObj);
+                await vendorModel.add_user_spoc(spocObj);
               }
             }
 

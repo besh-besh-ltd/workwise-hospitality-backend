@@ -537,7 +537,13 @@ const schemas = {
         'Please enter a valid mobile number in the format +91-XXXXXXXXXX'
       )
       .min(7) // Minimum 10 digits if non-empty
-      .max(15) // Maximum 15 digits if non-empty
+      .max(15), // Maximum 15 digits if non-empty
+    vendor_id: Joi.string().optional().allow(null, ''),
+  }),
+  vendor_spoc_params: Joi.object().keys({
+    vendor_id: Joi.string()
+      .required()
+      .regex(/^[0-9]*$/, 'Please send proper vendor id')
   }),
   id: Joi.object().keys({
     id: Joi.string()
