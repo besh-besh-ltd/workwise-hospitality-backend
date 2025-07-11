@@ -400,32 +400,41 @@ const CmsController = {
   },
   testimonial_list: async (req, res, next) => {
     let testimonialListing;
-    try {
-      const { id } = req.params;
-      if (id) {
-        testimonialListing = await cmsModel.testimonialListing(id);
-      } else {
-        testimonialListing = await cmsModel.testimonialListing();
-      }
-
-
-      if (testimonialListing != '') {
-        res
-          .status(200)
-          .json({
-            status: true,
-            data: testimonialListing
-          })
-          .end();
-      } else {
         res
           .status(400)
           .json({
-            status: 2,
-            message: 'Company not exist'
+            status: true,
+            message:"Testimonial not exist"
           })
           .end();
-      }
+
+    try {
+
+      // const { id } = req.params;
+      // if (id) {
+      //   testimonialListing = await cmsModel.testimonialListing(id);
+      // } else {
+      //   testimonialListing = await cmsModel.testimonialListing();
+      // }
+
+
+      // if (testimonialListing != '') {
+      //   res
+      //     .status(200)
+      //     .json({
+      //       status: true,
+      //       data: testimonialListing
+      //     })
+      //     .end();
+      // } else {
+      //   res
+      //     .status(400)
+      //     .json({
+      //       status: 2,
+      //       message: 'Company not exist'
+      //     })
+      //     .end();
+      // }
     } catch (error) {
       logError(error);
       res
