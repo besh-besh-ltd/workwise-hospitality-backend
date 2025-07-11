@@ -1994,6 +1994,24 @@ LIMIT 1;`;
           AND TQM.rfq_id = RFQ.id
           AND TQM.is_seen = false
           ) AS "unseen_query_count",
+          (
+            SELECT
+              CASE
+                WHEN COUNT(*) = 0 THEN false
+                ELSE
+                  (
+                    SELECT COUNT(*) 
+                      FROM tbl_rfq_products _rpv 
+                      WHERE _rpv.rfq_id = RFQ.id
+                  ) = (
+                    SELECT COUNT(*)
+                      FROM tbl_quote_finalization tqf2
+                      WHERE tqf2.rfq_id = RFQ.id
+                  )
+              END
+            FROM tbl_quotes tq
+            WHERE tq.rfq_id = RFQ.id
+          ) AS is_finalized,
           ARRAY(
               SELECT json_build_object('id', TQ.id)
               FROM tbl_quotes TQ
@@ -2368,7 +2386,7 @@ LIMIT 1;`;
                         ))
                         FROM tbl_users TU
                         LEFT JOIN tbl_company TCC2 ON TCC2.id = TU.company_id
-                        LEFT JOIN tbl_quote_finalization _TQF ON _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
+                        LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
                         WHERE TU.id = TQ.created_by
                         ${TA_Vendors === "TA" ? vendorCondition : ''}
                     ),
@@ -5365,6 +5383,10 @@ ORDER BY m.created_at;
       SELECT id AS comment_id, text AS comment_text, sender_id AS created_by
       FROM tbl_rfq_product_tech_evaluation_comments
       WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
+      AND (
+          (sender_id = $2) OR  -- Buyer to Vendor
+          (receiver_id = $2)    -- Vendor to Buyer
+      )
       ORDER BY timestamp ASC;
     `;
 
@@ -5402,9 +5424,9 @@ ORDER BY m.created_at;
       const hasAccess = await userModel.user_rfq_access_review(rfqId, user_id, user_type);
       let commentsResult;
 
-      if (hasAccess) {
+      if (hasAccess && user_type != '3') {
         // User has access to RFQ (creator or team member), show all comments
-        commentsResult = await db.query(fetchAllCommentsQuery, [clause_id]);
+        commentsResult = await db.query(fetchAllCommentsQuery, [clause_id, receiver_id]);
       } else {
         // User doesn't have general access, use original restricted logic
         commentsResult = await db.query(fetchCommentsQuery, [clause_id, sender_id, receiver_id]);
@@ -6513,34 +6535,30 @@ searchVariantVendors: async (product_id, variant_id) => {
     return [];
   }
 },
+
+
+/**
+ * @mukul_jatav 11/07/2025
+ * Reason for Changes:
+ * - To optimize query performance and reduce payload size.
+ * - To remove unnecessary or heavy data from the RFQ draft listing view.
+ * Changes Made:
+ * - Removed: tbl_query_messages and tbl_rfq_products_specs (not needed for drafts).
+ * - Trimmed product_details: Only fetch basic product info (id, name) from tbl_product_variant.
+ * - Limited products array: Return only 2 products per RFQ to minimize response time and frontend load.
+ * 
+ * @PENDING injection protection 
+ */
 getAllDraftRfqs: async (limit, offset, user_id, project_id, sort, reverse_auction, rfq_type, rfq_no) => {
   return new Promise(function (resolve, reject) {
     let q = `
       SELECT
         RFQ.*,
         P.name AS project_name, -- Fetch project_name using project_id from tbl_projects
-        (SELECT COUNT(*)
-        FROM tbl_query_messages TQM
-        WHERE TQM.receiver_id = ${user_id}
-        AND TQM.rfq_id = RFQ.id
-        AND TQM.is_seen = false
-        ) AS "unseen_query_count",
         ARRAY(
             SELECT json_build_object(
                 'id', RFQ_P.id, 
                 'product_id', RFQ_P.product_variant_id,
-                'product_specs', (
-                    SELECT json_agg(json_build_object(
-                        'title', RFQ_P_SPEC.title, 
-                        'value', RFQ_P_SPEC.value, 
-                        'id', RFQ_P_SPEC.id, 
-                        'product_id', RFQ_P_SPEC.product_variant_id, 
-                        'rfq_id', RFQ_P_SPEC.rfq_id))
-                    FROM tbl_rfq_products_specs RFQ_P_SPEC
-                    WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id 
-                      AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
-                      AND RFQ_P.variant = RFQ_P_SPEC.variant
-                  ),
                   'product_details', (
                       SELECT json_agg(json_build_object(
                           'id', T_P.id,
@@ -6551,6 +6569,7 @@ getAllDraftRfqs: async (limit, offset, user_id, project_id, sort, reverse_auctio
               )
               FROM tbl_rfq_products RFQ_P
               WHERE RFQ.id = RFQ_P.rfq_id
+              LIMIT 3
           ) AS "products"
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
