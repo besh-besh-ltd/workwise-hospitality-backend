@@ -400,15 +400,17 @@ const CmsController = {
   },
   testimonial_list: async (req, res, next) => {
     let testimonialListing;
-        res
+  
+
+    try {
+
+          res
           .status(400)
           .json({
             status: true,
             message:"Testimonial not exist"
           })
           .end();
-
-    try {
 
       // const { id } = req.params;
       // if (id) {
