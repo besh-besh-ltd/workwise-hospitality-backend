@@ -433,6 +433,14 @@ RfqRoutes.post('/get-tech-evaluation-rfqs',
   rfqController.getTechEvaluationRFQDetails
 )
 
+// New unified route for sidebar data (now GET, params in query)
+RfqRoutes.get('/get-rfqs',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  rfqController.getRfqs
+)
+
 // vendor side
 RfqRoutes.post('/get-clauses-of-product',
   noLogin.customer_auth,

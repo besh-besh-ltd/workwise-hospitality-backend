@@ -6701,7 +6701,71 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
         console.error(`[MODEL ERROR] Failed to execute ${type} query:`, error);
         throw error;
     }
-}
+},
+
+// New optimized method for sidebar data
+getRfqs: async (user_id, tech_eval, limit, offset, project_id, rfq_no, sort) => {
+  return new Promise(function (resolve, reject) {
+    let techEvalJoin = '';
+    let techEvalCondition = '';
+    
+    if (tech_eval) {
+      techEvalJoin = 'JOIN tbl_rfq_product_tech_evaluation RFQ_T_E ON RFQ.id = RFQ_T_E.rfq_id';
+      techEvalCondition = 'GROUP BY RFQ.id, P.name HAVING COUNT(RFQ_T_E.id) > 0';
+    }
+
+    let q = `
+      SELECT
+        RFQ.id,
+        RFQ.rfq_no,
+        RFQ.timestamp,
+        (
+          SELECT
+            CASE
+              WHEN COUNT(*) = 0 THEN false
+              ELSE
+                (
+                  SELECT COUNT(*) 
+                    FROM tbl_rfq_products _rpv 
+                    WHERE _rpv.rfq_id = RFQ.id
+                ) = (
+                  SELECT COUNT(*)
+                    FROM tbl_quote_finalization tqf2
+                    WHERE tqf2.rfq_id = RFQ.id
+                )
+            END
+          FROM tbl_quotes tq
+          WHERE tq.rfq_id = RFQ.id
+        ) AS is_finalized,
+        P.name AS project_name,
+        RFQ.company_name,
+        RFQ.contact_name,
+        RFQ.response_email,
+        RFQ.contact_number,
+        RFQ.bid_end_date,
+        RFQ.reverse_auction
+      FROM tbl_rfq RFQ
+      LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
+      ${techEvalJoin}
+      WHERE (RFQ.created_by = ${user_id} OR EXISTS (
+        SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+      )) AND RFQ.is_published = 1
+      AND (RFQ.project_id = $1 OR $1 IS NULL)
+      AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
+      ${techEvalCondition}
+      ORDER BY RFQ.timestamp ${sort || 'DESC'}
+      LIMIT $3 OFFSET $2;`;
+
+    db.any(q, [project_id, offset, limit, rfq_no])
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+  });
+},
 
 
 }

@@ -7889,5 +7889,52 @@ getClausesByRfqProductId: async (req,res) =>{
     }
 },
 
+// New unified controller method for sidebar data
+getRfqs: async (req, res) => {
+  try {
+    const user_id = req.user.id;
+    let { tech_eval, page = 1, limit = 10, project_id, rfq_no, sort = 'DESC' } = req.query;
+    
+    // Convert string query parameters to proper types
+    tech_eval = tech_eval === 'true';
+    page = parseInt(page) || 1;
+    limit = parseInt(limit) || 10;
+    project_id = project_id ? parseInt(project_id) : null;
+    rfq_no = rfq_no ? parseInt(rfq_no) : null;
+    
+    // Calculate offset
+    const offset = (page - 1) * limit;
+    
+    // Handle project_id filter
+    if (project_id === -1) {
+      project_id = null;
+    }
+    
+    // Get RFQs
+    const rfqs = await rfqModel.getRfqs(
+      user_id, 
+      tech_eval, 
+      limit, 
+      offset, 
+      project_id, 
+      rfq_no, 
+      sort
+    );
+    
+    res.status(200).json({
+      status: 1,
+      data: rfqs,
+      total_items: rfqs.length
+    });
+  } catch (error) {
+    console.error('Error in getRfqs:', error);
+    res.status(500).json({
+      status: 0,
+      message: 'Error fetching sidebar RFQs',
+      error: error.message
+    });
+  }
+},
+
 };
 export default rfqController;
