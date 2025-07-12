@@ -47,13 +47,13 @@ vendorRoutes.get(
   validateDbBody.vendor_id_exists,
   vendorController.vendor_edit_details
 );
-vendorRoutes.get(
-  '/vendor-rfq-list/:id',
-  passportSignIn,
-  validateParam(schemas.id),
-  validateDbBody.vendor_id_exists,
-  vendorController.vendor_rfq_list
-);
+// vendorRoutes.get(
+//   '/vendor-rfq-list/:id',
+//   passportSignIn,
+//   validateParam(schemas.id),
+//   validateDbBody.vendor_id_exists,
+//   vendorController.vendor_rfq_list
+// );
 
 vendorRoutes.delete(
   '/delete-vendor/:id',
