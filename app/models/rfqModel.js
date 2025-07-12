@@ -6677,8 +6677,124 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
         console.error(`[MODEL ERROR] Failed to execute ${type} query:`, error);
         throw error;
     }
-}
+},
 
+  /**
+   * @description Optimized method to get vendors for reminder with all necessary data in a single query
+   * @param {number} rfq_id 
+   * @returns {Object} - Contains vendors list and RFQ details
+   */
+  getVendorsForReminder: async (rfq_id) => {
+    const query = `
+      WITH rfq_data AS (
+        SELECT 
+          r.id, r.company_name, r.rfq_no, r.status,
+          r.created_by, r.timestamp, r.bid_end_date
+        FROM tbl_rfq r 
+        WHERE r.id = $1
+      ),
+      vendor_products AS (
+        SELECT DISTINCT
+          rpv.user_id,
+          rp.product_variant_id,
+          pv.name as product_name,
+          rpv.variant
+        FROM tbl_rfq_product_vendors rpv
+        JOIN tbl_rfq_products rp ON rp.rfq_id = rpv.rfq_id 
+          AND rp.product_variant_id = rpv.product_variant_id 
+          AND rp.variant = rpv.variant
+        JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+        WHERE rpv.rfq_id = $1
+      ),
+      quoted_products AS (
+        SELECT DISTINCT
+          q.created_by as user_id,
+          qi.product_variant_id,
+          qi.variant
+        FROM tbl_quotes q
+        JOIN tbl_quote_items qi ON qi.quote_id = q.id
+        WHERE q.rfq_id = $1
+          AND q.is_regret = 0
+          AND (qi.unit_price != 0 
+               OR (qi.comment IS NOT NULL AND qi.comment != '') 
+               OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') 
+               OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
+      ),
+      regret_vendors AS (
+        SELECT DISTINCT created_by as user_id
+        FROM tbl_quotes 
+        WHERE rfq_id = $1 AND is_regret = 1
+      )
+      SELECT 
+        rd.id as rfq_id,
+        rd.company_name,
+        rd.rfq_no,
+        rd.status as rfq_status,
+
+        rd.timestamp as rfq_timestamp,
+        rd.bid_end_date as rfq_deadline,
+        u.id as user_id,
+        COALESCE(u.organization_name, u.name) as vendor_name,
+        u.email,
+        json_agg(
+          json_build_object(
+            'product_id', vp.product_variant_id,
+            'name', vp.product_name,
+            'variant', vp.variant
+          )
+        ) FILTER (WHERE vp.product_variant_id IS NOT NULL) as remaining_products
+      FROM rfq_data rd
+      CROSS JOIN (
+        SELECT DISTINCT user_id 
+        FROM vendor_products
+      ) vendor_list
+      JOIN tbl_users u ON u.id = vendor_list.user_id
+      LEFT JOIN vendor_products vp ON vp.user_id = vendor_list.user_id
+        AND NOT EXISTS (
+          SELECT 1 FROM quoted_products qp 
+          WHERE qp.user_id = vp.user_id 
+            AND qp.product_variant_id = vp.product_variant_id 
+            AND qp.variant = vp.variant
+        )
+      LEFT JOIN regret_vendors rv ON rv.user_id = vendor_list.user_id
+      WHERE rv.user_id IS NULL
+        AND u.status = 1
+        AND u.is_deleted = 0
+      GROUP BY rd.id, rd.company_name, rd.rfq_no, rd.status, 
+               rd.timestamp, rd.bid_end_date, u.id, u.organization_name, u.name, u.email
+      HAVING count(vp.product_variant_id) > 0
+      ORDER BY vendor_name;
+    `;
+
+    try {
+      const result = await db.query(query, [rfq_id]);
+      
+      if (result.length === 0) {
+        return { rfq_details: null, vendors: [] };
+      }
+
+      const rfq_details = {
+        id: result[0].rfq_id,
+        company_name: result[0].company_name,
+        rfq_no: result[0].rfq_no,
+        status: result[0].rfq_status,
+
+        timestamp: result[0].rfq_timestamp,
+        bid_end_date: result[0].rfq_deadline
+      };
+
+      const vendors = result.map(row => ({
+        user_id: row.user_id,
+        vendor_name: row.vendor_name,
+        email: row.email,
+        remainingProducts: row.remaining_products || []
+      }));
+
+      return { rfq_details, vendors };
+         } catch (error) {
+       throw error;
+     }
+   },
 
 }
 export default rfqModel;
