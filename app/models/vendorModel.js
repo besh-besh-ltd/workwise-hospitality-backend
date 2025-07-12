@@ -918,10 +918,10 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
       const query = `
         SELECT 
           u.id AS vendor_id,
-          u.name AS vendor_name,
-          u.email AS vendor_email,
-          u.mobile AS vendor_mobile,
-          COALESCE(c.company_name, u.organization_name, u.name) AS vendor_organization,
+          u.name,
+          u.email,
+          u.mobile,
+          COALESCE(c.company_name, u.organization_name, u.name),
           c.company_name,
           -- Pick only ONE token using subquery (latest or earliest)
           (

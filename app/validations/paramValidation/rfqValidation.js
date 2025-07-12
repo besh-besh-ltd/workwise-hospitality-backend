@@ -220,6 +220,8 @@ export const rfqSchemas = {
     response_email: Joi.string().required(),
     contact_name: Joi.string().required(),
     status: Joi.number().allow(1, 2).optional(),
+    termsChanged: Joi.boolean().optional(),
+    selectedTerms: Joi.array().items(termsItems).allow(null).allow(''),
     contact_number: Joi.string()
       .trim()
       .min(6)

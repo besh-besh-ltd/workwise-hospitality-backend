@@ -94,7 +94,8 @@ function getRfqEmailContent({
   buyer_name,
   rfq_id,
   token,
-  emailType
+  emailType,
+  changedDetails,
 }) {
   const baseUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}`;
 
@@ -127,6 +128,44 @@ function getRfqEmailContent({
       };
 
     case RFQ_EMAIL_TYPE.UPDATED_RFQ:
+      return {
+        subject: `RFQ #${rfq_no} has been updated by ${buyer_name}`,
+        header: `<h2>Hello ${vendor_name},</h2>`,
+        content: `
+          <p style="font-size: 15px;">
+            RFQ #${rfq_no} has been updated by ${buyer_name}. Please review the latest details.
+          </p>
+          <a href="${baseUrl}"
+             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+            View RFQ
+          </a>
+        `
+      };
+    case RFQ_EMAIL_TYPE.UPDATED_VENDOR_WITH_CHANGABLE:
+      return {
+        subject: `RFQ #${rfq_no} has been updated by ${buyer_name}`,
+        header: `<h2>Hello ${vendor_name},</h2>`,
+        content: `
+          <p style="font-size: 15px;">
+            RFQ #${rfq_no} has been updated by ${buyer_name}. Please review the latest details.
+          </p>
+          ${
+            changedDetails
+              ? `
+            <p>
+              ${changedDetails
+                .map((detail) => `<strong>${detail}</strong>`)
+                .join('<br>')}
+            </p>
+            `
+              : ''
+          }
+          <a href="${baseUrl}"
+             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+            View RFQ
+          </a>
+        `
+      };
     default:
       return {
         subject: `RFQ #${rfq_no} has been updated by ${buyer_name}`,
@@ -147,7 +186,8 @@ const RFQ_EMAIL_TYPE = {
   NEW_PRODUCT: 'NEW_PRODUCT',
   REMOVED_VENDOR: 'REMOVED_VENDOR',
   UPDATED_RFQ: 'UPDATED_RFQ',
-  NEW_VENDOR: 'NEW_VENDOR'
+  NEW_VENDOR: 'NEW_VENDOR',
+  UPDATED_VENDOR_WITH_CHANGABLE: 'UPDATED_VENDOR_WITH_CHANGABLE'
 };
 
 export { generateEmailTemplate, getRfqEmailContent, RFQ_EMAIL_TYPE };
