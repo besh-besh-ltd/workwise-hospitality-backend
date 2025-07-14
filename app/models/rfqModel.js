@@ -5175,11 +5175,13 @@ ORDER BY m.created_at;
                 SELECT
                     ordered_clauses.rfq_id,
                     ordered_clauses.rfq_product_id,
+                    ordered_clauses.evaluation_id,
                     JSON_AGG(clause_entry ORDER BY clause_entry->>'clause_id') AS clauses
                 FROM (
                           SELECT
                               cf.rfq_id,
                               cf.rfq_product_id,
+                              cf.evaluation_id,
                               JSON_BUILD_OBJECT(
                                       'clause_id', cf.clause_id,
                                       'clause_text', cf.clause_text,
@@ -5190,7 +5192,7 @@ ORDER BY m.created_at;
                                   LEFT JOIN vendor_responses_aggregated vra
                                             ON cf.clause_id = vra.clause_id
                       ) AS ordered_clauses
-                GROUP BY rfq_id, rfq_product_id
+                GROUP BY rfq_id, rfq_product_id, evaluation_id
             ),
 
             vendors_list AS (
@@ -5242,6 +5244,7 @@ ORDER BY m.created_at;
 
         SELECT cd.rfq_id,
               cd.rfq_product_id,
+              cd.evaluation_id,
               cd.clauses,
               vl.vendors
         FROM clauses_data cd
