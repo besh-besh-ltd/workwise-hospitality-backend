@@ -1396,7 +1396,7 @@ update_user_detail: async (req, res, next) => {
       let user_id = req.user.id;
       const user = await userModel.userinfo(user_id);
       // now getting spoc details of the user
-      const spoc = await vendorModel.getSpocDetails(user_id);
+      const spoc = await vendorModel.getSpocDetails(user_id, false);
       if (user) {
         user.password = null;
         if (user.new_profile_image == '') {
@@ -1959,8 +1959,8 @@ update_user_detail: async (req, res, next) => {
         user = await userModel.vendorinfo(user_id, req.user.id);
       }
 
-      // Get Spoc Details of the vendor
-      const spoc_details = await vendorModel.getSpocDetails(user_id);
+      // Get Spoc Details of the vendor - only approved ones for public view
+      const spoc_details = await vendorModel.getSpocDetails(user_id, 1); // 1 = approved status only
       user = {
         ...user,
         spoc_details
@@ -3860,169 +3860,7 @@ update_user_detail: async (req, res, next) => {
     }
   },
 
-  addSpoc: async (req, res, next) => {
-    try {
-      let errors = {};
-      let err = 0;
 
-      const user_id = req.user.id;
-
-      let { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
-
-      spoc_name = spoc_name ?? null;
-      spoc_email = spoc_email?.toLowerCase() ?? null;
-      spoc_mobile = spoc_mobile ?? null;
-      spoc_role = spoc_role ?? null;
-
-      if (!spoc_name && !spoc_email && !spoc_mobile && !spoc_role) {
-        err++;
-        errors.empty_fields = 'All fields are empty or missing.';
-      }
-
-      if (err > 0) {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            errors
-          })
-          .end();
-        return;
-      }
-
-      const spocExist = await userModel.check_exactly_same_spoc({ spoc_name, spoc_email, spoc_mobile, spoc_role, user_id });
-
-      if (spocExist < 1) {
-        const response = await userModel.add_user_spoc({ spoc_name, spoc_email, spoc_mobile, spoc_role, user_id });
-        res
-          .status(200)
-          .json({
-            status: 1,
-            message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to your spoc`
-          })
-          .end();
-      } else {
-        res
-          .status(200)
-          .json({
-            status: 1,
-            message: `spoc already exist`
-          })
-          .end();
-      }
-
-
-    } catch (error) {
-      logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
-
-  updateSpoc: async (req, res, next) => {
-    try {
-      let errors = {};
-      let err = 0;
-
-      const userId = req.user.id;
-      const spocId = req.params.spoc_id;
-
-      const { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
-
-      const name = spoc_name ?? null;
-      const email = spoc_email?.toLowerCase() ?? null;
-      const mobile = spoc_mobile ?? null;
-      const role = spoc_role ?? null;
-
-      if (!name && !email && !mobile && !role) {
-        err++;
-        errors.empty_fields = 'All fields are empty or missing.';
-      }
-
-      if (err > 0) {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            errors
-          })
-          .end();
-        return;
-      }
-
-
-      const response = await userModel.updateUserSpoc(name, email, mobile, role, userId, spocId);
-
-      if (response) {
-        res
-          .status(200)
-          .json({
-            status: 1,
-            message: `spoc of ${response[0].role.toUpperCase()} ${response[0].name} updated`
-          })
-          .end();
-          return;
-      }
-
-    } catch (error) {
-      logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
-
-  deleteSpoc: async (req, res, next) => {
-    try {
-      let errors = {};
-      let err=0;
-      const spocId = req.params.spoc_id;
-  
-      // Validate required fields
-      if (!spocId) {
-       
-        return res.status(400).json({
-          status: 2,
-          
-          errors: { empty_fields: "SPOC ID is required." }
-        });
-      }
-
-      
-      const deleteResult = await userModel.deleteSpoc(spocId);
-      
-  
-      // Check if deletion was successful
-      if (deleteResult && deleteResult.data.length > 0) {
-        return res.status(200).json({
-          status: 1,
-          message: "SPOC deleted successfully",
-          data: deleteResult
-        });
-      } else {
-        return res.status(404).json({
-          status: 2,
-          message: "SPOC not found"
-        });
-      }
-      
-    } catch (error) {
-      logError(error);
-      return res.status(500).json({
-        status: 3,
-        message: "An internal server error occurred. chek"
-      });
-    }
-  },
 
 
   getTopVendorsandProducts: async (req, res) => {
@@ -4176,6 +4014,7 @@ update_user_detail: async (req, res, next) => {
         .end();
     }
   },
+
 
 };
 

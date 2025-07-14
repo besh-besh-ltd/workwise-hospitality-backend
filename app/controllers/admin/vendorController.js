@@ -184,7 +184,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       // Add vendor ID to the SPOC object
       spoc.user_id = vendorId;
       // Insert the SPOC details into the table
-      await userModel.add_user_spoc(spoc);
+      await vendorModel.add_user_spoc(spoc);
     }
   }
 }
@@ -306,7 +306,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       let vendorDetails = await vendorModel.getVendoreditDetails(vendorId);
       let companyDetails = await userModel.getCompanyDetail(vendorId);
       let files = await vendorModel.getFiles(vendorId);
-      let spocDetails = await vendorModel.getSpocDetails(vendorId);
+      let spocDetails = await vendorModel.getSpocDetails(vendorId, false); // Show all SPOCs regardless of status
       resObj.spocDetails = spocDetails;
       resObj.vendorDetails = vendorDetails[0];
       resObj.companyDetails = companyDetails[0];
@@ -775,17 +775,28 @@ if (Array.isArray(spocs) && spocs.length > 0) {
 
       const userId = req.params.id;
       const spocId = req.params.spoc_id;
-
-      const { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
+      
+      // Extract all possible fields
+      const { spoc_name, spoc_email, spoc_mobile, spoc_role, status } = req.body;
  
       const name = spoc_name ?? null;
       const email = spoc_email?.toLowerCase() ?? null;
       const mobile = spoc_mobile ?? null;
       const role = spoc_role ?? null;
+      const statusValue = status !== undefined ? parseInt(status) : null;
 
-      if (!name && !email && !mobile && !role) {
+      // Validate status if provided
+      if (statusValue !== null && ![0, 1, 2].includes(statusValue)) {
         err++;
-        errors.empty_fields = 'All fields are empty or missing.';
+        errors.invalid_status = 'Invalid status value. Must be 0 (disapproved), 1 (approved), or 2 (pending)';
+      }
+
+      // Only validate other fields if they are being updated
+      if (name !== null || email !== null || mobile !== null || role !== null) {
+        if (!name && !email && !mobile && !role) {
+          err++;
+          errors.empty_fields = 'All fields are empty or missing.';
+        }
       }
 
       if (err > 0) {
@@ -799,15 +810,14 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         return;
       }
 
-
-      const response = await vendorModel.updateUserSpoc(name, email, mobile, role, userId, spocId);
+      const response = await vendorModel.updateUserSpoc(name, email, mobile, role, userId, spocId, statusValue);
 
       if (response.length > 0) {
         res
           .status(200)
           .json({
             status: 1,
-            message: `spoc of ${response[0].role.toUpperCase()} ${response[0].name} updated`
+            message: `SPOC ${response[0].name} updated successfully`
           })
           .end();
       } else {
@@ -879,7 +889,6 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       let err = 0;
 
       const user_id = req.params.id;
-
       const { spoc_name, spoc_email, spoc_mobile, spoc_role } = req.body;
  
       const name = spoc_name ?? null;
@@ -903,18 +912,34 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         return;
       }
 
-      const spocExist = await userModel.check_exactly_same_spoc({spoc_name, spoc_email:spoc_email.toLowerCase(), spoc_mobile, spoc_role, user_id});
+      const spocExist = await vendorModel.check_exactly_same_spoc({spoc_name, spoc_email:spoc_email.toLowerCase(), spoc_mobile, spoc_role, user_id});
 
       if(spocExist<1){
-        const response = await userModel.add_user_spoc({spoc_name, spoc_email:spoc_email.toLowerCase(), spoc_mobile, spoc_role, user_id});
+        // Set initial status based on who's creating the SPOC
+        // Auto-approve (status=1) if:
+        // 1. Creator is admin (user_type=1)
+        // 2. Creator is vendor (user_type=3)
+        // Otherwise, set as pending (status=2)
+        const creatorType = parseInt(req.user.user_type ?? req.user.register_as ?? 0, 10);
+        const initialStatus = [1, 3].includes(creatorType) ? 1 : 2;
+
+        const response = await vendorModel.add_user_spoc({
+          spoc_name, 
+          spoc_email: email,
+          spoc_mobile, 
+          spoc_role, 
+          user_id,
+          status: initialStatus,
+          created_by: req.user.id
+        });
         res
         .status(200)
         .json({
           status: 1,
-          message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to your spoc`
+          message: `${response[0].name} as ${response[0].role.toUpperCase()} role added to your spoc${initialStatus === 1 ? ' and auto-approved' : ''}`
         })
         .end();
-      }else{
+      } else {
         res
         .status(200)
         .json({
@@ -954,6 +979,29 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+  spocList: async (req, res, next) => {
+    try {
+      const limit = parseInt(req.query.limit, 10) || 10;
+      const page = parseInt(req.query.page, 10) || 1;
+      const offset = (page - 1) * limit;
+
+      const spocs = await vendorModel.getAllSpocs(limit, offset);
+      const total = spocs.length > 0 ? spocs[0].total_count : 0;
+      res.status(200).json({
+        status: 1,
+        data: spocs,
+        total,
+        page,
+        limit
+      });
+    } catch (error) {
+      logError(error);
+      res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
     }
   },
 };

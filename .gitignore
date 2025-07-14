@@ -55,8 +55,6 @@ Thumbs.db
 .env
 
 
-newrelic.cjs
-
 
 #config
 app.config.js
@@ -68,4 +66,3 @@ app/uploads/
 app/storage/internal/*
 app/storage/logs/*
 ecosystem.config.js
-

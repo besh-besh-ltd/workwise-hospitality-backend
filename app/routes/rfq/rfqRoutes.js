@@ -36,6 +36,13 @@ RfqRoutes.get(
   acl([2, 8]),
   rfqController.getRFQDraftData
 );
+RfqRoutes.delete(
+  '/delete-draft/:id', 
+  passportSignIn,
+  validateParam(rfqSchemas.id),
+  rfqController.deleteDraft
+);  
+
 
 RfqRoutes.post(
   '/add-product-to-draft',
@@ -73,7 +80,7 @@ RfqRoutes.put(
 RfqRoutes.post(
   '/get-details',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check,
+  validateDbBody.rfq_access_check_req_body,
   rfqController.getRfqDetailsById
 );
 
@@ -194,6 +201,22 @@ RfqRoutes.get(
   acl([2, 8]),
   validateDbBody.rfq_access_check,
   rfqController.sendReminder
+);
+RfqRoutes.get(
+  '/vendors-for-reminder/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  rfqController.getVendorsForReminder
+);
+RfqRoutes.post(
+  '/send-selective-reminder/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  rfqController.sendSelectiveReminder
 );
 RfqRoutes.post(
   '/finalize',
@@ -375,7 +398,7 @@ RfqRoutes.delete('/remove-clause/:id',
 
 RfqRoutes.get('/get-clauses/:id',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check_req_body,
+  // validateDbBody.rfq_access_check_req_body,
   rfqController.getClauses
 )
 
@@ -404,7 +427,7 @@ RfqRoutes.post('/get-vendor-names',
 RfqRoutes.post('/get-vendor-responses',
   noLogin.customer_auth,
   validateBody(rfqSchemas.getVendorResponses),
-  validateDbBody.rfq_access_check,
+  // validateDbBody.rfq_access_check,
   rfqController.getVendorResponses
 )
 
@@ -424,6 +447,14 @@ RfqRoutes.post('/tech-evaluation-cleared-vendors',
 RfqRoutes.post('/get-tech-evaluation-rfqs',
   passportSignIn,
   rfqController.getTechEvaluationRFQDetails
+)
+
+// New unified route for sidebar data (now GET, params in query)
+RfqRoutes.get('/get-rfqs',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  rfqController.getRfqs
 )
 
 // vendor side

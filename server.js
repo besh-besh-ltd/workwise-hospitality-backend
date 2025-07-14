@@ -1,5 +1,4 @@
 /* eslint-disable no-console */
-import 'newrelic';
 import express from 'express';
 import http from 'http';
 import dotenv from 'dotenv';
@@ -12,9 +11,11 @@ const __filename = fileURLToPath(import.meta.url);
 
 const __dirname = path.dirname(__filename);
 
-
 // env config
 dotenv.config();
+
+import 'newrelic'; // Import after dotenv so New Relic can read environment variables
+
 
 // Initialize app
 const app = express();

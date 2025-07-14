@@ -400,32 +400,43 @@ const CmsController = {
   },
   testimonial_list: async (req, res, next) => {
     let testimonialListing;
+  
+
     try {
-      const { id } = req.params;
-      if (id) {
-        testimonialListing = await cmsModel.testimonialListing(id);
-      } else {
-        testimonialListing = await cmsModel.testimonialListing();
-      }
 
-
-      if (testimonialListing != '') {
-        res
-          .status(200)
-          .json({
-            status: true,
-            data: testimonialListing
-          })
-          .end();
-      } else {
-        res
+          res
           .status(400)
           .json({
-            status: 2,
-            message: 'Company not exist'
+            status: true,
+            message:"Join 10,000+ PSU approved Vendors & get verified buyer leads"
           })
           .end();
-      }
+
+      // const { id } = req.params;
+      // if (id) {
+      //   testimonialListing = await cmsModel.testimonialListing(id);
+      // } else {
+      //   testimonialListing = await cmsModel.testimonialListing();
+      // }
+
+
+      // if (testimonialListing != '') {
+      //   res
+      //     .status(200)
+      //     .json({
+      //       status: true,
+      //       data: testimonialListing
+      //     })
+      //     .end();
+      // } else {
+      //   res
+      //     .status(400)
+      //     .json({
+      //       status: 2,
+      //       message: 'Company not exist'
+      //     })
+      //     .end();
+      // }
     } catch (error) {
       logError(error);
       res

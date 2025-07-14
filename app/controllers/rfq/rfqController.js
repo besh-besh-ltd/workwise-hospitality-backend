@@ -472,10 +472,10 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
 
       if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
-        mailRecipients.cc = [user_details[0].email, buyerEmail];
+        // mailRecipients.cc = [user_details[0].email];
       } else {
         mailRecipients.to = user_details[0].email;
-        mailRecipients.cc = buyerEmail
+        // mailRecipients.cc = buyerEmail
       }
 
       // console.log(" rfq contoller 377 spoc console ", user_details[0]?.id, spocList)
@@ -717,17 +717,13 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
   // Preparing the email details
   let mailRecipients = {
     from: Config.webmasterMail,
-    to: buyerDetails[0]?.email,
-    // cc:"mukul@letsworkwise.com",
+    to: user.email,
     subject: `Work Wise | New Quotation Received for Your RFQ`,
     html: dynamicHTML
   };
 
   if (spocList && spocList.length > 0) {
     mailRecipients.to = spocList.map(spoc => spoc.email);
-    mailRecipients.cc = user.email;
-  } else {
-    mailRecipients.to = user.email;
   }
 
   // Sending the email
@@ -969,10 +965,11 @@ const containerContent = `
     };
     if (spocList && spocList.length > 0) {
       mailRecipients.to = spocList.map(spoc => spoc.email);
-      mailRecipients.cc = [user_details[0].email, rfqBasicDetails.response_email];
+      // mailRecipients.cc = [user_details[0].email, rfqBasicDetails.response_email];
+      mailRecipients.cc = [user_details[0].email];
     } else {
       mailRecipients.to = user_details[0].email;
-      mailRecipients.cc = rfqBasicDetails.response_email
+      // mailRecipients.cc = rfqBasicDetails.response_email
     }
     sendMail(mailRecipients);
 
@@ -1075,7 +1072,7 @@ const sendQuoteNotificationEmail = async (req) => {
 
       if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
-        mailRecipients.cc = buyer.email;
+        // mailRecipients.cc = buyer.email;
       } else {
         mailRecipients.to = buyer.email;
       }
@@ -1083,7 +1080,7 @@ const sendQuoteNotificationEmail = async (req) => {
       // Sending the email to the buyer
       sendMail(mailRecipients);
 
-      console.log(`Quotation update email sent to buyer: ${buyer.email}`);
+      // console.log(`Quotation update email sent to buyer: ${buyer.email}`);
     } 
   }
 
@@ -1094,7 +1091,8 @@ const sendQuoteNotificationEmail = async (req) => {
    rfq_id,
    rfq_no,
    buyer_name,
-   emailType
+   emailType,
+   changedDetails = []
  ) => {
    try {
      for (const vendor of vendorData) {
@@ -1115,7 +1113,8 @@ const sendQuoteNotificationEmail = async (req) => {
          buyer_name,
          rfq_id,
          token,
-         emailType
+         emailType,
+         changedDetails
        });
 
        const html = generateEmailTemplate(header, content);
@@ -1984,6 +1983,11 @@ const rfqController = {
    
       const data = req.body;
 
+      const { termsChanged, selectedTerms } = data;
+
+      delete data.termsChanged;
+      delete data.selectedTerms;
+
       const rfq_id = data.rfq_id;
       delete data.rfq_id; // Remove rfq_id from update fields
 
@@ -1994,7 +1998,12 @@ const rfqController = {
             vendorModel: withTransaction(vendorModel, t)
         };
 
+      let prevRfqDetails = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}`);
+      if(!prevRfqDetails || prevRfqDetails.length <= 0) {
+        throw new Error("RFQ does not exist with id: ", rfq_id);
+      }
 
+      prevRfqDetails = prevRfqDetails[0];
 
       const updatableData = data.updatableData;
       delete data.updatableData;
@@ -2006,7 +2015,7 @@ const rfqController = {
       const deletedVendorsFromExistingProducts = {}; // { [email]: { name, email, product_names: [] } }
       const addedVednorsToExistingProducts = {}; // { [email]: { name, email, product_names: [] } }
       const updatedDataVendors = [];
-
+      const changedDetails = [];
     
 
       if (products && products?.updatable) {
@@ -2499,11 +2508,55 @@ const rfqController = {
       }
 
       // Update rfq with latest data
-      const updatedData = await transactingModels.rfqModel.updateWithTimestamp(
+      let updatedData = await transactingModels.rfqModel.update(
         'tbl_rfq',
         data,
         rfq_id
       );
+
+      if(updatedData && updatedData.length > 0) {
+        updatedData = updatedData[0];
+
+        // Check each and every field with prevRfqDetails data to get what has changed!
+        if(updatedData.comment != prevRfqDetails.comment) changedDetails.push(`Comment from ${prevRfqDetails.comment} -> ${updatedData.comment}`)
+        if(updatedData.response_email != prevRfqDetails.response_email) changedDetails.push(`Response email from ${prevRfqDetails.response_email} -> ${updatedData.response_email}`)
+        if(updatedData.contact_name != prevRfqDetails.contact_name) changedDetails.push(`Contact name from ${prevRfqDetails.contact_name} -> ${updatedData.contact_name}`)
+        if(updatedData.contact_number != prevRfqDetails.contact_number) changedDetails.push(`Contact number from ${prevRfqDetails.contact_number} -> ${updatedData.contact_number}`)
+        if(updatedData.location != prevRfqDetails.location) changedDetails.push(`Location from ${prevRfqDetails.location} -> ${updatedData.location}`)
+        if(updatedData.bid_end_date != prevRfqDetails.bid_end_date) changedDetails.push(`Procurement end date from ${prevRfqDetails.bid_end_date} -> ${updatedData.bid_end_date}`)
+        if(updatedData.rfq_type != prevRfqDetails.rfq_type) changedDetails.push(`RFQ Type from ${prevRfqDetails.rfq_type} -> ${updatedData.rfq_type}`)
+        if (updatedData.reverse_auction != prevRfqDetails.reverse_auction)
+          changedDetails.push(
+            `Reverse Auction from ${
+              prevRfqDetails.reverse_auction == '-1' ||
+              prevRfqDetails.reverse_auction == '0'
+                ? 'Disabled'
+                : 'Enabled'
+            } -> ${
+              updatedData.reverse_auction == '-1' ||
+              updatedData.reverse_auction == '0'
+                ? 'Disabled'
+                : 'Enabled'
+            }`
+          );
+        if(updatedData.project_id != prevRfqDetails.project_id) changedDetails.push(`Reverse Auction from ${prevRfqDetails.project_id} -> ${updatedData.project_id}`)
+        if(updatedData.ra_start_date != prevRfqDetails.ra_start_date) changedDetails.push(`Reverse Auction Start Date from ${prevRfqDetails.ra_start_date} -> ${updatedData.ra_start_date}`)
+        if(updatedData.ra_end_date != prevRfqDetails.ra_end_date) changedDetails.push(`Reverse Auction End Date from ${prevRfqDetails.ra_end_date} -> ${updatedData.ra_end_date}`)
+      }
+
+      if (termsChanged && selectedTerms && selectedTerms.length > 0) {
+        // First delete existing selectedTerms only if selectedTerms have changed
+        await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id });
+        
+        // Then insert new selectedTerms
+        const rfqTerms = selectedTerms.map(term => ({ 
+            rfq_id, 
+            terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
+        }));
+        await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
+
+        changedDetails.push(`Terms and Conditions`)
+      }
 
       // get rfq vendors list
       let vendors = await transactingModels.rfqModel.gerRFQVendors(rfq_id);
@@ -2515,8 +2568,8 @@ const rfqController = {
         rfq_id
       );
 
-      const buyerName = updatedData?.[0]?.company_name ?? '-';
-      const rfqNo = updatedData?.[0]?.rfq_no ?? '000000';
+      const buyerName = updatedData?.company_name ?? '-';
+      const rfqNo = updatedData?.rfq_no ?? '000000';
 
       const newAddedproductVendorsArray = Object.values(newAddedproductVendors);
       const deletedProductVendorsArray = Object.values(deletedProductVendors);
@@ -2569,6 +2622,16 @@ const rfqController = {
         RFQ_EMAIL_TYPE.UPDATED_VENDOR
       );
 
+      if(changedDetails.length > 0)
+        await sendRfqUpdatedMailToVendors(
+          vendorData,
+          rfq_id,
+          rfqNo,
+          buyerName,
+          RFQ_EMAIL_TYPE.UPDATED_VENDOR_WITH_CHANGABLE,
+          changedDetails
+        );
+
       res.status(200).json({
         status: 1,
         data: updatedData || {},
@@ -2608,6 +2671,104 @@ const rfqController = {
       });
     }
   },  
+deleteDraft: async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user_id = req.user.id;
+
+    
+
+    const rfqDraft = await rfqModel.checkIfExists(
+      'tbl_rfq',
+      `id = ${id} AND is_published = 0 AND created_by = ${user_id}`
+    );
+   
+    if (!rfqDraft || rfqDraft.length === 0) {
+      return res.status(404).json({
+        status: 2,
+        message: "Draft RFQ not found or does not belong to the user!",
+      });
+    }
+    db.tx(async (t)=>{
+      // Delete main RFQ
+    await rfqModel.delete('tbl_rfq', { id });
+
+    // Delete RFQ-related records
+    const rfqProductIdList = await rfqModel.deleteWithReturnIds(
+      'tbl_rfq_products',
+      { rfq_id: id },
+      t
+    );
+
+    await rfqModel.delete('tbl_rfq_product_vendors', { rfq_id: id });
+    await rfqModel.delete('tbl_rfq_products_specs', { rfq_id: id });
+    await rfqModel.delete('tbl_rfq_product_files', { rfq_product_id: id });
+
+    await rfqModel.delete('tbl_rfq_draft_sheets', {rfq_id:id})
+
+    // Delete tech evaluations and associated data
+    const techEvaluationCondition = { rfq_id: id };
+    const techEvaluationDeletedRecordsIds = await rfqModel.deleteWithReturnIds(
+      'tbl_rfq_product_tech_evaluation',
+      techEvaluationCondition,
+      t
+    );
+
+    let techEvalClauseFilesId = [];
+
+    if (Array.isArray(techEvaluationDeletedRecordsIds) && techEvaluationDeletedRecordsIds.length > 0) {
+      for (const evaluationClauseId of techEvaluationDeletedRecordsIds) {
+        const clauseCondition = {
+          tbl_rfq_product_tech_evaluation_id: evaluationClauseId,
+        };
+
+        const clauseFiles = await rfqModel.deleteWithReturnIds(
+          'tbl_rfq_product_tech_evaluation_clauses',
+          clauseCondition,
+          t
+        );
+
+        if (Array.isArray(clauseFiles) && clauseFiles.length > 0) {
+          techEvalClauseFilesId.push(...clauseFiles);
+        }
+      }
+    }
+
+    // Delete clause files
+    if (techEvalClauseFilesId.length > 0) {
+      for (const techEvalClauseFileId of techEvalClauseFilesId) {
+        const clauseFileCondition = {
+          tbl_rfq_product_tech_evaluation_clauses_id: techEvalClauseFileId,
+        };
+
+        await rfqModel.delete(
+          'tbl_rfq_product_tech_evaluation_clauses_files',
+          clauseFileCondition,
+          t
+        );
+      }
+    }
+
+    // Delete terms and conditions
+    await rfqModel.delete('tbl_rfq_terms_map', { rfq_id: id },t);
+
+    return res.status(200).json({
+      status: 1,
+      message: "RFQ draft and all associated records deleted successfully",
+    });
+    })
+    
+  } catch (error) {
+    console.error("Error deleting RFQ draft:", error);
+    logError("Error deleting RFQ draft:", error);
+    return res.status(500).json({
+      status: 3,
+      message: "An error occurred while deleting the RFQ draft",
+    });
+  }
+},
+
+
 
   getRFQDraftData: async (req, res) => {
     try {
@@ -3613,10 +3774,10 @@ const rfqController = {
     }
   },
   getVendorsForProduct: async (req, res) => {
-    let {productId, excludeIds} = req.body;
+    let {productId, excludeIds, searchTerm} = req.body;
     let userId = req.user.id;
     try {
-      const vendorsList = await rfqModel.getVendorsForProduct(productId, excludeIds, userId);
+      const vendorsList = await rfqModel.getVendorsForProduct(productId, excludeIds, userId, searchTerm);
 
       res
         .status(200)
@@ -4383,14 +4544,13 @@ const rfqController = {
           const spocList = vendor.spocs;
         
             let mailRecipients ={
-              from: `${organization_name} ${Config.masterEmail}`,
+              from: `${organization_name ?? name} ${Config.masterEmail}`,
               subject: `RFQ Marked as Closed for #${rfQItem[0]?.rfq_no}`,
               html: dynamicHTMLVendor,
             }
 
             if (spocList && spocList.length > 0) {
               mailRecipients.to = spocList.map(spoc => spoc.spoc_email);
-              mailRecipients.cc = vendor.user_email;
             } else {
               mailRecipients.to = vendor.user_email;
             }
@@ -4542,6 +4702,147 @@ const rfqController = {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+
+  /**
+   * @description Get vendors who haven't submitted quotes for a specific RFQ
+   */
+  getVendorsForReminder: async (req, res, next) => {
+    let rfq_id = req.params.id;
+
+    try {
+      const result = await rfqModel.getVendorsForReminder(rfq_id);
+
+      if (!result.rfq_details) {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "RFQ not found, or is no longer available!"
+          })
+          .end();
+      }
+
+      if (result.rfq_details.status == '2') {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "Cannot get vendors for a closed RFQ!"
+          })
+          .end();
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: result.vendors
+      }).end();
+
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      }).end();
+    }
+  },
+
+  /**
+   * @description Send reminder to selected vendors for a specific RFQ
+   */
+  sendSelectiveReminder: async (req, res, next) => {
+    let rfq_id = req.params.id;
+    const { vendor_ids } = req.body;
+    const { id } = req.user;
+
+    try {
+      if (!vendor_ids || !Array.isArray(vendor_ids) || vendor_ids.length === 0) {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "Please select at least one vendor!"
+          })
+          .end();
+      }
+
+      const result = await rfqModel.getVendorsForReminder(rfq_id);
+
+      if (!result.rfq_details) {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "RFQ not found, or is no longer available!"
+          })
+          .end();
+      }
+
+      if (result.rfq_details.status == '2') {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "Cannot send reminder for a closed RFQ!"
+          })
+          .end();
+      }
+
+      const selectedVendors = result.vendors.filter(vendor => 
+        vendor_ids.includes(vendor.user_id)
+      );
+
+      if (selectedVendors.length === 0) {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: "No valid vendors found for the selected IDs!"
+          })
+          .end();
+      }
+
+      const org_name = result.rfq_details.company_name || '';
+
+      try {
+        for (const vendor of selectedVendors) {
+          await sendReminderRFQMAIL(
+            { user_id: vendor.user_id },
+            vendor.remainingProducts,
+            org_name,
+            rfq_id,
+            result.rfq_details
+          );
+        }
+
+        await rfqModel.insertRFQActivity(rfq_id, id);
+
+        res
+          .status(200)
+          .json({
+            status: 1,
+            message: 'Reminder has been sent successfully to selected vendors!'
+          })
+          .end();
+
+      } catch (error) {
+        logError(error);
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: Config.errorText.value
+          })
+          .end();
+      }
+
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      }).end();
     }
   },  
   
@@ -6301,10 +6602,17 @@ const rfqController = {
        }
 
         const cleanId = item?.variant_id;
+        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
   
-        if (!cleanId) {
+        if (!cleanId || item.fetched_product_name === 'Product not found') {
           validationErrors.push({
-            errors: { product: `${item.core_product_name || item.fetched_product_name} - Product not found` }
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            size: item.size || '',
+            quantity: item.quantity || '',
+            unit: item.unit || '',
+            sheet_name: item.sheet_name || '',
+            description: item.full_product_description || ''
           });
           continue;
         }
@@ -6313,12 +6621,18 @@ const rfqController = {
   
         if (!validProductId) {
           validationErrors.push({
-            errors: { product: `${item.core_product_name || item.fetched_product_name} - Product not found` }
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            size: item.size || '',
+            quantity: item.quantity || '',
+            unit: item.unit || '',
+            sheet_name: item.sheet_name || '',
+            description: item.full_product_description || ''
           });
           continue;
         }
   
-        const productName = item.fetched_product_name || item.core_product_name;
+        const finalProductName = item.fetched_product_name || item.core_product_name;
 
         if (!vendorCache[validProductId]) {
           const vendors = await rfqModel.genericSearchVendors(
@@ -6335,7 +6649,13 @@ const rfqController = {
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             errors: {
-              vendor: `${productName} - No Vendors Found` }
+              vendor: `${finalProductName} - No Vendors Found` },
+            name: finalProductName,
+            size: item.size || '',
+            quantity: item.quantity || '',
+            unit: item.unit || '',
+            sheet_name: item.sheet_name || '',
+            description: item.full_product_description || ''
           });
           continue;
         }
@@ -6344,7 +6664,7 @@ const rfqController = {
   
         products.push({
           product_id: validProductId,
-          name: productName || "Unnamed Product",
+          name: finalProductName || "Unnamed Product",
           variant: variantCount,
           spec: [
             { title: "Size", value: item.size || "" },
@@ -6382,7 +6702,67 @@ const rfqController = {
         availableSheets,
       };
 
-      return [validationErrors, finalObject];
+      // Send email notification for products or vendors not found
+      const hasProductNotFound = validationErrors.some(err => err.errors && err.errors.product);
+      const hasVendorNotFound = validationErrors.some(err => err.errors && err.errors.vendor);
+
+      // Comment if not needed
+      const uniqueErrors = validationErrors.filter((err, index, self) => 
+        index === self.findIndex(e => 
+          (e.errors?.product === err.errors?.product) && 
+          (e.errors?.vendor === err.errors?.vendor) && 
+          ((e.name || e.productName || '') === (err.name || err.productName || ''))
+        )
+      );
+      if (hasProductNotFound || hasVendorNotFound) {
+        try {
+          const rfqNumber = await getNextRfQNumber();
+          let emailContent = `
+            <h2>Products or Vendors Not Found in Workwise Magic Search</h2>
+            <p>Needs to work on these missing products or Vendors urgently.</p>
+            <p><strong>RFQ Number:</strong> ${rfqNumber}</p>
+            <p><strong>User:</strong> ${user.name} (${user.email})</p>
+            <p><strong>Organization:</strong> ${user.organization_name || 'N/A'}</p> 
+            <h3>Details:</h3>
+            <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; width: 100%;">
+              <thead>
+                <tr style="background-color: #f0f0f0;">
+                  <th>Error Type</th>
+                  <th>Product Name</th>
+                </tr>
+              </thead>
+              <tbody>
+          `;
+          uniqueErrors.forEach(err => {
+            let errorType = err.errors && err.errors.product ? 'Product Not Found' : (err.errors && err.errors.vendor ? 'Vendor Not Found' : 'Other');
+            let productName = err.name || err.productName || '';
+            emailContent += `
+              <tr>
+                <td>${errorType}</td>
+                <td>${productName}</td>
+              </tr>
+            `;
+          });
+          emailContent += `
+              </tbody>
+            </table>
+            <p><em>This email was automatically generated by WorkWise RFQ processing system.</em></p>
+          `;
+          
+          const mailOptions = {
+            from: Config.webmasterMail,
+            to: 'siddharth@letsworkwise.com',
+            cc: ['sayankaworkwise@gmail.com', 'prashant@letsworkwise.com'],
+            subject: `Workwise Magic Search - Product And Vendor Not Found Error List`,
+            html: emailContent
+          };
+          sendMail(mailOptions);
+        } catch (emailError) {
+          logError('Error sending product/vendor not found email:', emailError);
+        }
+      }
+
+      return [uniqueErrors, finalObject];
     }
     catch (error) {
       logError(error);
@@ -6402,7 +6782,7 @@ const rfqController = {
   magicSearchRfqCreate: async (req, res, next) => {
     try {
       let aiProcessedBoqJson = req.body.jsonFileUrl;
-      let availableSheets = req.body.availableSheets
+      let availableSheets = req.body.availableSheets;
       const user = req.user;
 
       if(availableSheets && availableSheets.length > 0) {
@@ -7311,8 +7691,10 @@ addTechComment: async (req, res) => {
 getTechComments: async (req, res) => {
   try{
     const { clause_id, sender_id, receiver_id } = req.body;
+    const user_id = req.user.id;
+    const user_type = req.user.user_type;
 
-    const response = await rfqModel.getTechComments(clause_id, sender_id, receiver_id);
+    const response = await rfqModel.getTechComments(clause_id, sender_id, receiver_id, user_id, user_type);
     res
       .status(200)
       .json(response)
@@ -7708,6 +8090,53 @@ getClausesByRfqProductId: async (req,res) =>{
             error: error.message
         });
     }
+},
+
+// New unified controller method for sidebar data
+getRfqs: async (req, res) => {
+  try {
+    const user_id = req.user.id;
+    let { tech_eval, page = 1, limit = 10, project_id, rfq_no, sort = 'DESC' } = req.query;
+    
+    // Convert string query parameters to proper types
+    tech_eval = tech_eval === 'true';
+    page = parseInt(page) || 1;
+    limit = parseInt(limit) || 10;
+    project_id = project_id ? parseInt(project_id) : null;
+    rfq_no = rfq_no ? parseInt(rfq_no) : null;
+    
+    // Calculate offset
+    const offset = (page - 1) * limit;
+    
+    // Handle project_id filter
+    if (project_id === -1) {
+      project_id = null;
+    }
+    
+    // Get RFQs
+    const rfqs = await rfqModel.getRfqs(
+      user_id, 
+      tech_eval, 
+      limit, 
+      offset, 
+      project_id, 
+      rfq_no, 
+      sort
+    );
+    
+    res.status(200).json({
+      status: 1,
+      data: rfqs,
+      total_items: rfqs.length
+    });
+  } catch (error) {
+    console.error('Error in getRfqs:', error);
+    res.status(500).json({
+      status: 0,
+      message: 'Error fetching sidebar RFQs',
+      error: error.message
+    });
+  }
 },
 
 };
