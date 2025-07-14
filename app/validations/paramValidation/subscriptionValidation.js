@@ -81,7 +81,8 @@ const schemas = {
         feature_id: Joi.string().required(),
         allocated_feature: Joi.string().required()
       })
-    )
+    ),
+    user_type: Joi.string().allow('2', '3')
   }),
   id: Joi.object().keys({
     id: Joi.string()

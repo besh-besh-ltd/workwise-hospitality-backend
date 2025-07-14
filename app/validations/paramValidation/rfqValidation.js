@@ -458,3 +458,57 @@ export const rfqSchemas = {
     vendor_id: Joi.number().integer().required()
   })
 };
+
+/**
+ * Middleware: validateGetRfqsQuery
+ *
+ * This middleware validates query parameters for the unified /get-rfqs API endpoint.
+ *
+ * API Purpose:
+ *   - Provides a single, optimized endpoint to fetch RFQs for sidebar use in both Technical Evaluation and Quote Comparison pages.
+ *   - Returns only essential RFQ fields, with fast queries and minimal payload.
+ *   - Enforces user-type-based access: Engineering users can only access technical evaluation RFQs, Finance users can only access non-technical evaluation RFQs.
+ *
+ * Validation Logic:
+ *   - Required query params: page (int, min 1), limit (int, 1-100), tech_eval ('0' or '1' as string)
+ *   - Optional query params: project_id (int), sort ('ASC'|'DESC'), rfq_no (int|null)
+ *   - .unknown(true) allows additional filters to be sent without breaking validation (future-proof)
+ *   - User type logic:
+ *       - If user_type == 9 (Finance), tech_eval must be '0'
+ *       - If user_type == 10 (Engineering), tech_eval must be '1'
+ *   - If any check fails, responds with 400 and a clear error message
+ *
+ * Notes for maintainers:
+ *   - Add new filters to the Joi schema as needed for future sidebar features.
+ *   - Keep user-type logic in this middleware, not in the controller.
+ *   - This ensures strict, centralized validation and access control for the sidebar RFQ API.
+ */
+export function validateGetRfqsQuery(req, res, next) {
+  const schema = Joi.object({
+    page: Joi.number().integer().min(1).required(),
+    limit: Joi.number().integer().min(1).max(100).required(),
+    tech_eval: Joi.boolean().required(),
+    project_id: Joi.number().optional(),
+    sort: Joi.string().valid('ASC', 'DESC').optional(),
+    rfq_no: Joi.number().optional().allow(null),
+    // add any other filters you want to support
+  }).unknown(true); // allow extra params
+
+  const { error, value } = schema.validate(req.query);
+  if (error) {
+    return res.status(400).json({ status: 2, message: error.details[0].message });
+  }
+
+
+  const userType = req.user?.user_type;
+  const techEval = req.query.tech_eval;
+
+  if (userType == 10 && techEval == true) {
+    return res.status(400).json({ status: 2, message: 'Engineering users can only access technical evaluation RFQs' });
+  }
+  if (userType == 9 && techEval == false) {
+    return res.status(400).json({ status: 2, message: 'Finance users can only access non-technical evaluation RFQs' });
+  }
+
+  next();
+}

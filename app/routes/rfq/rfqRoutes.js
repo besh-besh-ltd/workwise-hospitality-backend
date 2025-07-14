@@ -5,6 +5,7 @@ import { validateBody, validateParam } from '../../validations/paramValidation/u
 import { validateDbBody } from '../../validations/dbValidation/userDbValidation.js';
 import passport from '../../middleware/passport.js';
 import { rfqSchemas } from '../../validations/paramValidation/rfqValidation.js';
+import { validateGetRfqsQuery } from '../../validations/paramValidation/rfqValidation.js';
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 import { acl } from '../../helper/common.js';
 import { schema_posts } from '../../validations/paramValidation/productValidation.js';
@@ -453,7 +454,8 @@ RfqRoutes.post('/get-tech-evaluation-rfqs',
 RfqRoutes.get('/get-rfqs',
   passportSignIn,
   validateDbBody.user_id_profileexists,
-  acl([2, 8]),
+  acl([2, 8, 9, 10]),
+  validateGetRfqsQuery,
   rfqController.getRfqs
 )
 

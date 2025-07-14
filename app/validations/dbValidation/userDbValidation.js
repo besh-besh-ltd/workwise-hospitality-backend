@@ -326,80 +326,30 @@ const validateDbBody = {
         .end();
     }
   },
-  buyer_subscription_and_coupon_id_exists: async (req, res, next) => {
+  subscription_and_coupon_id_exists: async (req, res, next) => {
     try {
       let errors = {};
       let err = 0;
       let { sub_id, coupon_code } = req.body;
       let subscriptionIdExist =
-        await subscriptionModel.buyerSubscriptionIdExist(sub_id);
+        await subscriptionModel.subscriptionIdExist(sub_id, req.user.user_type);
       if (subscriptionIdExist.length == 0) {
         err++;
         errors.id = 'Please a send a valid subscription plan';
       }
 
-      let today = dateFormat(new Date(), 'yyyy-mm-dd');
-      let couponCodeExists = await couponModel.checkCouponCodeExists(
-        coupon_code,
-        today
-      );
-      if (couponCodeExists.length == 0) {
-        err++;
-        errors.coupon_code = 'Invalid coupon code';
-      }
-      if (err > 0) {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            errors
-          })
-          .end();
-      } else {
-        next();
-      }
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
-  buyer_subscription_id_exists: async (req, res, next) => {
-    try {
-      let errors = {};
-      let err = 0;
-      let { sub_id, coupon_code } = req.body;
-      let subscriptionIdExist =
-        await subscriptionModel.buyerSubscriptionIdExist(sub_id);
-      if (subscriptionIdExist.length == 0) {
-        err++;
-        errors.id = 'This is not a valid Subscription';
-      } else {
-        let buyerSubscriptionIdCheck =
-          await subscriptionModel.buyerSubscriptionIdCheck(req.user.id);
-        if (buyerSubscriptionIdCheck.length > 0) {
+      if(coupon_code) {
+        let today = dateFormat(new Date(), 'yyyy-mm-dd');
+        let couponCodeExists = await couponModel.checkCouponCodeExists(
+          coupon_code,
+          today,
+          req.user.user_type
+        );
+        if (couponCodeExists.length == 0) {
           err++;
-          errors.id = 'An active subscription plan is already in place';
-        }
-
-        if (coupon_code) {
-          let today = dateFormat(new Date(), 'yyyy-mm-dd');
-          let couponCodeExists = couponModel.checkCouponCodeExists(
-            coupon_code,
-            today
-          );
-          if (couponCodeExists.length == 0) {
-            err++;
-            errors.coupon_code = 'Invalid coupon code';
-          }
+          errors.coupon_code = 'Invalid coupon code';
         }
       }
-
       if (err > 0) {
         res
           .status(400)
