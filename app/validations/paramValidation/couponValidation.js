@@ -74,7 +74,8 @@ const schemas = {
     end_date: Joi.date().iso().min(Joi.ref('start_date')).required(),
     status: Joi.string()
       .required()
-      .regex(/^[0|1]$/, 'status should be 0 or 1')
+      .regex(/^[0|1]$/, 'status should be 0 or 1'),
+    user_type: Joi.string().optional().allow('2', '3')
   }),
   add_offer: Joi.object().keys({
     text: Joi.string().trim().required(),
@@ -87,7 +88,8 @@ const schemas = {
     end_date: Joi.date().iso().min(Joi.ref('start_date')).required(),
     status: Joi.string()
       .required()
-      .regex(/^[0|1]$/, 'status should be 0 or 1')
+      .regex(/^[0|1]$/, 'status should be 0 or 1'),
+    user_type: Joi.string().optional()
   })
 };
 

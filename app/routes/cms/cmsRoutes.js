@@ -30,7 +30,7 @@ CmsRoutes.get('/product-list', CmsController.product_list);
 CmsRoutes.get(
   '/subscription-list',
   passportSignIn,
-  acl([2, 4]),
+  acl([2, 3, 4]),
   subscriptionController.buyerSubscriptionList
 );
 

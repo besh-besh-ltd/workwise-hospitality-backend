@@ -33,12 +33,12 @@ const couponModel = {
         });
     });
   },
-  checkCouponCodeExists: async (coupon_code, today) => {
+  checkCouponCodeExists: async (coupon_code, today, user_type = 2) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT * FROM tbl_coupon WHERE coupon = $1 AND status = 1 AND 
-      start_date <= $2 AND end_date >= $2`,
-        [coupon_code, today]
+      start_date <= $2 AND end_date >= $2 AND user_type = $3::VARCHAR`,
+        [coupon_code, today, user_type]
       )
         .then(function (data) {
           resolve(data);
@@ -88,7 +88,8 @@ const couponModel = {
     end_date,
     status,
     coupon_id,
-    updated_by
+    updated_by,
+    user_type,
   ) => {
     return new Promise(function (resolve, reject) {
       db.one(
@@ -100,7 +101,8 @@ const couponModel = {
         start_date = ($4),
         end_date = ($5),
         status = ($6),
-        updated_by = ($8)
+        updated_by = ($8),
+        user_type = ($9)
        	WHERE id=($7) returning id`,
         [
           coupon,
@@ -110,7 +112,8 @@ const couponModel = {
           end_date,
           status,
           coupon_id,
-          updated_by
+          updated_by,
+          user_type
         ]
       )
         .then(function (data) {
@@ -121,11 +124,14 @@ const couponModel = {
         });
     });
   },
-  getAllCoupon: async (limit, offset, coupon) => {
+  getAllCoupon: async (limit, offset, coupon, user_type = '2') => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = ``;
       if (coupon) {
         dynamicQuery += `AND coupon ILIKE '%${coupon}%'`;
+      }
+      if(!coupon && user_type) {
+        dynamicQuery += `AND user_type = '${user_type}'`;
       }
       db.any(
         `SELECT * 
@@ -142,11 +148,14 @@ const couponModel = {
         });
     });
   },
-  getAllCouponCount: async (coupon) => {
+  getAllCouponCount: async (coupon, user_type = '2') => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = ``;
       if (coupon) {
         dynamicQuery += `AND coupon ILIKE '%${coupon}%'`;
+      }
+      if (!coupon && user_type) {
+        dynamicQuery += `AND user_type = '${user_type}'`
       }
       db.one(
         `SELECT COUNT(id) FROM tbl_coupon WHERE status !=2 ${dynamicQuery}`
@@ -252,7 +261,7 @@ const couponModel = {
         });
     });
   },
-  offerList: async () => {
+  offerList: async (user_type = 2) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT off.*,
@@ -263,7 +272,8 @@ const couponModel = {
         tbl_subscription_plans tsp
         WHERE off.id = tspom.offer_id
         AND tspom.subscription_plan_id = tsp.id AND tspom.status = 1 AND tsp.status != 2) AS "subscription_plan"
-        FROM tbl_offer off WHERE status !=2`
+        FROM tbl_offer off WHERE status !=2 AND off.user_type = $1`,
+        [user_type]
       )
         .then(function (data) {
           resolve(data);
@@ -387,9 +397,11 @@ const couponModel = {
   },
   deleteOffer: async (offerObj, offerId) => {
     return new Promise(function (resolve, reject) {
-      const condition = `WHERE id = $1 RETURNING id`;
+      const condition = ` WHERE id = $1 RETURNING id`;
       const values = [offerId];
       let query = pgp().helpers.update(offerObj, null, 'tbl_offer') + condition;
+
+      console.log("QUERY => ", query);
 
       db.one(query, values)
         .then(function (data) {

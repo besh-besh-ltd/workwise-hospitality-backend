@@ -3,7 +3,7 @@ import db from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 
 const subscriptionModel = {
-  getSubscriptionList: async () => {
+  getSubscriptionList: async (user_type = 2) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT * ,
@@ -13,7 +13,7 @@ const subscriptionModel = {
     WHERE tsfpm.plan_id = tsp.id
             AND tsfpm.feature_id =tsf.id AND tsf.status = 1 AND tsfpm.status = 1) AS "feature"
     FROM tbl_subscription_plans tsp
-    WHERE tsp.status != 2 ORDER BY tsp.price`
+    WHERE tsp.status != 2 ${user_type && user_type != '-1' ? 'AND user_type = $1::VARCHAR' : ''} ORDER BY tsp.plan_name, tsp.price`, [user_type]
       )
         .then(function (data) {
           resolve(data);
@@ -40,7 +40,7 @@ const subscriptionModel = {
         });
     });
   },
-  getBuyerSubscriptionList: async (today) => {
+  getBuyerSubscriptionList: async (today, userType) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT * ,
@@ -58,8 +58,8 @@ const subscriptionModel = {
             off.start_date <= $1 AND off.end_date >= $1 ) AS "Offers"        
 
     FROM tbl_subscription_plans tsp
-    WHERE tsp.status = 1 ORDER BY tsp.price`,
-        [today]
+    WHERE tsp.status = 1 AND tsp.user_type = $2::VARCHAR ORDER BY tsp.price`,
+        [today, userType]
       )
         .then(function (data) {
           resolve(data);
@@ -70,7 +70,7 @@ const subscriptionModel = {
         });
     });
   },
-  getBuyerSubscriptionDetails: async (today, sub_id) => {
+  getBuyerSubscriptionDetails: async (today, sub_id, user_type = 2) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT * ,
@@ -88,8 +88,8 @@ const subscriptionModel = {
             off.start_date <= $1 AND off.end_date >= $1 ) AS "Offers"        
 
     FROM tbl_subscription_plans tsp
-    WHERE tsp.status = 1 AND tsp.id = $2`,
-        [today, sub_id]
+    WHERE tsp.status = 1 AND tsp.id = $2 AND tsp.user_type = $3::VARCHAR`,
+        [today, sub_id, user_type]
       )
         .then(function (data) {
           resolve(data);
@@ -170,7 +170,7 @@ const subscriptionModel = {
         });
     });
   },
-  subscriptionIdExist: async (subscriptionId) => {
+  uncheckedSubscriptionIdExist: async (subscriptionId) => {
     return new Promise(function (resolve, reject) {
       db.any(
         'SELECT * FROM tbl_subscription_plans WHERE id = $1 AND status != 2',
@@ -205,11 +205,11 @@ const subscriptionModel = {
         });
     });
   },
-  buyerSubscriptionIdExist: async (subscriptionId) => {
+  subscriptionIdExist: async (subscriptionId, user_type = null) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        'SELECT * FROM tbl_subscription_plans WHERE id = $1 AND status = 1',
-        [subscriptionId]
+        `SELECT * FROM tbl_subscription_plans WHERE id = $1 AND status = 1 ${user_type ? 'AND user_type = $2::VARCHAR' : ''}`,
+        [subscriptionId, user_type]
       )
         .then(function (data) {
           resolve(data);
@@ -235,12 +235,12 @@ const subscriptionModel = {
         });
     });
   },
-  getSubscriptionFeatureList: async () => {
+  getSubscriptionFeatureList: async (user_type = 2) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT *
     FROM tbl_subscription_feature tsf
-    WHERE tsf.status = 1`
+    WHERE tsf.status = 1 AND tsf.user_type = $1::VARCHAR`, [user_type]
       )
         .then(function (data) {
           resolve(data);
@@ -412,7 +412,7 @@ const subscriptionModel = {
     return new Promise(function (resolve, reject) {
       db.any(
         `UPDATE tbl_subscriptions_payment SET status = $1, date= $2, after_payment_response= $3, payment_id= $4, method= $5
-        WHERE receipt = $6 AND order_id = $7 AND status = 0 RETURNING id, user_subscriptions_id,user_id,amount,
+        WHERE order_id = $7 AND status = 0 RETURNING id, user_subscriptions_id,user_id,amount,
         subscription_charge,	offer_price,	coupon_price`,
         [
           subscriptionPaymentObj.status,
@@ -519,11 +519,7 @@ const subscriptionModel = {
       db.any(
         `SELECT tus.*,users.name,users.email,users.mobile,tsp.plan_name,users.user_type,
         users.status user_status,
-        CASE
-        WHEN tspay.invoice_file IS NULL THEN
-        NULL
-        ELSE tspay.invoice_file
-        END AS invoice_file
+        tspay.invoice_file AS invoice_file
          ${dynamicSelect} 
          LEFT JOIN tbl_users users  on tus.user_id = users.id
          LEFT JOIN tbl_subscription_plans tsp ON tus.plan_id = tsp.id
@@ -606,7 +602,7 @@ const subscriptionModel = {
   },
   updateBuyerSubscription: async (userSubscriptionsObj, id) => {
     return new Promise(function (resolve, reject) {
-      const condition = `WHERE id = $1 RETURNING id`;
+      const condition = ` WHERE id = $1 RETURNING id`;
       const values = [id];
       let query =
         pgp().helpers.update(

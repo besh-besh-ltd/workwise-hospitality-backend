@@ -8,6 +8,7 @@ import Cryptr from 'cryptr';
 import userModel from '../../models/userModel.js';
 import xlsx from 'xlsx';
 import fs from 'fs';
+import moment from 'moment';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -219,8 +220,10 @@ const buyerController = {
         name,
         mobile,
         organization_name,
-        address
+        address,
+        subscription,
       } = req.body;
+
       const email = req.body.email?.toLowerCase() || '';
       let fileName = req?.file?.location;   //get file url from s3 bucket
       let originalFilename = req?.file?.originalname;
@@ -237,6 +240,58 @@ const buyerController = {
       };
       
       await buyerModel.updateBuyer(buyerId, buyerObj);
+
+      if (subscription) {
+        const condition = `user_id = ${parseInt(
+          buyerId
+        )} AND status = 1 AND end_date > CURRENT_DATE ORDER BY end_date DESC LIMIT 1`;
+        let activeSubscripton = await rfqModel.checkIfExists(
+          'tbl_user_subscriptions',
+          condition
+        );
+
+        if (activeSubscripton && activeSubscripton.length > 0) {
+          activeSubscripton = activeSubscripton[0];
+
+          const subscriptionObj = {
+            status: 3
+          };
+          await subscriptionModel.updateBuyerSubscription(
+            subscriptionObj,
+            activeSubscripton.id
+          );
+          
+          await userModel.updateUserAccount(buyerId, {
+            subscription_plan_id: null
+          });
+
+        }
+
+        if (subscription != '-1') {
+          const doesSubscriptionExist = await subscriptionModel.subscriptionIdExist(subscription, buyerDetails[0].user_type);
+          if(doesSubscriptionExist && doesSubscriptionExist.length > 0) {
+            const x = doesSubscriptionExist[0].duration;
+
+            let today = dateFormat(new Date(), 'yyyy-mm-dd');
+            const todayInMoment = moment(today);
+            const endDate = todayInMoment.clone().add(x, 'months').subtract(1, 'day').format('YYYY-MM-DD');
+            const renewDate = todayInMoment.clone().add(x, 'months').format('YYYY-MM-DD');
+
+            let UserSubscriptionObj = {
+              user_id: buyerId,
+              plan_id: doesSubscriptionExist[0].id,
+              status: 1, // payment pending
+              start_date: today,
+              end_date: endDate,
+              renew_date: renewDate
+            };
+
+            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
+            
+            await userModel.updateUserAccount(buyerId, { subscription_plan_id: doesSubscriptionExist[0].id })
+          }
+        }
+      }
 
       res
         .status(200)

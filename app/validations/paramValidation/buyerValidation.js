@@ -172,7 +172,8 @@ const schemas = {
     facebook: Joi.string().optional().allow('', null),
     whatsapp: Joi.string().optional().allow('', null),
     skype: Joi.string().optional().allow('', null),
-    image: Joi.string().optional().allow('', null)
+    image: Joi.string().optional().allow('', null),
+    subscription: Joi.string().optional().allow('', null),
     /* status: Joi.string()
       .required()
       .regex(/^[0|1]$/, 'numeric values only') */
