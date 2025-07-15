@@ -22,6 +22,7 @@ import generativeAI from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel from '../../models/generalModel.js';
+import { deleteSchedule } from '../../helper/createSchedule.js';
 
 
 
@@ -1982,7 +1983,7 @@ const rfqController = {
       await db.tx(async t => {
    
       const data = req.body;
-
+      console.log("rfq controller 1 data", data)
       const { termsChanged, selectedTerms } = data;
 
       delete data.termsChanged;
@@ -2004,6 +2005,15 @@ const rfqController = {
       }
 
       prevRfqDetails = prevRfqDetails[0];
+
+      // List of keys to populate from prev if not already present
+      const fieldsToPopulate = ['company_name', 'ra_start_date', 'ra_end_date'];
+
+      fieldsToPopulate.forEach((key) => {
+        if (!req.body[key] && prevRfqDetails[key]) {
+          req.body[key] = prevRfqDetails[key];
+        }
+      });
 
       const updatableData = data.updatableData;
       delete data.updatableData;
@@ -2539,10 +2549,14 @@ const rfqController = {
                 : 'Enabled'
             }`
           );
+        
         if(updatedData.project_id != prevRfqDetails.project_id) changedDetails.push(`Reverse Auction from ${prevRfqDetails.project_id} -> ${updatedData.project_id}`)
         if(updatedData.ra_start_date != prevRfqDetails.ra_start_date) changedDetails.push(`Reverse Auction Start Date from ${prevRfqDetails.ra_start_date} -> ${updatedData.ra_start_date}`)
         if(updatedData.ra_end_date != prevRfqDetails.ra_end_date) changedDetails.push(`Reverse Auction End Date from ${prevRfqDetails.ra_end_date} -> ${updatedData.ra_end_date}`)
       }
+      let reverseAuctionDateChanged = (updatedData.ra_start_date != prevRfqDetails.ra_start_date) && (updatedData.ra_end_date != prevRfqDetails.ra_end_date)
+     
+
 
       if (termsChanged && selectedTerms && selectedTerms.length > 0) {
         // First delete existing selectedTerms only if selectedTerms have changed
@@ -2580,6 +2594,135 @@ const rfqController = {
         addedVednorsToExistingProducts
       );
       const updatedDataVendorsArray = Object.values(updatedDataVendors);
+      
+   
+
+
+       const productsData = await rfqModel.getProductsByRfqId(rfq_id ,t );
+
+       const vendorProductmap = {}; // This is different variable check the  spelling.
+
+       //Creating  A New product vendor map
+       productsData.map((product) => {
+         const { name, vendors } = product;
+
+         vendors.map((vendor) => {
+           const { user_id } = vendor;
+
+           if (!vendorProductmap[user_id]) {
+             vendorProductmap[user_id] = {
+               vendorDetails: { ...vendor },
+               products: []
+             };
+           }
+
+           vendorProductmap[user_id].products.push({ product_name: name });
+         });
+       });
+      const deleteScheduleTypesForVendors = ["oneDayBeforeAuctionVendor",   "auctionStartVendor",   "midAuctionReminderVendor",  "auctionEndVendor"];
+      const deleteScheduleTypesForbuyers = ["auctionStartBuyer",   "auctionEndBuyer"];
+    
+      if(!data.reverse_auction){
+        //Delete Vendor Schedules if reverse auction is disabled
+       for(const vendorId of Object.keys(vendorProductmap)) {
+       
+        for(const scheduleType of deleteScheduleTypesForVendors) {
+         
+        await deleteSchedule(rfq_id ,scheduleType, vendorId);
+       }
+       }
+      //Delete Buyer Schedules if reverse auction is disabled
+      for(const scheduleType of deleteScheduleTypesForbuyers) {
+        await deleteSchedule(rfq_id ,scheduleType);
+      }
+    }
+      else if(data.reverse_auction === prevRfqDetails.reverse_auction){
+        //further processing for schedules
+        
+
+        if(reverseAuctionDateChanged){
+          //Date changed hence delete all the existing schedules for vendors
+          for (const vendorId of Object.keys(vendorProductmap)) {
+            
+            for (const scheduleType of deleteScheduleTypesForVendors) {
+              await deleteSchedule(rfq_id, scheduleType, vendorId);
+            }
+          }
+          //Date changed hence delete all the existing schedules for buyers
+          for (const scheduleType of deleteScheduleTypesForbuyers) {
+            await deleteSchedule(rfq_id, scheduleType);
+          }
+          //Create new schedules for vendors
+          await raSchedulerForVendor(req, rfq_id , vendorProductmap);
+
+          //create new schedules for buyers
+         await raSchedulerForBuyer(rfq_id, req , productsData);
+
+        }
+        else{
+          //handle the case where reverse auction is enabled but date is not changed
+          //vendors might have been added or removed
+          //So we need to add or remove some of the vendors schedules who have been deleted or added
+          //We will not delete the existing schedules as date is not changed
+          
+          if (deletedVendorsFromExistingProductsArray.length > 0) {
+            for (const vendor of deletedVendorsFromExistingProductsArray) {
+              const { vendor_id } = vendor;
+              for (const scheduleType of deleteScheduleTypesForVendors) {
+              
+                await deleteSchedule(rfq_id, scheduleType, vendor_id);
+              }
+            }
+          }
+
+          
+          if (deletedProductVendorsArray.length > 0) {
+            for (const vendor of deletedProductVendorsArray) {
+              const { vendor_id } = vendor;
+              for (const scheduleType of deleteScheduleTypesForVendors) {
+                
+                await deleteSchedule(rfq_id, scheduleType, vendor_id);
+              }
+            }
+          }
+
+          //create  a new product vendor map for new added vendors either in new products or existing products
+    
+          // Step 1: Collect all target vendor IDs from both arrays
+          const targetVendorIds = new Set([
+            ...newAddedproductVendorsArray.map((v) => v.vendor_id),
+            ...addedVednorsToExistingProductsArray.map((v) => v.vendor_id)
+          ]);
+
+          // Step 2: Filter vendorProductmap to include only those IDs
+          const filteredProductVendorMap = Object.fromEntries(
+            Object.entries(vendorProductmap).filter(([vendorId, vendorData]) =>
+              targetVendorIds.has(Number(vendorId))
+            )
+          );
+
+          // Step 3: Done
+          console.log('✅ filteredProductVendorMap:', filteredProductVendorMap);
+          //Create new schedules for vendors
+          if(Object.keys(filteredProductVendorMap).length > 0)
+            {
+              await raSchedulerForVendor(req, rfq_id, filteredProductVendorMap);
+            }
+         }
+      }
+      
+      else if(data.reverse_auction && !prevRfqDetails.reverse_auction){
+          //Create new schedules for vendors
+          await raSchedulerForVendor(req, rfq_id , vendorProductmap);
+
+          //create new schedules for buyers
+        await raSchedulerForBuyer(rfq_id, req , productsData);
+        
+      }
+      
+
+
+
 
       await sendRfqUpdatedMailToVendors(
         newAddedproductVendorsArray,
@@ -2621,16 +2764,6 @@ const rfqController = {
         buyerName,
         RFQ_EMAIL_TYPE.UPDATED_VENDOR
       );
-
-      if(changedDetails.length > 0)
-        await sendRfqUpdatedMailToVendors(
-          vendorData,
-          rfq_id,
-          rfqNo,
-          buyerName,
-          RFQ_EMAIL_TYPE.UPDATED_VENDOR_WITH_CHANGABLE,
-          changedDetails
-        );
 
       res.status(200).json({
         status: 1,

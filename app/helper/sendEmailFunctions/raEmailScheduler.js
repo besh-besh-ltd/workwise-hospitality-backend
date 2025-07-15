@@ -27,44 +27,48 @@ function formatDate(date) {
 }
 
 // Add this utility function at the top of your file
-function parseISTDate(datetimeStr) {
-  console.log("Parsing date string:", datetimeStr);
+/**
+ * Accepts "YYYY‑MM‑DDTHH:mm"  or  "YYYY‑MM‑DD HH:mm"
+ * Returns a JS Date in **UTC** that represents the same clock
+ * time in IST (+05:30).
+ */
+function parseISTDate(datetimeStr = '') {
   
-  // Handle cases where time might be missing
-  if (!datetimeStr.includes(' ')) {
-    datetimeStr += ' 00:00';  // Default to midnight
+
+  if (!datetimeStr) {
+    throw new Error('Empty date string');
   }
 
-  const cleaned = datetimeStr.trim().replace(/\s+/g, ' ');
-  const [datePart, timePart] = cleaned.split(' ');
-  
+  /* 1) normalise  -------------------------------------------------------- */
+  let s = datetimeStr.trim().replace('T', ' ');
+
+  /* if there’s still no time, default to 00:00 */
+  if (!/\d{2}:\d{2}/.test(s)) s += ' 00:00';
+
+  /* 2) split safely  ----------------------------------------------------- */
+  const [datePart, timePart] = s.split(' ');
   if (!datePart || !timePart) {
     throw new Error(`Invalid date format: ${datetimeStr}`);
   }
 
-  // Extract components
-  const [year, month, day] = datePart.split('-').map(Number);
-  const [hours, minutes] = timePart.split(':').map(Number);
+  const [y, m, d]       = datePart.split('-').map(Number);
+  const [hh, mm = 0]    = timePart.split(':').map(Number);
 
-  // Validate components
-  if (
-    isNaN(year) || isNaN(month) || isNaN(day) ||
-    isNaN(hours) || isNaN(minutes)
-  ) {
+  if ([y, m, d, hh, mm].some(v => isNaN(v))) {
     throw new Error(`Invalid date components: ${datetimeStr}`);
   }
 
-  // Create date in UTC equivalent to IST (IST = UTC+5:30)
-  const date = new Date(Date.UTC(year, month - 1, day, hours - 5, minutes - 30));
+  /* 3) IST → UTC  -------------------------------------------------------- */
+  const utc = new Date(Date.UTC(y, m - 1, d, hh - 5, mm - 30));
 
-  // Validate final date
-  if (isNaN(date.getTime())) {
-    throw new Error(`Invalid date: ${datetimeStr}`);
+  if (isNaN(utc)) {
+    throw new Error(`Resulting Date is invalid: ${datetimeStr}`);
   }
 
-  console.log("Parsed UTC date:", date.toISOString());
-  return date;
+  console.log('Parsed UTC date:', utc.toISOString());
+  return utc;
 }
+
 
 function isValidAuctionWindow(start, end) {
     return start && end && start.getTime() < end.getTime();
@@ -103,9 +107,12 @@ export const raSchedulerForBuyer = async (rfqNumber,req, products) => {
   
     const { ra_start_date, ra_end_date ,contact_number , response_email,contact_name,project_id} = req.body;
 
+
     const startDate = parseISTDate(ra_start_date);
 
     const endDate = parseISTDate(ra_end_date);
+
+  
     
         // Adjust the dates to avoid weekend triggers
     const adjustedStartDate = adjustDateForWeekend(startDate, 'start');
@@ -192,6 +199,8 @@ export const raSchedulerForVendor = async (req, rfqNumber, productVendormap) => 
 
   const { ra_start_date, ra_end_date , company_name } = req.body;
 
+ 
+
   // Validate required parameters
   if (!ra_start_date || !ra_end_date) {
     throw new Error('Missing required auction dates');
@@ -228,7 +237,7 @@ export const raSchedulerForVendor = async (req, rfqNumber, productVendormap) => 
         token,
         rfq_id: rfqNumber, // Add rfq_id for downstream use
         vendor_id: vendor.vendorDetails.user_id, // Add vendor_id
-        buyer_company_name : company_name
+        buyer_company_name : company_name || "N/A" // Add buyer company name
       };
 
       vendorPayloadList.push(vendorObject);

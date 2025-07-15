@@ -1,8 +1,21 @@
-import { SchedulerClient, CreateScheduleCommand } from "@aws-sdk/client-scheduler";
+import { SchedulerClient, CreateScheduleCommand, DeleteScheduleCommand } from "@aws-sdk/client-scheduler";
+import { randomUUID } from "crypto";
 
 const client = new SchedulerClient({ region: "ap-south-1" });
 
-export const createSchedule = async ({ rfqId, type,vendor_id="", scheduledTimeIST, payload }) => {
+
+
+
+/**
+ * Delete an existing EventBridge Scheduler schedule.
+ *
+ * @param {Object}   opts
+ * @param {string}   opts.rfqId        – RFQ id that was embedded in the schedule name
+ * @param {string}   opts.type         – schedule prefix (e.g. "auctionStartVendor")
+ * @param {string=}  opts.vendor_id    – user / vendor id, default empty string
+ */
+
+export const createSchedule = async ({ rfqId, type, vendor_id="", scheduledTimeIST, payload }) => {
   const scheduleName = `${type}-rfq-${rfqId}-${vendor_id}`;
   const istTime = new Date(scheduledTimeIST);
 
@@ -15,7 +28,7 @@ export const createSchedule = async ({ rfqId, type,vendor_id="", scheduledTimeIS
   
   const params = {
     Name: scheduleName,
-    GroupName: "default",
+    GroupName: process.env.GroupName, // Use the environment variable for group name
     ScheduleExpression: `at(${awsTimeString})`,  // Removed milliseconds and 'Z'
     FlexibleTimeWindow: { Mode: "OFF" },
     Target: {
@@ -41,5 +54,29 @@ export const createSchedule = async ({ rfqId, type,vendor_id="", scheduledTimeIS
   } catch (err) {
     console.error("❌ Schedule creation failed:", err);
     throw err;
+  }
+};
+
+export const deleteSchedule = async (rfq_id , type , vendor_id = "") => {
+  const scheduleName = `${type}-rfq-${rfq_id}-${vendor_id}`;
+  const params = {
+    Name: scheduleName,
+    GroupName: process.env.GroupName || "default", // same group you used at creation
+    ClientToken: randomUUID(),                     // idempotency
+  };
+
+  try {
+    const cmd = new DeleteScheduleCommand(params);
+    await client.send(cmd);
+    console.log("✅ Schedule deleted:", scheduleName);
+    return { ok: true, scheduleName };
+  } catch (err) {
+    // Swallow “not found” so repeated deletes don’t crash your service
+    if (err.name === "ResourceNotFoundException") {
+      console.warn("⚠️  Schedule not found (already deleted?):", scheduleName);
+      return { ok: false, reason: "not_found", scheduleName };
+    }
+    console.error("❌ Schedule deletion failed:", err);
+    throw err; // re‑throw for unexpected errors
   }
 };
