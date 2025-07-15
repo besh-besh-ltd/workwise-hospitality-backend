@@ -26,7 +26,7 @@ const rfqModel = {
     });
   },
 
-  getProductsByRfqId: async (rfqId) => {
+  getProductsByRfqId: async (rfqId, db_con = db) => {
     try {
       if(!rfqId) throw new Error("RFQ ID is required!")
       let q = `
@@ -60,7 +60,7 @@ const rfqModel = {
         WHERE rfq.id = $1;
       `
 
-      return await db.any(q, [rfqId])
+      return await db_con.any(q, [rfqId])
     } catch (error) {
       throw error;
     }
