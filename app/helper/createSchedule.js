@@ -15,22 +15,34 @@ const client = new SchedulerClient({ region: "ap-south-1" });
  * @param {string=}  opts.vendor_id    – user / vendor id, default empty string
  */
 
-export const createSchedule = async ({ rfqId, type, vendor_id="", scheduledTimeIST, payload }) => {
+export const createSchedule = async ({
+  rfqId,
+  type,
+  vendor_id = "",
+  scheduledTimeIST,
+  payload,
+}) => {
+  // ---------- 1. build identifiers ----------
   const scheduleName = `${type}-rfq-${rfqId}-${vendor_id}`;
-  const istTime = new Date(scheduledTimeIST);
+  const ist = new Date(scheduledTimeIST);
 
-  if (isNaN(istTime.getTime())) {
+  if (Number.isNaN(ist.getTime())) {
     throw new Error("Invalid scheduledTimeIST format");
   }
 
-  // Format to AWS-compatible string: yyyy-mm-ddThh:mm:ss
-  const awsTimeString = istTime.toISOString().replace(/\.\d{3}Z$/, '');
-  
-  const params = {
+  // keep the value as IST and let Scheduler do the TZ conversion
+  const isoWithoutMs = ist.toISOString().replace(/\.\d{3}Z$/, "");
+
+  // base request shared by both create & update paths
+  const baseParams = {
+    GroupName: process.env.GroupName,
     Name: scheduleName,
-    GroupName: process.env.GroupName, // Use the environment variable for group name
-    ScheduleExpression: `at(${awsTimeString})`,  // Removed milliseconds and 'Z'
+    // run exactly once at() expression
+    ScheduleExpression: `at(${isoWithoutMs})`,
+    ScheduleExpressionTimezone: "Asia/Kolkata",
     FlexibleTimeWindow: { Mode: "OFF" },
+    ActionAfterCompletion: "DELETE", // auto‑remove after execution
+    ClientToken: randomUUID(),       // idempotency
     Target: {
       Arn: process.env.LAMBDA_ARN,
       RoleArn: process.env.EVENTBRIDGE_ROLE_ARN,
@@ -38,22 +50,30 @@ export const createSchedule = async ({ rfqId, type, vendor_id="", scheduledTimeI
         type,
         payload: {
           ...payload,
-          startTime: scheduledTimeIST
-        }
+          startTime: scheduledTimeIST,
+        },
       }),
     },
   };
 
-  console.log("AWS ScheduleExpression:", params.ScheduleExpression);
-  
   try {
-    const command = new CreateScheduleCommand(params);
-    const response = await client.send(command);
+    // ---------- 2. attempt to create ----------
+    const command = new CreateScheduleCommand(baseParams);
+    const res = await client.send(command);
     console.log("✅ Schedule created:", scheduleName);
-    return response;
+    return { created: true, arn: res.ScheduleArn };
   } catch (err) {
-    console.error("❌ Schedule creation failed:", err);
-    throw err;
+    // ---------- 3. handle “already exists” ----------
+    if (err.name === "ConflictException") {
+      // clash == the schedule name exists → update it in‑place
+      const updateCmd = new UpdateScheduleCommand(baseParams);
+      const res = await client.send(updateCmd);
+      console.log("🔄 Schedule updated:", scheduleName);
+      return { created: false, updated: true, arn: res.ScheduleArn };
+    }
+
+    console.error("❌ Schedule operation failed:", err);
+    throw err; // rethrow anything we didn’t expect
   }
 };
 
