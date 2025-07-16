@@ -6,7 +6,8 @@ import {
   withTransaction,
   validateNumber,
   generateSignature,
-  PERSISTENCE_STATUSES
+  PERSISTENCE_STATUSES,
+  normalizeErrors
 } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
 import userModel from '../../models/userModel.js';
@@ -24,6 +25,7 @@ import generativeAI from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel from '../../models/generalModel.js';
+import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 
@@ -60,16 +62,19 @@ export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, st
           }
         </p>
         ${
-          status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
-          (status == PERSISTENCE_STATUSES.COMPLETED ?
-            `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management?tab=create-rfq&draft_id=${persisted_rfq_id}"
+          (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+          status == PERSISTENCE_STATUSES.COMPLETED)
+            ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management?tab=create-rfq&draft_id=${persisted_rfq_id}"
               style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
             View Draft
-          </a>` : '')
+          </a>`
+            : ''
         }
-        ${status == PERSISTENCE_STATUSES.FAILED ? (
-          `<strong>${errors}</strong>`
-        ) : ''}
+        ${
+          status == PERSISTENCE_STATUSES.FAILED
+            ? `<strong>${errors}</strong>`
+            : ''
+        }
       `;
 
       const html = generateEmailTemplate(headerContent, containerContent);
@@ -3188,6 +3193,7 @@ deleteDraft: async (req, res) => {
 
         let rfq_id;
         let rfqData;
+        let sheetData;
         let isNew = false;
 
         const sheet_id = req.body.sheet_id;
@@ -3207,9 +3213,23 @@ deleteDraft: async (req, res) => {
                     message: 'Specified draft RFQ not found or not authorized' 
                 });
             }
-            
+
             rfqData = specificRfq;
             rfq_id = specificRfq.id;
+
+            const sheetRes = await rfqModel.findOne('tbl_rfq_draft_sheets', {
+              id: sheet_id,
+              rfq_id,
+            })
+
+            if (!sheetRes) {
+                return res.status(404).json({ 
+                    status: 2, 
+                    message: 'Specified sheet data not found or not authorized' 
+                });
+            }
+
+            sheetData = sheetRes;
         } else {
             // Create a new RFQ
 
@@ -3248,8 +3268,15 @@ deleteDraft: async (req, res) => {
 
         // Add products to the RFQ
         const product = req.body;
-        if (!product || !product.variant_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
-          return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
+        if (!product || !product.variant_id) {
+          return res.status(400).json({ status: 2, message: 'Invalid product data' });
+        }
+
+        if(!product.vendors || product.vendors.length === 0) {
+          const vendors = await rfqModel.genericSearchVendors(user_id, product.variant_id);
+          if(vendors && vendors.length > 0) {
+            product.vendors = vendors.map(vendor => ({ vendor_id: vendor.id }));
+          }
         }
 
         const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
@@ -3282,6 +3309,33 @@ deleteDraft: async (req, res) => {
         });
 
         await Promise.all(vendorPromises);
+
+        if(product?.specs && typeof product.specs == 'object') {
+          for(const [key, value] of Object.entries(product.specs)) {
+            const specData = {
+              title: key,
+              value,
+              rfq_id,
+              product_variant_id: product.variant_id,
+              variant: variant,
+              sheet_id,
+            }
+            
+            await rfqModel.insert('tbl_rfq_products_specs', specData);
+          }
+        }
+
+        if(product.isUnfoundProduct && product.unfoundName) {
+          let validationErrors = sheetData.validation_errors;
+          if(validationErrors && Array.isArray(validationErrors) && validationErrors.length > 0) {
+            const updatedErrors = validationErrors.filter(error => error.name != product.unfoundName);
+
+            const updatedSheetData = {
+              validation_errors: JSON.stringify(updatedErrors)
+            }
+            await rfqModel.update('tbl_rfq_draft_sheets', updatedSheetData, sheet_id);
+          }
+        }
 
         res.status(200).json({
             status: 1,
@@ -6827,7 +6881,8 @@ deleteDraft: async (req, res) => {
             quantity: item.quantity || '',
             unit: item.unit || '',
             sheet_name: item.sheet_name || '',
-            description: item.full_product_description || ''
+            description: item.full_product_description || '',
+            similar_products: item.reranked_variants || [],
           });
           continue;
         }
@@ -6842,7 +6897,8 @@ deleteDraft: async (req, res) => {
             quantity: item.quantity || '',
             unit: item.unit || '',
             sheet_name: item.sheet_name || '',
-            description: item.full_product_description || ''
+            description: item.full_product_description || '',
+            similar_products: item.reranked_variants || [],
           });
           continue;
         }
@@ -6870,7 +6926,7 @@ deleteDraft: async (req, res) => {
             quantity: item.quantity || '',
             unit: item.unit || '',
             sheet_name: item.sheet_name || '',
-            description: item.full_product_description || ''
+            description: item.full_product_description || '',
           });
           continue;
         }
@@ -6886,6 +6942,7 @@ deleteDraft: async (req, res) => {
             { title: "Spec", value: item.feature_or_specifications || "" },
             { title: "Quantity", value: item.quantity || 0 },
             { title: "Unit", value: item.unit || "NA" },
+            { title: "total_price", value: item.total_price || "0" }
           ],
           vendors: vendorResult,
           comment: item.full_product_description || "",
@@ -6915,6 +6972,7 @@ deleteDraft: async (req, res) => {
         term_and_condition_files: [],
         sheetNameList: (availableSheets && availableSheets.length > 0) ? availableSheets.map(sheet => sheet.sheet_name) : Array.from(sheetNameList),
         availableSheets,
+        validationErrors,
       };
 
       // Send email notification for products or vendors not found
@@ -6990,12 +7048,32 @@ deleteDraft: async (req, res) => {
   initiateMagicSearch: async (req, res) => {
     try {
       const { id } = req.user;
-      const { file_name } = req.body;
+      const { file_name, type = 'rfq' } = req.body;
 
       if(!file_name) return res.status(400).json({
         status: 3,
         message: 'File name is required for persistant processing.'
       })
+
+      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing'`)
+      if(processing && processing.length > 0) {
+        processing = processing[0];
+
+        const inputUtcMoment = moment.utc(processing.started_at);
+        const inputIstMoment = inputUtcMoment.tz('Asia/Kolkata');
+        const nowIst = moment().tz('Asia/Kolkata');
+
+        const diffInHours = nowIst.diff(inputIstMoment, 'hours', true);
+        if(diffInHours > 2) {
+          await rfqModel.updatePersistenceJobStatus(processing.id, PERSISTENCE_STATUSES.TERMINATED, null, 'Due to a longer processing time, we have terminated this BOQ Processing, please upload this BOQ again to retry the processing');
+        } else {
+          return res.status(400).json({
+            status: 5,
+            message: 'This BOQ is already under processing, please refer to the Processing tab for more info!',
+            processing,
+          })
+        }
+      }
       
       const baseUrl = process.env.APP_BASE_PATH;
       const secret = process.env.WEBHOOK_SECRET;
@@ -7005,7 +7083,7 @@ deleteDraft: async (req, res) => {
       const signature = generateSignature(message, secret);
 
       return db.tx(async t => {
-        let persistence = await rfqModel.persistAIJobInDB(id, file_name, signature, t);
+        let persistence = await rfqModel.persistAIJobInDB(id, file_name, signature, type, t);
   
         if(!persistence || persistence.length <= 0) {
           return res.status(400).json({
@@ -7027,6 +7105,8 @@ deleteDraft: async (req, res) => {
         })
       })
     } catch (error) {
+      console.log(error);
+      logError(error);
       return res.status(400).json({
         status: 3,
         message: 'Something went wrong while initiating the job, please try again!',
@@ -7038,17 +7118,17 @@ deleteDraft: async (req, res) => {
   handleAIWebhook: async (req, res) => {
     try {
       let { persistence_id, user } = req.query;
-      const { jsonFileUrl, availableSheets, errors, status } = req.body;
+      const { jsonFileUrl, availableSheets, errors, type } = req.body;
 
       persistence_id = parseInt(persistence_id);
 
-      if((errors && errors.length > 0)) {
+      if((errors && errors.length > 0) || (!jsonFileUrl || !availableSheets)) {
         console.log("FOUND ERRORS FROM AI SERVER!", errors);
         await rfqModel.updatePersistenceJobStatus(
           persistence_id,
           PERSISTENCE_STATUSES.FAILED,
           null,
-          errors
+          errors ? normalizeErrors({ type: 'ai-error', actual: errors }) : null
         );
 
         return res.json({
@@ -7059,30 +7139,54 @@ deleteDraft: async (req, res) => {
 
       console.log("SAVING MAGIC SEARCH IN DB");
 
-      const response = await rfqController.magicSearchRfqCreate(jsonFileUrl, availableSheets, user);
-
-      console.log("SAVED MAGIC SEARCH IN DB");
-      if (response.success) {
-        console.log("SUCCEDDED IN SAVING")
+      if (type == 'simplified') {
         await rfqModel.updatePersistenceJobStatus(
           persistence_id,
-          (response.validation_errors ?? []).length > 0
-            ? PERSISTENCE_STATUSES.PARTIAL_COMPLETED
-            : PERSISTENCE_STATUSES.COMPLETED,
-          response.savedRfq,
-          response.validation_errors
+          PERSISTENCE_STATUSES.COMPLETED,
+          null,
+          errors ? normalizeErrors({ type: 'ai-error', actual: errors }) : null,
+          jsonFileUrl,
+        );
+      } else if (type == 'rfq') {
+        const response = await rfqController.magicSearchRfqCreate(
+          jsonFileUrl,
+          availableSheets,
+          user
         );
 
-        console.log("UPDATED PERSISTENCE JOB IN DB");
+        console.log('SAVED MAGIC SEARCH IN DB');
+        if (response.success) {
+          console.log('SUCCEDDED IN SAVING');
+          await rfqModel.updatePersistenceJobStatus(
+            persistence_id,
+            (response.validation_errors ?? []).length > 0
+              ? PERSISTENCE_STATUSES.PARTIAL_COMPLETED
+              : PERSISTENCE_STATUSES.COMPLETED,
+            response.savedRfq,
+            (response.validation_errors ?? []).length > 0 ? normalizeErrors({ type: 'ai-error', actual: response.validation_errors }) : null,
+            jsonFileUrl,
+          );
+
+          console.log('UPDATED PERSISTENCE JOB IN DB');
+        } else {
+          console.log('FAILED IN SAVING');
+          throw new Error(response.error || 'Magic search failed to be saved in the Database, please try again after some time...')
+        }
       } else {
-        console.log("FAILED TO SAVE")
+        console.log('FAILED TO SAVE');
         await rfqModel.updatePersistenceJobStatus(
           persistence_id,
           PERSISTENCE_STATUSES.FAILED,
           null,
-          response.error
+          normalizeErrors({
+            type: 'db-error',
+            actual: [{
+              status: 'failed',
+              error: 'Something went wrong while saving RFQ in the Database, please try again!',
+            }]
+          })
         );
-        console.log("UPDATED PERSISTENCE JOB IN DB");
+        console.log('UPDATED PERSISTENCE JOB IN DB');
       }
 
       return res.json({
@@ -7092,7 +7196,13 @@ deleteDraft: async (req, res) => {
     } catch (error) {
       console.log("FAILED TERIBBLY BACAUSE: ", error);
       const { persistence_id } = req.query;
-      await rfqModel.updatePersistenceJobStatus(persistence_id, PERSISTENCE_STATUSES.FAILED, null, error.message);
+      await rfqModel.updatePersistenceJobStatus(persistence_id, PERSISTENCE_STATUSES.FAILED, null, normalizeErrors({
+        type: 'backend-error',
+        actual: [{
+          status: 'failed',
+          error: error.message,
+        }]
+      }));
       console.log("UPDATED PERSISTENCE JOB IN DB");
 
       return res.status(400).json({

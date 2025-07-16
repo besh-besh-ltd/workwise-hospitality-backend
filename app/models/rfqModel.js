@@ -252,12 +252,13 @@ const rfqModel = {
     }
   },
 
-  persistAIJobInDB: async (user_id, file_name, signature, db_con = db) => {
+  persistAIJobInDB: async (user_id, file_name, signature, type, db_con = db) => {
     try {
       let persistenceData = {
         user_id,
         file_name,
-        signature
+        signature,
+        type
       }
 
       const res = await rfqModel.insert('tbl_rfq_persistent_jobs', persistenceData, db_con);
@@ -268,7 +269,7 @@ const rfqModel = {
     }
   },
 
-  updatePersistenceJobStatus: async (persistenceId, status = PERSISTENCE_STATUSES.PROCESSING, persisted_rfq_id = null, errors = null) => {
+  updatePersistenceJobStatus: async (persistenceId, status = PERSISTENCE_STATUSES.PROCESSING, persisted_rfq_id = null, errors = null, jsonUrl) => {
     try {
       const persistenceQuery = `id = ${persistenceId}`
       let persistence = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', persistenceQuery);
@@ -289,13 +290,27 @@ const rfqModel = {
 
       let q = `
         UPDATE tbl_rfq_persistent_jobs
-        SET status = $2, persisted_rfq_id = $3, errors = $4
+        SET status = $2, persisted_rfq_id = $3, errors = $4::jsonb, download_url = $5
         ${status == PERSISTENCE_STATUSES.COMPLETED || status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ? ', completed_at = NOW()' : ''}
 
         WHERE id = $1
       `;
+      
+      const formatttedError =
+        errors &&
+        (typeof errors == 'string' ||
+          Array.isArray(errors) ||
+          typeof errors == 'object')
+          ? JSON.stringify(errors)
+          : null;
 
-      const updatedPersistence = await db.any(q, [persistenceId, status, persisted_rfq_id, errors]);
+      const updatedPersistence = await db.any(q, [
+        persistenceId,
+        status,
+        persisted_rfq_id,
+        formatttedError,
+        jsonUrl
+      ]);
 
       // Notify buyer about the persistence completion, Whatsapp integration pending!!
       notifyBuyerOnPersistenceViaEmail(user, persistence.status, status, persisted_rfq_id, errors);
@@ -524,6 +539,7 @@ const rfqModel = {
         const updatableData = {
           is_processed: true,
           processed_at: new Date().toISOString(),
+          validation_errors: JSON.stringify(data?.validationErrors ?? []),
         }
         await rfqModel.update('tbl_rfq_draft_sheets', updatableData, sheet.id, t);
 

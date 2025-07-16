@@ -18,7 +18,7 @@ export const PERSISTENCE_STATUSES = {
   PARTIAL_COMPLETED: 'partially_completed',
   COMPLETED: 'completed',
   FAILED: 'failed',
-  UNKNOWN: 'unknown'
+  TERMINATED: 'terminated'
 }
 
 /** Log data for debugging purpose
@@ -309,14 +309,18 @@ export function generateSignature(message, secret) {
 
 export function verifyAIWebhookBody(req, res, next) {
   const { file_name, user, expires, signature } = req.query;
-  const { jsonFileUrl, availableSheets } = req.body;
+  const { type, jsonFileUrl, availableSheets, errors } = req.body;
 
   if (!file_name || !user || !expires || !signature) {
     return res.status(400).json({ error: 'Missing parameters.' });
   }
 
-  if(!jsonFileUrl || !availableSheets || availableSheets.length < 0) {
-    return res.status(400).json({ error: 'Missing required payload.' });
+  if(!errors && (!jsonFileUrl || !availableSheets)) {
+    return res.status(400).json({ error: 'Missing payload data, jsonFileUrl and availableSheets are required when there are no errors!' });
+  }
+
+  if(!type || !['rfq', 'simplified'].includes(type)) {
+    return res.status(400).json({ error: 'Type out of bound.' });
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -339,6 +343,20 @@ export function verifyAIWebhookBody(req, res, next) {
 
   // All good!
   next();
+}
+
+export function normalizeErrors(errors) {
+  if (!errors) return [];
+
+  if (typeof errors === 'string') {
+    return [{ message: errors }];
+  }
+
+  if (Array.isArray(errors) || typeof errors === 'object') {
+    return errors;
+  }
+
+  return [{ message: String(errors) }];
 }
 
 const convertSixDigit = (id) => {
