@@ -1,4 +1,4 @@
-import { SchedulerClient, CreateScheduleCommand, DeleteScheduleCommand } from "@aws-sdk/client-scheduler";
+import { SchedulerClient, CreateScheduleCommand, DeleteScheduleCommand, UpdateScheduleCommand } from "@aws-sdk/client-scheduler";
 import { randomUUID } from "crypto";
 
 const client = new SchedulerClient({ region: "ap-south-1" });
