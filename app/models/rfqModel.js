@@ -2871,19 +2871,34 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
       JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
       LEFT JOIN tbl_product_images img ON p.id = img.product_id
       JOIN tbl_category c ON pc.category_id = c.id
-      ${approved_by_id ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+      ${
+        approved_by_id
+          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id`
+          : ``
+      }
       WHERE p.status = 1 
         AND p.is_deleted = 0 
         AND p.is_review = 0 
         AND p.is_approve = 1 
         AND pv.is_approve = 1
-        AND pvvm.id IS NOT NULL
+            AND EXISTS (
+        SELECT 1
+        FROM tbl_product_variant_vendor_mapping pvvm
+        WHERE pvvm.product_variant_id = pv.id
+          AND pvvm.status = TRUE
+          AND pvvm.is_approved = TRUE
+          AND pvvm.id IS NOT NULL
+      )
         AND (
           to_tsvector('english', CONCAT(PV.name, ' - ', P.name)) @@ plainto_tsquery('english', $1) 
           OR similarity(CONCAT(PV.name, ' - ', P.name), $1) > 0.1
         )
         ${category_id ? `AND c.id = $2` : ``}
-        ${approved_by_id ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)` : ``}
+        ${
+          approved_by_id
+            ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)`
+            : ``
+        }
       ORDER BY rank DESC, similarity_score DESC, CONCAT(PV.name, ' - ', P.name) ASC;`;
 
     // Assuming db.query can handle parameterized queries:
