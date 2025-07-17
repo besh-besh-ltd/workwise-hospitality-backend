@@ -223,7 +223,7 @@ RfqRoutes.post(
   '/finalize',
   passportSignIn,
   validateDbBody.user_id_profileexists,
-  acl([2, 8]),
+  acl([2,8,10]),
   validateDbBody.rfq_access_check,
   validateBody(rfqSchemas.finalize),
   rfqController.finalize
