@@ -1201,22 +1201,31 @@ const sendWinningNotificaion = async (
 ) => {
   return new Promise(async (resolve, reject) => {
 
+  
+
+    const company = rfQItem.map(item => item.company_name);
+    const rfqNumber = rfQItem.map(item => item.rfq_no);
+   
+    const size = winning_product[0]?.product_specs.find(spec => spec.title === 'Size')?.value || 'N/A';
+    const spec = winning_product[0]?.product_specs.find(spec => spec.title === 'Spec')?.value || 'N/A';
+    const quantity = winning_product[0]?.product_specs.find(spec => spec.title === 'Quantity')?.value || 'N/A';
+
     const headerContent = `<h2>Hello ${winning_vendor_name || 'Mukul Vendor'},</h2>`;
 
 const containerContent = ` 
 <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
   <p>
-    <strong>${rfQItem[0]?.company_name}</strong> has made a selection for 
-    <strong>#${rfQItem[0]?.rfq_no} </strong>. We appreciate your participation and encourage you to stay active on Workwise for future opportunities.
+    <strong>${company}</strong> has made a selection for 
+    <strong>#${rfqNumber} </strong>. We appreciate your participation and encourage you to stay active on Workwise for future opportunities.
   </p>
 
 
   <h4> Product Details </h4> 
   <ul>
   <li> <strong> Product Name </strong> ${winning_product[0]?.product_details[0]?.name}  </li>
-  <li> <strong> Size </strong> ${winning_product[0]?.product_specs[0]?.value}  </li>
-  <li> <strong> Specification </strong> ${winning_product[0]?.product_specs[1]?.value}  </li>
-  <li> <strong> Quantity </strong> ${winning_product[0]?.product_specs[2]?.value} </li>
+  <li> <strong> Size </strong> ${size}  </li>
+  <li> <strong> Specification </strong> ${spec}  </li>
+  <li> <strong> Quantity </strong> ${quantity} </li>
   </ul>
 
 
