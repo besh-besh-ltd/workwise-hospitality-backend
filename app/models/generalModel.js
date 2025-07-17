@@ -195,6 +195,136 @@ const generalModel = {
         });
     });
   },
+  doesHierarchyExist: async (type, companyId) => {
+    try {
+      const raw = await db.any(`
+        SELECT id
+        FROM tbl_approval_hierarchy
+        WHERE company_id = $1
+        AND hierarchy_type = $2
+        ORDER BY hierarchy_type, approval_level ASC
+      `, [companyId, type]);
+
+      return raw && raw.length > 0;
+    } catch (error) {
+      throw error;
+    }
+  },
+  getHierarchies: async (type, companyId) => {
+    try {
+      const raw = await db.any(`
+        SELECT
+          hierarchy_type,
+          company_id,
+          user_id,
+          approval_level,
+          bypass_cap,
+          is_active,
+          created_at
+        FROM tbl_approval_hierarchy
+        WHERE company_id = $1
+        ${type ? ' AND hierarchy_type = $2' : ''}
+        ORDER BY hierarchy_type, approval_level ASC
+      `, [companyId, type]);
+
+      const grouped = raw.reduce((acc, row) => {
+        const { hierarchy_type, company_id, ...rest } = row;
+
+        if (!acc[hierarchy_type]) {
+          acc[hierarchy_type] = {
+            hierarchy_type,
+            company_id,
+            approvers: [],
+          };
+        }
+
+        // Only include if active
+        if (rest.is_active) {
+          acc[hierarchy_type].approvers.push(rest);
+        }
+
+        return acc;
+      }, {});
+
+      return Object.values(grouped);
+    } catch (error) {
+      throw error;
+    }
+  },
+  createHierarchy: async (type, approvers, companyId) => {
+    try {
+      let baseData = {
+        hierarchy_type: type,
+        company_id: companyId,
+        created_at: new Date(),
+      };
+      const insertableData = approvers.map(approver => ({...baseData, ...approver}));
+
+      await generalModel.insertMany('tbl_approval_hierarchy', insertableData);
+      return true;
+    } catch (error) {
+      throw error;
+    }
+  },
+  updateHierarchy: async (type, approvers, removableApprovers = [], companyId) => {
+    try {
+      const updatePromises = approvers.map(async (approver) => {
+        const exists = await db.oneOrNone(
+          `SELECT id FROM tbl_approval_hierarchy
+          WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3`,
+          [companyId, approver.user_id, type]
+        );
+
+        if (exists) {
+          // UPDATE existing record
+          return db.none(
+            `UPDATE tbl_approval_hierarchy
+            SET approval_level = $1,
+                bypass_cap = $2,
+                is_active = $3
+            WHERE id = $4`,
+            [approver.approval_level, approver.bypass_cap, approver.is_active ?? true, exists.id]
+          );
+        } else {
+          // INSERT new record
+          return db.none(
+            `INSERT INTO tbl_approval_hierarchy (company_id, user_id, approval_level, bypass_cap, hierarchy_type, is_active, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [
+              companyId,
+              approver.user_id,
+              approver.approval_level,
+              approver.bypass_cap,
+              type,
+              approver.is_active ?? true,
+              new Date()
+            ]
+          );
+        }
+      });
+
+      // Filter out removableApprovers already included in approvers
+      const approverUserIds = approvers.map(a => a.user_id);
+      const finalRemovals = removableApprovers
+        .filter((id) => !approverUserIds.includes(id))
+        .map(Number)
+        .filter(Boolean);
+
+      let deleteQuery = Promise.resolve();
+      if (finalRemovals.length > 0) {
+        deleteQuery = db.none(
+          `DELETE FROM tbl_approval_hierarchy
+          WHERE company_id = $1 AND hierarchy_type = $2 AND user_id IN ($3:csv)`,
+          [companyId, type, finalRemovals]
+        );
+      }
+
+      await Promise.all([...updatePromises, deleteQuery]);
+      return true;
+    } catch (error) {
+      throw error;
+    }
+  },
   deleteFromTable: async (tableName, columnName, value) => {
     //general function to delete a record from any table
     return new Promise((resolve, reject) => {

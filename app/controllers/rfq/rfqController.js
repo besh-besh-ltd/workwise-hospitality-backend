@@ -989,6 +989,87 @@ const sendQuoteNotificationToVendor = async (req) => {
 
 };
 
+const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
+  const { name, email, organization_name } = buyerInfo;
+
+  // Define email content based on user role
+  const headerContent = `<div>
+                           <h2>Hello ${name},</h2>
+                          </div>`;
+
+  const buyerContainerContent = `<div style="font-size:16px;">
+        You've marked your RFQ as closed. Here are the details for your records:<br>
+        <strong>RFQ Number:</strong> ${rfqItem.rfq_no}<br>
+        <strong>Closed By:</strong> ${name}<br>
+        <br>
+        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqItem.id}"
+           style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+          View Closed RFQs
+        </a>
+           <br>
+        <p>
+        Keep moving forward with Workwise!
+        </p>
+      </div>`;
+
+  const dynamicHTML = generateEmailTemplate(
+    headerContent,
+    buyerContainerContent
+  );
+
+  // Send email to the buyer
+  const buyerMailRecipients = {
+    from: Config.webmasterMail,
+    to: email,
+    subject: `RFQ Marked as Closed for #${rfqItem.rfq_no}`,
+    html: dynamicHTML
+  };
+  sendMail(buyerMailRecipients);
+
+  // Send email to all vendors and their SPOCs
+  for (const vendor of vendorList) {
+    const headerContentVendor = `<div>
+          <h2>Hello ${vendor.user_name},</h2>
+         </div>`;
+
+    const vendorContainerContent = `<div style="font-size:16px;">
+         The RFQ for <strong>${rfqItem.rfq_no}</strong> has been marked as closed by the buyer.<br>
+         Thank you for your participation, and we look forward to more opportunities to work with you.<br>
+         <br>
+         
+         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqItem.id}"
+            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+           Explore New RFQs
+         </a>
+          <br>
+         <p>
+          Tip: Regularly check for new RFQs to stay ahead and grow your business through Workwise.
+         </p>
+ 
+         </div>`;
+
+    const dynamicHTMLVendor = generateEmailTemplate(
+      headerContentVendor,
+      vendorContainerContent
+    );
+
+    const spocList = vendor.spocs;
+
+    let mailRecipients = {
+      from: `${organization_name ?? name} ${Config.masterEmail}`,
+      subject: `RFQ Marked as Closed for #${rfqItem.rfq_no}`,
+      html: dynamicHTMLVendor
+    };
+
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map((spoc) => spoc.spoc_email);
+    } else {
+      mailRecipients.to = vendor.user_email;
+    }
+
+    sendMail(mailRecipients);
+  }
+};
 
 const sendReminderRFQMAIL = async (vendoritem, remainingProducts, org_name,rfq_id, rfqBasicDetails) => {
   let user_details = await userModel.user_profile_detail(vendoritem.user_id);
@@ -4723,94 +4804,14 @@ deleteDraft: async (req, res) => {
   },
   closeRFQ: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { id , organization_name , name} = req.user;
-  
+    const { id } = req.user;
 
     try {
-
-
       const rfQItem = await rfqModel.changeRFQStatus(rfq_id, id);
-      const vendorList = await rfqModel.getRfqVendorListAlongWithSPOC(rfq_id)
+      const vendorList = await rfqModel.getRfqVendorListAlongWithSPOC(rfq_id)    
 
-    // Define email content based on user role
-    const headerContent = `<div>
-                           <h2>Hello ${req.user.name},</h2>
-                          </div>`;
-
-
-    const buyerContainerContent = `<div style="font-size:16px;">
-        You've marked your RFQ as closed. Here are the details for your records:<br>
-        <strong>RFQ Number:</strong> ${rfQItem[0]?.rfq_no}<br>
-        <strong>Closed By:</strong> ${req.user.name}<br>
-        <br>
-        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
-           style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-          View Closed RFQs
-        </a>
-           <br>
-        <p>
-        Keep moving forward with Workwise!
-        </p>
-      </div>`
-
-    const dynamicHTML = generateEmailTemplate(headerContent, buyerContainerContent);
-
-        // Send email to the buyer
-        const buyerMailRecipients = {
-          from: Config.webmasterMail,
-          to: req.user.email,
-          subject: `RFQ Marked as Closed for #${rfQItem[0]?.rfq_no}`,
-          html: dynamicHTML,
-        };
-        sendMail(buyerMailRecipients);
-
-        
-
-         // Send email to all vendors and their SPOCs
-         console.log("vendorList ", vendorList)
-         for (const vendor of vendorList) {
-
-          const headerContentVendor = `<div>
-          <h2>Hello ${vendor.user_name},</h2>
-         </div>`;
-
-         const vendorContainerContent = `<div style="font-size:16px;">
-         The RFQ for <strong>${rfQItem[0]?.rfq_no}</strong> has been marked as closed by the buyer.<br>
-         Thank you for your participation, and we look forward to more opportunities to work with you.<br>
-         <br>
-         
-         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}"
-            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-           Explore New RFQs
-         </a>
-          <br>
-         <p>
-          Tip: Regularly check for new RFQs to stay ahead and grow your business through Workwise.
-         </p>
- 
-         </div>`
-
-         const dynamicHTMLVendor = generateEmailTemplate(headerContentVendor, vendorContainerContent);
-
-          const spocList = vendor.spocs;
-        
-            let mailRecipients ={
-              from: `${organization_name ?? name} ${Config.masterEmail}`,
-              subject: `RFQ Marked as Closed for #${rfQItem[0]?.rfq_no}`,
-              html: dynamicHTMLVendor,
-            }
-
-            if (spocList && spocList.length > 0) {
-              mailRecipients.to = spocList.map(spoc => spoc.spoc_email);
-            } else {
-              mailRecipients.to = vendor.user_email;
-            }
-
-             sendMail(mailRecipients);
-          }       
-        
-
-
+      sendRFQClosedMail(req.user, rfQItem[0], vendorList);
+      
       res
         .status(200)
         .json({
