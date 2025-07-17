@@ -2000,16 +2000,17 @@ LIMIT 1;`;
                     ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
                   LEFT JOIN tbl_quote_items qi
                     ON trpv.product_variant_id = qi.product_variant_id 
+                    AND trpv.variant = qi.variant
                     AND trpv.rfq_id = qi.rfq_id 
                     AND qi.quote_id = tq.id
-                    AND (qi.unit_price != 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
+                    AND (qi.unit_price > 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
                   WHERE
                     trpv.rfq_id = rfq.id
                   GROUP BY
                     trpv.user_id
                   HAVING
                     BOOL_OR(tq.is_regret = 1)
-                    OR COUNT(DISTINCT trpv.product_variant_id) = COUNT(DISTINCT qi.product_variant_id)
+                    OR COUNT(DISTINCT trpv.id) = COUNT(DISTINCT qi.id)
                 ) AS fully_quoted_vendors
               )
             )
@@ -2721,6 +2722,7 @@ LIMIT 1;`;
       const q = `
       SELECT
         rpv.product_variant_id,
+        rpv.variant,
         pv.name,
         COUNT(rpv.id)
       FROM
@@ -2733,7 +2735,7 @@ LIMIT 1;`;
         rpv.rfq_id = $1
         AND rpv.user_id = $2
       GROUP BY
-        rpv.product_variant_id, pv.name;
+        rpv.product_variant_id, rpv.variant, pv.name;
       `;
 
       return await db.query(q, [rfq_id, vendor_id]);
@@ -2761,9 +2763,9 @@ LIMIT 1;`;
         WHERE
           qi.rfq_id = $1
           AND q.created_by = $2
-          AND (qi.unit_price != 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
+          AND (qi.unit_price > 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
         GROUP BY
-          qi.product_variant_id, p.name, pv.name, qi.unit_price;
+          qi.product_variant_id, qi.variant, p.name, pv.name, qi.unit_price;
     `;
 
     return await db.query(q, [rfq_id, vendor_id])
