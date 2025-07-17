@@ -2000,16 +2000,17 @@ LIMIT 1;`;
                     ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
                   LEFT JOIN tbl_quote_items qi
                     ON trpv.product_variant_id = qi.product_variant_id 
+                    AND trpv.variant = qi.variant
                     AND trpv.rfq_id = qi.rfq_id 
                     AND qi.quote_id = tq.id
-                    AND (qi.unit_price != 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
+                    AND (qi.unit_price > 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
                   WHERE
                     trpv.rfq_id = rfq.id
                   GROUP BY
                     trpv.user_id
                   HAVING
                     BOOL_OR(tq.is_regret = 1)
-                    OR COUNT(DISTINCT trpv.product_variant_id) = COUNT(DISTINCT qi.product_variant_id)
+                    OR COUNT(DISTINCT trpv.id) = COUNT(DISTINCT qi.id)
                 ) AS fully_quoted_vendors
               )
             )
@@ -2721,6 +2722,7 @@ LIMIT 1;`;
       const q = `
       SELECT
         rpv.product_variant_id,
+        rpv.variant,
         pv.name,
         COUNT(rpv.id)
       FROM
@@ -2733,7 +2735,7 @@ LIMIT 1;`;
         rpv.rfq_id = $1
         AND rpv.user_id = $2
       GROUP BY
-        rpv.product_variant_id, pv.name;
+        rpv.product_variant_id, rpv.variant, pv.name;
       `;
 
       return await db.query(q, [rfq_id, vendor_id]);
@@ -2761,9 +2763,9 @@ LIMIT 1;`;
         WHERE
           qi.rfq_id = $1
           AND q.created_by = $2
-          AND (qi.unit_price != 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
+          AND (qi.unit_price > 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
         GROUP BY
-          qi.product_variant_id, p.name, pv.name, qi.unit_price;
+          qi.product_variant_id, qi.variant, p.name, pv.name, qi.unit_price;
     `;
 
     return await db.query(q, [rfq_id, vendor_id])
@@ -2871,19 +2873,34 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
       JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
       LEFT JOIN tbl_product_images img ON p.id = img.product_id
       JOIN tbl_category c ON pc.category_id = c.id
-      ${approved_by_id ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+      ${
+        approved_by_id
+          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id`
+          : ``
+      }
       WHERE p.status = 1 
         AND p.is_deleted = 0 
         AND p.is_review = 0 
         AND p.is_approve = 1 
         AND pv.is_approve = 1
-        AND pvvm.id IS NOT NULL
+            AND EXISTS (
+        SELECT 1
+        FROM tbl_product_variant_vendor_mapping pvvm
+        WHERE pvvm.product_variant_id = pv.id
+          AND pvvm.status = TRUE
+          AND pvvm.is_approved = TRUE
+          AND pvvm.id IS NOT NULL
+      )
         AND (
           to_tsvector('english', CONCAT(PV.name, ' - ', P.name)) @@ plainto_tsquery('english', $1) 
           OR similarity(CONCAT(PV.name, ' - ', P.name), $1) > 0.1
         )
         ${category_id ? `AND c.id = $2` : ``}
-        ${approved_by_id ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)` : ``}
+        ${
+          approved_by_id
+            ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)`
+            : ``
+        }
       ORDER BY rank DESC, similarity_score DESC, CONCAT(PV.name, ' - ', P.name) ASC;`;
 
     // Assuming db.query can handle parameterized queries:

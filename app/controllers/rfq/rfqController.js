@@ -2765,7 +2765,7 @@ const rfqController = {
         rfq_id,
         rfqNo,
         buyerName,
-        RFQ_EMAIL_TYPE.REMOVED_VENDOR_FROM_EXISTING_PRODUCT
+        RFQ_EMAIL_TYPE.REMOVED_VENDOR
       ); //for deleted vendors from existing products
 
       await sendRfqUpdatedMailToVendors(
@@ -4784,12 +4784,12 @@ deleteDraft: async (req, res) => {
       }
 
       let vendors = await rfqModel.gerRFQVendors(rfq_id);
-      const quote_vendor = await rfqModel.quoteVendor(rfq_id);
+      // const quote_vendor = await rfqModel.quoteVendor(rfq_id);
 
       //  buyer org name, the company name he used in create rfq field
       let org_name = rfqBasicDetails?.company_name || '';
 
-      const createdByIds = new Set(quote_vendor.map((item) => item.created_by));
+      // const createdByIds = new Set(quote_vendor.map((item) => item.created_by));
 
       const unmatchedVendors = (
         await Promise.all(
@@ -4805,8 +4805,7 @@ deleteDraft: async (req, res) => {
             const requiredCount = vendorProducts.length;
             const quotedCount = vendorProductsQuoted.length;
       
-            const isUnmatched =
-              !createdByIds.has(vendor.user_id) || requiredCount !== quotedCount;
+            const isUnmatched = requiredCount !== quotedCount;
       
             return isUnmatched ? {
               vendor,
