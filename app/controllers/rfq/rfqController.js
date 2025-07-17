@@ -2669,8 +2669,14 @@ const rfqController = {
             for (const vendor of deletedVendorsFromExistingProductsArray) {
               const { vendor_id } = vendor;
               for (const scheduleType of deleteScheduleTypesForVendors) {
-              
-                await deleteSchedule(rfq_id, scheduleType, vendor_id);
+                const whereClause = `rfq_id = ${rfq_id} AND user_id = ${vendor_id}`;
+                // Check if vendor is still present in RFQ
+                const vendorPresentInRfq = await rfqModel.checkIfExists(
+                  'tbl_rfq_product_vendors',whereClause)
+
+                  if(!vendorPresentInRfq || vendorPresentInRfq.length === 0) {
+                   await deleteSchedule(rfq_id, scheduleType, vendor_id);
+                  }
               }
             }
           }
@@ -2680,6 +2686,11 @@ const rfqController = {
             for (const vendor of deletedProductVendorsArray) {
               const { vendor_id } = vendor;
               for (const scheduleType of deleteScheduleTypesForVendors) {
+
+                const whereClause = `rfq_id = ${rfq_id} AND user_id = ${vendor_id}`;
+                // Check if vendor is still present in RFQ
+                const vendorPresentInRfq = await rfqModel.checkIfExists(
+                  'tbl_rfq_product_vendors',whereClause)
                 
                 await deleteSchedule(rfq_id, scheduleType, vendor_id);
               }

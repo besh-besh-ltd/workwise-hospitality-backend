@@ -1,4 +1,4 @@
-import { SchedulerClient, CreateScheduleCommand, DeleteScheduleCommand } from "@aws-sdk/client-scheduler";
+import { SchedulerClient, CreateScheduleCommand, DeleteScheduleCommand, UpdateScheduleCommand } from "@aws-sdk/client-scheduler";
 import { randomUUID } from "crypto";
 
 const client = new SchedulerClient({ region: "ap-south-1" });
@@ -24,14 +24,15 @@ export const createSchedule = async ({
 }) => {
   // ---------- 1. build identifiers ----------
   const scheduleName = `${type}-rfq-${rfqId}-${vendor_id}`;
-  const ist = new Date(scheduledTimeIST);
-
-  if (Number.isNaN(ist.getTime())) {
-    throw new Error("Invalid scheduledTimeIST format");
+  const istTimeRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
+  if (!istTimeRegex.test(scheduledTimeIST)) {
+    throw new Error("Invalid scheduledTimeIST format. Expected format: YYYY-MM-DDTHH:mm:ss");
   }
 
+  console.log("Creating schedule with IST time:---------->", scheduledTimeIST);
+
   // keep the value as IST and let Scheduler do the TZ conversion
-  const isoWithoutMs = ist.toISOString().replace(/\.\d{3}Z$/, "");
+  const isoWithoutMs = scheduledTimeIST.replace(/\.\d{3}$/, "");
 
   // base request shared by both create & update paths
   const baseParams = {
