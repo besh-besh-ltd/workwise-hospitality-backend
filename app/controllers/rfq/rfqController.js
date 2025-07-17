@@ -2765,7 +2765,7 @@ const rfqController = {
         rfq_id,
         rfqNo,
         buyerName,
-        RFQ_EMAIL_TYPE.REMOVED_VENDOR_FROM_EXISTING_PRODUCT
+        RFQ_EMAIL_TYPE.REMOVED_VENDOR
       ); //for deleted vendors from existing products
 
       await sendRfqUpdatedMailToVendors(
