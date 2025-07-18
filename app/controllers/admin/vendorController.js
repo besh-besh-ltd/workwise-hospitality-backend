@@ -919,9 +919,10 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         // Auto-approve (status=1) if:
         // 1. Creator is admin (user_type=1)
         // 2. Creator is vendor (user_type=3)
+        // 3. Creator is subadmin (user_type=5)
         // Otherwise, set as pending (status=2)
         const creatorType = parseInt(req.user.user_type ?? req.user.register_as ?? 0, 10);
-        const initialStatus = [1, 3].includes(creatorType) ? 1 : 2;
+        const initialStatus = [1, 3, 5].includes(creatorType) ? 1 : 2;
 
         const response = await vendorModel.add_user_spoc({
           spoc_name, 

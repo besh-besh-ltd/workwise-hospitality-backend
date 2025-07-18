@@ -970,11 +970,12 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
                 tus.mobile,
                 tus.role,
                 tus.status,
-                tu.organization_name AS vendor_name,
+                COALESCE(tc.company_name, tu.organization_name) AS vendor_name,
                 creator.name AS created_by_name,
                 COUNT(*) OVER() AS total_count
          FROM tbl_users_spoc tus
          JOIN tbl_users tu ON tu.id = tus.user_id
+         LEFT JOIN tbl_company tc ON tu.company_id = tc.id
          LEFT JOIN tbl_users creator ON creator.id = tus.created_by
          WHERE (tus.is_deleted = 0 OR tus.is_deleted IS NULL)${statusFilter}
          ORDER BY tus.created_at DESC
