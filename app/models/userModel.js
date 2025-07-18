@@ -506,18 +506,33 @@ user_book_demo: async (mobile) => {
         });
     });
   },
-  get_vendorapprove_list: async (user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.any(`SELECT * from tbl_vendor_approve WHERE status = 1`)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
+  get_vendorapprove_list: async (variant_id) => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      let data;
+
+      if (variant_id) {
+        data = await db.any(
+          `SELECT tva.id, tva.vendor_approve , tva.show_in_website
+           FROM tbl_vendor_approve tva
+           JOIN tbl_vendorapprove_product_mapping tvum ON tva.id = tvum.vendor_approve_id
+           JOIN tbl_product_variant_vendor_mapping tpvvm ON tpvvm.id = tvum.variant_vendor_mapping_id
+           WHERE tpvvm.product_variant_id = $1
+             AND tpvvm.status = TRUE
+             AND tpvvm.is_approved = TRUE`,
+          [variant_id]
+        );
+      } else {
+        data = await db.any(`SELECT * FROM tbl_vendor_approve WHERE status = 1`);
+      }
+
+      resolve(data);
+    } catch (err) {
+      reject(new Error(err));
+    }
+  });
+ },
+
   get_vendorreview_list: async (user_id, limit, offset) => {
     return new Promise(function (resolve, reject) {
       db.any(
