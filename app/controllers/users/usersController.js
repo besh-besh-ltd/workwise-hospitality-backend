@@ -1776,7 +1776,8 @@ update_user_detail: async (req, res, next) => {
   vendorapprove_list: async (req, res, next) => {
     try {
       // var user_id = req.user.id;
-      const vendorApproveList = await userModel.get_vendorapprove_list();
+      const { variant_id } = req.query;
+      const vendorApproveList = await userModel.get_vendorapprove_list(variant_id);
       if (vendorApproveList && vendorApproveList.length > 0) {
         res
           .status(200)
