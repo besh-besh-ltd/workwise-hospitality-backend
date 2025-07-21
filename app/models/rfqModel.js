@@ -2,6 +2,7 @@ import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 import generalModel from './generalModel.js';
 import userModel from './userModel.js';
+import cmsModel from './cmsModel.js';
 
 const rfqModel = {
   insert: async (table_name, data, db_con = db) => {
@@ -2850,9 +2851,14 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
     }
   },
 
-  searchProduct: async (search_key, category_id, approved_by_id) => {
+  searchProduct: async (search_key, category_id, approved_by_id, locationFilters = {}) => {
     // query change by mukul 28-08-2024
     // query change by mukul 08-09-2024, added one more filter for created by 1 or 111 to exclude product for them
+    // Changes by Agnij: Modified to support slug-based search for better SEO and URL structure
+    
+    // Check if search_key looks like a slug (no spaces and either contains hyphens or is a single word)
+    const isSlugSearch = search_key && !search_key.includes(' ') && (search_key.includes('-') || search_key.length > 0);
+    
     let q = `
       SELECT DISTINCT p.id AS product_id,
                       P.name AS product_name,
@@ -2865,8 +2871,12 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
                       c.id AS category_id,
                       c.parent_id AS parent_category_id,
                       img.new_image_name AS image_url,
-                      similarity(CONCAT(PV.name, ' - ', P.name), $1) AS similarity_score,
-                      ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', P.name)), plainto_tsquery('english', $1)) AS rank
+                      ${isSlugSearch ? 
+                        `CASE WHEN pv.slug = $1 THEN 1.0 ELSE 0.0 END AS similarity_score,
+                         CASE WHEN pv.slug = $1 THEN 1.0 ELSE 0.0 END AS rank` :
+                        `similarity(CONCAT(PV.name, ' - ', P.name), $1) AS similarity_score,
+                         ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', P.name)), plainto_tsquery('english', $1)) AS rank`
+                      }
       FROM tbl_product_variant pv 
       JOIN tbl_product p ON pv.product_id = p.id
       JOIN tbl_product_categories pc ON p.id = pc.product_id
@@ -2892,8 +2902,11 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
           AND pvvm.id IS NOT NULL
       )
         AND (
-          to_tsvector('english', CONCAT(PV.name, ' - ', P.name)) @@ plainto_tsquery('english', $1) 
-          OR similarity(CONCAT(PV.name, ' - ', P.name), $1) > 0.1
+          ${isSlugSearch ? 
+            `pv.slug = $1` :
+            `to_tsvector('english', CONCAT(PV.name, ' - ', P.name)) @@ plainto_tsquery('english', $1) 
+             OR similarity(CONCAT(PV.name, ' - ', P.name), $1) > 0.1`
+          }
         )
         ${category_id ? `AND c.id = $2` : ``}
         ${
@@ -2901,6 +2914,30 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
             ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)`
             : ``
         }
+        ${locationFilters.country_id ? `AND EXISTS (
+          SELECT 1 FROM tbl_users u 
+          WHERE u.id IN (
+            SELECT DISTINCT pvvm2.vendor_id 
+            FROM tbl_product_variant_vendor_mapping pvvm2 
+            WHERE pvvm2.product_variant_id = pv.id
+          ) AND u.country::int = ${locationFilters.country_id}
+        )` : ``}
+        ${locationFilters.state_id ? `AND EXISTS (
+          SELECT 1 FROM tbl_users u 
+          WHERE u.id IN (
+            SELECT DISTINCT pvvm2.vendor_id 
+            FROM tbl_product_variant_vendor_mapping pvvm2 
+            WHERE pvvm2.product_variant_id = pv.id
+          ) AND u.state::int = ${locationFilters.state_id}
+        )` : ``}
+        ${locationFilters.city_id ? `AND EXISTS (
+          SELECT 1 FROM tbl_users u 
+          WHERE u.id IN (
+            SELECT DISTINCT pvvm2.vendor_id 
+            FROM tbl_product_variant_vendor_mapping pvvm2 
+            WHERE pvvm2.product_variant_id = pv.id
+          ) AND u.city::int = ${locationFilters.city_id}
+        )` : ``}
       ORDER BY rank DESC, similarity_score DESC, CONCAT(PV.name, ' - ', P.name) ASC;`;
 
     // Assuming db.query can handle parameterized queries:
@@ -2915,6 +2952,8 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
         });
     });
   },
+  // Location lookup functions removed - using cmsModel.findStateByName, cmsModel.findCityByNameAndState, cmsModel.findCountryByName instead
+
   getCategoryList: async (search_key) => {
     //   let q = `
     //  SELECT DISTINCT c.id AS category_id,
@@ -3067,7 +3106,7 @@ WHERE row_num_by_name_category = 1
 `;
 
     return new Promise(function (resolve, reject) {
-      db.query(q, [categoryIds])
+      db.query(q, [search_key, category_id, approved_by_id].filter(Boolean)) // Filters out any undefined or empty values
         .then(function (data) {
           resolve(data);
         })
@@ -3096,6 +3135,64 @@ WHERE row_num_by_name_category = 1
     responseKeys,
     productMakes
   ) => {
+    
+    // Convert location names to IDs if they are strings (optimized)
+    let stateIds = [];
+    let cityIds = [];
+    let countryIds = [];
+    
+    // Process all location lookups in parallel for better performance
+    const locationPromises = [];
+    
+    if (state && Array.isArray(state) && state.length > 0) {
+      if (typeof state[0] === 'string') {
+        // If state is array of strings, convert to IDs
+        locationPromises.push(
+          Promise.all(state.map(stateName => cmsModel.findStateByName(stateName)))
+            .then(results => {
+              stateIds = results.filter(result => result !== null);
+            })
+        );
+      } else {
+        // If state is array of objects with id property
+        stateIds = state.map(s => s.id);
+      }
+    }
+    
+    if (city && Array.isArray(city) && city.length > 0) {
+      if (typeof city[0] === 'string') {
+        // If city is array of strings, convert to IDs
+        locationPromises.push(
+          Promise.all(city.map(cityName => cmsModel.findCityByNameAndState(null, cityName)))
+            .then(results => {
+              cityIds = results.filter(result => result !== null);
+            })
+        );
+      } else {
+        // If city is array of objects with id property
+        cityIds = city.map(c => c.id);
+      }
+    }
+    
+    if (country && Array.isArray(country) && country.length > 0) {
+      if (typeof country[0] === 'string') {
+        // If country is array of strings, convert to IDs
+        locationPromises.push(
+          Promise.all(country.map(countryName => cmsModel.findCountryByName(countryName)))
+            .then(results => {
+              countryIds = results.filter(result => result !== null);
+            })
+        );
+      } else {
+        // If country is array of objects with id property
+        countryIds = country.map(c => c.id);
+      }
+    }
+    
+    // Wait for all location lookups to complete
+    if (locationPromises.length > 0) {
+      await Promise.all(locationPromises);
+    }
 
     // Adding dynamic turnover condition
     let turnoverCondition = '';
@@ -3224,9 +3321,9 @@ WHERE row_num_by_name_category = 1
             )
           ` : ''}
 
-          ${state != '' ? `AND tu.state::int IN (${state.map(s => s.id).join(",")})` : ``}
-          ${city != '' ? `AND tu.city::int IN (${city.map(c => c.id).join(",")})` : ``}
-          ${country != '' ? `AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(",")})` : ``}
+          ${stateIds.length > 0 ? `AND tu.state::int IN (${stateIds.join(",")})` : ``}
+          ${cityIds.length > 0 ? `AND tu.city::int IN (${cityIds.join(",")})` : ``}
+          ${countryIds.length > 0 ? `AND COALESCE(tu.country, '1')::int IN (${countryIds.join(",")})` : ``}
           ${turnoverCondition}
           ${vendorType.length > 0 ? `
             AND EXISTS (
@@ -3835,10 +3932,10 @@ WHERE row_num_by_name_category = 1
           SELECT trp.rfq_id
           FROM tbl_rfq_products trp
           LEFT JOIN tbl_quote_finalization tqf
-            ON trp.product_id = tqf.product_id
+            ON trp.product_variant_id = tqf.product_variant_id
           AND trp.variant = tqf.variant
           GROUP BY trp.rfq_id
-          HAVING count(trp.product_id) = count(tqf.product_id)
+          HAVING count(trp.product_variant_id) = count(tqf.product_variant_id)
         );
     `;
 
