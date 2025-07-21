@@ -1,4 +1,5 @@
 import db from '../config/dbConn.js';
+import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -210,6 +211,120 @@ const generalModel = {
       throw error;
     }
   },
+  deleteFromTable: async (tableName, columnName, value) => {
+    //general function to delete a record from any table
+    return new Promise((resolve, reject) => {
+      // Validate inputs
+      if (!tableName || !columnName) {
+        return reject(new Error('Invalid table or column name'));
+      }
+      if (value === undefined || value === null) {
+        return reject(new Error('Value to delete is required'));
+      }
+
+      const query = `DELETE FROM ${tableName} WHERE ${columnName} = $1`;
+
+      db.result(query, [value])
+        .then((result) => {
+          if (result.rowCount > 0) {
+            resolve({
+              message: 'Delete successful',
+              rowCount: result.rowCount
+            });
+          } else {
+            resolve({ message: 'No rows deleted', rowCount: result.rowCount });
+          }
+        })
+        .catch((err) => {
+          console.error('Error executing query', err);
+          reject(new Error('Database error'));
+        });
+    });
+  },
+
+  /**
+   * Extract filters from request data (query or body)
+   *
+   * @param {Object} req - Express request object
+   * @param {Array<string>} keys - Keys to extract from req.query or req.body
+   * @returns {Object} filter object with all keys set to value or null
+   */
+  generateFilters: (data, keys = []) => {
+    const filters = {};
+
+    keys.forEach((key) => {
+      let value = data[key];
+
+      if (value === undefined || value === null || (Array.isArray(value) && value.length <= 0)) {
+        filters[key] = null;
+        return;
+      }
+
+      // Try to parse JSON (e.g., arrays like ["a", "b"])
+      try {
+        const parsed = JSON.parse(value);
+        if (
+          typeof parsed === 'string' ||
+          typeof parsed === 'number' ||
+          typeof parsed === 'object' ||
+          Array.isArray(parsed)
+        ) {
+          filters[key] = parsed;
+          return;
+        }
+      } catch (e) {
+        // Not valid JSON, continue
+      }
+
+      // If it's a number string like "42", convert to number
+      if (!isNaN(value) && value.trim() !== '') {
+        filters[key] = Number(value);
+      } else {
+        // Otherwise, treat it as a string
+        filters[key] = value;
+      }
+    });
+
+    return filters;
+  },
+
+  /**
+   * Generate SQL WHERE conditions from a filters object
+   *
+   * @param {Object} filters - Object with keys and their filter values
+   * @returns {string} SQL conditions string (e.g. "category = 'electronics' AND price IN (100, 200)")
+   */
+  generateSQLConditions: (filters = {}, joinQuery = false) => {
+    const conditions = {};
+
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value === null || value === undefined) return;
+
+      if (typeof value === 'string' || typeof value === 'number') {
+        // Escape single quotes in strings
+        const escapedValue =
+          typeof value === 'string' ? `'${value.replace(/'/g, "''")}'` : value;
+        conditions[key] = `${key} = ${escapedValue}`;
+      } else if (Array.isArray(value)) {
+        const validArray = value.filter(
+          (v) => typeof v === 'string' || typeof v === 'number'
+        );
+
+        if (validArray.length > 0) {
+          const inValues = validArray
+            .map((v) =>
+              typeof v === 'string' ? `'${v.replace(/'/g, "''")}'` : v
+            )
+            .join(', ');
+          conditions[key] = `${key} IN (${inValues})`;
+        }
+      }
+    });
+
+    return joinQuery ? Object.values(conditions).join(' AND ') : conditions;
+  },
+
+  // Hierarchy Model Functions
   getHierarchies: async (type, companyId) => {
     try {
       const raw = await db.any(`
@@ -325,117 +440,230 @@ const generalModel = {
       throw error;
     }
   },
-  deleteFromTable: async (tableName, columnName, value) => {
-    //general function to delete a record from any table
-    return new Promise((resolve, reject) => {
-      // Validate inputs
-      if (!tableName || !columnName) {
-        return reject(new Error('Invalid table or column name'));
-      }
-      if (value === undefined || value === null) {
-        return reject(new Error('Value to delete is required'));
-      }
+  initiateApproval: async ({
+    type, // 'po'
+    entityType, // 'purchase_order'
+    entityId,
+    companyId,
+    initiatedBy,
+    meta = {},
+    errors = {},
+  }) => {
+    return db.tx(async t => {
+      // 0. Cancel any pending approvals for same entity
+      const existingTrx = await t.oneOrNone(
+        `SELECT *
+        FROM tbl_approval_hierarchy_transactions
+        WHERE hierarchy_type = $1
+          AND target_entity_type = $2
+          AND company_id = $3
+          AND status IN ('pending', 'approved')
+          AND meta ->> 'rfq_id' = $4
+          AND meta ->> 'rfq_product_id' = $5`,
+        [
+          type,
+          entityType,
+          companyId,
+          String(meta.rfq_id),           // meta.rfq_id must be passed as string
+          String(meta.rfq_product_id)    // meta.rfq_product_id must be passed as string
+        ]
+      );
 
-      const query = `DELETE FROM ${tableName} WHERE ${columnName} = $1`;
-
-      db.result(query, [value])
-        .then((result) => {
-          if (result.rowCount > 0) {
-            resolve({
-              message: 'Delete successful',
-              rowCount: result.rowCount
-            });
-          } else {
-            resolve({ message: 'No rows deleted', rowCount: result.rowCount });
-          }
-        })
-        .catch((err) => {
-          console.error('Error executing query', err);
-          reject(new Error('Database error'));
-        });
-    });
-  },
-
-  /**
-   * Extract filters from request data (query or body)
-   *
-   * @param {Object} req - Express request object
-   * @param {Array<string>} keys - Keys to extract from req.query or req.body
-   * @returns {Object} filter object with all keys set to value or null
-   */
-  generateFilters: (data, keys = []) => {
-    const filters = {};
-
-    keys.forEach((key) => {
-      let value = data[key];
-
-      if (value === undefined || value === null || (Array.isArray(value) && value.length <= 0)) {
-        filters[key] = null;
-        return;
-      }
-
-      // Try to parse JSON (e.g., arrays like ["a", "b"])
-      try {
-        const parsed = JSON.parse(value);
-        if (
-          typeof parsed === 'string' ||
-          typeof parsed === 'number' ||
-          typeof parsed === 'object' ||
-          Array.isArray(parsed)
-        ) {
-          filters[key] = parsed;
-          return;
+      if (existingTrx) {
+        if (existingTrx.status === 'approved') {
+          throw new Error(errors.exist ?? 'An already approved request exists for this entity.');
+        } else {
+          // cancel old pending transaction and any ongoing PO for current rfqProductId
+          await t.none(
+            `UPDATE tbl_approval_hierarchy_transactions
+            SET status = 'cancelled', current_approver_id = NULL, updated_at = NOW()
+            WHERE id = $1`,
+            [existingTrx.id, APPROVAL_DECISIONS.CANCELLED]
+          );
         }
-      } catch (e) {
-        // Not valid JSON, continue
       }
 
-      // If it's a number string like "42", convert to number
-      if (!isNaN(value) && value.trim() !== '') {
-        filters[key] = Number(value);
-      } else {
-        // Otherwise, treat it as a string
-        filters[key] = value;
+      // 1. Initiator's hierarchy
+      const initiatorHierarchy = await t.oneOrNone(
+        `SELECT * FROM tbl_approval_hierarchy
+        WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND is_active = true`,
+        [companyId, initiatedBy, type]
+      );
+
+      if (!initiatorHierarchy) {
+        await t.none(
+          `INSERT INTO tbl_approval_hierarchy_transactions 
+          (hierarchy_type, target_entity_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
+          VALUES ($1, $2, $3, $4, $5, NULL, $5, $6, $7)`,
+          [type, entityType, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
+        );
+        return {
+          approval_required: false,
+          current_approver_id: null
+        };
       }
+
+      const totalValue = meta?.total_value ?? 0;
+      const bypassCap = initiatorHierarchy.bypass_cap;
+
+      // Find next approver (above the initiator)
+      const nextApprover = await t.oneOrNone(
+        `SELECT user_id FROM tbl_approval_hierarchy
+        WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
+          AND approval_level < $3
+        ORDER BY approval_level DESC
+        LIMIT 1`,
+        [companyId, type, initiatorHierarchy.approval_level]
+      );
+
+      // 2. Auto-approve case: bypass cap OR if there exist no higher approver
+      if ((totalValue <= bypassCap) || !nextApprover) {
+        await t.none(
+          `INSERT INTO tbl_approval_hierarchy_transactions 
+          (hierarchy_type, target_entity_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
+          VALUES ($1, $2, $3, $4, $5, NULL, $5, $6, $7)`,
+          [type, entityType, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
+        );
+        return {
+          approval_required: false,
+          current_approver_id: null
+        };
+      }
+
+      // 4. Start approval chain
+      await t.none(
+        `INSERT INTO tbl_approval_hierarchy_transactions
+        (hierarchy_type, target_entity_type, target_entity_id, company_id, initiated_by, current_approver_id, meta, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [type, entityType, entityId, companyId, initiatedBy, nextApprover.user_id, meta, APPROVAL_DECISIONS.PENDING]
+      );
+
+      return {
+        approval_required: true,
+        current_approver_id: nextApprover.user_id
+      };
     });
-
-    return filters;
   },
+  approveRequest: async ({
+    transactionId,
+    approvedBy,
+    decision, // 'approved' or 'rejected'
+    remarks = '',
+    txn,
+  }) => {
+    return db.tx(async t => {
+      // Replace t to parent transaction if got any
+      t = txn ?? t;
 
-  /**
-   * Generate SQL WHERE conditions from a filters object
-   *
-   * @param {Object} filters - Object with keys and their filter values
-   * @returns {string} SQL conditions string (e.g. "category = 'electronics' AND price IN (100, 200)")
-   */
-  generateSQLConditions: (filters = {}, joinQuery = false) => {
-    const conditions = {};
+      let returnValue = null;
 
-    Object.entries(filters).forEach(([key, value]) => {
-      if (value === null || value === undefined) return;
+      const trx = await t.one(
+        `SELECT * FROM tbl_approval_hierarchy_transactions WHERE id = $1`,
+        [transactionId]
+      );
 
-      if (typeof value === 'string' || typeof value === 'number') {
-        // Escape single quotes in strings
-        const escapedValue =
-          typeof value === 'string' ? `'${value.replace(/'/g, "''")}'` : value;
-        conditions[key] = `${key} = ${escapedValue}`;
-      } else if (Array.isArray(value)) {
-        const validArray = value.filter(
-          (v) => typeof v === 'string' || typeof v === 'number'
+      if (trx.status !== 'pending') {
+        throw new Error('This approval request has already been resolved.');
+      }
+
+      if (trx.current_approver_id !== approvedBy) {
+        throw new Error('You are not authorized to act on this request.');
+      }
+
+      const { company_id, hierarchy_type } = trx;
+
+      // REJECTION FLOW
+      if (decision === 'rejected') {
+        await t.none(
+          `UPDATE tbl_approval_hierarchy_transactions
+          SET status = $3, final_decision_by = $1, current_approver_id = NULL, updated_at = NOW()
+          WHERE id = $2`,
+          [approvedBy, transactionId, APPROVAL_DECISIONS.REJECTED]
+        );
+        returnValue = {
+          is_rejected: true
+        }
+      } else {
+        // Find next approver
+        const currentLevel = await t.oneOrNone(
+          `SELECT approval_level, bypass_cap FROM tbl_approval_hierarchy
+          WHERE company_id = $1 AND hierarchy_type = $2 AND user_id = $3`,
+          [company_id, hierarchy_type, approvedBy]
         );
 
-        if (validArray.length > 0) {
-          const inValues = validArray
-            .map((v) =>
-              typeof v === 'string' ? `'${v.replace(/'/g, "''")}'` : v
-            )
-            .join(', ');
-          conditions[key] = `${key} IN (${inValues})`;
+        const nextApprover = await t.oneOrNone(
+          `SELECT user_id FROM tbl_approval_hierarchy
+          WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
+            AND approval_level < $3
+          ORDER BY approval_level DESC
+          LIMIT 1`,
+          [company_id, hierarchy_type, currentLevel?.approval_level ?? 999]
+        );
+
+        const totalValue = trx?.meta?.total_value ?? 0;
+        const bypassCap = currentLevel.bypass_cap;
+
+        if ((totalValue <= bypassCap) || !nextApprover) {
+          // This is the highest approver OR has enough cap → final approval
+          await t.none(
+            `UPDATE tbl_approval_hierarchy_transactions
+            SET status = $3, final_decision_by = $1, current_approver_id = NULL, updated_at = NOW()
+            WHERE id = $2`,
+            [approvedBy, transactionId, APPROVAL_DECISIONS.APPROVED]
+          );
+
+          returnValue = {
+            approval_required: false,
+            current_approver_id: null
+          };
+        } else {
+          // Forward to next approver
+          await t.none(
+            `UPDATE tbl_approval_hierarchy_transactions
+            SET current_approver_id = $1, updated_at = NOW()
+            WHERE id = $2`,
+            [nextApprover.user_id, transactionId]
+          );
+
+          returnValue = {
+            approval_required: true,
+            current_approver_id: nextApprover.user_id
+          };
         }
       }
-    });
 
-    return joinQuery ? Object.values(conditions).join(' AND ') : conditions;
+      // Insert history log
+      await t.none(
+        `INSERT INTO tbl_approval_hierarchy_history
+        (approval_transaction_id, approved_by, action, remarks, created_at)
+        VALUES ($1, $2, $3, $4, NOW())`,
+        [transactionId, approvedBy, decision === 'approved' ? APPROVAL_DECISIONS.APPROVED : APPROVAL_DECISIONS.REJECTED, remarks]
+      );
+
+      return returnValue;
+    });
+  },
+};
+
+
+// Reusable components
+export const markPOStatusChange = async (po_id, t, reject = false) => {
+  try {
+    await t.none(
+      `UPDATE tbl_rfq_purchase_order
+       SET status = $2,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [po_id, reject ? PO_STATUSES.REJECTED : PO_STATUSES.APPROVED]
+    );
+
+    // ⏳ Placeholder: trigger email notifications in future
+    // await triggerPOApprovalEmails(po_id);
+
+    return true;
+  } catch (error) {
+    console.error('Failed to mark PO as approved:', error);
+    throw error;
   }
 };
 

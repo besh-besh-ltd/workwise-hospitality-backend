@@ -301,7 +301,17 @@ export const rfqSchemas = {
     product_variant_id: Joi.number().required(),
     vendor_id: Joi.number().required(),
     quote_id: Joi.number().required(),
-    variant: Joi.number().required()
+    variant: Joi.number().required(),
+
+    // PO Related Validations
+    project_id: Joi.number().optional().allow(null),
+    total_value: Joi.number().required(),
+    product_info: Joi.object({
+      rfq_product_id: Joi.number().required(),
+      quantity: Joi.number().required(),
+      unit_price: Joi.number().required(),
+      finalized_vendor_id: Joi.number().required(),
+    })
   }),
   getAllRfqsForAdminValidation: Joi.object().keys({
     page: Joi.number().integer().optional(),
