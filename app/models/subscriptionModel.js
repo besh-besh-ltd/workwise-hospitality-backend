@@ -223,7 +223,7 @@ const subscriptionModel = {
   buyerSubscriptionIdCheck: async (userId) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        'SELECT * FROM tbl_user_subscriptions WHERE user_id = $1 AND status = 1',
+        'SELECT * FROM tbl_user_subscriptions WHERE user_id = $1 AND status = 1 AND end_date > NOW() ORDER BY end_date DESC LIMIT 1',
         [userId]
       )
         .then(function (data) {
