@@ -223,7 +223,7 @@ const subscriptionController = {
 
       let buyerSubscriptionIdCheck =
         await subscriptionModel.buyerSubscriptionIdCheck(req.user.id);
-      // console.log(subscriptionList);
+
       for await (let [
         index,
         availableSubscription
