@@ -1210,7 +1210,7 @@ const sendWinningNotificaion = async (
     const spec = winning_product[0]?.product_specs.find(spec => spec.title === 'Spec')?.value || 'N/A';
     const quantity = winning_product[0]?.product_specs.find(spec => spec.title === 'Quantity')?.value || 'N/A';
 
-    const headerContent = `<h2>Hello ${winning_vendor_name || 'Mukul Vendor'},</h2>`;
+    const headerContent = `<h2>Hello ${winning_vendor_name || ''},</h2>`;
 
 const containerContent = ` 
 <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
