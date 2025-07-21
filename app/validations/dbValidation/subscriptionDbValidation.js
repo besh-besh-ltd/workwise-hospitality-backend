@@ -51,8 +51,10 @@ const validateDbBody = {
       let errors = {};
       let err = 0;
       let subscriptionId = req.params.id;
+      const user_type = req.user.user_type;
+
       let subscriptionIdExist = await subscriptionModel.subscriptionIdExist(
-        subscriptionId
+        subscriptionId,
       );
       if (subscriptionIdExist.length == 0) {
         err++;

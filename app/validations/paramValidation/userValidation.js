@@ -482,11 +482,11 @@ const schemas = {
     gurdian_relation: Joi.string().required(),
     gurdian_email: Joi.string().trim().email().required()
   }),
-  buyer_subscription_payment: Joi.object().keys({
+  subscription_payment: Joi.object().keys({
     sub_id: Joi.number().required(),
     coupon_code: Joi.string().trim().optional().allow(null, '')
   }),
-  buyer_coupon_check: Joi.object().keys({
+  coupon_check: Joi.object().keys({
     coupon_code: Joi.string().trim().required(),
     sub_id: Joi.number().required()
   }),

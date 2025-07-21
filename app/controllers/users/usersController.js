@@ -1776,7 +1776,8 @@ update_user_detail: async (req, res, next) => {
   vendorapprove_list: async (req, res, next) => {
     try {
       // var user_id = req.user.id;
-      const vendorApproveList = await userModel.get_vendorapprove_list();
+      const { variant_id } = req.query;
+      const vendorApproveList = await userModel.get_vendorapprove_list(variant_id);
       if (vendorApproveList && vendorApproveList.length > 0) {
         res
           .status(200)
@@ -1997,17 +1998,20 @@ update_user_detail: async (req, res, next) => {
     }
   },
 
-  buyerSubscriptionDetails: async (req, res, next) => {
+  subscriptionDetails: async (req, res, next) => {
     try {
       let errors = {};
       let err = 0;
       let { coupon_code, sub_id } = req.body;
+      const user_type = req.user.user_type;
+
       let today = dateFormat(new Date(), 'yyyy-mm-dd');
       let subscriptionList =
-        await subscriptionModel.getBuyerSubscriptionDetails(today, sub_id);
+        await subscriptionModel.getBuyerSubscriptionDetails(today, sub_id, user_type);
       let couponDetails = await couponModel.checkCouponCodeExists(
         coupon_code,
-        today
+        today,
+        user_type,
       );
       // console.log('couponDetails===>>>>>>>>>>>>>>', couponDetails);
       for await (let [
@@ -2100,11 +2104,13 @@ update_user_detail: async (req, res, next) => {
     }
   },
 
-  buyerSubscriptionPayment: async (req, res, next) => {
+  subscriptionPayment: async (req, res, next) => {
     try {
       let { sub_id, coupon_code } = req.body;
+      const user_type = req.user.user_type;
+
       let subscriptionDetails =
-        await subscriptionModel.buyerSubscriptionIdExist(sub_id);
+        await subscriptionModel.subscriptionIdExist(sub_id, user_type);
       let offer = [];
       let checkOffers = await subscriptionModel.subscriptionOfferExist(sub_id);
       if (checkOffers.length > 0) {
@@ -2165,7 +2171,8 @@ update_user_detail: async (req, res, next) => {
         let today = dateFormat(new Date(), 'yyyy-mm-dd');
         let couponDetails = await couponModel.checkCouponCodeExists(
           coupon_code,
-          today
+          today,
+          user_type,
         );
         if (couponDetails.length > 0 && couponDetails[0].is_percentage) {
           couponDiscountedPrice =
@@ -2220,6 +2227,92 @@ update_user_detail: async (req, res, next) => {
           data: response.id
         })
         .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+  test_razorpay_webhook: async (req, res) => {
+    try {
+      let subscriptionPaymentObj = {
+          status: 1,
+          after_payment_response: "Requested Body",
+          payment_id: "Some id",
+          method: "rzpy",
+          order_id: req.body.order_id,
+          receipt: "Some receipt",
+          date: Moment().format('YYYY-MM-DD')
+        };
+
+        console.log(
+          'subscriptionPaymentObj ==>>>>>>>>>',
+          subscriptionPaymentObj
+        );
+        let paymentUpdate = await subscriptionModel.updateSubscriptionPayment(
+          subscriptionPaymentObj
+        );
+        console.log("PAYMENT UPDATE => ", paymentUpdate);
+
+        
+        if (paymentUpdate.length > 0) {
+          const condition = `user_id = ${parseInt(
+            paymentUpdate[0].user_id
+          )} AND status = 1 AND end_date > CURRENT_DATE ORDER BY end_date DESC LIMIT 1`;
+          let activeSubscripton = await rfqModel.checkIfExists(
+            'tbl_user_subscriptions',
+            condition
+          );
+  
+          if (activeSubscripton && activeSubscripton.length > 0) {
+            activeSubscripton = activeSubscripton[0];
+  
+            const subscriptionObj = {
+              status: 3
+            };
+            await subscriptionModel.updateBuyerSubscription(
+              subscriptionObj,
+              activeSubscripton.id
+            );
+  
+            await userModel.updateUserAccount(paymentUpdate[0].user_id, {
+              subscription_plan_id: null
+            });
+          }
+
+          let userSubscription = await subscriptionModel.updateUserSubscription(
+            paymentUpdate[0].user_subscriptions_id,
+            paymentUpdate[0].user_id
+          );
+          console.log(
+            '🚀 ~ razorpay_webhook: ~ userSubscription:',
+            userSubscription
+          );
+          await subscriptionModel.updateUserSubscriptionId(
+            userSubscription[0].plan_id,
+            paymentUpdate[0].user_id
+          );
+          res
+            .status(200)
+            .json({
+              status: 1,
+              message: "Successfully Triggered the Webhook!"
+            })
+            .end();
+        } else {
+          res
+            .status(400)
+            .json({
+              status: 3,
+              message: "Payment Update Not Found!"
+            })
+            .end();
+        }
     } catch (error) {
       logError(error);
       res

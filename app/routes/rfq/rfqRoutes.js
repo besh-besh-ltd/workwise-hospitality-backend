@@ -5,6 +5,7 @@ import { validateBody, validateParam } from '../../validations/paramValidation/u
 import { validateDbBody } from '../../validations/dbValidation/userDbValidation.js';
 import passport from '../../middleware/passport.js';
 import { rfqSchemas } from '../../validations/paramValidation/rfqValidation.js';
+import { validateGetRfqsQuery } from '../../validations/paramValidation/rfqValidation.js';
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 import { acl } from '../../helper/common.js';
 import { schema_posts } from '../../validations/paramValidation/productValidation.js';
@@ -202,11 +203,27 @@ RfqRoutes.get(
   validateDbBody.rfq_access_check,
   rfqController.sendReminder
 );
+RfqRoutes.get(
+  '/vendors-for-reminder/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  rfqController.getVendorsForReminder
+);
+RfqRoutes.post(
+  '/send-selective-reminder/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateDbBody.rfq_access_check,
+  rfqController.sendSelectiveReminder
+);
 RfqRoutes.post(
   '/finalize',
   passportSignIn,
   validateDbBody.user_id_profileexists,
-  acl([2, 8]),
+  acl([2,8,10]),
   validateDbBody.rfq_access_check,
   validateBody(rfqSchemas.finalize),
   rfqController.finalize
@@ -431,6 +448,15 @@ RfqRoutes.post('/tech-evaluation-cleared-vendors',
 RfqRoutes.post('/get-tech-evaluation-rfqs',
   passportSignIn,
   rfqController.getTechEvaluationRFQDetails
+)
+
+// New unified route for sidebar data (now GET, params in query)
+RfqRoutes.get('/get-rfqs',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8, 9, 10]),
+  validateGetRfqsQuery,
+  rfqController.getRfqs
 )
 
 // vendor side
