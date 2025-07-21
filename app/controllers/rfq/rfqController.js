@@ -6927,8 +6927,10 @@ deleteDraft: async (req, res) => {
           
           const mailOptions = {
             from: Config.webmasterMail,
-            to: 'siddharth@letsworkwise.com',
-            cc: ['sayankaworkwise@gmail.com', 'prashant@letsworkwise.com'],
+            to:'mukul@letsworkwise.com',
+            cc:'vineet@letsworkwise.com',
+            // to: 'siddharth@letsworkwise.com',
+            // cc: ['sayankaworkwise@gmail.com', 'prashant@letsworkwise.com'],
             subject: `Workwise Magic Search - Product And Vendor Not Found Error List`,
             html: emailContent
           };
