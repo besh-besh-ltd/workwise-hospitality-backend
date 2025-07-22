@@ -2861,8 +2861,8 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
     
     let q = `
       SELECT DISTINCT p.id AS product_id,
-                      P.name AS product_name,
-                      CONCAT(PV.name, ' - ', P.name) AS unified_name,
+                      p.name AS product_name,
+                      CONCAT(pv.name, ' - ', p.name) AS unified_name,
                       pv.id AS variant_id,
                       pv.name AS variant_name,
                       p.description,
@@ -2871,78 +2871,37 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
                       c.id AS category_id,
                       c.parent_id AS parent_category_id,
                       img.new_image_name AS image_url,
-                      ${isSlugSearch ? 
-                        `CASE WHEN pv.slug = $1 THEN 1.0 ELSE 0.0 END AS similarity_score,
-                         CASE WHEN pv.slug = $1 THEN 1.0 ELSE 0.0 END AS rank` :
-                        `similarity(CONCAT(PV.name, ' - ', P.name), $1) AS similarity_score,
-                         ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', P.name)), plainto_tsquery('english', $1)) AS rank`
-                      }
-      FROM tbl_product_variant pv 
+                      similarity(CONCAT(pv.name, ' - ', p.name), $1) AS similarity_score,
+                      ts_rank_cd(to_tsvector('english', CONCAT(pv.name, ' - ', p.name)), plainto_tsquery('english', $1)) AS rank
+      FROM tbl_product_variant pv
+      JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
+      JOIN tbl_users u ON u.id = pvvm.vendor_id
+        ${locationFilters.country_id ? `AND u.country::int = ${locationFilters.country_id}` : ''}
+        ${locationFilters.state_id ? `AND u.state::int = ${locationFilters.state_id}` : ''}
+        ${locationFilters.city_id ? `AND u.city::int = ${locationFilters.city_id}` : ''}
       JOIN tbl_product p ON pv.product_id = p.id
       JOIN tbl_product_categories pc ON p.id = pc.product_id
-      JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
-      LEFT JOIN tbl_product_images img ON p.id = img.product_id
       JOIN tbl_category c ON pc.category_id = c.id
-      ${
-        approved_by_id
-          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id`
-          : ``
-      }
-      WHERE p.status = 1 
-        AND p.is_deleted = 0 
-        AND p.is_review = 0 
-        AND p.is_approve = 1 
+      LEFT JOIN tbl_product_images img ON p.id = img.product_id
+      ${approved_by_id ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+      WHERE p.status = 1
+        AND p.is_deleted = 0
+        AND p.is_review = 0
+        AND p.is_approve = 1
         AND pv.is_approve = 1
-            AND EXISTS (
-        SELECT 1
-        FROM tbl_product_variant_vendor_mapping pvvm
-        WHERE pvvm.product_variant_id = pv.id
-          AND pvvm.status = TRUE
-          AND pvvm.is_approved = TRUE
-          AND pvvm.id IS NOT NULL
-      )
         AND (
-          ${isSlugSearch ? 
-            `pv.slug = $1` :
-            `to_tsvector('english', CONCAT(PV.name, ' - ', P.name)) @@ plainto_tsquery('english', $1) 
-             OR similarity(CONCAT(PV.name, ' - ', P.name), $1) > 0.1`
-          }
+          pv.slug = $1
+          OR to_tsvector('english', CONCAT(pv.name, ' - ', p.name)) @@ plainto_tsquery('english', $1)
+          OR similarity(CONCAT(pv.name, ' - ', p.name), $1) > 0.1
         )
         ${category_id ? `AND c.id = $2` : ``}
-        ${
-          approved_by_id
-            ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)`
-            : ``
-        }
-        ${locationFilters.country_id ? `AND EXISTS (
-          SELECT 1 FROM tbl_users u 
-          WHERE u.id IN (
-            SELECT DISTINCT pvvm2.vendor_id 
-            FROM tbl_product_variant_vendor_mapping pvvm2 
-            WHERE pvvm2.product_variant_id = pv.id
-          ) AND u.country::int = ${locationFilters.country_id}
-        )` : ``}
-        ${locationFilters.state_id ? `AND EXISTS (
-          SELECT 1 FROM tbl_users u 
-          WHERE u.id IN (
-            SELECT DISTINCT pvvm2.vendor_id 
-            FROM tbl_product_variant_vendor_mapping pvvm2 
-            WHERE pvvm2.product_variant_id = pv.id
-          ) AND u.state::int = ${locationFilters.state_id}
-        )` : ``}
-        ${locationFilters.city_id ? `AND EXISTS (
-          SELECT 1 FROM tbl_users u 
-          WHERE u.id IN (
-            SELECT DISTINCT pvvm2.vendor_id 
-            FROM tbl_product_variant_vendor_mapping pvvm2 
-            WHERE pvvm2.product_variant_id = pv.id
-          ) AND u.city::int = ${locationFilters.city_id}
-        )` : ``}
-      ORDER BY rank DESC, similarity_score DESC, CONCAT(PV.name, ' - ', P.name) ASC;`;
+        ${approved_by_id ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)` : ``}
+      ORDER BY rank DESC, similarity_score DESC, CONCAT(pv.name, ' - ', p.name) ASC ;
+    `;
 
     // Assuming db.query can handle parameterized queries:
     return new Promise(function (resolve, reject) {
-      db.query(q, [search_key, category_id, approved_by_id].filter(Boolean)) // Filters out any undefined or empty values
+      db.query(q, [search_key, category_id, approved_by_id, locationFilters.country_id, locationFilters.state_id, locationFilters.city_id].filter(Boolean)) // Filters out any undefined or empty values
         .then(function (data) {
           resolve(data);
         })
