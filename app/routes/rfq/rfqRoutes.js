@@ -416,6 +416,10 @@ RfqRoutes.post('/get-tech-comments',
   validateBody(rfqSchemas.getTechComments),
   rfqController.getTechComments
 )
+RfqRoutes.post('/get-summarised-deviation',
+  passportSignIn,
+  rfqController.getSummarisedDeviation
+)
 
 RfqRoutes.post('/get-vendor-names',
   passportSignIn,

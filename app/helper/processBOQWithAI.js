@@ -9,6 +9,8 @@ import fs from 'fs';
 import FormData from 'form-data';
 import path from 'path';
 import * as xlsx from 'xlsx'; // ✅ Added this line to fix the error
+import { summaryPrompt } from '../../prompt.js';
+
 
 const PDFParser = (await import('pdf2json')).PDFParser || (await import('pdf2json')).default;
 
@@ -154,6 +156,57 @@ ${pdfText}
       return { error: 'Error processing BOQ with AI' };
     }
   },
+
+summariseTechDeviation: async (techClause) => {
+  if (!techClause || !Array.isArray(techClause)) {
+    throw new Error("Invalid input: expected an array of deviation objects");
+  }
+
+  const finalPrompt = summaryPrompt.replace('{{deviation}}', JSON.stringify(techClause));
+
+  const apiKey = process.env.GOOGLE_AI_API_KEY;
+  if (!apiKey) {
+    throw new Error("Google AI API key is not configured");
+  }
+
+  try {
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        contents: [{
+          parts: [{
+            text: finalPrompt
+          }]
+        }]
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        timeout: 10000 // 10 seconds timeout
+      }
+    );
+
+    // Improved response parsing
+    const content = response.data?.candidates?.[0]?.content;
+    if (!content) {
+      throw new Error("No content in response");
+    }
+
+    const text = content.parts?.[0]?.text;
+    if (!text) {
+      throw new Error("No text in response parts");
+    }
+
+    // Clean the response (sometimes Gemini adds markdown backticks)
+    const cleanedText = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    
+    return JSON.parse(cleanedText);
+  } catch (error) {
+    console.error('Gemini API error:', error.response?.data || error.message);
+    throw new Error(`AI service error: ${error.message}`);
+  }
+}
 
 };
 
