@@ -3,6 +3,8 @@ import Config from '../config/app.config.js';
 import generalModel from './generalModel.js';
 import userModel from './userModel.js';
 import cmsModel from './cmsModel.js';
+import { PERSISTENCE_STATUSES } from '../helper/common.js';
+import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 
 const rfqModel = {
   insert: async (table_name, data, db_con = db) => {
@@ -250,6 +252,75 @@ const rfqModel = {
     }
   },
 
+  persistAIJobInDB: async (user_id, file_name, signature, type, db_con = db) => {
+    try {
+      let persistenceData = {
+        user_id,
+        file_name,
+        signature,
+        type
+      }
+
+      const res = await rfqModel.insert('tbl_rfq_persistent_jobs', persistenceData, db_con);
+      return res;
+    } catch (error) {
+      console.log(error)
+      throw error;
+    }
+  },
+
+  updatePersistenceJobStatus: async (persistenceId, status = PERSISTENCE_STATUSES.PROCESSING, persisted_rfq_id = null, errors = null, jsonUrl) => {
+    try {
+      const persistenceQuery = `id = ${persistenceId}`
+      let persistence = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', persistenceQuery);
+
+      if(!persistence || persistence.length <= 0) {
+        throw new Error("Persistence does not exist!");
+      }
+
+      persistence = persistence[0];
+
+      let user = await userModel.getUserById(persistence.user_id);
+      
+      if(!user || user.length <= 0) {
+        throw new Error("User does not exist for this persistence!");
+      }
+
+      user = user[0];
+
+      let q = `
+        UPDATE tbl_rfq_persistent_jobs
+        SET status = $2, persisted_rfq_id = $3, errors = $4::jsonb, download_url = $5
+        ${status == PERSISTENCE_STATUSES.COMPLETED || status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ? ', completed_at = NOW()' : ''}
+
+        WHERE id = $1
+      `;
+      
+      const formatttedError =
+        errors &&
+        (typeof errors == 'string' ||
+          Array.isArray(errors) ||
+          typeof errors == 'object')
+          ? JSON.stringify(errors)
+          : null;
+
+      const updatedPersistence = await db.any(q, [
+        persistenceId,
+        status,
+        persisted_rfq_id,
+        formatttedError,
+        jsonUrl
+      ]);
+
+      // Notify buyer about the persistence completion, Whatsapp integration pending!!
+      notifyBuyerOnPersistenceViaEmail(user, persistence.status, status, persisted_rfq_id, errors);
+
+      return updatedPersistence;
+    } catch (error) {
+      throw error;
+    }
+  },
+
   saveMagicSearchInDraft: async (data, nextRFQNumber, createdBy, processedUrl, rfqId, sheetId) => {
     try {
       return await db.tx(async t => {
@@ -468,6 +539,7 @@ const rfqModel = {
         const updatableData = {
           is_processed: true,
           processed_at: new Date().toISOString(),
+          validation_errors: JSON.stringify(data?.validationErrors ?? []),
         }
         await rfqModel.update('tbl_rfq_draft_sheets', updatableData, sheet.id, t);
 
@@ -2220,6 +2292,7 @@ LIMIT 1;`;
   },
   checkIfExists: async (table_name, parameter, db_con = db) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
+
     return new Promise(function (resolve, reject) {
       db_con.any(query,[table_name])
         .then(function (data) {
@@ -3411,6 +3484,7 @@ WHERE row_num_by_name_category = 1
           resolve(data);
         })
         .catch(function (err) {
+          console.log("ERROR: ", err);
           let error = new Error(err);
           reject(error);
         });
@@ -6698,6 +6772,40 @@ getAllDraftRfqs: async (limit, offset, user_id, project_id, sort, reverse_auctio
         ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
         ${reverse_auction == '-1' ? '' : ` AND RFQ.reverse_auction = ${reverse_auction}`}
         ${rfq_no == null ? '' : ` AND CAST(RFQ.rfq_no AS TEXT) LIKE '%${rfq_no}%'`}
+      `;
+
+      db.tx(t => {
+        return t.batch([
+          db.query(q),
+          db.query(countQuery)
+        ]);
+      })
+      .then(([data, countResult]) => {
+        resolve({
+          data: data,
+          total_count: countResult[0].total_count
+        });
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
+  getAllProcessingRfqs: async (limit, offset, user_id, sort) => {
+  return new Promise(function (resolve, reject) {
+    let q = `
+      SELECT
+        RPJ.*
+      FROM tbl_rfq_persistent_jobs RPJ
+      WHERE RPJ.user_id = ${user_id}
+      ORDER BY started_at ${sort ? sort : 'ASC'} LIMIT ${limit} OFFSET ${offset}`;
+      
+      const countQuery = `
+        SELECT COUNT(*) AS total_count
+        FROM tbl_rfq_persistent_jobs RPJ
+        WHERE RPJ.user_id = ${user_id}
       `;
 
       db.tx(t => {

@@ -4,7 +4,10 @@ import {
   sendMail,
   getDateRange,
   withTransaction,
-  validateNumber
+  validateNumber,
+  generateSignature,
+  PERSISTENCE_STATUSES,
+  normalizeErrors
 } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
 import userModel from '../../models/userModel.js';
@@ -22,6 +25,7 @@ import generativeAI from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel from '../../models/generalModel.js';
+import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 
@@ -39,6 +43,61 @@ const VENDORS_FILTER_KEYS = [
   'vendor_info',
   'productMakes'
 ];
+
+
+export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, status, persisted_rfq_id, errors) => {
+  try {
+    const { name, email } = buyer_info;
+      
+      const headerContent = `<h2>Hello ${name},</h2>`;
+      const containerContent = `
+        <p style="font-size: 15px;">
+          ${
+            status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+            status == PERSISTENCE_STATUSES.COMPLETED
+              ? `The Magic Search RFQ Processing has been completed successfully, follow the below link to see the processed draft.`
+              : status == PERSISTENCE_STATUSES.FAILED
+              ? `The Magic Search RFQ Processing has been failed due to the following reason:`
+              : `The Magic Search RFQ Processing status has been changed from <strong>${previous_status}</strong> to <strong>${status}</strong>`
+          }
+        </p>
+        ${
+          (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+          status == PERSISTENCE_STATUSES.COMPLETED)
+            ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management?tab=create-rfq&draft_id=${persisted_rfq_id}"
+              style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+            View Draft
+          </a>`
+            : ''
+        }
+        ${
+          status == PERSISTENCE_STATUSES.FAILED
+            ? `<strong>${errors}</strong>`
+            : ''
+        }
+      `;
+
+      const html = generateEmailTemplate(headerContent, containerContent);
+
+      const mail = {
+        from: Config.webmasterMail,
+        to: email,
+        subject:
+          status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+          status == PERSISTENCE_STATUSES.COMPLETED
+            ? `Magic Search RFQ has been processed successfully`
+            : status == PERSISTENCE_STATUSES.FAILED
+            ? `Magic Search RFQ Processing was failed`
+            : `Magic Search RFQ status has been changed`,
+        html
+      };
+
+        sendMail(mail);
+  } catch (err) {
+    console.error("Error in sendRfqUpdatedMailToVendors:", err);
+    throw err;
+  }
+};
 
 
 const getNextRfQNumber = async () => {
@@ -1143,51 +1202,6 @@ const sendQuoteNotificationEmail = async (req) => {
      throw err;
    }
  };
-
-  const sendRfqAddVendorMail = async (vendorData, rfq_id, rfq_no, buyer_name) => {
-    try {
-      for (const vendor of vendorData) {
-        const { vendor_name, vendor_email, spocs = [], token } = vendor;
-  
-        // Skip if no main email and no spocs
-        const validSpocEmails = spocs
-        .map(spoc => spoc?.email)
-        .filter(email => typeof email === 'string' && email.includes('@'));
-        
-        const headerContent = `<h2>Hello ${vendor_name},</h2>`;
-        const containerContent = `
-          <p style="font-size: 15px;">
-            RFQ #${rfq_no} has been updated by ${buyer_name}.
-          </p>
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}"
-             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
-            View RFQ
-          </a>
-        `;
-  
-        const html = generateEmailTemplate(headerContent, containerContent);
-  
-        const mail = {
-          from:  `${buyer_name} ${Config.masterEmail}`,
-          subject: `RFQ #${rfq_no} Details has beed updated by ${buyer_name}`,
-          html
-        };
-  
-
-        if (validSpocEmails.length > 0) {
-          mail.to = validSpocEmails;
-          mail.cc = vendor_email || '';
-        } else {
-          mail.to = vendor_email || '';
-        }
-
-         sendMail(mail);
-      }
-    } catch (err) {
-      console.error("Error in sendRfqUpdatedMailToVendors:", err);
-      throw err;
-    }
-  };
   
 
 
@@ -3023,6 +3037,36 @@ deleteDraft: async (req, res) => {
     }
   },
 
+  getProcessingRFQs: async (req, res) => {
+    try {
+      const user_id = req.user.id;
+      
+      const page = parseInt(req.body.page) || 1;
+      const limit = parseInt(req.body.limit) || 10;
+      const offset = (page - 1) * limit;
+      const sort = req.body.sort || 'DESC';
+
+      const result = await rfqModel.getAllProcessingRfqs(
+        limit, 
+        offset, 
+        user_id,
+        sort
+      );
+
+      res.status(200).json({
+        status: 1,
+        data: result.data,
+        total_items: parseInt(result.total_count)
+      });
+    } catch (error) {
+      logError("Error fetching processing RFQs:", error);
+      res.status(500).json({
+        status: 3,
+        message: "An error occurred while fetching processing RFQs"
+      });
+    }
+  },
+
   // Changes by Agnij 2025-05-24 [Updated method to get a specific draft RFQ by ID with debug logs]
   // Changes by Agnij 2025-06-17 [Fixed draft RFQ retrieval issue]
   getDraftById: async (req, res) => {
@@ -3149,6 +3193,7 @@ deleteDraft: async (req, res) => {
 
         let rfq_id;
         let rfqData;
+        let sheetData;
         let isNew = false;
 
         const sheet_id = req.body.sheet_id;
@@ -3168,9 +3213,23 @@ deleteDraft: async (req, res) => {
                     message: 'Specified draft RFQ not found or not authorized' 
                 });
             }
-            
+
             rfqData = specificRfq;
             rfq_id = specificRfq.id;
+
+            const sheetRes = await rfqModel.findOne('tbl_rfq_draft_sheets', {
+              id: sheet_id,
+              rfq_id,
+            })
+
+            if (!sheetRes) {
+                return res.status(404).json({ 
+                    status: 2, 
+                    message: 'Specified sheet data not found or not authorized' 
+                });
+            }
+
+            sheetData = sheetRes;
         } else {
             // Create a new RFQ
 
@@ -3209,8 +3268,15 @@ deleteDraft: async (req, res) => {
 
         // Add products to the RFQ
         const product = req.body;
-        if (!product || !product.variant_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
-          return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
+        if (!product || !product.variant_id) {
+          return res.status(400).json({ status: 2, message: 'Invalid product data' });
+        }
+
+        if(!product.vendors || product.vendors.length === 0) {
+          const vendors = await rfqModel.genericSearchVendors(user_id, product.variant_id);
+          if(vendors && vendors.length > 0) {
+            product.vendors = vendors.map(vendor => ({ vendor_id: vendor.id }));
+          }
         }
 
         const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
@@ -3243,6 +3309,33 @@ deleteDraft: async (req, res) => {
         });
 
         await Promise.all(vendorPromises);
+
+        if(product?.specs && typeof product.specs == 'object') {
+          for(const [key, value] of Object.entries(product.specs)) {
+            const specData = {
+              title: key,
+              value,
+              rfq_id,
+              product_variant_id: product.variant_id,
+              variant: variant,
+              sheet_id,
+            }
+            
+            await rfqModel.insert('tbl_rfq_products_specs', specData);
+          }
+        }
+
+        if(product.isUnfoundProduct && product.unfoundName) {
+          let validationErrors = sheetData.validation_errors;
+          if(validationErrors && Array.isArray(validationErrors) && validationErrors.length > 0) {
+            const updatedErrors = validationErrors.filter(error => error.name != product.unfoundName);
+
+            const updatedSheetData = {
+              validation_errors: JSON.stringify(updatedErrors)
+            }
+            await rfqModel.update('tbl_rfq_draft_sheets', updatedSheetData, sheet_id);
+          }
+        }
 
         res.status(200).json({
             status: 1,
@@ -6788,7 +6881,8 @@ deleteDraft: async (req, res) => {
             quantity: item.quantity || '',
             unit: item.unit || '',
             sheet_name: item.sheet_name || '',
-            description: item.full_product_description || ''
+            description: item.full_product_description || '',
+            similar_products: item.reranked_variants || [],
           });
           continue;
         }
@@ -6803,7 +6897,8 @@ deleteDraft: async (req, res) => {
             quantity: item.quantity || '',
             unit: item.unit || '',
             sheet_name: item.sheet_name || '',
-            description: item.full_product_description || ''
+            description: item.full_product_description || '',
+            similar_products: item.reranked_variants || [],
           });
           continue;
         }
@@ -6831,7 +6926,7 @@ deleteDraft: async (req, res) => {
             quantity: item.quantity || '',
             unit: item.unit || '',
             sheet_name: item.sheet_name || '',
-            description: item.full_product_description || ''
+            description: item.full_product_description || '',
           });
           continue;
         }
@@ -6847,6 +6942,7 @@ deleteDraft: async (req, res) => {
             { title: "Spec", value: item.feature_or_specifications || "" },
             { title: "Quantity", value: item.quantity || 0 },
             { title: "Unit", value: item.unit || "NA" },
+            { title: "total_price", value: item.total_price || "0" }
           ],
           vendors: vendorResult,
           comment: item.full_product_description || "",
@@ -6876,6 +6972,7 @@ deleteDraft: async (req, res) => {
         term_and_condition_files: [],
         sheetNameList: (availableSheets && availableSheets.length > 0) ? availableSheets.map(sheet => sheet.sheet_name) : Array.from(sheetNameList),
         availableSheets,
+        validationErrors,
       };
 
       // Send email notification for products or vendors not found
@@ -6944,51 +7041,216 @@ deleteDraft: async (req, res) => {
     }
     catch (error) {
       logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
+      return [null, null];
+    }
+  },
+
+  initiateMagicSearch: async (req, res) => {
+    try {
+      const { id } = req.user;
+      const { file_name, type = 'rfq' } = req.body;
+
+      if(!file_name) return res.status(400).json({
+        status: 3,
+        message: 'File name is required for persistant processing.'
+      })
+
+      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing'`)
+      if(processing && processing.length > 0) {
+        processing = processing[0];
+
+        const inputUtcMoment = moment.utc(processing.started_at);
+        const inputIstMoment = inputUtcMoment.tz('Asia/Kolkata');
+        const nowIst = moment().tz('Asia/Kolkata');
+
+        const diffInHours = nowIst.diff(inputIstMoment, 'hours', true);
+        if(diffInHours > 2) {
+          await rfqModel.updatePersistenceJobStatus(processing.id, PERSISTENCE_STATUSES.TERMINATED, null, 'Due to a longer processing time, we have terminated this BOQ Processing, please upload this BOQ again to retry the processing');
+        } else {
+          return res.status(400).json({
+            status: 5,
+            message: 'This BOQ is already under processing, please refer to the Processing tab for more info!',
+            processing,
+          })
+        }
+      }
+      
+      const baseUrl = process.env.APP_BASE_PATH;
+      const secret = process.env.WEBHOOK_SECRET;
+      const expires = Math.floor(Date.now() / 1000) + 12 * 60 * 60;
+      
+      const message = `${file_name}_${id}_${expires}`
+      const signature = generateSignature(message, secret);
+
+      return db.tx(async t => {
+        let persistence = await rfqModel.persistAIJobInDB(id, file_name, signature, type, t);
+  
+        if(!persistence || persistence.length <= 0) {
+          return res.status(400).json({
+            status: 3,
+            message: 'Something went wrong while saving job, please try again!'
+          })
+        }
+  
+        persistence = persistence[0];
+  
+        const signedUrl = `${baseUrl}/api/v1/rfq/magic-webhook?persistence_id=${persistence.id}&user=${id}&file_name=${encodeURIComponent(
+          file_name
+        )}&expires=${expires}&signature=${signature}`;
+  
+        return res.json({
+          status: 1,
+          persistence,
+          webhook: signedUrl
         })
-        .end();
+      })
+    } catch (error) {
+      console.log(error);
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while initiating the job, please try again!',
+        error,
+      })
+    }
+  },
+
+  handleAIWebhook: async (req, res) => {
+    try {
+      let { persistence_id, user } = req.query;
+      const { jsonFileUrl, availableSheets, errors, type } = req.body;
+
+      persistence_id = parseInt(persistence_id);
+
+      if((errors && errors.length > 0) || (!jsonFileUrl || !availableSheets)) {
+        console.log("FOUND ERRORS FROM AI SERVER!", errors);
+        await rfqModel.updatePersistenceJobStatus(
+          persistence_id,
+          PERSISTENCE_STATUSES.FAILED,
+          null,
+          errors ? normalizeErrors({ type: 'ai-error', actual: errors }) : null
+        );
+
+        return res.json({
+          status: 2,
+          message: 'Webhook triggered, errors handled!'
+        })
+      }
+
+      console.log("SAVING MAGIC SEARCH IN DB");
+
+      if (type == 'simplified') {
+        await rfqModel.updatePersistenceJobStatus(
+          persistence_id,
+          PERSISTENCE_STATUSES.COMPLETED,
+          null,
+          errors ? normalizeErrors({ type: 'ai-error', actual: errors }) : null,
+          jsonFileUrl,
+        );
+      } else if (type == 'rfq') {
+        const response = await rfqController.magicSearchRfqCreate(
+          jsonFileUrl,
+          availableSheets,
+          user
+        );
+
+        console.log('SAVED MAGIC SEARCH IN DB');
+        if (response.success) {
+          console.log('SUCCEDDED IN SAVING');
+          await rfqModel.updatePersistenceJobStatus(
+            persistence_id,
+            (response.validation_errors ?? []).length > 0
+              ? PERSISTENCE_STATUSES.PARTIAL_COMPLETED
+              : PERSISTENCE_STATUSES.COMPLETED,
+            response.savedRfq,
+            (response.validation_errors ?? []).length > 0 ? normalizeErrors({ type: 'ai-error', actual: response.validation_errors }) : null,
+            jsonFileUrl,
+          );
+
+          console.log('UPDATED PERSISTENCE JOB IN DB');
+        } else {
+          console.log('FAILED IN SAVING');
+          throw new Error(response.error || 'Magic search failed to be saved in the Database, please try again after some time...')
+        }
+      } else {
+        console.log('FAILED TO SAVE');
+        await rfqModel.updatePersistenceJobStatus(
+          persistence_id,
+          PERSISTENCE_STATUSES.FAILED,
+          null,
+          normalizeErrors({
+            type: 'db-error',
+            actual: [{
+              status: 'failed',
+              error: 'Something went wrong while saving RFQ in the Database, please try again!',
+            }]
+          })
+        );
+        console.log('UPDATED PERSISTENCE JOB IN DB');
+      }
+
+      return res.json({
+        status: 1,
+        message: 'Webhook triggered!'
+      })
+    } catch (error) {
+      console.log("FAILED TERIBBLY BACAUSE: ", error);
+      const { persistence_id } = req.query;
+      await rfqModel.updatePersistenceJobStatus(persistence_id, PERSISTENCE_STATUSES.FAILED, null, normalizeErrors({
+        type: 'backend-error',
+        actual: [{
+          status: 'failed',
+          error: error.message,
+        }]
+      }));
+      console.log("UPDATED PERSISTENCE JOB IN DB");
+
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while handling AI Webhook, please try again!',
+        error,
+      })
     }
   },
 
   // mukul - 21-05-2025, removed file handling as now we just get json url in request, also reviewed we handling many fields in payload but in api call we just get json url, not removing them now as very soon we start this flow enhancements
   // Kushal - 21-05-2025, Highly optimized to handle large datasets
   // Kushal - 23-05-2025, Completed Sheet wise processing while saving Draft of Magic Search
-  magicSearchRfqCreate: async (req, res, next) => {
+  magicSearchRfqCreate: async (jsonFileUrl, availableSheets, user_id) => {
     try {
-      let aiProcessedBoqJson = req.body.jsonFileUrl;
-      let availableSheets = req.body.availableSheets;
-      const user = req.user;
+      let aiProcessedBoqJson = jsonFileUrl;
 
       if(availableSheets && availableSheets.length > 0) {
         aiProcessedBoqJson = availableSheets[0]?.download_url ?? aiProcessedBoqJson
       }
   
+      let user = await userModel.getUserById(user_id);
+      if(!user) throw new Error('User dont exist with id: ', user_id);
 
+      user = user[0];
 
       const [validationErrors, processedData] = await rfqController.processRfqDraftSheetWise(aiProcessedBoqJson, user, null, null, availableSheets)
+      if(!processedData && !validationErrors) throw new Error("No Data processed!")
 
-      const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, aiProcessedBoqJson)
+      const savedRfq = await saveMagicSearchInDraft(processedData, user_id, aiProcessedBoqJson)
       const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq)
   
-      return res.status(200).json({
+      return {
         status: 1,
+        success: true,
         savedRfq,
         sheets,
         data: processedData, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
         validation_errors: validationErrors.length ? validationErrors : null,
-      });
+      };
   
     } catch (error) {
       logError(error);
-      return res.status(500).json({
+      return {
         success: false,
         message: 'Magic search failed to complete the action, Please try again.',
-        error: error.message,
-      });
+        error: error,
+      };
     }
   },
 
