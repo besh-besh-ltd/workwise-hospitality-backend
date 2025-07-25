@@ -85,7 +85,10 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
             [purchaseOrder.rfq_product_id]
         )
 
-        const headerContent = `<h2>Hello,</h2>`;
+        let vendor = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+        if(!vendor) throw new Error("Vendor Not Found!");
+
+        const headerContent = `<h2>Hello, ${vendor.name}</h2>`;
 
         const containerContent = ` 
             <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
@@ -133,9 +136,9 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
 
         if (spocList && spocList.length > 0) {
             mailRecipients.to = spocList.map(spoc => spoc.email);
-            mailRecipients.cc =  user.email;
+            mailRecipients.cc =  vendor.email;
         } else {
-            mailRecipients.to =  user.email;
+            mailRecipients.to =  vendor.email;
         }
 
         sendMail(mailRecipients);
