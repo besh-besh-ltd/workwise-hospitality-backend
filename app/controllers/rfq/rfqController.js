@@ -22,6 +22,7 @@ import generativeAI from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel from '../../models/generalModel.js';
+import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 
 
@@ -5103,64 +5104,87 @@ deleteDraft: async (req, res) => {
     }
   },
   searchProduct: async (req, res, next) => {
-    let search_key = '';
-    let category_id = '';
-    let approved_by_id = '';
-    search_key = req.body?.search_key ? req.body?.search_key : ' ';
-    category_id = req.body?.category_id ? req.body?.category_id : '';
-    approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
+    const search_key = req.body?.search_key || '';
+    const category_id = req.body?.category_id || '';
+    const approved_by_id = req.body?.approved_by_id || '';
 
     try {
-      const productResult = await rfqModel.searchProduct(
-        search_key,
-        category_id,
-        approved_by_id
-      );
-
-      const categoryResult = (search_key && search_key.length > 0) ? await rfqModel.getCategoryList(search_key) : [];
-
-      let dummyOBJ = {
-        product_id: '***',
-        product_name: '**** ****',
-        description:
-          '******* ***** ****** ***** ************* ***** ****** ***** ************* ***** ****** ***** ******',
-        category_name: '*******',
-        vendor_name: '***** ********'
-      };
-      let items_to_show = 5;
-      let total_items = productResult.length;
-      let rest_items = 0;
-      let items_to_sent = productResult;
-
-      // if (!user.subscription_plan_id || user.subscription_plan_id == 0) {
-      //   rest_items =
-      //     total_items > items_to_show ? total_items - items_to_show : 0;
-      //   items_to_sent = productResult.slice(0, items_to_show);
-
-      //   Array.apply(null, { length: rest_items }).map((item) => {
-      //     items_to_sent.push(dummyOBJ);
-      //   });
-      // }
-
-      res
-        .status(200)
-        .json({
+      // Skip processing for 'all'
+      if (search_key === 'all') {
+        const productResult = await rfqModel.searchProduct(search_key, category_id, approved_by_id);
+        const categoryResult = await rfqModel.getCategoryList(search_key);
+        
+        return res.status(200).json({
           status: 1,
-          data: removeDuplicates(items_to_sent),
+          data: removeDuplicates(productResult),
           categoryData: categoryResult
-        })
-        .end();
+        });
+      }
+
+      // Parse slug for location filters
+      let productSlug = search_key;
+      let locationFilters = {};
+
+      if (search_key.includes('-')) {
+        const segments = search_key.split('-');
+        
+        if (segments.length >= 2) {
+          const lastSegment = segments[segments.length - 1];
+          const stateResult = await cmsModel.findStateByName(lastSegment);
+          
+          if (stateResult) {
+            locationFilters.state_id = stateResult.id;
+            locationFilters.country_id = stateResult.country_id;
+            
+            if (segments.length >= 3) {
+              const secondLastSegment = segments[segments.length - 2];
+              const cityResult = await cmsModel.findCityByNameAndState(stateResult.id, secondLastSegment);
+              
+              if (cityResult) {
+                locationFilters.city_id = cityResult.id;
+                productSlug = segments.slice(0, -2).join('-');
+              } else {
+                productSlug = segments.slice(0, -1).join('-');
+              }
+            } else {
+              productSlug = segments.slice(0, -1).join('-');
+            }
+          } else {
+            const cityResult = await cmsModel.findCityByNameAndState(null, lastSegment);
+            
+            if (cityResult) {
+              locationFilters.city_id = cityResult.id;
+              locationFilters.state_id = cityResult.state_id;
+              locationFilters.country_id = cityResult.country_id;
+              productSlug = segments.slice(0, -1).join('-');
+            }
+          }
+        }
+      }
+      
+      // Default to India
+      if (!locationFilters.country_id) {
+        const indiaResult = await cmsModel.findCountryByName('India');
+        if (indiaResult) {
+          locationFilters.country_id = indiaResult.id;
+        }
+      }
+
+      const productResult = await rfqModel.searchProduct(productSlug, category_id, approved_by_id, locationFilters);
+      const categoryResult = await rfqModel.getCategoryList(productSlug);
+
+      res.status(200).json({
+          status: 1,
+        data: removeDuplicates(productResult),
+          categoryData: categoryResult
+      });
     } catch (error) {
       logError(error);
-      res
-        .status(400)
-        .json({
+      res.status(400).json({
           status: 3,
           message: Config.errorText.value
-        })
-        .end();
+      });
     }
-
   },
   searchProductByCategory: async (req, res, next) => {
     try {
