@@ -2562,6 +2562,7 @@ LIMIT 1;`;
           WHERE TQFH.rfq_id = TRF.rfq_id 
             AND TQFH.product_variant_id = TRF.product_variant_id 
             AND TQFH.variant = TRF.variant
+          ORDER BY TQFH.changed_at DESC
         ) AS "finalization_history",
         (
           SELECT json_build_object(
@@ -7099,7 +7100,6 @@ getRfqs: async (user_id, tech_eval, po, limit, offset, project_id, rfq_no, sort)
           WHERE tq.rfq_id = RFQ.id
         ) AS is_finalized,
         P.name AS project_name,
-        P.id AS project_id,
         RFQ.company_name,
         RFQ.contact_name,
         RFQ.response_email,

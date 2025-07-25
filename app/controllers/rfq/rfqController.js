@@ -29,6 +29,7 @@ import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { initiatePO } from '../po/purchaseOrderController.js';
+import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 
 const formatPersistentErrors = (errors) => {
   if(errors) {
@@ -5207,7 +5208,7 @@ deleteDraft: async (req, res) => {
         const response = await db.tx(async (t) => {
           let alreadyExists = await rfqModel.checkIfExists(
             'tbl_quote_finalization',
-            `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} AND created_by=${req.user.id} LIMIT 1`,
+            `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} LIMIT 1`,
             t
           );
 
@@ -5223,7 +5224,9 @@ deleteDraft: async (req, res) => {
               vendor_id: alreadyExists.vendor_id,
               quote_id: alreadyExists.quote_id,
               created_by: alreadyExists.created_by,
-              variant: alreadyExists.variant
+              timestamp: alreadyExists.timestamp,
+              variant: alreadyExists.variant,
+              changed_by: req.user.id,
             };
 
             const res = await rfqModel.insert(
@@ -5235,6 +5238,8 @@ deleteDraft: async (req, res) => {
               id: alreadyExists.id
             }, t);
             reFinalized = true;
+
+            await sendFinalizationRemovalMail(alreadyExists.vendor_id, )
           }
 
           const tbl_quote_finalization_data = {
@@ -5272,6 +5277,18 @@ deleteDraft: async (req, res) => {
 
           // Pre-initiate PO as if this throws error after this, it will trigger mail without ever finalizing anyone!
           const result = await initiatePO(req.body, req.user, t);
+          if(result.approval_required) {
+            const purchaseOrder = await t.oneOrNone(
+              `SELECT * FROM tbl_rfq_purchase_order
+              WHERE id = $1`,
+              [result.po_id]
+            );
+  
+            await sendApprovalNotification(
+              purchaseOrder,
+              result.current_approver_id
+            );
+          }
 
           if (reFinalized) {
             const lostVendorDetails = await userModel.user_profile_detail(
@@ -5305,7 +5322,7 @@ deleteDraft: async (req, res) => {
             status: 1,
             message: response.reFinalized
               ? 'Another vendor has been finalized, both vendors has been notified!'
-              : 'Notification has been sent!',
+              : 'Vendor has been finalized and notified!',
             data: response.result,
             isRefinalized: response.reFinalized
           })

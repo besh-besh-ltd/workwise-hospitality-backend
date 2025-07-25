@@ -1,4 +1,5 @@
 import db from '../config/dbConn.js';
+import { sendApprovalNotification, sendPONotificationToVendor } from '../controllers/po/purchaseOrderEmails.js';
 import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
 
 const generalModel = {
@@ -329,15 +330,18 @@ const generalModel = {
     try {
       const raw = await db.any(`
         SELECT
-          hierarchy_type,
-          company_id,
-          user_id,
-          approval_level,
-          bypass_cap,
-          is_active,
-          created_at
-        FROM tbl_approval_hierarchy
-        WHERE company_id = $1
+          TAH.hierarchy_type,
+          TAH.company_id,
+          user_id AS id,
+          U.name,
+          U.email,
+          TAH.approval_level AS level,
+          TAH.bypass_cap,
+          TAH.is_active AS active,
+          TAH.created_at
+        FROM tbl_approval_hierarchy TAH
+        JOIN tbl_users U ON TAH.user_id = U.id
+        WHERE TAH.company_id = $1
         ${type ? ' AND hierarchy_type = $2' : ''}
         ORDER BY hierarchy_type, approval_level ASC
       `, [companyId, type]);
@@ -353,10 +357,7 @@ const generalModel = {
           };
         }
 
-        // Only include if active
-        if (rest.is_active) {
-          acc[hierarchy_type].approvers.push(rest);
-        }
+        acc[hierarchy_type].approvers.push(rest);
 
         return acc;
       }, {});
@@ -440,229 +441,241 @@ const generalModel = {
       throw error;
     }
   },
-  initiateApproval: async ({
+  initiateApproval: async (
     type, // 'po'
-    entityType, // 'purchase_order'
     entityId,
     companyId,
     initiatedBy,
     meta = {},
     errors = {},
-  }) => {
-    return db.tx(async t => {
-      // 0. Cancel any pending approvals for same entity
-      const existingTrx = await t.oneOrNone(
-        `SELECT *
-        FROM tbl_approval_hierarchy_transactions
-        WHERE hierarchy_type = $1
-          AND target_entity_type = $2
-          AND company_id = $3
-          AND status IN ('pending', 'approved')
-          AND meta ->> 'rfq_id' = $4
-          AND meta ->> 'rfq_product_id' = $5`,
-        [
-          type,
-          entityType,
-          companyId,
-          String(meta.rfq_id),           // meta.rfq_id must be passed as string
-          String(meta.rfq_product_id)    // meta.rfq_product_id must be passed as string
-        ]
-      );
+    t
+  ) => {
+    // 0. Cancel any pending approvals for same entity
+    const existingTrx = await t.oneOrNone(
+      `SELECT *
+      FROM tbl_approval_hierarchy_transactions
+      WHERE hierarchy_type = $1
+        AND company_id = $2
+        AND status IN ('pending', 'approved')
+        AND meta ->> 'rfq_id' = $3
+        AND meta ->> 'rfq_product_id' = $4`,
+      [
+        type,
+        companyId,
+        String(meta.rfq_id),           // meta.rfq_id must be passed as string
+        String(meta.rfq_product_id)    // meta.rfq_product_id must be passed as string
+      ]
+    );
 
-      if (existingTrx) {
-        if (existingTrx.status === 'approved') {
-          throw new Error(errors.exist ?? 'An already approved request exists for this entity.');
-        } else {
-          // cancel old pending transaction and any ongoing PO for current rfqProductId
-          await t.none(
-            `UPDATE tbl_approval_hierarchy_transactions
-            SET status = 'cancelled', current_approver_id = NULL, updated_at = NOW()
-            WHERE id = $1`,
-            [existingTrx.id, APPROVAL_DECISIONS.CANCELLED]
-          );
-        }
-      }
-
-      // 1. Initiator's hierarchy
-      const initiatorHierarchy = await t.oneOrNone(
-        `SELECT * FROM tbl_approval_hierarchy
-        WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND is_active = true`,
-        [companyId, initiatedBy, type]
-      );
-
-      if (!initiatorHierarchy) {
+    if (existingTrx) {
+      if (existingTrx.status === 'approved') {
+        throw new Error(errors.exist ?? 'An already approved request exists for this entity.');
+      } else {
+        // cancel old pending transaction and any ongoing PO for current rfqProductId
         await t.none(
-          `INSERT INTO tbl_approval_hierarchy_transactions 
-          (hierarchy_type, target_entity_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
-          VALUES ($1, $2, $3, $4, $5, NULL, $5, $6, $7)`,
-          [type, entityType, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
+          `UPDATE tbl_approval_hierarchy_transactions
+          SET status = 'cancelled', final_decision_by = $3, current_approver_id = NULL, updated_at = NOW()
+          WHERE id = $1`,
+          [existingTrx.id, APPROVAL_DECISIONS.CANCELLED, initiatedBy]
         );
-        return {
-          approval_required: false,
-          current_approver_id: null
-        };
-      }
 
-      const totalValue = meta?.total_value ?? 0;
-      const bypassCap = initiatorHierarchy.bypass_cap;
-
-      // Find next approver (above the initiator)
-      const nextApprover = await t.oneOrNone(
-        `SELECT user_id FROM tbl_approval_hierarchy
-        WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
-          AND approval_level < $3
-        ORDER BY approval_level DESC
-        LIMIT 1`,
-        [companyId, type, initiatorHierarchy.approval_level]
-      );
-
-      // 2. Auto-approve case: bypass cap OR if there exist no higher approver
-      if ((totalValue <= bypassCap) || !nextApprover) {
         await t.none(
-          `INSERT INTO tbl_approval_hierarchy_transactions 
-          (hierarchy_type, target_entity_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
-          VALUES ($1, $2, $3, $4, $5, NULL, $5, $6, $7)`,
-          [type, entityType, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
+          `INSERT INTO tbl_approval_hierarchy_history
+          (approval_transaction_id, approved_by, action, created_at)
+          VALUES ($1, $2, $3, NOW())`,
+          [existingTrx.id, initiatedBy, APPROVAL_DECISIONS.CANCELLED]
         );
-        return {
-          approval_required: false,
-          current_approver_id: null
-        };
       }
+    }
 
-      // 4. Start approval chain
+    // 1. Initiator's hierarchy
+    const initiatorHierarchy = await t.oneOrNone(
+      `SELECT * FROM tbl_approval_hierarchy
+      WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND is_active = true`,
+      [companyId, initiatedBy, type]
+    );
+
+    if (!initiatorHierarchy) {
+      const transaction = await t.one(
+        `INSERT INTO tbl_approval_hierarchy_transactions 
+        (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
+        VALUES ($1, $2, $3, $4, NULL, $4, $5, $6) RETURNING *`,
+        [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
+      );
       await t.none(
-        `INSERT INTO tbl_approval_hierarchy_transactions
-        (hierarchy_type, target_entity_type, target_entity_id, company_id, initiated_by, current_approver_id, meta, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [type, entityType, entityId, companyId, initiatedBy, nextApprover.user_id, meta, APPROVAL_DECISIONS.PENDING]
+        `INSERT INTO tbl_approval_hierarchy_history
+        (approval_transaction_id, approved_by, action, created_at)
+        VALUES ($1, $2, $3, NOW())`,
+        [transaction.id, initiatedBy, APPROVAL_DECISIONS.APPROVED]
       );
-
       return {
-        approval_required: true,
-        current_approver_id: nextApprover.user_id
+        approval_required: false,
+        current_approver_id: null
       };
-    });
+    }
+
+    const totalValue = meta?.total_value ?? 0;
+    const bypassCap = initiatorHierarchy.bypass_cap;
+
+    // Find next approver (above the initiator)
+    const nextApprover = await t.oneOrNone(
+      `SELECT user_id FROM tbl_approval_hierarchy
+      WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
+        AND approval_level < $3
+      ORDER BY approval_level DESC
+      LIMIT 1`,
+      [companyId, type, initiatorHierarchy.approval_level]
+    );
+
+    // 2. Auto-approve case: bypass cap OR if there exist no higher approver
+    if ((totalValue <= bypassCap) || !nextApprover) {
+      const transaction = await t.one(
+        `INSERT INTO tbl_approval_hierarchy_transactions 
+        (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
+        VALUES ($1, $2, $3, $4, NULL, $4, $5, $6) RETURNING *`,
+        [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
+      );
+      await t.none(
+        `INSERT INTO tbl_approval_hierarchy_history
+        (approval_transaction_id, approved_by, action, created_at)
+        VALUES ($1, $2, $3, NOW())`,
+        [transaction.id, initiatedBy, APPROVAL_DECISIONS.APPROVED]
+      );
+      return {
+        approval_required: false,
+        current_approver_id: null
+      };
+    }
+
+    // 4. Start approval chain
+    await t.none(
+      `INSERT INTO tbl_approval_hierarchy_transactions
+      (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, meta, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [type, entityId, companyId, initiatedBy, nextApprover.user_id, meta, APPROVAL_DECISIONS.PENDING]
+    );
+
+    return {
+      approval_required: true,
+      current_approver_id: nextApprover.user_id
+    };
   },
   approveRequest: async ({
     transactionId,
     approvedBy,
     decision, // 'approved' or 'rejected'
     remarks = '',
-    txn,
+    t,
   }) => {
-    return db.tx(async t => {
-      // Replace t to parent transaction if got any
-      t = txn ?? t;
+    let returnValue = null;
 
-      let returnValue = null;
+    const trx = await t.one(
+      `SELECT * FROM tbl_approval_hierarchy_transactions WHERE id = $1`,
+      [transactionId]
+    );
 
-      const trx = await t.one(
-        `SELECT * FROM tbl_approval_hierarchy_transactions WHERE id = $1`,
-        [transactionId]
+    if (trx.status !== 'pending') {
+      throw new Error('This approval request has already been resolved.');
+    }
+
+    if (trx.current_approver_id !== approvedBy) {
+      throw new Error('You are not authorized to act on this request.');
+    }
+
+    const { company_id, hierarchy_type } = trx;
+
+    // REJECTION FLOW
+    if (decision === 'rejected') {
+      await t.none(
+        `UPDATE tbl_approval_hierarchy_transactions
+        SET status = $3, final_decision_by = $1, current_approver_id = NULL, updated_at = NOW()
+        WHERE id = $2`,
+        [approvedBy, transactionId, APPROVAL_DECISIONS.REJECTED]
+      );
+      returnValue = {
+        is_rejected: true
+      }
+    } else {
+      // Find next approver
+      const currentLevel = await t.oneOrNone(
+        `SELECT approval_level, bypass_cap FROM tbl_approval_hierarchy
+        WHERE company_id = $1 AND hierarchy_type = $2 AND user_id = $3`,
+        [company_id, hierarchy_type, approvedBy]
       );
 
-      if (trx.status !== 'pending') {
-        throw new Error('This approval request has already been resolved.');
-      }
+      const nextApprover = await t.oneOrNone(
+        `SELECT user_id FROM tbl_approval_hierarchy
+        WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
+          AND approval_level < $3
+        ORDER BY approval_level DESC
+        LIMIT 1`,
+        [company_id, hierarchy_type, currentLevel?.approval_level ?? 999]
+      );
 
-      if (trx.current_approver_id !== approvedBy) {
-        throw new Error('You are not authorized to act on this request.');
-      }
+      const totalValue = trx?.meta?.total_value ?? 0;
+      const bypassCap = currentLevel.bypass_cap;
 
-      const { company_id, hierarchy_type } = trx;
-
-      // REJECTION FLOW
-      if (decision === 'rejected') {
+      if ((totalValue <= bypassCap) || !nextApprover) {
+        // This is the highest approver OR has enough cap → final approval
         await t.none(
           `UPDATE tbl_approval_hierarchy_transactions
           SET status = $3, final_decision_by = $1, current_approver_id = NULL, updated_at = NOW()
           WHERE id = $2`,
-          [approvedBy, transactionId, APPROVAL_DECISIONS.REJECTED]
+          [approvedBy, transactionId, APPROVAL_DECISIONS.APPROVED]
         );
+
         returnValue = {
-          is_rejected: true
-        }
+          approval_required: false,
+          current_approver_id: null
+        };
       } else {
-        // Find next approver
-        const currentLevel = await t.oneOrNone(
-          `SELECT approval_level, bypass_cap FROM tbl_approval_hierarchy
-          WHERE company_id = $1 AND hierarchy_type = $2 AND user_id = $3`,
-          [company_id, hierarchy_type, approvedBy]
+        // Forward to next approver
+        await t.none(
+          `UPDATE tbl_approval_hierarchy_transactions
+          SET current_approver_id = $1, updated_at = NOW()
+          WHERE id = $2`,
+          [nextApprover.user_id, transactionId]
         );
 
-        const nextApprover = await t.oneOrNone(
-          `SELECT user_id FROM tbl_approval_hierarchy
-          WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
-            AND approval_level < $3
-          ORDER BY approval_level DESC
-          LIMIT 1`,
-          [company_id, hierarchy_type, currentLevel?.approval_level ?? 999]
-        );
-
-        const totalValue = trx?.meta?.total_value ?? 0;
-        const bypassCap = currentLevel.bypass_cap;
-
-        if ((totalValue <= bypassCap) || !nextApprover) {
-          // This is the highest approver OR has enough cap → final approval
-          await t.none(
-            `UPDATE tbl_approval_hierarchy_transactions
-            SET status = $3, final_decision_by = $1, current_approver_id = NULL, updated_at = NOW()
-            WHERE id = $2`,
-            [approvedBy, transactionId, APPROVAL_DECISIONS.APPROVED]
-          );
-
-          returnValue = {
-            approval_required: false,
-            current_approver_id: null
-          };
-        } else {
-          // Forward to next approver
-          await t.none(
-            `UPDATE tbl_approval_hierarchy_transactions
-            SET current_approver_id = $1, updated_at = NOW()
-            WHERE id = $2`,
-            [nextApprover.user_id, transactionId]
-          );
-
-          returnValue = {
-            approval_required: true,
-            current_approver_id: nextApprover.user_id
-          };
-        }
+        returnValue = {
+          approval_required: true,
+          current_approver_id: nextApprover.user_id
+        };
       }
+    }
 
-      // Insert history log
-      await t.none(
-        `INSERT INTO tbl_approval_hierarchy_history
-        (approval_transaction_id, approved_by, action, remarks, created_at)
-        VALUES ($1, $2, $3, $4, NOW())`,
-        [transactionId, approvedBy, decision === 'approved' ? APPROVAL_DECISIONS.APPROVED : APPROVAL_DECISIONS.REJECTED, remarks]
-      );
+    // Insert history log
+    await t.none(
+      `INSERT INTO tbl_approval_hierarchy_history
+      (approval_transaction_id, approved_by, action, remarks, created_at)
+      VALUES ($1, $2, $3, $4, NOW())`,
+      [transactionId, approvedBy, decision === 'approved' ? APPROVAL_DECISIONS.APPROVED : APPROVAL_DECISIONS.REJECTED, remarks]
+    );
 
-      return returnValue;
-    });
+    return returnValue;
   },
 };
 
 
 // Reusable components
-export const markPOStatusChange = async (po_id, t, reject = false) => {
+export const markPOStatusChange = async (po_id, t, reject = false, user) => {
   try {
-    await t.none(
+    const purchaseOrder = await t.one(
       `UPDATE tbl_rfq_purchase_order
        SET status = $2,
            updated_at = NOW()
-       WHERE id = $1`,
+       WHERE id = $1 RETURNING *`,
       [po_id, reject ? PO_STATUSES.REJECTED : PO_STATUSES.APPROVED]
     );
 
-    // ⏳ Placeholder: trigger email notifications in future
-    // await triggerPOApprovalEmails(po_id);
+    // ⏳ Trigger email notifications to vendors and all the team members (Not yet)!
+    if(!reject) {
+      await sendPONotificationToVendor(purchaseOrder, user);
+    }
 
     return true;
   } catch (error) {
-    console.error('Failed to mark PO as approved:', error);
+    console.error('Failed to mark PO status chnged:', error);
     throw error;
   }
 };

@@ -23,5 +23,6 @@ export const PO_STATUSES = {
   SENT: 'sent', 
   GRN: 'GRN', 
   COMPLETED: 'completed', 
-  CANCELLED: 'cancelled'
+  CANCELLED: 'cancelled',
+  REJECTED: 'rejected'
 }

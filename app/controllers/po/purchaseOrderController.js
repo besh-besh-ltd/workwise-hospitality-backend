@@ -1,8 +1,10 @@
 import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
+import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange } from "../../models/generalModel.js";
-import { getPOByRFQId, getPODetailsById, initiatePurchaseOrder } from "../../models/purchaseOrderModel.js";
+import { createMilestone, deleteMilestone, getMilestonesByPOId, getPOByRFQId, getPODetailsById, initiatePurchaseOrder, updateMilestone } from "../../models/purchaseOrderModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
+import { sendApprovalNotification } from "./purchaseOrderEmails.js";
 
 export const getPOByRFQ = async (req, res) => {
     try {
@@ -62,6 +64,7 @@ export const initiatePO = async (poInfo, user, txn) => {
       product_info,
       initiated_by,
       company_id,
+      user,
       txn
     );
 
@@ -90,7 +93,6 @@ export const approvePO = async (req, res) => {
         const trx = await t.oneOrNone(
           `SELECT * FROM tbl_approval_hierarchy_transactions
            WHERE hierarchy_type = $4
-             AND target_entity_type = $5
              AND company_id = $1
              AND status = $2
              AND meta ->> 'po_id' = $3`,
@@ -99,7 +101,6 @@ export const approvePO = async (req, res) => {
             APPROVAL_DECISIONS.PENDING,
             String(po_id),
             AVAILABLE_HIERARCHY_TYPES.po.type,
-            AVAILABLE_HIERARCHY_TYPES.po.target_entity_type
           ]
         );
     
@@ -119,7 +120,15 @@ export const approvePO = async (req, res) => {
         });
     
         if (result && (!result.approval_required || result.is_rejected)) {
-          await markPOStatusChange(po_id, t, result.is_rejected);
+          await markPOStatusChange(po_id, t, result.is_rejected, req.user);
+        } else if (result && (!result.is_rejected && result.approval_required)) {
+          const purchaseOrder = await t.oneOrNone(`
+            SELECT * FROM tbl_rfq_purchase_order trpo 
+              JOIN tbl_approval_hierarchy_transactions taht ON taht.id = $1 
+            WHERE trpo.id = taht.target_entity_id`,
+          [trx.id])
+
+          await sendApprovalNotification(purchaseOrder, result.current_approver_id);
         }
     
         return res.status(200).json({
@@ -140,5 +149,55 @@ export const approvePO = async (req, res) => {
       message: error.message || 'An error occurred while approving the PO.',
       error
     });
+  }
+};
+
+// Payment Milestone Controllers
+export const getMilestonesController = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+    const user = req.user;
+
+    const data = await getMilestonesByPOId(req.user.company_id, po_id, user.user_type == '8');
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const createMilestoneController = async (req, res) => {
+  try {
+    const milestone = await createMilestone(req.body, req.user);
+    if(milestone) await scheduleMilestoneReminder(milestone);
+
+    return res.status(201).json({ success: true, data: milestone });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateMilestoneController = async (req, res) => {
+  try {
+    const updated = await updateMilestone(req.params.id, req.body, req.user.id);
+    if (updated) await rescheduleMilestoneReminder(updated);
+
+    return res.status(200).json({ success: true, data: updated });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteMilestoneController = async (req, res) => {
+  try {
+    const deleted = await deleteMilestone(req.params.id, req.user);
+    if (deleted) removeMilestoneReminder(deleted.id);
+    
+    return res.status(200).json({ success: true, data: deleted });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };

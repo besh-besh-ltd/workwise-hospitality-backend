@@ -15,6 +15,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 import 'newrelic'; // Import after dotenv so New Relic can read environment variables
+import { rescheduleAllMilestoneReminders } from './app/helper/cronManager.js';
 
 
 // Initialize app
@@ -28,6 +29,8 @@ app.get('/health', (req, res) => {
 
 app.use(express.static(path.join(__dirname, '/app/uploads')));
 util(app);
+
+rescheduleAllMilestoneReminders();
 
 
 // Create server

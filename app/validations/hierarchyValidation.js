@@ -5,6 +5,7 @@ const approversType = Joi.object({
   user_id: Joi.number().required(),
   approval_level: Joi.number().required(),
   bypass_cap: Joi.number().required(),
+  is_active: Joi.boolean().required(),
 });
 
 export const hierarchySchema = {
