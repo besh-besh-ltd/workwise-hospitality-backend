@@ -146,14 +146,17 @@ ${pdfText}
       const secureUrl = aiProcessedBoqJson.startsWith('http://test')
         ? aiProcessedBoqJson.replace('http://', 'https://')
         : aiProcessedBoqJson;
-      
+
+      if(secureUrl.includes('localhost')) {
+        secureUrl.replace('localhost', '0.0.0.0')
+      }
 
       const downloadResponse = await axios.get(secureUrl);
 
       return downloadResponse?.data || [] ;
     } catch (error) {
       logError(error);
-      return { error: 'Error processing BOQ with AI' };
+      throw error;
     }
   },
 

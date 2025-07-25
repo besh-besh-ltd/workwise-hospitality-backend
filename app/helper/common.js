@@ -9,6 +9,18 @@ import bcrypt from 'bcryptjs';
 import userModel from '../models/userModel.js';
 import { URL } from 'url';
 import { DeleteObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import crypto from 'crypto';
+
+// Persistence Statuses
+export const PERSISTENCE_STATUSES = {
+  INITIATED: 'initiated',
+  PROCESSING: 'processing',
+  PARTIAL_COMPLETED: 'partially_completed',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+  TERMINATED: 'terminated'
+}
+
 /** Log data for debugging purpose
  * Only work when in DEV env
  */
@@ -280,6 +292,73 @@ const acl = function (role) {
     }
   };
 };
+
+/**
+ * Generate an HMAC SHA256 signature
+ * @param {string} message - The message you want to HASH
+ * @param {string} secret - Your secret key
+ * @returns {string} base64url-encoded signature
+ */
+export function generateSignature(message, secret) {
+  const hmac = crypto.createHmac('sha256', secret);
+  hmac.update(message);
+  const signature = hmac.digest('base64url');
+  
+  return signature;
+}
+
+export function verifyAIWebhookBody(req, res, next) {
+  const { file_name, user, expires, signature } = req.query;
+  const { type, jsonFileUrl, availableSheets, errors } = req.body;
+
+  if (!file_name || !user || !expires || !signature) {
+    return res.status(400).json({ error: 'Missing parameters.' });
+  }
+
+  if(!errors && (!jsonFileUrl || !availableSheets)) {
+    return res.status(400).json({ error: 'Missing payload data, jsonFileUrl and availableSheets are required when there are no errors!' });
+  }
+
+  if(!type || !['rfq', 'simplified'].includes(type)) {
+    return res.status(400).json({ error: 'Type out of bound.' });
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (now > parseInt(expires, 10)) {
+    return res.status(403).json({ error: 'Webhook URL or Signature has been expired, please .' });
+  }
+
+  const secret = process.env.WEBHOOK_SECRET;
+  const message = `${file_name}_${user}_${expires}`;
+  const expectedSignature = generateSignature(message, secret);
+
+  const isValid = crypto.timingSafeEqual(
+    Buffer.from(signature),
+    Buffer.from(expectedSignature)
+  );
+
+  if (!isValid) {
+    return res.status(403).json({ error: 'Invalid signature.' });
+  }
+
+  // All good!
+  next();
+}
+
+export function normalizeErrors(errors) {
+  if (!errors) return [];
+
+  if (typeof errors === 'string') {
+    return [{ message: errors }];
+  }
+
+  if (Array.isArray(errors) || typeof errors === 'object') {
+    return errors;
+  }
+
+  return [{ message: String(errors) }];
+}
+
 const convertSixDigit = (id) => {
   try {
     let str = '' + id;
