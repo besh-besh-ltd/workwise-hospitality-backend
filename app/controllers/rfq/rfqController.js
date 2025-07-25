@@ -7833,6 +7833,8 @@ getClauses: async (req, res) => {
     const result = await rfqModel.getClauses(rfq_id);
     // console.log("Result main of get clauses = ",result);
 
+    console.log("ehckinh th evendor result",JSON.stringify(result));
+
     res
       .status(200)
       .json(result)
@@ -7873,6 +7875,7 @@ getTechComments: async (req, res) => {
     const user_type = req.user.user_type;
 
     const response = await rfqModel.getTechComments(clause_id, sender_id, receiver_id, user_id, user_type);
+
     res
       .status(200)
       .json(response)
@@ -7885,6 +7888,53 @@ getTechComments: async (req, res) => {
     });
   }
 },
+getSummarisedDeviation: async (req, res) => {
+  try {
+    const { rfq_id } = req.body;
+    
+    if (!rfq_id) {
+      return res.status(400).json({
+        status: 0,
+        message: "rfq_id is required"
+      });
+    }
+
+    const result = await rfqModel.getSummarisedDeviation(rfq_id);
+    
+    if (!result || result.length === 0) {
+      return res.status(404).json({
+        status: 0,
+        message: "No deviations found for this RFQ"
+      });
+    }
+
+    const genresult = await generativeAI.summariseTechDeviation(result);
+    
+    // Parse the response in case it's returned as a string
+    let parsedResult;
+    try {
+      parsedResult = typeof genresult === 'string' ? JSON.parse(genresult) : genresult;
+    } catch (parseError) {
+      console.error("Failed to parse Gemini response:", parseError);
+      throw new Error("Invalid response format from AI service");
+    }
+
+    res.status(200).json({
+      status: 1,
+      data: parsedResult,
+    });
+
+  } catch (error) {
+    console.error("Error in getSummarisedDeviation API:", error.message);
+    res.status(500).json({
+      status: 0,
+      message: "Error processing deviation summary",
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+},
+
+
 addVendorResponse: async (req, res) => {
   try {
     const data = req.body;

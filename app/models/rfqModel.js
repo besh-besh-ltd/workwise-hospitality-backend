@@ -5546,6 +5546,36 @@ ORDER BY m.created_at;
       throw error; // Rethrow the error for the caller to handle
     }
   },
+ getSummarisedDeviation: async (rfq_id) => {
+  return new Promise(async (resolve, reject) => {
+    const q = `
+      SELECT 
+        tr.id, 
+        tr.rfq_no, 
+        trpec.id as clause_id,
+        trptec.sender_id, 
+        trptec.receiver_id,
+        trptec.text AS deviation
+      FROM tbl_rfq tr
+      JOIN tbl_rfq_product_tech_evaluation trpte ON trpte.rfq_id = tr.id 
+      JOIN tbl_rfq_product_tech_evaluation_clauses trpec ON trpec.tbl_rfq_product_tech_evaluation_id = trpte.id 
+      JOIN tbl_rfq_product_tech_evaluation_comments trptec ON trptec.tbl_rfq_product_tech_evaluation_clauses_id = trpec.id
+      WHERE tr.id = $1;
+    `;
+
+    try {
+      const result = await db.query(q, [rfq_id]);
+      resolve(result);
+    } catch (error) {
+      reject({
+        status: 0,
+        message: `Failed to fetch deviation summary for RFQ ID ${rfq_id}.`,
+        error: error.message,
+      });
+    }
+  });
+ },
+
 
   addVendorResponse: async (responses) => {
     const validateClauseQuery = `
