@@ -29,7 +29,15 @@ import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 
-
+const formatPersistentErrors = (errors) => {
+  if(errors) {
+    if(Array.isArray(errors)) {
+      return errors.map(error => ``)
+    }
+  } else {
+    return ""
+  }
+}
 
 const VENDORS_FILTER_KEYS = [
   'vendor_approved_by',
@@ -57,7 +65,7 @@ export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, st
             status == PERSISTENCE_STATUSES.COMPLETED
               ? `The Magic Search RFQ Processing has been completed successfully, follow the below link to see the processed draft.`
               : status == PERSISTENCE_STATUSES.FAILED
-              ? `The Magic Search RFQ Processing has been failed due to the following reason:`
+              ? `The Magic Search RFQ Processing has been failed due to some reasons`
               : `The Magic Search RFQ Processing status has been changed from <strong>${previous_status}</strong> to <strong>${status}</strong>`
           }
         </p>
@@ -65,14 +73,17 @@ export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, st
           (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
           status == PERSISTENCE_STATUSES.COMPLETED)
             ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management?tab=create-rfq&draft_id=${persisted_rfq_id}"
-              style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
-            View Draft
-          </a>`
+                  style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                View Draft
+              </a>`
             : ''
         }
         ${
           status == PERSISTENCE_STATUSES.FAILED
-            ? `<strong>${errors}</strong>`
+            ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/magic-search?tab=processing-files"
+                  style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                View Processing RFQs
+              </a>`
             : ''
         }
       `;
@@ -3222,14 +3233,7 @@ deleteDraft: async (req, res) => {
               rfq_id,
             })
 
-            if (!sheetRes) {
-                return res.status(404).json({ 
-                    status: 2, 
-                    message: 'Specified sheet data not found or not authorized' 
-                });
-            }
-
-            sheetData = sheetRes;
+            sheetData = sheetRes || null;
         } else {
             // Create a new RFQ
 
