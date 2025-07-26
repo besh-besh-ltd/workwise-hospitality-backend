@@ -110,7 +110,7 @@ const projectController = {
             message: "Project not found"
           });
         }
-        
+        console.log("checking the project details", projectDetails);
         res
         .status(200)
         .json({
@@ -145,10 +145,10 @@ const projectController = {
         } else {
           // Check if user is the project owner or a team member
           const isOwner = await projectModel.checkProjectOwnership(project_id, user_id);
-          
+          const file = 'yes'; // we want file hence explictly assigning tis value for feching project files and docs.
           if (isOwner) {
             // User is the project owner
-            projectDetails = await projectModel.getProjectTableDataById(project_id, user_id);
+            projectDetails = await projectModel.getProjectTableDataById(project_id, user_id , file );
           } else {
             // Check if user is a team member
             const isMember = await projectModel.isTeamMember(project_id, user_id);
@@ -172,7 +172,7 @@ const projectController = {
             message: "Project not found"
           });
         }
-        
+         console.log("checking the project table data",projectDetails);
         res
         .status(200)
         .json({
