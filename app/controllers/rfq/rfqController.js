@@ -3233,14 +3233,7 @@ deleteDraft: async (req, res) => {
               rfq_id,
             })
 
-            if (!sheetRes) {
-                return res.status(404).json({ 
-                    status: 2, 
-                    message: 'Specified sheet data not found or not authorized' 
-                });
-            }
-
-            sheetData = sheetRes;
+            sheetData = sheetRes || null;
         } else {
             // Create a new RFQ
 
