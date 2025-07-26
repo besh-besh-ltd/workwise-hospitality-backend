@@ -513,18 +513,17 @@ user_book_demo: async (mobile) => {
 
       if (variant_id) {
         data = await db.any(
-          `SELECT DISTINCT ON (tva.vendor_approve) tva.id, tva.vendor_approve, tva.show_in_website
-FROM tbl_vendor_approve tva
-WHERE tva.id IN (
-    SELECT DISTINCT tvum.vendor_approve_id
-    FROM tbl_vendorapprove_product_mapping tvum
-    JOIN tbl_product_variant_vendor_mapping tpvvm ON tpvvm.id = tvum.variant_vendor_mapping_id
-    WHERE tpvvm.product_variant_id = $1
-      AND tpvvm.status = TRUE
-      AND tpvvm.is_approved = TRUE
-      AND tvum.variant_vendor_mapping_id IS NOT NULL
-)
-ORDER BY tva.vendor_approve, tva.id;
+                    `SELECT DISTINCT ON (tva.vendor_approve) tva.id, tva.vendor_approve, tva.show_in_website
+          FROM tbl_vendor_approve tva
+          WHERE tva.id IN (
+              SELECT DISTINCT tvum.vendor_approve_id
+              FROM tbl_vendorapprove_product_mapping tvum
+              JOIN tbl_product_variant_vendor_mapping tpvvm ON tpvvm.id = tvum.variant_vendor_mapping_id
+              WHERE tpvvm.product_variant_id = $1
+                AND tpvvm.is_approved = TRUE
+                AND tvum.variant_vendor_mapping_id IS NOT NULL
+          )
+          ORDER BY tva.vendor_approve, tva.id;
 `,
           [variant_id]
         );

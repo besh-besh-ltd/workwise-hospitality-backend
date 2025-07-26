@@ -7,7 +7,7 @@ import passport from '../../middleware/passport.js';
 import { rfqSchemas } from '../../validations/paramValidation/rfqValidation.js';
 import { validateGetRfqsQuery } from '../../validations/paramValidation/rfqValidation.js';
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
-import { acl } from '../../helper/common.js';
+import { acl, verifyAIWebhookBody } from '../../helper/common.js';
 import { schema_posts } from '../../validations/paramValidation/productValidation.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
 
@@ -293,6 +293,19 @@ RfqRoutes.post('/magic-search-rfq-preview',
   rfqController.magicSearchRfqCreate
 );
 
+RfqRoutes.post('/initiate-magic-search',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.initiateMagicSearch,
+);
+
+RfqRoutes.post('/magic-webhook',
+  // passportSignIn,
+  // acl([2, 8]),
+  verifyAIWebhookBody,
+  rfqController.handleAIWebhook,
+);
+
 RfqRoutes.get('/process-magic-search-draft',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
@@ -416,6 +429,10 @@ RfqRoutes.post('/get-tech-comments',
   validateBody(rfqSchemas.getTechComments),
   rfqController.getTechComments
 )
+RfqRoutes.post('/get-summarised-deviation',
+  passportSignIn,
+  rfqController.getSummarisedDeviation
+)
 
 RfqRoutes.post('/get-vendor-names',
   passportSignIn,
@@ -505,6 +522,13 @@ RfqRoutes.post(
   passportSignIn,
   acl([2, 8]),
   rfqController.getDraftRFQs
+);
+
+RfqRoutes.post(
+  '/get-processing-rfqs',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.getProcessingRFQs
 );
 
 RfqRoutes.get(

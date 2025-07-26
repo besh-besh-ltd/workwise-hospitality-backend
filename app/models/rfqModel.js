@@ -2,6 +2,9 @@ import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 import generalModel from './generalModel.js';
 import userModel from './userModel.js';
+import cmsModel from './cmsModel.js';
+import { PERSISTENCE_STATUSES } from '../helper/common.js';
+import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 
 const rfqModel = {
   insert: async (table_name, data, db_con = db) => {
@@ -249,6 +252,75 @@ const rfqModel = {
     }
   },
 
+  persistAIJobInDB: async (user_id, file_name, signature, type, db_con = db) => {
+    try {
+      let persistenceData = {
+        user_id,
+        file_name,
+        signature,
+        type
+      }
+
+      const res = await rfqModel.insert('tbl_rfq_persistent_jobs', persistenceData, db_con);
+      return res;
+    } catch (error) {
+      console.log(error)
+      throw error;
+    }
+  },
+
+  updatePersistenceJobStatus: async (persistenceId, status = PERSISTENCE_STATUSES.PROCESSING, persisted_rfq_id = null, errors = null, jsonUrl) => {
+    try {
+      const persistenceQuery = `id = ${persistenceId}`
+      let persistence = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', persistenceQuery);
+
+      if(!persistence || persistence.length <= 0) {
+        throw new Error("Persistence does not exist!");
+      }
+
+      persistence = persistence[0];
+
+      let user = await userModel.getUserById(persistence.user_id);
+      
+      if(!user || user.length <= 0) {
+        throw new Error("User does not exist for this persistence!");
+      }
+
+      user = user[0];
+
+      let q = `
+        UPDATE tbl_rfq_persistent_jobs
+        SET status = $2, persisted_rfq_id = $3, errors = $4::jsonb, download_url = $5
+        ${status == PERSISTENCE_STATUSES.COMPLETED || status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ? ', completed_at = NOW()' : ''}
+
+        WHERE id = $1
+      `;
+      
+      const formatttedError =
+        errors &&
+        (typeof errors == 'string' ||
+          Array.isArray(errors) ||
+          typeof errors == 'object')
+          ? JSON.stringify(errors)
+          : null;
+
+      const updatedPersistence = await db.any(q, [
+        persistenceId,
+        status,
+        persisted_rfq_id,
+        formatttedError,
+        jsonUrl
+      ]);
+
+      // Notify buyer about the persistence completion, Whatsapp integration pending!!
+      notifyBuyerOnPersistenceViaEmail(user, persistence.status, status, persisted_rfq_id, errors);
+
+      return updatedPersistence;
+    } catch (error) {
+      throw error;
+    }
+  },
+
   saveMagicSearchInDraft: async (data, nextRFQNumber, createdBy, processedUrl, rfqId, sheetId) => {
     try {
       return await db.tx(async t => {
@@ -467,6 +539,7 @@ const rfqModel = {
         const updatableData = {
           is_processed: true,
           processed_at: new Date().toISOString(),
+          validation_errors: JSON.stringify(data?.validationErrors ?? []),
         }
         await rfqModel.update('tbl_rfq_draft_sheets', updatableData, sheet.id, t);
 
@@ -2219,6 +2292,7 @@ LIMIT 1;`;
   },
   checkIfExists: async (table_name, parameter, db_con = db) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
+
     return new Promise(function (resolve, reject) {
       db_con.any(query,[table_name])
         .then(function (data) {
@@ -2850,13 +2924,18 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
     }
   },
 
-  searchProduct: async (search_key, category_id, approved_by_id) => {
+  searchProduct: async (search_key, category_id, approved_by_id, locationFilters = {}) => {
     // query change by mukul 28-08-2024
     // query change by mukul 08-09-2024, added one more filter for created by 1 or 111 to exclude product for them
+    // Changes by Agnij: Modified to support slug-based search for better SEO and URL structure
+    
+    // Check if search_key looks like a slug (no spaces and either contains hyphens or is a single word)
+    const isSlugSearch = search_key && !search_key.includes(' ') && (search_key.includes('-') || search_key.length > 0);
+    
     let q = `
       SELECT DISTINCT p.id AS product_id,
-                      P.name AS product_name,
-                      CONCAT(PV.name, ' - ', P.name) AS unified_name,
+                      p.name AS product_name,
+                      CONCAT(pv.name, ' - ', p.name) AS unified_name,
                       pv.id AS variant_id,
                       pv.name AS variant_name,
                       p.description,
@@ -2865,47 +2944,37 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
                       c.id AS category_id,
                       c.parent_id AS parent_category_id,
                       img.new_image_name AS image_url,
-                      similarity(CONCAT(PV.name, ' - ', P.name), $1) AS similarity_score,
-                      ts_rank_cd(to_tsvector('english', CONCAT(PV.name, ' - ', P.name)), plainto_tsquery('english', $1)) AS rank
-      FROM tbl_product_variant pv 
+                      similarity(CONCAT(pv.name, ' - ', p.name), $1) AS similarity_score,
+                      ts_rank_cd(to_tsvector('english', CONCAT(pv.name, ' - ', p.name)), plainto_tsquery('english', $1)) AS rank
+      FROM tbl_product_variant pv
+      JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
+      JOIN tbl_users u ON u.id = pvvm.vendor_id
+        ${locationFilters.country_id ? `AND u.country::int = ${locationFilters.country_id}` : ''}
+        ${locationFilters.state_id ? `AND u.state::int = ${locationFilters.state_id}` : ''}
+        ${locationFilters.city_id ? `AND u.city::int = ${locationFilters.city_id}` : ''}
       JOIN tbl_product p ON pv.product_id = p.id
       JOIN tbl_product_categories pc ON p.id = pc.product_id
-      JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
-      LEFT JOIN tbl_product_images img ON p.id = img.product_id
       JOIN tbl_category c ON pc.category_id = c.id
-      ${
-        approved_by_id
-          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id`
-          : ``
-      }
-      WHERE p.status = 1 
-        AND p.is_deleted = 0 
-        AND p.is_review = 0 
-        AND p.is_approve = 1 
+      LEFT JOIN tbl_product_images img ON p.id = img.product_id
+      ${approved_by_id ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id` : ``}
+      WHERE p.status = 1
+        AND p.is_deleted = 0
+        AND p.is_review = 0
+        AND p.is_approve = 1
         AND pv.is_approve = 1
-            AND EXISTS (
-        SELECT 1
-        FROM tbl_product_variant_vendor_mapping pvvm
-        WHERE pvvm.product_variant_id = pv.id
-          AND pvvm.status = TRUE
-          AND pvvm.is_approved = TRUE
-          AND pvvm.id IS NOT NULL
-      )
         AND (
-          to_tsvector('english', CONCAT(PV.name, ' - ', P.name)) @@ plainto_tsquery('english', $1) 
-          OR similarity(CONCAT(PV.name, ' - ', P.name), $1) > 0.1
+          pv.slug = $1
+          OR to_tsvector('english', CONCAT(pv.name, ' - ', p.name)) @@ plainto_tsquery('english', $1)
+          OR similarity(CONCAT(pv.name, ' - ', p.name), $1) > 0.1
         )
         ${category_id ? `AND c.id = $2` : ``}
-        ${
-          approved_by_id
-            ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)`
-            : ``
-        }
-      ORDER BY rank DESC, similarity_score DESC, CONCAT(PV.name, ' - ', P.name) ASC;`;
+        ${approved_by_id ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)` : ``}
+      ORDER BY rank DESC, similarity_score DESC, CONCAT(pv.name, ' - ', p.name) ASC ;
+    `;
 
     // Assuming db.query can handle parameterized queries:
     return new Promise(function (resolve, reject) {
-      db.query(q, [search_key, category_id, approved_by_id].filter(Boolean)) // Filters out any undefined or empty values
+      db.query(q, [search_key, category_id, approved_by_id, locationFilters.country_id, locationFilters.state_id, locationFilters.city_id].filter(Boolean)) // Filters out any undefined or empty values
         .then(function (data) {
           resolve(data);
         })
@@ -2915,6 +2984,8 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
         });
     });
   },
+  // Location lookup functions removed - using cmsModel.findStateByName, cmsModel.findCityByNameAndState, cmsModel.findCountryByName instead
+
   getCategoryList: async (search_key) => {
     //   let q = `
     //  SELECT DISTINCT c.id AS category_id,
@@ -3067,7 +3138,7 @@ WHERE row_num_by_name_category = 1
 `;
 
     return new Promise(function (resolve, reject) {
-      db.query(q, [categoryIds])
+      db.query(q, [search_key, category_id, approved_by_id].filter(Boolean)) // Filters out any undefined or empty values
         .then(function (data) {
           resolve(data);
         })
@@ -3096,6 +3167,64 @@ WHERE row_num_by_name_category = 1
     responseKeys,
     productMakes
   ) => {
+    
+    // Convert location names to IDs if they are strings (optimized)
+    let stateIds = [];
+    let cityIds = [];
+    let countryIds = [];
+    
+    // Process all location lookups in parallel for better performance
+    const locationPromises = [];
+    
+    if (state && Array.isArray(state) && state.length > 0) {
+      if (typeof state[0] === 'string') {
+        // If state is array of strings, convert to IDs
+        locationPromises.push(
+          Promise.all(state.map(stateName => cmsModel.findStateByName(stateName)))
+            .then(results => {
+              stateIds = results.filter(result => result !== null);
+            })
+        );
+      } else {
+        // If state is array of objects with id property
+        stateIds = state.map(s => s.id);
+      }
+    }
+    
+    if (city && Array.isArray(city) && city.length > 0) {
+      if (typeof city[0] === 'string') {
+        // If city is array of strings, convert to IDs
+        locationPromises.push(
+          Promise.all(city.map(cityName => cmsModel.findCityByNameAndState(null, cityName)))
+            .then(results => {
+              cityIds = results.filter(result => result !== null);
+            })
+        );
+      } else {
+        // If city is array of objects with id property
+        cityIds = city.map(c => c.id);
+      }
+    }
+    
+    if (country && Array.isArray(country) && country.length > 0) {
+      if (typeof country[0] === 'string') {
+        // If country is array of strings, convert to IDs
+        locationPromises.push(
+          Promise.all(country.map(countryName => cmsModel.findCountryByName(countryName)))
+            .then(results => {
+              countryIds = results.filter(result => result !== null);
+            })
+        );
+      } else {
+        // If country is array of objects with id property
+        countryIds = country.map(c => c.id);
+      }
+    }
+    
+    // Wait for all location lookups to complete
+    if (locationPromises.length > 0) {
+      await Promise.all(locationPromises);
+    }
 
     // Adding dynamic turnover condition
     let turnoverCondition = '';
@@ -3224,9 +3353,9 @@ WHERE row_num_by_name_category = 1
             )
           ` : ''}
 
-          ${state != '' ? `AND tu.state::int IN (${state.map(s => s.id).join(",")})` : ``}
-          ${city != '' ? `AND tu.city::int IN (${city.map(c => c.id).join(",")})` : ``}
-          ${country != '' ? `AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(",")})` : ``}
+          ${stateIds.length > 0 ? `AND tu.state::int IN (${stateIds.join(",")})` : ``}
+          ${cityIds.length > 0 ? `AND tu.city::int IN (${cityIds.join(",")})` : ``}
+          ${countryIds.length > 0 ? `AND COALESCE(tu.country, '1')::int IN (${countryIds.join(",")})` : ``}
           ${turnoverCondition}
           ${vendorType.length > 0 ? `
             AND EXISTS (
@@ -3355,6 +3484,7 @@ WHERE row_num_by_name_category = 1
           resolve(data);
         })
         .catch(function (err) {
+          console.log("ERROR: ", err);
           let error = new Error(err);
           reject(error);
         });
@@ -3835,10 +3965,10 @@ WHERE row_num_by_name_category = 1
           SELECT trp.rfq_id
           FROM tbl_rfq_products trp
           LEFT JOIN tbl_quote_finalization tqf
-            ON trp.product_id = tqf.product_id
+            ON trp.product_variant_id = tqf.product_variant_id
           AND trp.variant = tqf.variant
           GROUP BY trp.rfq_id
-          HAVING count(trp.product_id) = count(tqf.product_id)
+          HAVING count(trp.product_variant_id) = count(tqf.product_variant_id)
         );
     `;
 
@@ -5490,6 +5620,36 @@ ORDER BY m.created_at;
       throw error; // Rethrow the error for the caller to handle
     }
   },
+ getSummarisedDeviation: async (rfq_id) => {
+  return new Promise(async (resolve, reject) => {
+    const q = `
+      SELECT 
+        tr.id, 
+        tr.rfq_no, 
+        trpec.id as clause_id,
+        trptec.sender_id, 
+        trptec.receiver_id,
+        trptec.text AS deviation
+      FROM tbl_rfq tr
+      JOIN tbl_rfq_product_tech_evaluation trpte ON trpte.rfq_id = tr.id 
+      JOIN tbl_rfq_product_tech_evaluation_clauses trpec ON trpec.tbl_rfq_product_tech_evaluation_id = trpte.id 
+      JOIN tbl_rfq_product_tech_evaluation_comments trptec ON trptec.tbl_rfq_product_tech_evaluation_clauses_id = trpec.id
+      WHERE tr.id = $1;
+    `;
+
+    try {
+      const result = await db.query(q, [rfq_id]);
+      resolve(result);
+    } catch (error) {
+      reject({
+        status: 0,
+        message: `Failed to fetch deviation summary for RFQ ID ${rfq_id}.`,
+        error: error.message,
+      });
+    }
+  });
+ },
+
 
   addVendorResponse: async (responses) => {
     const validateClauseQuery = `
@@ -6612,6 +6772,40 @@ getAllDraftRfqs: async (limit, offset, user_id, project_id, sort, reverse_auctio
         ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
         ${reverse_auction == '-1' ? '' : ` AND RFQ.reverse_auction = ${reverse_auction}`}
         ${rfq_no == null ? '' : ` AND CAST(RFQ.rfq_no AS TEXT) LIKE '%${rfq_no}%'`}
+      `;
+
+      db.tx(t => {
+        return t.batch([
+          db.query(q),
+          db.query(countQuery)
+        ]);
+      })
+      .then(([data, countResult]) => {
+        resolve({
+          data: data,
+          total_count: countResult[0].total_count
+        });
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
+  getAllProcessingRfqs: async (limit, offset, user_id, sort) => {
+  return new Promise(function (resolve, reject) {
+    let q = `
+      SELECT
+        RPJ.*
+      FROM tbl_rfq_persistent_jobs RPJ
+      WHERE RPJ.user_id = ${user_id}
+      ORDER BY started_at ${sort ? sort : 'ASC'} LIMIT ${limit} OFFSET ${offset}`;
+      
+      const countQuery = `
+        SELECT COUNT(*) AS total_count
+        FROM tbl_rfq_persistent_jobs RPJ
+        WHERE RPJ.user_id = ${user_id}
       `;
 
       db.tx(t => {
