@@ -1778,7 +1778,7 @@ update_user_detail: async (req, res, next) => {
       // var user_id = req.user.id;
       const { variant_id } = req.query;
       const vendorApproveList = await userModel.get_vendorapprove_list(variant_id);
-      if (vendorApproveList && vendorApproveList.length > 0) {
+      if (vendorApproveList) {
         res
           .status(200)
           .json({
@@ -1786,15 +1786,7 @@ update_user_detail: async (req, res, next) => {
             data: vendorApproveList
           })
           .end();
-      } else {
-        res
-          .status(400)
-          .json({
-            status: 2,
-            message: 'User detail not exist'
-          })
-          .end();
-      }
+      } 
     } catch (error) {
       logError(error);
       res
