@@ -75,7 +75,7 @@ const projectModel = {
                                 (
                     SELECT COUNT(*)
                     FROM tbl_rfq r
-                    WHERE r.project_id = p.id
+                    WHERE r.project_id = p.id AND is_published = 1
                   ) AS total_rfqs,
                                 (
                     SELECT COUNT(*)
@@ -85,7 +85,7 @@ const projectModel = {
                                 (
                     SELECT COUNT(*)
                     FROM tbl_rfq r
-                    WHERE r.project_id = p.id AND r.status = 1
+                    WHERE r.project_id = p.id AND r.status = 1 AND is_published = 1
                   ) AS open_rfqs,
                                 COALESCE(
                                     jsonb_object_agg(
