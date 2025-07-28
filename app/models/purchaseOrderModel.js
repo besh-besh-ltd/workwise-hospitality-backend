@@ -275,7 +275,28 @@ export const getPODetailsById = async (po_id, user_id) => {
                   )
                 ),
                 '[]'::json
-              ) AS payment_milestones
+              ) AS payment_milestones,
+              COALESCE(
+              (
+                SELECT JSON_AGG(
+                    JSON_BUILD_OBJECT(
+                      'id', M.id,
+                      'rfq_id', M.rfq_id,
+                      'po_id', M.po_id,
+                      'task_name', M.task_name,
+                      'completion_date', M.completion_date,
+                      'status', M.status,
+                      'task_description', M.task_description,
+                      'created_by', U.name,
+                      'created_at', M.created_at
+                    )
+                )
+                FROM tbl_purchase_order_tasks M
+                JOIN tbl_users U ON U.id = M.created_by
+                WHERE M.po_id = po.id
+              ),
+              '[]'::json
+            ) AS tasks
 
        FROM tbl_rfq_purchase_order po
        LEFT JOIN tbl_approval_hierarchy_transactions trx
@@ -355,6 +376,66 @@ export const deleteMilestone = async (id, user) => {
      SET status = 'deleted', updated_at = NOW(), updated_by = $2 
      WHERE id = $1 
      RETURNING *`,
+    [id, user.id]
+  );
+
+  return result;
+};
+
+export const getTasksByPOId = async (company_id, po_id) => {
+  let condition = 'WHERE po_id = $1'
+
+  return db.any(
+    `SELECT * FROM tbl_purchase_order_tasks
+     WHERE company_id = $2 ${condition}
+     ORDER BY completion_date ASC`,
+    [po_id, company_id]
+  );
+};
+
+export const createTask = async (data, user) => {
+  const {
+    rfq_id,
+    po_id,
+    task_name,
+    completion_date,
+    status,
+    task_description,
+  } = data;
+
+  const task = await db.oneOrNone(
+    `INSERT INTO tbl_purchase_order_tasks 
+      (rfq_id, po_id, company_id, task_name, completion_date, task_description, status, created_by) 
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [rfq_id, po_id, user.company_id, task_name, completion_date, task_description, status, user.id]
+  );
+
+  return task;
+};
+
+export const updateTask = async (id, updates, user_id) => {
+  const task = await db.oneOrNone(
+    `UPDATE tbl_purchase_order_tasks
+     SET task_name = COALESCE($2, task_name),
+         due_date = COALESCE($3, due_date),
+         task_description = COALESCE($4, task_description),
+         status = COALESCE($5, status),
+         updated_by = $6,
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING *`,
+    [id, updates.task_name, updates.due_date, updates.task_description, updates.status, user_id]
+  );
+
+  return task;
+};
+
+export const deleteTask = async (id, user) => {
+  const result = await db.oneOrNone(
+    `DELETE FROM tbl_purchase_order_tasks 
+      WHERE id = $1 
+      RETURNING *`,
     [id, user.id]
   );
 

@@ -2,7 +2,7 @@ import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange } from "../../models/generalModel.js";
-import { createMilestone, deleteMilestone, getMilestonesByPOId, getPOByRFQId, getPODetailsById, initiatePurchaseOrder, updateMilestone } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, initiatePurchaseOrder, updateMilestone, updateTask } from "../../models/purchaseOrderModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
 import { sendApprovalNotification } from "./purchaseOrderEmails.js";
 
@@ -194,6 +194,52 @@ export const deleteMilestoneController = async (req, res) => {
   try {
     const deleted = await deleteMilestone(req.params.id, req.user);
     if (deleted) removeMilestoneReminder(deleted.id);
+    
+    return res.status(200).json({ success: true, data: deleted });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// PO Tasks Controllers
+export const getTasksController = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+
+    const data = await getTasksByPOId(req.user.company_id, po_id);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const createTaskController = async (req, res) => {
+  try {
+    const milestone = await createTask(req.body, req.user);
+
+    return res.status(201).json({ success: true, data: milestone });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateTaskController = async (req, res) => {
+  try {
+    const updated = await updateTask(req.params.id, req.body, req.user.id);
+
+    return res.status(200).json({ success: true, data: updated });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteTaskController = async (req, res) => {
+  try {
+    const deleted = await deleteTask(req.params.id, req.user);
     
     return res.status(200).json({ success: true, data: deleted });
   } catch (error) {
