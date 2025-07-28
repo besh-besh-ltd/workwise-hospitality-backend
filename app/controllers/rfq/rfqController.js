@@ -8633,5 +8633,23 @@ getRfqs: async (req, res) => {
   }
 },
 
+// Saves user downloaded excel in database
+saveExcel: async (req, res) => {
+  try {
+    const { rfq_id, file_path } = req.body;
+    const user = req.user;
+
+    await rfqModel.saveExcel(rfq_id, user.id, file_path);
+    return res.status(201).end();
+  } catch (error) {
+    console.error('Error in saveExcel:', error);
+    return res.status(500).json({
+      status: 0,
+      message: 'Error saving Excel to database',
+      error: error.message
+    });
+  }
+}
+
 };
 export default rfqController;
