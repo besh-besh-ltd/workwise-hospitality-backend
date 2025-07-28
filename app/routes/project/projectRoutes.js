@@ -46,6 +46,13 @@ projectRoutes.get(
     projectController.getProjectTableDataById
 )
 
+projectRoutes.get('/project-budget/:project_id',
+    passportSignIn,
+    acl([2, 7, 8]),
+    validateParam(projectSchemas.project_id),
+    projectController.getProjectBudget
+)
+
 // route for getting all Projects
 projectRoutes.get(
     '/',

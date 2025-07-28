@@ -1,59 +1,57 @@
 import db, { pgp } from '../config/dbConn.js';
 
 const projectModel = {
-    createProject: async (projectObj) => {
-        return new Promise(function (resolve, reject) {
-            db.any(
-                `INSERT INTO tbl_projects(name, description, location, ended_at, user_id, rfq_type, reverse_auction)
-                 VALUES($1, $2, $3, $4, $5, $6, $7)`,
-                 [
-                    projectObj.name,
-                    projectObj.description,
-                    projectObj.location,
-                    projectObj.ended_at,
-                    projectObj.user_id,
-                    projectObj.rfq_type,
-                    projectObj.reverse_auction
-                 ]
-            )
-                .then(function (data) {
-                resolve(data);
-              })
-               .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-              });
+  createProject: async (projectObj) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `INSERT INTO tbl_projects(name, description, location, ended_at, user_id, rfq_type, reverse_auction,budget)
+                 VALUES($1, $2, $3, $4, $5, $6, $7 , $8s)`,
+        [
+          projectObj.name,
+          projectObj.description,
+          projectObj.location,
+          projectObj.ended_at,
+          projectObj.user_id,
+          projectObj.rfq_type,
+          projectObj.reverse_auction,
+          projectObj.budget
+        ]
+      )
+        .then(function (data) {
+          resolve(data);
         })
-    },
-    projectExist: async (name,user_id) => {
-        return new Promise(function (resolve, reject) {
-            db.any(
-                `SELECT 1 
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  projectExist: async (name, user_id) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT 1 
                 FROM tbl_projects 
                 WHERE name = $1 
                 AND user_id = $2`,
-                 [
-                    name,
-                    user_id
-                 ]
-            )
-                .then(function (data) {
-                resolve(data);
-              })
-               .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-              });
+        [name, user_id]
+      )
+        .then(function (data) {
+          resolve(data);
         })
-    },
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
 
-   getProjectTableDataById: async (project_id, user_id, file = 'no') => {
-  return new Promise(function (resolve, reject) {
-    let query = '';
-    let params = [project_id,user_id];
+  getProjectTableDataById: async (project_id, user_id, file = 'no') => {
+    return new Promise(function (resolve, reject) {
+      let query = '';
+      let params = [project_id, user_id];
 
-    if (file === 'yes') {
-      query = `
+      if (file === 'yes') {
+        query = `
         SELECT 
           t.*,
           COALESCE(
@@ -70,35 +68,46 @@ const projectModel = {
         WHERE t.id = $1
         GROUP BY t.id;
       `;
-    } else {
-      query = `
+      } else {
+        query = `
         SELECT *
         FROM tbl_projects
         WHERE id = $1
         and user_id = $2;
       `;
-    }
+      }
 
-    db.any(query, params)
-      .then(function (data) {
-        resolve(data);
-      })
-      .catch(function (err) {
-        reject(new Error(err));
-      });
-  });
-},
+      db.any(query, params)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          reject(new Error(err));
+        });
+    });
+  },
 
-
-    getProjectById: async (project_id, user_id, limit, offset) => {
-        return new Promise(function (resolve, reject) {
-                db.any(
-                    `SELECT 
+  getProjectById: async (project_id, user_id, limit, offset) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT 
                 p.*, 
                 -- Aggregated RFQ counts
-                COUNT(r.id) AS total_rfqs,
-                COUNT(CASE WHEN r.status = 0 THEN 1 END) AS closed_rfqs,
-                COUNT(CASE WHEN r.status = 1 THEN 1 END) AS open_rfqs,
+                 (
+    SELECT COUNT(*) 
+    FROM tbl_rfq r 
+    WHERE r.project_id = p.id
+  ) AS total_rfqs,
+                 (
+    SELECT COUNT(*) 
+    FROM tbl_rfq r 
+    WHERE r.project_id = p.id AND r.status = 2
+  ) AS closed_rfqs,
+                 (
+    SELECT COUNT(*) 
+    FROM tbl_rfq r 
+    WHERE r.project_id = p.id AND r.status = 1
+  ) AS open_rfqs,
 
                 COALESCE(
                     jsonb_object_agg(
@@ -157,31 +166,29 @@ const projectModel = {
             LEFT JOIN 
                 tbl_project_files f ON f.project_id = p.id    
             WHERE 
-                p.id = $1
+                p.id = $1 
             GROUP BY 
                 p.id;
               `,
-              [project_id, user_id, limit, offset]
-
-            )
-                .then(function (data) {
-                resolve(data);
-              })
-               .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-              });
+        [project_id, user_id, limit, offset]
+      )
+        .then(function (data) {
+          resolve(data);
         })
-    },
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   /**
-   * 
-   * @param {*} user_id 
+   *
+   * @param {*} user_id
    * @returns list of project in which user is creator or team member
    */
   getAllProjects: async (user_id) => {
     return new Promise(function (resolve, reject) {
-      const query =
-        `SELECT 
+      const query = `SELECT 
         p.*, 
         u.name AS created_by_name,
         COUNT(r.id) AS total_rfqs,
@@ -203,17 +210,17 @@ const projectModel = {
       ORDER BY 
         p.created_at DESC;`;
 
-      console.log(" query ", query)
+      console.log(' query ', query);
 
       db.any(query, [user_id])
-        .then(data => resolve(data))
-        .catch(err => reject(new Error(err)));
+        .then((data) => resolve(data))
+        .catch((err) => reject(new Error(err)));
     });
   },
 
   /**
-   * @param {*} company_id 
-   * @returns return list of project created in a company, 
+   * @param {*} company_id
+   * @returns return list of project created in a company,
    */
   getAllProjectsByCompany: async (company_id) => {
     return new Promise((resolve, reject) => {
@@ -247,16 +254,16 @@ ORDER BY
 `;
 
       db.any(query, [company_id])
-        .then(data => resolve(data))
-        .catch(err => reject(new Error(err)));
+        .then((data) => resolve(data))
+        .catch((err) => reject(new Error(err)));
     });
   },
 
-
-    updateProject: async (projectObj) => {
-      return new Promise(function (resolve, reject) {
-          db.oneOrNone(
-            `UPDATE tbl_projects
+  updateProject: async (projectObj) => {
+    console.log('projectObj in updateProject user', projectObj);
+    return new Promise(function (resolve, reject) {
+      db.oneOrNone(
+        `UPDATE tbl_projects
             SET
                status = $1,
                description = $2,
@@ -264,36 +271,38 @@ ORDER BY
                ended_at = $4,
                rfq_type = $7,
                reverse_auction = $8,
+               budget = $9,
                updated_at = NOW()
             WHERE
                id = $5
                AND user_id = $6
             RETURNING *;`,
-           [
-               projectObj.status,        
-               projectObj.description,   
-               projectObj.location,      
-               projectObj.ended_at,      
-               projectObj.project_id,    
-               projectObj.user_id,
-               projectObj.rfq_type,
-               projectObj.reverse_auction        
-           ]
-          )
-              .then(function (data) {
-              resolve(data);
-            })
-             .catch(function (err) {
-              let error = new Error(err);
-              reject(error);
-            });
-      })
+        [
+          projectObj.status,
+          projectObj.description,
+          projectObj.location,
+          projectObj.ended_at,
+          projectObj.project_id,
+          projectObj.user_id,
+          projectObj.rfq_type,
+          projectObj.reverse_auction,
+          projectObj.budget
+        ]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
   },
-// mukul 03--06-2025 retuen project list for user team
-getIdAndNameOfProjects: async (user_id) => {
+  // mukul 03--06-2025 retuen project list for user team
+  getIdAndNameOfProjects: async (user_id) => {
     return new Promise(function (resolve, reject) {
-        db.any(
-            `SELECT 
+      db.any(
+        `SELECT 
                 p.id,
                 p.name 
             FROM 
@@ -302,25 +311,25 @@ getIdAndNameOfProjects: async (user_id) => {
             WHERE 
                 p.user_id = $1 OR pt.user_id = $1
             GROUP BY p.id, p.name`,
-            [user_id]
-        )
+        [user_id]
+      )
         .then(function (data) {
-            resolve(data);
-          })
-           .catch(function (err) {
-            let error = new Error(err);
-            reject(error);
-          });
-    })
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
   },
 
   // Changes by Agnij 14-01-2025 [Added functions to handle project team members]
-  
+
   // Get all team members for a project
   getProjectTeamMembers: async (project_id) => {
     return new Promise(function (resolve, reject) {
-        db.any(
-            `SELECT 
+      db.any(
+        `SELECT 
                 pt.id,
                 pt.project_id,
                 pt.user_id,
@@ -338,95 +347,95 @@ getIdAndNameOfProjects: async (user_id) => {
                 pt.project_id = $1
             ORDER BY
                 pt.created_at DESC`,
-            [project_id]
-        )
-            .then(function (data) {
-                // Ensure data is always an array
-                const teamMembers = Array.isArray(data) ? data : (data ? [data] : []);
-                resolve(teamMembers);
-            })
-            .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-            });
+        [project_id]
+      )
+        .then(function (data) {
+          // Ensure data is always an array
+          const teamMembers = Array.isArray(data) ? data : data ? [data] : [];
+          resolve(teamMembers);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
     });
   },
 
   // Add a team member to a project
   addTeamMember: async (memberObj) => {
     return new Promise(function (resolve, reject) {
-        db.one(
-            `INSERT INTO tbl_project_team
+      db.one(
+        `INSERT INTO tbl_project_team
                 (project_id, user_id, role, created_by)
              VALUES
                 ($1, $2, $3, $4)
              RETURNING *`,
-            [
-                memberObj.project_id,
-                memberObj.user_id,
-                memberObj.role,
-                memberObj.created_by
-            ]
-        )
-            .then(function (data) {
-                resolve(data);
-            })
-            .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-            });
+        [
+          memberObj.project_id,
+          memberObj.user_id,
+          memberObj.role,
+          memberObj.created_by
+        ]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
     });
   },
 
   // Remove a team member from a project
   removeTeamMember: async (project_id, user_id) => {
     return new Promise(function (resolve, reject) {
-        // Ensure parameters are integers
-        project_id = parseInt(project_id);
-        user_id = parseInt(user_id);
-        
-        db.result(
-            `DELETE FROM tbl_project_team
+      // Ensure parameters are integers
+      project_id = parseInt(project_id);
+      user_id = parseInt(user_id);
+
+      db.result(
+        `DELETE FROM tbl_project_team
              WHERE project_id = $1 AND user_id = $2`,
-            [project_id, user_id]
-        )
-            .then(function (result) {
-                if (result.rowCount === 0) {
-                }
-                resolve({ rowCount: result.rowCount });
-            })
-            .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-            });
+        [project_id, user_id]
+      )
+        .then(function (result) {
+          if (result.rowCount === 0) {
+          }
+          resolve({ rowCount: result.rowCount });
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
     });
   },
 
   // Check if a user is already a member of a project
   isTeamMember: async (project_id, user_id) => {
     return new Promise(function (resolve, reject) {
-        db.oneOrNone(
-            `SELECT 1
+      db.oneOrNone(
+        `SELECT 1
              FROM tbl_project_team
              WHERE project_id = $1 AND user_id = $2`,
-            [project_id, user_id]
-        )
-            .then(function (data) {
-                const isMember = data !== null;
-                resolve(isMember);
-            })
-            .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-            });
+        [project_id, user_id]
+      )
+        .then(function (data) {
+          const isMember = data !== null;
+          resolve(isMember);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
     });
   },
 
   // Get all projects where a user is a team member
   getUserProjects: async (user_id) => {
     return new Promise(function (resolve, reject) {
-        db.any(
-            `SELECT 
+      db.any(
+        `SELECT 
                 p.id, 
                 p.name,
                 p.description,
@@ -442,15 +451,15 @@ getIdAndNameOfProjects: async (user_id) => {
                 pt.user_id = $1
             ORDER BY
                 p.created_at DESC`,
-            [user_id]
-        )
-            .then(function (data) {
-                resolve(data);
-            })
-            .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-            });
+        [user_id]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
     });
   },
 
@@ -499,6 +508,36 @@ getIdAndNameOfProjects: async (user_id) => {
         });
     });
   },
+  getProjectBudget: async (project_id) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+                    `SELECT 
+                trpo.id,
+                tr.rfq_no, 
+                tu.name AS vendor_name, 
+                trpo.updated_at, 
+                trpo.total_value::int AS total_value
+            FROM 
+                tbl_rfq_purchase_order trpo 
+            JOIN 
+                tbl_rfq tr ON tr.id = trpo.rfq_id 
+            JOIN 
+                tbl_users tu ON tu.id = trpo.finalized_vendor_id
+                where trpo.project_id = $1 and trpo.status = 'approved';`,
+        [project_id]
+      )
+
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+
+          reject(error);
+        });
+    });
+  },
+ 
 
   getProjectByIdForAdmin: async (project_id, limit, offset) => {
     return new Promise(function (resolve, reject) {
@@ -631,6 +670,7 @@ getIdAndNameOfProjects: async (user_id) => {
   },
 
   updateProjectForAdmin: async (projectObj) => {
+    console.log('projectObj in updateProjectForAdmin', projectObj);
     return new Promise(function (resolve, reject) {
       db.oneOrNone(
         `UPDATE tbl_projects
@@ -641,18 +681,21 @@ getIdAndNameOfProjects: async (user_id) => {
            ended_at = $4,
            rfq_type = $5,
            reverse_auction = $6,
+           budget = $7,
            updated_at = NOW()
         WHERE
-           id = $7
+           id = $8
         RETURNING *`,
         [
-          projectObj.status,        
-          projectObj.description,   
-          projectObj.location,      
-          projectObj.ended_at,      
+          projectObj.status,
+          projectObj.description,
+          projectObj.location,
+          projectObj.ended_at,
           projectObj.rfq_type,
           projectObj.reverse_auction,
-          projectObj.project_id        
+          projectObj.budget,
+          projectObj.project_id
+          
         ]
       )
         .then(function (data) {
@@ -663,8 +706,7 @@ getIdAndNameOfProjects: async (user_id) => {
           reject(error);
         });
     });
-  },
-
-}
+  }
+};
 
 export default projectModel;
