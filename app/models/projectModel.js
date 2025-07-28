@@ -80,7 +80,7 @@ const projectModel = {
                                 (
                     SELECT COUNT(*)
                     FROM tbl_rfq r
-                    WHERE r.project_id = p.id AND r.status = 2 AND is_published = 1
+                    WHERE r.project_id = p.id AND r.status = 2
                   ) AS closed_rfqs,
                                 (
                     SELECT COUNT(*)
