@@ -934,7 +934,7 @@ const productModel = {
     });
   },
   createProductVariant: async (variantObj) => {
-    return new Promise(function (resolve, reject) {
+    return new Promise(async function (resolve, reject) {
       // Changes by Agnij April 30, 2025 [Fixed column names to match actual database schema]
       try {
         // Ensure we have all required fields with proper defaults
@@ -947,11 +947,28 @@ const productModel = {
         // Set up all the fields with appropriate defaults
         // Use variant_name from input if available, otherwise use name
         const variantName = variantObj.variant_name || variantObj.name;
-        
-        // Changes by Agnij May 02, 2025 [Set is_approve to 0 by default]
+        // Generate base slug
+        const baseSlug = variantName
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+        let slug = baseSlug;
+        let counter = 1;
+        // Ensure uniqueness
+        while (true) {
+          const existing = await db.any(
+            'SELECT 1 FROM tbl_product_variant WHERE slug = $1',
+            [slug]
+          );
+          if (existing.length === 0) break;
+          slug = `${baseSlug}-${counter}`;
+          counter++;
+        }
+        // Set up all the fields with appropriate defaults
         const fields = {
           product_id: variantObj.product_id,
           name: variantName, // Database column is 'name'
+          slug: slug, // Database column is 'slug'
           status: variantObj.status !== undefined ? variantObj.status : 1,
           is_deleted: variantObj.is_deleted !== undefined ? variantObj.is_deleted : 0,
           is_review: variantObj.is_review !== undefined ? variantObj.is_review : 0,
@@ -2750,7 +2767,7 @@ getProductTechSpecByID: async (productId) => {
 },
 
   createProductVariant: async (variantObj) => {
-    return new Promise(function (resolve, reject) {
+    return new Promise(async function (resolve, reject) {
       // Changes by Agnij April 30, 2025 [Fixed column names to match actual database schema]
       try {
         // Ensure we have all required fields with proper defaults
@@ -2763,11 +2780,28 @@ getProductTechSpecByID: async (productId) => {
         // Set up all the fields with appropriate defaults
         // Use variant_name from input if available, otherwise use name
         const variantName = variantObj.variant_name || variantObj.name;
-        
-        // Changes by Agnij May 02, 2025 [Set is_approve to 0 by default]
+        // Generate base slug
+        const baseSlug = variantName
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+        let slug = baseSlug;
+        let counter = 1;
+        // Ensure uniqueness
+        while (true) {
+          const existing = await db.any(
+            'SELECT 1 FROM tbl_product_variant WHERE slug = $1',
+            [slug]
+          );
+          if (existing.length === 0) break;
+          slug = `${baseSlug}-${counter}`;
+          counter++;
+        }
+        // Set up all the fields with appropriate defaults
         const fields = {
           product_id: variantObj.product_id,
           name: variantName, // Database column is 'name'
+          slug: slug, // Database column is 'slug'
           status: variantObj.status !== undefined ? variantObj.status : 1,
           is_deleted: variantObj.is_deleted !== undefined ? variantObj.is_deleted : 0,
           is_review: variantObj.is_review !== undefined ? variantObj.is_review : 0,
