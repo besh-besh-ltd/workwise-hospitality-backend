@@ -69,84 +69,92 @@ const projectModel = {
     getProjectById: async (project_id, user_id, limit, offset) => {
         return new Promise(function (resolve, reject) {
                 db.any(
-                    `SELECT 
-                p.*, 
-                -- Aggregated RFQ counts
-                COUNT(r.id) AS total_rfqs,
-                COUNT(CASE WHEN r.status = 0 THEN 1 END) AS closed_rfqs,
-                COUNT(CASE WHEN r.status = 1 THEN 1 END) AS open_rfqs,
-
-                COALESCE(
-                    jsonb_object_agg(
-                        f.file_type,
-                        ARRAY(
-                            SELECT json_build_object(
-                                'name', file.file_name,
-                                'url', file.file_url
-                            )
-                            FROM tbl_project_files file
-                            WHERE file.project_id = p.id AND file.file_type = f.file_type
-                        )
-                    ) FILTER (WHERE f.file_type IS NOT NULL),
-                    '{}'::jsonb
-                ) AS files,
-
-                -- Fetch RFQ details with vendors, number of products and quotes, including all RFQ columns
-                ARRAY(
-                    SELECT json_build_object(
-                        -- Fetch all columns of tbl_rfq
-                        'rfq_details', row_to_json(r),
-                        'no_of_quotes', (
-                            SELECT COUNT(*)
-                            FROM tbl_quotes tq
-                            WHERE tq.rfq_id = r.id
-                        ),
-                        'vendors', (
-                            SELECT json_build_object(
-                                'total_vendors', COUNT(DISTINCT trpv.user_id),
-                                'quote_received', (
-                                    SELECT COUNT(DISTINCT tq.created_by)
-                                    FROM tbl_quotes tq
-                                    WHERE tq.rfq_id = r.id
-                                )
-                            )
-                            FROM tbl_rfq_product_vendors trpv
-                            WHERE trpv.rfq_id = r.id
-                            GROUP BY trpv.rfq_id
-                        ),
-                        'no_of_products', (
-                            SELECT COUNT(*)
-                            FROM tbl_rfq_products rfq_p
-                            WHERE rfq_p.rfq_id = r.id
-                        )
-                    )
+                  `SELECT
+                                p.*,
+                                -- Aggregated RFQ counts
+                                (
+                    SELECT COUNT(*)
                     FROM tbl_rfq r
                     WHERE r.project_id = p.id
-                    ORDER BY r.timestamp DESC
-                    LIMIT $3 OFFSET $4
-                ) AS rfqs
-
-            FROM 
-                tbl_projects p
-            LEFT JOIN 
-                tbl_rfq r ON r.project_id = p.id
-            LEFT JOIN 
-                tbl_project_files f ON f.project_id = p.id    
-            WHERE 
-                p.id = $1
-            GROUP BY 
-                p.id;
+                  ) AS total_rfqs,
+                                (
+                    SELECT COUNT(*)
+                    FROM tbl_rfq r
+                    WHERE r.project_id = p.id AND r.status = 2
+                  ) AS closed_rfqs,
+                                (
+                    SELECT COUNT(*)
+                    FROM tbl_rfq r
+                    WHERE r.project_id = p.id AND r.status = 1
+                  ) AS open_rfqs,
+                                COALESCE(
+                                    jsonb_object_agg(
+                                        f.file_type,
+                                        ARRAY(
+                                            SELECT json_build_object(
+                                                'name', file.file_name,
+                                                'url', file.file_url
+                                            )
+                                            FROM tbl_project_files file
+                                            WHERE file.project_id = p.id AND file.file_type = f.file_type
+                                        )
+                                    ) FILTER (WHERE f.file_type IS NOT NULL),
+                                    '{}'::jsonb
+                                ) AS files,
+                                -- Fetch RFQ details with vendors, number of products and quotes, including all RFQ columns
+                                ARRAY(
+                                    SELECT json_build_object(
+                                        -- Fetch all columns of tbl_rfq
+                                        'rfq_details', row_to_json(r),
+                                        'no_of_quotes', (
+                                            SELECT COUNT(*)
+                                            FROM tbl_quotes tq
+                                            WHERE tq.rfq_id = r.id
+                                        ),
+                                        'vendors', (
+                                            SELECT json_build_object(
+                                                'total_vendors', COUNT(DISTINCT trpv.user_id),
+                                                'quote_received', (
+                                                    SELECT COUNT(DISTINCT tq.created_by)
+                                                    FROM tbl_quotes tq
+                                                    WHERE tq.rfq_id = r.id
+                                                )
+                                            )
+                                            FROM tbl_rfq_product_vendors trpv
+                                            WHERE trpv.rfq_id = r.id
+                                            GROUP BY trpv.rfq_id
+                                        ),
+                                        'no_of_products', (
+                                            SELECT COUNT(*)
+                                            FROM tbl_rfq_products rfq_p
+                                            WHERE rfq_p.rfq_id = r.id
+                                        )
+                                    )
+                                    FROM tbl_rfq r
+                                    WHERE r.project_id = p.id
+                                    ORDER BY r.timestamp DESC
+                                    LIMIT $3 OFFSET $4
+                                ) AS rfqs
+                            FROM
+                                tbl_projects p
+                            LEFT JOIN
+                                tbl_rfq r ON r.project_id = p.id
+                            LEFT JOIN
+                                tbl_project_files f ON f.project_id = p.id
+                            WHERE
+                                p.id = $1
+                            GROUP BY
+                                p.id;
               `,
-              [project_id, user_id, limit, offset]
-
-            )
-                .then(function (data) {
-                resolve(data);
-              })
-               .catch(function (err) {
-                let error = new Error(err);
-                reject(error);
-              });
+                  [project_id, user_id, limit, offset]
+                )
+                  .then(function (data) {
+                    resolve(data);
+                  })
+                  .catch(function (err) {
+                    let error = new Error(err);
+                    reject(error);
+                  });
         })
     },
   /**
