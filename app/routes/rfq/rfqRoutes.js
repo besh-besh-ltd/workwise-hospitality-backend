@@ -551,4 +551,10 @@ RfqRoutes.post(
   rfqController.createOrUpdateRfqDraftWithProductVendors
 );
 
+RfqRoutes.post(
+  '/save-excel',
+  passportSignIn,
+  rfqController.saveExcel
+);
+
 export default RfqRoutes;

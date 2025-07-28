@@ -7091,7 +7091,23 @@ getRfqs: async (user_id, tech_eval, limit, offset, project_id, rfq_no, sort) => 
       });
   });
 },
+saveExcel: async (rfq_id, user_id, file_path) => {
+  return new Promise(function (resolve, reject) {
+    let q = `
+      INSERT INTO tbl_rfq_quote_excel (rfq_id, user_id, downloaded_excel)
+        VALUES($1, $2, $3)
+    `;
 
+    db.any(q, [rfq_id, user_id, file_path])
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+  });
+}
 
 }
 export default rfqModel;
