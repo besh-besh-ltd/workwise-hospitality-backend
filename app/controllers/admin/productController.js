@@ -2968,51 +2968,53 @@ const productController = {
       try {
         const result = await productModel.updateVariantMappingByData(variantObj, mappingId);
           
-            let html_variables = [
-              { name: mappingDetails?.vendor_organization || mappingDetails?.vendor_name },
-              {
-                message:
-                  status == 1
-                    ? `Your product ${mappingDetails.variant_name} has been approved`
-                    : `Your product ${mappingDetails.variant_name} has been rejected`
-              }
-            ];
+            // let html_variables = [
+            //   { name: mappingDetails?.vendor_organization || mappingDetails?.vendor_name },
+            //   {
+            //     message:
+            //       status == 1
+            //         ? `Your product ${mappingDetails.variant_name} has been approved`
+            //         : `Your product ${mappingDetails.variant_name} has been rejected`
+            //   }
+            // ];
+
             
-            let dynamic_html = fs
-              .readFileSync(`${Config.template_path}/dynamic_message_template.txt`)
-              .toString();
+            // let dynamic_html = fs
+            //   .readFileSync(`${Config.template_path}/dynamic_message_template.txt`)
+            //   .toString();
 
-            for (let index = 0; index < html_variables.length; index++) {
-              const element = html_variables[index];
-              let dynamic_key = Object.keys(element)[0];
-              let replace_char = html_variables[index][dynamic_key];
-              let replace_var = `[${dynamic_key.toLowerCase()}]`;
+            // for (let index = 0; index < html_variables.length; index++) {
+            //   const element = html_variables[index];
+            //   let dynamic_key = Object.keys(element)[0];
+            //   let replace_char = html_variables[index][dynamic_key];
+            //   let replace_var = `[${dynamic_key.toLowerCase()}]`;
 
-              dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
-            }
+            //   dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
+            // }
 
-            // Send the email to the SPOC or vendor
-            const spocList = await vendorModel.getSpocDetails(mappingDetails?.vendor_id);
+            // // Send the email to the SPOC or vendor
+            // const spocList = await vendorModel.getSpocDetails(mappingDetails?.vendor_id);
             
-            let mailRecipients = {
-              from: Config.webmasterMail,
-              subject: `Work Wise | Product Review Status`,
-              html: dynamic_html
-            };
+            // let mailRecipients = {
+            //   from: Config.webmasterMail,
+            //   subject: `Work Wise | Product Review Status`,
+            //   html: dynamic_html
+            // };
 
-            if (spocList && spocList.length > 0) {
-              mailRecipients.to = spocList.map(spoc => spoc.email);
-              mailRecipients.cc = mappingDetails.vendor_email;
-            } else {
-              mailRecipients.to = mappingDetails.vendor_email;
-            }
+            // if (spocList && spocList.length > 0) {
+            //   mailRecipients.to = spocList.map(spoc => spoc.email);
+            //   mailRecipients.cc = mappingDetails.vendor_email;
+            // } else {
+            //   mailRecipients.to = mappingDetails.vendor_email;
+            // }
 
-            sendMail(mailRecipients);
+            // sendMail(mailRecipients);
 
         return res.status(200).json({
           status: 1,
           message: status === 1 ? 'Mapping approved successfully' : 'Mapping disapproved successfully'
         });
+        
       } catch (updateError) {
         console.error("Error updating mapping:", updateError);
         return res.status(500).json({
