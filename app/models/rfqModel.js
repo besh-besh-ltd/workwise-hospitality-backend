@@ -2532,6 +2532,38 @@ LIMIT 1;`;
             FROM tbl_rfq TR
             WHERE TR.id = $1
           ) AS "rfq",
+          ARRAY(
+          SELECT json_build_object(
+            'quote_id', TQFH.quote_id,
+            'product_variant_id', TQFH.product_variant_id,
+            'variant', TQFH.variant,
+            'vendor_id', TQFH.vendor_id,
+            'vendor_name', TU.organization_name,
+            'changed_by', _TU.name,
+            'finalized_at', TQFH.timestamp,
+            'changed_at', TQFH.changed_at,
+            'quote_info', json_build_object(
+              'unit_price', TQI.unit_price,
+              'package_price', TQI.package_price,
+              'tax', TQI.tax,
+              'freight_price', TQI.freight_price,
+              'total_price', TQI.total_price
+            )
+          )
+          FROM tbl_quote_finalization_history TQFH
+          JOIN tbl_quote_items TQI
+            ON TQI.quote_id = TQFH.quote_id
+            AND TQI.product_variant_id = TQFH.product_variant_id
+            AND TQI.variant = TQFH.variant
+          JOIN tbl_users TU
+            ON TU.id = TQFH.vendor_id
+          JOIN tbl_users _TU
+            ON _TU.id = TQFH.changed_by
+          WHERE TQFH.rfq_id = TRF.rfq_id 
+            AND TQFH.product_variant_id = TRF.product_variant_id 
+            AND TQFH.variant = TRF.variant
+          ORDER BY TQFH.changed_at DESC
+        ) AS "finalization_history",
         (
           SELECT json_build_object(
            'unit_price', TQI1.unit_price,
@@ -7028,18 +7060,23 @@ getVendorsForReminder: async (rfq_id) => {
    }
  },
 // New optimized method for sidebar data
-getRfqs: async (user_id, tech_eval, limit, offset, project_id, rfq_no, sort) => {
+getRfqs: async (user_id, tech_eval, po, limit, offset, project_id, rfq_no, sort) => {
   return new Promise(function (resolve, reject) {
-    let techEvalJoin = '';
-    let techEvalCondition = '';
+    let dynamicJoins = '';
+    let dynamicConditions = '';
     
     if (tech_eval) {
-      techEvalJoin = 'JOIN tbl_rfq_product_tech_evaluation RFQ_T_E ON RFQ.id = RFQ_T_E.rfq_id';
-      techEvalCondition = 'GROUP BY RFQ.id, P.name HAVING COUNT(RFQ_T_E.id) > 0';
+      dynamicJoins += 'JOIN tbl_rfq_product_tech_evaluation RFQ_T_E ON RFQ.id = RFQ_T_E.rfq_id';
+      dynamicConditions += 'GROUP BY RFQ.id, P.name HAVING COUNT(RFQ_T_E.id) > 0';
+    }
+
+    if(po) {
+      dynamicJoins += 'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
     }
 
     let q = `
       SELECT
+        DISTINCT
         RFQ.id,
         RFQ.rfq_no,
         RFQ.timestamp,
@@ -7070,13 +7107,13 @@ getRfqs: async (user_id, tech_eval, limit, offset, project_id, rfq_no, sort) => 
         RFQ.reverse_auction
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
-      ${techEvalJoin}
+      ${dynamicJoins}
       WHERE (RFQ.created_by = ${user_id} OR EXISTS (
         SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
       )) AND RFQ.is_published = 1
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
-      ${techEvalCondition}
+      ${dynamicConditions}
       ORDER BY RFQ.timestamp ${sort || 'DESC'}
       LIMIT $3 OFFSET $2;`;
 
@@ -7090,23 +7127,6 @@ getRfqs: async (user_id, tech_eval, limit, offset, project_id, rfq_no, sort) => 
       });
   });
 },
-saveExcel: async (rfq_id, user_id, file_path) => {
-  return new Promise(function (resolve, reject) {
-    let q = `
-      INSERT INTO tbl_rfq_quote_excel (rfq_id, user_id, downloaded_excel)
-        VALUES($1, $2, $3)
-    `;
-
-    db.any(q, [rfq_id, user_id, file_path])
-      .then(function (data) {
-        resolve(data);
-      })
-      .catch(function (err) {
-        let error = new Error(err);
-        reject(error);
-      });
-  });
-}
 
 }
 export default rfqModel;
