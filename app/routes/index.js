@@ -11,6 +11,7 @@ import GeneralRoutes from './general.js';
 import portalTourRoutes from './portalTour/portalTourRoutes.js';
 import seoRoutes from './seo/seoRoutes.js';
 import Project from './project/projectRoutes.js';
+import PORoutes from './purchase_order/poRoutes.js';
 
 const v1 = Router();
 
@@ -24,5 +25,6 @@ v1.use('/general', GeneralRoutes);
 v1.use('/portal-tour', portalTourRoutes);
 v1.use('/seo', seoRoutes);
 v1.use('/project', Project);
+v1.use('/po', PORoutes);
 
 export default v1;
