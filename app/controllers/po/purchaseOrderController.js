@@ -206,9 +206,10 @@ export const deleteMilestoneController = async (req, res) => {
 export const getTasksController = async (req, res) => {
   try {
     const { po_id } = req.params;
+    const { page = 1, limit = 10 } = req.query;
 
-    const data = await getTasksByPOId(req.user.company_id, po_id);
-    return res.status(200).json({ success: true, data });
+    const [data, count] = await getTasksByPOId(req.user.company_id, po_id, page, limit);
+    return res.status(200).json({ success: true, data, total: count });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ success: false, message: error.message });

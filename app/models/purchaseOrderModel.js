@@ -382,15 +382,38 @@ export const deleteMilestone = async (id, user) => {
   return result;
 };
 
-export const getTasksByPOId = async (company_id, po_id) => {
-  let condition = 'WHERE po_id = $1'
+export const getTasksByPOId = async (company_id, po_id, page, limit) => {
+  const offset = (page - 1) * limit;
+  let condition = 'AND po_id = $1'
 
-  return db.any(
-    `SELECT * FROM tbl_purchase_order_tasks
-     WHERE company_id = $2 ${condition}
-     ORDER BY completion_date ASC`,
-    [po_id, company_id]
-  );
+  const [pos, { total }] = await db.tx(async t => {
+    const data = await t.any(
+      `SELECT pot.id, 
+        pot.rfq_id, 
+        pot.po_id, 
+        pot.company_id, 
+        pot.task_name, 
+        pot.completion_date::date, 
+        pot.status, 
+        pot.task_description
+      FROM tbl_purchase_order_tasks pot
+      WHERE company_id = $2 ${condition}
+      ORDER BY completion_date DESC
+      LIMIT $3 OFFSET $4`,
+      [po_id, company_id, limit, offset]
+    );
+
+    const count = await t.one(
+      `SELECT COUNT(*) AS total
+        FROM tbl_purchase_order_tasks
+        WHERE company_id = $2 ${condition}`,
+      [po_id, company_id]
+    );
+
+    return [data, count]
+  })
+
+  return [pos, total]
 };
 
 export const createTask = async (data, user) => {
