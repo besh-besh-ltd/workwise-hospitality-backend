@@ -1361,19 +1361,19 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 
       // WHERE CLAUSES
       if (city && Array.isArray(city) && city.length > 0) {
-        dynamicWhere += ` AND tu.city::int IN (${city.join(",")})`;
+        dynamicWhere += ` AND tu.city::int IN (${city.map(c => c.id).join(",")})`;
       } else if (typeof city == 'string' || typeof city == 'number') {
         dynamicWhere += ` AND tu.city = '${city}'`;
       }
 
       if (state && Array.isArray(state) && state.length > 0) {
-        dynamicWhere += ` AND tu.state::int IN (${state.join(",")})`;
+        dynamicWhere += ` AND tu.state::int IN (${state.map(s => s.id).join(",")})`;
       } else if (typeof state == 'string' || typeof state == 'number') {
         dynamicWhere += ` AND tu.state = '${state}'`;
       }
 
       if (country && Array.isArray(country) && country.length > 0) {
-        dynamicWhere += ` AND COALESCE(tu.country, '1')::int IN (${country.join(",")})`;
+        dynamicWhere += ` AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(",")})`;
       } else if (typeof country == 'string' || typeof country == 'number') {
         dynamicWhere += ` AND COALESCE(tu.country, '1') = '${country}'`;
       }
@@ -1933,9 +1933,9 @@ LIMIT 1;`;
         ` : ``}
           WHERE pvt.status = 1 AND pvt.is_deleted = 0 AND pvt.is_review = 0 AND pvt.is_approve = 1
          AND tu.is_deleted = 0 AND tu.status = 1 AND pvt.name = '${search_key}' AND tc.is_private = 0
-        ${state != '' ? `AND tu.state = ${state}` : ``}
-        ${city != '' ? `AND tu.city = ${city}` : ``}
-        ${country != '' ? `AND tu.country = ${country}` : ``}
+        ${state != '' ? `AND tu.state::int IN (${state.map(s => s.id).join(",")})` : ``}
+        ${city != '' ? `AND tu.city::int IN (${city.map(c => c.id).join(",")})` : ``}
+        ${country != '' ? `AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(",")})` : ``}
         ${category_id != '' ? `AND pvt.product_id IN (SELECT product_id FROM tbl_product_categories WHERE category_id = ${category_id})` : ``}
         ${approved_by_id != '' ? `
           AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(",")})
@@ -7027,7 +7027,6 @@ getVendorsForReminder: async (rfq_id) => {
      throw error;
    }
  },
-
 // New optimized method for sidebar data
 getRfqs: async (user_id, tech_eval, limit, offset, project_id, rfq_no, sort) => {
   return new Promise(function (resolve, reject) {
