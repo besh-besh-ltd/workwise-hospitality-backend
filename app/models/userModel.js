@@ -3424,27 +3424,27 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
         if (!buyer || !buyer.company_id) return reject(new Error('Buyer not found or no company associated'));
 
-        // check if buyer already mapped with vendor
+        // check if vendor already mapped with this company
         const result = await db.oneOrNone(
-          `SELECT 1 FROM tbl_buyer_private_vendors_mapping WHERE buyer_id = $1 AND vendor_id = $2`,
-          [buyerId, vendorId]
+          `SELECT 1 FROM tbl_buyer_private_vendors_mapping WHERE company_id = $1 AND vendor_id = $2`,
+          [buyer.company_id, vendorId]
         );
         if (result) {
-          resolve({ message: 'Mapping already exists. No changes made.' });
+          resolve({ message: 'Vendor already mapped to this company. No changes made.' });
         } else {
           await db.none(
-            `INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, company_id, created_date, updated_date)
+            `INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id, created_date, updated_date)
              VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
             [buyerId, vendorId, buyer.company_id]
           );
-          resolve({ message: 'Buyer and Vendor successfully mapped' });
+          resolve({ message: 'Vendor successfully mapped to company' });
         }
       } catch (err) {
         reject(err);
       }
     });
   },
-  bulkMapBuyersToVendors: async (emailPairs) => {
+  bulkMapBuyersToVendors: async (emailPairs, adminUserId) => {
     return new Promise(async (resolve, reject) => {
       if (!emailPairs || emailPairs.length === 0) {
         resolve({
@@ -3497,29 +3497,33 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
             SELECT vp.buyer_id, vp.vendor_id
             FROM valid_pairs vp
             INNER JOIN tbl_buyer_private_vendors_mapping bpvm 
-            ON vp.buyer_id = bpvm.buyer_id AND vp.vendor_id = bpvm.vendor_id
+            ON vp.company_id = bpvm.company_id AND vp.vendor_id = bpvm.vendor_id
             WHERE vp.buyer_id IS NOT NULL AND vp.vendor_id IS NOT NULL
           ),
           new_mappings AS (
-            INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, company_id, created_date, updated_date)
-            SELECT vp.buyer_id, vp.vendor_id, vp.company_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id, created_date, updated_date)
+            SELECT ${adminUserId}, vp.vendor_id, vp.company_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             FROM valid_pairs vp
             WHERE vp.buyer_id IS NOT NULL 
             AND vp.vendor_id IS NOT NULL
             AND NOT EXISTS (
               SELECT 1 FROM tbl_buyer_private_vendors_mapping bpvm 
-              WHERE bpvm.buyer_id = vp.buyer_id AND bpvm.vendor_id = vp.vendor_id
+              WHERE bpvm.company_id = vp.company_id AND bpvm.vendor_id = vp.vendor_id
             )
-            RETURNING buyer_id, vendor_id
+            RETURNING created_by, vendor_id
           )
           SELECT 
             vp.row_num,
             vp.buyer_email,
             vp.vendor_email,
+            COALESCE(buyer.name, 'Unknown') AS buyer_name,
+            COALESCE(vendor.name, 'Unknown') AS vendor_name,
+            COALESCE(buyer.email, vp.buyer_email) AS buyer_email_display,
+            COALESCE(vendor.email, vp.vendor_email) AS vendor_email_display,
             CASE 
               WHEN vp.error_reason IS NOT NULL THEN vp.error_reason
-              WHEN em.buyer_id IS NOT NULL THEN 'Already mapped'
-              WHEN nm.buyer_id IS NOT NULL THEN 'Mapped successfully'
+              WHEN em.buyer_id IS NOT NULL THEN 'Already mapped to company'
+              WHEN nm.created_by IS NOT NULL THEN 'Mapped successfully'
               ELSE 'Unknown error'
             END AS status,
             CASE 
@@ -3528,7 +3532,9 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
             END AS is_success
           FROM valid_pairs vp
           LEFT JOIN existing_mappings em ON vp.buyer_id = em.buyer_id AND vp.vendor_id = em.vendor_id
-          LEFT JOIN new_mappings nm ON vp.buyer_id = nm.buyer_id AND vp.vendor_id = nm.vendor_id
+          LEFT JOIN new_mappings nm ON vp.vendor_id = nm.vendor_id
+          LEFT JOIN tbl_users buyer ON buyer.id = vp.buyer_id
+          LEFT JOIN tbl_users vendor ON vendor.id = vp.vendor_id
           ORDER BY vp.row_num
         `;
         
@@ -3557,7 +3563,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
     });
   },
   getVendorsWithBuyerNames: async () => {
-    //  this query will get list of buyers vendor for review and with buyer id it will also return buyer name
+    //  this query will get list of buyers vendor for review and with buyer_id it will also return buyer name
     const query = `
         SELECT 
             tu.id, 
