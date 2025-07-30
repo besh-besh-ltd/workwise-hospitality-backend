@@ -5,7 +5,7 @@ const projectModel = {
     return new Promise(function (resolve, reject) {
       db.any(
         `INSERT INTO tbl_projects(name, description, location, ended_at, user_id, rfq_type, reverse_auction,budget)
-                 VALUES($1, $2, $3, $4, $5, $6, $7 , $8s)`,
+                 VALUES($1, $2, $3, $4, $5, $6, $7 , $8)`,
         [
           projectObj.name,
           projectObj.description,
