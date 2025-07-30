@@ -3332,11 +3332,15 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
   
   getBuyerPrivateVendors: async (buyerId, limit, page) => {
     try {
+      // get company_id for this buyer
+      const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+      if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+      const companyId = buyer.company_id;
 
-    return await db.any(
-        `SELECT u.name, u.email, u.mobile, u.status FROM tbl_users u RIGHT JOIN tbl_buyer_private_vendors_mapping b ON u.id = b.vendor_id WHERE b.buyer_id = $1 ORDER BY b.id DESC LIMIT $2 OFFSET $3`,
-        [buyerId, limit, (page - 1) * limit]
-    );
+      return await db.any(
+        `SELECT u.name, u.email, u.mobile, u.status FROM tbl_users u RIGHT JOIN tbl_buyer_private_vendors_mapping b ON u.id = b.vendor_id WHERE b.company_id = $1 ORDER BY b.id DESC LIMIT $2 OFFSET $3`,
+        [companyId, limit, (page - 1) * limit]
+      );
 
     } catch (err) {
       throw new Error(err);
@@ -3345,10 +3349,14 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
 
   getBuyerPrivateVendorsCount: async (buyerId) => {
     try {
+      // get company_id for this buyer
+      const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+      if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+      const companyId = buyer.company_id;
 
       const response = await db.any(
-        `SELECT COUNT(*) FROM tbl_users u RIGHT JOIN tbl_buyer_private_vendors_mapping b ON u.id = b.vendor_id WHERE b.buyer_id = $1`,
-        [buyerId]
+        `SELECT COUNT(*) FROM tbl_users u RIGHT JOIN tbl_buyer_private_vendors_mapping b ON u.id = b.vendor_id WHERE b.company_id = $1`,
+        [companyId]
       );
 
       return parseInt(response[0]?.count) || 0;
@@ -3410,35 +3418,33 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
   },
   mapBuyerToVendor: async (buyerId, vendorId) => {
     // Map buyers to vendors and prioritize these vendors in search results for the buyer
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        // get company_id for this buyer
+        const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+        if (!buyer || !buyer.company_id) return reject(new Error('Buyer not found or no company associated'));
 
-      // check if buyer already mapped with vendor
-      db.oneOrNone(`SELECT 1 FROM tbl_buyer_private_vendors_mapping WHERE buyer_id = $1 AND vendor_id = $2`, [buyerId, vendorId])
-        .then((result) => {
-          if (result) {
-            // If the mapping already exists, resolve without doing anything
-            resolve({ message: 'Mapping already exists. No changes made.' });
-          } else {
-            // If not, create the new mapping
-            db.none(
-              `INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, created_date, updated_date)
-               VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-              [buyerId, vendorId]
-            )
-              .then(() => {
-                resolve({ message: 'Buyer and Vendor successfully mapped' });
-              })
-              .catch((err) => {
-                reject(err);
-              });
-          }
-        })
-        .catch((err) => {
-          reject(err);
-        });
-    })
+        // check if vendor already mapped with this company
+        const result = await db.oneOrNone(
+          `SELECT 1 FROM tbl_buyer_private_vendors_mapping WHERE company_id = $1 AND vendor_id = $2`,
+          [buyer.company_id, vendorId]
+        );
+        if (result) {
+          resolve({ message: 'Vendor already mapped to this company. No changes made.' });
+        } else {
+          await db.none(
+            `INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id, created_date, updated_date)
+             VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [buyerId, vendorId, buyer.company_id]
+          );
+          resolve({ message: 'Vendor successfully mapped to company' });
+        }
+      } catch (err) {
+        reject(err);
+      }
+    });
   },
-  bulkMapBuyersToVendors: async (emailPairs) => {
+  bulkMapBuyersToVendors: async (emailPairs, adminUserId) => {
     return new Promise(async (resolve, reject) => {
       if (!emailPairs || emailPairs.length === 0) {
         resolve({
@@ -3462,7 +3468,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
                    unnest($3::int[]) AS row_num
           ),
           buyers AS (
-            SELECT id AS buyer_id, email AS buyer_email
+            SELECT id AS buyer_id, email AS buyer_email, company_id
             FROM tbl_users 
             WHERE email = ANY($4) 
             AND user_type IN (2, 8) 
@@ -3477,7 +3483,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
           ),
           valid_pairs AS (
             SELECT ep.row_num, ep.buyer_email, ep.vendor_email, 
-                   b.buyer_id, v.vendor_id,
+                   b.buyer_id, b.company_id, v.vendor_id,
                    CASE 
                      WHEN b.buyer_id IS NULL THEN 'Buyer not found'
                      WHEN v.vendor_id IS NULL THEN 'Vendor not found'
@@ -3491,29 +3497,33 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
             SELECT vp.buyer_id, vp.vendor_id
             FROM valid_pairs vp
             INNER JOIN tbl_buyer_private_vendors_mapping bpvm 
-            ON vp.buyer_id = bpvm.buyer_id AND vp.vendor_id = bpvm.vendor_id
+            ON vp.company_id = bpvm.company_id AND vp.vendor_id = bpvm.vendor_id
             WHERE vp.buyer_id IS NOT NULL AND vp.vendor_id IS NOT NULL
           ),
           new_mappings AS (
-            INSERT INTO tbl_buyer_private_vendors_mapping (buyer_id, vendor_id, created_date, updated_date)
-            SELECT vp.buyer_id, vp.vendor_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id, created_date, updated_date)
+            SELECT ${adminUserId}, vp.vendor_id, vp.company_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             FROM valid_pairs vp
             WHERE vp.buyer_id IS NOT NULL 
             AND vp.vendor_id IS NOT NULL
             AND NOT EXISTS (
               SELECT 1 FROM tbl_buyer_private_vendors_mapping bpvm 
-              WHERE bpvm.buyer_id = vp.buyer_id AND bpvm.vendor_id = vp.vendor_id
+              WHERE bpvm.company_id = vp.company_id AND bpvm.vendor_id = vp.vendor_id
             )
-            RETURNING buyer_id, vendor_id
+            RETURNING created_by, vendor_id
           )
           SELECT 
             vp.row_num,
             vp.buyer_email,
             vp.vendor_email,
+            COALESCE(buyer.name, 'Unknown') AS buyer_name,
+            COALESCE(vendor.name, 'Unknown') AS vendor_name,
+            COALESCE(buyer.email, vp.buyer_email) AS buyer_email_display,
+            COALESCE(vendor.email, vp.vendor_email) AS vendor_email_display,
             CASE 
               WHEN vp.error_reason IS NOT NULL THEN vp.error_reason
-              WHEN em.buyer_id IS NOT NULL THEN 'Already mapped'
-              WHEN nm.buyer_id IS NOT NULL THEN 'Mapped successfully'
+              WHEN em.buyer_id IS NOT NULL THEN 'Already mapped to company'
+              WHEN nm.created_by IS NOT NULL THEN 'Mapped successfully'
               ELSE 'Unknown error'
             END AS status,
             CASE 
@@ -3522,50 +3532,38 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
             END AS is_success
           FROM valid_pairs vp
           LEFT JOIN existing_mappings em ON vp.buyer_id = em.buyer_id AND vp.vendor_id = em.vendor_id
-          LEFT JOIN new_mappings nm ON vp.buyer_id = nm.buyer_id AND vp.vendor_id = nm.vendor_id
+          LEFT JOIN new_mappings nm ON vp.vendor_id = nm.vendor_id
+          LEFT JOIN tbl_users buyer ON buyer.id = vp.buyer_id
+          LEFT JOIN tbl_users vendor ON vendor.id = vp.vendor_id
           ORDER BY vp.row_num
         `;
-
-        const emailPairArrays = emailPairs.map(item => [item.buyerEmail, item.vendorEmail, item.row]);
-        const buyerEmailArray = emailPairArrays.map(arr => arr[0]);
-        const vendorEmailArray = emailPairArrays.map(arr => arr[1]);
-        const rowArray = emailPairArrays.map(arr => arr[2]);
-
-        const results = await db.any(query, [
-          buyerEmailArray,
-          vendorEmailArray, 
-          rowArray,
+        
+        const result = await db.any(query, [
+          buyerEmails,
+          vendorEmails,
+          emailPairs.map((_, index) => index + 1),
           buyerEmails,
           vendorEmails
         ]);
 
-        const mappedEntries = results.filter(r => r.is_success);
-        const unmappedEntries = results.filter(r => !r.is_success);
+        const successfulMappings = result.filter(r => r.is_success).length;
+        const failedMappings = result.filter(r => !r.is_success).length;
 
         resolve({
-          totalProcessed: results.length,
-          successfulMappings: mappedEntries.length,
-          failedMappings: unmappedEntries.length,
-          mappedEntries: mappedEntries.map(entry => ({
-            row: entry.row_num,
-            buyerEmail: entry.buyer_email,
-            vendorEmail: entry.vendor_email,
-            status: entry.status
-          })),
-          unmappedEntries: unmappedEntries.map(entry => ({
-            row: entry.row_num,
-            buyerEmail: entry.buyer_email,
-            vendorEmail: entry.vendor_email,
-            reason: entry.status
-          }))
+          totalProcessed: result.length,
+          successfulMappings,
+          failedMappings,
+          mappedEntries: result.filter(r => r.is_success),
+          unmappedEntries: result.filter(r => !r.is_success)
         });
-      } catch (err) {
-        reject(err);
+
+      } catch (error) {
+        reject(error);
       }
     });
   },
   getVendorsWithBuyerNames: async () => {
-    //  this query will get list of buyers vendor for review and with buyer id it will also return buyer name
+    //  this query will get list of buyers vendor for review and with buyer_id it will also return buyer name
     const query = `
         SELECT 
             tu.id, 

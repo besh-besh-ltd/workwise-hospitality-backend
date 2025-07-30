@@ -1274,6 +1274,11 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 
   getDraftProductVendors: async (draftId, rfqProductId, buyerId, filters) => {
     try {
+      // get company_id for this buyer
+      const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+      if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+      const companyId = buyer.company_id;
+
       let {
         vendor_approved_by,
         state,
@@ -1472,7 +1477,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
           JOIN tbl_users tu ON trpv.user_id = tu.id
           LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
-              ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+              ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
           JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id
           JOIN tbl_company tc ON tu.company_id = tc.id
 
@@ -1886,7 +1891,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         ORDER BY RFQ_P.id
 
     ) AS "products"
-
 FROM tbl_rfq RFQ WHERE id=$1
 ORDER BY RFQ.id DESC
 LIMIT 1;`;
@@ -2215,6 +2219,10 @@ LIMIT 1;`;
   },
   getVendorsForProduct: async (productId, excludeArray = null, buyerId, searchTerm = null) => {
     try {
+      const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+      if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+      const companyId = buyer.company_id;
+
       let q = `
       SELECT 
       DISTINCT
@@ -2235,7 +2243,7 @@ LIMIT 1;`;
         JOIN tbl_product_variant PV ON PVVM.product_variant_id = PV.id
         JOIN tbl_users U ON PVVM.vendor_id = U.id
         JOIN tbl_company C ON C.id = U.company_id
-        LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.buyer_id = ${buyerId}
+        LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.company_id = ${companyId}
   
         WHERE PVVM.product_variant_id = $1
         AND U.status = 1
@@ -2577,7 +2585,7 @@ LIMIT 1;`;
           )
           FROM tbl_quote_items TQI1
           JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
-          WHERE TQF1.created_by = $2 -- buyer's ID
+          WHERE TQF1.created_by IN (SELECT id FROM tbl_users WHERE company_id = (SELECT company_id FROM tbl_users WHERE id = $2) AND user_type IN (2,8))
             AND TQI1.product_variant_id = TRF.product_variant_id
             AND TQF1.rfq_id != $1 -- different RFQ
           ORDER BY TQF1.timestamp DESC
@@ -3201,6 +3209,11 @@ WHERE row_num_by_name_category = 1
     productMakes
   ) => {
     
+    // get company_id for this buyer
+    const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+    if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+    const companyId = buyer.company_id;
+    
     // Convert location names to IDs if they are strings (optimized)
     let stateIds = [];
     let cityIds = [];
@@ -3335,7 +3348,7 @@ WHERE row_num_by_name_category = 1
         JOIN tbl_category c ON pc.category_id = c.id
         JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
         LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-        LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+        LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
         LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
         LEFT JOIN tbl_location_states ls ON tu.state = ls.id
         LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
@@ -3443,6 +3456,10 @@ WHERE row_num_by_name_category = 1
     productName,
     responseKeys,
   ) => {
+    // get company_id for this buyer
+    const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+    if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+    const companyId = buyer.company_id;
 
   productName = productName?.toLowerCase()
 
@@ -3487,7 +3504,7 @@ WHERE row_num_by_name_category = 1
       JOIN tbl_category c ON pc.category_id = c.id
       JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
       LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-      LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+      LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
       LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
       LEFT JOIN (
         SELECT DISTINCT rpv.user_id
@@ -3525,6 +3542,10 @@ WHERE row_num_by_name_category = 1
   },
 
   searchVendorsByName: async (buyerId, vendor_name) => {
+    const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+    if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+    const companyId = buyer.company_id;
+
     let q = `
     SELECT *
     FROM (
@@ -3558,7 +3579,7 @@ WHERE row_num_by_name_category = 1
         LEFT JOIN
             tbl_company tc ON tc.id = tu.company_id
         LEFT JOIN
-            tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = $1
+            tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
         LEFT JOIN
             tbl_location_cities lc ON tu.city = lc.id
         LEFT JOIN
@@ -3587,7 +3608,7 @@ WHERE row_num_by_name_category = 1
       ${vendor_name ? 'similarity_score DESC' : ''};
     `;
 
-    const values = vendor_name ? [buyerId, vendor_name] : [buyerId];
+    const values = vendor_name ? [vendor_name] : [];
 
     return new Promise(function (resolve, reject) {
       db.query(q, values)
@@ -6891,6 +6912,10 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
         throw new Error(`Invalid type "${type}" - must be one of: ${validTypes.join(', ')}`);
     }
 
+    const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [user_id]);
+    if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+    const companyId = buyer.company_id;
+
     const queries = {
       lpr: `
               SELECT 
@@ -6904,13 +6929,16 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                   TU.email AS vendor_email,
                   TQF.timestamp AS quote_date,
                   TQI.rfq_no,
-                  TQI.unit_price
+                  TQI.unit_price,
+                  BUYER.name AS created_by
                   FROM tbl_quote_items TQI
                   JOIN tbl_quote_finalization TQF USING (quote_id)
                   JOIN tbl_quotes TQ ON TQ.id = TQF.quote_id
                   JOIN tbl_users TU ON TQ.created_by = TU.id
-                  WHERE TQF.created_by = $1
-                    AND TQI.product_variant_id = $2
+                  JOIN tbl_rfq RFQ ON RFQ.id = TQ.rfq_id
+                  JOIN tbl_users BUYER ON BUYER.id = RFQ.created_by
+                  WHERE TQF.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,8))
+                    AND TQI.product_variant_id = $1
                   ORDER BY TQF.timestamp DESC;
         `,
       lqr: `
@@ -6925,20 +6953,22 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                 TQI.rfq_no,
                 TQ.timestamp AS quote_date,
                 U.name AS vendor_name,       -- ✅ User's name
-                U.email AS vendor_email      -- ✅ User's email
+                U.email AS vendor_email,      -- ✅ User's email
+                BUYER.name AS created_by
             FROM tbl_rfq RFQ
             JOIN tbl_quotes TQ ON RFQ.id = TQ.rfq_id
             JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
             JOIN tbl_users U ON TQ.created_by = U.id    -- ✅ Join with tbl_user
-            WHERE RFQ.created_by = $1
-              AND TQI.product_variant_id = $2
+            JOIN tbl_users BUYER ON BUYER.id = RFQ.created_by
+            WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,8))
+              AND TQI.product_variant_id = $1
               AND TQI.unit_price > 0
             ORDER BY TQ.timestamp DESC;
 
         `
     };
     try {
-       const result = await db.query(queries[type], [user_id, variant_id]);
+       const result = await db.query(queries[type], [variant_id]);
        if(result.length>0)
         return result;
       else
