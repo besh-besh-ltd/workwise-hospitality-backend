@@ -2527,6 +2527,7 @@ LIMIT 1;`;
               'response_email', TR.response_email,
               'contact_name', TR.contact_name,
               'contact_number', TR.contact_number,
+              'project_id', TR.project_id,
               'status', TR.status
             )
             FROM tbl_rfq TR

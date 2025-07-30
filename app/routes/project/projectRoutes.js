@@ -52,6 +52,12 @@ projectRoutes.get('/project-budget/:project_id',
     validateParam(projectSchemas.project_id),
     projectController.getProjectBudget
 )
+projectRoutes.get('/available-budget/:project_id',
+    passportSignIn,
+    acl([2, 7, 8]),
+    validateParam(projectSchemas.project_id),
+    projectController.getProjectAvailableBudget
+)
 
 // route for getting all Projects
 projectRoutes.get(

@@ -246,8 +246,7 @@ const projectController = {
         if (isOwner) {
           // User is the project owner
           projectBudget = await projectModel.getProjectBudget(
-            project_id,
-            user_id
+            project_id
           );
         } else {
           // Check if user is a team member
@@ -297,6 +296,60 @@ const projectController = {
         .end();
     }
   },
+ getProjectAvailableBudget: async (req, res, next) => {
+  try {
+    const { project_id } = req.params;
+    const user_id = req.user.id;
+    const user_type = req.user.user_type;
+
+    let totalSpent = 0;
+    let totalBudget = 0;
+
+    // Helper: Get total spent for project
+    const getTotalSpent = async () => {
+      const spentArr = await projectModel.getProjectBudget(project_id);
+      return spentArr.reduce((sum, b) => sum + Number(b.total_value || 0), 0);
+    };
+
+    if (user_type === 7) {
+      // Admin can access any project's available budget
+      totalSpent = await getTotalSpent();
+    } else {
+      const isOwner = await projectModel.checkProjectOwnership(project_id, user_id);
+      if (isOwner) {
+        totalSpent = await getTotalSpent();
+      } else {
+        const isMember = await projectModel.isTeamMember(project_id, user_id);
+        if (isMember) {
+          totalSpent = await getTotalSpent();
+        } else {
+          return res.status(403).json({
+            status: false,
+            message: "You don't have permission to access this project's available budget",
+          });
+        }
+      }
+    }
+
+    // Get project budget from rfqModel
+    const budgetRows = await rfqModel.checkIfExists('tbl_projects', `id = ${project_id}`);
+    totalBudget = budgetRows.reduce((sum, b) => sum + Number(b.budget || 0), 0);
+
+    return res.status(200).json({
+      status: true,
+      data: {
+        project_id,
+        total_budget : totalBudget,
+        available_budget: totalBudget - totalSpent
+      }
+    });
+
+  } catch (error) {
+    next(error);
+  }
+ },
+
+        
 
   /**
    * @description This function will return project list, all project to admin user_type 7, and project in which user added as member by admin for non admin users of org.
