@@ -1389,7 +1389,7 @@ const sendFinalizationRemovalMail = async (
   vendor_email,
   vendor_name
 ) => {
-  return new Promise(async (resolve, reject) => {
+  try {
     const company = rfQItem.map(item => item.company_name);
     const rfqNumber = rfQItem.map(item => item.rfq_no);
 
@@ -1446,14 +1446,10 @@ const sendFinalizationRemovalMail = async (
 
     sendMail(mailRecipients);
 
-    // sendMail({
-    //   from: Config.webmasterMail, // sender address
-    //   to: winning_vendor_email, // list of receivers
-    //   subject: `Work Wise | Quotation Winner | Congratulation`, // Subject line
-    //   html: dynamicHTML // plain text body
-    // });
-    resolve(true);
-  });
+    return true;
+  } catch (error) {
+    throw error;
+  }
 };
 
 const getVendorDetails = async (item, user_has_subscription) => {
@@ -5238,8 +5234,6 @@ deleteDraft: async (req, res) => {
               id: alreadyExists.id
             }, t);
             reFinalized = true;
-
-            await sendFinalizationRemovalMail(alreadyExists.vendor_id, )
           }
 
           const tbl_quote_finalization_data = {
