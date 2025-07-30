@@ -223,7 +223,7 @@ RfqRoutes.post(
   '/finalize',
   passportSignIn,
   validateDbBody.user_id_profileexists,
-  acl([2,8,10]),
+  acl([2, 8, 10]),
   validateDbBody.rfq_access_check,
   validateBody(rfqSchemas.finalize),
   rfqController.finalize
@@ -549,6 +549,12 @@ RfqRoutes.post(
   passportSignIn,
   acl([2, 8]),
   rfqController.createOrUpdateRfqDraftWithProductVendors
+);
+
+RfqRoutes.post(
+  '/save-excel',
+  passportSignIn,
+  rfqController.saveExcel
 );
 
 export default RfqRoutes;
