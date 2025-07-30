@@ -5,9 +5,9 @@ import generalModel, { markPOStatusChange } from "./generalModel.js";
 const getNextPONumber = async () => {
   return new Promise(async function (resolve, reject) {
     const query = `SELECT po_number FROM tbl_rfq_purchase_order ORDER BY created_at DESC LIMIT 1`;
-    const response = await db.one(query);
-    if (response && response.length > 0) {
-      resolve(response[0].po_number + 1);
+    const response = await db.oneOrNone(query);
+    if (response) {
+      resolve(response.po_number + 1);
     } else {
       resolve(Math.floor(100000 + Math.random() * 900000));
     }
