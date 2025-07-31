@@ -501,7 +501,9 @@ const buyerController = {
         }).end();
       }
 
-      const result = await userModel.bulkMapBuyersToVendors(emailPairs);
+      // Get the admin's user ID who is performing the bulk mapping
+      const adminUserId = req.user.id;
+      const result = await userModel.bulkMapBuyersToVendors(emailPairs, adminUserId);
 
       res.status(200).json({
         status: 1,
