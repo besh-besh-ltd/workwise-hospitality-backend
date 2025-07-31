@@ -3483,17 +3483,17 @@ deleteDraft: async (req, res) => {
           }
         }
 
-        if(product.isUnfoundProduct && product.unfoundName) {
-          let validationErrors = sheetData.validation_errors;
-          if(validationErrors && Array.isArray(validationErrors) && validationErrors.length > 0) {
-            const updatedErrors = validationErrors.filter(error => error.name != product.unfoundName);
+        // if(product.isUnfoundProduct && product.unfoundName) {
+        //   let validationErrors = sheetData.validation_errors;
+        //   if(validationErrors && Array.isArray(validationErrors) && validationErrors.length > 0) {
+        //     const updatedErrors = validationErrors.filter(error => error.name != product.unfoundName);
 
-            const updatedSheetData = {
-              validation_errors: JSON.stringify(updatedErrors)
-            }
-            await rfqModel.update('tbl_rfq_draft_sheets', updatedSheetData, sheet_id);
-          }
-        }
+        //     const updatedSheetData = {
+        //       validation_errors: JSON.stringify(updatedErrors)
+        //     }
+        //     await rfqModel.update('tbl_rfq_draft_sheets', updatedSheetData, sheet_id);
+        //   }
+        // }
 
         res.status(200).json({
             status: 1,
@@ -7072,6 +7072,7 @@ deleteDraft: async (req, res) => {
             unit: item.unit || '',
             sheet_name: item.sheet_name || '',
             description: item.full_product_description || '',
+            similar_products: item.reranked_variants || [],
           });
           continue;
         }
