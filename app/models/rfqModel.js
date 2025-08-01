@@ -1871,7 +1871,11 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                 )
               ))
             FROM tbl_rfq_product_vendors RFQ_P_V
-            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id AND RFQ_P.variant = RFQ_P_V.variant
+            JOIN tbl_users U ON RFQ_P_V.user_id = U.id
+            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
+              AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
+              AND RFQ_P.variant = RFQ_P_V.variant
+              AND U.status = 1
           ),
           'vendors', (
             SELECT json_agg(json_build_object(
@@ -1883,6 +1887,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
               AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
               AND RFQ_P.variant = RFQ_P_V.variant
+              AND U.status = 1
           )
         )
         FROM tbl_rfq_products RFQ_P
