@@ -6932,7 +6932,9 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                   TQI.unit_price,
                   BUYER.name AS created_by
                   FROM tbl_quote_items TQI
-                  JOIN tbl_quote_finalization TQF USING (quote_id)
+                  JOIN tbl_quote_finalization TQF ON TQI.quote_id = TQF.quote_id 
+                    AND TQI.product_variant_id = TQF.product_variant_id 
+                    AND TQI.variant = TQF.variant
                   JOIN tbl_quotes TQ ON TQ.id = TQF.quote_id
                   JOIN tbl_users TU ON TQ.created_by = TU.id
                   JOIN tbl_rfq RFQ ON RFQ.id = TQ.rfq_id
