@@ -4302,10 +4302,8 @@ deleteDraft: async (req, res) => {
 
     try {
       // check if the rfq is belongs to the vendor
-      const listRfq = await rfqModel.getRfqByUser(1000000, 0, user.id);
-      if (listRfq.length > 0) {
-        let filteredRFQ = listRfq.filter((item) => item.id == rfq_id);
-        if (filteredRFQ.length > 0) {
+      const checkRFQExist = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id} AND created_by = ${user.id}`);
+      if (checkRFQExist && checkRFQExist.length > 0) {
           // Get RFQ details to check dates
           const rfqDetails = await rfqModel.getRFQDetails(rfq_id);
           if (!rfqDetails || rfqDetails.length === 0) {
@@ -4474,7 +4472,10 @@ deleteDraft: async (req, res) => {
                   delivery_period,
                   quantity,
                   variant,
-                  document_files
+                  document_files,
+                  freight_mode,
+                  package_mode,
+                  tax_mode,
                 }) => {
                   if(unit_price!=""){
                     quote_items_data.push({
@@ -4490,7 +4491,10 @@ deleteDraft: async (req, res) => {
                       comment,
                       delivery_period,
                       quantity,
-                      variant
+                      variant,
+                      freight_mode,
+                      package_mode,
+                      tax_mode,
                     });
                   }else if(comment!="" || document_files?.length>0){
                     quote_items_data.push({
@@ -4506,7 +4510,10 @@ deleteDraft: async (req, res) => {
                       comment,
                       delivery_period,
                       quantity,
-                      variant
+                      variant,
+                      freight_mode,
+                      package_mode,
+                      tax_mode,
                     });
                   } else if(is_regret){
                     quote_items_data.push({
@@ -4522,7 +4529,10 @@ deleteDraft: async (req, res) => {
                       comment,
                       delivery_period,
                       quantity,
-                      variant
+                      variant,
+                      freight_mode,
+                      package_mode,
+                      tax_mode,
                     })
                   }
                 }
@@ -4552,7 +4562,10 @@ deleteDraft: async (req, res) => {
                     'comment',
                     'delivery_period',
                     'quantity',
-                    'variant'
+                    'variant',
+                    'freight_mode',
+                    'package_mode',
+                    'tax_mode',
                   ];
                   await rfqModel.insertArray(
                     quote_items_data,
@@ -4694,16 +4707,6 @@ deleteDraft: async (req, res) => {
             }
           })
 
-        } else {
-          res
-            .status(400)
-            .json({
-              status: 3,
-              message: 'The RFQ is not belongs to you!'
-            })
-            .end();
-          return;
-        }
       } else {
         res
           .status(400)
@@ -7747,6 +7750,7 @@ deleteDraft: async (req, res) => {
             // Process each product in the request
         const quoteItemChanges = await Promise.all(
           products.map((product) => {
+            console.log("UPDATING: ", product);
             if ((product.comment == "" && product.document_files?.length <= 0) && (product.unit_price=='' || product.unit_price==0)) {
               return null;
             }
@@ -7754,7 +7758,7 @@ deleteDraft: async (req, res) => {
           }).filter(Boolean)
         );
 
-        // console.log("mj ", quoteItemChanges)
+        console.log("QUOTE ITEM CHANGES: ", quoteItemChanges)
 
       // Check if global terms & conditions file are uploaded
       if (term_and_condition_files && term_and_condition_files.length > 0) {
