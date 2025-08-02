@@ -7201,7 +7201,7 @@ deleteDraft: async (req, res) => {
         message: 'File name is required for persistant processing.'
       })
 
-      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing'`)
+      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id}`)
       if(processing && processing.length > 0) {
         processing = processing[0];
 

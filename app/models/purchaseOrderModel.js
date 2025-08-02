@@ -7,7 +7,7 @@ const getNextPONumber = async () => {
     const query = `SELECT po_number FROM tbl_rfq_purchase_order ORDER BY created_at DESC LIMIT 1`;
     const response = await db.oneOrNone(query);
     if (response) {
-      resolve(response.po_number + 1);
+      resolve(parseInt(response.po_number) + 1);
     } else {
       resolve(Math.floor(100000 + Math.random() * 900000));
     }
@@ -195,6 +195,8 @@ export const getPODetailsById = async (po_id, user_id) => {
   try {
     const result = await db.oneOrNone(
       `SELECT po.*,
+              COALESCE(VENDOR.organization_name, VENDOR.name) AS finalized_vendor_name,
+              VENDOR.email AS finalized_vendor_email,
               JSON_BUILD_OBJECT(
                   'id', LOGGED_IN_USER.id,
                   'name', LOGGED_IN_USER.name,
@@ -307,6 +309,7 @@ export const getPODetailsById = async (po_id, user_id) => {
        JOIN tbl_rfq_products TRP ON TRP.id = po.rfq_product_id
        JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
        JOIN tbl_users TU ON TU.id = po.initiated_by
+       JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2
        WHERE po.id = $1`,
       [po_id, user_id]
@@ -441,14 +444,14 @@ export const updateTask = async (id, updates, user_id) => {
   const task = await db.oneOrNone(
     `UPDATE tbl_purchase_order_tasks
      SET task_name = COALESCE($2, task_name),
-         due_date = COALESCE($3, due_date),
+         completion_date = COALESCE($3, completion_date),
          task_description = COALESCE($4, task_description),
          status = COALESCE($5, status),
          updated_by = $6,
          updated_at = NOW()
      WHERE id = $1
      RETURNING *`,
-    [id, updates.task_name, updates.due_date, updates.task_description, updates.status, user_id]
+    [id, updates.task_name, updates.completion_date, updates.task_description, updates.status, user_id]
   );
 
   return task;
