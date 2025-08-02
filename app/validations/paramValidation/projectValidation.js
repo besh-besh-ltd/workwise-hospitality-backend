@@ -61,7 +61,8 @@ export const projectSchemas = {
                 return value;
             }),
         rfq_type: Joi.string().valid('firm', 'budgetary').allow('', null),
-        reverse_auction: Joi.number().valid(0, 1, -1)
+        reverse_auction: Joi.number().valid(0, 1, -1),
+        budget: Joi.number().optional().allow(null), // Budget can be optional or null
     }),
 
     project_id: Joi.object().keys({
@@ -93,7 +94,8 @@ export const projectSchemas = {
                 return value;
             }),
         rfq_type: Joi.string().valid('firm', 'budgetary').allow('', null),
-        reverse_auction: Joi.number().valid(0, 1, -1)
+        reverse_auction: Joi.number().valid(0, 1, -1),
+        budget: Joi.number().optional().allow(null), // Budget can be optional or null
     }),
 
     projectFileUploadHandler: async (req, res, next) => {

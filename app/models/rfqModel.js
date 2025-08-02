@@ -1871,7 +1871,11 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                 )
               ))
             FROM tbl_rfq_product_vendors RFQ_P_V
-            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id AND RFQ_P.variant = RFQ_P_V.variant
+            JOIN tbl_users U ON RFQ_P_V.user_id = U.id
+            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
+              AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
+              AND RFQ_P.variant = RFQ_P_V.variant
+              AND U.status = 1
           ),
           'vendors', (
             SELECT json_agg(json_build_object(
@@ -1883,6 +1887,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
               AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
               AND RFQ_P.variant = RFQ_P_V.variant
+              AND U.status = 1
           )
         )
         FROM tbl_rfq_products RFQ_P
@@ -2535,6 +2540,7 @@ LIMIT 1;`;
               'response_email', TR.response_email,
               'contact_name', TR.contact_name,
               'contact_number', TR.contact_number,
+              'project_id', TR.project_id,
               'status', TR.status
             )
             FROM tbl_rfq TR
@@ -6931,7 +6937,9 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                   TQI.unit_price,
                   BUYER.name AS created_by
                   FROM tbl_quote_items TQI
-                  JOIN tbl_quote_finalization TQF USING (quote_id)
+                  JOIN tbl_quote_finalization TQF ON TQI.quote_id = TQF.quote_id 
+                    AND TQI.product_variant_id = TQF.product_variant_id 
+                    AND TQI.variant = TQF.variant
                   JOIN tbl_quotes TQ ON TQ.id = TQF.quote_id
                   JOIN tbl_users TU ON TQ.created_by = TU.id
                   JOIN tbl_rfq RFQ ON RFQ.id = TQ.rfq_id
