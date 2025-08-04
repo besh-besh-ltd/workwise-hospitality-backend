@@ -3184,7 +3184,7 @@ WHERE row_num_by_name_category = 1
 `;
 
     return new Promise(function (resolve, reject) {
-      db.query(q, [search_key, category_id, approved_by_id].filter(Boolean)) // Filters out any undefined or empty values
+      db.query(q, [categoryIds]) // Pass the category IDs array
         .then(function (data) {
           resolve(data);
         })
