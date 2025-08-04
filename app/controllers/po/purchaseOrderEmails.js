@@ -88,7 +88,7 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
         let vendor = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
         if(!vendor) throw new Error("Vendor Not Found!");
 
-        const headerContent = `<h2>Hello, ${vendor.name}</h2>`;
+        const headerContent = `<h2>Hello ${vendor.organization_name || vendor.name || "Vendor"},</h2>`;
 
         const containerContent = ` 
             <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
@@ -102,7 +102,7 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
                 <li><strong>Product Name:</strong> ${product.name}</li>
                 <li><strong>Quantity:</strong> ${purchaseOrder.quantity}</li>
                 <li><strong>Total Value:</strong> ₹${purchaseOrder.total_value}.00</li>
-                <li><strong>Created At:</strong> ${new Date(purchaseOrder.created_at).toLocaleString()}</li>
+                <li><strong>Created At:</strong> ${new Date(purchaseOrder.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</li>
             </ul>
 
             <h4>Buyer Info</h4>

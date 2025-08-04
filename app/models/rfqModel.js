@@ -1885,7 +1885,11 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                 )
               ))
             FROM tbl_rfq_product_vendors RFQ_P_V
-            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id AND RFQ_P.variant = RFQ_P_V.variant
+            JOIN tbl_users U ON RFQ_P_V.user_id = U.id
+            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
+              AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
+              AND RFQ_P.variant = RFQ_P_V.variant
+              AND U.status = 1
           ),
           'vendors', (
             SELECT json_agg(json_build_object(
@@ -1897,6 +1901,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
               AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
               AND RFQ_P.variant = RFQ_P_V.variant
+              AND U.status = 1
           )
         )
         FROM tbl_rfq_products RFQ_P
@@ -3202,7 +3207,7 @@ WHERE row_num_by_name_category = 1
 `;
 
     return new Promise(function (resolve, reject) {
-      db.query(q, [search_key, category_id, approved_by_id].filter(Boolean)) // Filters out any undefined or empty values
+      db.query(q, [categoryIds]) // Pass the category IDs array
         .then(function (data) {
           resolve(data);
         })
@@ -6973,7 +6978,9 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                   TQI.unit_price,
                   BUYER.name AS created_by
                   FROM tbl_quote_items TQI
-                  JOIN tbl_quote_finalization TQF USING (quote_id)
+                  JOIN tbl_quote_finalization TQF ON TQI.quote_id = TQF.quote_id 
+                    AND TQI.product_variant_id = TQF.product_variant_id 
+                    AND TQI.variant = TQF.variant
                   JOIN tbl_quotes TQ ON TQ.id = TQF.quote_id
                   JOIN tbl_users TU ON TQ.created_by = TU.id
                   JOIN tbl_rfq RFQ ON RFQ.id = TQ.rfq_id

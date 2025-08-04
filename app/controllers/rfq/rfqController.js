@@ -2070,7 +2070,6 @@ const rfqController = {
     try {
       let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction} = req.body;
       const user_id = req.user.id;
-
       if (!rfq_id) {
         return res.status(400).json({
           status: 3,
@@ -2119,7 +2118,7 @@ const rfqController = {
           }
         }).end();
       }
-      const products = await rfqModel.getProductsByRfqId(rfq_id);
+      // const products = await rfqModel.getProductsByRfqId(rfq_id);
 
       const responseUpdate = await rfqModel.update(
         'tbl_rfq',
@@ -7204,7 +7203,7 @@ deleteDraft: async (req, res) => {
         message: 'File name is required for persistant processing.'
       })
 
-      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing'`)
+      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id}`)
       if(processing && processing.length > 0) {
         processing = processing[0];
 
