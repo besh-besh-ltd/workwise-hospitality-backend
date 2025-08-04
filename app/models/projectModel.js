@@ -87,10 +87,10 @@ const projectModel = {
     });
   },
 
-    getProjectById: async (project_id, user_id, limit, offset) => {
-        return new Promise(function (resolve, reject) {
-                db.any(
-                  `SELECT
+  getProjectById: async (project_id, user_id, limit, offset) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT
                                 p.*,
                                 -- Aggregated RFQ counts
                                 (
@@ -167,17 +167,17 @@ const projectModel = {
                             GROUP BY
                                 p.id;
               `,
-                  [project_id, user_id, limit, offset]
-                )
-                  .then(function (data) {
-                    resolve(data);
-                  })
-                  .catch(function (err) {
-                    let error = new Error(err);
-                    reject(error);
-                  });
+        [project_id, user_id, limit, offset]
+      )
+        .then(function (data) {
+          resolve(data);
         })
-    },
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   /**
    *
    * @param {*} user_id
@@ -508,7 +508,7 @@ ORDER BY
   getProjectBudget: async (project_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
-                    `SELECT 
+        `SELECT 
                 trpo.id,
                 tr.rfq_no, 
                 tu.name AS vendor_name, 
@@ -534,7 +534,6 @@ ORDER BY
         });
     });
   },
- 
 
   getProjectByIdForAdmin: async (project_id, limit, offset) => {
     return new Promise(function (resolve, reject) {
@@ -618,20 +617,43 @@ ORDER BY
     });
   },
 
-  getProjectTableDataByIdForAdmin: async (project_id) => {
+  getProjectTableDataByIdForAdmin: async (project_id, user_id,file = 'no') => {
     return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT t.* 
-         FROM tbl_projects t
-         WHERE t.id = $1`,
-        [project_id]
-      )
+      let query = '';
+      let params = [project_id];
+
+      if (file === 'yes') {
+        query = `
+        SELECT 
+          t.*,
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'file_name', tpf.file_name,
+                'file_type', tpf.file_type,
+                'file_url', tpf.file_url
+              )
+            ) FILTER (WHERE tpf.file_name IS NOT NULL), '[]'
+          ) AS files
+        FROM tbl_projects t
+        LEFT JOIN tbl_project_files tpf ON tpf.project_id = t.id
+        WHERE t.id = $1
+        GROUP BY t.id;
+      `;
+      } else {
+        query = `
+        SELECT *
+        FROM tbl_projects
+        WHERE id = $1;
+      `;
+      }
+
+      db.any(query, params)
         .then(function (data) {
           resolve(data);
         })
         .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
+          reject(new Error(err));
         });
     });
   },
@@ -692,7 +714,6 @@ ORDER BY
           projectObj.reverse_auction,
           projectObj.budget,
           projectObj.project_id
-          
         ]
       )
         .then(function (data) {
