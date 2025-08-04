@@ -2366,7 +2366,7 @@ LIMIT 1;`;
         });
     });
   },
-  getQuotesByRfqByIdByProduct: async (id, user_id, TA_Vendors, no_freight) => {
+  getQuotesByRfqByIdByProduct: async (id, user_id, company_id, TA_Vendors, no_freight) => {
     return new Promise(function (resolve, reject) {
         const vendorCondition = `
         AND EXISTS (
@@ -2404,6 +2404,34 @@ LIMIT 1;`;
                 ORDER BY TQF1.timestamp DESC
                 LIMIT 1
             ) AS "last_purchase_rate",
+            (
+              SELECT
+                  json_build_object(
+                    'unit_price', TQI.unit_price,
+                    'package_price', TQI.package_price,
+                    'tax', TQI.tax,
+                    'freight_price', TQI.freight_price,
+                    'freight_mode', TQI.freight_mode,
+                    'package_mode', TQI.package_mode,
+                    'tax_mode', TQI.tax_mode,
+                    'total_price', TQI.total_price,
+                    'quantity', TQI.quantity,
+                    'product_name', TQI.product_name,
+                    'rfq_no', TQI.rfq_no,
+                    'timestamp', TQ.timestamp
+                  )
+              FROM tbl_rfq RFQ
+                      JOIN tbl_quotes TQ ON RFQ.id = TQ.rfq_id
+                      JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
+                      JOIN tbl_users U ON TQ.created_by = U.id
+                      JOIN tbl_users BUYER ON BUYER.id = RFQ.created_by
+              WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = $3 AND user_type IN (2,8))
+                AND TQI.product_variant_id = TRP.product_variant_id
+                AND TQI.unit_price > 0
+                AND RFQ.id != $1
+              ORDER BY TQ.timestamp DESC
+              LIMIT 1
+          ) AS "last_quote_rate",
             ARRAY(
                 SELECT json_build_object('name', PV.name,'description', TP.description) 
                 FROM tbl_product_variant PV
@@ -2524,7 +2552,7 @@ LIMIT 1;`;
             ) AS "product_specs"
             FROM tbl_rfq_products TRP WHERE TRP.rfq_id=$1`;
 
-        db.query(mainQuery, [id, user_id])
+        db.query(mainQuery, [id, user_id, company_id])
         .then(function (data) {
             resolve(data);
         })
@@ -2537,7 +2565,7 @@ LIMIT 1;`;
 
 
 
-  getQuotesByRfqById2: async (id, user_id, TA_Vendors, no_freight) => {
+  getQuotesByRfqById2: async (id, user_id, company_id, TA_Vendors, no_freight) => {
     return new Promise(function (resolve, reject) {
 
       const vendorCondition = `
@@ -2617,6 +2645,32 @@ LIMIT 1;`;
           LIMIT 1
         ) AS "last_purchase_rate"
           ,
+        (
+          SELECT
+              json_build_object(
+                'unit_price', TQI.unit_price,
+                'package_price', TQI.package_price,
+                'tax', TQI.tax,
+                'freight_price', TQI.freight_price,
+                'freight_mode', TQI.freight_mode,
+                'package_mode', TQI.package_mode,
+                'tax_mode', TQI.tax_mode,
+                'total_price', TQI.total_price,
+                'quantity', TQI.quantity,
+                'product_name', TQI.product_name,
+                'rfq_no', TQI.rfq_no,
+                'timestamp', TQ.timestamp
+              )
+              FROM tbl_rfq RFQ
+              JOIN tbl_quotes TQ ON RFQ.id = TQ.rfq_id
+              JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
+            WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = $3 AND user_type IN (2,8))
+            AND TQI.product_variant_id = TRF.product_variant_id
+            AND TQI.unit_price > 0
+            AND RFQ.id != $1
+          ORDER BY TQ.timestamp DESC
+          LIMIT 1
+        ) AS "last_quote_rate",
           ARRAY(
             SELECT json_build_object(
               'product_name', TV.name,
@@ -2769,7 +2823,7 @@ LIMIT 1;`;
         FROM tbl_rfq_products TRF
         WHERE TRF.rfq_id = $1;`
 
-        db.query(mainQuery, [id, user_id])
+        db.query(mainQuery, [id, user_id, company_id])
         .then(function (data) {
           resolve(data);
         })

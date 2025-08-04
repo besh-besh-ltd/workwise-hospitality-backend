@@ -399,7 +399,6 @@ const updateRfqProductIdInTechEvaluation = async (oldProductId, newProductId) =>
 };
 
 const getQUOTES = async ({ id }, user_id) => {
-  console.log('RFQ ID', id);
   try {
     const rfQItem = await rfqModel.getQuotesByRfqById(id, user_id);
     // const rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(id, user_id);
@@ -4301,8 +4300,8 @@ deleteDraft: async (req, res) => {
 
     try {
       // check if the rfq is belongs to the vendor
-      const checkRFQExist = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id} AND created_by = ${user.id}`);
-      if (checkRFQExist && checkRFQExist.length > 0) {
+      const checkRFQExist = await userModel.user_rfq_access_review(rfq_id, user.id, user.user_type);
+      if (checkRFQExist) {
           // Get RFQ details to check dates
           const rfqDetails = await rfqModel.getRFQDetails(rfq_id);
           if (!rfqDetails || rfqDetails.length === 0) {
@@ -4640,7 +4639,10 @@ deleteDraft: async (req, res) => {
                 'comment',
                 'delivery_period',
                 'quantity',
-                'variant'
+                'variant',
+                'freight_mode',
+                'package_mode',
+                'tax_mode',
               ];
               let quotes_items = await rfqModel.insertArray(
                 quote_items_data,
@@ -4731,10 +4733,10 @@ deleteDraft: async (req, res) => {
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
     const {TA_Vendors, no_freight} = req.query;
-    const { id } = req.user;
+    const { id, company_id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqById2(rfq_id, id, TA_Vendors, no_freight);
+      let rfQItem = await rfqModel.getQuotesByRfqById2(rfq_id, id, company_id, TA_Vendors, no_freight);
       // rfQItem = filterQuotations(rfQItem);
       // rfQItem = processQuotations(rfQItem);
       res
@@ -4791,10 +4793,10 @@ deleteDraft: async (req, res) => {
     let rfq_id = req.params.id;
     const {TA_Vendors, no_freight} = req.query;
 
-    const { id } = req.user;
+    const { id, company_id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, TA_Vendors, no_freight);
+      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, company_id, TA_Vendors, no_freight);
       
       rfQItem.forEach(product => {
         const vendorMap = new Map();
@@ -8574,6 +8576,7 @@ projectWiseReport: async (req, res) => {
   try {
     const { projectId, startDate, endDate } = req.query;
     const userId = req.user.id;
+    const company_id = req.user.company_id
 
 
     const rfqDetails = await rfqModel.getProjectDetailsReport(projectId, startDate, endDate);
@@ -8583,7 +8586,7 @@ projectWiseReport: async (req, res) => {
     for (let i = 0; i < rfqDetails.length; i++) {
       for (let j = 0; j < rfqDetails[i].rfq_details.length; j++) {
         const rfqId = rfqDetails[i].rfq_details[j].rfq_id;
-        let quoteDetails = await rfqModel.getQuotesByRfqById2(rfqId, userId, false);
+        let quoteDetails = await rfqModel.getQuotesByRfqById2(rfqId, company_id, userId, false);
         quoteList.push(quoteDetails)
       }
     }
