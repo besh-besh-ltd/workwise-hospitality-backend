@@ -161,8 +161,11 @@ const projectController = {
 
       if (user_type === 7) {
         // Admin can access any project
+        const file = 'yes';
         projectDetails = await projectModel.getProjectTableDataByIdForAdmin(
-          project_id
+           project_id,
+            user_id,
+            file
         );
       } else {
         // Check if user is the project owner or a team member
@@ -181,11 +184,13 @@ const projectController = {
         } else {
           // Check if user is a team member
           const isMember = await projectModel.isTeamMember(project_id, user_id);
-
+          const file = 'yes';
           if (isMember) {
             // User is a team member, use the admin function to bypass owner check
             projectDetails = await projectModel.getProjectTableDataByIdForAdmin(
-              project_id
+            project_id,
+            user_id,
+            file
             );
           } else {
             // User doesn't have access to this project
@@ -206,7 +211,6 @@ const projectController = {
           message: 'Project not found'
         });
       }
-      console.log('checking the project table data', projectDetails);
       res
         .status(200)
         .json({
