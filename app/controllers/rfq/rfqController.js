@@ -399,7 +399,6 @@ const updateRfqProductIdInTechEvaluation = async (oldProductId, newProductId) =>
 };
 
 const getQUOTES = async ({ id }, user_id) => {
-  console.log('RFQ ID', id);
   try {
     const rfQItem = await rfqModel.getQuotesByRfqById(id, user_id);
     // const rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(id, user_id);
@@ -4301,10 +4300,8 @@ deleteDraft: async (req, res) => {
 
     try {
       // check if the rfq is belongs to the vendor
-      const listRfq = await rfqModel.getRfqByUser(1000000, 0, user.id);
-      if (listRfq.length > 0) {
-        let filteredRFQ = listRfq.filter((item) => item.id == rfq_id);
-        if (filteredRFQ.length > 0) {
+      const checkRFQExist = await userModel.user_rfq_access_review(rfq_id, user.id, user.user_type);
+      if (checkRFQExist) {
           // Get RFQ details to check dates
           const rfqDetails = await rfqModel.getRFQDetails(rfq_id);
           if (!rfqDetails || rfqDetails.length === 0) {
@@ -4473,7 +4470,10 @@ deleteDraft: async (req, res) => {
                   delivery_period,
                   quantity,
                   variant,
-                  document_files
+                  document_files,
+                  freight_mode,
+                  package_mode,
+                  tax_mode,
                 }) => {
                   if(unit_price!=""){
                     quote_items_data.push({
@@ -4489,7 +4489,10 @@ deleteDraft: async (req, res) => {
                       comment,
                       delivery_period,
                       quantity,
-                      variant
+                      variant,
+                      freight_mode,
+                      package_mode,
+                      tax_mode,
                     });
                   }else if(comment!="" || document_files?.length>0){
                     quote_items_data.push({
@@ -4505,7 +4508,10 @@ deleteDraft: async (req, res) => {
                       comment,
                       delivery_period,
                       quantity,
-                      variant
+                      variant,
+                      freight_mode,
+                      package_mode,
+                      tax_mode,
                     });
                   } else if(is_regret){
                     quote_items_data.push({
@@ -4521,7 +4527,10 @@ deleteDraft: async (req, res) => {
                       comment,
                       delivery_period,
                       quantity,
-                      variant
+                      variant,
+                      freight_mode,
+                      package_mode,
+                      tax_mode,
                     })
                   }
                 }
@@ -4551,7 +4560,10 @@ deleteDraft: async (req, res) => {
                     'comment',
                     'delivery_period',
                     'quantity',
-                    'variant'
+                    'variant',
+                    'freight_mode',
+                    'package_mode',
+                    'tax_mode',
                   ];
                   await rfqModel.insertArray(
                     quote_items_data,
@@ -4627,7 +4639,10 @@ deleteDraft: async (req, res) => {
                 'comment',
                 'delivery_period',
                 'quantity',
-                'variant'
+                'variant',
+                'freight_mode',
+                'package_mode',
+                'tax_mode',
               ];
               let quotes_items = await rfqModel.insertArray(
                 quote_items_data,
@@ -4693,16 +4708,6 @@ deleteDraft: async (req, res) => {
             }
           })
 
-        } else {
-          res
-            .status(400)
-            .json({
-              status: 3,
-              message: 'The RFQ is not belongs to you!'
-            })
-            .end();
-          return;
-        }
       } else {
         res
           .status(400)
@@ -4728,10 +4733,10 @@ deleteDraft: async (req, res) => {
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
     const {TA_Vendors, no_freight} = req.query;
-    const { id } = req.user;
+    const { id, company_id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqById2(rfq_id, id, TA_Vendors, no_freight);
+      let rfQItem = await rfqModel.getQuotesByRfqById2(rfq_id, id, company_id, TA_Vendors, no_freight);
       // rfQItem = filterQuotations(rfQItem);
       // rfQItem = processQuotations(rfQItem);
       res
@@ -4788,10 +4793,10 @@ deleteDraft: async (req, res) => {
     let rfq_id = req.params.id;
     const {TA_Vendors, no_freight} = req.query;
 
-    const { id } = req.user;
+    const { id, company_id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, TA_Vendors, no_freight);
+      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, company_id, TA_Vendors, no_freight);
       
       rfQItem.forEach(product => {
         const vendorMap = new Map();
@@ -7746,6 +7751,7 @@ deleteDraft: async (req, res) => {
             // Process each product in the request
         const quoteItemChanges = await Promise.all(
           products.map((product) => {
+            console.log("UPDATING: ", product);
             if ((product.comment == "" && product.document_files?.length <= 0) && (product.unit_price=='' || product.unit_price==0)) {
               return null;
             }
@@ -7753,7 +7759,7 @@ deleteDraft: async (req, res) => {
           }).filter(Boolean)
         );
 
-        // console.log("mj ", quoteItemChanges)
+        console.log("QUOTE ITEM CHANGES: ", quoteItemChanges)
 
       // Check if global terms & conditions file are uploaded
       if (term_and_condition_files && term_and_condition_files.length > 0) {
@@ -8570,6 +8576,7 @@ projectWiseReport: async (req, res) => {
   try {
     const { projectId, startDate, endDate } = req.query;
     const userId = req.user.id;
+    const company_id = req.user.company_id
 
 
     const rfqDetails = await rfqModel.getProjectDetailsReport(projectId, startDate, endDate);
@@ -8579,7 +8586,7 @@ projectWiseReport: async (req, res) => {
     for (let i = 0; i < rfqDetails.length; i++) {
       for (let j = 0; j < rfqDetails[i].rfq_details.length; j++) {
         const rfqId = rfqDetails[i].rfq_details[j].rfq_id;
-        let quoteDetails = await rfqModel.getQuotesByRfqById2(rfqId, userId, false);
+        let quoteDetails = await rfqModel.getQuotesByRfqById2(rfqId, company_id, userId, false);
         quoteList.push(quoteDetails)
       }
     }
