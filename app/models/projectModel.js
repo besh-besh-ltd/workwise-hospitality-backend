@@ -513,7 +513,7 @@ ORDER BY
                 tr.rfq_no, 
                 tu.name AS vendor_name, 
                 trpo.updated_at, 
-                trpo.total_value::int AS total_value
+                trpo.total_value::bigint AS total_value
             FROM 
                 tbl_rfq_purchase_order trpo 
             JOIN 
