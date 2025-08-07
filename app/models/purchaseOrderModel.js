@@ -195,6 +195,13 @@ export const getPODetailsById = async (po_id, user_id) => {
   try {
     const result = await db.oneOrNone(
       `SELECT po.*,
+              CASE
+                WHEN PD.id IS NOT NULL THEN
+                  JSON_BUILD_OBJECT(
+                      'id', PD.id,
+                      'name', PD.name
+                  )
+                ELSE NULL END AS project_details,
               COALESCE(VENDOR.organization_name, VENDOR.name) AS finalized_vendor_name,
               VENDOR.email AS finalized_vendor_email,
               JSON_BUILD_OBJECT(
@@ -264,6 +271,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                           FROM UNNEST(M.reminder_users) AS reminder_user_id
                           JOIN tbl_users RU ON RU.id = reminder_user_id
                         ),
+                        'attachments', M.attachments,
                         'created_by', U.name,
                         'created_at', M.created_at
                       )
@@ -304,6 +312,7 @@ export const getPODetailsById = async (po_id, user_id) => {
        LEFT JOIN tbl_approval_hierarchy_transactions trx
          ON trx.hierarchy_type = 'po'
          AND trx.target_entity_id = po.id
+       LEFT JOIN tbl_projects PD ON PD.id = po.project_id
 
        LEFT JOIN tbl_users trx_user ON trx_user.id = trx.current_approver_id
        JOIN tbl_rfq_products TRP ON TRP.id = po.rfq_product_id
@@ -342,14 +351,15 @@ export const createMilestone = async (data, user) => {
     due_date,
     milestone_description,
     reminder_users = [],
+    attachments = [],
   } = data;
 
   const milestone = await db.oneOrNone(
     `INSERT INTO tbl_payment_milestone 
-      (rfq_id, po_id, company_id, milestone_name, due_date, milestone_description, created_by, reminder_users) 
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      (rfq_id, po_id, company_id, milestone_name, due_date, milestone_description, created_by, reminder_users, attachments) 
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
-    [rfq_id, po_id, user.company_id, milestone_name, due_date, milestone_description, user.id, reminder_users]
+    [rfq_id, po_id, user.company_id, milestone_name, due_date, milestone_description, user.id, reminder_users, attachments ? JSON.stringify(attachments) : []]
   );
 
   return milestone;
@@ -364,10 +374,11 @@ export const updateMilestone = async (id, updates, user_id) => {
          status = COALESCE($5, status),
          updated_by = $6,
          reminder_users = $7,
+         attachments = $8,
          updated_at = NOW()
      WHERE id = $1
      RETURNING *`,
-    [id, updates.milestone_name, updates.due_date, updates.milestone_description, updates.status, user_id, updates.reminder_users]
+    [id, updates.milestone_name, updates.due_date, updates.milestone_description, updates.status, user_id, updates.reminder_users, updates.attachments ? JSON.stringify(updates.attachments) : []]
   );
 
   return milestone;

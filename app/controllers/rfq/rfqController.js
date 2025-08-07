@@ -1609,7 +1609,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
           for (const spec of Object.keys(products.updatable.specs[rfqProductId])) {
             let value = products.updatable.specs[rfqProductId][spec]
             if(spec == 'Quantity')
-              value = parseInt(value) || '';
+              value = parseFloat(value) || '';
 
               const data = {
                 value
@@ -4849,7 +4849,6 @@ deleteDraft: async (req, res) => {
    
    const { variant_id, type } = req.query; 
     const {id} = req.user;
-    console.log("req recieved", variant_id, type, id);
     try {
          
       if(variant_id){
