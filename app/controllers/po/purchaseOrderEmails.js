@@ -87,6 +87,7 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
 
         let vendor = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
         if(!vendor) throw new Error("Vendor Not Found!");
+        vendor = vendor[0];
 
         const headerContent = `<h2>Hello ${vendor.organization_name || vendor.name || "Vendor"},</h2>`;
 

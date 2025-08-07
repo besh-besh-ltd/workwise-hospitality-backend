@@ -3425,11 +3425,11 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         if (!buyer || !buyer.company_id) return reject(new Error('Buyer not found or no company associated'));
 
         // check if vendor already mapped with this company
-        const result = await db.oneOrNone(
+        const result = await db.any(
           `SELECT 1 FROM tbl_buyer_private_vendors_mapping WHERE company_id = $1 AND vendor_id = $2`,
           [buyer.company_id, vendorId]
         );
-        if (result) {
+        if (result && result.length > 0) {
           resolve({ message: 'Vendor already mapped to this company. No changes made.' });
         } else {
           await db.none(
