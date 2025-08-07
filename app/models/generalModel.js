@@ -521,8 +521,8 @@ const generalModel = {
     const nextApprover = await t.oneOrNone(
       `SELECT user_id FROM tbl_approval_hierarchy
       WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
-        AND approval_level < $3
-      ORDER BY approval_level DESC
+        AND approval_level > $3
+      ORDER BY approval_level
       LIMIT 1`,
       [companyId, type, initiatorHierarchy.approval_level]
     );
@@ -606,8 +606,8 @@ const generalModel = {
       const nextApprover = await t.oneOrNone(
         `SELECT user_id FROM tbl_approval_hierarchy
         WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
-          AND approval_level < $3
-        ORDER BY approval_level DESC
+          AND approval_level > $3
+        ORDER BY approval_level
         LIMIT 1`,
         [company_id, hierarchy_type, currentLevel?.approval_level ?? 999]
       );

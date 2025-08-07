@@ -2609,6 +2609,9 @@ LIMIT 1;`;
               'package_price', TQI.package_price,
               'tax', TQI.tax,
               'freight_price', TQI.freight_price,
+              'freight_mode', TQI.freight_mode,
+              'package_mode', TQI.package_mode,
+              'tax_mode', TQI.tax_mode,
               'total_price', TQI.total_price
             )
           )
@@ -2788,8 +2791,7 @@ LIMIT 1;`;
               'global_payment_term', TQ.global_payment_term,
               'global_comment', TQ.global_comment,
               'previous_quotes', (
-                SELECT json_agg(
-                  json_build_object(
+                SELECT json_agg(json_build_object(
                     'id', TH.id,
                     'quote_item_id', TH.quote_item_id,
                     'rfq_id', TH.rfq_id,
@@ -2798,19 +2800,25 @@ LIMIT 1;`;
                     'package_price', TH.package_price,
                     'tax', TH.tax,
                     'freight_price', ${no_freight === 'true' ? '0' : 'TH.freight_price'},
+                    'freight_mode', TH.freight_mode,
+                    'package_mode', TH.package_mode,
+                    'tax_mode', TH.tax_mode,
                     'total_price', ${no_freight === 'true' ? 
-                      'ROUND((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100) + (((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100)) * COALESCE(TH.tax, 0) / 100))' 
+                      'ROUND((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100) + (((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100)) * COALESCE(TH.tax, 0) / 100))'
                       : 'TH.total_price'},
                     'comment', TH.comment,
                     'delivery_period', TH.delivery_period,
                     'quantity', TH.quantity,
                     'variant', TH.variant,
                     'timestamp', TH.timestamp
-                  )
+                ))
+                FROM (
+                  SELECT *
+                  FROM tbl_quote_item_history TH
+                  WHERE TH.quote_item_id = TQI.id
                   ORDER BY TH.timestamp DESC
-                )
-                FROM tbl_quote_item_history TH
-                WHERE TH.quote_item_id = TQI.id
+                  LIMIT 1
+                ) TH
               )
             )
             FROM tbl_quote_items TQI
@@ -7020,8 +7028,11 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
       lpr: `
               SELECT 
                   TQI.package_price,
+                  TQI.package_mode,
                   TQI.tax,
+                  TQI.tax_mode,
                   TQI.freight_price,
+                  TQI.freight_mode,
                   TQI.total_price,
                   TQI.quantity,
                   TQI.product_name,
@@ -7049,6 +7060,9 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                 TQI.package_price,
                 TQI.tax,
                 TQI.freight_price,
+                TQI.package_mode,
+                TQI.tax_mode,
+                TQI.freight_mode,
                 TQI.total_price,
                 TQI.quantity,
                 TQI.product_name,
