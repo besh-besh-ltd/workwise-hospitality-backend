@@ -2425,7 +2425,7 @@ LIMIT 1;`;
                       JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
                       JOIN tbl_users U ON TQ.created_by = U.id
                       JOIN tbl_users BUYER ON BUYER.id = RFQ.created_by
-              WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = $3 AND user_type IN (2,8))
+              WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = $3 AND user_type IN (2,8,10))
                 AND TQI.product_variant_id = TRP.product_variant_id
                 AND TQI.unit_price > 0
                 AND RFQ.id != $1
@@ -2641,7 +2641,7 @@ LIMIT 1;`;
           )
           FROM tbl_quote_items TQI1
           JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
-          WHERE TQF1.created_by IN (SELECT id FROM tbl_users WHERE company_id = (SELECT company_id FROM tbl_users WHERE id = $2) AND user_type IN (2,8))
+          WHERE TQF1.created_by IN (SELECT id FROM tbl_users WHERE company_id = (SELECT company_id FROM tbl_users WHERE id = $2) AND user_type IN (2,8,10))
             AND TQI1.product_variant_id = TRF.product_variant_id
             AND TQF1.rfq_id != $1 -- different RFQ
           ORDER BY TQF1.timestamp DESC
@@ -2667,7 +2667,7 @@ LIMIT 1;`;
               FROM tbl_rfq RFQ
               JOIN tbl_quotes TQ ON RFQ.id = TQ.rfq_id
               JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
-            WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = $3 AND user_type IN (2,8))
+            WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = $3 AND user_type IN (2,8,10))
             AND TQI.product_variant_id = TRF.product_variant_id
             AND TQI.unit_price > 0
             AND RFQ.id != $1
@@ -7041,7 +7041,7 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                   TQF.timestamp AS quote_date,
                   TQI.rfq_no,
                   TQI.unit_price,
-                  BUYER.name AS created_by
+                  FINALIZER.name AS created_by
                   FROM tbl_quote_items TQI
                   JOIN tbl_quote_finalization TQF ON TQI.quote_id = TQF.quote_id 
                     AND TQI.product_variant_id = TQF.product_variant_id 
@@ -7049,8 +7049,8 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                   JOIN tbl_quotes TQ ON TQ.id = TQF.quote_id
                   JOIN tbl_users TU ON TQ.created_by = TU.id
                   JOIN tbl_rfq RFQ ON RFQ.id = TQ.rfq_id
-                  JOIN tbl_users BUYER ON BUYER.id = RFQ.created_by
-                  WHERE TQF.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,8))
+                  JOIN tbl_users FINALIZER ON FINALIZER.id = TQF.created_by
+                  WHERE TQF.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,8,10))
                     AND TQI.product_variant_id = $1
                   ORDER BY TQF.timestamp DESC;
         `,
@@ -7070,13 +7070,17 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                 TQ.timestamp AS quote_date,
                 U.name AS vendor_name,       -- ✅ User's name
                 U.email AS vendor_email,      -- ✅ User's email
-                BUYER.name AS created_by
+                COALESCE(FINALIZER.name, BUYER.name) AS created_by
             FROM tbl_rfq RFQ
             JOIN tbl_quotes TQ ON RFQ.id = TQ.rfq_id
             JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
             JOIN tbl_users U ON TQ.created_by = U.id    -- ✅ Join with tbl_user
             JOIN tbl_users BUYER ON BUYER.id = RFQ.created_by
-            WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,8))
+            LEFT JOIN tbl_quote_finalization TQF ON TQF.quote_id = TQ.id 
+              AND TQF.product_variant_id = TQI.product_variant_id 
+              AND TQF.variant = TQI.variant
+            LEFT JOIN tbl_users FINALIZER ON FINALIZER.id = TQF.created_by
+            WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,8,10))
               AND TQI.product_variant_id = $1
               AND TQI.unit_price > 0
             ORDER BY TQ.timestamp DESC;
