@@ -1594,25 +1594,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       )
         AND TQF.file_type = 'term_and_condition'
     ) AS "terms_and_conditions_files",
-    (
-      SELECT COUNT(*)::INT
-      FROM tbl_quotes TQ1
-      WHERE TQ1.rfq_id = RFQ.id
-      ) AS "total_quotes_received",
-    ARRAY(
-      SELECT json_build_object('id', TQF.id,'product_id',TQF.product_variant_id, 'timestamp', TQF.timestamp,'variant', TQF.variant,
-        'winning_vendor', 
-          (
-            SELECT json_build_object( 'id', TUU.id, 'name', TUU.name, 'email', TUU.email, 'mobile', TUU.mobile, 'address', TUU.address, 'organization_name', COALESCE(TCC.company_name, TUU.organization_name, TUU.name) ) 
-            FROM tbl_users TUU 
-            LEFT JOIN tbl_company TCC ON TCC.id = TUU.company_id 
-            WHERE TUU.id = TQF.vendor_id
-          ),
-        'product_details', (
-          SELECT json_build_object( 'id', TV.id, 'name', TV.name, 'description', TPP.description ) FROM tbl_product_variant TV JOIN tbl_product TPP ON TPP.id = TV.product_id WHERE TV.id = TQF.product_variant_id
-        )
-      ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id
-  ) AS "finalizations",
+    
     ARRAY(
       SELECT json_build_object(
         'id', RFQ_TM.terms_id,
@@ -1647,277 +1629,228 @@ deleteProductFilesByIds: async (rfqProductIds) => {
               'freight_mode', TQI.freight_mode,
               'package_mode', TQI.package_mode,
               'tax_mode', TQI.tax_mode,
-          'previous_document_files', (
-                SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
-                FROM tbl_quote_item_files QIF
-                WHERE QIF.quote_item_id = TQI.id
-            ),
-          'document_files', (
-                SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
-                FROM tbl_quote_item_files QIF
-                WHERE QIF.quote_item_id = TQI.id
-            )
+              'previous_document_files', (
+                    SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
+                    FROM tbl_quote_item_files QIF
+                    WHERE QIF.quote_item_id = TQI.id
+                ),
+              'document_files', (
+                    SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
+                    FROM tbl_quote_item_files QIF
+                    WHERE QIF.quote_item_id = TQI.id
+                )
           ))
           FROM tbl_quote_items TQI
           WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id
         )
       ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = ${user_id}
-    ) AS "quotations",
-    ARRAY(
-        SELECT json_build_object(
-        'id', RFQ_P.id, 
-        'product_id', RFQ_P.product_variant_id, 
-        'name', _TPV.name, 
-        'variant', RFQ_P.variant, 
-        'comment', RFQ_P.comment, 
-        'qap', RFQ_P.qap, 
-        'qap_file', (
-          SELECT json_agg(RPF.file_url)
-          FROM tbl_rfq_product_files RPF
-          WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
-        ), 
-        'spec_file', (
-            SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
-        ), 
-        'datasheet_file', (
-            SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
-        ),
-          'TDS_flies', (
-            SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
-          ),
-          'QAP_files', (
-            SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
-          ),
-          'SPEC_files', (
-            SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
-          ),
-
-          'datasheet', (
-            SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
-                CASE
-                  WHEN TVA.datasheet_file IS NULL THEN
-                  NULL
-                  ELSE TVA.datasheet_file
-                END
-              ))
-            FROM tbl_vendor_approve TVA
-            WHERE TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
-          ),
-          'qap', (
-            SELECT json_agg(json_build_object('name', TVA.vendor_approve,'qap_link', CASE
-                  WHEN TVA.qap_file IS NULL THEN
-                  NULL
-                  ELSE TVA.qap_file
-                END))
-            FROM tbl_vendor_approve TVA
-            WHERE TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
-          ),
-          'product_specs', (
-            SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title,'value', RFQ_P_SPEC.value))
-            FROM tbl_rfq_products_specs RFQ_P_SPEC
-            WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id AND RFQ_P.variant = RFQ_P_SPEC.variant
-          ),
-          'product_details', (
-            SELECT json_agg(json_build_object('id', T_V.id,'name', T_V.name, 'description', T_P.description))
-            FROM tbl_product_variant T_V
-            JOIN tbl_product T_P ON T_P.id = T_V.product_id
-            WHERE RFQ_P.product_variant_id = T_V.id
-          ),
-          -- New finalization_status field for each product
-          'finalization_status', COALESCE(
-            (
-              SELECT
-                CASE
-                  WHEN TQF.vendor_id = ${user_id} THEN 'You are finalized'
-                  ELSE 'Another vendor is finalized'
-                END
-              FROM tbl_quote_finalization TQF
-              WHERE TQF.rfq_id = RFQ_P.rfq_id 
-                AND TQF.product_variant_id = RFQ_P.product_variant_id 
-                AND TQF.variant = RFQ_P.variant
-              LIMIT 1
-            ),
-            'No vendor finalized yet'
-          ),
-            ${
-              // Changes by Agnij 2025-05-05 [Modified to include both user_type 2 and 3]
-              user_type == 2 || user_type == 3
-        ? `-- Changes made by Imtiaj 28/09/2024 [Added logic to get the lowest_total from quotes for each unique product with the specified RFQ_id.]
-                'lowest_quotation', (
-                        ${user_type == 3 ? `
-                        -- Check if this product has technical evaluation enabled (has clauses)
-                        WITH tech_eval AS (
-                            SELECT TE.id AS tech_eval_id
-                            FROM tbl_rfq_product_tech_evaluation TE
-                            JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON TE.id = TEC.tbl_rfq_product_tech_evaluation_id
-                            WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
-                            LIMIT 1
-                        ),
-
-                        -- Check if current vendor is technically accepted for this product
-                        tech_accepted AS (
-                            SELECT 1 AS is_accepted
-                            FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
-                            JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
-                            WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
-                            LIMIT 1
-                        )` : ``}
-                        -- Changes by Agnij 2025-05-08 [Fixed lowest quotation selection to always pick the lowest price]
-                        SELECT json_build_object(
-                            'quote_id', TQI.quote_id,
-                            'total_price', TQI.total_price
-                        )
-                        FROM (
-                            SELECT 
-                                quote_id,
-                                total_price,
-                                ROW_NUMBER() OVER (PARTITION BY product_variant_id, variant ORDER BY total_price ASC) AS rn
-                            FROM tbl_quote_items
-                            WHERE product_variant_id = RFQ_P.product_variant_id
-                            AND variant = RFQ_P.variant
-                            AND rfq_id = RFQ_P.rfq_id
-                            AND total_price > 0
-                        ) TQI
-                        WHERE TQI.rn = 1  -- Get only the lowest price for each product/variant
-                        AND RFQ.reverse_auction = 1
-                        ${user_type == 3 ? `
-                        -- Apply technical evaluation filtering if enabled for this product
-                        AND (
-                            -- If no technical evaluation exists for this product OR
-                            -- vendor is technically accepted, OR
-                            -- if reverse auction ends before/with RFQ end date
-                            (SELECT COUNT(*) FROM tech_eval) = 0
-                            OR (SELECT COUNT(*) FROM tech_accepted) > 0
-                            OR (
-                                -- Special case: For technically evaluated products where RA ends before RFQ end date
-                                -- Show lowest quote only to technically accepted vendors
-                                (SELECT COUNT(*) FROM tech_eval) > 0
-                                AND RFQ.ra_end_date IS NOT NULL
-                                AND RFQ.bid_end_date IS NOT NULL
-                                AND CAST(RFQ.ra_end_date AS TIMESTAMP) <= CAST(RFQ.bid_end_date AS TIMESTAMP)
-                                AND (
-                                    -- Check if vendor is technically accepted
-                                    (SELECT COUNT(*) FROM tech_accepted) > 0
-                                )
-                            )
-                        )` : ``}
-                        -- Timing conditions for when lowest quote should be visible
-                        AND (
-                            -- Show lowest quote if current time is within auction period
-                          CURRENT_TIMESTAMP BETWEEN
-                            CAST(RFQ.ra_start_date AS TIMESTAMP)
-                            AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
-                            OR
-                            -- If reverse auction starts after RFQ ends
-                            (
-                                RFQ.ra_start_date IS NOT NULL
-                                AND RFQ.bid_end_date IS NOT NULL
-                                AND CAST(RFQ.ra_start_date AS TIMESTAMP) >= CAST(RFQ.bid_end_date AS TIMESTAMP)
-                            )
-                            OR
-                            -- Fallback to old logic if auction dates aren't set
-                            (
-                                (RFQ.ra_start_date IS NULL OR RFQ.ra_end_date IS NULL)
-                                AND
-                                (
-                                    (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != ''
-                                    AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
-                                    OR
-                                    (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = ''
-                                    AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '1 days') <= CURRENT_TIMESTAMP)
-                                )
-                            )
-                        )
-                        ORDER BY TQI.total_price ASC  -- Get the lowest total_price
-                        LIMIT 1  -- Limit to the lowest price for that product and variant
-                    ),
-                    ${user_type == 3 ? `
-                    -- Get technical evaluation status for this product/vendor
-                    'tech_evaluation_status', (
-                        WITH tech_eval AS (
-                            SELECT TE.id AS tech_eval_id
-                            FROM tbl_rfq_product_tech_evaluation TE
-                            JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON TE.id = TEC.tbl_rfq_product_tech_evaluation_id
-                            WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
-                            LIMIT 1
-                        )
-                        SELECT json_build_object(
-                            'has_tech_eval', (SELECT COUNT(*) > 0 FROM tech_eval),
-                            'is_accepted', (
-                                SELECT COALESCE(
-                                    (SELECT status = 1
-                                     FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
-                                     JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
-                                     WHERE TECV.vendor_id = ${user_id}
-                                     LIMIT 1),
-                                    false
-                                )
-                            )
-                        )
-                    ),` : ``}
-                    `
-        : ''
-      }
-          'vendor_details', (
-            SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id, 'variant', RFQ_P_V.variant,
-                'user_details', (
-                  SELECT json_build_object(
-                    'user_id', U.id,
-                    'name', U.name,
-                    'company_name', C.company_name,
-                    'email', U.email,
-                    'address', U.address,
-                    'mobile', U.mobile
-                  )
-                  FROM tbl_users U
-                  JOIN tbl_company C ON U.company_id = C.id
-                  WHERE RFQ_P_V.user_id = U.id
-                )
-              ))
-            FROM tbl_rfq_product_vendors RFQ_P_V
-            JOIN tbl_users U ON RFQ_P_V.user_id = U.id
-            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
-              AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
-              AND RFQ_P.variant = RFQ_P_V.variant
-              AND U.status = 1
-          ),
-          'vendors', (
-            SELECT json_agg(json_build_object(
-                'user_id', RFQ_P_V.user_id,
-                'name', U.name
-            ))
-            FROM tbl_rfq_product_vendors RFQ_P_V
-            LEFT JOIN tbl_users U ON RFQ_P_V.user_id = U.id
-            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
-              AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
-              AND RFQ_P.variant = RFQ_P_V.variant
-              AND U.status = 1
-          )
-        )
-        FROM tbl_rfq_products RFQ_P
-        JOIN tbl_product_variant _TPV ON _TPV.id = RFQ_P.product_variant_id
-        WHERE RFQ.id = RFQ_P.rfq_id
-        ORDER BY RFQ_P.id
-
-    ) AS "products"
+    ) AS "quotations"
 FROM tbl_rfq RFQ WHERE id=$1
 ORDER BY RFQ.id DESC
 LIMIT 1;`;
 
+const productQuery = `
+    SELECT
+      RFQ_P.id,
+      RFQ_P.product_variant_id AS product_id,
+      _TPV.name,
+      RFQ_P.variant,
+      RFQ_P.comment,
+      -- QAP file list
+      (
+          SELECT json_agg(RPF.file_url)
+          FROM tbl_rfq_product_files RPF
+          WHERE RPF.rfq_product_id = RFQ_P.id
+            AND RPF.file_type = 'QAP'
+      ) AS qap_files,
+      -- SPEC file list
+      (
+          SELECT json_agg(RPF.file_url)
+          FROM tbl_rfq_product_files RPF
+          WHERE RPF.rfq_product_id = RFQ_P.id
+            AND RPF.file_type = 'SPEC'
+      ) AS spec_files,
+      -- Datasheet file list
+      (
+          SELECT json_agg(RPF.file_url)
+          FROM tbl_rfq_product_files RPF
+          WHERE RPF.rfq_product_id = RFQ_P.id
+            AND RPF.file_type = 'TDS'
+      ) AS datasheet_files,
+      -- Product Specs
+      (
+          SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title,'value', RFQ_P_SPEC.value))
+          FROM tbl_rfq_products_specs RFQ_P_SPEC
+          WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id
+            AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
+            AND RFQ_P.variant = RFQ_P_SPEC.variant
+      ) AS product_specs,
+      -- Product Details
+      (
+          SELECT json_agg(json_build_object('id', T_V.id, 'name', T_V.name, 'description', T_P.description))
+          FROM tbl_product_variant T_V
+          JOIN tbl_product T_P ON T_P.id = T_V.product_id
+          WHERE RFQ_P.product_variant_id = T_V.id
+      ) AS product_details,
+      -- Finalization Status
+      COALESCE(
+        (
+          SELECT
+            CASE
+              WHEN TQF.vendor_id = $2 THEN 'You are finalized'
+              ELSE 'Another vendor is finalized'
+            END
+          FROM tbl_quote_finalization TQF
+          WHERE TQF.rfq_id = RFQ_P.rfq_id
+            AND TQF.product_variant_id = RFQ_P.product_variant_id
+            AND TQF.variant = RFQ_P.variant
+          LIMIT 1
+        ),
+        'No vendor finalized yet'
+      ) AS finalization_status,
+      ${
+        // Changes by Agnij 2025-05-05 [Modified to include both user_type 2 and 3]
+        user_type == 2 || user_type == 3
+        ? `(
+            ${user_type == 3 ? `
+            WITH tech_eval AS (
+                SELECT TE.id AS tech_eval_id
+                FROM tbl_rfq_product_tech_evaluation TE
+                JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON TE.id = TEC.tbl_rfq_product_tech_evaluation_id
+                WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
+                LIMIT 1
+            ),
+
+            tech_accepted AS (
+                SELECT 1 AS is_accepted
+                FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
+                JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
+                LIMIT 1
+            )` : ``}
+
+            SELECT json_build_object(
+                'quote_id', TQI.quote_id,
+                'total_price', TQI.total_price
+            )
+            FROM (
+                SELECT 
+                    quote_id,
+                    total_price,
+                    ROW_NUMBER() OVER (PARTITION BY product_variant_id, variant ORDER BY total_price ASC) AS rn
+                FROM tbl_quote_items
+                WHERE product_variant_id = RFQ_P.product_variant_id
+                AND variant = RFQ_P.variant
+                AND rfq_id = RFQ_P.rfq_id
+                AND total_price > 0
+            ) TQI
+            WHERE TQI.rn = 1
+            AND RFQ.reverse_auction = 1
+            ${user_type == 3 ? `
+            AND (
+                (SELECT COUNT(*) FROM tech_eval) = 0
+                OR (SELECT COUNT(*) FROM tech_accepted) > 0
+                OR (
+                    (SELECT COUNT(*) FROM tech_eval) > 0
+                    AND RFQ.ra_end_date IS NOT NULL
+                    AND RFQ.bid_end_date IS NOT NULL
+                    AND CAST(RFQ.ra_end_date AS TIMESTAMP) <= CAST(RFQ.bid_end_date AS TIMESTAMP)
+                    AND (
+                        (SELECT COUNT(*) FROM tech_accepted) > 0
+                    )
+                )
+            )` : ``}
+            AND (
+              CURRENT_TIMESTAMP BETWEEN
+                CAST(RFQ.ra_start_date AS TIMESTAMP)
+                AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
+                OR
+                (
+                    RFQ.ra_start_date IS NOT NULL
+                    AND RFQ.bid_end_date IS NOT NULL
+                    AND CAST(RFQ.ra_start_date AS TIMESTAMP) >= CAST(RFQ.bid_end_date AS TIMESTAMP)
+                )
+                OR
+                (
+                    (RFQ.ra_start_date IS NULL OR RFQ.ra_end_date IS NULL)
+                    AND
+                    (
+                        (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != ''
+                        AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
+                        OR
+                        (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = ''
+                        AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '1 days') <= CURRENT_TIMESTAMP)
+                    )
+                )
+            )
+            ORDER BY TQI.total_price ASC
+            LIMIT 1
+        ) AS lowest_quotation,` : ``}
+        ${user_type == 3 ? `
+        (
+            WITH tech_eval AS (
+                SELECT TE.id AS tech_eval_id
+                FROM tbl_rfq_product_tech_evaluation TE
+                JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON TE.id = TEC.tbl_rfq_product_tech_evaluation_id
+                WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
+                LIMIT 1
+            )
+            SELECT json_build_object(
+                'has_tech_eval', (SELECT COUNT(*) > 0 FROM tech_eval),
+                'is_accepted', (
+                    SELECT COALESCE(
+                        (SELECT status = 1
+                          FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
+                          JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                          WHERE TECV.vendor_id = ${user_id}
+                          LIMIT 1),
+                        false
+                    )
+                )
+            ) AS tech_evaluation_status,`
+        : ''
+      }
+
+      -- Vendor Details
+      (
+          SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id, 'variant', RFQ_P_V.variant))
+          FROM tbl_rfq_product_vendors RFQ_P_V
+          JOIN tbl_users U ON RFQ_P_V.user_id = U.id
+          WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id
+            AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
+            AND RFQ_P.variant = RFQ_P_V.variant
+            AND U.status = 1
+      ) AS vendor_details,
+
+      -- Vendor count (for admin type, for example)
+      (
+          SELECT COUNT(RFQ_P_V.id)
+          FROM tbl_rfq_product_vendors RFQ_P_V
+          JOIN tbl_users U ON RFQ_P_V.user_id = U.id
+          WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id
+            AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
+            AND RFQ_P.variant = RFQ_P_V.variant
+            AND U.status = 1
+      ) AS vendors_count
+
+  FROM
+      tbl_rfq_products RFQ_P
+      JOIN tbl_rfq RFQ ON RFQ.id = $1
+      JOIN tbl_product_variant _TPV ON _TPV.id = RFQ_P.product_variant_id
+  WHERE
+      RFQ_P.rfq_id = $1
+  ORDER BY
+      RFQ_P.id;
+`
 
     return new Promise(function (resolve, reject) {
       db.query(q,[id])
-        .then(function (data) {
+        .then(async function (data) {
+          const products = await db.query(productQuery, [id, user_id])
+          if(data && products) {
+            data[0].products = products;
+            console.log("DATA AND PRODUCTS PRESENT:", data)
+          }
           resolve(data);
         })
         .catch(function (err) {
