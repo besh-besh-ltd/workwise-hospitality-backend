@@ -1708,109 +1708,125 @@ const productQuery = `
         ),
         'No vendor finalized yet'
       ) AS finalization_status,
-      ${
+       ${
         // Changes by Agnij 2025-05-05 [Modified to include both user_type 2 and 3]
         user_type == 2 || user_type == 3
-        ? `(
-            ${user_type == 3 ? `
-            WITH tech_eval AS (
-                SELECT TE.id AS tech_eval_id
-                FROM tbl_rfq_product_tech_evaluation TE
-                JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON TE.id = TEC.tbl_rfq_product_tech_evaluation_id
-                WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
-                LIMIT 1
-            ),
+        ? `'lowest_quotation', (
+              ${user_type == 3 ? `
+              -- Check if this product has technical evaluation enabled (has clauses)
+              WITH tech_eval AS (
+                  SELECT TE.id AS tech_eval_id
+                  FROM tbl_rfq_product_tech_evaluation TE
+                  JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON TE.id = TEC.tbl_rfq_product_tech_evaluation_id
+                  WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
+                  LIMIT 1
+              ),
 
-            tech_accepted AS (
-                SELECT 1 AS is_accepted
-                FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
-                JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
-                WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
-                LIMIT 1
-            )` : ``}
 
-            SELECT json_build_object(
-                'quote_id', TQI.quote_id,
-                'total_price', TQI.total_price
-            )
-            FROM (
-                SELECT 
-                    quote_id,
-                    total_price,
-                    ROW_NUMBER() OVER (PARTITION BY product_variant_id, variant ORDER BY total_price ASC) AS rn
-                FROM tbl_quote_items
-                WHERE product_variant_id = RFQ_P.product_variant_id
-                AND variant = RFQ_P.variant
-                AND rfq_id = RFQ_P.rfq_id
-                AND total_price > 0
-            ) TQI
-            WHERE TQI.rn = 1
-            AND RFQ.reverse_auction = 1
-            ${user_type == 3 ? `
-            AND (
-                (SELECT COUNT(*) FROM tech_eval) = 0
-                OR (SELECT COUNT(*) FROM tech_accepted) > 0
-                OR (
-                    (SELECT COUNT(*) FROM tech_eval) > 0
-                    AND RFQ.ra_end_date IS NOT NULL
-                    AND RFQ.bid_end_date IS NOT NULL
-                    AND CAST(RFQ.ra_end_date AS TIMESTAMP) <= CAST(RFQ.bid_end_date AS TIMESTAMP)
-                    AND (
-                        (SELECT COUNT(*) FROM tech_accepted) > 0
-                    )
-                )
-            )` : ``}
-            AND (
-              CURRENT_TIMESTAMP BETWEEN
-                CAST(RFQ.ra_start_date AS TIMESTAMP)
-                AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
-                OR
-                (
-                    RFQ.ra_start_date IS NOT NULL
-                    AND RFQ.bid_end_date IS NOT NULL
-                    AND CAST(RFQ.ra_start_date AS TIMESTAMP) >= CAST(RFQ.bid_end_date AS TIMESTAMP)
-                )
-                OR
-                (
-                    (RFQ.ra_start_date IS NULL OR RFQ.ra_end_date IS NULL)
-                    AND
-                    (
-                        (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != ''
-                        AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
-                        OR
-                        (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = ''
-                        AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '1 days') <= CURRENT_TIMESTAMP)
-                    )
-                )
-            )
-            ORDER BY TQI.total_price ASC
-            LIMIT 1
-        ) AS lowest_quotation,` : ``}
-        ${user_type == 3 ? `
-        (
-            WITH tech_eval AS (
-                SELECT TE.id AS tech_eval_id
-                FROM tbl_rfq_product_tech_evaluation TE
-                JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON TE.id = TEC.tbl_rfq_product_tech_evaluation_id
-                WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
-                LIMIT 1
-            )
-            SELECT json_build_object(
-                'has_tech_eval', (SELECT COUNT(*) > 0 FROM tech_eval),
-                'is_accepted', (
-                    SELECT COALESCE(
-                        (SELECT status = 1
-                          FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
-                          JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
-                          WHERE TECV.vendor_id = ${user_id}
-                          LIMIT 1),
-                        false
-                    )
-                )
-            ) AS tech_evaluation_status,`
+              -- Check if current vendor is technically accepted for this product
+              tech_accepted AS (
+                  SELECT 1 AS is_accepted
+                  FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
+                  JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                  WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
+                  LIMIT 1
+              )` : ``}
+              -- Changes by Agnij 2025-05-08 [Fixed lowest quotation selection to always pick the lowest price]
+              SELECT json_build_object(
+                  'quote_id', TQI.quote_id,
+                  'total_price', TQI.total_price
+              )
+              FROM (
+                  SELECT 
+                      quote_id,
+                      total_price,
+                      ROW_NUMBER() OVER (PARTITION BY product_variant_id, variant ORDER BY total_price ASC) AS rn
+                  FROM tbl_quote_items
+                  WHERE product_variant_id = RFQ_P.product_variant_id
+                  AND variant = RFQ_P.variant
+                  AND rfq_id = RFQ_P.rfq_id
+                  AND total_price > 0
+              ) TQI
+              WHERE TQI.rn = 1  -- Get only the lowest price for each product/variant
+              AND RFQ.reverse_auction = 1
+              ${user_type == 3 ? `
+              -- Apply technical evaluation filtering if enabled for this product
+              AND (
+                  -- If no technical evaluation exists for this product OR
+                  -- vendor is technically accepted, OR
+                  -- if reverse auction ends before/with RFQ end date
+                  (SELECT COUNT(*) FROM tech_eval) = 0
+                  OR (SELECT COUNT(*) FROM tech_accepted) > 0
+                  OR (
+                      -- Special case: For technically evaluated products where RA ends before RFQ end date
+                      -- Show lowest quote only to technically accepted vendors
+                      (SELECT COUNT(*) FROM tech_eval) > 0
+                      AND RFQ.ra_end_date IS NOT NULL
+                      AND RFQ.bid_end_date IS NOT NULL
+                      AND CAST(RFQ.ra_end_date AS TIMESTAMP) <= CAST(RFQ.bid_end_date AS TIMESTAMP)
+                      AND (
+                          -- Check if vendor is technically accepted
+                          (SELECT COUNT(*) FROM tech_accepted) > 0
+                      )
+                  )
+              )` : ``}
+              -- Timing conditions for when lowest quote should be visible
+              AND (
+                  -- Show lowest quote if current time is within auction period
+                CURRENT_TIMESTAMP BETWEEN
+                  CAST(RFQ.ra_start_date AS TIMESTAMP)
+                  AND CAST(RFQ.ra_end_date AS TIMESTAMP) + interval '23 hours 59 minutes'
+                  OR
+                  -- If reverse auction starts after RFQ ends
+                  (
+                      RFQ.ra_start_date IS NOT NULL
+                      AND RFQ.bid_end_date IS NOT NULL
+                      AND CAST(RFQ.ra_start_date AS TIMESTAMP) >= CAST(RFQ.bid_end_date AS TIMESTAMP)
+                  )
+                  OR
+                  -- Fallback to old logic if auction dates aren't set
+                  (
+                      (RFQ.ra_start_date IS NULL OR RFQ.ra_end_date IS NULL)
+                      AND
+                      (
+                          (RFQ.bid_end_date IS NOT NULL AND RFQ.bid_end_date != ''
+                          AND CAST(RFQ.bid_end_date AS TIMESTAMP) <= (CURRENT_TIMESTAMP + interval '1 days'))
+                          OR
+                          (RFQ.bid_end_date IS NULL OR RFQ.bid_end_date = ''
+                          AND (CAST(RFQ.timestamp AS TIMESTAMP) + interval '1 days') <= CURRENT_TIMESTAMP)
+                      )
+                  )
+              )
+              ORDER BY TQI.total_price ASC  -- Get the lowest total_price
+              LIMIT 1  -- Limit to the lowest price for that product and variant
+          ),
+          ${user_type == 3 ? `
+          -- Get technical evaluation status for this product/vendor
+          'tech_evaluation_status', (
+              WITH tech_eval AS (
+                  SELECT TE.id AS tech_eval_id
+                  FROM tbl_rfq_product_tech_evaluation TE
+                  JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON TE.id = TEC.tbl_rfq_product_tech_evaluation_id
+                  WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
+                  LIMIT 1
+              )
+              SELECT json_build_object(
+                  'has_tech_eval', (SELECT COUNT(*) > 0 FROM tech_eval),
+                  'is_accepted', (
+                      SELECT COALESCE(
+                          (SELECT status = 1
+                            FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
+                            JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                            WHERE TECV.vendor_id = ${user_id}
+                            LIMIT 1),
+                          false
+                      )
+                  )
+              )
+          ),` : ``}
+          `
         : ''
       }
-
       -- Vendor Details
       (
           SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id, 'variant', RFQ_P_V.variant))
