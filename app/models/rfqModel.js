@@ -107,8 +107,8 @@ const rfqModel = {
             AND TRIM(s.value) != 'NA'
             AND (
               (s.title = 'Quantity' AND
-              TRIM(s.value) ~ '^\\d+$' AND  -- Regex to check it's all digits
-              CAST(TRIM(s.value) AS INTEGER) > 0)
+              TRIM(s.value) ~ '^\\d.+$' AND  -- Regex to check it's all digits
+              CAST(TRIM(s.value) AS FLOAT) > 0)
                   OR
               (s.title = 'Unit' AND LENGTH(TRIM(s.value)) >= 2)
               )
@@ -6959,8 +6959,10 @@ getAllDraftRfqs: async (limit, offset, user_id, project_id, sort, reverse_auctio
   return new Promise(function (resolve, reject) {
     let q = `
       SELECT
-        RPJ.*
+        RPJ.*,
+        RFQ.is_published
       FROM tbl_rfq_persistent_jobs RPJ
+      LEFT JOIN tbl_rfq RFQ ON RFQ.id = RPJ.persisted_rfq_id
       WHERE RPJ.user_id = ${user_id}
       ORDER BY started_at ${sort ? sort : 'ASC'} LIMIT ${limit} OFFSET ${offset}`;
       
