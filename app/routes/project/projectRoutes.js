@@ -4,7 +4,7 @@ import { validateBody,validateParam } from '../../validations/paramValidation/us
 import { validateDbBody } from '../../validations/dbValidation/projectDbValidation.js';
 import passport from '../../middleware/passport.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
-import { acl } from '../../helper/common.js';
+import { acl, noAcl } from '../../helper/common.js';
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
 const projectRoutes = Router();
@@ -44,6 +44,20 @@ projectRoutes.get(
     acl([2, 7, 8]),
     validateParam(projectSchemas.project_id),
     projectController.getProjectTableDataById
+)
+
+projectRoutes.get('/project-budget/:project_id',
+    passportSignIn,
+    noAcl([3]),
+    validateParam(projectSchemas.project_id),
+    projectController.getProjectBudget
+)
+//For fetching available budget By Ayush
+projectRoutes.get('/available-budget/:project_id',
+    passportSignIn,
+    noAcl([3]),   //Exclude from ACL
+    validateParam(projectSchemas.project_id),
+    projectController.getProjectAvailableBudget
 )
 
 // route for getting all Projects

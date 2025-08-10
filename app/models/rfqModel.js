@@ -107,8 +107,8 @@ const rfqModel = {
             AND TRIM(s.value) != 'NA'
             AND (
               (s.title = 'Quantity' AND
-              TRIM(s.value) ~ '^\\d+$' AND  -- Regex to check it's all digits
-              CAST(TRIM(s.value) AS INTEGER) > 0)
+              TRIM(s.value) ~ '^\\d.+$' AND  -- Regex to check it's all digits
+              CAST(TRIM(s.value) AS FLOAT) > 0)
                   OR
               (s.title = 'Unit' AND LENGTH(TRIM(s.value)) >= 2)
               )
@@ -1274,6 +1274,11 @@ deleteProductFilesByIds: async (rfqProductIds) => {
 
   getDraftProductVendors: async (draftId, rfqProductId, buyerId, filters) => {
     try {
+      // get company_id for this buyer
+      const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+      if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+      const companyId = buyer.company_id;
+
       let {
         vendor_approved_by,
         state,
@@ -1472,7 +1477,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
           JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
           JOIN tbl_users tu ON trpv.user_id = tu.id
           LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
-              ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+              ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
           JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id
           JOIN tbl_company tc ON tu.company_id = tc.id
 
@@ -1627,7 +1632,21 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     ARRAY(
       SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
         'products', (
-          SELECT json_agg(json_build_object('product_id', TQI.product_variant_id,'variant', TQI.variant,'product_name', TQI.product_name,'unit_price', TQI.unit_price,'package_price', TQI.package_price,'tax', TQI.tax,'freight_price', TQI.freight_price,'total_price', TQI.total_price,'comment', TQI.comment,'delivery_period', TQI.delivery_period,
+          SELECT json_agg(
+            json_build_object(
+              'product_id', TQI.product_variant_id,
+              'variant', TQI.variant,
+              'product_name', TQI.product_name,
+              'unit_price', TQI.unit_price,
+              'package_price', TQI.package_price,
+              'tax', TQI.tax,
+              'freight_price', TQI.freight_price,
+              'total_price', TQI.total_price,
+              'comment', TQI.comment,
+              'delivery_period', TQI.delivery_period,
+              'freight_mode', TQI.freight_mode,
+              'package_mode', TQI.package_mode,
+              'tax_mode', TQI.tax_mode,
           'previous_document_files', (
                 SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
                 FROM tbl_quote_item_files QIF
@@ -1866,7 +1885,11 @@ deleteProductFilesByIds: async (rfqProductIds) => {
                 )
               ))
             FROM tbl_rfq_product_vendors RFQ_P_V
-            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id AND RFQ_P.variant = RFQ_P_V.variant
+            JOIN tbl_users U ON RFQ_P_V.user_id = U.id
+            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
+              AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
+              AND RFQ_P.variant = RFQ_P_V.variant
+              AND U.status = 1
           ),
           'vendors', (
             SELECT json_agg(json_build_object(
@@ -1878,6 +1901,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
               AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
               AND RFQ_P.variant = RFQ_P_V.variant
+              AND U.status = 1
           )
         )
         FROM tbl_rfq_products RFQ_P
@@ -1886,7 +1910,6 @@ deleteProductFilesByIds: async (rfqProductIds) => {
         ORDER BY RFQ_P.id
 
     ) AS "products"
-
 FROM tbl_rfq RFQ WHERE id=$1
 ORDER BY RFQ.id DESC
 LIMIT 1;`;
@@ -2215,6 +2238,10 @@ LIMIT 1;`;
   },
   getVendorsForProduct: async (productId, excludeArray = null, buyerId, searchTerm = null) => {
     try {
+      const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+      if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+      const companyId = buyer.company_id;
+
       let q = `
       SELECT 
       DISTINCT
@@ -2235,7 +2262,7 @@ LIMIT 1;`;
         JOIN tbl_product_variant PV ON PVVM.product_variant_id = PV.id
         JOIN tbl_users U ON PVVM.vendor_id = U.id
         JOIN tbl_company C ON C.id = U.company_id
-        LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.buyer_id = ${buyerId}
+        LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.company_id = ${companyId}
   
         WHERE PVVM.product_variant_id = $1
         AND U.status = 1
@@ -2339,7 +2366,7 @@ LIMIT 1;`;
         });
     });
   },
-  getQuotesByRfqByIdByProduct: async (id, user_id, TA_Vendors, no_freight) => {
+  getQuotesByRfqByIdByProduct: async (id, user_id, company_id, TA_Vendors, no_freight) => {
     return new Promise(function (resolve, reject) {
         const vendorCondition = `
         AND EXISTS (
@@ -2364,7 +2391,10 @@ LIMIT 1;`;
                   'ROUND((TQI1.unit_price * CAST(TQI1.quantity AS NUMERIC)) + ((TQI1.unit_price * CAST(TQI1.quantity AS NUMERIC)) * COALESCE(TQI1.package_price, 0) / 100) + (((TQI1.unit_price * CAST(TQI1.quantity AS NUMERIC)) + ((TQI1.unit_price * CAST(TQI1.quantity AS NUMERIC)) * COALESCE(TQI1.package_price, 0) / 100)) * COALESCE(TQI1.tax, 0) / 100))' 
                   : 'TQI1.total_price'},
                 'quantity', TQI1.quantity,
-                'timestamp', TQF1.timestamp
+                'timestamp', TQF1.timestamp,
+                'package_mode', TQI1.package_mode,
+                'tax_mode', TQI1.tax_mode,
+                'freight_mode', TQI1.freight_mode
                 )
                 FROM tbl_quote_items TQI1
                 JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
@@ -2374,6 +2404,34 @@ LIMIT 1;`;
                 ORDER BY TQF1.timestamp DESC
                 LIMIT 1
             ) AS "last_purchase_rate",
+            (
+              SELECT
+                  json_build_object(
+                    'unit_price', TQI.unit_price,
+                    'package_price', TQI.package_price,
+                    'tax', TQI.tax,
+                    'freight_price', TQI.freight_price,
+                    'freight_mode', TQI.freight_mode,
+                    'package_mode', TQI.package_mode,
+                    'tax_mode', TQI.tax_mode,
+                    'total_price', TQI.total_price,
+                    'quantity', TQI.quantity,
+                    'product_name', TQI.product_name,
+                    'rfq_no', TQI.rfq_no,
+                    'timestamp', TQ.timestamp
+                  )
+              FROM tbl_rfq RFQ
+                      JOIN tbl_quotes TQ ON RFQ.id = TQ.rfq_id
+                      JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
+                      JOIN tbl_users U ON TQ.created_by = U.id
+                      JOIN tbl_users BUYER ON BUYER.id = RFQ.created_by
+              WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = $3 AND user_type IN (2,8,10))
+                AND TQI.product_variant_id = TRP.product_variant_id
+                AND TQI.unit_price > 0
+                AND RFQ.id != $1
+              ORDER BY TQ.timestamp DESC
+              LIMIT 1
+          ) AS "last_quote_rate",
             ARRAY(
                 SELECT json_build_object('name', PV.name,'description', TP.description) 
                 FROM tbl_product_variant PV
@@ -2453,8 +2511,11 @@ LIMIT 1;`;
                             'comment', TQI.comment,
                             'delivery_period', TQI.delivery_period,
                             'package_price', TQI.package_price,
+                            'package_mode', TQI.package_mode,
                             'tax', TQI.tax,
+                            'tax_mode', TQI.tax_mode,
                             'freight_price', ${no_freight === 'true' ? '0' : 'TQI.freight_price'},
+                            'freight_mode', TQI.freight_mode,
                             'quantity', TQI.quantity,
                             'timestamp', TQ_inner.timestamp,
                             'document_files', (
@@ -2491,7 +2552,7 @@ LIMIT 1;`;
             ) AS "product_specs"
             FROM tbl_rfq_products TRP WHERE TRP.rfq_id=$1`;
 
-        db.query(mainQuery, [id, user_id])
+        db.query(mainQuery, [id, user_id, company_id])
         .then(function (data) {
             resolve(data);
         })
@@ -2504,7 +2565,7 @@ LIMIT 1;`;
 
 
 
-  getQuotesByRfqById2: async (id, user_id, TA_Vendors, no_freight) => {
+  getQuotesByRfqById2: async (id, user_id, company_id, TA_Vendors, no_freight) => {
     return new Promise(function (resolve, reject) {
 
       const vendorCondition = `
@@ -2527,11 +2588,47 @@ LIMIT 1;`;
               'response_email', TR.response_email,
               'contact_name', TR.contact_name,
               'contact_number', TR.contact_number,
+              'project_id', TR.project_id,
               'status', TR.status
             )
             FROM tbl_rfq TR
             WHERE TR.id = $1
           ) AS "rfq",
+          ARRAY(
+          SELECT json_build_object(
+            'quote_id', TQFH.quote_id,
+            'product_variant_id', TQFH.product_variant_id,
+            'variant', TQFH.variant,
+            'vendor_id', TQFH.vendor_id,
+            'vendor_name', TU.organization_name,
+            'changed_by', _TU.name,
+            'finalized_at', TQFH.timestamp,
+            'changed_at', TQFH.changed_at,
+            'quote_info', json_build_object(
+              'unit_price', TQI.unit_price,
+              'package_price', TQI.package_price,
+              'tax', TQI.tax,
+              'freight_price', TQI.freight_price,
+              'freight_mode', TQI.freight_mode,
+              'package_mode', TQI.package_mode,
+              'tax_mode', TQI.tax_mode,
+              'total_price', TQI.total_price
+            )
+          )
+          FROM tbl_quote_finalization_history TQFH
+          JOIN tbl_quote_items TQI
+            ON TQI.quote_id = TQFH.quote_id
+            AND TQI.product_variant_id = TQFH.product_variant_id
+            AND TQI.variant = TQFH.variant
+          JOIN tbl_users TU
+            ON TU.id = TQFH.vendor_id
+          JOIN tbl_users _TU
+            ON _TU.id = TQFH.changed_by
+          WHERE TQFH.rfq_id = TRF.rfq_id 
+            AND TQFH.product_variant_id = TRF.product_variant_id 
+            AND TQFH.variant = TRF.variant
+          ORDER BY TQFH.changed_at DESC
+        ) AS "finalization_history",
         (
           SELECT json_build_object(
            'unit_price', TQI1.unit_price,
@@ -2544,13 +2641,39 @@ LIMIT 1;`;
           )
           FROM tbl_quote_items TQI1
           JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
-          WHERE TQF1.created_by = $2 -- buyer's ID
+          WHERE TQF1.created_by IN (SELECT id FROM tbl_users WHERE company_id = (SELECT company_id FROM tbl_users WHERE id = $2) AND user_type IN (2,8,10))
             AND TQI1.product_variant_id = TRF.product_variant_id
             AND TQF1.rfq_id != $1 -- different RFQ
           ORDER BY TQF1.timestamp DESC
           LIMIT 1
         ) AS "last_purchase_rate"
           ,
+        (
+          SELECT
+              json_build_object(
+                'unit_price', TQI.unit_price,
+                'package_price', TQI.package_price,
+                'tax', TQI.tax,
+                'freight_price', TQI.freight_price,
+                'freight_mode', TQI.freight_mode,
+                'package_mode', TQI.package_mode,
+                'tax_mode', TQI.tax_mode,
+                'total_price', TQI.total_price,
+                'quantity', TQI.quantity,
+                'product_name', TQI.product_name,
+                'rfq_no', TQI.rfq_no,
+                'timestamp', TQ.timestamp
+              )
+              FROM tbl_rfq RFQ
+              JOIN tbl_quotes TQ ON RFQ.id = TQ.rfq_id
+              JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
+            WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = $3 AND user_type IN (2,8,10))
+            AND TQI.product_variant_id = TRF.product_variant_id
+            AND TQI.unit_price > 0
+            AND RFQ.id != $1
+          ORDER BY TQ.timestamp DESC
+          LIMIT 1
+        ) AS "last_quote_rate",
           ARRAY(
             SELECT json_build_object(
               'product_name', TV.name,
@@ -2576,8 +2699,11 @@ LIMIT 1;`;
               'quote_id', TQI.quote_id,
               'unit_price', TQI.unit_price,
               'package_price', TQI.package_price,
+              'package_mode', TQI.package_mode,
               'tax', TQI.tax,
+              'tax_mode', TQI.tax_mode,
               'freight_price', ${no_freight === 'true' ? '0' : 'TQI.freight_price'},
+              'freight_mode', TQI.freight_mode,
               'total_price', ${no_freight === 'true' ? 
                 'ROUND((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100) + (((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) + ((TQI.unit_price * CAST(TQI.quantity AS NUMERIC)) * COALESCE(TQI.package_price, 0) / 100)) * COALESCE(TQI.tax, 0) / 100))' 
                 : 'TQI.total_price'},
@@ -2665,8 +2791,7 @@ LIMIT 1;`;
               'global_payment_term', TQ.global_payment_term,
               'global_comment', TQ.global_comment,
               'previous_quotes', (
-                SELECT json_agg(
-                  json_build_object(
+                SELECT json_agg(json_build_object(
                     'id', TH.id,
                     'quote_item_id', TH.quote_item_id,
                     'rfq_id', TH.rfq_id,
@@ -2675,19 +2800,25 @@ LIMIT 1;`;
                     'package_price', TH.package_price,
                     'tax', TH.tax,
                     'freight_price', ${no_freight === 'true' ? '0' : 'TH.freight_price'},
+                    'freight_mode', TH.freight_mode,
+                    'package_mode', TH.package_mode,
+                    'tax_mode', TH.tax_mode,
                     'total_price', ${no_freight === 'true' ? 
-                      'ROUND((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100) + (((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100)) * COALESCE(TH.tax, 0) / 100))' 
+                      'ROUND((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100) + (((TH.unit_price * CAST(TH.quantity AS NUMERIC)) + ((TH.unit_price * CAST(TH.quantity AS NUMERIC)) * COALESCE(TH.package_price, 0) / 100)) * COALESCE(TH.tax, 0) / 100))'
                       : 'TH.total_price'},
                     'comment', TH.comment,
                     'delivery_period', TH.delivery_period,
                     'quantity', TH.quantity,
                     'variant', TH.variant,
                     'timestamp', TH.timestamp
-                  )
+                ))
+                FROM (
+                  SELECT *
+                  FROM tbl_quote_item_history TH
+                  WHERE TH.quote_item_id = TQI.id
                   ORDER BY TH.timestamp DESC
-                )
-                FROM tbl_quote_item_history TH
-                WHERE TH.quote_item_id = TQI.id
+                  LIMIT 1
+                ) TH
               )
             )
             FROM tbl_quote_items TQI
@@ -2700,7 +2831,7 @@ LIMIT 1;`;
         FROM tbl_rfq_products TRF
         WHERE TRF.rfq_id = $1;`
 
-        db.query(mainQuery, [id, user_id])
+        db.query(mainQuery, [id, user_id, company_id])
         .then(function (data) {
           resolve(data);
         })
@@ -3138,7 +3269,7 @@ WHERE row_num_by_name_category = 1
 `;
 
     return new Promise(function (resolve, reject) {
-      db.query(q, [search_key, category_id, approved_by_id].filter(Boolean)) // Filters out any undefined or empty values
+      db.query(q, [categoryIds]) // Pass the category IDs array
         .then(function (data) {
           resolve(data);
         })
@@ -3167,6 +3298,11 @@ WHERE row_num_by_name_category = 1
     responseKeys,
     productMakes
   ) => {
+    
+    // get company_id for this buyer
+    const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+    if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+    const companyId = buyer.company_id;
     
     // Convert location names to IDs if they are strings (optimized)
     let stateIds = [];
@@ -3302,7 +3438,7 @@ WHERE row_num_by_name_category = 1
         JOIN tbl_category c ON pc.category_id = c.id
         JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
         LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-        LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+        LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
         LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
         LEFT JOIN tbl_location_states ls ON tu.state = ls.id
         LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
@@ -3410,6 +3546,10 @@ WHERE row_num_by_name_category = 1
     productName,
     responseKeys,
   ) => {
+    // get company_id for this buyer
+    const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+    if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+    const companyId = buyer.company_id;
 
   productName = productName?.toLowerCase()
 
@@ -3454,7 +3594,7 @@ WHERE row_num_by_name_category = 1
       JOIN tbl_category c ON pc.category_id = c.id
       JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
       LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-      LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = ${buyerId}
+      LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
       LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
       LEFT JOIN (
         SELECT DISTINCT rpv.user_id
@@ -3492,6 +3632,10 @@ WHERE row_num_by_name_category = 1
   },
 
   searchVendorsByName: async (buyerId, vendor_name) => {
+    const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [buyerId]);
+    if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+    const companyId = buyer.company_id;
+
     let q = `
     SELECT *
     FROM (
@@ -3525,7 +3669,7 @@ WHERE row_num_by_name_category = 1
         LEFT JOIN
             tbl_company tc ON tc.id = tu.company_id
         LEFT JOIN
-            tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.buyer_id = $1
+            tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
         LEFT JOIN
             tbl_location_cities lc ON tu.city = lc.id
         LEFT JOIN
@@ -3554,7 +3698,7 @@ WHERE row_num_by_name_category = 1
       ${vendor_name ? 'similarity_score DESC' : ''};
     `;
 
-    const values = vendor_name ? [buyerId, vendor_name] : [buyerId];
+    const values = vendor_name ? [vendor_name] : [];
 
     return new Promise(function (resolve, reject) {
       db.query(q, values)
@@ -4197,7 +4341,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         const existingItemQuery = `
       SELECT * FROM tbl_quote_items
       WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3
-       AND (unit_price != $4 OR package_price != $5 OR tax != $6 OR freight_price != $7 OR total_price != $8 OR comment != $9 OR delivery_period != $10)
+       AND (unit_price != $4 OR package_price != $5 OR tax != $6 OR freight_price != $7 OR total_price != $8 OR comment != $9 OR delivery_period != $10 OR freight_mode != $11 OR package_mode != $12 OR tax_mode != $13)
    `;
         const result = await db.query(existingItemQuery, [
           quoteId,
@@ -4209,25 +4353,30 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           product.freight_price,
           product.total_price,
           product.comment,
-          product.delivery_period
+          product.delivery_period,
+          product.freight_mode,
+          product.package_mode,
+          product.tax_mode,
         ]);
         const item = result[0];
 
         // In case when product is existing but there is a change in the product details.
         if(item) {
+          console.log("COMING INSIDE NO CHANGE BLOCK")
           existingProductWithNoChange=false;
         }
 
         // we process all products with unitprices and having comment
 
         if (!existingProductWithNoChange) {
+          console.log("COMING INSIDE CHANGE BLOCK")
           let updatedItem = [];
           if (item) {
             // Move existing quote to quote history table
             const insertHistoryQuery = `INSERT INTO tbl_quote_item_history 
           (quote_item_id, rfq_id, product_variant_id, unit_price, package_price, tax, freight_price, total_price,
-           comment, delivery_period, quantity, variant, timestamp)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`;
+           comment, delivery_period, quantity, variant, freight_mode, package_mode, tax_mode, timestamp)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())`;
             await db.query(insertHistoryQuery, [
               item.id,
               item.rfq_id,
@@ -4240,14 +4389,18 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               item.comment,
               item.delivery_period,
               item.quantity,
-              item.variant
+              item.variant,
+              item.freight_mode,
+              item.package_mode,
+              item.tax_mode,
             ]);
 
             // Update existing item with new data
             const updateQuery = `UPDATE tbl_quote_items SET
           unit_price = $1, package_price = $2, tax = $3, freight_price = $4,
-          total_price = $5, comment = $6, delivery_period = $7
-          WHERE id = $8 RETURNING *`;
+          total_price = $5, comment = $6, delivery_period = $7, 
+          freight_mode = $8, package_mode = $9, tax_mode = $10
+          WHERE id = $11 RETURNING *`;
             const productPrice = product.unit_price!='' ? product.unit_price : 0;
             updatedItem = await db.query(updateQuery, [
               productPrice,
@@ -4257,6 +4410,9 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               product.total_price,
               product.comment,
               product.delivery_period,
+              product.freight_mode,
+              product.package_mode,
+              product.tax_mode,
               item.id
             ]);
           } else {
@@ -4278,7 +4434,10 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               comment: product.comment,
               delivery_period: product.delivery_period,
               quantity: product.quantity,
-              variant: product.variant
+              variant: product.variant,
+              freight_mode: product.freight_mode,
+              package_mode: product.package_mode,
+              tax_mode: product.tax_mode,
             }];
 
             // From frontend the `unit_price` will never come as empty string now.
@@ -4300,7 +4459,10 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               'comment',
               'delivery_period',
               'quantity',
-              'variant'
+              'variant',
+              'freight_mode',
+              'package_mode',
+              'tax_mode',
             ];
 
             let quotes_items = await rfqModel.insertArray(
@@ -6797,8 +6959,10 @@ getAllDraftRfqs: async (limit, offset, user_id, project_id, sort, reverse_auctio
   return new Promise(function (resolve, reject) {
     let q = `
       SELECT
-        RPJ.*
+        RPJ.*,
+        RFQ.is_published
       FROM tbl_rfq_persistent_jobs RPJ
+      LEFT JOIN tbl_rfq RFQ ON RFQ.id = RPJ.persisted_rfq_id
       WHERE RPJ.user_id = ${user_id}
       ORDER BY started_at ${sort ? sort : 'ASC'} LIMIT ${limit} OFFSET ${offset}`;
       
@@ -6858,12 +7022,19 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
         throw new Error(`Invalid type "${type}" - must be one of: ${validTypes.join(', ')}`);
     }
 
+    const buyer = await db.oneOrNone('SELECT company_id FROM tbl_users WHERE id = $1', [user_id]);
+    if (!buyer || !buyer.company_id) throw new Error('Buyer not found or no company associated');
+    const companyId = buyer.company_id;
+
     const queries = {
       lpr: `
               SELECT 
                   TQI.package_price,
+                  TQI.package_mode,
                   TQI.tax,
+                  TQI.tax_mode,
                   TQI.freight_price,
+                  TQI.freight_mode,
                   TQI.total_price,
                   TQI.quantity,
                   TQI.product_name,
@@ -6871,13 +7042,18 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                   TU.email AS vendor_email,
                   TQF.timestamp AS quote_date,
                   TQI.rfq_no,
-                  TQI.unit_price
+                  TQI.unit_price,
+                  FINALIZER.name AS created_by
                   FROM tbl_quote_items TQI
-                  JOIN tbl_quote_finalization TQF USING (quote_id)
+                  JOIN tbl_quote_finalization TQF ON TQI.quote_id = TQF.quote_id 
+                    AND TQI.product_variant_id = TQF.product_variant_id 
+                    AND TQI.variant = TQF.variant
                   JOIN tbl_quotes TQ ON TQ.id = TQF.quote_id
                   JOIN tbl_users TU ON TQ.created_by = TU.id
-                  WHERE TQF.created_by = $1
-                    AND TQI.product_variant_id = $2
+                  JOIN tbl_rfq RFQ ON RFQ.id = TQ.rfq_id
+                  JOIN tbl_users FINALIZER ON FINALIZER.id = TQF.created_by
+                  WHERE TQF.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,8,10))
+                    AND TQI.product_variant_id = $1
                   ORDER BY TQF.timestamp DESC;
         `,
       lqr: `
@@ -6886,26 +7062,35 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
                 TQI.package_price,
                 TQI.tax,
                 TQI.freight_price,
+                TQI.package_mode,
+                TQI.tax_mode,
+                TQI.freight_mode,
                 TQI.total_price,
                 TQI.quantity,
                 TQI.product_name,
                 TQI.rfq_no,
                 TQ.timestamp AS quote_date,
                 U.name AS vendor_name,       -- ✅ User's name
-                U.email AS vendor_email      -- ✅ User's email
+                U.email AS vendor_email,      -- ✅ User's email
+                COALESCE(FINALIZER.name, BUYER.name) AS created_by
             FROM tbl_rfq RFQ
             JOIN tbl_quotes TQ ON RFQ.id = TQ.rfq_id
             JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
             JOIN tbl_users U ON TQ.created_by = U.id    -- ✅ Join with tbl_user
-            WHERE RFQ.created_by = $1
-              AND TQI.product_variant_id = $2
+            JOIN tbl_users BUYER ON BUYER.id = RFQ.created_by
+            LEFT JOIN tbl_quote_finalization TQF ON TQF.quote_id = TQ.id 
+              AND TQF.product_variant_id = TQI.product_variant_id 
+              AND TQF.variant = TQI.variant
+            LEFT JOIN tbl_users FINALIZER ON FINALIZER.id = TQF.created_by
+            WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,8,10))
+              AND TQI.product_variant_id = $1
               AND TQI.unit_price > 0
             ORDER BY TQ.timestamp DESC;
 
         `
     };
     try {
-       const result = await db.query(queries[type], [user_id, variant_id]);
+       const result = await db.query(queries[type], [variant_id]);
        if(result.length>0)
         return result;
       else
@@ -7028,18 +7213,23 @@ getVendorsForReminder: async (rfq_id) => {
    }
  },
 // New optimized method for sidebar data
-getRfqs: async (user_id, tech_eval, limit, offset, project_id, rfq_no, sort) => {
+getRfqs: async (user_id, tech_eval, po, limit, offset, project_id, rfq_no, sort) => {
   return new Promise(function (resolve, reject) {
-    let techEvalJoin = '';
-    let techEvalCondition = '';
+    let dynamicJoins = '';
+    let dynamicConditions = '';
     
     if (tech_eval) {
-      techEvalJoin = 'JOIN tbl_rfq_product_tech_evaluation RFQ_T_E ON RFQ.id = RFQ_T_E.rfq_id';
-      techEvalCondition = 'GROUP BY RFQ.id, P.name HAVING COUNT(RFQ_T_E.id) > 0';
+      dynamicJoins += 'JOIN tbl_rfq_product_tech_evaluation RFQ_T_E ON RFQ.id = RFQ_T_E.rfq_id';
+      dynamicConditions += 'GROUP BY RFQ.id, P.name HAVING COUNT(RFQ_T_E.id) > 0';
+    }
+
+    if(po) {
+      dynamicJoins += 'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
     }
 
     let q = `
       SELECT
+        DISTINCT
         RFQ.id,
         RFQ.rfq_no,
         RFQ.timestamp,
@@ -7070,13 +7260,21 @@ getRfqs: async (user_id, tech_eval, limit, offset, project_id, rfq_no, sort) => 
         RFQ.reverse_auction
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
-      ${techEvalJoin}
+      ${dynamicJoins}
       WHERE (RFQ.created_by = ${user_id} OR EXISTS (
-        SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+        ${po ? `
+          SELECT 1 
+            FROM tbl_company TC 
+            JOIN tbl_users _TU ON _TU.id = RFQ.created_by 
+            JOIN tbl_users _TU1 ON _TU1.id = ${user_id} 
+            WHERE _TU.company_id = _TU1.company_id
+          ` : `
+          SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+          `}
       )) AND RFQ.is_published = 1
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
-      ${techEvalCondition}
+      ${dynamicConditions}
       ORDER BY RFQ.timestamp ${sort || 'DESC'}
       LIMIT $3 OFFSET $2;`;
 

@@ -3022,7 +3022,7 @@ update_user_detail: async (req, res, next) => {
     let data = {};
     const user_id = req.user.id;
     try {
-      if (req.user.user_type == 2) {
+      if (req.user.user_type == 2 || req.user.user_type == 8) {
         // Buyer
         const total_rfqs = await rfqModel.getAllRfqByUser( user_id );
         const active_rfqs = await rfqModel.getAllRfqByUser(user_id, 1);

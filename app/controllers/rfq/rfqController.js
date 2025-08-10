@@ -28,6 +28,8 @@ import generalModel from '../../models/generalModel.js';
 import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
+import { initiatePO } from '../po/purchaseOrderController.js';
+import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 
 const formatPersistentErrors = (errors) => {
   if(errors) {
@@ -397,7 +399,6 @@ const updateRfqProductIdInTechEvaluation = async (oldProductId, newProductId) =>
 };
 
 const getQUOTES = async ({ id }, user_id) => {
-  console.log('RFQ ID', id);
   try {
     const rfQItem = await rfqModel.getQuotesByRfqById(id, user_id);
     // const rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(id, user_id);
@@ -989,6 +990,87 @@ const sendQuoteNotificationToVendor = async (req) => {
 
 };
 
+const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
+  const { name, email, organization_name } = buyerInfo;
+
+  // Define email content based on user role
+  const headerContent = `<div>
+                           <h2>Hello ${name},</h2>
+                          </div>`;
+
+  const buyerContainerContent = `<div style="font-size:16px;">
+        You've marked your RFQ as closed. Here are the details for your records:<br>
+        <strong>RFQ Number:</strong> ${rfqItem.rfq_no}<br>
+        <strong>Closed By:</strong> ${name}<br>
+        <br>
+        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqItem.id}"
+           style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+          View Closed RFQs
+        </a>
+           <br>
+        <p>
+        Keep moving forward with Workwise!
+        </p>
+      </div>`;
+
+  const dynamicHTML = generateEmailTemplate(
+    headerContent,
+    buyerContainerContent
+  );
+
+  // Send email to the buyer
+  const buyerMailRecipients = {
+    from: Config.webmasterMail,
+    to: email,
+    subject: `RFQ Marked as Closed for #${rfqItem.rfq_no}`,
+    html: dynamicHTML
+  };
+  sendMail(buyerMailRecipients);
+
+  // Send email to all vendors and their SPOCs
+  for (const vendor of vendorList) {
+    const headerContentVendor = `<div>
+          <h2>Hello ${vendor.user_name},</h2>
+         </div>`;
+
+    const vendorContainerContent = `<div style="font-size:16px;">
+         The RFQ for <strong>${rfqItem.rfq_no}</strong> has been marked as closed by the buyer.<br>
+         Thank you for your participation, and we look forward to more opportunities to work with you.<br>
+         <br>
+         
+         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqItem.id}"
+            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+           Explore New RFQs
+         </a>
+          <br>
+         <p>
+          Tip: Regularly check for new RFQs to stay ahead and grow your business through Workwise.
+         </p>
+ 
+         </div>`;
+
+    const dynamicHTMLVendor = generateEmailTemplate(
+      headerContentVendor,
+      vendorContainerContent
+    );
+
+    const spocList = vendor.spocs;
+
+    let mailRecipients = {
+      from: `${organization_name ?? name} ${Config.masterEmail}`,
+      subject: `RFQ Marked as Closed for #${rfqItem.rfq_no}`,
+      html: dynamicHTMLVendor
+    };
+
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map((spoc) => spoc.spoc_email);
+    } else {
+      mailRecipients.to = vendor.user_email;
+    }
+
+    sendMail(mailRecipients);
+  }
+};
 
 const sendReminderRFQMAIL = async (vendoritem, remainingProducts, org_name,rfq_id, rfqBasicDetails) => {
   let user_details = await userModel.user_profile_detail(vendoritem.user_id);
@@ -1298,6 +1380,77 @@ const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
   });
 };
 
+const sendFinalizationRemovalMail = async (
+  vendor_id,
+  rfQItem,
+  product,
+  vendor_organization,
+  vendor_email,
+  vendor_name
+) => {
+  try {
+    const company = rfQItem.map(item => item.company_name);
+    const rfqNumber = rfQItem.map(item => item.rfq_no);
+
+    const size = product[0]?.product_specs.find(spec => spec.title === 'Size')?.value || 'N/A';
+    const spec = product[0]?.product_specs.find(spec => spec.title === 'Spec')?.value || 'N/A';
+    const quantity = product[0]?.product_specs.find(spec => spec.title === 'Quantity')?.value || 'N/A';
+
+    const headerContent = `<h2>Hello ${
+      vendor_name || 'Mukul Vendor'
+    },</h2>`;
+
+    const containerContent = ` 
+<div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+  <p>
+    <strong>${company}</strong> has made a selection for 
+    <strong>#${rfqNumber} </strong>. You are no longer finalized for <strong>${product[0]?.product_details[0]?.name}</strong>
+  </p>
+
+  <h4> Product Details </h4> 
+  <ul>
+  <li> <strong> Product Name </strong> ${
+    product[0]?.product_details[0]?.name
+  }  </li>
+  <li> <strong> Size </strong> ${size}  </li>
+  <li> <strong> Specification </strong> ${spec}  </li>
+  <li> <strong> Quantity </strong> ${quantity} </li>
+  </ul>
+
+     <p style="margin-top:20px; text-align:center;"> <strong> Explore More Leads: </strong> New RFQs are frequently posted, so check back regularly to find other opportunities.</p>
+  <p style="margin-top:20px; text-align:center;">
+    Thank you for partnering with us,
+  </p>
+</div>`;
+
+    // Generate final email layout
+    const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+    const spocList = await vendorModel.getSpocDetails(vendor_id);
+
+    // console.log(" rfq contoller 901 spoc console ", vendor_id, spocList)
+
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      subject: `${rfQItem[0]?.company_name} Has Made a decision for #${rfQItem[0]?.rfq_no} `, // Subject line
+      html: dynamicHTML
+    };
+
+    if (spocList && spocList.length > 0) {
+      mailRecipients.to = spocList.map((spoc) => spoc.email);
+      mailRecipients.cc = vendor_email;
+    } else {
+      mailRecipients.to = vendor_email;
+    }
+
+    sendMail(mailRecipients);
+
+    return true;
+  } catch (error) {
+    throw error;
+  }
+};
+
 const getVendorDetails = async (item, user_has_subscription) => {
   const vendor_approved = await rfqModel.getVendorApprovedBy(item.id);
   item.vendor_approved = vendor_approved;
@@ -1456,7 +1609,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
           for (const spec of Object.keys(products.updatable.specs[rfqProductId])) {
             let value = products.updatable.specs[rfqProductId][spec]
             if(spec == 'Quantity')
-              value = parseInt(value) || '';
+              value = parseFloat(value) || '';
 
               const data = {
                 value
@@ -1916,7 +2069,6 @@ const rfqController = {
     try {
       let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction} = req.body;
       const user_id = req.user.id;
-
       if (!rfq_id) {
         return res.status(400).json({
           status: 3,
@@ -1965,7 +2117,7 @@ const rfqController = {
           }
         }).end();
       }
-      const products = await rfqModel.getProductsByRfqId(rfq_id);
+      // const products = await rfqModel.getProductsByRfqId(rfq_id);
 
       const responseUpdate = await rfqModel.update(
         'tbl_rfq',
@@ -4148,10 +4300,8 @@ deleteDraft: async (req, res) => {
 
     try {
       // check if the rfq is belongs to the vendor
-      const listRfq = await rfqModel.getRfqByUser(1000000, 0, user.id);
-      if (listRfq.length > 0) {
-        let filteredRFQ = listRfq.filter((item) => item.id == rfq_id);
-        if (filteredRFQ.length > 0) {
+      const checkRFQExist = await userModel.user_rfq_access_review(rfq_id, user.id, user.user_type);
+      if (checkRFQExist) {
           // Get RFQ details to check dates
           const rfqDetails = await rfqModel.getRFQDetails(rfq_id);
           if (!rfqDetails || rfqDetails.length === 0) {
@@ -4320,7 +4470,10 @@ deleteDraft: async (req, res) => {
                   delivery_period,
                   quantity,
                   variant,
-                  document_files
+                  document_files,
+                  freight_mode,
+                  package_mode,
+                  tax_mode,
                 }) => {
                   if(unit_price!=""){
                     quote_items_data.push({
@@ -4336,7 +4489,10 @@ deleteDraft: async (req, res) => {
                       comment,
                       delivery_period,
                       quantity,
-                      variant
+                      variant,
+                      freight_mode,
+                      package_mode,
+                      tax_mode,
                     });
                   }else if(comment!="" || document_files?.length>0){
                     quote_items_data.push({
@@ -4352,7 +4508,10 @@ deleteDraft: async (req, res) => {
                       comment,
                       delivery_period,
                       quantity,
-                      variant
+                      variant,
+                      freight_mode,
+                      package_mode,
+                      tax_mode,
                     });
                   } else if(is_regret){
                     quote_items_data.push({
@@ -4368,7 +4527,10 @@ deleteDraft: async (req, res) => {
                       comment,
                       delivery_period,
                       quantity,
-                      variant
+                      variant,
+                      freight_mode,
+                      package_mode,
+                      tax_mode,
                     })
                   }
                 }
@@ -4398,7 +4560,10 @@ deleteDraft: async (req, res) => {
                     'comment',
                     'delivery_period',
                     'quantity',
-                    'variant'
+                    'variant',
+                    'freight_mode',
+                    'package_mode',
+                    'tax_mode',
                   ];
                   await rfqModel.insertArray(
                     quote_items_data,
@@ -4474,7 +4639,10 @@ deleteDraft: async (req, res) => {
                 'comment',
                 'delivery_period',
                 'quantity',
-                'variant'
+                'variant',
+                'freight_mode',
+                'package_mode',
+                'tax_mode',
               ];
               let quotes_items = await rfqModel.insertArray(
                 quote_items_data,
@@ -4540,16 +4708,6 @@ deleteDraft: async (req, res) => {
             }
           })
 
-        } else {
-          res
-            .status(400)
-            .json({
-              status: 3,
-              message: 'The RFQ is not belongs to you!'
-            })
-            .end();
-          return;
-        }
       } else {
         res
           .status(400)
@@ -4575,10 +4733,10 @@ deleteDraft: async (req, res) => {
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
     const {TA_Vendors, no_freight} = req.query;
-    const { id } = req.user;
+    const { id, company_id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqById2(rfq_id, id, TA_Vendors, no_freight);
+      let rfQItem = await rfqModel.getQuotesByRfqById2(rfq_id, id, company_id, TA_Vendors, no_freight);
       // rfQItem = filterQuotations(rfQItem);
       // rfQItem = processQuotations(rfQItem);
       res
@@ -4635,10 +4793,10 @@ deleteDraft: async (req, res) => {
     let rfq_id = req.params.id;
     const {TA_Vendors, no_freight} = req.query;
 
-    const { id } = req.user;
+    const { id, company_id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, TA_Vendors, no_freight);
+      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, company_id, TA_Vendors, no_freight);
       
       rfQItem.forEach(product => {
         const vendorMap = new Map();
@@ -4691,7 +4849,6 @@ deleteDraft: async (req, res) => {
    
    const { variant_id, type } = req.query; 
     const {id} = req.user;
-    console.log("req recieved", variant_id, type, id);
     try {
          
       if(variant_id){
@@ -4723,94 +4880,14 @@ deleteDraft: async (req, res) => {
   },
   closeRFQ: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { id , organization_name , name} = req.user;
-  
+    const { id } = req.user;
 
     try {
-
-
       const rfQItem = await rfqModel.changeRFQStatus(rfq_id, id);
-      const vendorList = await rfqModel.getRfqVendorListAlongWithSPOC(rfq_id)
+      const vendorList = await rfqModel.getRfqVendorListAlongWithSPOC(rfq_id)    
 
-    // Define email content based on user role
-    const headerContent = `<div>
-                           <h2>Hello ${req.user.name},</h2>
-                          </div>`;
-
-
-    const buyerContainerContent = `<div style="font-size:16px;">
-        You've marked your RFQ as closed. Here are the details for your records:<br>
-        <strong>RFQ Number:</strong> ${rfQItem[0]?.rfq_no}<br>
-        <strong>Closed By:</strong> ${req.user.name}<br>
-        <br>
-        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
-           style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-          View Closed RFQs
-        </a>
-           <br>
-        <p>
-        Keep moving forward with Workwise!
-        </p>
-      </div>`
-
-    const dynamicHTML = generateEmailTemplate(headerContent, buyerContainerContent);
-
-        // Send email to the buyer
-        const buyerMailRecipients = {
-          from: Config.webmasterMail,
-          to: req.user.email,
-          subject: `RFQ Marked as Closed for #${rfQItem[0]?.rfq_no}`,
-          html: dynamicHTML,
-        };
-        sendMail(buyerMailRecipients);
-
-        
-
-         // Send email to all vendors and their SPOCs
-         console.log("vendorList ", vendorList)
-         for (const vendor of vendorList) {
-
-          const headerContentVendor = `<div>
-          <h2>Hello ${vendor.user_name},</h2>
-         </div>`;
-
-         const vendorContainerContent = `<div style="font-size:16px;">
-         The RFQ for <strong>${rfQItem[0]?.rfq_no}</strong> has been marked as closed by the buyer.<br>
-         Thank you for your participation, and we look forward to more opportunities to work with you.<br>
-         <br>
-         
-         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}"
-            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-           Explore New RFQs
-         </a>
-          <br>
-         <p>
-          Tip: Regularly check for new RFQs to stay ahead and grow your business through Workwise.
-         </p>
- 
-         </div>`
-
-         const dynamicHTMLVendor = generateEmailTemplate(headerContentVendor, vendorContainerContent);
-
-          const spocList = vendor.spocs;
-        
-            let mailRecipients ={
-              from: `${organization_name ?? name} ${Config.masterEmail}`,
-              subject: `RFQ Marked as Closed for #${rfQItem[0]?.rfq_no}`,
-              html: dynamicHTMLVendor,
-            }
-
-            if (spocList && spocList.length > 0) {
-              mailRecipients.to = spocList.map(spoc => spoc.spoc_email);
-            } else {
-              mailRecipients.to = vendor.user_email;
-            }
-
-             sendMail(mailRecipients);
-          }       
-        
-
-
+      sendRFQClosedMail(req.user, rfQItem[0], vendorList);
+      
       res
         .status(200)
         .json({
@@ -5097,7 +5174,6 @@ deleteDraft: async (req, res) => {
   },  
   
   finalize: async (req, res, next) => {
-    const { organization_name, name } = req.user;
     const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, variant } = req.body;
 
     try {
@@ -5128,20 +5204,41 @@ deleteDraft: async (req, res) => {
         // removed  AND quote_id=${quote_id} condition from query, 
         // return 09 Conflict status code if vendor already exist for same product + variant, 
 
-        let alreadyExists = await rfqModel.checkIfExists(
-          'tbl_quote_finalization',
-          `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} AND created_by=${req.user.id} LIMIT 1`
-        );
+        const response = await db.tx(async (t) => {
+          let alreadyExists = await rfqModel.checkIfExists(
+            'tbl_quote_finalization',
+            `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} LIMIT 1`,
+            t
+          );
 
-        if (alreadyExists.length > 0) {
-          res
-            .status(409)
-            .json({
-              status: 1,
-              message: "You've already finalized a vendor for this product!"
-            })
-            .end();
-        } else {
+          let reFinalized = false;
+
+          if (alreadyExists.length > 0) {
+            alreadyExists = alreadyExists[0];
+
+            const history_data = {
+              rfq_id: alreadyExists.rfq_id,
+              rfq_no: alreadyExists.rfq_no,
+              product_variant_id: alreadyExists.product_variant_id,
+              vendor_id: alreadyExists.vendor_id,
+              quote_id: alreadyExists.quote_id,
+              created_by: alreadyExists.created_by,
+              timestamp: alreadyExists.timestamp,
+              variant: alreadyExists.variant,
+              changed_by: req.user.id,
+            };
+
+            const res = await rfqModel.insert(
+              'tbl_quote_finalization_history',
+              history_data,
+              t,
+            );
+            await rfqModel.delete('tbl_quote_finalization', {
+              id: alreadyExists.id
+            }, t);
+            reFinalized = true;
+          }
+
           const tbl_quote_finalization_data = {
             rfq_id,
             rfq_no,
@@ -5154,10 +5251,14 @@ deleteDraft: async (req, res) => {
 
           const response = await rfqModel.insert(
             'tbl_quote_finalization',
-            tbl_quote_finalization_data
+            tbl_quote_finalization_data,
+            t
           );
 
-          const vendorNonLoginRfqAccessToken = await rfqModel.getVendorRfqToken(vendor_id, rfq_id)
+          const vendorNonLoginRfqAccessToken = await rfqModel.getVendorRfqToken(
+            vendor_id,
+            rfq_id
+          );
 
           await sendWinningNotificaion(
             vendorNonLoginRfqAccessToken,
@@ -5171,15 +5272,57 @@ deleteDraft: async (req, res) => {
 
           await userModel.mapBuyerToVendor(req.user.id, vendor_id);
 
-          res
-            .status(200)
-            .json({
-              status: 1,
-              message: 'Notification has been sent!',
-              data: response
-            })
-            .end();
-        }
+          // Pre-initiate PO as if this throws error after this, it will trigger mail without ever finalizing anyone!
+          const result = await initiatePO(req.body, req.user, t);
+          if(result.approval_required) {
+            const purchaseOrder = await t.oneOrNone(
+              `SELECT * FROM tbl_rfq_purchase_order
+              WHERE id = $1`,
+              [result.po_id]
+            );
+  
+            await sendApprovalNotification(
+              purchaseOrder,
+              result.current_approver_id
+            );
+          }
+
+          if (reFinalized) {
+            const lostVendorDetails = await userModel.user_profile_detail(
+              vendor_id
+            );
+            const lostVendorOrganization =
+              lostVendorDetails[0]?.organization_name ??
+              lostVendorDetails[0]?.company_name;
+            const lostVendorEmail = lostVendorDetails[0].email;
+            const lostVendorName = lostVendorDetails[0].name;
+
+            await sendFinalizationRemovalMail(
+              alreadyExists.vendor_id,
+              rfQItem,
+              winning_product,
+              lostVendorOrganization,
+              lostVendorEmail,
+              lostVendorName
+            );
+          }
+
+          return {
+            reFinalized,
+            result
+          }
+        });
+
+        return res
+          .status(200)
+          .json({
+            status: 1,
+            message: response.reFinalized
+              ? 'Another vendor has been finalized, both vendors has been notified!'
+              : 'Vendor has been finalized and notified!',
+            data: response.result,
+            isRefinalized: response.reFinalized
+          })
       } else {
         res
           .status(400)
@@ -5195,7 +5338,8 @@ deleteDraft: async (req, res) => {
         .status(400)
         .json({
           status: 3,
-          message: Config.errorText.value
+          message: error.message ?? Config.errorText.value,
+          error
         })
         .end();
     }
@@ -7060,7 +7204,7 @@ deleteDraft: async (req, res) => {
         message: 'File name is required for persistant processing.'
       })
 
-      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing'`)
+      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id}`)
       if(processing && processing.length > 0) {
         processing = processing[0];
 
@@ -7606,6 +7750,7 @@ deleteDraft: async (req, res) => {
             // Process each product in the request
         const quoteItemChanges = await Promise.all(
           products.map((product) => {
+            console.log("UPDATING: ", product);
             if ((product.comment == "" && product.document_files?.length <= 0) && (product.unit_price=='' || product.unit_price==0)) {
               return null;
             }
@@ -7613,7 +7758,7 @@ deleteDraft: async (req, res) => {
           }).filter(Boolean)
         );
 
-        // console.log("mj ", quoteItemChanges)
+        console.log("QUOTE ITEM CHANGES: ", quoteItemChanges)
 
       // Check if global terms & conditions file are uploaded
       if (term_and_condition_files && term_and_condition_files.length > 0) {
@@ -8430,6 +8575,7 @@ projectWiseReport: async (req, res) => {
   try {
     const { projectId, startDate, endDate } = req.query;
     const userId = req.user.id;
+    const company_id = req.user.company_id
 
 
     const rfqDetails = await rfqModel.getProjectDetailsReport(projectId, startDate, endDate);
@@ -8439,7 +8585,7 @@ projectWiseReport: async (req, res) => {
     for (let i = 0; i < rfqDetails.length; i++) {
       for (let j = 0; j < rfqDetails[i].rfq_details.length; j++) {
         const rfqId = rfqDetails[i].rfq_details[j].rfq_id;
-        let quoteDetails = await rfqModel.getQuotesByRfqById2(rfqId, userId, false);
+        let quoteDetails = await rfqModel.getQuotesByRfqById2(rfqId, company_id, userId, false);
         quoteList.push(quoteDetails)
       }
     }
@@ -8591,10 +8737,12 @@ getClausesByRfqProductId: async (req,res) =>{
 getRfqs: async (req, res) => {
   try {
     const user_id = req.user.id;
-    let { tech_eval, page = 1, limit = 10, project_id, rfq_no, sort = 'DESC' } = req.query;
+    let { tech_eval, po = 'false', page = 1, limit = 10, project_id, rfq_no, sort = 'DESC' } = req.query;
     
     // Convert string query parameters to proper types
     tech_eval = tech_eval === 'true';
+    po = po === 'true';
+
     page = parseInt(page) || 1;
     limit = parseInt(limit) || 10;
     project_id = project_id ? parseInt(project_id) : null;
@@ -8612,6 +8760,7 @@ getRfqs: async (req, res) => {
     const rfqs = await rfqModel.getRfqs(
       user_id, 
       tech_eval, 
+      po,
       limit, 
       offset, 
       project_id, 

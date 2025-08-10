@@ -293,6 +293,19 @@ const acl = function (role) {
   };
 };
 
+const noAcl = function (deniedRoles) {
+  return (req, res, next) => {
+    const userRole = req.user.user_type;
+    const isDenied = deniedRoles.includes(userRole);
+
+    if (isDenied) {
+      res.status(403).json({ message: 'Access denied for this role' });
+    } else {
+      next();
+    }
+  };
+};
+
 /**
  * Generate an HMAC SHA256 signature
  * @param {string} message - The message you want to HASH
@@ -488,6 +501,7 @@ export {
   createPay,
   generatePassword,
   acl,
+  noAcl,
   convertSixDigit,
   notificationMail,
   addDefaultNotifications,
