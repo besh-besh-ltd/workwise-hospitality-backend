@@ -7099,6 +7099,39 @@ getLprLqrByVariantId : async (user_id, variant_id, type) => {
     }
 },
 
+getTargetPriceHistory: async (rfq_product_id, created_by, limit = null) => {
+  return new Promise(async (resolve, reject) => {
+    let query = `
+      SELECT * FROM tbl_rfq_product_target_price
+      WHERE tbl_rfq_product_id = $1
+      AND created_by = $2
+      ORDER BY created_at DESC
+    `;
+
+    // Add limit conditionally
+    if (limit === 1) {
+      query += ` LIMIT 1`;
+    }
+
+    try {
+      const data = await db.any(query, [rfq_product_id, created_by]);
+      
+      if (data.length === 0) {
+        resolve({
+          success: false,
+          message: "No target price history found for the given RFQ product and user.",
+        });
+        return;
+      }
+      
+      resolve(data);
+    } catch (error) {
+      reject(error);
+    }
+  });
+},
+
+
 getVendorsForReminder: async (rfq_id) => {
   const query = `
     WITH rfq_data AS (
@@ -7278,6 +7311,61 @@ getRfqs: async (user_id, tech_eval, po, limit, offset, project_id, rfq_no, sort)
       });
   });
 },
+
+getRfqProductvendorsForTargetPrice: async (rfq_product_id) => {
+  return new Promise(function (resolve, reject) {
+    try {
+                      const query = `WITH rfq_info AS (
+                      SELECT rfq_id, product_variant_id 
+                      FROM tbl_rfq_products
+                      WHERE id = $1
+                  ),
+                  valid_quotes AS (
+                      SELECT q.created_by, r.product_variant_id, r.rfq_id
+                      FROM tbl_quotes q
+                      JOIN rfq_info r ON q.rfq_id = r.rfq_id
+                      WHERE q.is_regret IS NULL OR q.is_regret != 1
+                  )
+                  SELECT 
+                      pv.name AS productname,
+                      v.rfq_id,
+                      JSON_AGG(
+                          JSON_BUILD_OBJECT(
+                              'id', u.id,
+                              'name', u.name,
+                              'email', u.email,
+                              'company_name', c.company_name
+                          )
+                      ) AS created_by
+                  FROM valid_quotes v
+                  JOIN tbl_users u ON u.id = v.created_by
+                  JOIN tbl_company c ON c.id = u.company_id
+                  JOIN tbl_product_variant pv ON pv.id = v.product_variant_id
+                  GROUP BY pv.name, v.rfq_id;
+
+
+        `;
+      db.any(query, [rfq_product_id])
+        .then((data) => {
+          if (data.length === 0) {
+            resolve({
+              success: false,
+              message: 'No vendors found for the given criteria.',
+              data: []
+            });
+            return;
+          }
+          resolve(data);
+        })
+        .catch((error) => {
+          reject(error);
+        });
+    } catch (err) {
+      reject(err);
+    }
+  });
+},
+
 saveExcel: async (rfq_id, user_id, file_path) => {
   return new Promise(function (resolve, reject) {
     let q = `

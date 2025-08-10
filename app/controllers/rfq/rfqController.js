@@ -642,6 +642,129 @@ const validateEmailAddresses = (emails) => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emails.every(email => emailRegex.test(email));
 };
+//Send quotation mail to vendors here
+const sendMailToVendorsForTargetPrice = async (
+  vendorList,
+  target_price,
+  rfq_id,
+  buyer_id
+) => {
+  try {
+    // Loop through each vendor in the vendorList
+    const productName = vendorList[0].productname;
+    const rfq_id = vendorList[0].rfq_id;
+    const VendorList = vendorList[0]?.created_by || [];
+
+    const buyer_details = await userModel.user_profile_detail(buyer_id);
+    for (const vendor of VendorList) {
+      try {
+        const spocList = await vendorModel.getSpocDetails(vendor.id);
+        const token = await rfqModel.insertVendorRfqToken(vendor.id, rfq_id);
+
+        // Create product HTML content
+        let productHTML = `
+          <tr>
+            <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+              <strong>Product:</strong> ${productName}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+              <strong>Target Price:</strong> ${target_price}
+            </td>
+          </tr>
+          <tr>
+            <td colspan="2" style="text-align: right; padding-bottom: 3px;">
+              <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
+              style="font-size: 15px; color: blue; text-decoration: none;">
+                ...view more
+              </a>
+            </td>
+          </tr>
+        `;
+
+        const headerContent = `
+          <div>
+            <h2>Hello ${vendor?.name}</h2>
+            <p style="font-size:16px;">
+              The buyer has set a new target price for ${productName}. Kindly review and update your quote accordingly.
+            </p>
+          </div>
+        `;
+
+        const containerContent = `
+          <div>
+            <h3 style="font-family: 'Roboto', sans-serif; text-align: center; font-size: 24px; margin-bottom: 8px;">
+              Target Price Update
+            </h3>
+
+            <table style="width: 100%; padding: 8px;">
+              <tbody>
+                ${productHTML}
+                <tr>
+                  <td></td>
+                </tr>
+              </tbody>
+            </table>
+
+            <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
+              style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+              Update Your Quote
+            </a>
+
+            <p style="margin-top:20px">
+              Please update your quote promptly to align with the new target price set by ${buyer_details[0]?.company_name}.
+            </p>
+          </div>
+        `;
+
+        const dynamicHTML = generateEmailTemplate(
+          headerContent,
+          containerContent
+        );
+
+        let mailRecipients = {
+          from: `${buyer_details[0]?.organization_name} ${Config.masterEmail}`,
+          subject: `Target Price Update for ${productName} - RFQ ${rfq_id}`,
+          html: dynamicHTML
+        };
+
+        // Set recipients - prioritize SPOCs if available
+        if (spocList && spocList.length > 0) {
+          mailRecipients.to = spocList.map((spoc) => spoc.email);
+          // Optionally CC the main vendor email
+          // mailRecipients.cc = [user_details[0].email];
+        } else {
+          mailRecipients.to = vendor.email;
+          // Optionally CC the buyer's email
+          // mailRecipients.cc = buyerEmail;
+        }
+
+        // Send the email
+        sendMail(mailRecipients);
+
+        console.log(`Email sent successfully to vendor: ${vendor.name}`);
+      } catch (vendorError) {
+        console.error(
+          `Error sending email to vendor ${vendor.id}:`,
+          vendorError
+        );
+        // Continue with next vendor even if one fails
+      }
+    }
+
+    return {
+      success: true,
+      message: 'Target price notifications sent to all vendors'
+    };
+  } catch (error) {
+    console.error('Error in sendMailToVendorsForTargetPrice:', error);
+    throw error;
+  }
+};
+
+
+
 
 // Update the sendMailtoVendors function
 const sendMailtoVendors = async (req, rfqNumber) => {
@@ -8007,6 +8130,227 @@ sendQueryMessage: async (req, res) => {
       });
   }
 },
+sendBroadcastQueryMessageToVendors: async (req, res) => {
+  const { rfq_id, receiver_ids, message_text } = req.body;
+  const files = req.files;
+  const sender_id = req.user.id;
+  const sender_type = req.user.user_type;
+
+  // console.log("Broadcasting message to vendors for RFQ ID:", rfq_id , "from sender ID:", sender_id, "with message:", message_text, "vendors", receiver_ids);
+
+  try {
+    const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+    if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
+
+    const rfqNumber = rfqDetails.rfq_no;
+    const sender_details = await userModel.user_profile_detail(sender_id);
+    const senderDetails = sender_details[0];
+
+    for (const receiver of receiver_ids) {
+      const receiver_id = receiver.id;
+      let payload = [];
+      const data = {
+        rfq_id,
+        sender_id,
+        receiver_id,
+        sender_type,
+        message_text
+      };
+
+      const result = await rfqModel.insertReturnId('tbl_query_messages', data);
+      const message_id = result[0].id;
+     
+      if(files) {
+      const filesData = files.map(file => ({
+        message_id: message_id,
+        file_name: file.originalname,
+        file_url: file.location
+      }));
+    }
+
+      if (files) {
+        await rfqModel.insertArray(filesData, ['message_id', 'file_name', 'file_url'], 'tbl_query_message_files');
+      }
+
+      const receiver_details = await userModel.user_profile_detail(receiver_id);
+      // if (receiver_details.length > 0) {
+      //   const receiverDetails = receiver_details[0];
+      //   const spocList = await vendorModel.getSpocDetails(receiver_id);
+
+      //   const headerContent = `<div><h2>Hello ${receiverDetails?.organization_name || receiverDetails?.name}</h2></div>`;
+
+      //   const containerContent = `
+      //     <div>
+      //       <div style="font-size:16px;">
+      //         ${sender_type == 2 ?
+      //           `${senderDetails?.organization_name || senderDetails?.name} has a question about your submitted quotation for #${rfqNumber}.` :
+      //           `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
+      //       </div>
+      //       <h4> Query </h4>
+      //       <blockquote style='border-left:3px solid #203367; font-size:16px; margin:10px 0; margin-top:-10px; padding-left:15px; padding:10px; border-radius:10px; background-color:#eef3f6; color:#333333; margin-bottom:30px;'>
+      //         ${message_text}
+      //       </blockquote>
+      //       <a href=${process.env.FRONT_END_WEBSITE}/dashboard/${sender_type == 2 ? "buyer" : "vendor"}/query?rfq_id=${rfq_id}&role=${sender_type == 2 ? "buyer" : "vendor"}
+      //         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+      //         Respond to Query
+      //       </a>
+      //       <p style="font-size:16px; text-align:center;">
+      //         ${sender_type == 2 ?
+      //           "Your quick response can help avoid delays!" :
+      //           "Thank you for helping ensure a smooth, transparent process."
+      //         }
+      //       </p>
+      //     </div>
+      //   `;
+
+      //   const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+      //   const emailSubject = sender_type == 3
+      //     ? `Vendor Query on Your RFQ #${rfqNumber}`
+      //     : `Buyer Query for #${rfqNumber} – Your Response Needed`;
+
+      //   const mailRecipients = {
+      //     from: `${senderDetails?.organization_name || senderDetails?.name} <${Config.masterEmail}>`,
+      //     subject: emailSubject,
+      //     html: dynamicHTML
+      //   };
+
+      //   if (spocList && spocList.length > 0) {
+      //     mailRecipients.to = spocList.map(spoc => spoc.email);
+      //     mailRecipients.cc = receiverDetails.email;
+      //   } else {
+      //     mailRecipients.to = receiverDetails.email;
+      //   }
+
+      //   sendMail(mailRecipients);
+
+      //   const notificationData = {
+      //     type: 'New Message',
+      //     title: 'New RFQ Message Received',
+      //     message: `You have received a new message from ${senderDetails.name}.`,
+      //     additional_data: { user_type: receiverDetails.user_type }
+      //   };
+
+      //   const payload = {
+      //     title: `Hello ${receiverDetails.name}`,
+      //     body: 'You have a new message regarding an RFQ.'
+      //   };
+
+      //   const ss = JSON.parse(receiverDetails.endpoint);
+      //   sendNotification(receiver_id, '', notificationData, payload, ss);
+      // }
+    }
+
+    res.status(200).json({
+      status: 1,
+      message: 'Broadcast message sent to all vendors successfully.'
+    });
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+      success: false,
+      message: 'Error broadcasting message',
+      error: error.message
+    });
+  }
+},
+negotiatePrice : async (req, res ) => { 
+  const { rfq_product_id , target_price} = req.body;
+  const user_id = req.user.id;
+
+
+  try {
+
+    if (!rfq_product_id || !target_price) {
+      return res.status(400).json({
+        status: 0,
+        message: 'rfq_product_id and target_price are required'
+      });
+    }
+    const validate  = await rfqModel.checkIfExists('tbl_rfq_products', `id = ${rfq_product_id}`);
+
+    if( !validate || validate.length === 0) {
+      return res.status(404).json({
+        status: 0,
+        message: 'RFQ Product not found'
+      });
+    }
+
+    const payload = {
+      tbl_rfq_product_id : rfq_product_id,
+      target_price: target_price,
+      created_by : user_id
+    }
+
+    const result = await rfqModel.insertReturnId('tbl_rfq_product_target_price', payload);
+
+    if( !result || !result[0] || !result[0].id) {
+      return res.status(500).json({
+        status: 0,
+        message: 'Failed to negotiate price, please try again later.'
+      });
+    }
+    // Notify the vendor about the price negotiation
+    const rfqProductVendors =  await rfqModel.getRfqProductvendorsForTargetPrice(rfq_product_id);
+    console.log("Full data:", JSON.stringify(rfqProductVendors, null, 2));
+    await sendMailToVendorsForTargetPrice(rfqProductVendors, target_price, user_id);
+
+    res.status(200).json({
+      status: 1,
+      message: 'Price negotiation request sent successfully.',
+      data: {
+        negotiation_id: result[0].id,
+        rfq_product_id: rfq_product_id,
+        target_price: target_price
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 0,
+      message: 'Error IN updating Target Price',
+      error: error.message
+    });
+  }
+},
+
+getTargetPriceHistrory : async (req, res) => {
+  const { rfq_product_id } = req.params;
+  const limit = req.query.limit === "1" ? 1 : null;
+  const user_id = req.user.id;
+  try {
+    if (!rfq_product_id) {
+      return res.status(400).json({
+        status: 0,
+        message: 'rfq_product_id is required'
+      });
+    }
+    const validate  = await rfqModel.checkIfExists('tbl_rfq_products', `id = ${rfq_product_id}`);
+    if( !validate || validate.length === 0) {
+      return res.status(404).json({
+        status: 0,
+        message: 'RFQ Product not found'
+      });
+    }
+    const history = await rfqModel.getTargetPriceHistory(rfq_product_id, user_id, limit );
+    if (!history || history.length === 0) {
+      return res.status(404).json({
+        status: 0,
+        message: 'No target price history found for this RFQ product'
+      });
+    }
+    res.status(200).json({
+      status: 1,
+      message: 'Target price history retrieved successfully',
+      data: history
+    });
+  } catch (error) { 
+    res.status(500).json({
+      status: 0,
+      message: 'Error retrieving target price history',
+      error: error.message
+    });
+  }
+},
 
 listQueryMessages: async (req, res) => {
   const { rfq_id, receiver_id } = req.body;
@@ -8800,6 +9144,5 @@ saveExcel: async (req, res) => {
     });
   }
 }
-
 };
 export default rfqController;
