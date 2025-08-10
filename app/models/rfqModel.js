@@ -1540,7 +1540,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
   },
 
 
-  getRfqById: async (id, user_id, user_type, includeVendors) => {
+  getRfqById: async (id, user_id, user_type, includeVendors = false) => {
     // First, let's directly check the auction dates in the database
     try {
 

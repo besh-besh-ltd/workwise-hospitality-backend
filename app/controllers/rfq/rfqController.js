@@ -3863,7 +3863,11 @@ deleteDraft: async (req, res) => {
     }
 
         const { user_type, id:user_id } = req.user;
-        const { includeVendors = false } = req.query;
+        let { includeVendors = false } = req.query;
+
+        if(includeVendors) {
+          includeVendors = includeVendors == 'true';
+        }
 
     try {
       if (user_type == 2 || user_type == 8) {
