@@ -92,6 +92,11 @@ RfqRoutes.get(
   rfqController.getRfqById
 );
 
+RfqRoutes.get('/targetPriceHistory',
+  passportSignIn,
+  rfqController.getTargetPricehistory
+)
+
 RfqRoutes.post(
   '/getMyRfq',
   passportSignIn,

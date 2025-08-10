@@ -4122,6 +4122,36 @@ deleteDraft: async (req, res) => {
         .end();
     }
   },
+  getTargetPricehistory: async (req, res) => {
+  try {
+     const condition = 'ORDER BY created_at DESC';
+     const response = await rfqModel.findAll(
+       'tbl_rfq_product_target_price',
+       condition
+     );
+
+
+    if (response && response.length > 0) {
+      return res.json({
+        status: 1,
+        data: response
+      });
+    } else {
+      return res.json({
+        status: 0,
+        message: 'No target price history found'
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching target price history:', error);
+    return res.status(500).json({
+      status: 0,
+      message: 'Internal server error',
+      error: error.message
+    });
+  }
+  },
+
   rfqList: async (req, res, next) => {
     try {
       let user_id = req.user.id;
@@ -8136,110 +8166,66 @@ sendBroadcastQueryMessageToVendors: async (req, res) => {
   const sender_id = req.user.id;
   const sender_type = req.user.user_type;
 
-  // console.log("Broadcasting message to vendors for RFQ ID:", rfq_id , "from sender ID:", sender_id, "with message:", message_text, "vendors", receiver_ids);
-
   try {
+    // Get RFQ and sender details (unchanged)
     const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
     if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
-
+    
     const rfqNumber = rfqDetails.rfq_no;
     const sender_details = await userModel.user_profile_detail(sender_id);
     const senderDetails = sender_details[0];
 
-    for (const receiver of receiver_ids) {
-      const receiver_id = receiver.id;
-      let payload = [];
-      const data = {
-        rfq_id,
-        sender_id,
-        receiver_id,
-        sender_type,
-        message_text
-      };
+    // Prepare messages for bulk insert
+    const messagesData = receiver_ids.map(receiver => ({
+      rfq_id,
+      sender_id,
+      receiver_id: receiver.id,
+      sender_type,
+      message_text,
+      created_at: new Date()
+    }));
 
-      const result = await rfqModel.insertReturnId('tbl_query_messages', data);
-      const message_id = result[0].id;
-     
-      if(files) {
-      const filesData = files.map(file => ({
-        message_id: message_id,
-        file_name: file.originalname,
-        file_url: file.location
-      }));
+    // Bulk insert messages
+    const insertedMessages = await rfqModel.insertArray(
+      messagesData, 
+      ['rfq_id', 'sender_id', 'receiver_id', 'sender_type', 'message_text', 'created_at'], 
+      'tbl_query_messages'
+    );
+
+    // Handle file attachments if present
+    if (files && files.length > 0) {
+      const filesData = [];
+      
+      insertedMessages.forEach(message => {
+        files.forEach(file => {
+          filesData.push({
+            message_id: message.id,
+            file_name: file.originalname,
+            file_url: file.location
+          });
+        });
+      });
+
+      await rfqModel.insertArray(
+        filesData,
+        ['message_id', 'file_name', 'file_url'],
+        'tbl_query_message_files'
+      );
     }
 
-      if (files) {
-        await rfqModel.insertArray(filesData, ['message_id', 'file_name', 'file_url'], 'tbl_query_message_files');
-      }
+    // Get all receiver details in one query
+    // const receiverDetails = await userModel.getUsersByIds(receiver_ids.map(r => r.id));
 
-      const receiver_details = await userModel.user_profile_detail(receiver_id);
-      // if (receiver_details.length > 0) {
-      //   const receiverDetails = receiver_details[0];
-      //   const spocList = await vendorModel.getSpocDetails(receiver_id);
+    // Prepare notifications (if needed)
+    // const notifications = receiverDetails.map(receiver => ({
+    //   type: 'New Message',
+    //   title: 'New RFQ Message Received',
+    //   message: `You have received a new message from ${senderDetails.name}.`,
+    //   additional_data: { user_type: receiver.user_type }
+    // }));
 
-      //   const headerContent = `<div><h2>Hello ${receiverDetails?.organization_name || receiverDetails?.name}</h2></div>`;
-
-      //   const containerContent = `
-      //     <div>
-      //       <div style="font-size:16px;">
-      //         ${sender_type == 2 ?
-      //           `${senderDetails?.organization_name || senderDetails?.name} has a question about your submitted quotation for #${rfqNumber}.` :
-      //           `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
-      //       </div>
-      //       <h4> Query </h4>
-      //       <blockquote style='border-left:3px solid #203367; font-size:16px; margin:10px 0; margin-top:-10px; padding-left:15px; padding:10px; border-radius:10px; background-color:#eef3f6; color:#333333; margin-bottom:30px;'>
-      //         ${message_text}
-      //       </blockquote>
-      //       <a href=${process.env.FRONT_END_WEBSITE}/dashboard/${sender_type == 2 ? "buyer" : "vendor"}/query?rfq_id=${rfq_id}&role=${sender_type == 2 ? "buyer" : "vendor"}
-      //         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-      //         Respond to Query
-      //       </a>
-      //       <p style="font-size:16px; text-align:center;">
-      //         ${sender_type == 2 ?
-      //           "Your quick response can help avoid delays!" :
-      //           "Thank you for helping ensure a smooth, transparent process."
-      //         }
-      //       </p>
-      //     </div>
-      //   `;
-
-      //   const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
-
-      //   const emailSubject = sender_type == 3
-      //     ? `Vendor Query on Your RFQ #${rfqNumber}`
-      //     : `Buyer Query for #${rfqNumber} – Your Response Needed`;
-
-      //   const mailRecipients = {
-      //     from: `${senderDetails?.organization_name || senderDetails?.name} <${Config.masterEmail}>`,
-      //     subject: emailSubject,
-      //     html: dynamicHTML
-      //   };
-
-      //   if (spocList && spocList.length > 0) {
-      //     mailRecipients.to = spocList.map(spoc => spoc.email);
-      //     mailRecipients.cc = receiverDetails.email;
-      //   } else {
-      //     mailRecipients.to = receiverDetails.email;
-      //   }
-
-      //   sendMail(mailRecipients);
-
-      //   const notificationData = {
-      //     type: 'New Message',
-      //     title: 'New RFQ Message Received',
-      //     message: `You have received a new message from ${senderDetails.name}.`,
-      //     additional_data: { user_type: receiverDetails.user_type }
-      //   };
-
-      //   const payload = {
-      //     title: `Hello ${receiverDetails.name}`,
-      //     body: 'You have a new message regarding an RFQ.'
-      //   };
-
-      //   const ss = JSON.parse(receiverDetails.endpoint);
-      //   sendNotification(receiver_id, '', notificationData, payload, ss);
-      // }
-    }
+    // Bulk insert notifications if needed
+    // await notificationModel.insertArray(notifications, [...fields...], 'notifications_table');
 
     res.status(200).json({
       status: 1,
