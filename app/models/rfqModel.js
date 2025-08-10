@@ -7209,7 +7209,15 @@ getRfqs: async (user_id, tech_eval, po, limit, offset, project_id, rfq_no, sort)
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
       ${dynamicJoins}
       WHERE (RFQ.created_by = ${user_id} OR EXISTS (
-        SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+        ${po ? `
+          SELECT 1 
+            FROM tbl_company TC 
+            JOIN tbl_users _TU ON _TU.id = RFQ.created_by 
+            JOIN tbl_users _TU1 ON _TU1.id = ${user_id} 
+            WHERE _TU.company_id = _TU1.company_id
+          ` : `
+          SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+          `}
       )) AND RFQ.is_published = 1
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
