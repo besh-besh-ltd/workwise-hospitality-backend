@@ -1701,6 +1701,13 @@ deleteProductFilesByIds: async (rfqProductIds) => {
             FROM tbl_rfq_product_files RPF
             WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
           ),
+          'latest_target_price', (
+            SELECT tptp.target_price
+            FROM tbl_rfq_product_target_price tptp
+            WHERE tptp.tbl_rfq_product_id = RFQ_P.id
+            ORDER BY tptp.created_at DESC
+            LIMIT 1
+        ),
 
           'datasheet', (
             SELECT json_agg(json_build_object('name', TVA.vendor_approve,'datasheet_link',
@@ -1912,7 +1919,7 @@ deleteProductFilesByIds: async (rfqProductIds) => {
     ) AS "products"
 FROM tbl_rfq RFQ WHERE id=$1
 ORDER BY RFQ.id DESC
-LIMIT 1;`;
+    LIMIT 1;`;
 
 
     return new Promise(function (resolve, reject) {
@@ -2380,7 +2387,14 @@ LIMIT 1;`;
         )`;
 
         const mainQuery = 
-            `SELECT TRP.product_variant_id, TRP.variant, TRP.rfq_id,
+            `SELECT TRP.product_variant_id, TRP.variant, TRP.rfq_id, TRP.id,
+                      (
+                        SELECT tptp.target_price 
+                        FROM tbl_rfq_product_target_price tptp
+                        WHERE tptp.tbl_rfq_product_id = TRP.id
+                        ORDER BY tptp.created_at DESC
+                        LIMIT 1
+                    ) AS latest_target_price,
             (
                 SELECT json_build_object(
                 'unit_price', TQI1.unit_price,
@@ -2582,6 +2596,14 @@ LIMIT 1;`;
 
       let mainQuery =
         `SELECT TRF.*,
+                    (
+              SELECT tptp.target_price
+              FROM tbl_rfq_product_target_price tptp
+              WHERE tptp.tbl_rfq_product_id = TRF.id
+              ORDER BY tptp.created_at DESC  -- Or timestamp column you use
+              LIMIT 1
+            ) AS latest_target_price,
+
           ARRAY(
             SELECT json_build_object(
               'rfq_no', TR.rfq_no,
