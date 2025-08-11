@@ -107,7 +107,7 @@ const rfqModel = {
             AND TRIM(s.value) != 'NA'
             AND (
               (s.title = 'Quantity' AND
-              TRIM(s.value) ~ '^\\d.+$' AND  -- Regex to check it's all digits
+              TRIM(s.value) ~ '^[0-9]+(\.[0-9]+)?$' AND  -- Regex to check it's all digits
               CAST(TRIM(s.value) AS FLOAT) > 0)
                   OR
               (s.title = 'Unit' AND LENGTH(TRIM(s.value)) >= 2)
