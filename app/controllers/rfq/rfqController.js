@@ -3792,13 +3792,11 @@ deleteDraft: async (req, res) => {
       user_id = req.body.user_id;
     }
     try {
-      let page, limit, offset;
+      let page, limit = req.body.limit || Config.globalAdminLimit, offset;
       if (req.body.page && req.body.page > 0) {
         page = req.body.page;
-        limit = req.body.limit || Config.globalAdminLimit;
         offset = (page - 1) * limit;
       } else {
-        limit = Config.globalAdminLimit;
         offset = 0;
       }
 
@@ -3865,6 +3863,11 @@ deleteDraft: async (req, res) => {
     }
 
         const { user_type, id:user_id } = req.user;
+        let { includeVendors = false } = req.query;
+
+        if(includeVendors) {
+          includeVendors = includeVendors == 'true';
+        }
 
     try {
       if (user_type == 2 || user_type == 8) {
@@ -3913,72 +3916,9 @@ deleteDraft: async (req, res) => {
       const rfQItem = await rfqModel.getRfqById(
         id,
         req.user.id,
-        req.user.user_type
+        req.user.user_type,
+        includeVendors
       );
-
-      // Fix for auction dates - Enhanced logging and data transformation
-      if (rfQItem && rfQItem.length > 0) {
-        
-        // Ensure auction dates are properly formatted strings, not null/undefined
-        if (rfQItem[0].reverse_auction === 1) {
-          // If reverse auction is enabled but dates are empty, set default values
-          if (!rfQItem[0].ra_start_date || rfQItem[0].ra_start_date === '' || rfQItem[0].ra_start_date === 'null') {
-            rfQItem[0].ra_start_date = new Date().toISOString().split('T')[0];
-          }
-          
-          if (!rfQItem[0].ra_end_date || rfQItem[0].ra_end_date === '' || rfQItem[0].ra_end_date === 'null') {
-            if (rfQItem[0].bid_end_date) {
-              rfQItem[0].ra_end_date = rfQItem[0].bid_end_date;
-            } else {
-              // If no bid_end_date, set to 7 days from now
-              const endDate = new Date();
-              endDate.setDate(endDate.getDate() + 7);
-              rfQItem[0].ra_end_date = endDate.toISOString().split('T')[0];
-            }
-          }
-          
-          // Update the database with these defaults if they were missing
-          if (rfQItem[0].ra_start_date && rfQItem[0].ra_end_date) {
-            try {
-              await rfqModel.update('tbl_rfq', {
-                ra_start_date: rfQItem[0].ra_start_date,
-                ra_end_date: rfQItem[0].ra_end_date
-              }, id);
-            } catch (updateError) {
-              console.error("Error updating auction dates:", updateError);
-            }
-          }
-        } else {
-          // If reverse auction is disabled, explicitly set dates to empty strings for frontend
-          rfQItem[0].ra_start_date = '';
-          rfQItem[0].ra_end_date = '';
-        }
-        
-      }
-
-      // this block is for vendor, to show only those products which are assigned to the vendor
-      if (req.user.user_type != 2) {
-        const userProducts = await rfqModel.getUserProducts(id, req.user.id);
-        if (
-          userProducts.length > 0 &&
-          rfQItem.length > 0 &&
-          rfQItem[0].products.length > 0
-        ) {
-          let fproducts = [];
-          userProducts.map((prod_item) => {
-            rfQItem[0].products.map((pintem) => {
-              if (prod_item.product_id == pintem.product_id && prod_item.variant == pintem.variant) {
-                pintem.vendor_details = pintem.vendor_details.filter(vendor => vendor.user_id === req.user.id);
-                fproducts.push(pintem);
-              }
-            });
-          });
-
-          // changes done by mukul, no need to remove duplicate specs, they are already product and variant specific
-          // rfQItem[0].products =  await removeSpecsDynamically(fproducts); // remove duplicate specs from products
-          rfQItem[0].products = fproducts;
-        }
-      }
 
 
       res
