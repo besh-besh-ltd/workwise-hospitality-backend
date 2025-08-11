@@ -7137,7 +7137,7 @@ deleteDraft: async (req, res) => {
   initiateMagicSearch: async (req, res) => {
     try {
       const { id } = req.user;
-      const { file_name, type = 'rfq' } = req.body;
+      const { file_name, type = 'rfq', raw_file_url } = req.body;
 
       if(!file_name) return res.status(400).json({
         status: 3,
@@ -7153,7 +7153,7 @@ deleteDraft: async (req, res) => {
         const nowIst = moment().tz('Asia/Kolkata');
 
         const diffInHours = nowIst.diff(inputIstMoment, 'hours', true);
-        if(diffInHours > 2) {
+        if(diffInHours > 1) {
           await rfqModel.updatePersistenceJobStatus(processing.id, PERSISTENCE_STATUSES.TERMINATED, null, 'Due to a longer processing time, we have terminated this BOQ Processing, please upload this BOQ again to retry the processing');
         } else {
           return res.status(400).json({
@@ -7172,7 +7172,7 @@ deleteDraft: async (req, res) => {
       const signature = generateSignature(message, secret);
 
       return db.tx(async t => {
-        let persistence = await rfqModel.persistAIJobInDB(id, file_name, signature, type, t);
+        let persistence = await rfqModel.persistAIJobInDB(id, file_name, raw_file_url, signature, type, t);
   
         if(!persistence || persistence.length <= 0) {
           return res.status(400).json({

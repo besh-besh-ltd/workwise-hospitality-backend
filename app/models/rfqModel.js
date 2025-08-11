@@ -252,11 +252,12 @@ const rfqModel = {
     }
   },
 
-  persistAIJobInDB: async (user_id, file_name, signature, type, db_con = db) => {
+  persistAIJobInDB: async (user_id, file_name, raw_file_url, signature, type, db_con = db) => {
     try {
       let persistenceData = {
         user_id,
         file_name,
+        raw_file_url,
         signature,
         type
       }
