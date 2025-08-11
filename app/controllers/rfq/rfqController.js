@@ -4244,6 +4244,7 @@ deleteDraft: async (req, res) => {
       products,
       globalPaymentTerms,
       globalComment,
+      global_payment_term_list,
       term_and_condition_files,
       is_regret,
       regret_reason
@@ -4619,6 +4620,34 @@ deleteDraft: async (req, res) => {
                   await rfqModel.insert('tbl_quotes_files', fileData, t);
                 }
               }
+
+             // Payment Terms (tbl_quotes_payment_terms)
+             if (Array.isArray(global_payment_term_list) && global_payment_term_list.length) {
+               const rows = global_payment_term_list
+                 .filter(r => r && r.type && r.value != null)
+                 .map(r => {
+                   const type = String(r.type).toLowerCase();
+                   return ['advance','credit','other'].includes(type) ? {
+                     quote_id: created_quote_id,
+                     value: Number(r.value) || 0,
+                     type,
+                     days: type === 'credit' && r.days != null ? Number(r.days) : null,
+                     comment: r.comment?.trim() || null,
+                     created_by: req.user.id,
+                   } : null;
+                 })
+                 .filter(Boolean);
+             
+               if (rows.length) {
+                 await rfqModel.insertArray(
+                   rows,
+                   ['quote_id','value','type','days','comment','created_by'],
+                   'tbl_quotes_payment_terms',
+                   t
+                 );
+               }
+             }
+           //  save payment term array
   
               // adding the quote_id
               quote_items_data.map((item)=> item.quote_id=created_quote_id);
