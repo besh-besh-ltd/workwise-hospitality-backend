@@ -4124,23 +4124,23 @@ deleteDraft: async (req, res) => {
   },
   getTargetPricehistory: async (req, res) => {
   try {
-     const condition = 'ORDER BY created_at DESC';
-     const response = await rfqModel.findAll(
-       'tbl_rfq_product_target_price',
-       condition
-     );
+    const { rfq_product_id } = req.params;
 
+    const result  =  await rfqModel.getPricehistory(rfq_product_id);
 
-    if (response && response.length > 0) {
-      return res.json({
-        status: 1,
-        data: response
-      });
+    // const query = `
+    //   SELECT * 
+    //   FROM tbl_rfq_product_target_price
+    //   WHERE tbl_rfq_product_id = $1
+    //   ORDER BY created_at DESC
+    // `;
+
+    // const data = await db.query(query, [rfq_product_id]);
+
+    if (result.length > 0) {
+      return res.json({ status: 1, data: result });
     } else {
-      return res.json({
-        status: 0,
-        message: 'No target price history found'
-      });
+      return res.json({ status: 0, message: 'No target price history found' });
     }
   } catch (error) {
     console.error('Error fetching target price history:', error);
@@ -4150,7 +4150,8 @@ deleteDraft: async (req, res) => {
       error: error.message
     });
   }
-  },
+},
+
 
   rfqList: async (req, res, next) => {
     try {
