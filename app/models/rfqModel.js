@@ -2465,6 +2465,30 @@ LIMIT 1;`;
                     'email', TU.email,
                     'mobile', TU.mobile,
                     'address', TU.address,
+
+                     -- add this field here
+                     'payment_terms',
+                     (
+                       SELECT COALESCE(
+                         json_agg(
+                           json_build_object(
+                             'id', TQPT.id,
+                             'type', TQPT.type,
+                             'value', TQPT.value,
+                             'days', TQPT.days,
+                             'comment', TQPT.comment,
+                             'timestamp', TQPT.timestamp,
+                             'created_by', TQPT.created_by
+                           )
+                           ORDER BY TQPT.id
+                         ),
+                         '[]'::json
+                       )
+                       FROM tbl_quotes_payment_terms TQPT
+                       WHERE TQPT.quote_id = TQ.id
+                     ),
+
+
                     'organization_name', COALESCE(TCC.company_name, TU.organization_name, TU.name),
                     'global_payment_term', (
                         SELECT json_agg(json_build_object('details', TQ_inner.global_payment_term,'comment', TQ_inner.global_comment))
@@ -2496,29 +2520,6 @@ LIMIT 1;`;
                     'regret_reason', TQ.regret_reason,
                     'global_payment_term', TQ.global_payment_term,
                     'global_comment', TQ.global_comment,
-
-                     -- add this field here
-                     'payment_terms',
-                     (
-                       SELECT COALESCE(
-                         json_agg(
-                           json_build_object(
-                             'id', TQPT.id,
-                             'type', TQPT.type,
-                             'value', TQPT.value,
-                             'days', TQPT.days,
-                             'comment', TQPT.comment,
-                             'timestamp', TQPT.timestamp,
-                             'created_by', TQPT.created_by
-                           )
-                           ORDER BY TQPT.id
-                         ),
-                         '[]'::json
-                       )
-                       FROM tbl_quotes_payment_terms TQPT
-                       WHERE TQPT.quote_id = TQ.id
-                     ),
-
 
                     'vendor_details', (
                         SELECT json_agg(json_build_object(
@@ -2856,7 +2857,6 @@ LIMIT 1;`;
                  FROM tbl_quotes_payment_terms TQPT
                  WHERE TQPT.quote_id = TQ.id
                ),
-               
               'previous_quotes', (
                 SELECT json_agg(json_build_object(
                     'id', TH.id,
