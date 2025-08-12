@@ -1630,7 +1630,27 @@ deleteProductFilesByIds: async (rfqProductIds) => {
       WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
     ) AS "TERM_files",
     ARRAY(
-      SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
+    SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
+
+    -- payment term list 
+    'payment_terms', COALESCE(
+      (
+        SELECT json_agg(
+          json_build_object(
+            'id', QPT.id,
+            'type', QPT.type,
+            'value', QPT.value,
+            'days', QPT.days,
+            'comment', QPT.comment
+          )
+          ORDER BY QPT.id
+        )
+        FROM tbl_quotes_payment_terms QPT
+        WHERE QPT.quote_id = TQ.id
+      ),
+      '[]'::json
+    ),
+
         'products', (
           SELECT json_agg(
             json_build_object(
@@ -2476,6 +2496,30 @@ LIMIT 1;`;
                     'regret_reason', TQ.regret_reason,
                     'global_payment_term', TQ.global_payment_term,
                     'global_comment', TQ.global_comment,
+
+                     -- add this field here
+                     'payment_terms',
+                     (
+                       SELECT COALESCE(
+                         json_agg(
+                           json_build_object(
+                             'id', TQPT.id,
+                             'type', TQPT.type,
+                             'value', TQPT.value,
+                             'days', TQPT.days,
+                             'comment', TQPT.comment,
+                             'timestamp', TQPT.timestamp,
+                             'created_by', TQPT.created_by
+                           )
+                           ORDER BY TQPT.id
+                         ),
+                         '[]'::json
+                       )
+                       FROM tbl_quotes_payment_terms TQPT
+                       WHERE TQPT.quote_id = TQ.id
+                     ),
+
+
                     'vendor_details', (
                         SELECT json_agg(json_build_object(
                             'id', TU.id,
@@ -2790,6 +2834,29 @@ LIMIT 1;`;
               ),
               'global_payment_term', TQ.global_payment_term,
               'global_comment', TQ.global_comment,
+              
+              -- payment term list
+               'payment_terms',
+               (
+                 SELECT COALESCE(
+                   json_agg(
+                     json_build_object(
+                       'id', TQPT.id,
+                       'type', TQPT.type,
+                       'value', TQPT.value,
+                       'days', TQPT.days,
+                       'comment', TQPT.comment,
+                       'timestamp', TQPT.timestamp,
+                       'created_by', TQPT.created_by
+                     )
+                     ORDER BY TQPT.id
+                   ),
+                   '[]'::json
+                 )
+                 FROM tbl_quotes_payment_terms TQPT
+                 WHERE TQPT.quote_id = TQ.id
+               ),
+               
               'previous_quotes', (
                 SELECT json_agg(json_build_object(
                     'id', TH.id,
