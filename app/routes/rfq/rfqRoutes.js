@@ -311,6 +311,11 @@ RfqRoutes.post('/estimate-cost',
   rfqController.estimateCost,
 )
 
+RfqRoutes.post('/tender-summary',
+  noLogin.customer_auth,
+  rfqController.tenderSummary
+)
+
 RfqRoutes.get('/process-magic-search-draft',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
