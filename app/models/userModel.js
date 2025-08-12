@@ -73,7 +73,7 @@ user_book_demo: async (mobile) => {
           const insertUserQuery = `
             INSERT INTO tbl_users (${userFields.join(', ')})
             VALUES (${userPlaceholders})
-            RETURNING id
+            RETURNING *
           `;
 
           const userResult = await t.one(insertUserQuery, userValues);
@@ -81,7 +81,8 @@ user_book_demo: async (mobile) => {
           resolve({
             success: true,
             company_id,
-            user_id: userResult.id
+            user_id: userResult.id,
+            user: userResult
           });
 
         } catch (error) {

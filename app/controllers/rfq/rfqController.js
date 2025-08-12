@@ -56,53 +56,102 @@ const VENDORS_FILTER_KEYS = [
 ];
 
 
-export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, status, persisted_rfq_id, errors) => {
+export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, status, persisted_rfq_id, errors, persistence_id, type) => {
   try {
     const { name, email } = buyer_info;
+
+    let headerContent = '';
+    let containerContent = '';
+    let subject = '';
       
-      const headerContent = `<h2>Hello ${name},</h2>`;
-      const containerContent = `
-        <p style="font-size: 15px;">
+    switch(type) {
+      case 'cost-estimation':
+        headerContent = `<h2>Hello ${name},</h2>`;
+        containerContent = `
+          <p style="font-size: 15px;">
+            ${
+              status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+              status == PERSISTENCE_STATUSES.COMPLETED
+                ? `The Cost Estimation Processing for your BOQ has been completed successfully, follow the below link to see the processed estimation table.`
+                : status == PERSISTENCE_STATUSES.FAILED
+                ? `The Cost Estimation Processing for your BOQ has been failed due to some reasons`
+                : `The Cost Estimation Processing for your BOQ status has been changed from <strong>${previous_status}</strong> to <strong>${status}</strong>`
+            }
+          </p>
           ${
-            status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
-            status == PERSISTENCE_STATUSES.COMPLETED
-              ? `The Magic Search RFQ Processing has been completed successfully, follow the below link to see the processed draft.`
-              : status == PERSISTENCE_STATUSES.FAILED
-              ? `The Magic Search RFQ Processing has been failed due to some reasons`
-              : `The Magic Search RFQ Processing status has been changed from <strong>${previous_status}</strong> to <strong>${status}</strong>`
+            (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+            status == PERSISTENCE_STATUSES.COMPLETED)
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/ai-tools/cost-estimation/${persistence_id}"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Estimation
+                </a>`
+              : ''
           }
-        </p>
-        ${
-          (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
-          status == PERSISTENCE_STATUSES.COMPLETED)
-            ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management?tab=create-rfq&draft_id=${persisted_rfq_id}"
-                  style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
-                View Draft
-              </a>`
-            : ''
-        }
-        ${
-          status == PERSISTENCE_STATUSES.FAILED
-            ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/magic-search?tab=processing-files"
-                  style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
-                View Processing RFQs
-              </a>`
-            : ''
-        }
-      `;
+          ${
+            status == PERSISTENCE_STATUSES.FAILED
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/magic-search?tab=processing-files"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Processing RFQs
+                </a>`
+              : ''
+          }
+        `;
+        subject = status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+          status == PERSISTENCE_STATUSES.COMPLETED
+            ? `Cost Estimation has been processed successfully`
+            : status == PERSISTENCE_STATUSES.FAILED
+            ? `Cost Estimation Processing was failed`
+            : `Cost Estimation status has been changed`;
+        break;
+
+      default:
+        headerContent = `<h2>Hello ${name},</h2>`;
+        containerContent = `
+          <p style="font-size: 15px;">
+            ${
+              status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+              status == PERSISTENCE_STATUSES.COMPLETED
+                ? `The Magic Search RFQ Processing has been completed successfully, follow the below link to see the processed draft.`
+                : status == PERSISTENCE_STATUSES.FAILED
+                ? `The Magic Search RFQ Processing has been failed due to some reasons`
+                : `The Magic Search RFQ Processing status has been changed from <strong>${previous_status}</strong> to <strong>${status}</strong>`
+            }
+          </p>
+          ${
+            (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+            status == PERSISTENCE_STATUSES.COMPLETED)
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management?tab=create-rfq&draft_id=${persisted_rfq_id}"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Draft
+                </a>`
+              : ''
+          }
+          ${
+            status == PERSISTENCE_STATUSES.FAILED
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/magic-search?tab=processing-files"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Processing RFQs
+                </a>`
+              : ''
+          }
+        `;
+        subject = status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+          status == PERSISTENCE_STATUSES.COMPLETED
+            ? `Magic Search RFQ has been processed successfully`
+            : status == PERSISTENCE_STATUSES.FAILED
+            ? `Magic Search RFQ Processing was failed`
+            : `Magic Search RFQ status has been changed`;
+            
+        break;
+      
+    }
 
       const html = generateEmailTemplate(headerContent, containerContent);
 
       const mail = {
         from: Config.webmasterMail,
         to: email,
-        subject:
-          status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
-          status == PERSISTENCE_STATUSES.COMPLETED
-            ? `Magic Search RFQ has been processed successfully`
-            : status == PERSISTENCE_STATUSES.FAILED
-            ? `Magic Search RFQ Processing was failed`
-            : `Magic Search RFQ status has been changed`,
+        subject,
         html
       };
 
@@ -7464,7 +7513,7 @@ deleteDraft: async (req, res) => {
             (response.validation_errors ?? []).length > 0
               ? PERSISTENCE_STATUSES.PARTIAL_COMPLETED
               : PERSISTENCE_STATUSES.COMPLETED,
-            response.savedRfq,
+            response.saveEstimate,
             (response.validation_errors ?? []).length > 0 ? normalizeErrors({ type: 'ai-error', actual: response.validation_errors }) : null,
             jsonFileUrl,
           );
@@ -7505,6 +7554,22 @@ deleteDraft: async (req, res) => {
       return res.status(400).json({
         status: 3,
         message: 'Something went wrong while handling AI Webhook, please try again!',
+        error,
+      })
+    }
+  },
+
+  getCostEstimatesData: async (req, res) => {
+    try {
+      const { persistent_id } = req.params;
+      const estimates = await rfqModel.getEstimatesData(persistent_id);
+
+      return res.json(estimates);
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while fetching cost estimates, please try again!',
         error,
       })
     }

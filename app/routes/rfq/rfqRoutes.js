@@ -311,6 +311,11 @@ RfqRoutes.post('/estimate-cost',
   rfqController.estimateCost,
 )
 
+RfqRoutes.get('/get-cost-estimation/:persistent_id',
+  passportSignIn,
+  rfqController.getCostEstimatesData
+)
+
 RfqRoutes.get('/process-magic-search-draft',
   passportSignIn, 
   validateDbBody.user_id_profileexists,

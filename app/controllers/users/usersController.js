@@ -307,7 +307,7 @@ const UsersController = {
       const { name, companyName, email, mobile } = userData;
 
       if(!userData.password) {
-        userData.password = generateRandomString();
+        userData.password = generateRandomString(8);
       }
 
       const user_data = {
@@ -324,13 +324,16 @@ const UsersController = {
         is_private: 0
       };
 
-      const { company_id, user_id } = await userModel.company_registration(
+      const { company_id, user } = await userModel.company_registration(
         user_data,
         company_data
       );
       await continueBuyerCompanyRegistration(userData, company_id);
 
-      return { id: user_id };
+      return {
+        ...user,
+        password: userData.password
+      };
     } catch (error) {
       throw error;
     }
