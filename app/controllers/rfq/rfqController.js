@@ -30,6 +30,7 @@ import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { initiatePO } from '../po/purchaseOrderController.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
+import UsersController from '../users/usersController.js';
 
 const formatPersistentErrors = (errors) => {
   if(errors) {
@@ -247,6 +248,14 @@ const saveMagicSearchInDraft = async (data, createdBy, processedUrl, rfqId, shee
    
     const nextRfqNumber = await getNextRfQNumber()
     return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy, processedUrl, rfqId, sheetId);
+  } catch (error) {
+    throw error
+  }
+}
+
+const saveEstimates = async (data, createdBy) => {
+  try {
+    return await rfqModel.saveEstimatesInDB(data, createdBy);
   } catch (error) {
     throw error
   }
@@ -7194,6 +7203,116 @@ deleteDraft: async (req, res) => {
     }
   },
 
+  getCostEstimates: async (processedUrl) => {
+    try {
+
+      if (process.env.NODE_ENV=='uat' &&  processedUrl.startsWith('http:')) {
+        processedUrl = processedUrl.replace('http:', 'https:');
+      }
+  
+      const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
+  
+      const validationErrors = [];
+      const products = [];
+      const sheetNameList = new Set();
+      const globalVariantCount = {};
+  
+      const allProductIds = boqDataJson.map(item => item.variant_id).filter(item => typeof item == 'number' || typeof item == 'string');
+  
+      const uniqueProductIds = [...new Set(allProductIds)];
+      const existingProducts = await rfqModel.checkIfExists(
+        'tbl_product',
+        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+      );
+      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
+  
+      const quoteCache = {};
+  
+      for (const item of boqDataJson) {
+        if (item.is_product == "No") {
+          continue
+       }
+
+        const cleanId = item?.variant_id;
+        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
+  
+        if (!cleanId || item.fetched_product_name === 'Product not found') {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const validProductId = existingProductIdSet.has(cleanId) ? cleanId : null;
+  
+        if (!validProductId) {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const finalProductName = item.fetched_product_name || item.core_product_name;
+
+        if (!quoteCache[validProductId]) {
+          const quotes = await rfqModel.getEstimateQuotes(
+            validProductId,
+          );
+          quoteCache[validProductId] = quotes;
+        }
+  
+        const quotesResult = quoteCache[validProductId];
+  
+        if (!quotesResult || quotesResult.length === 0) {
+          validationErrors.push({
+            errors: {
+              quote: `${finalProductName} - No Quotes Found` },
+            name: finalProductName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const variantCount = globalVariantCount[validProductId] ?? 0;
+  
+        products.push({
+          product_id: validProductId,
+          name: finalProductName || "Unnamed Product",
+          variant: variantCount,
+          quantity: item.quantity,
+          quotes: quotesResult,
+        });
+  
+        globalVariantCount[validProductId] = variantCount + 1;
+        sheetNameList.add(item.sheet_name || "");
+      }
+  
+      const finalObject = {
+        products,
+        validationErrors,
+      };
+
+      // Comment if not needed
+      const uniqueErrors = validationErrors.filter((err, index, self) => 
+        index === self.findIndex(e => 
+          (e.errors?.product === err.errors?.product) && 
+          (e.errors?.quote === err.errors?.quote) && 
+          ((e.name || e.productName || '') === (err.name || err.productName || ''))
+        )
+      );
+
+      return [uniqueErrors, finalObject];
+    }
+    catch (error) {
+      logError(error);
+      return [null, null];
+    }
+  },
+
   initiateMagicSearch: async (req, res) => {
     try {
       const { id } = req.user;
@@ -7204,9 +7323,24 @@ deleteDraft: async (req, res) => {
         message: 'File name is required for persistant processing.'
       })
 
+      return await rfqController.handleMagicSearchInsertion(file_name, type, id);
+    } catch (error) {
+      console.log(error);
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while initiating the job, please try again!',
+        error,
+      })
+    }
+  },
+
+  handleMagicSearchInsertion: async (file_name, type, id) => {
+    try {
       let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id}`)
       if(processing && processing.length > 0) {
         processing = processing[0];
+        console.log("FOUND ALREADY PROCESSING TASK!")
 
         const inputUtcMoment = moment.utc(processing.started_at);
         const inputIstMoment = inputUtcMoment.tz('Asia/Kolkata');
@@ -7214,13 +7348,23 @@ deleteDraft: async (req, res) => {
 
         const diffInHours = nowIst.diff(inputIstMoment, 'hours', true);
         if(diffInHours > 2) {
-          await rfqModel.updatePersistenceJobStatus(processing.id, PERSISTENCE_STATUSES.TERMINATED, null, 'Due to a longer processing time, we have terminated this BOQ Processing, please upload this BOQ again to retry the processing');
+          await rfqModel.updatePersistenceJobStatus(
+            processing.id,
+            PERSISTENCE_STATUSES.TERMINATED,
+            null,
+            {
+              type: 'db-error',
+              actual: [
+                'Due to a longer processing time, we have terminated this BOQ Processing, please upload this BOQ again to retry the processing'
+              ]
+            }
+          );
         } else {
-          return res.status(400).json({
+          return {
             status: 5,
             message: 'This BOQ is already under processing, please refer to the Processing tab for more info!',
             processing,
-          })
+          }
         }
       }
       
@@ -7235,32 +7379,28 @@ deleteDraft: async (req, res) => {
         let persistence = await rfqModel.persistAIJobInDB(id, file_name, signature, type, t);
   
         if(!persistence || persistence.length <= 0) {
-          return res.status(400).json({
+          return {
             status: 3,
             message: 'Something went wrong while saving job, please try again!'
-          })
+          }
         }
   
         persistence = persistence[0];
   
-        const signedUrl = `${baseUrl}/api/v1/rfq/magic-webhook?persistence_id=${persistence.id}&user=${id}&file_name=${encodeURIComponent(
+        const signedUrl = `${baseUrl}/api/v1/rfq/magic-webhook?persistence_id=${
+          persistence.id
+        }&user=${id}&file_name=${encodeURIComponent(
           file_name
         )}&expires=${expires}&signature=${signature}`;
   
-        return res.json({
+        return {
           status: 1,
           persistence,
           webhook: signedUrl
-        })
+        }
       })
     } catch (error) {
-      console.log(error);
-      logError(error);
-      return res.status(400).json({
-        status: 3,
-        message: 'Something went wrong while initiating the job, please try again!',
-        error,
-      })
+      throw error;
     }
   },
 
@@ -7272,7 +7412,6 @@ deleteDraft: async (req, res) => {
       persistence_id = parseInt(persistence_id);
 
       if((errors && errors.length > 0) || (!jsonFileUrl || !availableSheets)) {
-        console.log("FOUND ERRORS FROM AI SERVER!", errors);
         await rfqModel.updatePersistenceJobStatus(
           persistence_id,
           PERSISTENCE_STATUSES.FAILED,
@@ -7285,8 +7424,6 @@ deleteDraft: async (req, res) => {
           message: 'Webhook triggered, errors handled!'
         })
       }
-
-      console.log("SAVING MAGIC SEARCH IN DB");
 
       if (type == 'simplified') {
         await rfqModel.updatePersistenceJobStatus(
@@ -7302,10 +7439,7 @@ deleteDraft: async (req, res) => {
           availableSheets,
           user
         );
-
-        console.log('SAVED MAGIC SEARCH IN DB');
         if (response.success) {
-          console.log('SUCCEDDED IN SAVING');
           await rfqModel.updatePersistenceJobStatus(
             persistence_id,
             (response.validation_errors ?? []).length > 0
@@ -7316,13 +7450,29 @@ deleteDraft: async (req, res) => {
             jsonFileUrl,
           );
 
-          console.log('UPDATED PERSISTENCE JOB IN DB');
         } else {
-          console.log('FAILED IN SAVING');
+          throw new Error(response.error || 'Magic search failed to be saved in the Database, please try again after some time...')
+        }
+      } else if (type == 'cost-estimation') {
+        const response = await rfqController.createCostEstimation(
+          jsonFileUrl,
+          user
+        );
+        if (response.success) {
+          await rfqModel.updatePersistenceJobStatus(
+            persistence_id,
+            (response.validation_errors ?? []).length > 0
+              ? PERSISTENCE_STATUSES.PARTIAL_COMPLETED
+              : PERSISTENCE_STATUSES.COMPLETED,
+            response.savedRfq,
+            (response.validation_errors ?? []).length > 0 ? normalizeErrors({ type: 'ai-error', actual: response.validation_errors }) : null,
+            jsonFileUrl,
+          );
+
+        } else {
           throw new Error(response.error || 'Magic search failed to be saved in the Database, please try again after some time...')
         }
       } else {
-        console.log('FAILED TO SAVE');
         await rfqModel.updatePersistenceJobStatus(
           persistence_id,
           PERSISTENCE_STATUSES.FAILED,
@@ -7335,7 +7485,6 @@ deleteDraft: async (req, res) => {
             }]
           })
         );
-        console.log('UPDATED PERSISTENCE JOB IN DB');
       }
 
       return res.json({
@@ -7343,7 +7492,6 @@ deleteDraft: async (req, res) => {
         message: 'Webhook triggered!'
       })
     } catch (error) {
-      console.log("FAILED TERIBBLY BACAUSE: ", error);
       const { persistence_id } = req.query;
       await rfqModel.updatePersistenceJobStatus(persistence_id, PERSISTENCE_STATUSES.FAILED, null, normalizeErrors({
         type: 'backend-error',
@@ -7352,8 +7500,48 @@ deleteDraft: async (req, res) => {
           error: error.message,
         }]
       }));
-      console.log("UPDATED PERSISTENCE JOB IN DB");
 
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while handling AI Webhook, please try again!',
+        error,
+      })
+    }
+  },
+
+  estimateCost: async (req, res) => {
+    try {
+      const { email, phone, file_name, type } = req.body;
+      let user = req.user ?? null;
+      let didUserRegister = false;
+
+      if(!user) {
+        const userExists = await userModel.user_exist(email, phone);
+        if(userExists && userExists.length > 0) {
+          return res.status(403).json({
+            status: 3,
+            message: 'User already exist with given credentials, please login!'
+          })
+        }
+  
+        const registeredUser = await UsersController.registerBuyerAnonymously(req.body);
+        if(!registeredUser) {
+          return res.status(400).json({
+            status: 3,
+            message: 'Failed to register, please try again later. If this issue persists please contact our support team!'
+          })
+        }
+
+        user = registeredUser;
+        didUserRegister = true;
+      }
+
+      const processingRes = await rfqController.handleMagicSearchInsertion(file_name, type, user.id);
+
+      return res.status(processingRes.status != 1 ? 400 : 200).json({ ...processingRes, didUserRegister, user });
+    } catch (error) {
+      logError(error);
       return res.status(400).json({
         status: 3,
         message: 'Something went wrong while handling AI Webhook, please try again!',
@@ -7389,6 +7577,38 @@ deleteDraft: async (req, res) => {
         success: true,
         savedRfq,
         sheets,
+        data: processedData, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
+        validation_errors: validationErrors.length ? validationErrors : null,
+      };
+  
+    } catch (error) {
+      logError(error);
+      return {
+        success: false,
+        message: 'Magic search failed to complete the action, Please try again.',
+        error: error,
+      };
+    }
+  },
+
+  createCostEstimation: async (jsonFileUrl, user_id) => {
+    try {
+      let aiProcessedBoqJson = jsonFileUrl;
+  
+      let user = await userModel.getUserById(user_id);
+      if(!user) throw new Error('User dont exist with id: ', user_id);
+
+      user = user[0];
+
+      const [validationErrors, processedData] = await rfqController.getCostEstimates(aiProcessedBoqJson, user)
+      if(!processedData && !validationErrors) throw new Error("No Data processed!")
+
+      const saveEstimate = await saveEstimates(processedData, user_id)
+  
+      return {
+        status: 1,
+        success: true,
+        saveEstimate,
         data: processedData, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
         validation_errors: validationErrors.length ? validationErrors : null,
       };

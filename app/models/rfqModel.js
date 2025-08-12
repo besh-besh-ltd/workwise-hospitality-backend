@@ -3,7 +3,7 @@ import Config from '../config/app.config.js';
 import generalModel from './generalModel.js';
 import userModel from './userModel.js';
 import cmsModel from './cmsModel.js';
-import { PERSISTENCE_STATUSES } from '../helper/common.js';
+import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 
 const rfqModel = {
@@ -544,6 +544,69 @@ const rfqModel = {
         await rfqModel.update('tbl_rfq_draft_sheets', updatableData, sheet.id, t);
 
         return rfq_id;
+      });
+
+    } catch (error) {
+      console.error('Transaction failed. All operations rolled back.', error);
+      throw error;
+    }
+  },
+
+  saveEstimatesInDB: async (data, createdBy) => {
+    try {
+      let estimatesQuery = ``;
+      let estimateQueryValues = [];
+
+      estimatesQuery = `
+        INSERT INTO tbl_quote_estimates (
+          user_id
+        )
+        VALUES (
+          $1,
+        )
+        RETURNING id
+      `;
+
+      const estimatesValues = [
+        createdBy,
+      ];
+
+      estimateQueryValues.push(...estimatesValues);
+
+      const estimateResult = await t.one(rfqQuery, rfqQueryValues);
+
+      return await db.tx(async t => {
+        for (const product of data.products) {
+          const estimatesItemQuery = `
+            INSERT INTO tbl_quote_estimates_item (
+              quote_estimates_id,
+              product_variant_id,
+              lowest_price,
+              average_price,
+              highest_price
+            )
+            VALUES (
+              $1, 
+              $2, 
+              $3, 
+              $4, 
+              $5
+            )
+            RETURNING id
+          `;
+
+          const estimatesItemValues = [
+            estimateResult.id,
+            product.product_id,
+            product.quotes?.lowest_price ?? null,
+            product.quotes?.average_price ?? null,
+            product.quotes?.highest_price ?? null,
+          ];
+
+          await t.one(estimatesItemQuery, estimatesItemValues);
+        }
+
+        return estimateResult.id;
       });
 
     } catch (error) {
@@ -2562,7 +2625,31 @@ LIMIT 1;`;
         });
     });
 },
+  getEstimateQuotes: async (product_variant_id) => {
+    try {
+      let q = `
+        SELECT *
+          FROM (
+                  SELECT
+                      MIN(unit_price) AS lowest_price,
+                      ROUND(AVG(unit_price)::numeric, 2) AS average_price,
+                      MAX(unit_price) AS highest_price
+                  FROM tbl_quote_items
+                  WHERE product_variant_id = $1
+                  AND unit_price > 0
+              ) t
+          WHERE t.lowest_price IS NOT NULL
+            OR t.average_price IS NOT NULL
+            OR t.highest_price IS NOT NULL;
+      `
 
+      const res = db.oneOrNone(q, [product_variant_id]);
+      return res;
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
+  },
 
 
   getQuotesByRfqById2: async (id, user_id, company_id, TA_Vendors, no_freight) => {

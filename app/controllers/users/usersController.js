@@ -302,6 +302,40 @@ const UsersController = {
     }
   },
 
+  registerBuyerAnonymously: async (userData) => {
+    try {
+      const { name, companyName, email, mobile } = userData;
+
+      if(!userData.password) {
+        userData.password = generateRandomString();
+      }
+
+      const user_data = {
+        name: name || null,
+        email: email?.toLowerCase() || null,
+        mobile: mobile || null,
+        user_type: 7,
+        status: 1,
+        password: generatePassword(userData.password)
+      };
+
+      const company_data = {
+        company_name: companyName || null,
+        is_private: 0
+      };
+
+      const { company_id, user_id } = await userModel.company_registration(
+        user_data,
+        company_data
+      );
+      await continueBuyerCompanyRegistration(userData, company_id);
+
+      return { id: user_id };
+    } catch (error) {
+      throw error;
+    }
+  },
+
 
 /**
  * mukul - 09-06-2025 created

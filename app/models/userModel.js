@@ -3609,8 +3609,8 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
       db.any(
         `SELECT *
         FROM tbl_users
-        WHERE email = $1
-        OR mobile = $2;`,
+        WHERE (email = $1 AND $1 IS NOT NULL)
+        OR (mobile = $2 AND $2 IS NOT NULL);`,
         [email,mobile]
       )
         .then(function (data) {
