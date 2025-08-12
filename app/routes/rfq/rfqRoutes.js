@@ -92,6 +92,11 @@ RfqRoutes.get(
   rfqController.getRfqById
 );
 
+RfqRoutes.get('/targetPriceHistory/:rfq_product_id',
+  passportSignIn,
+  rfqController.getTargetPricehistory
+)
+
 RfqRoutes.post(
   '/getMyRfq',
   passportSignIn,
@@ -341,6 +346,25 @@ RfqRoutes.post(
   validateBody(rfqSchemas.sendMessage),
   rfqController.sendQueryMessage
 );
+RfqRoutes.post(
+  '/send-query-message-to-vendor',
+  noLogin.customer_auth,
+  rfqSchemas.queryMessageFileUploadHandler,
+  // validateDbBody.rfq_access_check_req_body,
+  // validateBody(rfqSchemas.sendMessageToVendors),
+  rfqController.sendBroadcastQueryMessageToVendors
+);
+
+RfqRoutes.post(
+  '/negotiate',
+  passportSignIn,
+  rfqController.negotiatePrice
+)
+
+RfqRoutes.get('/targetPrice/:rfq_product_id',
+  passportSignIn,
+  rfqController.getTargetPriceHistrory  
+)
 
 RfqRoutes.post(
   '/list-query-messages',
