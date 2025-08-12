@@ -2466,28 +2466,27 @@ LIMIT 1;`;
                     'mobile', TU.mobile,
                     'address', TU.address,
 
-                     -- add this field here
-                     'payment_terms',
-                     (
-                       SELECT COALESCE(
-                         json_agg(
-                           json_build_object(
-                             'id', TQPT.id,
-                             'type', TQPT.type,
-                             'value', TQPT.value,
-                             'days', TQPT.days,
-                             'comment', TQPT.comment,
-                             'timestamp', TQPT.timestamp,
-                             'created_by', TQPT.created_by
-                           )
-                           ORDER BY TQPT.id
-                         ),
-                         '[]'::json
-                       )
-                       FROM tbl_quotes_payment_terms TQPT
-                       WHERE TQPT.quote_id = TQ.id
-                     ),
-
+                     -- added payment terms list this field here
+                       'payment_terms',
+                          (
+                            SELECT COALESCE(
+                              json_agg(
+                                json_build_object(
+                                  'id', TQPT.id,
+                                  'type', TQPT.type,
+                                  'value', TQPT.value,
+                                  'days', TQPT.days,
+                                  'comment', TQPT.comment,
+                                  'timestamp', TQPT.timestamp,
+                                  'created_by', TQPT.created_by
+                                )
+                                ORDER BY TQPT.id
+                              ),
+                              '[]'::json
+                            )
+                            FROM tbl_quotes_payment_terms TQPT
+                            WHERE TQPT.quote_id = TQ.id
+                          ),
 
                     'organization_name', COALESCE(TCC.company_name, TU.organization_name, TU.name),
                     'global_payment_term', (
@@ -3130,6 +3129,8 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
     // Check if search_key looks like a slug (no spaces and either contains hyphens or is a single word)
     const isSlugSearch = search_key && !search_key.includes(' ') && (search_key.includes('-') || search_key.length > 0);
     
+    console.log("  search_key, category_id, approved_by_id, locationFilters =>>>>>>>>>>>>>>>>. ", locationFilters)
+
     let q = `
       SELECT DISTINCT p.id AS product_id,
                       p.name AS product_name,
@@ -3169,6 +3170,13 @@ getRFQActivity: async (rfq_id, user_id, date = null) => {
         ${approved_by_id ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)` : ``}
       ORDER BY rank DESC, similarity_score DESC, CONCAT(pv.name, ' - ', p.name) ASC ;
     `;
+
+
+    console.log(" ===============================================  ")
+    console.log(q)
+    console.log(" ===============================================  ")
+
+
 
     // Assuming db.query can handle parameterized queries:
     return new Promise(function (resolve, reject) {
