@@ -5403,13 +5403,13 @@ deleteDraft: async (req, res) => {
         }
       }
       
-      // Default to India
-      if (!locationFilters.country_id) {
-        const indiaResult = await cmsModel.findCountryByName('India');
-        if (indiaResult) {
-          locationFilters.country_id = indiaResult.id;
-        }
-      }
+      // // Default to India
+      // if (!locationFilters.country_id) {
+      //   const indiaResult = await cmsModel.findCountryByName('India');
+      //   if (indiaResult) {
+      //     locationFilters.country_id = indiaResult.id;
+      //   }
+      // }
 
       const productResult = await rfqModel.searchProduct(productSlug, category_id, approved_by_id, locationFilters);
       const categoryResult = await rfqModel.getCategoryList(productSlug);
