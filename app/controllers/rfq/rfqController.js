@@ -7615,6 +7615,49 @@ deleteDraft: async (req, res) => {
     }
   },
 
+  tenderSummary : async (req , res) =>{
+
+    try {
+      const { email, phone, file_name, type } = req.body;
+      let user = req.user ?? null;
+      let didUserRegister = false;
+
+      if(!user) {
+        const userExists = await userModel.user_exist(email, phone);
+        if(userExists && userExists.length > 0) {
+          return res.status(403).json({
+            status: 3,
+            message: 'User already exist with given credentials, please login!'
+          })
+        }
+  
+        const registeredUser = await UsersController.registerBuyerAnonymously(req.body);
+        if(!registeredUser) {
+          return res.status(400).json({
+            status: 3,
+            message: 'Failed to register, please try again later. If this issue persists please contact our support team!'
+          })
+        }
+
+        user = registeredUser;
+        didUserRegister = true;
+      }
+       return res.status(200).json({status : 1 , message : "SuccessFully genenrated"})
+      // const processingRes = await rfqController.handleMagicSearchInsertion(file_name, type, user.id);
+
+      // return res.status(processingRes.status != 1 ? 400 : 200).json({ ...processingRes, didUserRegister, user });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while handling AI Webhook, please try again!',
+        error,
+      })
+    }
+
+  },
+
+
   // mukul - 21-05-2025, removed file handling as now we just get json url in request, also reviewed we handling many fields in payload but in api call we just get json url, not removing them now as very soon we start this flow enhancements
   // Kushal - 21-05-2025, Highly optimized to handle large datasets
   // Kushal - 23-05-2025, Completed Sheet wise processing while saving Draft of Magic Search

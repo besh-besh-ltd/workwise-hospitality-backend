@@ -315,6 +315,10 @@ RfqRoutes.get('/get-cost-estimation/:persistent_id',
   passportSignIn,
   rfqController.getCostEstimatesData
 )
+RfqRoutes.post('/tender-summary',
+  noLogin.customer_auth,
+  rfqController.tenderSummary
+)
 
 RfqRoutes.get('/process-magic-search-draft',
   passportSignIn, 
