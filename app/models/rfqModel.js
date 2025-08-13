@@ -1827,13 +1827,13 @@ const productQuery = `
             FROM tbl_rfq_product_files RPF
             WHERE RPF.rfq_product_id = RFQ_P.id
               AND RPF.file_type = 'QAP'
-        ) AS QAP_files,
+        ) AS qap_file,
         (
             SELECT json_agg(RPF.file_url)
             FROM tbl_rfq_product_files RPF
             WHERE RPF.rfq_product_id = RFQ_P.id
               AND RPF.file_type = 'SPEC'
-        ) AS spec_files,
+        ) AS spec_file,
           'latest_target_price', (
             SELECT tptp.target_price
             FROM tbl_rfq_product_target_price tptp
@@ -1846,7 +1846,7 @@ const productQuery = `
             FROM tbl_rfq_product_files RPF
             WHERE RPF.rfq_product_id = RFQ_P.id
               AND RPF.file_type = 'TDS'
-        ) AS datasheet_files,
+        ) AS datasheet_file,
         (
             SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title,'value', RFQ_P_SPEC.value))
             FROM tbl_rfq_products_specs RFQ_P_SPEC
