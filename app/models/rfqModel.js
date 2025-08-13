@@ -1758,7 +1758,27 @@ const rfqModel = {
       WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
     ) AS "TERM_files",
     ARRAY(
-      SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
+    SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
+
+    -- payment term list 
+    'payment_terms', COALESCE(
+      (
+        SELECT json_agg(
+          json_build_object(
+            'id', QPT.id,
+            'type', QPT.type,
+            'value', QPT.value,
+            'days', QPT.days,
+            'comment', QPT.comment
+          )
+          ORDER BY QPT.id
+        )
+        FROM tbl_quotes_payment_terms QPT
+        WHERE QPT.quote_id = TQ.id
+      ),
+      '[]'::json
+    ),
+
         'products', (
           SELECT json_agg(
             json_build_object(
@@ -2685,6 +2705,29 @@ const productQuery = `
                     'email', TU.email,
                     'mobile', TU.mobile,
                     'address', TU.address,
+
+                     -- added payment terms list this field here
+                       'payment_terms',
+                          (
+                            SELECT COALESCE(
+                              json_agg(
+                                json_build_object(
+                                  'id', TQPT.id,
+                                  'type', TQPT.type,
+                                  'value', TQPT.value,
+                                  'days', TQPT.days,
+                                  'comment', TQPT.comment,
+                                  'timestamp', TQPT.timestamp,
+                                  'created_by', TQPT.created_by
+                                )
+                                ORDER BY TQPT.id
+                              ),
+                              '[]'::json
+                            )
+                            FROM tbl_quotes_payment_terms TQPT
+                            WHERE TQPT.quote_id = TQ.id
+                          ),
+
                     'organization_name', COALESCE(TCC.company_name, TU.organization_name, TU.name),
                     'global_payment_term', (
                         SELECT json_agg(json_build_object('details', TQ_inner.global_payment_term,'comment', TQ_inner.global_comment))
@@ -2716,6 +2759,7 @@ const productQuery = `
                     'regret_reason', TQ.regret_reason,
                     'global_payment_term', TQ.global_payment_term,
                     'global_comment', TQ.global_comment,
+
                     'vendor_details', (
                         SELECT json_agg(json_build_object(
                             'id', TU.id,
@@ -3048,6 +3092,28 @@ const productQuery = `
               ),
               'global_payment_term', TQ.global_payment_term,
               'global_comment', TQ.global_comment,
+              
+              -- payment term list
+               'payment_terms',
+               (
+                 SELECT COALESCE(
+                   json_agg(
+                     json_build_object(
+                       'id', TQPT.id,
+                       'type', TQPT.type,
+                       'value', TQPT.value,
+                       'days', TQPT.days,
+                       'comment', TQPT.comment,
+                       'timestamp', TQPT.timestamp,
+                       'created_by', TQPT.created_by
+                     )
+                     ORDER BY TQPT.id
+                   ),
+                   '[]'::json
+                 )
+                 FROM tbl_quotes_payment_terms TQPT
+                 WHERE TQPT.quote_id = TQ.id
+               ),
               'previous_quotes', (
                 SELECT json_agg(json_build_object(
                     'id', TH.id,
@@ -3394,6 +3460,13 @@ const productQuery = `
         }
       ORDER BY rank DESC, similarity_score DESC, CONCAT(pv.name, ' - ', p.name) ASC ;
     `;
+
+
+    console.log(" ===============================================  ")
+    console.log(q)
+    console.log(" ===============================================  ")
+
+
 
     // Assuming db.query can handle parameterized queries:
     return new Promise(function (resolve, reject) {

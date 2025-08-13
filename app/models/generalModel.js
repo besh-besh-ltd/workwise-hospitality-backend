@@ -120,6 +120,87 @@ const generalModel = {
     });
   },
 
+
+  /**
+  created_by 13-08-2025 Mukul Jatav
+ updateMany: batch update rows by a key (default "id") using a single SQL statement with CASE expressions.
+ - Prevents SQL injection for values via positional placeholders
+ - Validates inputs; throws descriptive errors
+ - Returns all updated rows
+NOTE: Consider maintaining a whitelist of allowed table names elsewhere (same as insertMany).
+
+Example usage:
+const rows = [ { id: 8, type: 'credit', value: 10, days: 2, comment: null } ];
+await generalModel.updateMany('tbl_quote_payment_terms', rows); 
+*/
+    updateMany: async (tableName, rows, key = 'id') => {
+    if (!tableName) throw new Error('Table name is required.');
+    if (!Array.isArray(rows) || rows.length === 0) {
+      throw new Error('Non-empty array of rows is required.');
+    }
+
+    // Ensure all rows have the key and same columns
+    const allKeysPresent = rows.every(r => Object.prototype.hasOwnProperty.call(r, key));
+    if (!allKeysPresent) {
+      throw new Error(`Every row must include the primary key "${key}".`);
+    }
+
+    // Build set of columns to update (exclude the key)
+    const columns = Object.keys(rows[0]).filter(c => c !== key);
+    if (columns.length === 0) {
+      throw new Error('No updatable columns found (only key present).');
+    }
+
+    // Optional: ensure all rows have the same column set
+    for (const r of rows) {
+      const cols = Object.keys(r).filter(c => c !== key);
+      if (cols.length !== columns.length || !columns.every(c => cols.includes(c))) {
+        throw new Error('All rows must have the same set of columns to update.');
+      }
+    }
+
+    // Build CASE expressions for each column
+    // "col" = CASE "key" WHEN $1 THEN $2 WHEN $3 THEN $4 ... ELSE "col" END
+    const values = [];
+    const setClauses = columns.map(col => {
+      const whens = rows.map(r => {
+        values.push(r[key]);      // WHEN <id>
+        values.push(r[col]);      // THEN <value>
+        const a = values.length - 1;
+        const b = values.length;
+        return `WHEN $${a} THEN $${b}`;
+      }).join(' ');
+
+      return `"${col}" = CASE "${key}" ${whens} ELSE "${col}" END`;
+    }).join(', ');
+
+    // WHERE "key" IN (...)
+    const idPlaceholders = rows.map(r => {
+      values.push(r[key]);
+      return `$${values.length}`;
+    }).join(', ');
+
+    const query = `
+      UPDATE ${tableName}
+      SET ${setClauses}
+      WHERE "${key}" IN (${idPlaceholders})
+      RETURNING *;
+    `;
+
+    try {
+      const updated = await db.any(query, values);
+      return updated;
+    } catch (err) {
+      // Log with context; rethrow a clean error
+      console.error(`updateMany failed for ${tableName}:`, {
+        message: err?.message,
+        code: err?.code,
+        detail: err?.detail
+      });
+      throw new Error('Failed to batch update records. Please try again or check server logs.');
+    }
+  },
+
   getStates: async () => {
     return new Promise(function (resolve, reject) {
       db.any(`SELECT * FROM tbl_location_states ORDER BY state_name ASC`)
