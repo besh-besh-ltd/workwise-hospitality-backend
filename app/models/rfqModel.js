@@ -313,7 +313,7 @@ const rfqModel = {
       ]);
 
       // Notify buyer about the persistence completion, Whatsapp integration pending!!
-      notifyBuyerOnPersistenceViaEmail(user, persistence.status, status, persisted_rfq_id, errors);
+      notifyBuyerOnPersistenceViaEmail(user, persistence.status, status, persisted_rfq_id, errors, persistence.id, persistence.type);
 
       return updatedPersistence;
     } catch (error) {
@@ -554,59 +554,59 @@ const rfqModel = {
 
   saveEstimatesInDB: async (data, createdBy) => {
     try {
-      let estimatesQuery = ``;
-      let estimateQueryValues = [];
+      return db.tx(async (t) => {
+        let estimatesQuery = ``;
+        let estimateQueryValues = [];
 
-      estimatesQuery = `
-        INSERT INTO tbl_quote_estimates (
-          user_id
-        )
-        VALUES (
-          $1,
-        )
-        RETURNING id
-      `;
+        estimatesQuery = `
+          INSERT INTO tbl_quote_estimates (
+            user_id
+          )
+          VALUES (
+            $1
+          )
+          RETURNING id
+        `;
 
-      const estimatesValues = [
-        createdBy,
-      ];
+        const estimatesValues = [createdBy];
 
-      estimateQueryValues.push(...estimatesValues);
+        estimateQueryValues.push(...estimatesValues);
 
-      const estimateResult = await t.one(rfqQuery, rfqQueryValues);
+        const estimateResult = await t.one(estimatesQuery, estimateQueryValues);
 
-      return await db.tx(async t => {
-        for (const product of data.products) {
-          const estimatesItemQuery = `
-            INSERT INTO tbl_quote_estimates_item (
-              quote_estimates_id,
-              product_variant_id,
-              lowest_price,
-              average_price,
-              highest_price
-            )
-            VALUES (
-              $1, 
-              $2, 
-              $3, 
-              $4, 
-              $5
-            )
-            RETURNING id
-          `;
+        return await db.tx(async (t) => {
+          for (const product of data.products) {
+            const estimatesItemQuery = `
+              INSERT INTO tbl_quote_estimates_item (
+                quote_estimates_id,
+                product_variant_id,
+                lowest_price,
+                average_price,
+                highest_price
+              )
+              VALUES (
+                $1, 
+                $2, 
+                $3, 
+                $4, 
+                $5
+              )
+              RETURNING id
+            `;
 
-          const estimatesItemValues = [
-            estimateResult.id,
-            product.product_id,
-            product.quotes?.lowest_price ?? null,
-            product.quotes?.average_price ?? null,
-            product.quotes?.highest_price ?? null,
-          ];
+            const estimatesItemValues = [
+              estimateResult.id,
+              product.product_id,
+              product.quotes?.lowest_price ?? null,
+              product.quotes?.average_price ?? null,
+              product.quotes?.highest_price ?? null
+            ];
 
-          await t.one(estimatesItemQuery, estimatesItemValues);
-        }
+            await t.one(estimatesItemQuery, estimatesItemValues);
+          }
 
-        return estimateResult.id;
+          return estimateResult.id;
+        });
       });
 
     } catch (error) {
@@ -2625,6 +2625,41 @@ LIMIT 1;`;
         });
     });
 },
+  getEstimatesData: async (persistent_id) => {
+    try {
+      const [persistentData, estimatesData] = await db.tx(async t => {
+        let persistenceQuery = `
+        SELECT * FROM tbl_rfq_persistent_jobs TQPJ
+        WHERE TQPJ.id = $1 AND status IN ('completed', 'partially_completed');
+        `
+        const persistentData = await t.one(persistenceQuery, [persistent_id]);
+  
+        let estimateQuery = `
+         SELECT * FROM tbl_quote_estimates TQE
+         WHERE TQE.id = $1
+        `
+
+        const estimateData = await t.one(estimateQuery, [persistentData.persisted_rfq_id])
+  
+        let estimateItemsQuery = `
+          SELECT TQEI.*, TPV.name AS product_name FROM tbl_quote_estimates_item TQEI
+          JOIN tbl_product_variant TPV ON TQEI.product_variant_id = TPV.id
+          WHERE TQEI.quote_estimates_id = $1
+        `
+
+        const items = await t.any(estimateItemsQuery, [estimateData.id]);
+
+        return [persistentData, { estimates: estimateData, items }];
+      }) 
+
+      return {
+        persistent: persistentData,
+        estimates: estimatesData
+      }
+    } catch (error) {
+      throw error;
+    }
+  },
   getEstimateQuotes: async (product_variant_id) => {
     try {
       let q = `
