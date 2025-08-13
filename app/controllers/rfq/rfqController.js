@@ -7711,6 +7711,7 @@ deleteDraft: async (req, res) => {
       products,
       globalPaymentTerms,
       globalComment,
+      global_payment_term_list,
       term_and_condition_files
     } = req.body;
 
@@ -7894,6 +7895,33 @@ deleteDraft: async (req, res) => {
           await rfqModel.insert('tbl_quotes_files', fileData);
         }
       }
+
+      // delete payment terms list
+      const deletedTerms = global_payment_term_list.deletedTerms || [];
+      if(deletedTerms.length>0){
+        await generalModel.deleteManyByIds("tbl_quotes_payment_terms", deletedTerms)
+      }
+
+      // update payment terms list
+      const updatedTerms = global_payment_term_list.updatedTerms || [];
+     if (updatedTerms.length>0) {
+       await generalModel.updateMany("tbl_quotes_payment_terms", updatedTerms, "id");
+     }
+
+      // insert new payment terms list       
+      const createdTerms = global_payment_term_list?.createdTerms ?? [];
+      if (createdTerms.length > 0) {
+        const termsWithQuoteId = createdTerms.map(({ action, ...t }) => ({
+          value: Number(t.value) || 0,
+          type: t.type || "advance",
+          days: t.type === 'credit' && t.days != null ? Number(t.days) : null,
+          comment: t.comment?.trim() || null,
+          quote_id: quoteId,
+          created_by: user.id,
+        }));
+        await generalModel.insertMany("tbl_quotes_payment_terms", termsWithQuoteId);
+      }
+
 
 
       // Insert new document_files for each product if exists
