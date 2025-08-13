@@ -4338,6 +4338,7 @@ deleteDraft: async (req, res) => {
       products,
       globalPaymentTerms,
       globalComment,
+      global_payment_term_list,
       term_and_condition_files,
       is_regret,
       regret_reason
@@ -4713,6 +4714,34 @@ deleteDraft: async (req, res) => {
                   await rfqModel.insert('tbl_quotes_files', fileData, t);
                 }
               }
+
+             // Payment Terms (tbl_quotes_payment_terms)
+             if (Array.isArray(global_payment_term_list) && global_payment_term_list.length) {
+               const rows = global_payment_term_list
+                 .filter(r => r && r.type && r.value != null)
+                 .map(r => {
+                   const type = String(r.type).toLowerCase();
+                   return ['advance','credit','other'].includes(type) ? {
+                     quote_id: created_quote_id,
+                     value: Number(r.value) || 0,
+                     type,
+                     days: type === 'credit' && r.days != null ? Number(r.days) : null,
+                     comment: r.comment?.trim() || null,
+                     created_by: req.user.id,
+                   } : null;
+                 })
+                 .filter(Boolean);
+             
+               if (rows.length) {
+                 await rfqModel.insertArray(
+                   rows,
+                   ['quote_id','value','type','days','comment','created_by'],
+                   'tbl_quotes_payment_terms',
+                   t
+                 );
+               }
+             }
+           //  save payment term array
   
               // adding the quote_id
               quote_items_data.map((item)=> item.quote_id=created_quote_id);
@@ -7682,6 +7711,7 @@ deleteDraft: async (req, res) => {
       products,
       globalPaymentTerms,
       globalComment,
+      global_payment_term_list,
       term_and_condition_files
     } = req.body;
 
@@ -7865,6 +7895,33 @@ deleteDraft: async (req, res) => {
           await rfqModel.insert('tbl_quotes_files', fileData);
         }
       }
+
+      // delete payment terms list
+      const deletedTerms = global_payment_term_list.deletedTerms || [];
+      if(deletedTerms.length>0){
+        await generalModel.deleteManyByIds("tbl_quotes_payment_terms", deletedTerms)
+      }
+
+      // update payment terms list
+      const updatedTerms = global_payment_term_list.updatedTerms || [];
+     if (updatedTerms.length>0) {
+       await generalModel.updateMany("tbl_quotes_payment_terms", updatedTerms, "id");
+     }
+
+      // insert new payment terms list       
+      const createdTerms = global_payment_term_list?.createdTerms ?? [];
+      if (createdTerms.length > 0) {
+        const termsWithQuoteId = createdTerms.map(({ action, ...t }) => ({
+          value: Number(t.value) || 0,
+          type: t.type || "advance",
+          days: t.type === 'credit' && t.days != null ? Number(t.days) : null,
+          comment: t.comment?.trim() || null,
+          quote_id: quoteId,
+          created_by: user.id,
+        }));
+        await generalModel.insertMany("tbl_quotes_payment_terms", termsWithQuoteId);
+      }
+
 
 
       // Insert new document_files for each product if exists
