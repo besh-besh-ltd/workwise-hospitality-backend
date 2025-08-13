@@ -4009,6 +4009,8 @@ WHERE row_num_by_name_category = 1
       throw new Error('Buyer not found or no company associated');
     const companyId = buyer.company_id;
 
+    console.log(" mukul  =>         ", buyer)
+
     let q = `
     SELECT *
     FROM (
@@ -4019,36 +4021,18 @@ WHERE row_num_by_name_category = 1
             tu.mobile,
             tc.company_name AS company_name,
             tu.address,
-            ${
-              vendor_name
-                ? "ts_rank_cd(to_tsvector('english', tc.company_name), plainto_tsquery('english', $2)) AS rank,"
-                : ''
-            }
-            ${
-              vendor_name
-                ? 'word_similarity(lower(tc.company_name), lower($2)) as similarity_score,'
-                : ''
-            }
-            ${
-              vendor_name
-                ? `CASE
-                WHEN lower(tc.company_name) LIKE lower($2) || '%' THEN 1
+            ${vendor_name ? "ts_rank_cd(to_tsvector('english', tc.company_name), plainto_tsquery('english', $1)) AS rank," : ''}
+            ${vendor_name ? 'word_similarity(lower(tc.company_name), lower($1)) as similarity_score,' : ''}
+            ${vendor_name ? `CASE
+                WHEN lower(tc.company_name) LIKE lower($1) || '%' THEN 1
                 ELSE 0
-            END AS starts_with_input,`
-                : ''
-            }
-            ${
-              vendor_name
-                ? `CASE
-              WHEN lower(tc.company_name) ~* ('(^|\\s)' || lower($2) || '(\\s|$)') THEN 1
+            END AS starts_with_input,` : ''}
+            ${vendor_name ? `CASE
+              WHEN lower(tc.company_name) ~* ('(^|\\s)' || lower($1) || '(\\s|$)') THEN 1
               ELSE 0
-            END AS exact_word_match,`
-                : ''
-            }
-            ${
-              vendor_name
-                ? `CASE
-              WHEN position(lower($2) in lower(tc.company_name)) > 0 THEN 1
+            END AS exact_word_match,` : ''}
+            ${vendor_name ? `CASE
+              WHEN position(lower($1) in lower(tc.company_name)) > 0 THEN 1
               ELSE 0
             END AS partial_word_match,`
                 : ''
@@ -4076,15 +4060,11 @@ WHERE row_num_by_name_category = 1
                 tc.is_private = 0 -- Public vendors
                 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL) -- Privately mapped vendors for this buyer
             )
-            ${
-              vendor_name
-                ? `AND (
-                to_tsvector('english', tc.company_name) @@ plainto_tsquery('english', $2)
-                OR (char_length($2) = 1 AND similarity(tc.company_name, $2) > 0)
-                OR (char_length($2) > 1 AND similarity(tc.company_name, $2) > 0.1)
-            )`
-                : ''
-            }
+            ${vendor_name ? `AND (
+                to_tsvector('english', tc.company_name) @@ plainto_tsquery('english', $1)
+                OR (char_length($1) = 1 AND similarity(tc.company_name, $1) > 0)
+                OR (char_length($1) > 1 AND similarity(tc.company_name, $1) > 0.1)
+            )` : ''}
     ) AS distinct_vendors
     ORDER BY
       is_linked_with_buyer DESC,
@@ -4097,12 +4077,17 @@ WHERE row_num_by_name_category = 1
 
     const values = vendor_name ? [vendor_name] : [];
 
+    console.log("   values ", values)
+
     return new Promise(function (resolve, reject) {
       db.query(q, values)
         .then(function (data) {
           resolve(data);
         })
         .catch(function (err) {
+          console.log(" ---------------------------------  ")
+          console.log(err)
+          console.log(" ---------------------------------  ")
           let error = new Error(err);
           reject(error);
         });
