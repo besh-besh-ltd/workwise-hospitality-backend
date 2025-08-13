@@ -7577,7 +7577,7 @@ deleteDraft: async (req, res) => {
         user = registeredUser;
         didUserRegister = true;
       }
-       return res.status(200).json({status : 1 , message : "SuccessFully genenrated"})
+       return res.status(200).json({status : 1 ,didUserRegister, user, message : "SuccessFully genenrated"})
       // const processingRes = await rfqController.handleMagicSearchInsertion(file_name, type, user.id);
 
       // return res.status(processingRes.status != 1 ? 400 : 200).json({ ...processingRes, didUserRegister, user });
