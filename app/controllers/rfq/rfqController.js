@@ -31,6 +31,7 @@ import { deleteSchedule } from '../../helper/createSchedule.js';
 import { initiatePO } from '../po/purchaseOrderController.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
+import { summaries } from '../../util/constants.js';
 
 const formatPersistentErrors = (errors) => {
   if(errors) {
@@ -7618,7 +7619,7 @@ deleteDraft: async (req, res) => {
   tenderSummary : async (req , res) =>{
 
     try {
-      const { email, phone, file_name, type } = req.body;
+      const { email, phone, file_name } = req.body;
       let user = req.user ?? null;
       let didUserRegister = false;
 
@@ -7642,7 +7643,24 @@ deleteDraft: async (req, res) => {
         user = registeredUser;
         didUserRegister = true;
       }
-       return res.status(200).json({status : 1 ,didUserRegister, user, message : "SuccessFully genenrated"})
+
+      const data = summaries.find((summary) =>
+        file_name.toLowerCase().includes(summary.file_name.toLowerCase())
+      );
+      if(data) {
+        return res.json({
+          ...data,
+          didUserRegister,
+          user,
+        });
+      }
+
+      return res.json({
+        status: 2,
+        message: `Summary cannot be generated for ${file_name} at the time, please try again later!`,
+        didUserRegister,
+        user
+      })
       // const processingRes = await rfqController.handleMagicSearchInsertion(file_name, type, user.id);
 
       // return res.status(processingRes.status != 1 ? 400 : 200).json({ ...processingRes, didUserRegister, user });
