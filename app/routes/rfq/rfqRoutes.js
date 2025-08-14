@@ -92,10 +92,10 @@ RfqRoutes.get(
   rfqController.getRfqById
 );
 
-RfqRoutes.get('/targetPriceHistory/:rfq_product_id',
-  passportSignIn,
-  rfqController.getTargetPricehistory
-)
+// RfqRoutes.get('/targetPriceHistory/:rfq_product_id',
+//   passportSignIn,
+//   rfqController.getTargetPricehistory
+// )
 
 RfqRoutes.post(
   '/getMyRfq',

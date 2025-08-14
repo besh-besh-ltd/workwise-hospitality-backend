@@ -1837,7 +1837,7 @@ const productQuery = `
           'latest_target_price', (
             SELECT tptp.target_price
             FROM tbl_rfq_product_target_price tptp
-            WHERE tptp.tbl_rfq_product_id = RFQ_P.id
+            WHERE tptp.tbl_rfq_product_id = RFQ_P.id and vendor_id = ${user_id}
             ORDER BY tptp.created_at DESC
             LIMIT 1
             ),
@@ -2871,15 +2871,7 @@ const productQuery = `
           AND TECV.status = 1
       )`;
 
-      let mainQuery = `SELECT TRF.*,
-                    (
-              SELECT tptp.target_price
-              FROM tbl_rfq_product_target_price tptp
-              WHERE tptp.tbl_rfq_product_id = TRF.id
-              ORDER BY tptp.created_at DESC  -- Or timestamp column you use
-              LIMIT 1
-            ) AS latest_target_price,
-
+      let mainQuery =`SELECT TRF.*,
           ARRAY(
             SELECT json_build_object(
               'rfq_no', TR.rfq_no,
@@ -3050,11 +3042,19 @@ const productQuery = `
               ),
               'quote_details', (
                 SELECT json_build_object(
-                  'status', TQ.status,
-                  'created_by', TQ.created_by,
-                  'is_regret', TQ.is_regret,
-                  'regret_reason', TQ.regret_reason,
-                  'timestamp', TQ.timestamp,
+                  'status', TQ_INNER.status,
+                  'created_by', TQ_INNER.created_by,
+                  'is_regret', TQ_INNER.is_regret,
+                  'regret_reason', TQ_INNER.regret_reason,
+                  'timestamp', TQ_INNER.timestamp,
+                  'latest_target_price', (
+                    SELECT tptp.target_price
+                    FROM tbl_rfq_product_target_price tptp
+                    WHERE tptp.tbl_rfq_product_id = TRF.id 
+                      AND tptp.vendor_id = TQ_INNER.created_by
+                    ORDER BY tptp.created_at DESC
+                    LIMIT 1
+                  ),
                   'vendor_details', (
                     SELECT json_build_object(
                       'id', TU.id,
@@ -3073,12 +3073,12 @@ const productQuery = `
                     )
                     FROM tbl_users TU
                     LEFT JOIN tbl_company TCC3 ON TCC3.id = TU.company_id
-                    WHERE TU.id = TQ.created_by
+                    WHERE TU.id = TQ_INNER.created_by
                   )
                 )
-                FROM tbl_quotes TQ
-                WHERE TQ.id = TQI.quote_id
-                  AND TQ.rfq_id = $1
+                FROM tbl_quotes TQ_INNER
+                WHERE TQ_INNER.id = TQI.quote_id
+                  AND TQ_INNER.rfq_id = $1
               ),
                 'document_files', (
                 SELECT json_agg(json_build_object('file_type', QIF.file_type, 'file_url', QIF.file_url))
@@ -8109,59 +8109,66 @@ ORDER BY m.created_at;
       }
     });
   },
-  getRfqProductvendorsForTargetPrice: async (rfq_product_id) => {
-    return new Promise(function (resolve, reject) {
-      try {
-        const query = `WITH rfq_info AS (
-                      SELECT rfq_id, product_variant_id 
-                      FROM tbl_rfq_products
-                      WHERE id = $1
-                  ),
-                  valid_quotes AS (
-                      SELECT q.created_by, r.product_variant_id, r.rfq_id
-                      FROM tbl_quotes q
-                      JOIN rfq_info r ON q.rfq_id = r.rfq_id
-                      WHERE q.is_regret IS NULL OR q.is_regret != 1
-                  )
-                  SELECT 
-                      pv.name AS productname,
-                      v.rfq_id,
-                      JSON_AGG(
-                          JSON_BUILD_OBJECT(
-                              'id', u.id,
-                              'name', u.name,
-                              'email', u.email,
-                              'company_name', c.company_name
-                          )
-                      ) AS created_by
-                  FROM valid_quotes v
-                  JOIN tbl_users u ON u.id = v.created_by
-                  JOIN tbl_company c ON c.id = u.company_id
-                  JOIN tbl_product_variant pv ON pv.id = v.product_variant_id
-                  GROUP BY pv.name, v.rfq_id;
+getRfqProductvendorsForTargetPrice: async (rfq_product_id, vendorIds) => {
+  return new Promise(function (resolve, reject) {
+    try {
+      const query = `
+        WITH rfq_info AS (
+          SELECT rfq_id, product_variant_id 
+          FROM tbl_rfq_products
+          WHERE id = $1
+        ),
+        valid_quotes AS (
+          SELECT q.created_by, r.product_variant_id, r.rfq_id
+          FROM tbl_quotes q
+          JOIN rfq_info r ON q.rfq_id = r.rfq_id
+          WHERE (q.is_regret IS NULL OR q.is_regret != 1)
+        ),
+        vendor_filter AS (
+          SELECT DISTINCT vendor_id
+          FROM tbl_rfq_product_target_price
+          WHERE vendor_id = ANY($2::int[])
+        )
+        SELECT 
+          pv.name AS productname,
+          v.rfq_id,
+          JSON_AGG(
+            JSON_BUILD_OBJECT(
+              'id', u.id,
+              'name', u.name,
+              'email', u.email,
+              'company_name', c.company_name
+            )
+          ) AS created_by
+        FROM valid_quotes v
+        JOIN vendor_filter vf ON vf.vendor_id = v.created_by
+        JOIN tbl_users u ON u.id = v.created_by
+        JOIN tbl_company c ON c.id = u.company_id
+        JOIN tbl_product_variant pv ON pv.id = v.product_variant_id
+        GROUP BY pv.name, v.rfq_id;
+      `;
 
+      db.any(query, [rfq_product_id, vendorIds])
+        .then((data) => {
+          if (data.length === 0) {
+            resolve({
+              success: false,
+              message: 'No vendors found for the given criteria.',
+              data: []
+            });
+            return;
+          }
+          resolve(data);
+        })
+        .catch((error) => {
+          reject(error);
+        });
+    } catch (err) {
+      reject(err);
+    }
+  });
+},
 
-        `;
-        db.any(query, [rfq_product_id])
-          .then((data) => {
-            if (data.length === 0) {
-              resolve({
-                success: false,
-                message: 'No vendors found for the given criteria.',
-                data: []
-              });
-              return;
-            }
-            resolve(data);
-          })
-          .catch((error) => {
-            reject(error);
-          });
-      } catch (err) {
-        reject(err);
-      }
-    });
-  },
 
   saveExcel: async (rfq_id, user_id, file_path) => {
     return new Promise(function (resolve, reject) {

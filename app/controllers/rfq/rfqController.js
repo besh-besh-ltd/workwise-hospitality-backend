@@ -646,7 +646,6 @@ const validateEmailAddresses = (emails) => {
 const sendMailToVendorsForTargetPrice = async (
   vendorList,
   target_price,
-  rfq_id,
   buyer_id
 ) => {
   try {
@@ -656,6 +655,7 @@ const sendMailToVendorsForTargetPrice = async (
     const VendorList = vendorList[0]?.created_by || [];
 
     const buyer_details = await userModel.user_profile_detail(buyer_id);
+    console.log("checking the buyer details", buyer_details);
     for (const vendor of VendorList) {
       try {
         const spocList = await vendorModel.getSpocDetails(vendor.id);
@@ -724,7 +724,7 @@ const sendMailToVendorsForTargetPrice = async (
         );
 
         let mailRecipients = {
-          from: `${buyer_details[0]?.organization_name} ${Config.masterEmail}`,
+          from: `${buyer_details[0]?.company_name} ${Config.masterEmail}`,
           subject: `Target Price Update for ${productName} - RFQ ${rfq_id}`,
           html: dynamicHTML
         };
@@ -8239,62 +8239,73 @@ sendBroadcastQueryMessageToVendors: async (req, res) => {
   }
 },
 negotiatePrice : async (req, res ) => { 
-  const { rfq_product_id , target_price} = req.body;
+  const { productId, vendorIds, targetPrice } = req.body;
   const user_id = req.user.id;
 
 
   try {
 
-    if (!rfq_product_id || !target_price) {
-      return res.status(400).json({
-        status: 0,
-        message: 'rfq_product_id and target_price are required'
-      });
-    }
-    const validate  = await rfqModel.checkIfExists('tbl_rfq_products', `id = ${rfq_product_id}`);
+  // if (!rfq_product_id || !target_price) {
+  //   return res.status(400).json({
+  //     status: 0,
+  //     message: 'rfq_product_id and target_price are required'
+  //   });
+  // }
+  // const validate  = await rfqModel.checkIfExists('tbl_rfq_products', `id = ${rfq_product_id}`);
 
-    if( !validate || validate.length === 0) {
-      return res.status(404).json({
-        status: 0,
-        message: 'RFQ Product not found'
-      });
-    }
+  // if( !validate || validate.length === 0) {
+  //   return res.status(404).json({
+  //     status: 0,
+  //     message: 'RFQ Product not found'
+  //   });
+  // }
 
-    const payload = {
-      tbl_rfq_product_id : rfq_product_id,
-      target_price: target_price,
-      created_by : user_id
-    }
+  // Create payload for multiple vendors
+  let payload = vendorIds.map((vendorId) => {
+    return {
+      tbl_rfq_product_id: productId,
+      target_price: targetPrice,
+      created_by: user_id,
+      vendor_id: vendorId,
+    };
+  });
 
-    const result = await rfqModel.insertReturnId('tbl_rfq_product_target_price', payload);
+  // console.log("checking the payload here vendor ID", payload);
 
-    if( !result || !result[0] || !result[0].id) {
-      return res.status(500).json({
-        status: 0,
-        message: 'Failed to negotiate price, please try again later.'
-      });
-    }
-    // Notify the vendor about the price negotiation
-    const rfqProductVendors =  await rfqModel.getRfqProductvendorsForTargetPrice(rfq_product_id);
-    console.log("Full data:", JSON.stringify(rfqProductVendors, null, 2));
-    await sendMailToVendorsForTargetPrice(rfqProductVendors, target_price, user_id);
+  // Keys for pg-promise insert
+  const keys = [
+    'tbl_rfq_product_id',
+    'target_price',
+    'created_by',
+    'vendor_id'
+  ];
+  const vendorProductList =  await rfqModel.getRfqProductvendorsForTargetPrice(productId,vendorIds); 
 
-    res.status(200).json({
-      status: 1,
-      message: 'Price negotiation request sent successfully.',
-      data: {
-        negotiation_id: result[0].id,
-        rfq_product_id: rfq_product_id,
-        target_price: target_price
-      }
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 0,
-      message: 'Error IN updating Target Price',
-      error: error.message
-    });
-  }
+  await sendMailToVendorsForTargetPrice(vendorProductList  , targetPrice , user_id  );
+
+
+  console.log("getting the result", JSON.stringify(vendorProductList));
+  // Insert using insertArray helper
+  const result = await rfqModel.insertArray(
+    payload,
+    keys,
+    'tbl_rfq_product_target_price'
+  );
+
+  res.json({
+    status: 1,
+    message: 'Target price(s) set successfully',
+    data: result
+  });
+
+} catch (error) {
+  console.error('Error setting target price:', error);
+  res.status(500).json({
+    status: 0,
+    message: 'Internal server error'
+  });
+}
+
 },
 
 getTargetPriceHistrory : async (req, res) => {
