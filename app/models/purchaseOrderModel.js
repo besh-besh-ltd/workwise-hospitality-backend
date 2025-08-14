@@ -140,6 +140,8 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
     const [pos, { total }] = await db.tx(async t => {
       const data = await t.any(
         `SELECT po.*,
+                VENDOR.organization_name AS finalized_vendor_name,
+                PRJ.name AS project_name,
                 TU.name AS initiated_by,
                 CASE WHEN trx.current_approver_id = $2 THEN TRUE ELSE FALSE END AS is_approver,
                 JSON_BUILD_OBJECT(
@@ -155,14 +157,25 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
                     'final_decision_by', trx.final_decision_by
                   )
                   ELSE NULL
-                END AS approval_status
+                END AS approval_status,
+                (
+                  SELECT PM.* 
+                    FROM tbl_payment_milestone PM 
+                    WHERE PM.po_id = PO.id 
+                      AND NOT PM.is_done 
+                      AND PM.due_date > NOW()
+                    
+                    LIMIT 1
+                ) AS upcoming_milestone
          FROM tbl_rfq_purchase_order po
+         JOIN tbl_projects PRJ ON PRJ.id = PO.project_id
          LEFT JOIN tbl_approval_hierarchy_transactions trx
            ON trx.hierarchy_type = 'po'
            AND trx.target_entity_id = po.id
         JOIN tbl_rfq_products TRP ON TRP.id = po.rfq_product_id
         JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
         JOIN tbl_users TU ON TU.id = po.initiated_by
+        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
          ${whereClause}
          ORDER BY po.created_at DESC
          LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
