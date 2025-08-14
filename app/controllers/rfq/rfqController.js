@@ -21,7 +21,7 @@ import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxC
 import { generateEmailTemplate, getRfqEmailContent, RFQ_EMAIL_TYPE } from '../../helper/notificationEmailLayout.js';
 import fs from 'fs';
 import productModel from '../../models/productModel.js';
-import generativeAI from '../../helper/processBOQWithAI.js';
+import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel from '../../models/generalModel.js';
@@ -8431,15 +8431,13 @@ addClauseUsingFile : async (req, res) => {
     }
     // Use new product/variant name function
     const productName = await rfqModel.getProductOrVariantNameByRfqProductId(rfq_product_id);
-    const result = await generativeAI.extractClauses(file, productName);
+    // const result = await generativeAI.extractClauses(file, productName);
+    const result = await extractDatasheetSummary(file);
 
-  const techEvaluationClauses = result?.structuredData?.technicalSpecifications.map(item => {
-    if (item?.text) return item.text;
-    if (item?.parameter && item?.value) return `${item.parameter}: ${item.value}${item.unit ? ' ' + item.unit : ''}`;
-    if (item?.parameter) return `${item.parameter}: ${item.value || ''}${item.unit ? ' ' + item.unit : ''}`;
+  const techEvaluationClauses = result?.structuredData.map(item => {
+    if(item.key && item.value) return `${item.key} - ${item.value}`
     return JSON.stringify(item);
   }).filter(Boolean);
-  
 
     if (!result.status) {
       let userMessage = result.message || "Failed to extract information";
