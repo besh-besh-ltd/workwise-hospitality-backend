@@ -320,6 +320,13 @@ RfqRoutes.post('/tender-summary',
   rfqController.tenderSummary
 )
 
+RfqRoutes.post('/technical-summary',
+  noLogin.customer_auth,
+  schema_posts.clauseFileUpload,
+  validateBody(rfqSchemas.technicalSummary),
+  rfqController.addClauseUsingFile
+)
+
 RfqRoutes.get('/process-magic-search-draft',
   passportSignIn, 
   validateDbBody.user_id_profileexists,

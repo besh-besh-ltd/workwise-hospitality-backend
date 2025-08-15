@@ -8444,21 +8444,49 @@ addClauseUsingFile : async (req, res) => {
     if (!file) {
       return res.status(400).json({ status: 0, message: "No file provided" });
     }
+    
+    // Check if this is a technical summary request (no rfq_id and rfq_product_id)
     if (!rfq_id || !rfq_product_id) {
-      return res.status(400).json({ status: 0, message: "Invalid input. Ensure RFQ_ID and RFQ_PRODUCT_ID are provided" });
+      // This is a technical summary request - extract clauses without product context
+      const result = await generativeAI.extractClauses(file);
+      
+      if (!result.status) {
+        let userMessage = result.message || "Failed to extract information";
+        if (userMessage.match(/no relevant information detected|no information detected/i)) {
+          userMessage = "No relevant information was found in the uploaded document. Please ensure the document contains technical specifications.";
+        }
+        return res.json({ status: 0, message: userMessage, errors: [{ Row: 0, error: userMessage }] });
+      }
+      
+      if (!result.clauses || result.clauses.length === 0) {
+        return res.json({
+          status: 0,
+          message: "No information was found in the document",
+          errors: [{ Row: 0, error: "No information detected in the document" }]
+        });
+      }
+      
+      // Return the extracted clauses for technical summary
+      return res.json({
+        status: 1,
+        message: "Technical document analyzed successfully",
+        clauses: result,
+        structuredData: result.structuredData
+      });
     }
+    
+    // Original logic for RFQ clause addition
     // Use new product/variant name function
     const productName = await rfqModel.getProductOrVariantNameByRfqProductId(rfq_product_id);
     const result = await generativeAI.extractClauses(file, productName);
 
-  const techEvaluationClauses = result?.structuredData?.technicalSpecifications.map(item => {
-    if (item?.text) return item.text;
-    if (item?.parameter && item?.value) return `${item.parameter}: ${item.value}${item.unit ? ' ' + item.unit : ''}`;
-    if (item?.parameter) return `${item.parameter}: ${item.value || ''}${item.unit ? ' ' + item.unit : ''}`;
-    return JSON.stringify(item);
-  }).filter(Boolean);
-  
-
+    const techEvaluationClauses = result?.structuredData?.technicalSpecifications.map(item => {
+      if (item?.text) return item.text;
+      if (item?.parameter && item?.value) return `${item.parameter}: ${item.value}${item.unit ? ' ' + item.unit : ''}`;
+      if (item?.parameter) return `${item.parameter}: ${item.value || ''}${item.unit ? ' ' + item.unit : ''}`;
+      return JSON.stringify(item);
+    }).filter(Boolean);
+    
     if (!result.status) {
       let userMessage = result.message || "Failed to extract information";
       if (userMessage.match(/no relevant information detected|no information detected/i)) {

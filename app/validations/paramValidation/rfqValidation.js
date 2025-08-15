@@ -395,8 +395,8 @@ export const rfqSchemas = {
     // ).default([]),
   }),
   addClauseUsingFile: Joi.object({
-    rfq_id: Joi.number().integer().required(),
-    rfq_product_id: Joi.number().integer().required()
+    rfq_id: Joi.number().integer().optional(),
+    rfq_product_id: Joi.number().integer().optional()
   }),
   updateClause: Joi.object().keys({
     clause_id: Joi.number().integer().required(),
