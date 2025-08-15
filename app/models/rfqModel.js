@@ -2698,57 +2698,73 @@ const productQuery = `
                 JOIN tbl_product TP ON TP.id = PV.product_id
                 WHERE PV.id = TRP.product_variant_id 
             ) AS "product_details",
-            ARRAY(
-                SELECT json_build_object(
-                    'id', TU.id,
-                    'name', TU.name,
-                    'email', TU.email,
-                    'mobile', TU.mobile,
-                    'address', TU.address,
+           ARRAY(
+    SELECT json_build_object(
+        'id', TU.id,
+        'name', TU.name,
+        'email', TU.email,
+        'mobile', TU.mobile,
+        'address', TU.address,
 
-                     -- added payment terms list this field here
-                       'payment_terms',
-                          (
-                            SELECT COALESCE(
-                              json_agg(
-                                json_build_object(
-                                  'id', TQPT.id,
-                                  'type', TQPT.type,
-                                  'value', TQPT.value,
-                                  'days', TQPT.days,
-                                  'comment', TQPT.comment,
-                                  'timestamp', TQPT.timestamp,
-                                  'created_by', TQPT.created_by
-                                )
-                                ORDER BY TQPT.id
-                              ),
-                              '[]'::json
-                            )
-                            FROM tbl_quotes_payment_terms TQPT
-                            WHERE TQPT.quote_id = TQ.id
-                          ),
+        -- vendor-specific latest_target_price
+        'latest_target_price', (
+            SELECT tptp.target_price
+            FROM tbl_rfq_product_target_price tptp
+            WHERE tptp.tbl_rfq_product_id = TRP.id
+              AND tptp.vendor_id = TU.id
+            ORDER BY tptp.created_at DESC
+            LIMIT 1
+        ),
 
-                    'organization_name', COALESCE(TCC.company_name, TU.organization_name, TU.name),
-                    'global_payment_term', (
-                        SELECT json_agg(json_build_object('details', TQ_inner.global_payment_term,'comment', TQ_inner.global_comment))
-                        FROM tbl_quotes TQ_inner
-                        JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
-                        WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
+        -- added payment terms list
+        'payment_terms',
+            (
+                SELECT COALESCE(
+                    json_agg(
+                        json_build_object(
+                            'id', TQPT.id,
+                            'type', TQPT.type,
+                            'value', TQPT.value,
+                            'days', TQPT.days,
+                            'comment', TQPT.comment,
+                            'timestamp', TQPT.timestamp,
+                            'created_by', TQPT.created_by
+                        )
+                        ORDER BY TQPT.id
                     ),
-                    'global_document_files', (
-                        SELECT json_agg(json_build_object('file_type', QF.file_type, 'file_url', QF.file_url))
-                        FROM tbl_quotes_files QF
-                        WHERE QF.quote_id = TQ.id
-                    ),
-                    'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END)
+                    '[]'::json
                 )
-                FROM tbl_quotes TQ
-                JOIN tbl_users TU ON TU.id = TQ.created_by
-                LEFT JOIN tbl_company TCC ON TCC.id = TU.company_id
-                LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
-                WHERE TQ.rfq_id = TRP.rfq_id
-                ORDER BY TU.id ASC
-            ) AS "all_vendors",
+                FROM tbl_quotes_payment_terms TQPT
+                WHERE TQPT.quote_id = TQ.id
+            ),
+
+        'organization_name', COALESCE(TCC.company_name, TU.organization_name, TU.name),
+        'global_payment_term', (
+            SELECT json_agg(json_build_object('details', TQ_inner.global_payment_term,'comment', TQ_inner.global_comment))
+            FROM tbl_quotes TQ_inner
+            JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
+            WHERE TQ_inner.rfq_id = TRP.rfq_id AND TQ_inner.created_by = TU.id
+        ),
+        'global_document_files', (
+            SELECT json_agg(json_build_object('file_type', QF.file_type, 'file_url', QF.file_url))
+            FROM tbl_quotes_files QF
+            WHERE QF.quote_id = TQ.id
+        ),
+        'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END)
+    )
+    FROM tbl_quotes TQ
+    JOIN tbl_users TU ON TU.id = TQ.created_by
+    LEFT JOIN tbl_company TCC ON TCC.id = TU.company_id
+    LEFT JOIN tbl_quote_finalization _TQF 
+        ON _TQF.rfq_id = $1 
+       AND _TQF.vendor_id = TU.id 
+       AND _TQF.product_variant_id = TRP.product_variant_id 
+       AND _TQF.variant = TRP.variant 
+       AND _TQF.created_by = $2
+    WHERE TQ.rfq_id = TRP.rfq_id
+    ORDER BY TU.id ASC
+) AS "all_vendors",
+
             ARRAY(
                 SELECT json_build_object(
                     'id', TQ.id,
