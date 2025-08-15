@@ -257,6 +257,7 @@ const schemas = {
       .required()
       .regex(/^[3|7]$/, 'user_type should be 3 (vendor) or 7 (buyer)'),
     password: Joi.string().min(3).max(15).required().label('Password'),
+    status: Joi.number().valid(0, 1).optional().allow(null), // Allow status field for paid subscriptions
     address: Joi.string().optional().allow(null).allow(''),
     country: Joi.string().optional().allow(null).allow(''),
     whatsapp: Joi.string().optional().allow(null).allow(''),
