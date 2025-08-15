@@ -358,6 +358,7 @@ RfqRoutes.post(
 RfqRoutes.post(
   '/negotiate',
   passportSignIn,
+  validateDbBody.negotiateModule,
   rfqController.negotiatePrice
 )
 

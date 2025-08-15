@@ -8241,6 +8241,7 @@ sendBroadcastQueryMessageToVendors: async (req, res) => {
 negotiatePrice : async (req, res ) => { 
   const { productId, vendorIds, targetPrice } = req.body;
   const user_id = req.user.id;
+  console.log("checking the req", req.body);
 
 
   try {
