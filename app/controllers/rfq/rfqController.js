@@ -650,8 +650,8 @@ const sendMailToVendorsForTargetPrice = async (
 ) => {
   try {
     // Loop through each vendor in the vendorList
-    const productName = vendorList[0].productname;
-    const rfq_id = vendorList[0].rfq_id;
+    const productName = vendorList[0]?.productname;
+    const rfq_id = vendorList[0]?.rfq_id;
     const VendorList = vendorList[0]?.created_by || [];
 
     const buyer_details = await userModel.user_profile_detail(buyer_id);
@@ -671,14 +671,6 @@ const sendMailToVendorsForTargetPrice = async (
           <tr>
             <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
               <strong>Target Price:</strong> ${target_price}
-            </td>
-          </tr>
-          <tr>
-            <td colspan="2" style="text-align: right; padding-bottom: 3px;">
-              <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
-              style="font-size: 15px; color: blue; text-decoration: none;">
-                ...view more
-              </a>
             </td>
           </tr>
         `;
@@ -724,10 +716,11 @@ const sendMailToVendorsForTargetPrice = async (
         );
 
         let mailRecipients = {
-          from: `${buyer_details[0]?.company_name} ${Config.masterEmail}`,
+          from: buyer_details[0]?.company_name || Config.masterEmail,
           subject: `Target Price Update for ${productName} - RFQ ${rfq_id}`,
           html: dynamicHTML
         };
+
 
         // Set recipients - prioritize SPOCs if available
         if (spocList && spocList.length > 0) {
@@ -8279,16 +8272,17 @@ negotiatePrice : async (req, res ) => {
   ];
   const vendorProductList =  await rfqModel.getRfqProductvendorsForTargetPrice(productId,vendorIds); 
 
-  await sendMailToVendorsForTargetPrice(vendorProductList  , targetPrice , user_id  );
-
-
-  console.log("getting the result", JSON.stringify(vendorProductList));
   // Insert using insertArray helper
   const result = await rfqModel.insertArray(
     payload,
     keys,
     'tbl_rfq_product_target_price'
   );
+
+  console.log(" vendorProductList  , targetPrice , user_id ", vendorProductList  , targetPrice , user_id)
+
+    await sendMailToVendorsForTargetPrice(vendorProductList  , targetPrice , user_id  );
+
 
   res.json({
     status: 1,
