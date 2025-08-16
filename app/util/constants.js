@@ -33,7 +33,7 @@ export const summaries = [
     file_name: "gmpl_composite_works",
     markup: `
       <div>
-      <h2 class="mb-3 text-primary">Tender Summary – GMPL Composite Works</h2>
+      <h2 class="mb-3 text-primary">Tender Summary - GMPL Composite Works</h2>
 
       <!-- Tender Basic Details -->
       <h4 class="mt-4 text-secondary">1. Tender Title, Owner, Location, Tender Type</h4>
@@ -49,7 +49,7 @@ export const summaries = [
               </tr>
               <tr>
                   <th scope="row">Location</th>
-                  <td>GMPL, Village Bajpe, Mangalore SEZ Ltd., Karnataka – 574142</td>
+                  <td>GMPL, Village Bajpe, Mangalore SEZ Ltd., Karnataka - 574142</td>
               </tr>
               <tr>
                   <th scope="row">Tender Type</th>
@@ -171,7 +171,7 @@ export const summaries = [
     file_name: "mrpl_depot_automation_works",
     markup: `
       <div>
-      <h2 class="mb-3 text-primary">Tender Summary – MRPL Depot Automation Works</h2>
+      <h2 class="mb-3 text-primary">Tender Summary - MRPL Depot Automation Works</h2>
 
       <!-- Tender Basic Details -->
       <h4 class="mt-4 text-secondary">1. Tender Title, Owner, Location, Tender Type</h4>
@@ -188,8 +188,8 @@ export const summaries = [
               <tr>
                   <th scope="row">Location</th>
                   <td>
-                      <strong>MRPL Petroleum Oil Depot, Kasaragod:</strong> Plot No. 15 to 19, KINFRA Small Industries Park, Seethangoli, Maipady P.O., Kasaragod – 671124, Kerala<br>
-                      <strong>MRPL Depot, Hosur:</strong> E.11, SIPCOT Phase 2 Expansion 1, Moranapalli, Hosur – 635109, Tamil Nadu
+                      <strong>MRPL Petroleum Oil Depot, Kasaragod:</strong> Plot No. 15 to 19, KINFRA Small Industries Park, Seethangoli, Maipady P.O., Kasaragod - 671124, Kerala<br>
+                      <strong>MRPL Depot, Hosur:</strong> E.11, SIPCOT Phase 2 Expansion 1, Moranapalli, Hosur - 635109, Tamil Nadu
                   </td>
               </tr>
               <tr>
@@ -325,7 +325,7 @@ export const summaries = [
     markup: `
       <div>
       <h2 class="mb-3 text-primary">
-          Tender Summary – Mechanical, Piping & Insulation Works for CRU Project at IOCL Guwahati Refinery (Part A & Part B)
+          Tender Summary - Mechanical, Piping & Insulation Works for CRU Project at IOCL Guwahati Refinery (Part A & Part B)
       </h2>
 
       <!-- Basic Tender Info -->
@@ -463,9 +463,9 @@ export const summaries = [
 
       <!-- Safety, Health & Environment -->
       <h4 class="mt-4 text-secondary">8. Safety, Health & Environment</h4>
-      <p><strong>Annexure A-VI:</strong> Worley’s Field HSE Specification (IND-SS-Z-007 Rev. 09)</p>
+      <p><strong>Annexure A-VI:</strong> Worley's Field HSE Specification (IND-SS-Z-007 Rev. 09)</p>
       <ul>
-          <li><strong>Objectives:</strong> “Zero harm” – no lost-time injuries, reportable injuries, or environmental/property incidents.</li>
+          <li><strong>Objectives:</strong> “Zero harm” - no lost-time injuries, reportable injuries, or environmental/property incidents.</li>
           <li><strong>Critical Risk Management:</strong> Pre-job risk assessment, PPE rules, emergency response.</li>
       </ul>
       <h6 class="mt-3">Key Risk Areas</h6>
@@ -484,7 +484,7 @@ export const summaries = [
           <li>Taxes/Duties: GST extra; e-invoicing compliance if applicable.</li>
           <li>Payment Terms: Progressive RA bill payments; final after mechanical completion & acceptance.</li>
           <li>Security Deposit: 3% of contract value (from RA bills or BG).</li>
-          <li>Insurance: Workmen’s Compensation, Contractor’s All Risk, Third-Party, Transit — covering from mobilization till acceptance.</li>
+          <li>Insurance: Workmen's Compensation, Contractor's All Risk, Third-Party, Transit — covering from mobilization till acceptance.</li>
           <li>Liquidated Damages: 0.5% per week (max 5%).</li>
           <li>Force Majeure: Standard IOCL clause.</li>
           <li>Termination: By Owner (convenience/default) or Contractor (prolonged suspension/non-payment).</li>
@@ -494,7 +494,7 @@ export const summaries = [
       <!-- Submission Rules -->
       <h4 class="mt-4 text-secondary">10. Submission Rules</h4>
       <ul>
-          <li>Formats: PDF, XLS (97–2003), JPG, RAR.</li>
+          <li>Formats: PDF, XLS (97-2003), JPG, RAR.</li>
           <li>Bid Freeze: Must click “FREEZE BID SUBMISSION” to confirm.</li>
           <li>Resubmission Allowed until deadline (tech/financial docs only).</li>
           <li>Withdrawal Allowed — but bidder cannot re-participate.</li>
