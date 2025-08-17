@@ -444,7 +444,7 @@ RfqRoutes.get('/get-clauses/:id',
 // vendor side
 RfqRoutes.post('/add-tech-comment',
   noLogin.customer_auth,
-  validateBody(rfqSchemas.addTechComment),
+  // validateBody(rfqSchemas.addTechComment),
   rfqController.addTechComment
 )
 

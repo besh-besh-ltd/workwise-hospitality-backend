@@ -1412,6 +1412,100 @@ const sendQuoteNotificationEmail = async (req) => {
    }
  };
   
+const sendAddTechCommentMail = async (vendor , product, rfq_no,  sender_id) => {
+  try {
+    const productName = product.name;
+    const vendor_name = vendor.vendor_name;
+
+    const buyer_details = await userModel.user_profile_detail(sender_id);
+    const rfq = await rfqModel.checkIfExists('tbl_rfq', `rfq_no = '${rfq_no}'`);
+    const rfq_id = rfq[0].id;
+
+    try {
+      const spocList = await vendorModel.getSpocDetails(vendor.id);
+      const token = await rfqModel.insertVendorRfqToken(vendor.id, rfq_id);
+
+      // Product HTML content
+      let productHTML = `
+        <tr>
+          <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+            <strong>Product:</strong> ${productName}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+            <strong>RFQ No:</strong> ${rfq_no}
+          </td>
+        </tr>
+      `;
+
+      const headerContent = `
+        <div>
+          <h2>Hello ${vendor_name}</h2>
+          <p style="font-size:16px;">
+            The buyer has added a new <strong>Technical Clause Comment</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no}</strong>. 
+            Kindly review it at the earliest.
+          </p>
+        </div>
+      `;
+
+      const containerContent = `
+        <div>
+          <h3 style="font-family: 'Roboto', sans-serif; text-align: center; font-size: 24px; margin-bottom: 8px;">
+            New Technical Clause Comment
+          </h3>
+
+          <table style="width: 100%; padding: 8px;">
+            <tbody>
+              ${productHTML}
+              <tr><td></td></tr>
+            </tbody>
+          </table>
+
+          <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
+            style="background-color: #2563eb; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+            View Comment
+          </a>
+
+          <p style="margin-top:20px">
+            Please review the newly added comment to ensure alignment with the buyer's requirements.
+          </p>
+        </div>
+      `;
+
+      const dynamicHTML = generateEmailTemplate(
+        headerContent,
+        containerContent
+      );
+
+      let mailRecipients = {
+        from: buyer_details[0]?.company_name || Config.masterEmail,
+        subject: `New Technical Clause Comment - ${productName} (RFQ ${rfq_no})`,
+        html: dynamicHTML
+      };
+
+      if (spocList && spocList.length > 0) {
+        mailRecipients.to = spocList.map((spoc) => spoc.email);
+      } else {
+        mailRecipients.to = vendor.email;
+      }
+
+      sendMail(mailRecipients);
+
+      console.log(`Email sent successfully to vendor: ${vendor.name}`);
+    } catch (vendorError) {
+      console.error(`Error sending email to vendor ${vendor.id}:`, vendorError);
+    }
+
+    return {
+      success: true,
+      message: 'Technical clause comment notification sent to vendor'
+    };
+  } catch (error) {
+    console.error('Error in sendAddTechCommentMail:', error);
+    throw error;
+  }
+};
 
 
 const sendWinningNotificaion = async (
@@ -3067,7 +3161,7 @@ const rfqController = {
         rfq_id,
         rfqNo,
         buyerName,
-        RFQ_EMAIL_TYPE.ADDED_VENDOR_TO_EXISTING_PRODUCT
+        RFQ_EMAIL_TYPE.NEW_PRODUCT
       ); //for added vendors to existing products
 
       // Send updated RFQ mail to vendors
@@ -3076,7 +3170,7 @@ const rfqController = {
         rfq_id,
         rfqNo,
         buyerName,
-        RFQ_EMAIL_TYPE.UPDATED_VENDOR
+        RFQ_EMAIL_TYPE.UPDATED_RFQ
       );
 
       res.status(200).json({
@@ -8236,20 +8330,7 @@ negotiatePrice : async (req, res ) => {
   const user_id = req.user.id;
   try {
 
-  // if (!rfq_product_id || !target_price) {
-  //   return res.status(400).json({
-  //     status: 0,
-  //     message: 'rfq_product_id and target_price are required'
-  //   });
-  // }
-  // const validate  = await rfqModel.checkIfExists('tbl_rfq_products', `id = ${rfq_product_id}`);
-
-  // if( !validate || validate.length === 0) {
-  //   return res.status(404).json({
-  //     status: 0,
-  //     message: 'RFQ Product not found'
-  //   });
-  // }
+ 
 
   // Create payload for multiple vendors
   let payload = vendorIds.map((vendorId) => {
@@ -8592,10 +8673,17 @@ getClauses: async (req, res) => {
 
 addTechComment: async (req, res) => {
   try{
-    const { clause_id, sender_id, receiver_id, text, file_url } = req.body;
+    const {  clause_id, sender_id, receiver_id, text, file_url, product , vendor , rfq_no } = req.body;
+
+   
+    console.log("products ---->" , product);
+    console.log("venodr" , vendor);
 
     // Save tech comment 
     const response = await rfqModel.addTechComment(clause_id, sender_id, receiver_id, text, file_url);
+    
+
+  await sendAddTechCommentMail( vendor , product, rfq_no,  sender_id);
     res
       .status(200)
       .json(response)
