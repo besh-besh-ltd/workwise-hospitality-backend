@@ -879,7 +879,63 @@ const validateDbBody = {
       });
     }
 
+  },
+negotiateModule: async (req, res, next) => {
+  try {
+    const { productId, vendorIds } = req.body;
+
+    // ✅ Validate input
+    if (!productId || !Array.isArray(vendorIds) || vendorIds.length === 0) {
+      return res.status(400).json({
+        status: 0,
+        message: "Missing productId or vendorIds"
+      });
+    }
+
+    // ✅ Check if product exists
+    const productCheck = await rfqModel.checkIfExists(
+      "tbl_rfq_products",
+      `id = ${productId}`
+    );
+    if (productCheck.length === 0) {
+      return res.status(404).json({
+        status: 0,
+        message: "Provide a valid Product ID"
+      });
+    }
+
+    // ✅ Check if all vendors exist
+    const vendorWhereClause = `id IN (${vendorIds.join(",")})`;
+    const vendorsCheck = await rfqModel.checkIfExists(
+      "tbl_users",
+      vendorWhereClause
+    );
+
+    if (vendorsCheck.length !== vendorIds.length) {
+      return res.status(404).json({
+        status: 0,
+        message: "Some vendor IDs do not exist"
+      });
+    }
+
+    console.log("✅ All vendors exist");
+
+    // Store validated data in req for the next controller
+    req.validatedData = { productId, vendorIds };
+
+    // ✅ Pass control to the next middleware/controller
+    return next();
+
+  } catch (error) {
+    console.error("❌ Error in negotiateModule:", error.message);
+    return res.status(500).json({
+      status: 0,
+      message: "Internal server error"
+    });
   }
+}
+
+
   
 };
 

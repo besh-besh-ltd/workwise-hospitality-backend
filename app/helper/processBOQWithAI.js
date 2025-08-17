@@ -40,6 +40,92 @@ function extractTextFromPDF(buffer) {
   });
 }
 
+export const extractDatasheetSummary = async (file) => {
+  try {
+    let buffer;
+
+    // 1) Resolve buffer from S3, local path, or provided buffer
+    if (file.location) {
+      const s3Url = new URL(file.location);
+      const bucket = s3Url.hostname.split(".")[0];
+      const key = decodeURIComponent(s3Url.pathname).slice(1);
+      const command = new GetObjectCommand({ Bucket: bucket, Key: key });
+      const result = await s3Client.send(command);
+
+      // AWS SDK v3: Body is a Readable stream; use transformToByteArray if available, else stream to Buffer
+      if (typeof result.Body?.transformToByteArray === "function") {
+        buffer = Buffer.from(await result.Body.transformToByteArray());
+      } else {
+        buffer = await streamToBuffer(result.Body);
+      }
+    } else if (file.path) {
+      buffer = fs.readFileSync(file.path);
+    } else if (file.buffer) {
+      buffer = file.buffer;
+    } else {
+      throw new Error("Invalid file format or location");
+    }
+
+    // 2) Validate extension (fallback to application/pdf content-type)
+    const originalName = file.originalname || file.filename || "document.pdf";
+    const fileExt = path.extname(originalName).toLowerCase();
+    if (fileExt !== ".pdf") throw new Error("Only PDF files are supported");
+
+    const AI_BASE_URL = process.env.AI_BASE_URL;
+    if (!AI_BASE_URL) throw new Error("AI_BASE_URL is not configured");
+
+    const form = new FormData();
+    form.append("file", buffer, { filename: originalName, contentType: "application/pdf" });
+    form.append("mode", "vlm");
+
+    const response = await axios.post(`${AI_BASE_URL}/extract_datasheet`, form, {
+      headers: {
+        ...form.getHeaders(),
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      // Optional: timeout: 60000,
+    });
+
+    const data = response?.data;
+    if (!data) throw new Error("Empty response from AI service");
+
+    const clauseDetails = data?.result?.details;
+    let structured;
+    if (typeof clauseDetails === "string") {
+      try {
+        structured = JSON.parse(clauseDetails);
+      } catch (e) {
+        throw new Error("Failed to parse clause details JSON");
+      }
+    } else if (typeof clauseDetails === "object" && clauseDetails !== null) {
+      structured = clauseDetails;
+    } else {
+      throw new Error("Unexpected response format: result.details missing");
+    }
+
+    const clauses = Object.values(structured || {}).flat();
+
+    const productName = data?.result?.product || data.filename;
+
+    return {
+      status: 1,
+      message: `Information extracted successfully for ${productName}`,
+      structuredData: structured,
+      clauses,
+    };
+  } catch (err) {
+    const apiData = err?.response?.data;
+    if (apiData) {
+      console.log("ERR RES:", apiData);
+    } else {
+      console.log("ERR:", err?.message || err);
+    }
+    logError(err);
+    return { status: 0, message: err.message, clauses: [] };
+  }
+};
+
 
 const generativeAI = {
   extractClauses: async (file, productName = null) => {

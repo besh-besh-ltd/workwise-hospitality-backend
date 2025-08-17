@@ -21,7 +21,7 @@ import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxC
 import { generateEmailTemplate, getRfqEmailContent, RFQ_EMAIL_TYPE } from '../../helper/notificationEmailLayout.js';
 import fs from 'fs';
 import productModel from '../../models/productModel.js';
-import generativeAI from '../../helper/processBOQWithAI.js';
+import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel from '../../models/generalModel.js';
@@ -701,6 +701,122 @@ const validateEmailAddresses = (emails) => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emails.every(email => emailRegex.test(email));
 };
+//Send quotation mail to vendors here
+const sendMailToVendorsForTargetPrice = async (
+  vendorList,
+  target_price,
+  buyer_id
+) => {
+  try {
+    // Loop through each vendor in the vendorList
+    const productName = vendorList[0]?.productname;
+    const rfq_id = vendorList[0]?.rfq_id;
+    const VendorList = vendorList[0]?.created_by || [];
+
+    const buyer_details = await userModel.user_profile_detail(buyer_id);
+    console.log("checking the buyer details", buyer_details);
+    for (const vendor of VendorList) {
+      try {
+        const spocList = await vendorModel.getSpocDetails(vendor.id);
+        const token = await rfqModel.insertVendorRfqToken(vendor.id, rfq_id);
+
+        // Create product HTML content
+        let productHTML = `
+          <tr>
+            <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+              <strong>Product:</strong> ${productName}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+              <strong>Target Price:</strong> ${target_price}
+            </td>
+          </tr>
+        `;
+
+        const headerContent = `
+          <div>
+            <h2>Hello ${vendor?.name}</h2>
+            <p style="font-size:16px;">
+              The buyer has set a new target price for ${productName}. Kindly review and update your quote accordingly.
+            </p>
+          </div>
+        `;
+
+        const containerContent = `
+          <div>
+            <h3 style="font-family: 'Roboto', sans-serif; text-align: center; font-size: 24px; margin-bottom: 8px;">
+              Target Price Update
+            </h3>
+
+            <table style="width: 100%; padding: 8px;">
+              <tbody>
+                ${productHTML}
+                <tr>
+                  <td></td>
+                </tr>
+              </tbody>
+            </table>
+
+            <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
+              style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+              Update Your Quote
+            </a>
+
+            <p style="margin-top:20px">
+              Please update your quote promptly to align with the new target price set by ${buyer_details[0]?.company_name}.
+            </p>
+          </div>
+        `;
+
+        const dynamicHTML = generateEmailTemplate(
+          headerContent,
+          containerContent
+        );
+
+        let mailRecipients = {
+          from: buyer_details[0]?.company_name || Config.masterEmail,
+          subject: `Target Price Update for ${productName} - RFQ ${rfq_id}`,
+          html: dynamicHTML
+        };
+
+
+        // Set recipients - prioritize SPOCs if available
+        if (spocList && spocList.length > 0) {
+          mailRecipients.to = spocList.map((spoc) => spoc.email);
+          // Optionally CC the main vendor email
+          // mailRecipients.cc = [user_details[0].email];
+        } else {
+          mailRecipients.to = vendor.email;
+          // Optionally CC the buyer's email
+          // mailRecipients.cc = buyerEmail;
+        }
+
+        // Send the email
+        sendMail(mailRecipients);
+
+        console.log(`Email sent successfully to vendor: ${vendor.name}`);
+      } catch (vendorError) {
+        console.error(
+          `Error sending email to vendor ${vendor.id}:`,
+          vendorError
+        );
+        // Continue with next vendor even if one fails
+      }
+    }
+
+    return {
+      success: true,
+      message: 'Target price notifications sent to all vendors'
+    };
+  } catch (error) {
+    console.error('Error in sendMailToVendorsForTargetPrice:', error);
+    throw error;
+  }
+};
+
+
+
 
 // Update the sendMailtoVendors function
 const sendMailtoVendors = async (req, rfqNumber) => {
@@ -3851,13 +3967,11 @@ deleteDraft: async (req, res) => {
       user_id = req.body.user_id;
     }
     try {
-      let page, limit, offset;
+      let page, limit = req.body.limit || Config.globalAdminLimit, offset;
       if (req.body.page && req.body.page > 0) {
         page = req.body.page;
-        limit = req.body.limit || Config.globalAdminLimit;
         offset = (page - 1) * limit;
       } else {
-        limit = Config.globalAdminLimit;
         offset = 0;
       }
 
@@ -3924,6 +4038,11 @@ deleteDraft: async (req, res) => {
     }
 
         const { user_type, id:user_id } = req.user;
+        let { includeVendors = false } = req.query;
+
+        if(includeVendors) {
+          includeVendors = includeVendors == 'true';
+        }
 
     try {
       if (user_type == 2 || user_type == 8) {
@@ -3972,72 +4091,9 @@ deleteDraft: async (req, res) => {
       const rfQItem = await rfqModel.getRfqById(
         id,
         req.user.id,
-        req.user.user_type
+        req.user.user_type,
+        includeVendors
       );
-
-      // Fix for auction dates - Enhanced logging and data transformation
-      if (rfQItem && rfQItem.length > 0) {
-        
-        // Ensure auction dates are properly formatted strings, not null/undefined
-        if (rfQItem[0].reverse_auction === 1) {
-          // If reverse auction is enabled but dates are empty, set default values
-          if (!rfQItem[0].ra_start_date || rfQItem[0].ra_start_date === '' || rfQItem[0].ra_start_date === 'null') {
-            rfQItem[0].ra_start_date = new Date().toISOString().split('T')[0];
-          }
-          
-          if (!rfQItem[0].ra_end_date || rfQItem[0].ra_end_date === '' || rfQItem[0].ra_end_date === 'null') {
-            if (rfQItem[0].bid_end_date) {
-              rfQItem[0].ra_end_date = rfQItem[0].bid_end_date;
-            } else {
-              // If no bid_end_date, set to 7 days from now
-              const endDate = new Date();
-              endDate.setDate(endDate.getDate() + 7);
-              rfQItem[0].ra_end_date = endDate.toISOString().split('T')[0];
-            }
-          }
-          
-          // Update the database with these defaults if they were missing
-          if (rfQItem[0].ra_start_date && rfQItem[0].ra_end_date) {
-            try {
-              await rfqModel.update('tbl_rfq', {
-                ra_start_date: rfQItem[0].ra_start_date,
-                ra_end_date: rfQItem[0].ra_end_date
-              }, id);
-            } catch (updateError) {
-              console.error("Error updating auction dates:", updateError);
-            }
-          }
-        } else {
-          // If reverse auction is disabled, explicitly set dates to empty strings for frontend
-          rfQItem[0].ra_start_date = '';
-          rfQItem[0].ra_end_date = '';
-        }
-        
-      }
-
-      // this block is for vendor, to show only those products which are assigned to the vendor
-      if (req.user.user_type != 2) {
-        const userProducts = await rfqModel.getUserProducts(id, req.user.id);
-        if (
-          userProducts.length > 0 &&
-          rfQItem.length > 0 &&
-          rfQItem[0].products.length > 0
-        ) {
-          let fproducts = [];
-          userProducts.map((prod_item) => {
-            rfQItem[0].products.map((pintem) => {
-              if (prod_item.product_id == pintem.product_id && prod_item.variant == pintem.variant) {
-                pintem.vendor_details = pintem.vendor_details.filter(vendor => vendor.user_id === req.user.id);
-                fproducts.push(pintem);
-              }
-            });
-          });
-
-          // changes done by mukul, no need to remove duplicate specs, they are already product and variant specific
-          // rfQItem[0].products =  await removeSpecsDynamically(fproducts); // remove duplicate specs from products
-          rfQItem[0].products = fproducts;
-        }
-      }
 
 
       res
@@ -4058,6 +4114,37 @@ deleteDraft: async (req, res) => {
         .end();
     }
   },
+  getTargetPricehistory: async (req, res) => {
+  try {
+    const { rfq_product_id } = req.params;
+
+    const result  =  await rfqModel.getPricehistory(rfq_product_id);
+
+    // const query = `
+    //   SELECT * 
+    //   FROM tbl_rfq_product_target_price
+    //   WHERE tbl_rfq_product_id = $1
+    //   ORDER BY created_at DESC
+    // `;
+
+    // const data = await db.query(query, [rfq_product_id]);
+
+    if (result.length > 0) {
+      return res.json({ status: 1, data: result });
+    } else {
+      return res.json({ status: 0, message: 'No target price history found' });
+    }
+  } catch (error) {
+    console.error('Error fetching target price history:', error);
+    return res.status(500).json({
+      status: 0,
+      message: 'Internal server error',
+      error: error.message
+    });
+  }
+},
+
+
   rfqList: async (req, res, next) => {
     try {
       let user_id = req.user.id;
@@ -4303,6 +4390,7 @@ deleteDraft: async (req, res) => {
       products,
       globalPaymentTerms,
       globalComment,
+      global_payment_term_list,
       term_and_condition_files,
       is_regret,
       regret_reason
@@ -4678,6 +4766,34 @@ deleteDraft: async (req, res) => {
                   await rfqModel.insert('tbl_quotes_files', fileData, t);
                 }
               }
+
+             // Payment Terms (tbl_quotes_payment_terms)
+             if (Array.isArray(global_payment_term_list) && global_payment_term_list.length) {
+               const rows = global_payment_term_list
+                 .filter(r => r && r.type && r.value != null)
+                 .map(r => {
+                   const type = String(r.type).toLowerCase();
+                   return ['advance','credit','other'].includes(type) ? {
+                     quote_id: created_quote_id,
+                     value: Number(r.value) || 0,
+                     type,
+                     days: type === 'credit' && r.days != null ? Number(r.days) : null,
+                     comment: r.comment?.trim() || null,
+                     created_by: req.user.id,
+                   } : null;
+                 })
+                 .filter(Boolean);
+             
+               if (rows.length) {
+                 await rfqModel.insertArray(
+                   rows,
+                   ['quote_id','value','type','days','comment','created_by'],
+                   'tbl_quotes_payment_terms',
+                   t
+                 );
+               }
+             }
+           //  save payment term array
   
               // adding the quote_id
               quote_items_data.map((item)=> item.quote_id=created_quote_id);
@@ -5462,13 +5578,13 @@ deleteDraft: async (req, res) => {
         }
       }
       
-      // Default to India
-      if (!locationFilters.country_id) {
-        const indiaResult = await cmsModel.findCountryByName('India');
-        if (indiaResult) {
-          locationFilters.country_id = indiaResult.id;
-        }
-      }
+      // // Default to India
+      // if (!locationFilters.country_id) {
+      //   const indiaResult = await cmsModel.findCountryByName('India');
+      //   if (indiaResult) {
+      //     locationFilters.country_id = indiaResult.id;
+      //   }
+      // }
 
       const productResult = await rfqModel.searchProduct(productSlug, category_id, approved_by_id, locationFilters);
       const categoryResult = await rfqModel.getCategoryList(productSlug);
@@ -7366,7 +7482,7 @@ deleteDraft: async (req, res) => {
   initiateMagicSearch: async (req, res) => {
     try {
       const { id } = req.user;
-      const { file_name, type = 'rfq' } = req.body;
+      const { file_name, type = 'rfq', raw_file_url } = req.body;
 
       if(!file_name) return res.status(400).json({
         status: 3,
@@ -7397,18 +7513,8 @@ deleteDraft: async (req, res) => {
         const nowIst = moment().tz('Asia/Kolkata');
 
         const diffInHours = nowIst.diff(inputIstMoment, 'hours', true);
-        if(diffInHours > 2) {
-          await rfqModel.updatePersistenceJobStatus(
-            processing.id,
-            PERSISTENCE_STATUSES.TERMINATED,
-            null,
-            {
-              type: 'db-error',
-              actual: [
-                'Due to a longer processing time, we have terminated this BOQ Processing, please upload this BOQ again to retry the processing'
-              ]
-            }
-          );
+        if(diffInHours > 1) {
+          await rfqModel.updatePersistenceJobStatus(processing.id, PERSISTENCE_STATUSES.TERMINATED, null, 'Due to a longer processing time, we have terminated this BOQ Processing, please upload this BOQ again to retry the processing');
         } else {
           return {
             status: 5,
@@ -7426,7 +7532,7 @@ deleteDraft: async (req, res) => {
       const signature = generateSignature(message, secret);
 
       return db.tx(async t => {
-        let persistence = await rfqModel.persistAIJobInDB(id, file_name, signature, type, t);
+        let persistence = await rfqModel.persistAIJobInDB(id, file_name, raw_file_url, signature, type, t);
   
         if(!persistence || persistence.length <= 0) {
           return {
@@ -7934,6 +8040,7 @@ deleteDraft: async (req, res) => {
       products,
       globalPaymentTerms,
       globalComment,
+      global_payment_term_list,
       term_and_condition_files
     } = req.body;
 
@@ -8117,6 +8224,33 @@ deleteDraft: async (req, res) => {
           await rfqModel.insert('tbl_quotes_files', fileData);
         }
       }
+
+      // delete payment terms list
+      const deletedTerms = global_payment_term_list.deletedTerms || [];
+      if(deletedTerms.length>0){
+        await generalModel.deleteManyByIds("tbl_quotes_payment_terms", deletedTerms)
+      }
+
+      // update payment terms list
+      const updatedTerms = global_payment_term_list.updatedTerms || [];
+     if (updatedTerms.length>0) {
+       await generalModel.updateMany("tbl_quotes_payment_terms", updatedTerms, "id");
+     }
+
+      // insert new payment terms list       
+      const createdTerms = global_payment_term_list?.createdTerms ?? [];
+      if (createdTerms.length > 0) {
+        const termsWithQuoteId = createdTerms.map(({ action, ...t }) => ({
+          value: Number(t.value) || 0,
+          type: t.type || "advance",
+          days: t.type === 'credit' && t.days != null ? Number(t.days) : null,
+          comment: t.comment?.trim() || null,
+          quote_id: quoteId,
+          created_by: user.id,
+        }));
+        await generalModel.insertMany("tbl_quotes_payment_terms", termsWithQuoteId);
+      }
+
 
 
       // Insert new document_files for each product if exists
@@ -8353,6 +8487,193 @@ sendQueryMessage: async (req, res) => {
       });
   }
 },
+sendBroadcastQueryMessageToVendors: async (req, res) => {
+  const { rfq_id, receiver_ids, message_text } = req.body;
+  const files = req.files;
+  const sender_id = req.user.id;
+  const sender_type = req.user.user_type;
+
+  try {
+    // Get RFQ and sender details (unchanged)
+    const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+    if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
+    
+    const rfqNumber = rfqDetails.rfq_no;
+    const sender_details = await userModel.user_profile_detail(sender_id);
+    const senderDetails = sender_details[0];
+
+    // Prepare messages for bulk insert
+    const messagesData = receiver_ids.map(receiver => ({
+      rfq_id,
+      sender_id,
+      receiver_id: receiver.id,
+      sender_type,
+      message_text,
+      created_at: new Date()
+    }));
+
+    // Bulk insert messages
+    const insertedMessages = await rfqModel.insertArray(
+      messagesData, 
+      ['rfq_id', 'sender_id', 'receiver_id', 'sender_type', 'message_text', 'created_at'], 
+      'tbl_query_messages'
+    );
+
+    // Handle file attachments if present
+    if (files && files.length > 0) {
+      const filesData = [];
+      
+      insertedMessages.forEach(message => {
+        files.forEach(file => {
+          filesData.push({
+            message_id: message.id,
+            file_name: file.originalname,
+            file_url: file.location
+          });
+        });
+      });
+
+      await rfqModel.insertArray(
+        filesData,
+        ['message_id', 'file_name', 'file_url'],
+        'tbl_query_message_files'
+      );
+    }
+
+    // Get all receiver details in one query
+    // const receiverDetails = await userModel.getUsersByIds(receiver_ids.map(r => r.id));
+
+    // Prepare notifications (if needed)
+    // const notifications = receiverDetails.map(receiver => ({
+    //   type: 'New Message',
+    //   title: 'New RFQ Message Received',
+    //   message: `You have received a new message from ${senderDetails.name}.`,
+    //   additional_data: { user_type: receiver.user_type }
+    // }));
+
+    // Bulk insert notifications if needed
+    // await notificationModel.insertArray(notifications, [...fields...], 'notifications_table');
+
+    res.status(200).json({
+      status: 1,
+      message: 'Broadcast message sent to all vendors successfully.'
+    });
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+      success: false,
+      message: 'Error broadcasting message',
+      error: error.message
+    });
+  }
+},
+negotiatePrice : async (req, res ) => { 
+  const { productId, vendorIds, targetPrice } = req.body;
+  const user_id = req.user.id;
+  try {
+
+  // if (!rfq_product_id || !target_price) {
+  //   return res.status(400).json({
+  //     status: 0,
+  //     message: 'rfq_product_id and target_price are required'
+  //   });
+  // }
+  // const validate  = await rfqModel.checkIfExists('tbl_rfq_products', `id = ${rfq_product_id}`);
+
+  // if( !validate || validate.length === 0) {
+  //   return res.status(404).json({
+  //     status: 0,
+  //     message: 'RFQ Product not found'
+  //   });
+  // }
+
+  // Create payload for multiple vendors
+  let payload = vendorIds.map((vendorId) => {
+    return {
+      tbl_rfq_product_id: productId,
+      target_price: targetPrice,
+      created_by: user_id,
+      vendor_id: vendorId,
+    };
+  });
+
+  // console.log("checking the payload here vendor ID", payload);
+
+  // Keys for pg-promise insert
+  const keys = [
+    'tbl_rfq_product_id',
+    'target_price',
+    'created_by',
+    'vendor_id'
+  ];
+  const vendorProductList =  await rfqModel.getRfqProductvendorsForTargetPrice(productId,vendorIds); 
+
+  // Insert using insertArray helper
+  const result = await rfqModel.insertArray(
+    payload,
+    keys,
+    'tbl_rfq_product_target_price'
+  );
+
+  console.log(" vendorProductList  , targetPrice , user_id ", vendorProductList  , targetPrice , user_id)
+
+    await sendMailToVendorsForTargetPrice(vendorProductList  , targetPrice , user_id  );
+
+
+  res.json({
+    status: 1,
+    message: 'Target price(s) set successfully',
+    data: result
+  });
+
+} catch (error) {
+  console.error('Error setting target price:', error);
+  res.status(500).json({
+    status: 0,
+    message: 'Internal server error'
+  });
+}
+
+},
+
+getTargetPriceHistrory : async (req, res) => {
+  const { rfq_product_id } = req.params;
+  const limit = req.query.limit === "1" ? 1 : null;
+  const user_id = req.user.id;
+  try {
+    if (!rfq_product_id) {
+      return res.status(400).json({
+        status: 0,
+        message: 'rfq_product_id is required'
+      });
+    }
+    const validate  = await rfqModel.checkIfExists('tbl_rfq_products', `id = ${rfq_product_id}`);
+    if( !validate || validate.length === 0) {
+      return res.status(404).json({
+        status: 0,
+        message: 'RFQ Product not found'
+      });
+    }
+    const history = await rfqModel.getTargetPriceHistory(rfq_product_id, user_id, limit );
+    if (!history || history.length === 0) {
+      return res.status(404).json({
+        status: 0,
+        message: 'No target price history found for this RFQ product'
+      });
+    }
+    res.status(200).json({
+      status: 1,
+      message: 'Target price history retrieved successfully',
+      data: history
+    });
+  } catch (error) { 
+    res.status(500).json({
+      status: 0,
+      message: 'Error retrieving target price history',
+      error: error.message
+    });
+  }
+},
 
 listQueryMessages: async (req, res) => {
   const { rfq_id, receiver_id } = req.body;
@@ -8478,15 +8799,14 @@ addClauseUsingFile : async (req, res) => {
     // Original logic for RFQ clause addition
     // Use new product/variant name function
     const productName = await rfqModel.getProductOrVariantNameByRfqProductId(rfq_product_id);
-    const result = await generativeAI.extractClauses(file, productName);
+    // const result = await generativeAI.extractClauses(file, productName);
+    const result = await extractDatasheetSummary(file);
 
-    const techEvaluationClauses = result?.structuredData?.technicalSpecifications.map(item => {
-      if (item?.text) return item.text;
-      if (item?.parameter && item?.value) return `${item.parameter}: ${item.value}${item.unit ? ' ' + item.unit : ''}`;
-      if (item?.parameter) return `${item.parameter}: ${item.value || ''}${item.unit ? ' ' + item.unit : ''}`;
-      return JSON.stringify(item);
-    }).filter(Boolean);
-    
+  const techEvaluationClauses = result?.structuredData.map(item => {
+    if(item.key && item.value) return `${item.key} - ${item.value}`
+    return JSON.stringify(item);
+  }).filter(Boolean);
+
     if (!result.status) {
       let userMessage = result.message || "Failed to extract information";
       if (userMessage.match(/no relevant information detected|no information detected/i)) {
@@ -9174,6 +9494,5 @@ saveExcel: async (req, res) => {
     });
   }
 }
-
 };
 export default rfqController;
