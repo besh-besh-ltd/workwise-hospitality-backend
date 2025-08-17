@@ -25,45 +25,46 @@ function formatDate(date) {
 }
 
 /**
- * Accepts "YYYY‑MM‑DDTHH:mm"  or  "YYYY‑MM‑DD HH:mm"
- * Returns a JS Date in **UTC** that represents the same clock
- * time in IST (+05:30).
+ * Accepts "YYYY‑MM-DDTHH:mm" or "YYYY‑MM-DD HH:mm"
+ * Returns a JS Date in **UTC** that representsرفه
+
+ the same clock time in IST (+05:30).
  */
 function parseISTDate(datetimeStr = '') {
-  if (!datetimeStr) {
-    throw new Error('Empty date string');
-  }
+    if (!datetimeStr) {
+        throw new Error('Empty date string');
+    }
 
-  // Normalize input string
-  let s = datetimeStr.trim().replace('T', ' ');
-  if (!/\d{2}:\d{2}/.test(s)) s += ' 00:00';
+    // Normalize input string
+    let s = datetimeStr.trim().replace('T', ' ');
+    if (!/\d{2}:\d{2}/.test(s)) s += ' 00:00';
 
-  const [datePart, timePart] = s.split(' ');
-  if (!datePart || !timePart) {
-    throw new Error(`Invalid date format: ${datetimeStr}`);
-  }
+    const [datePart, timePart] = s.split(' ');
+    if (!datePart || !timePart) {
+        throw new Error(`Invalid date format: ${datetimeStr}`);
+    }
 
-  const [y, m, d] = datePart.split('-').map(Number);
-  const [hh, mm = 0] = timePart.split(':').map(Number);
+    const [y, m, d] = datePart.split('-').map(Number);
+    const [hh, mm = 0] = timePart.split(':').map(Number);
 
-  if ([y, m, d, hh, mm].some(v => isNaN(v))) {
-    throw new Error(`Invalid date components: ${datetimeStr}`);
-  }
+    if ([y, m, d, hh, mm].some(v => isNaN(v))) {
+        throw new Error(`Invalid date components: ${datetimeStr}`);
+    }
 
-  // Create JS Date in local time (assumed to be IST if machine is set to IST)
-  const localDate = new Date(y, m - 1, d, hh, mm);
+    // Create JS Date in local time (assumed to be IST if machine is set to IST)
+    const localDate = new Date(y, m - 1, d, hh, mm);
 
-  // Format to IST ISO-like string (without Z or UTC shift)
-  const yyyy = localDate.getFullYear();
-  const MM = String(localDate.getMonth() + 1).padStart(2, '0');
-  const dd = String(localDate.getDate()).padStart(2, '0');
-  const HH = String(localDate.getHours()).padStart(2, '0');
-  const mmStr = String(localDate.getMinutes()).padStart(2, '0');
+    // Format to IST ISO-like string (without Z or UTC shift)
+    const yyyy = localDate.getFullYear();
+    const MM = String(localDate.getMonth() + 1).padStart(2, '0');
+    const dd = String(localDate.getDate()).padStart(2, '0');
+    const HH = String(localDate.getHours()).padStart(2, '0');
+    const mmStr = String(localDate.getMinutes()).padStart(2, '0');
 
-  const istFormatted = `${yyyy}-${MM}-${dd}T${HH}:${mmStr}:00`;
+    const istFormatted = `${yyyy}-${MM}-${dd}T${HH}:${mmStr}:00`;
 
-  console.log('Parsed IST date:', istFormatted);
-  return istFormatted;
+    console.log('Parsed IST date:', istFormatted);
+    return istFormatted;
 }
 
 /**
@@ -71,147 +72,20 @@ function parseISTDate(datetimeStr = '') {
  * while preserving the IST format for scheduling
  */
 function createDateFromIST(istDateString) {
-  const [datePart, timePart] = istDateString.split('T');
-  const [y, m, d] = datePart.split('-').map(Number);
-  const [hh, mm, ss = 0] = timePart.split(':').map(Number);
-  
-  return new Date(y, m - 1, d, hh, mm, ss);
-}
-
-/**
- * Adjusts IST date string for weekends
- */
-function adjustISTDateForWeekend(originalISTDate, type) {
-  const date = createDateFromIST(originalISTDate);
-  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
-
-  if (type === 'start') {
-    // If Saturday, subtract 1 day (Friday)
-    if (day === 6) {
-      date.setDate(date.getDate() - 1);
-    }
-    // If Sunday, subtract 2 days (Friday)
-    else if (day === 0) {
-      date.setDate(date.getDate() - 2);
-    }
-  } else if (type === 'end') {
-    // If Saturday, add 2 days (Monday)
-    if (day === 6) {
-      date.setDate(date.getDate() + 2);
-    }
-    // If Sunday, add 1 day (Monday)
-    else if (day === 0) {
-      date.setDate(date.getDate() + 1);
-    }
-  }
-
-  // Convert back to IST format
-  const yyyy = date.getFullYear();
-  const MM = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  const HH = String(date.getHours()).padStart(2, '0');
-  const mmStr = String(date.getMinutes()).padStart(2, '0');
-
-  return `${yyyy}-${MM}-${dd}T${HH}:${mmStr}:00`;
+    const [datePart, timePart] = istDateString.split('T');
+    const [y, m, d] = datePart.split('-').map(Number);
+    const [hh, mm, ss = 0] = timePart.split(':').map(Number);
+    
+    return new Date(y, m - 1, d, hh, mm, ss);
 }
 
 function isValidAuctionWindow(start, end) {
     return start && end && start.getTime() < end.getTime();
-} 
-
-export const raSchedulerForBuyer = async (rfqNumber, req, products) => {
-    const { ra_start_date, ra_end_date, contact_number, response_email, contact_name, project_id } = req.body;
-
-    const startDate = parseISTDate(ra_start_date);
-    const endDate = parseISTDate(ra_end_date);
-
-    // Adjust the dates to avoid weekend triggers - keep in IST format
-    const adjustedStartDate = adjustISTDateForWeekend(startDate, 'start');
-    const adjustedEndDate = adjustISTDateForWeekend(endDate, 'end');
-
-    const productArray = products.map(product => ({
-        product_name: product.name,
-    }));
-
-    let project_name = '';
-    
-    if (project_id && !isNaN(project_id) && Number(project_id) !== -1) {
-        const result = await rfqModel.findOne("tbl_projects", { id: Number(project_id) });
-        if (result) {
-            project_name = result.name;
-        }
-    }
-
-    // Start email to buyer - pass IST time directly
-    await createSchedule({
-        rfqId: rfqNumber,
-        type: 'auctionStartBuyer',
-        scheduledTimeIST: adjustedStartDate,
-        payload: {
-            buyer_name: contact_name,
-            buyer_email: response_email,
-            contact_number: contact_number,
-            product_name: productArray,
-            project_name: project_name ?? "NA"
-        }
-    });
-
-    // End email to buyer - pass IST time directly
-    await createSchedule({
-        rfqId: rfqNumber,
-        type: 'auctionEndBuyer',
-        scheduledTimeIST: adjustedEndDate,
-        payload: {
-            buyer_name: contact_name,
-            buyer_email: response_email,
-            contact_number: contact_number,
-            product_name: productArray,
-            project_name: project_name ?? "NA"
-        }
-    });
-};
-
-// Helper functions for weekend handling
-function isWeekend(date) {
-    const day = date.getDay();
-    return day === 0 || day === 6; // Sunday = 0, Saturday = 6
 }
 
-function getPreviousFridayIST(istDateString) {
+function addHoursToISTDate(istDateString, hours) {
     const date = createDateFromIST(istDateString);
-    const daysToSubtract = (date.getDay() + 2) % 7; // Calculate days to subtract to get to Friday
-    date.setDate(date.getDate() - daysToSubtract);
-    date.setHours(17, 0, 0, 0); // Set to 5 PM Friday
-    
-    // Convert back to IST format
-    const yyyy = date.getFullYear();
-    const MM = String(date.getMonth() + 1).padStart(2, '0');
-    const dd = String(date.getDate()).padStart(2, '0');
-    const HH = String(date.getHours()).padStart(2, '0');
-    const mmStr = String(date.getMinutes()).padStart(2, '0');
-    
-    return `${yyyy}-${MM}-${dd}T${HH}:${mmStr}:00`;
-}
-
-function getNextMondayIST(istDateString) {
-    const date = createDateFromIST(istDateString);
-    const daysToAdd = (8 - date.getDay()) % 7; // Calculate days to add to get to Monday
-    date.setDate(date.getDate() + daysToAdd);
-    date.setHours(9, 0, 0, 0); // Set to 9 AM Monday
-    
-    // Convert back to IST format
-    const yyyy = date.getFullYear();
-    const MM = String(date.getMonth() + 1).padStart(2, '0');
-    const dd = String(date.getDate()).padStart(2, '0');
-    const HH = String(date.getHours()).padStart(2, '0');
-    const mmStr = String(date.getMinutes()).padStart(2, '0');
-    
-    return `${yyyy}-${MM}-${dd}T${HH}:${mmStr}:00`;
-}
-
-function addDaysToISTDate(istDateString, days) {
-    const date = createDateFromIST(istDateString);
-    date.setDate(date.getDate() + days);
+    date.setTime(date.getTime() + hours * 60 * 60 * 1000);
     
     // Convert back to IST format
     const yyyy = date.getFullYear();
@@ -238,6 +112,58 @@ function getMidPointISTDate(startIST, endIST) {
     
     return `${yyyy}-${MM}-${dd}T${HH}:${mmStr}:00`;
 }
+
+export const raSchedulerForBuyer = async (rfqNumber, req, products) => {
+    const { ra_start_date, ra_end_date, contact_number, response_email, contact_name, project_id } = req.body;
+
+    const startDate = parseISTDate(ra_start_date);
+    const endDate = parseISTDate(ra_end_date);
+
+    const productArray = products.map(product => ({
+        product_name: product.name,
+    }));
+
+    let project_name = '';
+    
+    if (project_id && !isNaN(project_id) && Number(project_id) !== -1) {
+        const result = await rfqModel.findOne("tbl_projects", { id: Number(project_id) });
+        if (result) {
+            project_name = result.name;
+        }
+    }
+
+   
+
+    // Start email to buyer - use IST time directly
+    await createSchedule({
+        rfqId: rfqNumber,
+        type: 'auctionStartBuyer',
+        scheduledTimeIST: startDate,
+        payload: {
+            buyer_name: contact_name,
+            buyer_email: response_email,
+            contact_number: contact_number,
+            product_name: productArray,
+            project_name: project_name ?? "NA"
+        }
+    });
+
+
+
+    // End email to buyer - use IST time directly
+    await createSchedule({
+        rfqId: rfqNumber,
+        type: 'auctionEndBuyer',
+        scheduledTimeIST: endDate,
+        payload: {
+            buyer_name: contact_name,
+            buyer_email: response_email,
+            contact_number: contact_number,
+            product_name: productArray,
+            project_name: project_name ?? "NA"
+        }
+    });
+};
 
 export const raSchedulerForVendor = async (req, rfqNumber, productVendormap) => {
     console.log("Reverse Auction Scheduler is running...");
@@ -357,28 +283,16 @@ export async function scheduleEmailsForAuctionEventBridge(
         console.log(`📧 Scheduling emails for vendor: ${vendor_name} (${vendor_email})`);
 
         // === 1. One-Day-Before Email ===
-        const oneDayBeforeIST = addDaysToISTDate(startDateIST, -1);
-        const oneDayBeforeDate = createDateFromIST(oneDayBeforeIST);
-        oneDayBeforeDate.setHours(9, 0, 0, 0); // Set to 9 AM
-        
-        // Convert back to IST format with adjusted time
-        const yyyy = oneDayBeforeDate.getFullYear();
-        const MM = String(oneDayBeforeDate.getMonth() + 1).padStart(2, '0');
-        const dd = String(oneDayBeforeDate.getDate()).padStart(2, '0');
-        let oneDayBeforeAdjusted = `${yyyy}-${MM}-${dd}T09:00:00`;
-        
-        let oneDayBeforeScheduleIST = isWeekend(oneDayBeforeDate)
-            ? getPreviousFridayIST(oneDayBeforeAdjusted)
-            : oneDayBeforeAdjusted;
+        const oneDayBeforeIST = addHoursToISTDate(startDateIST, -24);
 
-        console.log("One day before schedule time check ------>", oneDayBeforeScheduleIST);
+        console.log("One day before schedule time check ------>", oneDayBeforeIST);
 
-        if (createDateFromIST(oneDayBeforeScheduleIST) > now) {
+        if (createDateFromIST(oneDayBeforeIST) > now) {
             await createSchedule({
                 rfqId: rfq_id,
                 type: 'oneDayBeforeAuctionVendor',
                 vendor_id,
-                scheduledTimeIST: oneDayBeforeScheduleIST,
+                scheduledTimeIST: oneDayBeforeIST,
                 payload: {
                     vendor_email,
                     vendor_name,
@@ -398,18 +312,14 @@ export async function scheduleEmailsForAuctionEventBridge(
         }
 
         // === 2. Auction Start Email ===
-        let auctionStartScheduleIST = isWeekend(startDate)
-            ? getPreviousFridayIST(startDateIST)
-            : startDateIST;
-            
-        console.log("Auction start schedule:", auctionStartScheduleIST);
+        console.log("Auction start schedule:", startDateIST);
         
-        if (createDateFromIST(auctionStartScheduleIST) >= now) {
+        if (createDateFromIST(startDateIST) >= now) {
             await createSchedule({
                 rfqId: rfq_id,
                 type: 'auctionStartVendor',
                 vendor_id,
-                scheduledTimeIST: auctionStartScheduleIST,
+                scheduledTimeIST: startDateIST,
                 payload: {
                     vendor_email,
                     vendor_name,
@@ -430,20 +340,15 @@ export async function scheduleEmailsForAuctionEventBridge(
 
         // === 3. Mid Auction Reminder Email ===
         const midAuctionTimeIST = getMidPointISTDate(startDateIST, endDateIST);
-        const midAuctionDate = createDateFromIST(midAuctionTimeIST);
         
-        const midAuctionScheduleIST = isWeekend(midAuctionDate)
-            ? getNextMondayIST(midAuctionTimeIST)
-            : midAuctionTimeIST;
-            
-        console.log("Mid auction schedule time check:", midAuctionScheduleIST);
+        console.log("Mid auction schedule time check:", midAuctionTimeIST);
 
-        if (createDateFromIST(midAuctionScheduleIST) >= now) {
+        if (createDateFromIST(midAuctionTimeIST) >= now) {
             await createSchedule({
                 rfqId: rfq_id,
                 type: 'midAuctionReminderVendor',
                 vendor_id,
-                scheduledTimeIST: midAuctionScheduleIST,
+                scheduledTimeIST: midAuctionTimeIST,
                 payload: {
                     vendor_email,
                     vendor_name,
@@ -461,17 +366,13 @@ export async function scheduleEmailsForAuctionEventBridge(
         }
 
         // === 4. Auction End Email ===
-        const auctionEndScheduleIST = isWeekend(endDate)
-            ? getNextMondayIST(endDateIST)
-            : endDateIST;
-            
-        console.log("Auction end schedule:", auctionEndScheduleIST);
+        console.log("Auction end schedule:", endDateIST);
 
         await createSchedule({
             rfqId: rfq_id,
             type: 'auctionEndVendor',
             vendor_id,
-            scheduledTimeIST: auctionEndScheduleIST,
+            scheduledTimeIST: endDateIST,
             payload: {
                 vendor_email,
                 vendor_name,
@@ -493,9 +394,9 @@ export async function scheduleEmailsForAuctionEventBridge(
             success: true,
             vendor: vendor_name,
             scheduledEmails: {
-                oneDayBefore: createDateFromIST(oneDayBeforeScheduleIST) > now,
-                auctionStart: createDateFromIST(auctionStartScheduleIST) >= now,
-                midAuction: createDateFromIST(midAuctionScheduleIST) >= now,
+                oneDayBefore: createDateFromIST(oneDayBeforeIST) > now,
+                auctionStart: createDateFromIST(startDateIST) >= now,
+                midAuction: createDateFromIST(midAuctionTimeIST) >= now,
                 auctionEnd: true
             }
         };
