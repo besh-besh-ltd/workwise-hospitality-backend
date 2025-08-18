@@ -8769,7 +8769,31 @@ addClauseUsingFile : async (req, res) => {
     // Check if this is a technical summary request (no rfq_id and rfq_product_id)
     if (!rfq_id || !rfq_product_id) {
       // This is a technical summary request - extract clauses without product context
-      const result = await generativeAI.extractClauses(file);
+      const { email, phone, file_name } = req.body;
+      let user = req.user ?? null;
+      let didUserRegister = false;
+
+      if(!user) {
+        const userExists = await userModel.user_exist(email, phone);
+        if(userExists && userExists.length > 0) {
+          return res.status(403).json({
+            status: 3,
+            message: 'User already exist with given credentials, please login!'
+          })
+        }
+  
+        const registeredUser = await UsersController.registerBuyerAnonymously(req.body);
+        if(!registeredUser) {
+          return res.status(400).json({
+            status: 3,
+            message: 'Failed to register, please try again later. If this issue persists please contact our support team!'
+          })
+        }
+
+        user = registeredUser;
+        didUserRegister = true;
+      }
+      const result = await extractDatasheetSummary(file);
       
       if (!result.status) {
         let userMessage = result.message || "Failed to extract information";
