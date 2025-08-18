@@ -328,7 +328,6 @@ RfqRoutes.post('/tender-summary',
 RfqRoutes.post('/technical-summary',
   noLogin.customer_auth,
   schema_posts.clauseFileUpload,
-  validateBody(rfqSchemas.technicalSummary),
   rfqController.addClauseUsingFile
 )
 
