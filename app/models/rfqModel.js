@@ -340,7 +340,9 @@ const rfqModel = {
         persistence.status,
         status,
         persisted_rfq_id,
-        errors
+        errors,
+        persistence,
+        jsonUrl,
       );
 
       return updatedPersistence;
@@ -2929,6 +2931,68 @@ const productQuery = `
           reject(error);
         });
     });
+  },
+
+  getEstimatesData: async (persistent_id) => {
+    try {
+      const [persistentData, estimatesData] = await db.tx(async t => {
+        let persistenceQuery = `
+        SELECT * FROM tbl_rfq_persistent_jobs TQPJ
+        WHERE TQPJ.id = $1 AND status IN ('completed', 'partially_completed');
+        `
+        const persistentData = await t.one(persistenceQuery, [persistent_id]);
+  
+        let estimateQuery = `
+         SELECT * FROM tbl_quote_estimates TQE
+         WHERE TQE.id = $1
+        `
+
+        const estimateData = await t.one(estimateQuery, [persistentData.persisted_rfq_id])
+  
+        let estimateItemsQuery = `
+          SELECT TQEI.*, TPV.name AS product_name FROM tbl_quote_estimates_item TQEI
+          JOIN tbl_product_variant TPV ON TQEI.product_variant_id = TPV.id
+          WHERE TQEI.quote_estimates_id = $1
+        `
+
+        const items = await t.any(estimateItemsQuery, [estimateData.id]);
+
+        return [persistentData, { estimates: estimateData, items }];
+      }) 
+
+      return {
+        persistent: persistentData,
+        estimates: estimatesData
+      }
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  getEstimateQuotes: async (product_variant_id) => {
+    try {
+      let q = `
+        SELECT *
+          FROM (
+                  SELECT
+                      MIN(unit_price) AS lowest_price,
+                      ROUND(AVG(unit_price)::numeric, 2) AS average_price,
+                      MAX(unit_price) AS highest_price
+                  FROM tbl_quote_items
+                  WHERE product_variant_id = $1
+                  AND unit_price > 0
+              ) t
+          WHERE t.lowest_price IS NOT NULL
+            OR t.average_price IS NOT NULL
+            OR t.highest_price IS NOT NULL;
+      `
+
+      const res = db.oneOrNone(q, [product_variant_id]);
+      return res;
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
   },
 
   getQuotesByRfqById2: async (

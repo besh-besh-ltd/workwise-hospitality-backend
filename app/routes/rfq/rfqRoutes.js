@@ -572,7 +572,7 @@ RfqRoutes.post(
 RfqRoutes.post(
   '/get-processing-rfqs',
   passportSignIn,
-  acl([2, 8]),
+  acl([2, 7, 8]),
   rfqController.getProcessingRFQs
 );
 

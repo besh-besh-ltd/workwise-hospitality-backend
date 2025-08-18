@@ -56,8 +56,19 @@ const VENDORS_FILTER_KEYS = [
   'productMakes'
 ];
 
+const getDownloadURL = (url, excelToJson = false) => {
+  if(process.env.NODE_ENV == "production" && !url.includes("https")) {
+    url = url.replace("http", "https");
+  }
 
-export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, status, persisted_rfq_id, errors, persistence_id, type) => {
+  if(excelToJson) {
+    url = url.replace("excel", "json");
+  }
+
+  return url;
+}
+
+export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, status, persisted_rfq_id, errors, persistence, download_url) => {
   try {
     const { name, email } = buyer_info;
 
@@ -65,7 +76,7 @@ export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, st
     let containerContent = '';
     let subject = '';
       
-    switch(type) {
+    switch(persistence.type) {
       case 'cost-estimation':
         headerContent = `<h2>Hello ${name},</h2>`;
         containerContent = `
@@ -82,7 +93,7 @@ export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, st
           ${
             (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
             status == PERSISTENCE_STATUSES.COMPLETED)
-              ? `<a href="${process.env.FRONT_END_WEBSITE}/ai-tools/cost-estimation/${persistence_id}"
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/ai-tools/cost-estimation/${persistence.id}"
                     style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
                   View Estimation
                 </a>`
@@ -90,7 +101,7 @@ export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, st
           }
           ${
             status == PERSISTENCE_STATUSES.FAILED
-              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/magic-search?tab=processing-files"
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/boq-automation?tab=processing-files"
                     style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
                   View Processing RFQs
                 </a>`
@@ -103,6 +114,49 @@ export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, st
             : status == PERSISTENCE_STATUSES.FAILED
             ? `Cost Estimation Processing was failed`
             : `Cost Estimation status has been changed`;
+        break;
+      
+      case 'simplified':
+        headerContent = `<h2>Hello ${name},</h2>`;
+        containerContent = `
+          <p style="font-size: 15px;">
+            ${
+              status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+              status == PERSISTENCE_STATUSES.COMPLETED
+                ? `The BOQ Simplification Processing has been completed successfully, follow the below link to see the simplified version of your BOQ.`
+                : status == PERSISTENCE_STATUSES.FAILED
+                ? `BOQ Simplification has been failed due to some reasons`
+                : `BOQ Simplification status has been changed from <strong>${previous_status}</strong> to <strong>${status}</strong>`
+            }
+          </p>
+          ${
+            (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+            status == PERSISTENCE_STATUSES.COMPLETED) && download_url
+              ? `<a href="${
+                  process.env.FRONT_END_WEBSITE
+                }/dashboard/buyer/boq-automation/view?jsonUrl=${encodeURIComponent(
+                  getDownloadURL(download_url, true)
+                )}"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Simplified BOQ
+                </a>`
+              : ''
+          }
+          ${
+            status == PERSISTENCE_STATUSES.FAILED
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/boq-automation?tab=processing-files"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Processing RFQs
+                </a>`
+              : ''
+          }
+        `;
+        subject = status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+          status == PERSISTENCE_STATUSES.COMPLETED
+            ? `BOQ Simplification has been processed successfully`
+            : status == PERSISTENCE_STATUSES.FAILED
+            ? `BOQ Simplification Processing was failed`
+            : `BOQ Simplification status has been changed`;
         break;
 
       default:
@@ -129,7 +183,7 @@ export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, st
           }
           ${
             status == PERSISTENCE_STATUSES.FAILED
-              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/magic-search?tab=processing-files"
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/boq-automation?tab=processing-files"
                     style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
                   View Processing RFQs
                 </a>`
@@ -7532,7 +7586,7 @@ deleteDraft: async (req, res) => {
       const signature = generateSignature(message, secret);
 
       return db.tx(async t => {
-        let persistence = await rfqModel.persistAIJobInDB(id, file_name, raw_file_url, signature, type, t);
+        let persistence = await rfqModel.persistAIJobInDB(id, file_name, null, signature, type, t);
   
         if(!persistence || persistence.length <= 0) {
           return {
@@ -8765,8 +8819,6 @@ addClauseUsingFile : async (req, res) => {
     if (!file) {
       return res.status(400).json({ status: 0, message: "No file provided" });
     }
-    
-    // Check if this is a technical summary request (no rfq_id and rfq_product_id)
     if (!rfq_id || !rfq_product_id) {
       // This is a technical summary request - extract clauses without product context
       const { email, phone, file_name } = req.body;
@@ -8800,14 +8852,15 @@ addClauseUsingFile : async (req, res) => {
         if (userMessage.match(/no relevant information detected|no information detected/i)) {
           userMessage = "No relevant information was found in the uploaded document. Please ensure the document contains technical specifications.";
         }
-        return res.json({ status: 0, message: userMessage, errors: [{ Row: 0, error: userMessage }] });
+        return res.json({ status: 0, message: userMessage, errors: [{ Row: 0, error: userMessage }], user, didUserRegister });
       }
       
       if (!result.clauses || result.clauses.length === 0) {
         return res.json({
           status: 0,
           message: "No information was found in the document",
-          errors: [{ Row: 0, error: "No information detected in the document" }]
+          errors: [{ Row: 0, error: "No information detected in the document" }],
+          user, didUserRegister
         });
       }
       
@@ -8816,11 +8869,10 @@ addClauseUsingFile : async (req, res) => {
         status: 1,
         message: "Technical document analyzed successfully",
         clauses: result,
-        structuredData: result.structuredData
+        structuredData: result.structuredData,
+        user, didUserRegister
       });
     }
-    
-    // Original logic for RFQ clause addition
     // Use new product/variant name function
     const productName = await rfqModel.getProductOrVariantNameByRfqProductId(rfq_product_id);
     // const result = await generativeAI.extractClauses(file, productName);
@@ -8848,7 +8900,7 @@ addClauseUsingFile : async (req, res) => {
       });
     }
     // Bulk insert all clauses at once
-const insertResult = await rfqModel.addManyClauses(rfq_id, rfq_product_id, techEvaluationClauses);
+    const insertResult = await rfqModel.addManyClauses(rfq_id, rfq_product_id, techEvaluationClauses);
     return res.json({
       status: insertResult.status,
       message: insertResult.status ? `${insertResult.inserted} of ${result.clauses.length} items added successfully for '${productName}'` : insertResult.message,

@@ -496,7 +496,15 @@ export const rfqSchemas = {
     rfq_id: Joi.number().integer().optional(),
     rfq_product_id: Joi.number().integer().required(),
     vendor_id: Joi.number().integer().required()
-  })
+  }),
+
+  technicalSummary: Joi.object({
+    fullName: Joi.string().optional(),
+    companyName: Joi.string().optional(),
+    designation: Joi.string().optional(),
+    workEmail: Joi.string().email().optional(),
+    phoneNumber: Joi.string().optional()
+  }),
 };
 
 /**
