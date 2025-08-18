@@ -73,7 +73,7 @@ user_book_demo: async (mobile) => {
           const insertUserQuery = `
             INSERT INTO tbl_users (${userFields.join(', ')})
             VALUES (${userPlaceholders})
-            RETURNING id
+            RETURNING *
           `;
 
           const userResult = await t.one(insertUserQuery, userValues);
@@ -81,7 +81,8 @@ user_book_demo: async (mobile) => {
           resolve({
             success: true,
             company_id,
-            user_id: userResult.id
+            user_id: userResult.id,
+            user: userResult
           });
 
         } catch (error) {
@@ -3609,8 +3610,8 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
       db.any(
         `SELECT *
         FROM tbl_users
-        WHERE email = $1
-        OR mobile = $2;`,
+        WHERE (email = $1 AND $1 IS NOT NULL)
+        OR (mobile = $2 AND $2 IS NOT NULL);`,
         [email,mobile]
       )
         .then(function (data) {
