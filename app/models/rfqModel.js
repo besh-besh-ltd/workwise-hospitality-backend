@@ -1484,7 +1484,6 @@ const rfqModel = {
       // WHERE CLAUSES
       if (city && Array.isArray(city) && city.length > 0) {
         dynamicWhere += ` AND tu.city::int IN (${city
-          .map((c) => c.id)
           .join(',')})`;
       } else if (typeof city == 'string' || typeof city == 'number') {
         dynamicWhere += ` AND tu.city = '${city}'`;
@@ -1492,7 +1491,6 @@ const rfqModel = {
 
       if (state && Array.isArray(state) && state.length > 0) {
         dynamicWhere += ` AND tu.state::int IN (${state
-          .map((s) => s.id)
           .join(',')})`;
       } else if (typeof state == 'string' || typeof state == 'number') {
         dynamicWhere += ` AND tu.state = '${state}'`;
@@ -1500,7 +1498,6 @@ const rfqModel = {
 
       if (country && Array.isArray(country) && country.length > 0) {
         dynamicWhere += ` AND COALESCE(tu.country, '1')::int IN (${country
-          .map((c) => c.id)
           .join(',')})`;
       } else if (typeof country == 'string' || typeof country == 'number') {
         dynamicWhere += ` AND COALESCE(tu.country, '1') = '${country}'`;
