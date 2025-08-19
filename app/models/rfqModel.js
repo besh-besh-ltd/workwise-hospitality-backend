@@ -1769,6 +1769,16 @@ const rfqModel = {
       RFQ.ra_start_date, -- Select raw timestamp
       RFQ.ra_end_date,   -- Select raw timestamp
       RFQ.project_id,
+        -- Add here
+      (
+        SELECT EXISTS (
+          SELECT 1
+          FROM tbl_quotes tq
+          WHERE tq.rfq_id = RFQ.id
+          LIMIT 1
+        )
+      ) AS is_quotes_present,
+
       (SELECT COUNT(*)
      FROM tbl_query_messages TQM
      WHERE TQM.receiver_id = ${user_id}
