@@ -232,7 +232,7 @@ const UsersController = {
     try {
        const { name, email, mobile, organization_name, user_type, password, address, country, whatsapp, 
         state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
-       import_export_code,established_year,website, is_private} = req.body;
+       import_export_code,established_year,website, is_private, status} = req.body;
 
        const current_user = req.user || null
 
@@ -241,7 +241,7 @@ const UsersController = {
         email: email?.toLowerCase() || null,
         mobile: mobile || null,
         user_type: user_type || null,
-        status: user_type == 7 ? 1 : 0,
+        status: status !== undefined ? status : (user_type == 7 ? 1 : 0),
         password: generatePassword(password), 
         address: address || null,
         created_by:current_user?.id || null,
@@ -299,6 +299,43 @@ const UsersController = {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+
+  registerBuyerAnonymously: async (userData) => {
+    try {
+      const { name, companyName, email, mobile } = userData;
+
+      if(!userData.password) {
+        userData.password = generateRandomString(8);
+      }
+
+      const user_data = {
+        name: name || null,
+        email: email?.toLowerCase() || null,
+        mobile: mobile || null,
+        user_type: 7,
+        status: 1,
+        password: generatePassword(userData.password)
+      };
+
+      const company_data = {
+        company_name: companyName || null,
+        is_private: 0
+      };
+
+      const { company_id, user } = await userModel.company_registration(
+        user_data,
+        company_data
+      );
+      await continueBuyerCompanyRegistration(userData, company_id);
+
+      return {
+        ...user,
+        password: userData.password
+      };
+    } catch (error) {
+      throw error;
     }
   },
 

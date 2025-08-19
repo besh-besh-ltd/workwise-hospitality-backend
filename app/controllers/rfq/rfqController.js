@@ -30,6 +30,8 @@ import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { initiatePO } from '../po/purchaseOrderController.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
+import UsersController from '../users/usersController.js';
+import { summaries } from '../../util/constants.js';
 
 const formatPersistentErrors = (errors) => {
   if(errors) {
@@ -54,54 +56,157 @@ const VENDORS_FILTER_KEYS = [
   'productMakes'
 ];
 
+const getDownloadURL = (url, excelToJson = false) => {
+  if(process.env.NODE_ENV == "production" && !url.includes("https")) {
+    url = url.replace("http", "https");
+  }
 
-export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, status, persisted_rfq_id, errors) => {
+  if(excelToJson) {
+    url = url.replace("excel", "json");
+  }
+
+  return url;
+}
+
+export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, status, persisted_rfq_id, errors, persistence, download_url) => {
   try {
     const { name, email } = buyer_info;
+
+    let headerContent = '';
+    let containerContent = '';
+    let subject = '';
       
-      const headerContent = `<h2>Hello ${name},</h2>`;
-      const containerContent = `
-        <p style="font-size: 15px;">
+    switch(persistence.type) {
+      case 'cost-estimation':
+        headerContent = `<h2>Hello ${name},</h2>`;
+        containerContent = `
+          <p style="font-size: 15px;">
+            ${
+              status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+              status == PERSISTENCE_STATUSES.COMPLETED
+                ? `The Cost Estimation Processing for your BOQ has been completed successfully, follow the below link to see the processed estimation table.`
+                : status == PERSISTENCE_STATUSES.FAILED
+                ? `The Cost Estimation Processing for your BOQ has been failed due to some reasons`
+                : `The Cost Estimation Processing for your BOQ status has been changed from <strong>${previous_status}</strong> to <strong>${status}</strong>`
+            }
+          </p>
           ${
-            status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
-            status == PERSISTENCE_STATUSES.COMPLETED
-              ? `The Magic Search RFQ Processing has been completed successfully, follow the below link to see the processed draft.`
-              : status == PERSISTENCE_STATUSES.FAILED
-              ? `The Magic Search RFQ Processing has been failed due to some reasons`
-              : `The Magic Search RFQ Processing status has been changed from <strong>${previous_status}</strong> to <strong>${status}</strong>`
+            (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+            status == PERSISTENCE_STATUSES.COMPLETED)
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/ai-tools/cost-estimation/${persistence.id}"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Estimation
+                </a>`
+              : ''
           }
-        </p>
-        ${
-          (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
-          status == PERSISTENCE_STATUSES.COMPLETED)
-            ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management?tab=create-rfq&draft_id=${persisted_rfq_id}"
-                  style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
-                View Draft
-              </a>`
-            : ''
-        }
-        ${
-          status == PERSISTENCE_STATUSES.FAILED
-            ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/magic-search?tab=processing-files"
-                  style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
-                View Processing RFQs
-              </a>`
-            : ''
-        }
-      `;
+          ${
+            status == PERSISTENCE_STATUSES.FAILED
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/boq-automation?tab=processing-files"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Processing RFQs
+                </a>`
+              : ''
+          }
+        `;
+        subject = status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+          status == PERSISTENCE_STATUSES.COMPLETED
+            ? `Cost Estimation has been processed successfully`
+            : status == PERSISTENCE_STATUSES.FAILED
+            ? `Cost Estimation Processing was failed`
+            : `Cost Estimation status has been changed`;
+        break;
+      
+      case 'simplified':
+        headerContent = `<h2>Hello ${name},</h2>`;
+        containerContent = `
+          <p style="font-size: 15px;">
+            ${
+              status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+              status == PERSISTENCE_STATUSES.COMPLETED
+                ? `The BOQ Simplification Processing has been completed successfully, follow the below link to see the simplified version of your BOQ.`
+                : status == PERSISTENCE_STATUSES.FAILED
+                ? `BOQ Simplification has been failed due to some reasons`
+                : `BOQ Simplification status has been changed from <strong>${previous_status}</strong> to <strong>${status}</strong>`
+            }
+          </p>
+          ${
+            (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+            status == PERSISTENCE_STATUSES.COMPLETED) && download_url
+              ? `<a href="${
+                  process.env.FRONT_END_WEBSITE
+                }/dashboard/buyer/boq-automation/view?jsonUrl=${encodeURIComponent(
+                  getDownloadURL(download_url, true)
+                )}"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Simplified BOQ
+                </a>`
+              : ''
+          }
+          ${
+            status == PERSISTENCE_STATUSES.FAILED
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/boq-automation?tab=processing-files"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Processing RFQs
+                </a>`
+              : ''
+          }
+        `;
+        subject = status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+          status == PERSISTENCE_STATUSES.COMPLETED
+            ? `BOQ Simplification has been processed successfully`
+            : status == PERSISTENCE_STATUSES.FAILED
+            ? `BOQ Simplification Processing was failed`
+            : `BOQ Simplification status has been changed`;
+        break;
+
+      default:
+        headerContent = `<h2>Hello ${name},</h2>`;
+        containerContent = `
+          <p style="font-size: 15px;">
+            ${
+              status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+              status == PERSISTENCE_STATUSES.COMPLETED
+                ? `The Magic Search RFQ Processing has been completed successfully, follow the below link to see the processed draft.`
+                : status == PERSISTENCE_STATUSES.FAILED
+                ? `The Magic Search RFQ Processing has been failed due to some reasons`
+                : `The Magic Search RFQ Processing status has been changed from <strong>${previous_status}</strong> to <strong>${status}</strong>`
+            }
+          </p>
+          ${
+            (status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+            status == PERSISTENCE_STATUSES.COMPLETED)
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management?tab=create-rfq&draft_id=${persisted_rfq_id}"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Draft
+                </a>`
+              : ''
+          }
+          ${
+            status == PERSISTENCE_STATUSES.FAILED
+              ? `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/boq-automation?tab=processing-files"
+                    style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+                  View Processing RFQs
+                </a>`
+              : ''
+          }
+        `;
+        subject = status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
+          status == PERSISTENCE_STATUSES.COMPLETED
+            ? `Magic Search RFQ has been processed successfully`
+            : status == PERSISTENCE_STATUSES.FAILED
+            ? `Magic Search RFQ Processing was failed`
+            : `Magic Search RFQ status has been changed`;
+            
+        break;
+      
+    }
 
       const html = generateEmailTemplate(headerContent, containerContent);
 
       const mail = {
         from: Config.webmasterMail,
         to: email,
-        subject:
-          status == PERSISTENCE_STATUSES.PARTIAL_COMPLETED ||
-          status == PERSISTENCE_STATUSES.COMPLETED
-            ? `Magic Search RFQ has been processed successfully`
-            : status == PERSISTENCE_STATUSES.FAILED
-            ? `Magic Search RFQ Processing was failed`
-            : `Magic Search RFQ status has been changed`,
+        subject,
         html
       };
 
@@ -247,6 +352,14 @@ const saveMagicSearchInDraft = async (data, createdBy, processedUrl, rfqId, shee
    
     const nextRfqNumber = await getNextRfQNumber()
     return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy, processedUrl, rfqId, sheetId);
+  } catch (error) {
+    throw error
+  }
+}
+
+const saveEstimates = async (data, createdBy) => {
+  try {
+    return await rfqModel.saveEstimatesInDB(data, createdBy);
   } catch (error) {
     throw error
   }
@@ -8040,6 +8153,226 @@ const rfqController = {
     }
   },
 
+  getCostEstimates: async (processedUrl) => {
+    try {
+
+      if (process.env.NODE_ENV=='uat' &&  processedUrl.startsWith('http:')) {
+        processedUrl = processedUrl.replace('http:', 'https:');
+      }
+  
+      const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
+  
+      const validationErrors = [];
+      const products = [];
+      const sheetNameList = new Set();
+      const globalVariantCount = {};
+  
+      const allProductIds = boqDataJson.map(item => item.variant_id).filter(item => typeof item == 'number' || typeof item == 'string');
+  
+      const uniqueProductIds = [...new Set(allProductIds)];
+      const existingProducts = await rfqModel.checkIfExists(
+        'tbl_product',
+        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+      );
+      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
+  
+      const quoteCache = {};
+  
+      for (const item of boqDataJson) {
+        if (item.is_product == "No") {
+          continue
+       }
+
+        const cleanId = item?.variant_id;
+        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
+  
+        if (!cleanId || item.fetched_product_name === 'Product not found') {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const validProductId = existingProductIdSet.has(cleanId) ? cleanId : null;
+  
+        if (!validProductId) {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const finalProductName = item.fetched_product_name || item.core_product_name;
+
+        if (!quoteCache[validProductId]) {
+          const quotes = await rfqModel.getEstimateQuotes(
+            validProductId,
+          );
+          quoteCache[validProductId] = quotes;
+        }
+  
+        const quotesResult = quoteCache[validProductId];
+  
+        if (!quotesResult || quotesResult.length === 0) {
+          validationErrors.push({
+            errors: {
+              quote: `${finalProductName} - No Quotes Found` },
+            name: finalProductName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const variantCount = globalVariantCount[validProductId] ?? 0;
+  
+        products.push({
+          product_id: validProductId,
+          name: finalProductName || "Unnamed Product",
+          variant: variantCount,
+          quantity: item.quantity,
+          quotes: quotesResult,
+        });
+  
+        globalVariantCount[validProductId] = variantCount + 1;
+        sheetNameList.add(item.sheet_name || "");
+      }
+  
+      const finalObject = {
+        products,
+        validationErrors,
+      };
+
+      // Comment if not needed
+      const uniqueErrors = validationErrors.filter((err, index, self) => 
+        index === self.findIndex(e => 
+          (e.errors?.product === err.errors?.product) && 
+          (e.errors?.quote === err.errors?.quote) && 
+          ((e.name || e.productName || '') === (err.name || err.productName || ''))
+        )
+      );
+
+      return [uniqueErrors, finalObject];
+    }
+    catch (error) {
+      logError(error);
+      return [null, null];
+    }
+  },
+
+  getCostEstimates: async (processedUrl) => {
+    try {
+
+      if (process.env.NODE_ENV=='uat' &&  processedUrl.startsWith('http:')) {
+        processedUrl = processedUrl.replace('http:', 'https:');
+      }
+  
+      const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
+  
+      const validationErrors = [];
+      const products = [];
+      const sheetNameList = new Set();
+      const globalVariantCount = {};
+  
+      const allProductIds = boqDataJson.map(item => item.variant_id).filter(item => typeof item == 'number' || typeof item == 'string');
+  
+      const uniqueProductIds = [...new Set(allProductIds)];
+      const existingProducts = await rfqModel.checkIfExists(
+        'tbl_product',
+        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+      );
+      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
+  
+      const quoteCache = {};
+  
+      for (const item of boqDataJson) {
+        if (item.is_product == "No") {
+          continue
+       }
+
+        const cleanId = item?.variant_id;
+        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
+  
+        if (!cleanId || item.fetched_product_name === 'Product not found') {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const validProductId = existingProductIdSet.has(cleanId) ? cleanId : null;
+  
+        if (!validProductId) {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const finalProductName = item.fetched_product_name || item.core_product_name;
+
+        if (!quoteCache[validProductId]) {
+          const quotes = await rfqModel.getEstimateQuotes(
+            validProductId,
+          );
+          quoteCache[validProductId] = quotes;
+        }
+  
+        const quotesResult = quoteCache[validProductId];
+  
+        if (!quotesResult || quotesResult.length === 0) {
+          validationErrors.push({
+            errors: {
+              quote: `${finalProductName} - No Quotes Found` },
+            name: finalProductName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const variantCount = globalVariantCount[validProductId] ?? 0;
+  
+        products.push({
+          product_id: validProductId,
+          name: finalProductName || "Unnamed Product",
+          variant: variantCount,
+          quantity: item.quantity,
+          quotes: quotesResult,
+        });
+  
+        globalVariantCount[validProductId] = variantCount + 1;
+        sheetNameList.add(item.sheet_name || "");
+      }
+  
+      const finalObject = {
+        products,
+        validationErrors,
+      };
+
+      // Comment if not needed
+      const uniqueErrors = validationErrors.filter((err, index, self) => 
+        index === self.findIndex(e => 
+          (e.errors?.product === err.errors?.product) && 
+          (e.errors?.quote === err.errors?.quote) && 
+          ((e.name || e.productName || '') === (err.name || err.productName || ''))
+        )
+      );
+
+      return [uniqueErrors, finalObject];
+    }
+    catch (error) {
+      logError(error);
+      return [null, null];
+    }
+  },
+
   initiateMagicSearch: async (req, res) => {
     try {
       const { id } = req.user;
@@ -8051,12 +8384,24 @@ const rfqController = {
           message: 'File name is required for persistant processing.'
         });
 
-      let processing = await rfqModel.checkIfExists(
-        'tbl_rfq_persistent_jobs',
-        `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id}`
-      );
-      if (processing && processing.length > 0) {
+      return await rfqController.handleMagicSearchInsertion(file_name, type, id);
+    } catch (error) {
+      console.log(error);
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while initiating the job, please try again!',
+        error,
+      })
+    }
+  },
+
+  handleMagicSearchInsertion: async (file_name, type, id) => {
+    try {
+      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id}`)
+      if(processing && processing.length > 0) {
         processing = processing[0];
+        console.log("FOUND ALREADY PROCESSING TASK!")
 
         const inputUtcMoment = moment.utc(processing.started_at);
         const inputIstMoment = inputUtcMoment.tz('Asia/Kolkata');
@@ -8071,12 +8416,11 @@ const rfqController = {
             'Due to a longer processing time, we have terminated this BOQ Processing, please upload this BOQ again to retry the processing'
           );
         } else {
-          return res.status(400).json({
+          return {
             status: 5,
-            message:
-              'This BOQ is already under processing, please refer to the Processing tab for more info!',
-            processing
-          });
+            message: 'This BOQ is already under processing, please refer to the Processing tab for more info!',
+            processing,
+          }
         }
       }
 
@@ -8087,46 +8431,32 @@ const rfqController = {
       const message = `${file_name}_${id}_${expires}`;
       const signature = generateSignature(message, secret);
 
-      return db.tx(async (t) => {
-        let persistence = await rfqModel.persistAIJobInDB(
-          id,
-          file_name,
-          raw_file_url,
-          signature,
-          type,
-          t
-        );
-
-        if (!persistence || persistence.length <= 0) {
-          return res.status(400).json({
+      return db.tx(async t => {
+        let persistence = await rfqModel.persistAIJobInDB(id, file_name, null, signature, type, t);
+  
+        if(!persistence || persistence.length <= 0) {
+          return {
             status: 3,
             message: 'Something went wrong while saving job, please try again!'
-          });
+          }
         }
 
         persistence = persistence[0];
-
+  
         const signedUrl = `${baseUrl}/api/v1/rfq/magic-webhook?persistence_id=${
           persistence.id
         }&user=${id}&file_name=${encodeURIComponent(
           file_name
         )}&expires=${expires}&signature=${signature}`;
-
-        return res.json({
+  
+        return {
           status: 1,
           persistence,
           webhook: signedUrl
-        });
-      });
+        }
+      })
     } catch (error) {
-      console.log(error);
-      logError(error);
-      return res.status(400).json({
-        status: 3,
-        message:
-          'Something went wrong while initiating the job, please try again!',
-        error
-      });
+      throw error;
     }
   },
 
@@ -8137,8 +8467,7 @@ const rfqController = {
 
       persistence_id = parseInt(persistence_id);
 
-      if ((errors && errors.length > 0) || !jsonFileUrl || !availableSheets) {
-        console.log('FOUND ERRORS FROM AI SERVER!', errors);
+      if((errors && errors.length > 0) || (!jsonFileUrl || !availableSheets)) {
         await rfqModel.updatePersistenceJobStatus(
           persistence_id,
           PERSISTENCE_STATUSES.FAILED,
@@ -8151,8 +8480,6 @@ const rfqController = {
           message: 'Webhook triggered, errors handled!'
         });
       }
-
-      console.log('SAVING MAGIC SEARCH IN DB');
 
       if (type == 'simplified') {
         await rfqModel.updatePersistenceJobStatus(
@@ -8168,35 +8495,21 @@ const rfqController = {
           availableSheets,
           user
         );
-
-        console.log('SAVED MAGIC SEARCH IN DB');
         if (response.success) {
-          console.log('SUCCEDDED IN SAVING');
           await rfqModel.updatePersistenceJobStatus(
             persistence_id,
             (response.validation_errors ?? []).length > 0
               ? PERSISTENCE_STATUSES.PARTIAL_COMPLETED
               : PERSISTENCE_STATUSES.COMPLETED,
             response.savedRfq,
-            (response.validation_errors ?? []).length > 0
-              ? normalizeErrors({
-                  type: 'ai-error',
-                  actual: response.validation_errors
-                })
-              : null,
-            jsonFileUrl
+            (response.validation_errors ?? []).length > 0 ? normalizeErrors({ type: 'ai-error', actual: response.validation_errors }) : null,
+            jsonFileUrl,
           );
 
-          console.log('UPDATED PERSISTENCE JOB IN DB');
         } else {
-          console.log('FAILED IN SAVING');
-          throw new Error(
-            response.error ||
-              'Magic search failed to be saved in the Database, please try again after some time...'
-          );
+          throw new Error(response.error || 'Magic search failed to be saved in the Database, please try again after some time...')
         }
       } else {
-        console.log('FAILED TO SAVE');
         await rfqModel.updatePersistenceJobStatus(
           persistence_id,
           PERSISTENCE_STATUSES.FAILED,
@@ -8212,7 +8525,6 @@ const rfqController = {
             ]
           })
         );
-        console.log('UPDATED PERSISTENCE JOB IN DB');
       }
 
       return res.json({
@@ -8220,32 +8532,82 @@ const rfqController = {
         message: 'Webhook triggered!'
       });
     } catch (error) {
-      console.log('FAILED TERIBBLY BACAUSE: ', error);
       const { persistence_id } = req.query;
-      await rfqModel.updatePersistenceJobStatus(
-        persistence_id,
-        PERSISTENCE_STATUSES.FAILED,
-        null,
-        normalizeErrors({
-          type: 'backend-error',
-          actual: [
-            {
-              status: 'failed',
-              error: error.message
-            }
-          ]
-        })
-      );
-      console.log('UPDATED PERSISTENCE JOB IN DB');
+      await rfqModel.updatePersistenceJobStatus(persistence_id, PERSISTENCE_STATUSES.FAILED, null, normalizeErrors({
+        type: 'backend-error',
+        actual: [{
+          status: 'failed',
+          error: error.message,
+        }]
+      }));
 
       return res.status(400).json({
         status: 3,
-        message:
-          'Something went wrong while handling AI Webhook, please try again!',
-        error
-      });
+        message: 'Something went wrong while handling AI Webhook, please try again!',
+        error,
+      })
     }
   },
+
+  tenderSummary : async (req , res) =>{
+
+    try {
+      const { email, phone, file_name } = req.body;
+      let user = req.user ?? null;
+      let didUserRegister = false;
+
+      if(!user) {
+        const userExists = await userModel.user_exist(email, phone);
+        if(userExists && userExists.length > 0) {
+          return res.status(403).json({
+            status: 3,
+            message: 'User already exist with given credentials, please login!'
+          })
+        }
+  
+        const registeredUser = await UsersController.registerBuyerAnonymously(req.body);
+        if(!registeredUser) {
+          return res.status(400).json({
+            status: 3,
+            message: 'Failed to register, please try again later. If this issue persists please contact our support team!'
+          })
+        }
+
+        user = registeredUser;
+        didUserRegister = true;
+      }
+
+      const data = summaries.find((summary) =>
+        file_name.toLowerCase().includes(summary.file_name.toLowerCase())
+      );
+      if(data) {
+        return res.json({
+          ...data,
+          didUserRegister,
+          user,
+        });
+      }
+
+      return res.json({
+        status: 2,
+        message: `Summary cannot be generated for ${file_name} at the time, please try again later!`,
+        didUserRegister,
+        user
+      })
+      // const processingRes = await rfqController.handleMagicSearchInsertion(file_name, type, user.id);
+
+      // return res.status(processingRes.status != 1 ? 400 : 200).json({ ...processingRes, didUserRegister, user });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while handling AI Webhook, please try again!',
+        error,
+      })
+    }
+
+  },
+
 
   // mukul - 21-05-2025, removed file handling as now we just get json url in request, also reviewed we handling many fields in payload but in api call we just get json url, not removing them now as very soon we start this flow enhancements
   // Kushal - 21-05-2025, Highly optimized to handle large datasets
@@ -8297,6 +8659,70 @@ const rfqController = {
         message:
           'Magic search failed to complete the action, Please try again.',
         error: error
+      };
+    }
+  },
+
+  createCostEstimation: async (jsonFileUrl, user_id) => {
+    try {
+      let aiProcessedBoqJson = jsonFileUrl;
+  
+      let user = await userModel.getUserById(user_id);
+      if(!user) throw new Error('User dont exist with id: ', user_id);
+
+      user = user[0];
+
+      const [validationErrors, processedData] = await rfqController.getCostEstimates(aiProcessedBoqJson, user)
+      if(!processedData && !validationErrors) throw new Error("No Data processed!")
+
+      const saveEstimate = await saveEstimates(processedData, user_id)
+  
+      return {
+        status: 1,
+        success: true,
+        saveEstimate,
+        data: processedData, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
+        validation_errors: validationErrors.length ? validationErrors : null,
+      };
+  
+    } catch (error) {
+      logError(error);
+      return {
+        success: false,
+        message: 'Magic search failed to complete the action, Please try again.',
+        error: error,
+      };
+    }
+  },
+
+  createCostEstimation: async (jsonFileUrl, user_id) => {
+    try {
+      let aiProcessedBoqJson = jsonFileUrl;
+  
+      let user = await userModel.getUserById(user_id);
+      if(!user) throw new Error('User dont exist with id: ', user_id);
+
+      user = user[0];
+
+      const [validationErrors, processedData] = await rfqController.getCostEstimates(aiProcessedBoqJson, user)
+      if(!processedData && !validationErrors) throw new Error("No Data processed!")
+
+      const saveEstimate = await saveEstimates(processedData, user_id)
+  
+      return {
+        status: 1,
+        success: true,
+        saveEstimate,
+        data: processedData, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
+        validation_errors: validationErrors.length ? validationErrors : null,
+      };
+  
+    } catch (error) {
+      logError(error);
+      return {
+        success: false,
+        message: 'Magic search failed to complete the action, Please try again.',
+        error: error,
       };
     }
   },
@@ -9335,29 +9761,74 @@ const rfqController = {
     }
   },
 
-  addClauseUsingFile: async (req, res) => {
-    // Changes by Agnij 2025-05-14 [Refactor: use bulk insert, clean up logs, new product name function]
-    try {
-      let file = req.file;
-      const { rfq_id, rfq_product_id } = req.body;
-      if (!file) {
-        return res.status(400).json({ status: 0, message: 'No file provided' });
+
+
+addClauseUsingFile : async (req, res) => {
+  // Changes by Agnij 2025-05-14 [Refactor: use bulk insert, clean up logs, new product name function]
+  try {
+    let file = req.file;
+    const { rfq_id, rfq_product_id } = req.body;
+    if (!file) {
+      return res.status(400).json({ status: 0, message: "No file provided" });
+    }
+    if (!rfq_id || !rfq_product_id) {
+      // This is a technical summary request - extract clauses without product context
+      const { email, phone, file_name } = req.body;
+      let user = req.user ?? null;
+      let didUserRegister = false;
+
+      if(!user) {
+        const userExists = await userModel.user_exist(email, phone);
+        if(userExists && userExists.length > 0) {
+          return res.status(403).json({
+            status: 3,
+            message: 'User already exist with given credentials, please login!'
+          })
+        }
+  
+        const registeredUser = await UsersController.registerBuyerAnonymously(req.body);
+        if(!registeredUser) {
+          return res.status(400).json({
+            status: 3,
+            message: 'Failed to register, please try again later. If this issue persists please contact our support team!'
+          })
+        }
+
+        user = registeredUser;
+        didUserRegister = true;
       }
-      if (!rfq_id || !rfq_product_id) {
-        return res
-          .status(400)
-          .json({
-            status: 0,
-            message:
-              'Invalid input. Ensure RFQ_ID and RFQ_PRODUCT_ID are provided'
-          });
-      }
-      // Use new product/variant name function
-      const productName = await rfqModel.getProductOrVariantNameByRfqProductId(
-        rfq_product_id
-      );
-      // const result = await generativeAI.extractClauses(file, productName);
       const result = await extractDatasheetSummary(file);
+      
+      if (!result.status) {
+        let userMessage = result.message || "Failed to extract information";
+        if (userMessage.match(/no relevant information detected|no information detected/i)) {
+          userMessage = "No relevant information was found in the uploaded document. Please ensure the document contains technical specifications.";
+        }
+        return res.json({ status: 0, message: userMessage, errors: [{ Row: 0, error: userMessage }], user, didUserRegister });
+      }
+      
+      if (!result.clauses || result.clauses.length === 0) {
+        return res.json({
+          status: 0,
+          message: "No information was found in the document",
+          errors: [{ Row: 0, error: "No information detected in the document" }],
+          user, didUserRegister
+        });
+      }
+      
+      // Return the extracted clauses for technical summary
+      return res.json({
+        status: 1,
+        message: "Technical document analyzed successfully",
+        clauses: result,
+        structuredData: result.structuredData,
+        user, didUserRegister
+      });
+    }
+    // Use new product/variant name function
+    const productName = await rfqModel.getProductOrVariantNameByRfqProductId(rfq_product_id);
+    // const result = await generativeAI.extractClauses(file, productName);
+    const result = await extractDatasheetSummary(file);
 
       const techEvaluationClauses = result?.structuredData
         .map((item) => {
@@ -9366,67 +9837,38 @@ const rfqController = {
         })
         .filter(Boolean);
 
-      if (!result.status) {
-        let userMessage = result.message || 'Failed to extract information';
-        if (
-          userMessage.match(
-            /no relevant information detected|no information detected/i
-          )
-        ) {
-          userMessage =
-            'No relevant information for this product was found in the uploaded document. Please ensure the document is for the selected product.';
-        }
-        return res.json({
-          status: 0,
-          message: userMessage,
-          errors: [{ Row: 0, error: userMessage }]
-        });
+    if (!result.status) {
+      let userMessage = result.message || "Failed to extract information";
+      if (userMessage.match(/no relevant information detected|no information detected/i)) {
+        userMessage = "No relevant information for this product was found in the uploaded document. Please ensure the document is for the selected product.";
       }
-      if (!result.clauses || result.clauses.length === 0) {
-        return res.json({
-          status: 0,
-          message: productName
-            ? `No information was found for product '${productName}'`
-            : 'No information was found in the document',
-          errors: [
-            {
-              Row: 0,
-              error: productName
-                ? `No relevant information detected for product '${productName}'`
-                : 'No information detected in the document'
-            }
-          ]
-        });
-      }
-      // Bulk insert all clauses at once
-      const insertResult = await rfqModel.addManyClauses(
-        rfq_id,
-        rfq_product_id,
-        techEvaluationClauses
-      );
-      return res.json({
-        status: insertResult.status,
-        message: insertResult.status
-          ? `${insertResult.inserted} of ${result.clauses.length} items added successfully for '${productName}'`
-          : insertResult.message,
-        errors: insertResult.status
-          ? []
-          : [{ Row: 0, error: insertResult.error }],
-        clauses: result
-      });
-    } catch (error) {
-      res
-        .status(500)
-        .json({
-          status: 0,
-          message: 'Error adding information',
-          errors: [{ Row: 0, error: error?.message }]
-        });
+      return res.json({ status: 0, message: userMessage, errors: [{ Row: 0, error: userMessage }] });
     }
-  },
-  processBoqAndDownload: async (req, res) => {
-    try {
-      const response = await generativeAI.processBoqAndDownload(req.file);
+    if (!result.clauses || result.clauses.length === 0) {
+      return res.json({
+        status: 0,
+        message: productName 
+          ? `No information was found for product '${productName}'`
+          : "No information was found in the document",
+        errors: [{ Row: 0, error: productName ? `No relevant information detected for product '${productName}'` : "No information detected in the document" }]
+      });
+    }
+    // Bulk insert all clauses at once
+    const insertResult = await rfqModel.addManyClauses(rfq_id, rfq_product_id, techEvaluationClauses);
+    return res.json({
+      status: insertResult.status,
+      message: insertResult.status ? `${insertResult.inserted} of ${result.clauses.length} items added successfully for '${productName}'` : insertResult.message,
+      errors: insertResult.status ? [] : [{ Row: 0, error: insertResult.error }],
+      clauses: result
+    });
+  } catch (error) {
+    res.status(500).json({ status: 0, message: "Error adding information", errors: [{ Row: 0, error: error?.message }] });
+  }
+},
+processBoqAndDownload : async (req, res) => {
+  try {
+
+    const response = await generativeAI.processBoqAndDownload(req.file);
 
       res
         .status(200)

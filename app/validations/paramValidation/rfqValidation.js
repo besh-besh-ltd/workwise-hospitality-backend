@@ -124,6 +124,15 @@ todayForComparison.setHours(0, 0, 0, 0);
 const todayString = todayForComparison.toISOString().slice(0, 10); // Format as YYYY-MM-DD
 
 export const rfqSchemas = {
+  // Technical summary lead form (public)
+  technicalSummary: Joi.object({
+    fullName: Joi.string().optional(),
+    companyName: Joi.string().optional(),
+    designation: Joi.string().optional(),
+    workEmail: Joi.string().email().optional(),
+    phoneNumber: Joi.string().optional()
+  }),
+
   create: Joi.object().keys({
     rfq_id: Joi.number().optional().allow('').allow(null),
     comment: Joi.string().optional().allow(''),
@@ -415,8 +424,8 @@ export const rfqSchemas = {
     // ).default([]),
   }),
   addClauseUsingFile: Joi.object({
-    rfq_id: Joi.number().integer().required(),
-    rfq_product_id: Joi.number().integer().required()
+    rfq_id: Joi.number().integer().optional(),
+    rfq_product_id: Joi.number().integer().optional()
   }),
   updateClause: Joi.object().keys({
     clause_id: Joi.number().integer().required(),
@@ -487,7 +496,15 @@ export const rfqSchemas = {
     rfq_id: Joi.number().integer().optional(),
     rfq_product_id: Joi.number().integer().required(),
     vendor_id: Joi.number().integer().required()
-  })
+  }),
+
+  technicalSummary: Joi.object({
+    fullName: Joi.string().optional(),
+    companyName: Joi.string().optional(),
+    designation: Joi.string().optional(),
+    workEmail: Joi.string().email().optional(),
+    phoneNumber: Joi.string().optional()
+  }),
 };
 
 /**

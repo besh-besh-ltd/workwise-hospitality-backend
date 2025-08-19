@@ -161,11 +161,11 @@ const generativeAI = {
       const prompt = `
 You are a specialized engineering AI expert tasked with extracting comprehensive technical and commercial information from engineering documents.
 
-TARGET PRODUCT: "${productName}"
+${productName ? `TARGET PRODUCT: "${productName}"` : 'GENERAL TECHNICAL DOCUMENT ANALYSIS'}
 
 # DOCUMENT ANALYSIS TASK:
-xtract ALL technical specifications, commercial terms, quality standards, inspection requirements, notes, and conditions from the document.
-Focus specifically on information related to "${productName}" and similar products.
+Extract ALL technical specifications, commercial terms, quality standards, inspection requirements, notes, and conditions from the document.
+${productName ? `Focus specifically on information related to "${productName}" and similar products.` : 'Extract all relevant technical information from the document.'}
 
 # OUTPUT FORMAT:
 \`\`\`json
@@ -212,7 +212,7 @@ ${pdfText}
 
       return {
         status: 1,
-        message: `Information extracted successfully for ${productName}`,
+        message: productName ? `Information extracted successfully for ${productName}` : 'Technical document analyzed successfully',
         structuredData: structured,
         clauses: Object.values(structured).flat()
       };

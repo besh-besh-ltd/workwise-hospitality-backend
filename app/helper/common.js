@@ -177,10 +177,10 @@ const generateOTPRandomNo = () => {
   return OTP;
 };
 
-const generateRandomString = () => {
+const generateRandomString = (length = 24) => {
   let digits = 'abcdefghijklmnopqrstuxy';
   let str = '';
-  for (let i = 0; i < 24; i++) {
+  for (let i = 0; i < length; i++) {
     str += digits[Math.floor(Math.random() * 10)];
   }
   return str;
@@ -332,7 +332,7 @@ export function verifyAIWebhookBody(req, res, next) {
     return res.status(400).json({ error: 'Missing payload data, jsonFileUrl and availableSheets are required when there are no errors!' });
   }
 
-  if(!type || !['rfq', 'simplified'].includes(type)) {
+  if(!type || !['rfq', 'simplified', 'cost-estimation'].includes(type)) {
     return res.status(400).json({ error: 'Type out of bound.' });
   }
 
