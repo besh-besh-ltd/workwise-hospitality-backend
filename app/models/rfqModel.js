@@ -1937,11 +1937,11 @@ const productQuery = `
             LIMIT 1
           ),
           'No vendor finalized yet'
-        ) AS finalization_status,
+        ) AS finalization_status
         ${
           // Changes by Agnij 2025-05-05 [Modified to include both user_type 2 and 3]
           user_type == 2 || user_type == 3
-          ? `(
+          ? `,(
                 ${user_type == 3 ? `
                 -- Check if this product has technical evaluation enabled (has clauses)
                 WITH tech_eval AS (
