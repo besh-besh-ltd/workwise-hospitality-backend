@@ -8548,6 +8548,173 @@ const rfqController = {
       })
     }
   },
+   getCostEstimates: async (processedUrl) => {
+    try {
+
+      if (process.env.NODE_ENV=='uat' &&  processedUrl.startsWith('http:')) {
+        processedUrl = processedUrl.replace('http:', 'https:');
+      }
+  
+      const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
+  
+      const validationErrors = [];
+      const products = [];
+      const sheetNameList = new Set();
+      const globalVariantCount = {};
+  
+      const allProductIds = boqDataJson.map(item => item.variant_id).filter(item => typeof item == 'number' || typeof item == 'string');
+  
+      const uniqueProductIds = [...new Set(allProductIds)];
+      const existingProducts = await rfqModel.checkIfExists(
+        'tbl_product',
+        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+      );
+      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
+  
+      const quoteCache = {};
+  
+      for (const item of boqDataJson) {
+        if (item.is_product == "No") {
+          continue
+       }
+
+        const cleanId = item?.variant_id;
+        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
+  
+        if (!cleanId || item.fetched_product_name === 'Product not found') {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const validProductId = existingProductIdSet.has(cleanId) ? cleanId : null;
+  
+        if (!validProductId) {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const finalProductName = item.fetched_product_name || item.core_product_name;
+
+        if (!quoteCache[validProductId]) {
+          const quotes = await rfqModel.getEstimateQuotes(
+            validProductId,
+          );
+          quoteCache[validProductId] = quotes;
+        }
+  
+        const quotesResult = quoteCache[validProductId];
+  
+        if (!quotesResult || quotesResult.length === 0) {
+          validationErrors.push({
+            errors: {
+              quote: `${finalProductName} - No Quotes Found` },
+            name: finalProductName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const variantCount = globalVariantCount[validProductId] ?? 0;
+  
+        products.push({
+          product_id: validProductId,
+          name: finalProductName || "Unnamed Product",
+          variant: variantCount,
+          quantity: item.quantity,
+          quotes: quotesResult,
+        });
+  
+        globalVariantCount[validProductId] = variantCount + 1;
+        sheetNameList.add(item.sheet_name || "");
+      }
+  
+      const finalObject = {
+        products,
+        validationErrors,
+      };
+
+      // Comment if not needed
+      const uniqueErrors = validationErrors.filter((err, index, self) => 
+        index === self.findIndex(e => 
+          (e.errors?.product === err.errors?.product) && 
+          (e.errors?.quote === err.errors?.quote) && 
+          ((e.name || e.productName || '') === (err.name || err.productName || ''))
+        )
+      );
+
+      return [uniqueErrors, finalObject];
+    }
+    catch (error) {
+      logError(error);
+      return [null, null];
+    }
+  },
+
+   getCostEstimatesData: async (req, res) => {
+    try {
+      const { persistent_id } = req.params;
+      const estimates = await rfqModel.getEstimatesData(persistent_id);
+
+      return res.json(estimates);
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while fetching cost estimates, please try again!',
+        error,
+      })
+    }
+  },
+
+
+   estimateCost: async (req, res) => {
+    try {
+      const { email, phone, file_name, type } = req.body;
+      let user = req.user ?? null;
+      let didUserRegister = false;
+
+      if(!user) {
+        const userExists = await userModel.user_exist(email, phone);
+        if(userExists && userExists.length > 0) {
+          return res.status(403).json({
+            status: 3,
+            message: 'User already exist with given credentials, please login!'
+          })
+        }
+  
+        const registeredUser = await UsersController.registerBuyerAnonymously(req.body);
+        if(!registeredUser) {
+          return res.status(400).json({
+            status: 3,
+            message: 'Failed to register, please try again later. If this issue persists please contact our support team!'
+          })
+        }
+
+        user = registeredUser;
+        didUserRegister = true;
+      }
+
+      const processingRes = await rfqController.handleMagicSearchInsertion(file_name, type, user.id);
+
+      return res.status(processingRes.status != 1 ? 400 : 200).json({ ...processingRes, didUserRegister, user });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while handling AI Webhook, please try again!',
+        error,
+      })
+    }
+  },
+
 
   tenderSummary : async (req , res) =>{
 
@@ -10011,7 +10178,7 @@ processBoqAndDownload : async (req, res) => {
         if (req.user.user_type == 3) {
           //Notice the vendor object is passed as buyer since this requet is coming from vendor and concerend prop value at frontend is same hence
           await sendAddTechCommentMailForBuyer(
-            (vendor),
+            vendor,
             sender_id,
             product
           );
