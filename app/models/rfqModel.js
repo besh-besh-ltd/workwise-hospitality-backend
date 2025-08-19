@@ -8217,6 +8217,10 @@ ORDER BY m.created_at;
           SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
           `}
       )) AND RFQ.is_published = 1
+      AND EXISTS (
+        SELECT 1 FROM tbl_quotes ITQ
+        WHERE ITQ.rfq_id = RFQ.id
+      )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
       ${dynamicConditions}
