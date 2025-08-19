@@ -1769,6 +1769,16 @@ const rfqModel = {
       RFQ.ra_start_date, -- Select raw timestamp
       RFQ.ra_end_date,   -- Select raw timestamp
       RFQ.project_id,
+        -- Add here
+      (
+        SELECT EXISTS (
+          SELECT 1
+          FROM tbl_quotes tq
+          WHERE tq.rfq_id = RFQ.id
+          LIMIT 1
+        )
+      ) AS is_quotes_present,
+
       (SELECT COUNT(*)
      FROM tbl_query_messages TQM
      WHERE TQM.receiver_id = ${user_id}
@@ -8217,6 +8227,10 @@ ORDER BY m.created_at;
           SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
           `}
       )) AND RFQ.is_published = 1
+      AND EXISTS (
+        SELECT 1 FROM tbl_quotes ITQ
+        WHERE ITQ.rfq_id = RFQ.id
+      )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
       ${dynamicConditions}
