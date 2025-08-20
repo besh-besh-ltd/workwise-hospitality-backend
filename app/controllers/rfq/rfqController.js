@@ -7543,7 +7543,9 @@ deleteDraft: async (req, res) => {
         message: 'File name is required for persistant processing.'
       })
 
-      return await rfqController.handleMagicSearchInsertion(file_name, type, id);
+      const result = await rfqController.handleMagicSearchInsertion(file_name, type, id);
+
+      return res.json(result);
     } catch (error) {
       console.log(error);
       logError(error);
@@ -7557,7 +7559,7 @@ deleteDraft: async (req, res) => {
 
   handleMagicSearchInsertion: async (file_name, type, id) => {
     try {
-      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id}`)
+      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id} AND type = '${type}'`)
       if(processing && processing.length > 0) {
         processing = processing[0];
         console.log("FOUND ALREADY PROCESSING TASK!")
