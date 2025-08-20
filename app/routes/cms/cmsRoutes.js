@@ -17,6 +17,8 @@ const CmsRoutes = Router();
 CmsRoutes.get('/home-banner/:page_id', CmsController.homeBanner);
 CmsRoutes.get('/get-cms-data/:page_id', CmsController.cms_data);
 CmsRoutes.post('/contact-us', CmsController.contact_us);
+// Alias endpoint to reuse Contact Us logic for RegisterFormModal
+CmsRoutes.post('/register-interest', CmsController.contact_us);
 CmsRoutes.get(
   '/management-list/:management_type',
   CmsController.management_list
