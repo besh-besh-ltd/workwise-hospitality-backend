@@ -311,6 +311,26 @@ RfqRoutes.post('/magic-webhook',
   rfqController.handleAIWebhook,
 );
 
+RfqRoutes.post('/estimate-cost',
+  noLogin.customer_auth,
+  rfqController.estimateCost,
+)
+
+RfqRoutes.get('/get-cost-estimation/:persistent_id',
+  passportSignIn,
+  rfqController.getCostEstimatesData
+)
+RfqRoutes.post('/tender-summary',
+  noLogin.customer_auth,
+  rfqController.tenderSummary
+)
+
+RfqRoutes.post('/technical-summary',
+  noLogin.customer_auth,
+  schema_posts.clauseFileUpload,
+  rfqController.addClauseUsingFile
+)
+
 RfqRoutes.get('/process-magic-search-draft',
   passportSignIn, 
   validateDbBody.user_id_profileexists,
@@ -552,7 +572,7 @@ RfqRoutes.post(
 RfqRoutes.post(
   '/get-processing-rfqs',
   passportSignIn,
-  acl([2, 8]),
+  acl([2, 7, 8]),
   rfqController.getProcessingRFQs
 );
 

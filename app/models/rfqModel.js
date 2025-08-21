@@ -3,7 +3,7 @@ import Config from '../config/app.config.js';
 import generalModel from './generalModel.js';
 import userModel from './userModel.js';
 import cmsModel from './cmsModel.js';
-import { PERSISTENCE_STATUSES } from '../helper/common.js';
+import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 
 
@@ -340,7 +340,9 @@ const rfqModel = {
         persistence.status,
         status,
         persisted_rfq_id,
-        errors
+        errors,
+        persistence,
+        jsonUrl,
       );
 
       return updatedPersistence;
@@ -599,6 +601,70 @@ const rfqModel = {
 
         return rfq_id;
       });
+
+    } catch (error) {
+      console.error('Transaction failed. All operations rolled back.', error);
+      throw error;
+    }
+  },
+
+  saveEstimatesInDB: async (data, createdBy) => {
+    try {
+      return db.tx(async (t) => {
+        let estimatesQuery = ``;
+        let estimateQueryValues = [];
+
+        estimatesQuery = `
+          INSERT INTO tbl_quote_estimates (
+            user_id
+          )
+          VALUES (
+            $1
+          )
+          RETURNING id
+        `;
+
+        const estimatesValues = [createdBy];
+
+        estimateQueryValues.push(...estimatesValues);
+
+        const estimateResult = await t.one(estimatesQuery, estimateQueryValues);
+
+        return await db.tx(async (t) => {
+          for (const product of data.products) {
+            const estimatesItemQuery = `
+              INSERT INTO tbl_quote_estimates_item (
+                quote_estimates_id,
+                product_variant_id,
+                lowest_price,
+                average_price,
+                highest_price
+              )
+              VALUES (
+                $1, 
+                $2, 
+                $3, 
+                $4, 
+                $5
+              )
+              RETURNING id
+            `;
+
+            const estimatesItemValues = [
+              estimateResult.id,
+              product.product_id,
+              product.quotes?.lowest_price ?? null,
+              product.quotes?.average_price ?? null,
+              product.quotes?.highest_price ?? null
+            ];
+
+            await t.one(estimatesItemQuery, estimatesItemValues);
+          }
+
+          return estimateResult.id;
+        });
+      });
+
     } catch (error) {
       console.error('Transaction failed. All operations rolled back.', error);
       throw error;
@@ -1703,6 +1769,16 @@ const rfqModel = {
       RFQ.ra_start_date, -- Select raw timestamp
       RFQ.ra_end_date,   -- Select raw timestamp
       RFQ.project_id,
+        -- Add here
+      (
+        SELECT EXISTS (
+          SELECT 1
+          FROM tbl_quotes tq
+          WHERE tq.rfq_id = RFQ.id
+          LIMIT 1
+        )
+      ) AS is_quotes_present,
+
       (SELECT COUNT(*)
      FROM tbl_query_messages TQM
      WHERE TQM.receiver_id = ${user_id}
@@ -2862,6 +2938,68 @@ const productQuery = `
           reject(error);
         });
     });
+  },
+
+  getEstimatesData: async (persistent_id) => {
+    try {
+      const [persistentData, estimatesData] = await db.tx(async t => {
+        let persistenceQuery = `
+        SELECT * FROM tbl_rfq_persistent_jobs TQPJ
+        WHERE TQPJ.id = $1 AND status IN ('completed', 'partially_completed');
+        `
+        const persistentData = await t.one(persistenceQuery, [persistent_id]);
+  
+        let estimateQuery = `
+         SELECT * FROM tbl_quote_estimates TQE
+         WHERE TQE.id = $1
+        `
+
+        const estimateData = await t.one(estimateQuery, [persistentData.persisted_rfq_id])
+  
+        let estimateItemsQuery = `
+          SELECT TQEI.*, TPV.name AS product_name FROM tbl_quote_estimates_item TQEI
+          JOIN tbl_product_variant TPV ON TQEI.product_variant_id = TPV.id
+          WHERE TQEI.quote_estimates_id = $1
+        `
+
+        const items = await t.any(estimateItemsQuery, [estimateData.id]);
+
+        return [persistentData, { estimates: estimateData, items }];
+      }) 
+
+      return {
+        persistent: persistentData,
+        estimates: estimatesData
+      }
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  getEstimateQuotes: async (product_variant_id) => {
+    try {
+      let q = `
+        SELECT *
+          FROM (
+                  SELECT
+                      MIN(unit_price) AS lowest_price,
+                      ROUND(AVG(unit_price)::numeric, 2) AS average_price,
+                      MAX(unit_price) AS highest_price
+                  FROM tbl_quote_items
+                  WHERE product_variant_id = $1
+                  AND unit_price > 0
+              ) t
+          WHERE t.lowest_price IS NOT NULL
+            OR t.average_price IS NOT NULL
+            OR t.highest_price IS NOT NULL;
+      `
+
+      const res = db.oneOrNone(q, [product_variant_id]);
+      return res;
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
   },
 
   getQuotesByRfqById2: async (
@@ -8089,6 +8227,10 @@ ORDER BY m.created_at;
           SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
           `}
       )) AND RFQ.is_published = 1
+      AND EXISTS (
+        SELECT 1 FROM tbl_quotes ITQ
+        WHERE ITQ.rfq_id = RFQ.id
+      )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
       ${dynamicConditions}
