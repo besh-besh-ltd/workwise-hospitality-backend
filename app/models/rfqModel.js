@@ -2134,6 +2134,11 @@ const productQuery = `
         });
     });
   },
+
+/**
+  * 
+  * @last_changes - mukul 28-08-2025 without login senf 2 vendors details
+  */
   searchVendorWithoutLogin: async (
     search_key,
     category_id,
@@ -2280,7 +2285,7 @@ const productQuery = `
           : ``
       }
     )
-    SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 1;
+    SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 2;
   `;
 
     try {
@@ -2291,7 +2296,7 @@ const productQuery = `
 
       return {
         total: totalCount,
-        vendor: dataResult.length > 0 ? dataResult[0] : null
+        vendor: dataResult.length > 0 ? dataResult : null
       };
     } catch (err) {
       console.error('Error in searchVendor:', err);

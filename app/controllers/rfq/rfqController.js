@@ -5697,6 +5697,11 @@ deleteDraft: async (req, res) => {
         .end();
     }
   },
+
+  /**
+   * 
+   * @last_changes - mukul 28-08-2025 without login senf 2 vendors details
+   */
   searchVendor: async (req, res, next) => {
 
     // Extracting parameters from the request
@@ -5735,13 +5740,12 @@ deleteDraft: async (req, res) => {
 
         // Check if vendorResult is not empty and has the expected structure
         if (vendorResult && vendorResult.total && vendorResult.vendor) {
-          const vendorData = vendorResult.vendor; // First query result
           const totalCount = vendorResult.total; // Second query result: total count
 
           // Send the response with the vendor data and the total count
           return res.status(200).json({
             status: 1,
-            data: [vendorData],
+            data: vendorResult.vendor,
             total: totalCount,
             logged_In: false,
             subscription: false
