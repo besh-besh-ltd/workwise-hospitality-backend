@@ -5697,6 +5697,11 @@ deleteDraft: async (req, res) => {
         .end();
     }
   },
+
+  /**
+   * 
+   * @last_changes - mukul 28-08-2025 without login senf 2 vendors details
+   */
   searchVendor: async (req, res, next) => {
 
     // Extracting parameters from the request
@@ -5735,13 +5740,12 @@ deleteDraft: async (req, res) => {
 
         // Check if vendorResult is not empty and has the expected structure
         if (vendorResult && vendorResult.total && vendorResult.vendor) {
-          const vendorData = vendorResult.vendor; // First query result
           const totalCount = vendorResult.total; // Second query result: total count
 
           // Send the response with the vendor data and the total count
           return res.status(200).json({
             status: 1,
-            data: [vendorData],
+            data: vendorResult.vendor,
             total: totalCount,
             logged_In: false,
             subscription: false
@@ -7543,7 +7547,9 @@ deleteDraft: async (req, res) => {
         message: 'File name is required for persistant processing.'
       })
 
-      return await rfqController.handleMagicSearchInsertion(file_name, type, id);
+      const result = await rfqController.handleMagicSearchInsertion(file_name, type, id);
+
+      return res.json(result);
     } catch (error) {
       console.log(error);
       logError(error);
@@ -7557,7 +7563,7 @@ deleteDraft: async (req, res) => {
 
   handleMagicSearchInsertion: async (file_name, type, id) => {
     try {
-      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id}`)
+      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id} AND type = '${type}'`)
       if(processing && processing.length > 0) {
         processing = processing[0];
         console.log("FOUND ALREADY PROCESSING TASK!")
