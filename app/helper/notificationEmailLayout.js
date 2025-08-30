@@ -28,11 +28,14 @@ const companyObj = [
 ];
 
 const defaultEmailTemplate = {
-  logo: 'https://api.letsworkwise.com/user_document/1738825197968-2d5fea6d-0266-451e-96d0-025781f2a119.png',
+  // Use WorkWise logo to avoid company-specific overrides
+  logo: 'https://letsworkwise.com/assets/images/logo.png',
   address: `1st Floor, 271 Business Park, Model Industrial Estate, near Virwani Industrial Estate <br/>
       off Western Express Highway, Vishveshwar Nagar, Goregaon, Mumbai, Maharashtra 400063`,
-  displayAddress: true,
-  primaryColor: '#ffe4e4eb',
+  displayAddress: false,
+  // Bluish-green gradient to match website theming. Using 'background' later keeps
+  // company-specific solid colors working without any change to their objects.
+  primaryColor: 'linear-gradient(135deg, #0ea5e9 0%, #06b6d4 50%, #10b981 100%)',
   primaryTextColor: '#000000',
   seconderyColor: '#ffffff',
   seconderyTextColor: '#000000'
@@ -63,15 +66,10 @@ function generateEmailTemplate(headerContent, containerContent, userID = null) {
     : defaultEmailTemplate;
 
   return `
-    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background-color: ${primaryColor}; color: ${primaryTextColor}; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
-        <div>
-        
-            <img style="width: 200px;  margin-left: -18px;" src="${logo}" alt="Company Logo" />
-            ${
-              displayAddress
-                ? `<p style="font-size: 16px; font-weight: 600; color: ${primaryTextColor}; margin-top: -7px;">${address}</p>`
-                : ''
-            }
+    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background: ${primaryColor}; color: ${primaryTextColor}; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
+        <div style="background: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 50%, #10b981 100%); padding: 32px 28px; border-radius: 16px; text-align: center; margin-bottom: 16px;">
+            <img style="width: 190px; max-width: 100%; height: auto; display: inline-block; margin: 0 auto;" src="${logo}" alt="Company Logo" />
+            <div style="margin-top: 10px; font-size: 16px; font-weight: 600; color: #ffffff; letter-spacing: 0.4px;">Procurement Se Profit Banao</div>
         </div>
         <hr style="border-color: ${seconderyColor}" />
         ${headerContent}
@@ -82,8 +80,10 @@ function generateEmailTemplate(headerContent, containerContent, userID = null) {
             
 
         <hr style="border-color: ${seconderyColor}" />
-        <p style="font-size: 16px; color: ${primaryTextColor};">If you need assistance, contact us at <a href="mailto:hello@letsworkwise.com" style="color: ${primaryTextColor};">hello@letsworkwise.com</a></p>
-        <p style="font-size: 16px; color: ${primaryTextColor};">© WorkWise. All Rights Reserved.</p>
+        <div style="text-align: center; padding: 8px 0 0;">
+          <p style="font-size: 14px; color: #ffffff; margin: 0;">If you need assistance, contact us at <a href="mailto:hello@letsworkwise.com" style="color: #ffffff; text-decoration: underline;">hello@letsworkwise.com</a></p>
+          <p style="font-size: 12px; color: #ffffff; opacity: 0.9; margin: 6px 0 0;">© WorkWise. All Rights Reserved.</p>
+        </div>
     </div>
     `;
 }
