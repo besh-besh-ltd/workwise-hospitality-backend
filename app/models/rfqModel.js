@@ -1950,7 +1950,7 @@ const productQuery = `
         ) AS finalization_status
         ${
           // Changes by Agnij 2025-05-05 [Modified to include both user_type 2 and 3]
-          user_type == 2 || user_type == 3
+          (user_type == 2 || user_type == 8 || user_type == 3)
           ? `,(
                 ${user_type == 3 ? `
                 -- Check if this product has technical evaluation enabled (has clauses)
@@ -2106,7 +2106,7 @@ const productQuery = `
         tbl_rfq_products RFQ_P
         JOIN tbl_rfq RFQ ON RFQ.id = $1
         JOIN tbl_product_variant _TPV ON _TPV.id = RFQ_P.product_variant_id
-        ${user_type != 2 ? 
+        ${(user_type != 2 && user_type != 8)  ? 
           `JOIN tbl_rfq_product_vendors RPV 
             ON RPV.rfq_id = $1 
             AND RPV.product_variant_id = RFQ_P.product_variant_id 
@@ -2134,6 +2134,11 @@ const productQuery = `
         });
     });
   },
+
+/**
+  * 
+  * @last_changes - mukul 28-08-2025 without login senf 2 vendors details
+  */
   searchVendorWithoutLogin: async (
     search_key,
     category_id,
@@ -2280,7 +2285,7 @@ const productQuery = `
           : ``
       }
     )
-    SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 1;
+    SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 2;
   `;
 
     try {
@@ -2291,7 +2296,7 @@ const productQuery = `
 
       return {
         total: totalCount,
-        vendor: dataResult.length > 0 ? dataResult[0] : null
+        vendor: dataResult.length > 0 ? dataResult : null
       };
     } catch (err) {
       console.error('Error in searchVendor:', err);
