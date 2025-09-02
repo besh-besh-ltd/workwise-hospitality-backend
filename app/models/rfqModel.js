@@ -1949,8 +1949,8 @@ const productQuery = `
           'No vendor finalized yet'
         ) AS finalization_status
         ${
-          // Changes by Agnij 2025-05-05 [Modified to include both user_type 2 and 3]
-          (user_type == 2 || user_type == 8 || user_type == 3)
+          // Changes by Agnij 2025-05-05 [Modified to include user_type 2, 3, 8, 9, 10]
+          (user_type == 2 || user_type == 8 || user_type == 3 || user_type == 9 || user_type == 10)
           ? `,(
                 ${user_type == 3 ? `
                 -- Check if this product has technical evaluation enabled (has clauses)
@@ -2106,7 +2106,7 @@ const productQuery = `
         tbl_rfq_products RFQ_P
         JOIN tbl_rfq RFQ ON RFQ.id = $1
         JOIN tbl_product_variant _TPV ON _TPV.id = RFQ_P.product_variant_id
-        ${(user_type != 2 && user_type != 8)  ? 
+        ${(user_type != 2 && user_type != 8 && user_type != 9 && user_type != 10)  ? 
           `JOIN tbl_rfq_product_vendors RPV 
             ON RPV.rfq_id = $1 
             AND RPV.product_variant_id = RFQ_P.product_variant_id 
