@@ -1071,17 +1071,24 @@ const sendRevisedQuotationEmailToBuyer = async (buyerDetails, quoteItemChanges, 
   // Extract vendor details from user object
   const vendorName = user.organization_name || user?.name;
 
-// Extract unique product names safely
-const productList = [...new Set(
-  quoteItemChanges
-    .filter(item => item.quote && item.quote.product_name)  // Ensure 'quote' and 'product_name' exist
-    .map(item => item.quote.product_name)
-)];
+// Group product names and count occurrences (variants)
+const productCountMap = quoteItemChanges
+  .filter(item => item.quote && item.quote.product_name)
+  .reduce((acc, item) => {
+    const name = item.quote.product_name;
+    acc[name] = (acc[name] || 0) + 1;
+    return acc;
+  }, {});
 
-// Format the product list
-const formattedProducts = productList.length > 0 
-  ? productList.slice(0, 2).join(', ') + (productList.length > 2 ? ', and more' : '') 
-  : '[Product 1], [Product 2], and more';
+// Build a list like ["Product A (x3)", "Product B (x2)", ...] max 3
+const countedProducts = Object.entries(productCountMap)
+  .slice(0, 3)
+  .map(([name, count]) => `${name} (x${count})`);
+
+// Append a simple "view more" indicator when there are more than 3
+const formattedProducts = countedProducts.length > 0
+  ? countedProducts.join(', ') + (Object.keys(productCountMap).length > 3 ? ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>` : '')
+  : '[Products]';
   
 
   // Email content
@@ -1408,12 +1415,20 @@ const sendQuoteNotificationEmail = async (req) => {
     if (u.length > 0) {
       let buyer = u[0];
 
-      // Prepare product list with inline logic
-      let productNames = products.map(item => item.product_name);
-      let formattedProducts = productNames.slice(0, 3).join(', ');
-      if (productNames.length > 3) {
-        formattedProducts += `, <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
-          style="color: #f87171; text-decoration: none;">view more</a>`;
+      // Prepare product list with grouping and variant counts, max 3 entries
+      const productCountMap = (products || []).reduce((acc, item) => {
+        const name = item?.product_name || item?.name;
+        if (name) acc[name] = (acc[name] || 0) + 1;
+        return acc;
+      }, {});
+
+      let productEntries = Object.entries(productCountMap)
+        .slice(0, 3)
+        .map(([name, count]) => `${name} (x${count})`)
+        .join(', ');
+
+      if (Object.keys(productCountMap).length > 3) {
+        productEntries += ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>`;
       }
 
       // Email header content
