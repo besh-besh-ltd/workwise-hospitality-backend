@@ -26,9 +26,7 @@ function formatDate(date) {
 
 /**
  * Accepts "YYYY‑MM-DDTHH:mm" or "YYYY‑MM-DD HH:mm"
- * Returns a JS Date in **UTC** that representsرفه
-
- the same clock time in IST (+05:30).
+ * Returns a JS Date in **UTC** that represents the same clock time in IST (+05:30).
  */
 function parseISTDate(datetimeStr = '') {
     if (!datetimeStr) {
@@ -132,8 +130,6 @@ export const raSchedulerForBuyer = async (rfqNumber, req, products) => {
         }
     }
 
-   
-
     // Start email to buyer - use IST time directly
     await createSchedule({
         rfqId: rfqNumber,
@@ -147,8 +143,6 @@ export const raSchedulerForBuyer = async (rfqNumber, req, products) => {
             project_name: project_name ?? "NA"
         }
     });
-
-
 
     // End email to buyer - use IST time directly
     await createSchedule({
@@ -283,7 +277,21 @@ export async function scheduleEmailsForAuctionEventBridge(
         console.log(`📧 Scheduling emails for vendor: ${vendor_name} (${vendor_email})`);
 
         // === 1. One-Day-Before Email ===
-        const oneDayBeforeIST = addHoursToISTDate(startDateIST, -24);
+        let oneDayBeforeIST = addHoursToISTDate(startDateIST, -24);
+        const oneDayBeforeDate = createDateFromIST(oneDayBeforeIST);
+        const dayOfWeek = oneDayBeforeDate.getDay(); // 0 = Sunday, 6 = Saturday
+
+        // If one-day-before falls on Saturday (6) or Sunday (0), reschedule to Friday at 5 PM
+        if (dayOfWeek === 0 || dayOfWeek === 6) {
+            const daysToSubtract = dayOfWeek === 0 ? 2 : 1; // Sunday -> Friday (2 days), Saturday -> Friday (1 day)
+            oneDayBeforeDate.setDate(oneDayBeforeDate.getDate() - daysToSubtract);
+            oneDayBeforeDate.setHours(17, 0, 0, 0); // Set to 5 PM
+            const yyyy = oneDayBeforeDate.getFullYear();
+            const MM = String(oneDayBeforeDate.getMonth() + 1).padStart(2, '0');
+            const dd = String(oneDayBeforeDate.getDate()).padStart(2, '0');
+            oneDayBeforeIST = `${yyyy}-${MM}-${dd}T17:00:00`;
+            console.log(`Adjusted one-day-before to Friday 5 PM: ${oneDayBeforeIST}`);
+        }
 
         console.log("One day before schedule time check ------>", oneDayBeforeIST);
 
