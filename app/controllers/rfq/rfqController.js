@@ -637,7 +637,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
           </table>
 
             <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}
-        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+        style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
         Submit Your Quote Now
       </a>
 
@@ -1326,7 +1326,7 @@ const containerContent = `
          <p> <strong> Deadline: </strong> ${rfqBasicDetails?.bid_end_date || 'N/A'} </p>
        
          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}"
-            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Submit Your Quote Now
          </a>
        
@@ -6377,6 +6377,11 @@ const rfqController = {
         .end();
     }
   },
+
+  /**
+   * 
+   * @last_changes - mukul 28-08-2025 without login senf 2 vendors details
+   */
   searchVendor: async (req, res, next) => {
     // Extracting parameters from the request
 
@@ -6423,13 +6428,12 @@ const rfqController = {
 
         // Check if vendorResult is not empty and has the expected structure
         if (vendorResult && vendorResult.total && vendorResult.vendor) {
-          const vendorData = vendorResult.vendor; // First query result
           const totalCount = vendorResult.total; // Second query result: total count
 
           // Send the response with the vendor data and the total count
           return res.status(200).json({
             status: 1,
-            data: [vendorData],
+            data: vendorResult.vendor,
             total: totalCount,
             logged_In: false,
             subscription: false
@@ -8384,7 +8388,9 @@ const rfqController = {
           message: 'File name is required for persistant processing.'
         });
 
-      return await rfqController.handleMagicSearchInsertion(file_name, type, id);
+      const result = await rfqController.handleMagicSearchInsertion(file_name, type, id);
+
+      return res.json(result);
     } catch (error) {
       console.log(error);
       logError(error);
@@ -8398,7 +8404,7 @@ const rfqController = {
 
   handleMagicSearchInsertion: async (file_name, type, id) => {
     try {
-      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id}`)
+      let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id} AND type = '${type}'`)
       if(processing && processing.length > 0) {
         processing = processing[0];
         console.log("FOUND ALREADY PROCESSING TASK!")

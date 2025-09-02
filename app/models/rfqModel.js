@@ -1769,6 +1769,16 @@ const rfqModel = {
       RFQ.ra_start_date, -- Select raw timestamp
       RFQ.ra_end_date,   -- Select raw timestamp
       RFQ.project_id,
+        -- Add here
+      (
+        SELECT EXISTS (
+          SELECT 1
+          FROM tbl_quotes tq
+          WHERE tq.rfq_id = RFQ.id
+          LIMIT 1
+        )
+      ) AS is_quotes_present,
+
       (SELECT COUNT(*)
      FROM tbl_query_messages TQM
      WHERE TQM.receiver_id = ${user_id}
@@ -1937,11 +1947,11 @@ const productQuery = `
             LIMIT 1
           ),
           'No vendor finalized yet'
-        ) AS finalization_status,
+        ) AS finalization_status
         ${
-          // Changes by Agnij 2025-05-05 [Modified to include both user_type 2 and 3]
-          user_type == 2 || user_type == 3
-          ? `(
+          // Changes by Agnij 2025-05-05 [Modified to include user_type 2, 3, 8, 9, 10]
+          (user_type == 2 || user_type == 8 || user_type == 3 || user_type == 9 || user_type == 10)
+          ? `,(
                 ${user_type == 3 ? `
                 -- Check if this product has technical evaluation enabled (has clauses)
                 WITH tech_eval AS (
@@ -2096,7 +2106,7 @@ const productQuery = `
         tbl_rfq_products RFQ_P
         JOIN tbl_rfq RFQ ON RFQ.id = $1
         JOIN tbl_product_variant _TPV ON _TPV.id = RFQ_P.product_variant_id
-        ${user_type != 2 ? 
+        ${(user_type != 2 && user_type != 8 && user_type != 9 && user_type != 10)  ? 
           `JOIN tbl_rfq_product_vendors RPV 
             ON RPV.rfq_id = $1 
             AND RPV.product_variant_id = RFQ_P.product_variant_id 
@@ -2124,6 +2134,11 @@ const productQuery = `
         });
     });
   },
+
+/**
+  * 
+  * @last_changes - mukul 28-08-2025 without login senf 2 vendors details
+  */
   searchVendorWithoutLogin: async (
     search_key,
     category_id,
@@ -2270,7 +2285,7 @@ const productQuery = `
           : ``
       }
     )
-    SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 1;
+    SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 2;
   `;
 
     try {
@@ -2281,7 +2296,7 @@ const productQuery = `
 
       return {
         total: totalCount,
-        vendor: dataResult.length > 0 ? dataResult[0] : null
+        vendor: dataResult.length > 0 ? dataResult : null
       };
     } catch (err) {
       console.error('Error in searchVendor:', err);
@@ -8217,6 +8232,10 @@ ORDER BY m.created_at;
           SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
           `}
       )) AND RFQ.is_published = 1
+      AND EXISTS (
+        SELECT 1 FROM tbl_quotes ITQ
+        WHERE ITQ.rfq_id = RFQ.id
+      )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
       ${dynamicConditions}
