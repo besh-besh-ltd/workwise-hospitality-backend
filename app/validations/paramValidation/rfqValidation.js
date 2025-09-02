@@ -223,6 +223,7 @@ export const rfqSchemas = {
     filters: Joi.object().optional(),
     termsChanged: Joi.boolean().optional(),
     termFilesChanged: Joi.boolean().optional(),
+    selectedSheets: Joi.array().items(Joi.number()).allow(null),
     terms: Joi.array().items(termsItems).allow(null).allow(''),
     project_id: Joi.number().integer().required(),
     term_and_condition_files: Joi.array().items(Joi.string()).optional()

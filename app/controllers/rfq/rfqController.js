@@ -2296,7 +2296,7 @@ const rfqController = {
     }
 
     try {
-      let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction} = req.body;
+      let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction, selectedSheets } = req.body;
       const user_id = req.user.id;
       if (!rfq_id) {
         return res.status(400).json({
@@ -2347,6 +2347,8 @@ const rfqController = {
         }).end();
       }
       // const products = await rfqModel.getProductsByRfqId(rfq_id);
+
+      await rfqModel.removeRFQData(rfq_id, selectedSheets);
 
       const responseUpdate = await rfqModel.update(
         'tbl_rfq',
@@ -7547,7 +7549,7 @@ deleteDraft: async (req, res) => {
         message: 'File name is required for persistant processing.'
       })
 
-      const result = await rfqController.handleMagicSearchInsertion(file_name, type, id);
+      const result = await rfqController.handleMagicSearchInsertion(file_name, type, id, raw_file_url);
 
       return res.json(result);
     } catch (error) {
@@ -7561,7 +7563,7 @@ deleteDraft: async (req, res) => {
     }
   },
 
-  handleMagicSearchInsertion: async (file_name, type, id) => {
+  handleMagicSearchInsertion: async (file_name, type, id, raw_file_url) => {
     try {
       let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id} AND type = '${type}'`)
       if(processing && processing.length > 0) {
@@ -7592,7 +7594,7 @@ deleteDraft: async (req, res) => {
       const signature = generateSignature(message, secret);
 
       return db.tx(async t => {
-        let persistence = await rfqModel.persistAIJobInDB(id, file_name, null, signature, type, t);
+        let persistence = await rfqModel.persistAIJobInDB(id, file_name, raw_file_url, signature, type, t);
   
         if(!persistence || persistence.length <= 0) {
           return {
