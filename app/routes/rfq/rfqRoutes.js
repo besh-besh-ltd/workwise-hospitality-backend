@@ -464,7 +464,7 @@ RfqRoutes.get('/get-clauses/:id',
 // vendor side
 RfqRoutes.post('/add-tech-comment',
   noLogin.customer_auth,
-  validateBody(rfqSchemas.addTechComment),
+  // validateBody(rfqSchemas.addTechComment),
   rfqController.addTechComment
 )
 
@@ -503,7 +503,7 @@ RfqRoutes.post('/add-vendor-response',
 
 RfqRoutes.post('/tech-evaluation-cleared-vendors',
   passportSignIn,
-  validateBody(rfqSchemas.addtechEvaluationClearedVendors),
+  // validateBody(rfqSchemas.addtechEvaluationClearedVendors),
   rfqController.addtechEvaluationClearedVendors
 )
 
