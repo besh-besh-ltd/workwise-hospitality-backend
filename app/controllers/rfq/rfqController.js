@@ -10591,13 +10591,14 @@ processBoqAndDownload : async (req, res) => {
         <p>Thank you for your time and consideration.</p>
         <p>Best regards,</p>
         <p>${userDetails.name}<br>
-        ${userDetails.organization_name}</p>
+        ${userDetails.organization_name || ''}</p>
     </div>
     `;
 
       const emailTemplate = generateEmailTemplate(
         headerContent,
-        containerContent
+        containerContent,
+        userDetails.id
       );
 
       // Preparing email options with an attachment
