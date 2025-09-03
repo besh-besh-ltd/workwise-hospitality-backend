@@ -545,7 +545,7 @@ const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret
       <p style="font-size: 15px; padding-bottom: 3px;">Reason: ${regret_reason}</p>
       
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
-        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+        style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
        Click here to view
       </a>      
     </div>`;
@@ -813,7 +813,7 @@ const sendMailToVendorsForTargetPrice = async (
             </table>
 
             <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
-              style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+              style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
               Update Your Quote
             </a>
 
@@ -960,7 +960,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
       Your RFQ has been successfully shared with vendors. </p>
       
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
-        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+        style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
        Click here to view
       </a>      
     </div>`;
@@ -1005,7 +1005,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
                    </p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0]?.token || ""}"
-         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; 
+         style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; 
          text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
          width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
         Track RFQ Status
@@ -1104,7 +1104,7 @@ const formattedProducts = countedProducts.length > 0
       <p><strong>Products:</strong> ${formattedProducts}</p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}"
-         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; 
+         style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; 
          text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
          width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
          Compare Quote
@@ -1165,7 +1165,7 @@ const sendQuoteNotificationToVendor = async (req) => {
                and be ready to discuss terms to secure the order.</p>
 
             <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}" 
-               style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+               style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                View RFQ Status
             </a>
           </div>`}
@@ -1240,7 +1240,7 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
         <strong>Closed By:</strong> ${name}<br>
         <br>
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqItem.id}"
-           style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+           style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
           View Closed RFQs
         </a>
            <br>
@@ -1275,7 +1275,7 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
          <br>
          
          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqItem.id}"
-            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Explore New RFQs
          </a>
           <br>
@@ -1895,7 +1895,7 @@ const containerContent = `
 
 
   <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfQItem[0]?.id}&token=${vendorNonLoginRfqAccessToken[0]?.token||''}"
-     style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+     style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
     Go to Dashboard
   </a>
 
@@ -9585,7 +9585,7 @@ const rfqController = {
                 <a href=${process.env.FRONT_END_WEBSITE}/dashboard/${
           sender_type == 2 ? 'buyer' : 'vendor'
         }/query?rfq_id=${rfq_id}&role=${sender_type == 2 ? 'buyer' : 'vendor'}
-                  style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+                  style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                   Respond to Query
                 </a>
               

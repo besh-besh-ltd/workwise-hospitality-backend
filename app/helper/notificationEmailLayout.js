@@ -109,7 +109,7 @@ function getRfqEmailContent({
             A new RFQ #${rfq_no} has been created by ${buyer_name}. You are invited to participate.
           </p>
           <a href="${baseUrl}"
-             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+             style="background-color: #059669; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
             View RFQ
           </a>
         `
@@ -135,7 +135,7 @@ function getRfqEmailContent({
             RFQ #${rfq_no} has been updated by ${buyer_name}. Please review the latest details.
           </p>
           <a href="${baseUrl}"
-             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+             style="background-color: #059669; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
             View RFQ
           </a>
         `
@@ -160,7 +160,7 @@ function getRfqEmailContent({
               : ''
           }
           <a href="${baseUrl}"
-             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+             style="background-color: #059669; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
             View RFQ
           </a>
         `
@@ -174,7 +174,7 @@ function getRfqEmailContent({
             RFQ #${rfq_no} has been updated by ${buyer_name}. Please review the latest details.
           </p>
           <a href="${baseUrl}"
-             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+             style="background-color: #059669; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
             View RFQ
           </a>
         `
