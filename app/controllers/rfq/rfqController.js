@@ -1540,7 +1540,7 @@ const sendQuoteNotificationEmail = async (req) => {
    }
  };
   
-const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender_id) => {
+const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender_id , text) => {
   try {
     const productName = product.name;
     const vendor_name = vendor.vendor_name;
@@ -1571,35 +1571,43 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
         <div>
           <h2>Hello ${vendor_name}</h2>
           <p style="font-size:16px;">
-            The buyer has added a new <strong>Technical Clause Comment</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no}</strong>. 
+            The buyer has added a new <strong> Deviation in The Technical Clause</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no}</strong>. 
             Kindly review it at the earliest.
           </p>
         </div>
       `;
 
       const containerContent = `
-        <div>
-          <h3 style="font-family: 'Roboto', sans-serif; text-align: center; font-size: 24px; margin-bottom: 8px;">
-            New Technical Clause Comment
-          </h3>
+      <div style="font-family: 'Roboto', sans-serif; color: #333;">
+        <h3 style="text-align: center; font-size: 24px; margin-bottom: 12px; color: #2E5BA8;">
+          New Technical Clause Comment
+        </h3>
 
-          <table style="width: 100%; padding: 8px;">
+          <p style="font-size: 16px; line-height: 1.5; text-align: center; margin-bottom: 20px;">
+            ${text}
+          </p>
+
+          <table style="width: 100%; padding: 8px; border-collapse: collapse; margin-bottom: 20px;">
             <tbody>
               ${productHTML}
               <tr><td></td></tr>
             </tbody>
           </table>
 
-          <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
-            style="background-color: #2563eb; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-            View Comment
+          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}"
+            style="background-color: #2E5BA8; color: white; font-family: 'Roboto', sans-serif;
+                  text-align: center; padding: 12px 24px; display: inline-block; 
+                  border-radius: 8px; font-size: 16px; font-weight: 500;
+                  text-decoration: none; margin: 0 auto; transition: background 0.3s;">
+            View Deviation
           </a>
 
-          <p style="margin-top:20px">
+          <p style="margin-top: 20px; font-size: 14px; text-align: center; color: #555;">
             Please review the newly added comment to ensure alignment with the buyer's requirements.
           </p>
         </div>
-      `;
+`;
+
 
       const dynamicHTML = generateEmailTemplate(
         headerContent,
@@ -1607,10 +1615,13 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
       );
 
       let mailRecipients = {
-        from: buyer_details[0]?.company_name || Config.masterEmail,
-        subject: `New Technical Clause Comment - ${productName} (RFQ ${rfq_no})`,
+        from: `"${buyer_details[0]?.company_name}" <${
+          buyer_details[0]?.email || Config.masterEmail
+        }>`,
+        subject: `New Technical Clause Comment - ${productName} (RFQ ${rfq_no.rfq_no})`,
         html: dynamicHTML
       };
+
 
       if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map((spoc) => spoc.email);
@@ -1772,7 +1783,7 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
 };
 
 
-const sendAddTechCommentMailForBuyer = async (buyer, vendor_id, product) => {
+const sendAddTechCommentMailForBuyer = async (buyer, vendor_id, product, text) => {
   try {
     const productName = product.name;
     const vendor_details = await userModel.user_profile_detail(vendor_id);
@@ -1807,9 +1818,11 @@ const sendAddTechCommentMailForBuyer = async (buyer, vendor_id, product) => {
       const containerContent = `
         <div>
           <h3 style="font-family: 'Roboto', sans-serif; text-align: center; font-size: 24px; margin-bottom: 8px;">
-            New Technical Clause Comment
+            New Technical Clause Deviation
           </h3>
-
+          <p style="font-size: 16px; line-height: 1.5; text-align: center; margin-bottom: 20px;">
+            ${text}
+          </p>
           <table style="width: 100%; padding: 8px;">
             <tbody>
               ${productHTML}
@@ -1817,10 +1830,13 @@ const sendAddTechCommentMailForBuyer = async (buyer, vendor_id, product) => {
             </tbody>
           </table>
 
-          <a href=${process.env.FRONT_END_WEBSITE}/dashboard/buyer
-            style="background-color: #2563eb; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-            View Comment
-          </a>
+         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/technical-evaluation?rfq_id=${buyer.rfq_id}"
+          style="background-color: #2563eb; color: white; font-family: 'Roboto', sans-serif; 
+                text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
+                width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+          View Deviation
+        </a>
+
 
           <p style="margin-top:20px">
             Please review this newly added comment to ensure alignment with your requirements.
@@ -1834,9 +1850,9 @@ const sendAddTechCommentMailForBuyer = async (buyer, vendor_id, product) => {
       );
 
       let mailRecipients = {
-        from: Config.masterEmail,
+        from: `"${vendor_details[0]?.company_name}" <${vendor_details[0]?.email || Config.masterEmail}>`,
         to: buyer.response_email,
-        subject: `Vendor ${vendorName} Added Technical Clause Comment - ${productName} (RFQ ${rfq_no})`,
+        subject: `Vendor ${vendorName} Added Technical Clause Deviation - ${productName} (RFQ ${rfq_no})`,
         html: dynamicHTML
       };
 
@@ -10194,6 +10210,8 @@ processBoqAndDownload : async (req, res) => {
         text,
         file_url
       );
+     const clause = await rfqModel.checkIfExists('tbl_rfq_product_tech_evaluation_clauses', `id = ${clause_id}`);
+     const clausText = clause && clause.length > 0 ? clause[0].clause_text : '';
 
       if (response) {
         if (req.user.user_type == 3) {
@@ -10201,7 +10219,8 @@ processBoqAndDownload : async (req, res) => {
           await sendAddTechCommentMailForBuyer(
             vendor,
             sender_id,
-            product
+            product,
+            clausText
           );
         } else if (req.user.user_type == 2) {
           //Mail t0 vendor from buyer
@@ -10209,7 +10228,8 @@ processBoqAndDownload : async (req, res) => {
             vendor,
             product,
             rfq_no,
-            sender_id
+            sender_id,
+            clausText
           );
         }
       }
