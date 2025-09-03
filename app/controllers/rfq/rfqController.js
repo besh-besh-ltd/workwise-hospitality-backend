@@ -1441,7 +1441,7 @@ const sendQuoteNotificationEmail = async (req) => {
           You've received a new quotation! Check out the details below:
         </p>
         <p><strong>Vendor:</strong> ${organization_name || name}</p>
-        <p><strong>Products:</strong> ${formattedProducts || '-'}</p>
+        <p><strong>Products:</strong> ${productEntries || '-'}</p>
 
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
             style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
