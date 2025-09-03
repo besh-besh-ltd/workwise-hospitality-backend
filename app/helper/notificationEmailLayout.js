@@ -65,14 +65,18 @@ function generateEmailTemplate(headerContent, containerContent, userID = null) {
       }
     : defaultEmailTemplate;
 
+  const headerBackground = userID && (companyObj.find((c) => c.userID === userID))
+    ? primaryColor
+    : 'linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%)';
+
   return `
     <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background: ${primaryColor}; color: ${primaryTextColor}; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
-        <div style="background: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%); padding: 32px 28px; border-radius: 16px; text-align: center; margin-bottom: 16px;">
+        <div style="background: ${headerBackground}; padding: 32px 28px; border-radius: 16px; text-align: center; margin-bottom: 16px;">
             <img style="width: 190px; max-width: 100%; height: auto; display: inline-block; margin: 0 auto;" src="${logo}" alt="Company Logo" />
             <div style="margin-top: 0; font-size: 16px; font-weight: 600; color: #ffffff; letter-spacing: 0.4px;">Procurement Se Profit Banao</div>
         </div>
         <hr style="border-color: ${seconderyColor}" />
-        <div style="border-radius: 24px; padding: 32px 16px; margin-bottom: 24px; background-color: ${seconderyColor}; color: #333333; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+        <div style="border-radius: 24px; padding: 32px 16px; margin-bottom: 24px; background-color: #ffffff; color: #333333; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
             ${headerContent}
             ${containerContent}
             </div>
