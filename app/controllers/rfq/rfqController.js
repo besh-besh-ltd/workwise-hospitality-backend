@@ -545,7 +545,7 @@ const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret
       <p style="font-size: 15px; padding-bottom: 3px;">Reason: ${regret_reason}</p>
       
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
-        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+        style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
        Click here to view
       </a>      
     </div>`;
@@ -813,7 +813,7 @@ const sendMailToVendorsForTargetPrice = async (
             </table>
 
             <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
-              style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+              style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
               Update Your Quote
             </a>
 
@@ -960,7 +960,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
       Your RFQ has been successfully shared with vendors. </p>
       
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
-        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+        style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
        Click here to view
       </a>      
     </div>`;
@@ -1005,7 +1005,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
                    </p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0]?.token || ""}"
-         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; 
+         style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; 
          text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
          width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
         Track RFQ Status
@@ -1071,17 +1071,24 @@ const sendRevisedQuotationEmailToBuyer = async (buyerDetails, quoteItemChanges, 
   // Extract vendor details from user object
   const vendorName = user.organization_name || user?.name;
 
-// Extract unique product names safely
-const productList = [...new Set(
-  quoteItemChanges
-    .filter(item => item.quote && item.quote.product_name)  // Ensure 'quote' and 'product_name' exist
-    .map(item => item.quote.product_name)
-)];
+// Group product names and count occurrences (variants)
+const productCountMap = quoteItemChanges
+  .filter(item => item.quote && item.quote.product_name)
+  .reduce((acc, item) => {
+    const name = item.quote.product_name;
+    acc[name] = (acc[name] || 0) + 1;
+    return acc;
+  }, {});
 
-// Format the product list
-const formattedProducts = productList.length > 0 
-  ? productList.slice(0, 2).join(', ') + (productList.length > 2 ? ', and more' : '') 
-  : '[Product 1], [Product 2], and more';
+// Build a list like ["Product A (x3)", "Product B (x2)", ...] max 3
+const countedProducts = Object.entries(productCountMap)
+  .slice(0, 3)
+  .map(([name, count]) => `${name} (x${count})`);
+
+// Append a simple "view more" indicator when there are more than 3
+const formattedProducts = countedProducts.length > 0
+  ? countedProducts.join(', ') + (Object.keys(productCountMap).length > 3 ? ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>` : '')
+  : '[Products]';
   
 
   // Email content
@@ -1097,7 +1104,7 @@ const formattedProducts = productList.length > 0
       <p><strong>Products:</strong> ${formattedProducts}</p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}"
-         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; 
+         style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; 
          text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
          width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
          Compare Quote
@@ -1158,7 +1165,7 @@ const sendQuoteNotificationToVendor = async (req) => {
                and be ready to discuss terms to secure the order.</p>
 
             <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}" 
-               style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+               style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                View RFQ Status
             </a>
           </div>`}
@@ -1233,7 +1240,7 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
         <strong>Closed By:</strong> ${name}<br>
         <br>
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqItem.id}"
-           style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+           style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
           View Closed RFQs
         </a>
            <br>
@@ -1268,7 +1275,7 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
          <br>
          
          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqItem.id}"
-            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Explore New RFQs
          </a>
           <br>
@@ -1408,12 +1415,20 @@ const sendQuoteNotificationEmail = async (req) => {
     if (u.length > 0) {
       let buyer = u[0];
 
-      // Prepare product list with inline logic
-      let productNames = products.map(item => item.product_name);
-      let formattedProducts = productNames.slice(0, 3).join(', ');
-      if (productNames.length > 3) {
-        formattedProducts += `, <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
-          style="color: #f87171; text-decoration: none;">view more</a>`;
+      // Prepare product list with grouping and variant counts, max 3 entries
+      const productCountMap = (products || []).reduce((acc, item) => {
+        const name = item?.product_name || item?.name;
+        if (name) acc[name] = (acc[name] || 0) + 1;
+        return acc;
+      }, {});
+
+      let productEntries = Object.entries(productCountMap)
+        .slice(0, 3)
+        .map(([name, count]) => `${name} (x${count})`)
+        .join(', ');
+
+      if (Object.keys(productCountMap).length > 3) {
+        productEntries += ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>`;
       }
 
       // Email header content
@@ -1429,7 +1444,7 @@ const sendQuoteNotificationEmail = async (req) => {
         <p><strong>Products:</strong> ${formattedProducts || '-'}</p>
 
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
-            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Review the Quotation
         </a>      
 
@@ -1880,7 +1895,7 @@ const containerContent = `
 
 
   <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfQItem[0]?.id}&token=${vendorNonLoginRfqAccessToken[0]?.token||''}"
-     style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+     style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
     Go to Dashboard
   </a>
 
@@ -9570,7 +9585,7 @@ const rfqController = {
                 <a href=${process.env.FRONT_END_WEBSITE}/dashboard/${
           sender_type == 2 ? 'buyer' : 'vendor'
         }/query?rfq_id=${rfq_id}&role=${sender_type == 2 ? 'buyer' : 'vendor'}
-                  style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+                  style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                   Respond to Query
                 </a>
               
@@ -10576,13 +10591,14 @@ processBoqAndDownload : async (req, res) => {
         <p>Thank you for your time and consideration.</p>
         <p>Best regards,</p>
         <p>${userDetails.name}<br>
-        ${userDetails.organization_name}</p>
+        ${userDetails.organization_name || ''}</p>
     </div>
     `;
 
       const emailTemplate = generateEmailTemplate(
         headerContent,
-        containerContent
+        containerContent,
+        userDetails.id
       );
 
       // Preparing email options with an attachment
