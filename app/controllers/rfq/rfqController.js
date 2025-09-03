@@ -10210,6 +10210,8 @@ processBoqAndDownload : async (req, res) => {
         text,
         file_url
       );
+     const clause = await rfqModel.checkIfExists('tbl_rfq_product_tech_evaluation_clauses', `id = ${clause_id}`);
+     const clausText = clause && clause.length > 0 ? clause[0].clause_text : '';
 
       if (response) {
         if (req.user.user_type == 3) {
@@ -10218,7 +10220,7 @@ processBoqAndDownload : async (req, res) => {
             vendor,
             sender_id,
             product,
-            text
+            clausText
           );
         } else if (req.user.user_type == 2) {
           //Mail t0 vendor from buyer
@@ -10227,7 +10229,7 @@ processBoqAndDownload : async (req, res) => {
             product,
             rfq_no,
             sender_id,
-            text
+            clausText
           );
         }
       }
