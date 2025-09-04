@@ -1658,8 +1658,7 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
 
     const vendor_details = await userModel.user_profile_detail(vendor_id);
     const vendor = vendor_details[0];
-    
-
+ 
     const buyer_details = await userModel.user_profile_detail(buyer_id);
     const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = '${rfq_id}'`);
 
@@ -1752,9 +1751,11 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
       );
 
       let mailRecipients = {
-        from: buyer_details[0]?.company_name || Config.masterEmail,
+        from: `"${buyer_details[0]?.company_name || 'Workwise'}" <${
+          Config.masterEmail
+        }>`,
         subject: subjectLine,
-        html: dynamicHTML,
+        html: dynamicHTML
       };
 
       if (spocList && spocList.length > 0) {
@@ -10170,9 +10171,7 @@ processBoqAndDownload : async (req, res) => {
       const rfq_id = req.params.id;
 
       const result = await rfqModel.getClauses(rfq_id);
-      // console.log("Result main of get clauses = ",result);
-
-      console.log('ehckinh th evendor result', JSON.stringify(result));
+     
 
       res.status(200).json(result).end();
     } catch (error) {
