@@ -825,7 +825,8 @@ const sendMailToVendorsForTargetPrice = async (
 
         const dynamicHTML = generateEmailTemplate(
           headerContent,
-          containerContent
+          containerContent,
+          sender_id
         );
 
         let mailRecipients = {
@@ -1343,7 +1344,16 @@ const containerContent = `
 
   // console.log(containerContent)
   
-  const dynamicHTML = generateEmailTemplate(headerContent, containerContent, rfqBasicDetails.created_by)
+  // Resolve theming user id: prefer RFQ.created_by; fallback to explicit DB fetch
+  let themingUserId = rfqBasicDetails?.created_by;
+  if (!themingUserId) {
+    try {
+      const buyerRows = await rfqModel.getBuyerForRfq(rfq_id);
+      themingUserId = buyerRows?.[0]?.user_id || themingUserId;
+    } catch (e) {}
+  }
+
+  const dynamicHTML = generateEmailTemplate(headerContent, containerContent, themingUserId)
 
     const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
 
@@ -9548,6 +9558,8 @@ const rfqController = {
       if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
 
       const rfqNumber = rfqDetails.rfq_no;
+      const userIdForTheme = rfqDetails?.created_by || sender_id;
+     
 
       const result = await rfqModel.insertReturnId('tbl_query_messages', data);
       const message_id = result[0].id;
@@ -9617,7 +9629,8 @@ const rfqController = {
 
         const dynamicHTML = generateEmailTemplate(
           headerContent,
-          containerContent
+          containerContent,
+          userIdForTheme
         );
 
         const emailSubject =
