@@ -545,7 +545,7 @@ const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret
       <p style="font-size: 15px; padding-bottom: 3px;">Reason: ${regret_reason}</p>
       
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
-        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+        style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
        Click here to view
       </a>      
     </div>`;
@@ -637,7 +637,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
           </table>
 
             <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}
-        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+        style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
         Submit Your Quote Now
       </a>
 
@@ -813,7 +813,7 @@ const sendMailToVendorsForTargetPrice = async (
             </table>
 
             <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
-              style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+              style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
               Update Your Quote
             </a>
 
@@ -960,7 +960,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
       Your RFQ has been successfully shared with vendors. </p>
       
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqNumber}"
-        style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+        style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
        Click here to view
       </a>      
     </div>`;
@@ -1005,7 +1005,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
                    </p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0]?.token || ""}"
-         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; 
+         style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; 
          text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
          width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
         Track RFQ Status
@@ -1071,17 +1071,24 @@ const sendRevisedQuotationEmailToBuyer = async (buyerDetails, quoteItemChanges, 
   // Extract vendor details from user object
   const vendorName = user.organization_name || user?.name;
 
-// Extract unique product names safely
-const productList = [...new Set(
-  quoteItemChanges
-    .filter(item => item.quote && item.quote.product_name)  // Ensure 'quote' and 'product_name' exist
-    .map(item => item.quote.product_name)
-)];
+// Group product names and count occurrences (variants)
+const productCountMap = quoteItemChanges
+  .filter(item => item.quote && item.quote.product_name)
+  .reduce((acc, item) => {
+    const name = item.quote.product_name;
+    acc[name] = (acc[name] || 0) + 1;
+    return acc;
+  }, {});
 
-// Format the product list
-const formattedProducts = productList.length > 0 
-  ? productList.slice(0, 2).join(', ') + (productList.length > 2 ? ', and more' : '') 
-  : '[Product 1], [Product 2], and more';
+// Build a list like ["Product A (x3)", "Product B (x2)", ...] max 3
+const countedProducts = Object.entries(productCountMap)
+  .slice(0, 3)
+  .map(([name, count]) => `${name} (x${count})`);
+
+// Append a simple "view more" indicator when there are more than 3
+const formattedProducts = countedProducts.length > 0
+  ? countedProducts.join(', ') + (Object.keys(productCountMap).length > 3 ? ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>` : '')
+  : '[Products]';
   
 
   // Email content
@@ -1097,7 +1104,7 @@ const formattedProducts = productList.length > 0
       <p><strong>Products:</strong> ${formattedProducts}</p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}"
-         style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; 
+         style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; 
          text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
          width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
          Compare Quote
@@ -1158,7 +1165,7 @@ const sendQuoteNotificationToVendor = async (req) => {
                and be ready to discuss terms to secure the order.</p>
 
             <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}" 
-               style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+               style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                View RFQ Status
             </a>
           </div>`}
@@ -1233,7 +1240,7 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
         <strong>Closed By:</strong> ${name}<br>
         <br>
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqItem.id}"
-           style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+           style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
           View Closed RFQs
         </a>
            <br>
@@ -1268,7 +1275,7 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
          <br>
          
          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqItem.id}"
-            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Explore New RFQs
          </a>
           <br>
@@ -1326,7 +1333,7 @@ const containerContent = `
          <p> <strong> Deadline: </strong> ${rfqBasicDetails?.bid_end_date || 'N/A'} </p>
        
          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}"
-            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Submit Your Quote Now
          </a>
        
@@ -1408,12 +1415,20 @@ const sendQuoteNotificationEmail = async (req) => {
     if (u.length > 0) {
       let buyer = u[0];
 
-      // Prepare product list with inline logic
-      let productNames = products.map(item => item.product_name);
-      let formattedProducts = productNames.slice(0, 3).join(', ');
-      if (productNames.length > 3) {
-        formattedProducts += `, <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
-          style="color: #f87171; text-decoration: none;">view more</a>`;
+      // Prepare product list with grouping and variant counts, max 3 entries
+      const productCountMap = (products || []).reduce((acc, item) => {
+        const name = item?.product_name || item?.name;
+        if (name) acc[name] = (acc[name] || 0) + 1;
+        return acc;
+      }, {});
+
+      let productEntries = Object.entries(productCountMap)
+        .slice(0, 3)
+        .map(([name, count]) => `${name} (x${count})`)
+        .join(', ');
+
+      if (Object.keys(productCountMap).length > 3) {
+        productEntries += ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>`;
       }
 
       // Email header content
@@ -1426,10 +1441,10 @@ const sendQuoteNotificationEmail = async (req) => {
           You've received a new quotation! Check out the details below:
         </p>
         <p><strong>Vendor:</strong> ${organization_name || name}</p>
-        <p><strong>Products:</strong> ${formattedProducts || '-'}</p>
+        <p><strong>Products:</strong> ${productEntries || '-'}</p>
 
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
-            style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Review the Quotation
         </a>      
 
@@ -1525,6 +1540,335 @@ const sendQuoteNotificationEmail = async (req) => {
    }
  };
   
+const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender_id , text) => {
+  try {
+    const productName = product.name;
+    const vendor_name = vendor.vendor_name;
+
+    const buyer_details = await userModel.user_profile_detail(sender_id);
+    // const rfq = await rfqModel.checkIfExists('tbl_rfq', `rfq_no = '${rfq_no.id}'`);
+    const rfq_id = rfq_no.id;
+
+    try {
+      const spocList = await vendorModel.getSpocDetails(vendor.vendor_id);
+      const token = await rfqModel.insertVendorRfqToken(vendor.vendor_id, rfq_id);
+
+      // Product HTML content
+      let productHTML = `
+        <tr>
+          <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+            <strong>Product:</strong> ${productName}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+            <strong>RFQ No:</strong> ${rfq_no.rfq_no}
+          </td>
+        </tr>
+      `;
+
+      const headerContent = `
+        <div>
+          <h2>Hello ${vendor_name}</h2>
+          <p style="font-size:16px;">
+            The buyer has added a new <strong> Deviation in The Technical Clause</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no}</strong>. 
+            Kindly review it at the earliest.
+          </p>
+        </div>
+      `;
+
+      const containerContent = `
+      <div style="font-family: 'Roboto', sans-serif; color: #333;">
+        <h3 style="text-align: center; font-size: 24px; margin-bottom: 12px; color: #2E5BA8;">
+          New Technical Clause Comment
+        </h3>
+
+          <p style="font-size: 16px; line-height: 1.5; text-align: center; margin-bottom: 20px;">
+            ${text}
+          </p>
+
+          <table style="width: 100%; padding: 8px; border-collapse: collapse; margin-bottom: 20px;">
+            <tbody>
+              ${productHTML}
+              <tr><td></td></tr>
+            </tbody>
+          </table>
+
+          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}"
+            style="background-color: #2E5BA8; color: white; font-family: 'Roboto', sans-serif;
+                  text-align: center; padding: 12px 24px; display: inline-block; 
+                  border-radius: 8px; font-size: 16px; font-weight: 500;
+                  text-decoration: none; margin: 0 auto; transition: background 0.3s;">
+            View Deviation
+          </a>
+
+          <p style="margin-top: 20px; font-size: 14px; text-align: center; color: #555;">
+            Please review the newly added comment to ensure alignment with the buyer's requirements.
+          </p>
+        </div>
+`;
+
+
+      const dynamicHTML = generateEmailTemplate(
+        headerContent,
+        containerContent
+      );
+
+      let mailRecipients = {
+        from: `"${buyer_details[0]?.company_name}" <${
+          buyer_details[0]?.email || Config.masterEmail
+        }>`,
+        subject: `New Technical Clause Comment - ${productName} (RFQ ${rfq_no.rfq_no})`,
+        html: dynamicHTML
+      };
+
+
+      if (spocList && spocList.length > 0) {
+        mailRecipients.to = spocList.map((spoc) => spoc.email);
+      } else {
+        mailRecipients.to = vendor.vendor_email;
+      }
+
+      sendMail(mailRecipients);
+
+      console.log(`Email sent successfully to vendor: ${vendor.vendor_name}`);
+    } catch (vendorError) {
+      console.error(`Error sending email to vendor ${vendor.id}:`, vendorError);
+    }
+
+    return {
+      success: true,
+      message: 'Technical clause comment notification sent to vendor'
+    };
+  } catch (error) {
+    console.error('Error in sendAddTechCommentMail:', error);
+    throw error;
+  }
+};
+
+const sendTechEvalAccepOrRejectMailToVendor = async (
+  rfq_id,
+  product,
+  vendor_id,
+  buyer_id,
+  reject_message
+) => {
+  try {
+    const productName = product.name;
+
+    const vendor_details = await userModel.user_profile_detail(vendor_id);
+    const vendor = vendor_details[0];
+    
+
+    const buyer_details = await userModel.user_profile_detail(buyer_id);
+    const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = '${rfq_id}'`);
+
+    try {
+      const spocList = await vendorModel.getSpocDetails(vendor_id);
+      const token = await rfqModel.insertVendorRfqToken(
+        vendor_id,
+        rfq_id
+      );
+
+      // Product info HTML
+      let productHTML = `
+        <tr>
+          <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+            <strong>Product:</strong> ${productName}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+            <strong>RFQ No:</strong> ${rfq[0].rfq_no}
+          </td>
+        </tr>
+      `;
+
+      // ✅ Dynamic message based on rejection or acceptance
+      let decisionMessage = "";
+      let subjectLine = "";
+
+      if (!reject_message) {
+        // Accepted
+        decisionMessage = `
+          <p style="font-size:16px;">
+            We are pleased to inform you that your submission for 
+            <strong>${productName}</strong> under RFQ <strong>${rfq[0].rfq_no}</strong> 
+            has been <strong style="color:green;">technically accepted</strong>.
+          </p>
+          <p style="font-size:16px;">
+            You may proceed with the next steps as per the RFQ process.
+          </p>
+        `;
+        subjectLine = `Technical Evaluation Accepted - ${productName} (RFQ ${rfq[0].rfq_no})`;
+      } else {
+        // Rejected
+        decisionMessage = `
+          <p style="font-size:16px;">
+            We regret to inform you that your submission for 
+            <strong>${productName}</strong> under RFQ <strong>${rfq[0].rfq_no}</strong> 
+            has been <strong style="color:red;">technically rejected</strong>.
+          </p>
+          <p style="font-size:16px;">
+            <strong>Reason for Rejection:</strong> ${reject_message}
+          </p>
+          <p style="font-size:16px;">
+            Please review the rejection details and make necessary improvements for future submissions.
+          </p>
+        `;
+        subjectLine = `Technical Evaluation Rejected - ${productName} (RFQ ${rfq[0].rfq_no})`;
+      }
+
+      const headerContent = `
+        <div>
+          <h2>Hello ${vendor.name},</h2>
+          ${decisionMessage}
+        </div>
+      `;
+
+      const containerContent = `
+        <div>
+          <h3 style="font-family: 'Roboto', sans-serif; text-align: center; font-size: 22px; margin-bottom: 8px;">
+            Technical Evaluation Update
+          </h3>
+
+          <table style="width: 100%; padding: 8px;">
+            <tbody>
+              ${productHTML}
+              <tr><td></td></tr>
+            </tbody>
+          </table>
+
+          <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
+            style="background-color: #2563eb; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+            View Details
+          </a>
+        </div>
+      `;
+
+      const dynamicHTML = generateEmailTemplate(
+        headerContent,
+        containerContent
+      );
+
+      let mailRecipients = {
+        from: buyer_details[0]?.company_name || Config.masterEmail,
+        subject: subjectLine,
+        html: dynamicHTML,
+      };
+
+      if (spocList && spocList.length > 0) {
+        mailRecipients.to = spocList.map((spoc) => spoc.email);
+      } else {
+        mailRecipients.to = vendor.email;
+      }
+
+      sendMail(mailRecipients);
+
+      console.log(
+        `Email sent successfully to vendor: ${vendor.name} [${reject_message ? "Rejected" : "Accepted"}]`
+      );
+    } catch (vendorError) {
+      console.error(`Error sending email to vendor ${vendor.id}:`, vendorError);
+    }
+
+    return {
+      success: true,
+      message: 'Technical evaluation decision email sent to vendor',
+    };
+  } catch (error) {
+    console.error('Error in sendTechEvalAccepOrRejectMailToVendor:', error);
+    throw error;
+  }
+};
+
+
+const sendAddTechCommentMailForBuyer = async (buyer, vendor_id, product, text) => {
+  try {
+    const productName = product.name;
+    const vendor_details = await userModel.user_profile_detail(vendor_id);
+    const vendorName = vendor_details[0]?.company_name || "A Vendor";
+    const rfq_no = buyer.rfq_no;
+
+    try {
+      // Product HTML content
+      let productHTML = `
+        <tr>
+          <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+            <strong>Product:</strong> ${productName}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; font-family: 'Roboto', sans-serif; font-size: 16px;">
+            <strong>RFQ No:</strong> ${rfq_no}
+          </td>
+        </tr>
+      `;
+
+      const headerContent = `
+        <div>
+          <h2>Hello ${buyer.companyName},</h2>
+          <p style="font-size:16px;">
+            Vendor <strong>${vendorName}</strong> has added a new <strong>Technical Clause Comment</strong> 
+            for the product <strong>${productName}</strong> under RFQ <strong>${rfq_no}</strong>.
+          </p>
+        </div>
+      `;
+
+      const containerContent = `
+        <div>
+          <h3 style="font-family: 'Roboto', sans-serif; text-align: center; font-size: 24px; margin-bottom: 8px;">
+            New Technical Clause Deviation
+          </h3>
+          <p style="font-size: 16px; line-height: 1.5; text-align: center; margin-bottom: 20px;">
+            ${text}
+          </p>
+          <table style="width: 100%; padding: 8px;">
+            <tbody>
+              ${productHTML}
+              <tr><td></td></tr>
+            </tbody>
+          </table>
+
+         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/technical-evaluation?rfq_id=${buyer.rfq_id}"
+          style="background-color: #2563eb; color: white; font-family: 'Roboto', sans-serif; 
+                text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; 
+                width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+          View Deviation
+        </a>
+
+
+          <p style="margin-top:20px">
+            Please review this newly added comment to ensure alignment with your requirements.
+          </p>
+        </div>
+      `;
+
+      const dynamicHTML = generateEmailTemplate(
+        headerContent,
+        containerContent
+      );
+
+      let mailRecipients = {
+        from: `"${vendor_details[0]?.company_name}" <${vendor_details[0]?.email || Config.masterEmail}>`,
+        to: buyer.response_email,
+        subject: `Vendor ${vendorName} Added Technical Clause Deviation - ${productName} (RFQ ${rfq_no})`,
+        html: dynamicHTML
+      };
+
+      sendMail(mailRecipients);
+
+      console.log(`Email sent successfully to buyer: ${buyer.contactName}`);
+    } catch (vendorError) {
+      console.error(`Error sending email for vendor ${vendor_id}:`, vendorError);
+    }
+
+  } catch (error) {
+    console.error('Error in sendAddTechCommentMailForBuyer:', error);
+    throw error;
+  }
+};
+
 
 
 const sendWinningNotificaion = async (
@@ -1567,7 +1911,7 @@ const containerContent = `
 
 
   <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfQItem[0]?.id}&token=${vendorNonLoginRfqAccessToken[0]?.token||''}"
-     style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+     style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
     Go to Dashboard
   </a>
 
@@ -2289,62 +2633,81 @@ const saveRfqDraft = async (user_id, reqBody) => {
 const rfqController = {
   create: async (req, res, next) => {
     if (!req.user.subscription_plan_id) {
-      return res.status(400).json({
-        status: 3,
-        message: 'You need to purchase subscription to create RFQ'
-      }).end();
+      return res
+        .status(400)
+        .json({
+          status: 3,
+          message: 'You need to purchase subscription to create RFQ'
+        })
+        .end();
     }
 
     try {
       let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction, selectedSheets } = req.body;
       const user_id = req.user.id;
       if (!rfq_id) {
-        return res.status(400).json({
-          status: 3,
-          errors: {
-            rfq: 'RFQ Id is required to create an RFQ from Draft!'
-          }
-        }).end();
+        return res
+          .status(400)
+          .json({
+            status: 3,
+            errors: {
+              rfq: 'RFQ Id is required to create an RFQ from Draft!'
+            }
+          })
+          .end();
       }
       // check if RA is true
-      if(reverse_auction){
-        if(!ra_start_date || !ra_end_date){
-          return res.status(400).json({
-            status: 3,
-            errors: {
-              ra_start_date: 'RA Start Date is required',
-              ra_end_date: 'RA End Date is required'
-            }
-          }).end();
+      if (reverse_auction) {
+        if (!ra_start_date || !ra_end_date) {
+          return res
+            .status(400)
+            .json({
+              status: 3,
+              errors: {
+                ra_start_date: 'RA Start Date is required',
+                ra_end_date: 'RA End Date is required'
+              }
+            })
+            .end();
         }
-        if(new Date(ra_start_date) >= new Date(ra_end_date)){
-          return res.status(400).json({
-            status: 3,
-            errors: {
-              ra_start_date: 'RA Start Date should be before RA End Date'
-            }
-          }).end();
+        if (new Date(ra_start_date) >= new Date(ra_end_date)) {
+          return res
+            .status(400)
+            .json({
+              status: 3,
+              errors: {
+                ra_start_date: 'RA Start Date should be before RA End Date'
+              }
+            })
+            .end();
         }
-        if(new Date(ra_start_date) <= new Date(bid_end_date)){
-          return res.status(400).json({
-            status: 3,
-            errors: {
-              ra_start_date: 'RA Start Date should be after Bid End Date'
-            }
-          }).end();
+        if (new Date(ra_start_date) <= new Date(bid_end_date)) {
+          return res
+            .status(400)
+            .json({
+              status: 3,
+              errors: {
+                ra_start_date: 'RA Start Date should be after Bid End Date'
+              }
+            })
+            .end();
         }
       }
       await saveRfqDraft(user_id, req.body);
 
       const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id);
 
-      if(!isRFQComplete) {
-        return res.status(400).json({
-          status: 2,
-          errors: {
-            rfq_specs: 'Some products are missing quantity or unit. Please fill them before proceeding.'
-          }
-        }).end();
+      if (!isRFQComplete) {
+        return res
+          .status(400)
+          .json({
+            status: 2,
+            errors: {
+              rfq_specs:
+                'Some products are missing quantity or unit. Please fill them before proceeding.'
+            }
+          })
+          .end();
       }
       // const products = await rfqModel.getProductsByRfqId(rfq_id);
 
@@ -2355,7 +2718,7 @@ const rfqController = {
         { is_published: 1 },
         rfq_id
       );
-      
+
       await sendMailtoVendors(req, rfq_id);
       await sendQuotationMailToBuyer(req, rfq_id);
 
@@ -2364,26 +2727,30 @@ const rfqController = {
         rfq_id: rfq_id,
         rfq_no: responseUpdate[0]?.rfq_no
       };
-  
+
       whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload);
 
-      return res.status(200).json({
-        status: 1,
-        data: responseUpdate[0],
-        mail_sent: true
-      }).end();
-
+      return res
+        .status(200)
+        .json({
+          status: 1,
+          data: responseUpdate[0],
+          mail_sent: true
+        })
+        .end();
     } catch (error) {
       logError(error);
-      return res.status(400).json({
-        status: 3,
-        message: Config.errorText.value
-      }).end();
+      return res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
     }
   },
 
   update: async (req, res, next) => {
-
     if (!req.user.subscription_plan_id) {
       res
         .status(400)
@@ -2394,426 +2761,488 @@ const rfqController = {
         .end();
       return;
     }
-   
 
     try {
+      await db.tx(async (t) => {
+        const data = req.body;
+        console.log('rfq controller 1 data', data);
+        const { termsChanged, selectedTerms } = data;
 
-      await db.tx(async t => {
-   
-      const data = req.body;
-      console.log("rfq controller 1 data", data)
-      const { termsChanged, selectedTerms } = data;
+        delete data.termsChanged;
+        delete data.selectedTerms;
 
-      delete data.termsChanged;
-      delete data.selectedTerms;
+        const rfq_id = data.rfq_id;
+        delete data.rfq_id; // Remove rfq_id from update fields
 
-      const rfq_id = data.rfq_id;
-      delete data.rfq_id; // Remove rfq_id from update fields
-
-      // Override model database access to use transaction
-      const transactingModels = {
-            rfqModel: withTransaction(rfqModel, t),
-            userModel: withTransaction(userModel, t),
-            vendorModel: withTransaction(vendorModel, t)
+        // Override model database access to use transaction
+        const transactingModels = {
+          rfqModel: withTransaction(rfqModel, t),
+          userModel: withTransaction(userModel, t),
+          vendorModel: withTransaction(vendorModel, t)
         };
 
-      let prevRfqDetails = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}`);
-      if(!prevRfqDetails || prevRfqDetails.length <= 0) {
-        throw new Error("RFQ does not exist with id: ", rfq_id);
-      }
-
-      prevRfqDetails = prevRfqDetails[0];
-
-      // List of keys to populate from prev if not already present
-      const fieldsToPopulate = ['company_name', 'ra_start_date', 'ra_end_date'];
-
-      fieldsToPopulate.forEach((key) => {
-        if (!req.body[key] && prevRfqDetails[key]) {
-          req.body[key] = prevRfqDetails[key];
+        let prevRfqDetails = await rfqModel.checkIfExists(
+          'tbl_rfq',
+          `id = ${rfq_id}`
+        );
+        if (!prevRfqDetails || prevRfqDetails.length <= 0) {
+          throw new Error('RFQ does not exist with id: ', rfq_id);
         }
-      });
 
-      const updatableData = data.updatableData;
-      delete data.updatableData;
+        prevRfqDetails = prevRfqDetails[0];
 
-      const products = updatableData?.products;
-      const updatableVendors = updatableData?.vendors;
-      const newAddedproductVendors = {}; // { [email]: { name, email, product_names: [] } }
-      const deletedProductVendors = {}; // { [email]: { name, email, product_names: [] } }
-      const deletedVendorsFromExistingProducts = {}; // { [email]: { name, email, product_names: [] } }
-      const addedVednorsToExistingProducts = {}; // { [email]: { name, email, product_names: [] } }
-      const updatedDataVendors = [];
-      const changedDetails = [];
-    
+        // List of keys to populate from prev if not already present
+        const fieldsToPopulate = [
+          'company_name',
+          'ra_start_date',
+          'ra_end_date'
+        ];
 
-      if (products && products?.updatable) {
-        const updatableKeys = new Set();
-        //handling new Product added
-        if (products?.addable?.length > 0) {
-          await Promise.all(
-            products.addable.map(async (productId) => {
-              if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(productId))) return null;
-              const vendors = await transactingModels.rfqModel.searchEmailAndNameForVendor(
-                rfq_id,
-                productId
-              ); // returns array of { name, email, product_name }
+        fieldsToPopulate.forEach((key) => {
+          if (!req.body[key] && prevRfqDetails[key]) {
+            req.body[key] = prevRfqDetails[key];
+          }
+        });
 
-              if (Array.isArray(vendors) && vendors.length > 0) {
-                for (const {
-                  vendor_id,
-                  name,
-                  email,
-                  product_name
-                } of vendors) {
-                  if (!newAddedproductVendors[vendor_id]) {
-                    newAddedproductVendors[vendor_id] = {
+        const updatableData = data.updatableData;
+        delete data.updatableData;
+
+        const products = updatableData?.products;
+        const updatableVendors = updatableData?.vendors;
+        const newAddedproductVendors = {}; // { [email]: { name, email, product_names: [] } }
+        const deletedProductVendors = {}; // { [email]: { name, email, product_names: [] } }
+        const deletedVendorsFromExistingProducts = {}; // { [email]: { name, email, product_names: [] } }
+        const addedVednorsToExistingProducts = {}; // { [email]: { name, email, product_names: [] } }
+        const updatedDataVendors = [];
+        const changedDetails = [];
+
+        if (products && products?.updatable) {
+          const updatableKeys = new Set();
+          //handling new Product added
+          if (products?.addable?.length > 0) {
+            await Promise.all(
+              products.addable
+                .map(async (productId) => {
+                  if (
+                    products?.deletable &&
+                    products.deletable.length > 0 &&
+                    products.deletable.includes(parseInt(productId))
+                  )
+                    return null;
+                  const vendors =
+                    await transactingModels.rfqModel.searchEmailAndNameForVendor(
+                      rfq_id,
+                      productId
+                    ); // returns array of { name, email, product_name }
+
+                  if (Array.isArray(vendors) && vendors.length > 0) {
+                    for (const {
+                      vendor_id,
                       name,
                       email,
-                      product_names: [],
-                      vendor_id
-                    };
-                  }
-
-                  if (
-                    !newAddedproductVendors[vendor_id].product_names.includes(
                       product_name
-                    )
-                  ) {
-                    newAddedproductVendors[vendor_id].product_names.push(
-                      product_name
-                    );
+                    } of vendors) {
+                      if (!newAddedproductVendors[vendor_id]) {
+                        newAddedproductVendors[vendor_id] = {
+                          name,
+                          email,
+                          product_names: [],
+                          vendor_id
+                        };
+                      }
+
+                      if (
+                        !newAddedproductVendors[
+                          vendor_id
+                        ].product_names.includes(product_name)
+                      ) {
+                        newAddedproductVendors[vendor_id].product_names.push(
+                          product_name
+                        );
+                      }
+
+                      await transactingModels.rfqModel.insertVendorRfqToken(
+                        vendor_id,
+                        rfq_id
+                      );
+                    }
                   }
-
-                  await transactingModels.rfqModel.insertVendorRfqToken(vendor_id, rfq_id);
-                }
-              }
-            }).filter(Boolean)
-          );
-        }
-
-        // Handling Specs insert and/or update
-        if (products.updatable?.specs)
-          Object.keys(products.updatable.specs).forEach((rfqProductId) => {
-            if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) return;
-
-            const productId = products.updatable.specs[rfqProductId].product_id;
-            const variant = products.updatable.specs[rfqProductId].variant;
-            delete products.updatable.specs[rfqProductId].variant;
-            delete products.updatable.specs[rfqProductId].product_id;
-
-            if (!products.addable?.includes(parseInt(rfqProductId))) {
-              updatableKeys.add(rfqProductId);
-            }
-
-            let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${
-              variant ?? '0'
-            })::INT`;
-
-            Object.keys(products.updatable.specs[rfqProductId]).forEach(
-              async (spec) => {
-                const data = {
-                  value: products.updatable.specs[rfqProductId][spec]
-                };
-                const currentWhereClause =
-                  whereClause + ` AND title = '${spec}'`;
-                const doesExist = await transactingModels.rfqModel.checkIfExists(
-                  'tbl_rfq_products_specs',
-                  currentWhereClause
-                );
-                if (doesExist && doesExist.length > 0) {
-                  await transactingModels.rfqModel.updateWhere(
-                    'tbl_rfq_products_specs',
-                    data,
-                    currentWhereClause
-                  );
-                } else {
-                  const insertData = {
-                    ...data,
-                    rfq_id,
-                    product_variant_id: productId,
-                    title: spec,
-                    variant: parseInt(
-                      variant ?? '0'
-                    )
-                  };
-                  await transactingModels.rfqModel.insert('tbl_rfq_products_specs', insertData);
-                }
-              }
+                })
+                .filter(Boolean)
             );
-          });
+          }
 
-        // Handling Files insert and/or update
-        if (products.updatable?.files)
-          Object.keys(products.updatable.files).forEach((rfqProductId) => {
-            if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(parseInt(rfqProductId))) return;
-
-            delete products.updatable.files[rfqProductId].variant;
-            delete products.updatable.files[rfqProductId].product_id;
-
-            if (!products.addable?.includes(parseInt(rfqProductId))) {
-              updatableKeys.add(rfqProductId);
-            }
-
-            let whereClause = `rfq_product_id = (${rfqProductId})::INT`;
-
-            Object.keys(products.updatable.files[rfqProductId]).forEach(
-              async (fileType) => {
-                const transformedFileType =
-                  fileType == 'qap_file'
-                    ? 'QAP'
-                    : fileType == 'spec_file'
-                    ? 'SPEC'
-                    : 'TDS';
-
-                const currentWhereClause =
-                  whereClause + ` AND file_type = '${transformedFileType}'`;
-                const doesExist = await transactingModels.rfqModel.checkIfExists(
-                  'tbl_rfq_product_files',
-                  currentWhereClause,
-                );
-                const data = products.updatable.files[rfqProductId][fileType];
-                const isRemovable = !Array.isArray(data) && data == 'rm';
-
-                if (doesExist && doesExist.length > 0) {
-                  const conditions = {
-                    rfq_product_id: rfqProductId,
-                    file_type: transformedFileType
-                  };
-                  await transactingModels.rfqModel.delete('tbl_rfq_product_files', conditions, t);
-                  if (!isRemovable) {
-                    const insertableData = data.map((file_url) => ({
-                      rfq_product_id: rfqProductId,
-                      file_type: transformedFileType,
-                      file_url
-                    }));
-                    await rfqModel.insertArray(
-                      insertableData,
-                      Object.keys(insertableData[0]),
-                      'tbl_rfq_product_files',
-                    );
-                  }
-                } else if (!isRemovable) {
-                  const insertableData = data.map((file_url) => ({
-                    rfq_product_id: rfqProductId,
-                    file_type: transformedFileType,
-                    file_url
-                  }));
-                  await transactingModels.rfqModel.insertArray(
-                    insertableData,
-                    Object.keys(insertableData[0]),
-                    'tbl_rfq_product_files',
-                  );
-                }
-              }
-            );
-          });
-
-        if (products.updatable?.comment)
-          Object.keys(products.updatable.comment).forEach(
-            async (rfqProductId) => {
-              if(products?.deletable && products.deletable.length > 0 && products.deletable.includes(rfqProductId)) return;
+          // Handling Specs insert and/or update
+          if (products.updatable?.specs)
+            Object.keys(products.updatable.specs).forEach((rfqProductId) => {
+              if (
+                products?.deletable &&
+                products.deletable.length > 0 &&
+                products.deletable.includes(parseInt(rfqProductId))
+              )
+                return;
 
               const productId =
-                products.updatable.comment[rfqProductId].product_id;
-              const variant = products.updatable.comment[rfqProductId].variant;
-              const comment = products.updatable.comment[rfqProductId].comment;
+                products.updatable.specs[rfqProductId].product_id;
+              const variant = products.updatable.specs[rfqProductId].variant;
+              delete products.updatable.specs[rfqProductId].variant;
+              delete products.updatable.specs[rfqProductId].product_id;
 
               if (!products.addable?.includes(parseInt(rfqProductId))) {
                 updatableKeys.add(rfqProductId);
               }
 
-              let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${variant})::INT`;
+              let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${
+                variant ?? '0'
+              })::INT`;
 
-              const data = {
-                comment
-              };
-              await transactingModels.rfqModel.updateWhere('tbl_rfq_products', data, whereClause);
-            }
+              Object.keys(products.updatable.specs[rfqProductId]).forEach(
+                async (spec) => {
+                  const data = {
+                    value: products.updatable.specs[rfqProductId][spec]
+                  };
+                  const currentWhereClause =
+                    whereClause + ` AND title = '${spec}'`;
+                  const doesExist =
+                    await transactingModels.rfqModel.checkIfExists(
+                      'tbl_rfq_products_specs',
+                      currentWhereClause
+                    );
+                  if (doesExist && doesExist.length > 0) {
+                    await transactingModels.rfqModel.updateWhere(
+                      'tbl_rfq_products_specs',
+                      data,
+                      currentWhereClause
+                    );
+                  } else {
+                    const insertData = {
+                      ...data,
+                      rfq_id,
+                      product_variant_id: productId,
+                      title: spec,
+                      variant: parseInt(variant ?? '0')
+                    };
+                    await transactingModels.rfqModel.insert(
+                      'tbl_rfq_products_specs',
+                      insertData
+                    );
+                  }
+                }
+              );
+            });
+
+          // Handling Files insert and/or update
+          if (products.updatable?.files)
+            Object.keys(products.updatable.files).forEach((rfqProductId) => {
+              if (
+                products?.deletable &&
+                products.deletable.length > 0 &&
+                products.deletable.includes(parseInt(rfqProductId))
+              )
+                return;
+
+              delete products.updatable.files[rfqProductId].variant;
+              delete products.updatable.files[rfqProductId].product_id;
+
+              if (!products.addable?.includes(parseInt(rfqProductId))) {
+                updatableKeys.add(rfqProductId);
+              }
+
+              let whereClause = `rfq_product_id = (${rfqProductId})::INT`;
+
+              Object.keys(products.updatable.files[rfqProductId]).forEach(
+                async (fileType) => {
+                  const transformedFileType =
+                    fileType == 'qap_file'
+                      ? 'QAP'
+                      : fileType == 'spec_file'
+                      ? 'SPEC'
+                      : 'TDS';
+
+                  const currentWhereClause =
+                    whereClause + ` AND file_type = '${transformedFileType}'`;
+                  const doesExist =
+                    await transactingModels.rfqModel.checkIfExists(
+                      'tbl_rfq_product_files',
+                      currentWhereClause
+                    );
+                  const data = products.updatable.files[rfqProductId][fileType];
+                  const isRemovable = !Array.isArray(data) && data == 'rm';
+
+                  if (doesExist && doesExist.length > 0) {
+                    const conditions = {
+                      rfq_product_id: rfqProductId,
+                      file_type: transformedFileType
+                    };
+                    await transactingModels.rfqModel.delete(
+                      'tbl_rfq_product_files',
+                      conditions,
+                      t
+                    );
+                    if (!isRemovable) {
+                      const insertableData = data.map((file_url) => ({
+                        rfq_product_id: rfqProductId,
+                        file_type: transformedFileType,
+                        file_url
+                      }));
+                      await rfqModel.insertArray(
+                        insertableData,
+                        Object.keys(insertableData[0]),
+                        'tbl_rfq_product_files'
+                      );
+                    }
+                  } else if (!isRemovable) {
+                    const insertableData = data.map((file_url) => ({
+                      rfq_product_id: rfqProductId,
+                      file_type: transformedFileType,
+                      file_url
+                    }));
+                    await transactingModels.rfqModel.insertArray(
+                      insertableData,
+                      Object.keys(insertableData[0]),
+                      'tbl_rfq_product_files'
+                    );
+                  }
+                }
+              );
+            });
+
+          if (products.updatable?.comment)
+            Object.keys(products.updatable.comment).forEach(
+              async (rfqProductId) => {
+                if (
+                  products?.deletable &&
+                  products.deletable.length > 0 &&
+                  products.deletable.includes(rfqProductId)
+                )
+                  return;
+
+                const productId =
+                  products.updatable.comment[rfqProductId].product_id;
+                const variant =
+                  products.updatable.comment[rfqProductId].variant;
+                const comment =
+                  products.updatable.comment[rfqProductId].comment;
+
+                if (!products.addable?.includes(parseInt(rfqProductId))) {
+                  updatableKeys.add(rfqProductId);
+                }
+
+                let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${variant})::INT`;
+
+                const data = {
+                  comment
+                };
+                await transactingModels.rfqModel.updateWhere(
+                  'tbl_rfq_products',
+                  data,
+                  whereClause
+                );
+              }
+            );
+          //Handle tech eval add ,update, delete here
+          if (products.updatable?.techEval) {
+            Object.keys(products.updatable.techEval).forEach((rfqProductId) => {
+              if (!products.addable?.includes(parseInt(rfqProductId))) {
+                updatableKeys.add(rfqProductId);
+              }
+            });
+          }
+
+          const uniqueVendorMap = {};
+          // Fetch vendors for updated product RFQ IDs
+          await Promise.all(
+            Array.from(updatableKeys).map(async (rfqProductId) => {
+              // const productId =
+              //   products.updatable.specs?.[rfqProductId]?.product_id ||
+              //   products.updatable.comment?.[rfqProductId]?.product_id ||
+              //   products.updatable.files?.[rfqProductId]?.product_id;
+
+              const vendors =
+                await transactingModels.rfqModel.searchEmailAndNameForVendor(
+                  rfq_id,
+                  rfqProductId
+                ); // returns array of { name, email, product_name }
+              // console.log('vendors for updated product', vendors);
+
+              if (Array.isArray(vendors)) {
+                vendors.forEach(({ vendor_id, name, email, product_name }) => {
+                  if (!uniqueVendorMap[vendor_id]) {
+                    uniqueVendorMap[vendor_id] = {
+                      name,
+                      email,
+                      product_names: new Set(),
+                      vendor_id
+                    };
+                  }
+                  uniqueVendorMap[vendor_id].product_names.add(product_name);
+                });
+              }
+            })
           );
-        //Handle tech eval add ,update, delete here
-        if (products.updatable?.techEval) {
-          Object.keys(products.updatable.techEval).forEach((rfqProductId) => {
-            if (!products.addable?.includes(parseInt(rfqProductId))) {
-              updatableKeys.add(rfqProductId);
-            }
-          });
+
+          // Convert Set to array
+          for (const vendor of Object.values(uniqueVendorMap)) {
+            updatedDataVendors.push({
+              name: vendor.name,
+              email: vendor.email,
+              product_name: [...vendor.product_names].join(', '),
+              vendor_id: vendor.vendor_id
+            });
+            await transactingModels.rfqModel.insertVendorRfqToken(
+              vendor.vendor_id,
+              rfq_id
+            );
+          }
         }
 
-        const uniqueVendorMap = {};
-        // Fetch vendors for updated product RFQ IDs
-        await Promise.all(
-          Array.from(updatableKeys).map(async (rfqProductId) => {
-            // const productId =
-            //   products.updatable.specs?.[rfqProductId]?.product_id ||
-            //   products.updatable.comment?.[rfqProductId]?.product_id ||
-            //   products.updatable.files?.[rfqProductId]?.product_id;
+        if (products && products?.deletable && products.deletable.length > 0) {
+          for (const rfqProductId of products.deletable) {
+            const vendors =
+              await transactingModels.rfqModel.searchEmailAndNameForVendor(
+                rfq_id,
+                rfqProductId
+              );
 
-            const vendors = await transactingModels.rfqModel.searchEmailAndNameForVendor(
-              rfq_id,
-              rfqProductId
-            ); // returns array of { name, email, product_name }
-            // console.log('vendors for updated product', vendors);
-
-            if (Array.isArray(vendors)) {
-              vendors.forEach(({ vendor_id, name, email, product_name }) => {
-                if (!uniqueVendorMap[vendor_id]) {
-                  uniqueVendorMap[vendor_id] = {
+            if (Array.isArray(vendors) && vendors.length > 0) {
+              for (const { vendor_id, name, email, product_name } of vendors) {
+                if (!deletedProductVendors[vendor_id]) {
+                  deletedProductVendors[vendor_id] = {
                     name,
                     email,
-                    product_names: new Set(),
+                    product_names: [],
                     vendor_id
                   };
                 }
-                uniqueVendorMap[vendor_id].product_names.add(product_name);
-              });
-            }
-          })
-        );
 
-        // Convert Set to array
-        for (const vendor of Object.values(uniqueVendorMap)) {
-          updatedDataVendors.push({
-            name: vendor.name,
-            email: vendor.email,
-            product_name: [...vendor.product_names].join(', '),
-            vendor_id: vendor.vendor_id
-          });
-          await transactingModels.rfqModel.insertVendorRfqToken(vendor.vendor_id, rfq_id);
-        }
-      }
-
-      if (products && products?.deletable && products.deletable.length > 0) {
-        for (const rfqProductId of products.deletable) {
-          const vendors = await transactingModels.rfqModel.searchEmailAndNameForVendor(
-            rfq_id,
-            rfqProductId
-          );
-
-          if (Array.isArray(vendors) && vendors.length > 0) {
-            for (const { vendor_id, name, email, product_name } of vendors) {
-              if (!deletedProductVendors[vendor_id]) {
-                deletedProductVendors[vendor_id] = {
-                  name,
-                  email,
-                  product_names: [],
-                  vendor_id
-                };
-              }
-
-              if (
-                !deletedProductVendors[vendor_id].product_names.includes(
-                  product_name
-                )
-              ) {
-                deletedProductVendors[vendor_id].product_names.push(
-                  product_name
-                );
+                if (
+                  !deletedProductVendors[vendor_id].product_names.includes(
+                    product_name
+                  )
+                ) {
+                  deletedProductVendors[vendor_id].product_names.push(
+                    product_name
+                  );
+                }
               }
             }
-          }
 
-          // Delete records from tbl_rfq_products
-          let deletedRecord = await transactingModels.rfqModel.delete('tbl_rfq_products', {
-            id: rfqProductId
-          });
-          if (!deletedRecord || deletedRecord.length === 0) continue;
+            // Delete records from tbl_rfq_products
+            let deletedRecord = await transactingModels.rfqModel.delete(
+              'tbl_rfq_products',
+              {
+                id: rfqProductId
+              }
+            );
+            if (!deletedRecord || deletedRecord.length === 0) continue;
 
-          deletedRecord = deletedRecord[0];
+            deletedRecord = deletedRecord[0];
 
-          // Delete vendor mapping
-          const vendorConditions = {
-            rfq_id,
-            product_variant_id: deletedRecord.product_variant_id,
-            variant: deletedRecord.variant
-          };
-          await transactingModels.rfqModel.delete('tbl_rfq_product_vendors', vendorConditions);
-
-          // Directly deleting product specs as well
-          await transactingModels.rfqModel.delete('tbl_rfq_products_specs', vendorConditions);
-
-          // Delete associated files
-          const directRfqProductConditions = { rfq_product_id: rfqProductId };
-          await transactingModels.rfqModel.delete(
-            'tbl_rfq_product_files',
-            directRfqProductConditions
-          );
-
-          // Delete tech evaluations
-          const techEvaluationCondition = { tbl_rfq_product_id: rfqProductId };
-          const techEvaluationDeletedRecordsIds =
-            await transactingModels.rfqModel.deleteWithReturnIds(
-              'tbl_rfq_product_tech_evaluation',
-              techEvaluationCondition
+            // Delete vendor mapping
+            const vendorConditions = {
+              rfq_id,
+              product_variant_id: deletedRecord.product_variant_id,
+              variant: deletedRecord.variant
+            };
+            await transactingModels.rfqModel.delete(
+              'tbl_rfq_product_vendors',
+              vendorConditions
             );
 
-          // Delete tech evaluation clauses and other nested data
-          if (techEvaluationDeletedRecordsIds?.length > 0) {
-            for (const techEvaluationId of techEvaluationDeletedRecordsIds) {
-              const techEvaluationClauseCondition = {
-                tbl_rfq_product_tech_evaluation_id: techEvaluationId
-              };
+            // Directly deleting product specs as well
+            await transactingModels.rfqModel.delete(
+              'tbl_rfq_products_specs',
+              vendorConditions
+            );
 
-              const techEvaluationClausesDeletedRecordsIds =
+            // Delete associated files
+            const directRfqProductConditions = { rfq_product_id: rfqProductId };
+            await transactingModels.rfqModel.delete(
+              'tbl_rfq_product_files',
+              directRfqProductConditions
+            );
+
+            // Delete tech evaluations
+            const techEvaluationCondition = {
+              tbl_rfq_product_id: rfqProductId
+            };
+            const techEvaluationDeletedRecordsIds =
+              await transactingModels.rfqModel.deleteWithReturnIds(
+                'tbl_rfq_product_tech_evaluation',
+                techEvaluationCondition
+              );
+
+            // Delete tech evaluation clauses and other nested data
+            if (techEvaluationDeletedRecordsIds?.length > 0) {
+              for (const techEvaluationId of techEvaluationDeletedRecordsIds) {
+                const techEvaluationClauseCondition = {
+                  tbl_rfq_product_tech_evaluation_id: techEvaluationId
+                };
+
+                const techEvaluationClausesDeletedRecordsIds =
+                  await transactingModels.rfqModel.deleteWithReturnIds(
+                    'tbl_rfq_product_tech_evaluation_clauses',
+                    techEvaluationClauseCondition
+                  );
+
+                // Delete cleared vendors
                 await transactingModels.rfqModel.deleteWithReturnIds(
-                  'tbl_rfq_product_tech_evaluation_clauses',
+                  'tbl_rfq_product_tech_evaluation_cleared_vendors',
                   techEvaluationClauseCondition
                 );
 
-              // Delete cleared vendors
-              await transactingModels.rfqModel.deleteWithReturnIds(
-                'tbl_rfq_product_tech_evaluation_cleared_vendors',
-                techEvaluationClauseCondition
-              );
+                if (techEvaluationClausesDeletedRecordsIds?.length > 0) {
+                  for (const techEvaluationClauseId of techEvaluationClausesDeletedRecordsIds) {
+                    const clauseCondition = {
+                      tbl_rfq_product_tech_evaluation_clauses_id:
+                        techEvaluationClauseId
+                    };
 
-              if (techEvaluationClausesDeletedRecordsIds?.length > 0) {
-                for (const techEvaluationClauseId of techEvaluationClausesDeletedRecordsIds) {
-                  const clauseCondition = {
-                    tbl_rfq_product_tech_evaluation_clauses_id:
-                      techEvaluationClauseId
-                  };
-
-                  await transactingModels.rfqModel.delete(
-                    'tbl_rfq_product_tech_evaluation_clauses_files',
-                    clauseCondition
-                  );
-
-                  const techEvaluationVendorResponseDeletedRecords =
-                    await transactingModels.rfqModel.deleteWithReturnIds(
-                      'tbl_rfq_product_tech_evaluation_vendors_response',
+                    await transactingModels.rfqModel.delete(
+                      'tbl_rfq_product_tech_evaluation_clauses_files',
                       clauseCondition
                     );
 
-                  if (techEvaluationVendorResponseDeletedRecords?.length > 0) {
-                    for (const vendorResponse of techEvaluationVendorResponseDeletedRecords) {
-                      const vendorResponseCondition = {
-                        tbl_rfq_product_tech_evaluation_vendors_response_id:
-                          vendorResponse
-                      };
-
-                      await transactingModels.rfqModel.delete(
-                        'tbl_rfq_product_tech_evaluation_vendors_response_files',
-                        vendorResponseCondition
-                      );
-                    }
-                  }
-
-                  const techEvaluationCommentsDeletedRecords =
-                    await transactingModels.rfqModel.deleteWithReturnIds(
-                      'tbl_rfq_product_tech_evaluation_comments',
-                      clauseCondition
-                    );
-
-                  if (techEvaluationCommentsDeletedRecords?.length > 0) {
-                    for (const evaluationComment of techEvaluationCommentsDeletedRecords) {
-                      const commentFilesCondition = {
-                        tbl_rfq_product_tech_evaluation_comments_id:
-                          evaluationComment
-                      };
-
+                    const techEvaluationVendorResponseDeletedRecords =
                       await transactingModels.rfqModel.deleteWithReturnIds(
-                        'tbl_rfq_product_tech_evaluation_comments_files',
-                        commentFilesCondition
+                        'tbl_rfq_product_tech_evaluation_vendors_response',
+                        clauseCondition
                       );
+
+                    if (
+                      techEvaluationVendorResponseDeletedRecords?.length > 0
+                    ) {
+                      for (const vendorResponse of techEvaluationVendorResponseDeletedRecords) {
+                        const vendorResponseCondition = {
+                          tbl_rfq_product_tech_evaluation_vendors_response_id:
+                            vendorResponse
+                        };
+
+                        await transactingModels.rfqModel.delete(
+                          'tbl_rfq_product_tech_evaluation_vendors_response_files',
+                          vendorResponseCondition
+                        );
+                      }
+                    }
+
+                    const techEvaluationCommentsDeletedRecords =
+                      await transactingModels.rfqModel.deleteWithReturnIds(
+                        'tbl_rfq_product_tech_evaluation_comments',
+                        clauseCondition
+                      );
+
+                    if (techEvaluationCommentsDeletedRecords?.length > 0) {
+                      for (const evaluationComment of techEvaluationCommentsDeletedRecords) {
+                        const commentFilesCondition = {
+                          tbl_rfq_product_tech_evaluation_comments_id:
+                            evaluationComment
+                        };
+
+                        await transactingModels.rfqModel.deleteWithReturnIds(
+                          'tbl_rfq_product_tech_evaluation_comments_files',
+                          commentFilesCondition
+                        );
+                      }
                     }
                   }
                 }
@@ -2821,389 +3250,430 @@ const rfqController = {
             }
           }
         }
-      }
 
-      if (updatableVendors && Object.keys(updatableVendors).length > 0) {
-        for (const rfqProductId of Object.keys(updatableVendors)) {
-          const productId = updatableVendors[rfqProductId].product_id;
-          const variant = updatableVendors[rfqProductId].variant;
+        if (updatableVendors && Object.keys(updatableVendors).length > 0) {
+          for (const rfqProductId of Object.keys(updatableVendors)) {
+            const productId = updatableVendors[rfqProductId].product_id;
+            const variant = updatableVendors[rfqProductId].variant;
 
-          const addable = updatableVendors[rfqProductId]?.addable ?? [];
-          const deletable = updatableVendors[rfqProductId]?.deletable ?? [];
+            const addable = updatableVendors[rfqProductId]?.addable ?? [];
+            const deletable = updatableVendors[rfqProductId]?.deletable ?? [];
 
-          const productDetails =
-            await transactingModels.rfqModel.getProductOrVariantNameByRfqProductId(rfqProductId);
-
-          // Extract Deleted Vendors Before deletion operation
-          for (const vendorId of deletable) {
-            const vendordata = await transactingModels.userModel.getUserById(vendorId);
-            if (!vendordata || vendordata.length === 0) continue;
-
-            const { id, name, email } = vendordata[0];
-
-            if (productDetails) {
-              deletedVendorsFromExistingProducts[id] = {
-                name: name || 'Unknown',
-                email: email || 'Unknown',
-                productDetails,
-                vendor_id: id
-              };
-            }
-          }
-
-          // Extract Added Vendors
-          for (const vendorId of addable) {
-            const vendordata = await transactingModels.userModel.getUserById(vendorId);
-            if (!vendordata || vendordata.length === 0) continue;
-
-            const { id, name, email } = vendordata[0];
-
-            if (productDetails) {
-              addedVednorsToExistingProducts[id] = {
-                name: name || 'Unknown',
-                email: email || 'Unknown',
-                productDetails,
-                vendor_id: id
-              };
-            }
-            await transactingModels.rfqModel.insertVendorRfqToken(id, rfq_id);
-          }
-
-          // Insert new vendors
-          if (addable.length > 0) {
-            const addableData = addable.map((vendor) => ({
-              rfq_id,
-              product_variant_id: productId,
-              user_id: vendor,
-              variant
-            }));
-
-            await transactingModels.rfqModel.insertArray(
-              addableData,
-              Object.keys(addableData[0]),
-              'tbl_rfq_product_vendors'
-            );
-          }
-
-          // Delete existing vendors
-          if (deletable.length > 0) {
-            for (const vendor of deletable) {
-              let productDetails = await transactingModels.rfqModel.checkIfExists(
-                'tbl_product_variant',
-                `id = ${productId}`
+            const productDetails =
+              await transactingModels.rfqModel.getProductOrVariantNameByRfqProductId(
+                rfqProductId
               );
-              if (!productDetails || productDetails.length === 0) continue;
 
-              productDetails = productDetails[0];
+            // Extract Deleted Vendors Before deletion operation
+            for (const vendorId of deletable) {
+              const vendordata = await transactingModels.userModel.getUserById(
+                vendorId
+              );
+              if (!vendordata || vendordata.length === 0) continue;
 
-              const conditions = {
+              const { id, name, email } = vendordata[0];
+
+              if (productDetails) {
+                deletedVendorsFromExistingProducts[id] = {
+                  name: name || 'Unknown',
+                  email: email || 'Unknown',
+                  productDetails,
+                  vendor_id: id
+                };
+              }
+            }
+
+            // Extract Added Vendors
+            for (const vendorId of addable) {
+              const vendordata = await transactingModels.userModel.getUserById(
+                vendorId
+              );
+              if (!vendordata || vendordata.length === 0) continue;
+
+              const { id, name, email } = vendordata[0];
+
+              if (productDetails) {
+                addedVednorsToExistingProducts[id] = {
+                  name: name || 'Unknown',
+                  email: email || 'Unknown',
+                  productDetails,
+                  vendor_id: id
+                };
+              }
+              await transactingModels.rfqModel.insertVendorRfqToken(id, rfq_id);
+            }
+
+            // Insert new vendors
+            if (addable.length > 0) {
+              const addableData = addable.map((vendor) => ({
                 rfq_id,
                 product_variant_id: productId,
                 user_id: vendor,
                 variant
-              };
+              }));
 
-              await transactingModels.rfqModel.delete('tbl_rfq_product_vendors', conditions);
+              await transactingModels.rfqModel.insertArray(
+                addableData,
+                Object.keys(addableData[0]),
+                'tbl_rfq_product_vendors'
+              );
+            }
+
+            // Delete existing vendors
+            if (deletable.length > 0) {
+              for (const vendor of deletable) {
+                let productDetails =
+                  await transactingModels.rfqModel.checkIfExists(
+                    'tbl_product_variant',
+                    `id = ${productId}`
+                  );
+                if (!productDetails || productDetails.length === 0) continue;
+
+                productDetails = productDetails[0];
+
+                const conditions = {
+                  rfq_id,
+                  product_variant_id: productId,
+                  user_id: vendor,
+                  variant
+                };
+
+                await transactingModels.rfqModel.delete(
+                  'tbl_rfq_product_vendors',
+                  conditions
+                );
+              }
             }
           }
         }
-      }
 
-      // Explicitly handle potential empty strings from frontend, converting them to null
-      if ('ra_start_date' in data && data.ra_start_date === '') {
-        data.ra_start_date = null;
-      }
-      if ('ra_end_date' in data && data.ra_end_date === '') {
-        data.ra_end_date = null;
-      }
-      if ('bid_end_date' in data && data.bid_end_date === '') {
-        data.bid_end_date = null;
-      }
-      // Ensure reverse_auction is boolean/integer if present
-      if ('reverse_auction' in data) {
-        data.reverse_auction = data.reverse_auction ? 1 : 0;
-      }
+        // Explicitly handle potential empty strings from frontend, converting them to null
+        if ('ra_start_date' in data && data.ra_start_date === '') {
+          data.ra_start_date = null;
+        }
+        if ('ra_end_date' in data && data.ra_end_date === '') {
+          data.ra_end_date = null;
+        }
+        if ('bid_end_date' in data && data.bid_end_date === '') {
+          data.bid_end_date = null;
+        }
+        // Ensure reverse_auction is boolean/integer if present
+        if ('reverse_auction' in data) {
+          data.reverse_auction = data.reverse_auction ? 1 : 0;
+        }
 
-      //  Ensure project_id is either an integer or null
-      if (
-        'project_id' in data &&
-        data.project_id !== null &&
-        data.project_id !== undefined
-      ) {
-        data.project_id = parseInt(data.project_id);
-      } else {
-        delete data.project_id; // Avoid updating with undefined/null
-      }
+        //  Ensure project_id is either an integer or null
+        if (
+          'project_id' in data &&
+          data.project_id !== null &&
+          data.project_id !== undefined
+        ) {
+          data.project_id = parseInt(data.project_id);
+        } else {
+          delete data.project_id; // Avoid updating with undefined/null
+        }
 
-      // Update rfq with latest data
-      let updatedData = await transactingModels.rfqModel.update(
-        'tbl_rfq',
-        data,
-        rfq_id
-      );
+        // Update rfq with latest data
+        let updatedData = await transactingModels.rfqModel.update(
+          'tbl_rfq',
+          data,
+          rfq_id
+        );
 
-      if(updatedData && updatedData.length > 0) {
-        updatedData = updatedData[0];
+        if (updatedData && updatedData.length > 0) {
+          updatedData = updatedData[0];
 
-        // Check each and every field with prevRfqDetails data to get what has changed!
-        if(updatedData.comment != prevRfqDetails.comment) changedDetails.push(`Comment from ${prevRfqDetails.comment} -> ${updatedData.comment}`)
-        if(updatedData.response_email != prevRfqDetails.response_email) changedDetails.push(`Response email from ${prevRfqDetails.response_email} -> ${updatedData.response_email}`)
-        if(updatedData.contact_name != prevRfqDetails.contact_name) changedDetails.push(`Contact name from ${prevRfqDetails.contact_name} -> ${updatedData.contact_name}`)
-        if(updatedData.contact_number != prevRfqDetails.contact_number) changedDetails.push(`Contact number from ${prevRfqDetails.contact_number} -> ${updatedData.contact_number}`)
-        if(updatedData.location != prevRfqDetails.location) changedDetails.push(`Location from ${prevRfqDetails.location} -> ${updatedData.location}`)
-        if(updatedData.bid_end_date != prevRfqDetails.bid_end_date) changedDetails.push(`Procurement end date from ${prevRfqDetails.bid_end_date} -> ${updatedData.bid_end_date}`)
-        if(updatedData.rfq_type != prevRfqDetails.rfq_type) changedDetails.push(`RFQ Type from ${prevRfqDetails.rfq_type} -> ${updatedData.rfq_type}`)
-        if (updatedData.reverse_auction != prevRfqDetails.reverse_auction)
-          changedDetails.push(
-            `Reverse Auction from ${
-              prevRfqDetails.reverse_auction == '-1' ||
-              prevRfqDetails.reverse_auction == '0'
-                ? 'Disabled'
-                : 'Enabled'
-            } -> ${
-              updatedData.reverse_auction == '-1' ||
-              updatedData.reverse_auction == '0'
-                ? 'Disabled'
-                : 'Enabled'
-            }`
-          );
-        
-        if(updatedData.project_id != prevRfqDetails.project_id) changedDetails.push(`Reverse Auction from ${prevRfqDetails.project_id} -> ${updatedData.project_id}`)
-        if(updatedData.ra_start_date != prevRfqDetails.ra_start_date) changedDetails.push(`Reverse Auction Start Date from ${prevRfqDetails.ra_start_date} -> ${updatedData.ra_start_date}`)
-        if(updatedData.ra_end_date != prevRfqDetails.ra_end_date) changedDetails.push(`Reverse Auction End Date from ${prevRfqDetails.ra_end_date} -> ${updatedData.ra_end_date}`)
-      }
-      let reverseAuctionDateChanged = (updatedData.ra_start_date != prevRfqDetails.ra_start_date) && (updatedData.ra_end_date != prevRfqDetails.ra_end_date)
-     
+          // Check each and every field with prevRfqDetails data to get what has changed!
+          if (updatedData.comment != prevRfqDetails.comment)
+            changedDetails.push(
+              `Comment from ${prevRfqDetails.comment} -> ${updatedData.comment}`
+            );
+          if (updatedData.response_email != prevRfqDetails.response_email)
+            changedDetails.push(
+              `Response email from ${prevRfqDetails.response_email} -> ${updatedData.response_email}`
+            );
+          if (updatedData.contact_name != prevRfqDetails.contact_name)
+            changedDetails.push(
+              `Contact name from ${prevRfqDetails.contact_name} -> ${updatedData.contact_name}`
+            );
+          if (updatedData.contact_number != prevRfqDetails.contact_number)
+            changedDetails.push(
+              `Contact number from ${prevRfqDetails.contact_number} -> ${updatedData.contact_number}`
+            );
+          if (updatedData.location != prevRfqDetails.location)
+            changedDetails.push(
+              `Location from ${prevRfqDetails.location} -> ${updatedData.location}`
+            );
+          if (updatedData.bid_end_date != prevRfqDetails.bid_end_date)
+            changedDetails.push(
+              `Procurement end date from ${prevRfqDetails.bid_end_date} -> ${updatedData.bid_end_date}`
+            );
+          if (updatedData.rfq_type != prevRfqDetails.rfq_type)
+            changedDetails.push(
+              `RFQ Type from ${prevRfqDetails.rfq_type} -> ${updatedData.rfq_type}`
+            );
+          if (updatedData.reverse_auction != prevRfqDetails.reverse_auction)
+            changedDetails.push(
+              `Reverse Auction from ${
+                prevRfqDetails.reverse_auction == '-1' ||
+                prevRfqDetails.reverse_auction == '0'
+                  ? 'Disabled'
+                  : 'Enabled'
+              } -> ${
+                updatedData.reverse_auction == '-1' ||
+                updatedData.reverse_auction == '0'
+                  ? 'Disabled'
+                  : 'Enabled'
+              }`
+            );
 
+          if (updatedData.project_id != prevRfqDetails.project_id)
+            changedDetails.push(
+              `Reverse Auction from ${prevRfqDetails.project_id} -> ${updatedData.project_id}`
+            );
+          if (updatedData.ra_start_date != prevRfqDetails.ra_start_date)
+            changedDetails.push(
+              `Reverse Auction Start Date from ${prevRfqDetails.ra_start_date} -> ${updatedData.ra_start_date}`
+            );
+          if (updatedData.ra_end_date != prevRfqDetails.ra_end_date)
+            changedDetails.push(
+              `Reverse Auction End Date from ${prevRfqDetails.ra_end_date} -> ${updatedData.ra_end_date}`
+            );
+        }
+        let reverseAuctionDateChanged =
+          updatedData.ra_start_date != prevRfqDetails.ra_start_date &&
+          updatedData.ra_end_date != prevRfqDetails.ra_end_date;
 
-      if (termsChanged && selectedTerms && selectedTerms.length > 0) {
-        // First delete existing selectedTerms only if selectedTerms have changed
-        await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id });
-        
-        // Then insert new selectedTerms
-        const rfqTerms = selectedTerms.map(term => ({ 
-            rfq_id, 
+        if (termsChanged && selectedTerms && selectedTerms.length > 0) {
+          // First delete existing selectedTerms only if selectedTerms have changed
+          await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id });
+
+          // Then insert new selectedTerms
+          const rfqTerms = selectedTerms.map((term) => ({
+            rfq_id,
             terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
-        }));
-        await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
+          }));
+          await rfqModel.insertArray(
+            rfqTerms,
+            ['rfq_id', 'terms_id'],
+            'tbl_rfq_terms_map'
+          );
 
-        changedDetails.push(`Terms and Conditions`)
-      }
+          changedDetails.push(`Terms and Conditions`);
+        }
 
-      // get rfq vendors list
-      let vendors = await transactingModels.rfqModel.gerRFQVendors(rfq_id);
-      let vendorIdList = vendors.map((vendor) => vendor.user_id);
+        // get rfq vendors list
+        let vendors = await transactingModels.rfqModel.gerRFQVendors(rfq_id);
+        let vendorIdList = vendors.map((vendor) => vendor.user_id);
 
-      // get vendor details along with spoc
-      const vendorData = await transactingModels.vendorModel.getVendorsWithSpocsAndToken(
-        vendorIdList,
-        rfq_id
-      );
+        // get vendor details along with spoc
+        const vendorData =
+          await transactingModels.vendorModel.getVendorsWithSpocsAndToken(
+            vendorIdList,
+            rfq_id
+          );
 
-      const buyerName = updatedData?.company_name ?? '-';
-      const rfqNo = updatedData?.rfq_no ?? '000000';
+        const buyerName = updatedData?.company_name ?? '-';
+        const rfqNo = updatedData?.rfq_no ?? '000000';
 
-      const newAddedproductVendorsArray = Object.values(newAddedproductVendors);
-      const deletedProductVendorsArray = Object.values(deletedProductVendors);
-      const deletedVendorsFromExistingProductsArray = Object.values(
-        deletedVendorsFromExistingProducts
-      );
-      const addedVednorsToExistingProductsArray = Object.values(
-        addedVednorsToExistingProducts
-      );
-      const updatedDataVendorsArray = Object.values(updatedDataVendors);
-      
-   
+        const newAddedproductVendorsArray = Object.values(
+          newAddedproductVendors
+        );
+        const deletedProductVendorsArray = Object.values(deletedProductVendors);
+        const deletedVendorsFromExistingProductsArray = Object.values(
+          deletedVendorsFromExistingProducts
+        );
+        const addedVednorsToExistingProductsArray = Object.values(
+          addedVednorsToExistingProducts
+        );
+        const updatedDataVendorsArray = Object.values(updatedDataVendors);
 
+        const productsData = await rfqModel.getProductsByRfqId(rfq_id, t);
 
-       const productsData = await rfqModel.getProductsByRfqId(rfq_id ,t );
+        const vendorProductmap = {}; // This is different variable check the  spelling.
 
-       const vendorProductmap = {}; // This is different variable check the  spelling.
+        //Creating  A New product vendor map
+        productsData.map((product) => {
+          const { name, vendors } = product;
 
-       //Creating  A New product vendor map
-       productsData.map((product) => {
-         const { name, vendors } = product;
+          vendors.map((vendor) => {
+            const { user_id } = vendor;
 
-         vendors.map((vendor) => {
-           const { user_id } = vendor;
+            if (!vendorProductmap[user_id]) {
+              vendorProductmap[user_id] = {
+                vendorDetails: { ...vendor },
+                products: []
+              };
+            }
 
-           if (!vendorProductmap[user_id]) {
-             vendorProductmap[user_id] = {
-               vendorDetails: { ...vendor },
-               products: []
-             };
-           }
+            vendorProductmap[user_id].products.push({ product_name: name });
+          });
+        });
+        const deleteScheduleTypesForVendors = [
+          'oneDayBeforeAuctionVendor',
+          'auctionStartVendor',
+          'midAuctionReminderVendor',
+          'auctionEndVendor'
+        ];
+        const deleteScheduleTypesForbuyers = [
+          'auctionStartBuyer',
+          'auctionEndBuyer'
+        ];
 
-           vendorProductmap[user_id].products.push({ product_name: name });
-         });
-       });
-      const deleteScheduleTypesForVendors = ["oneDayBeforeAuctionVendor",   "auctionStartVendor",   "midAuctionReminderVendor",  "auctionEndVendor"];
-      const deleteScheduleTypesForbuyers = ["auctionStartBuyer",   "auctionEndBuyer"];
-    
-      if(!data.reverse_auction){
-        //Delete Vendor Schedules if reverse auction is disabled
-       for(const vendorId of Object.keys(vendorProductmap)) {
-       
-        for(const scheduleType of deleteScheduleTypesForVendors) {
-         
-        await deleteSchedule(rfq_id ,scheduleType, vendorId);
-       }
-       }
-      //Delete Buyer Schedules if reverse auction is disabled
-      for(const scheduleType of deleteScheduleTypesForbuyers) {
-        await deleteSchedule(rfq_id ,scheduleType);
-      }
-    }
-      else if(data.reverse_auction === prevRfqDetails.reverse_auction){
-        //further processing for schedules
-        
-
-        if(reverseAuctionDateChanged){
-          //Date changed hence delete all the existing schedules for vendors
+        if (!data.reverse_auction) {
+          //Delete Vendor Schedules if reverse auction is disabled
           for (const vendorId of Object.keys(vendorProductmap)) {
-            
             for (const scheduleType of deleteScheduleTypesForVendors) {
               await deleteSchedule(rfq_id, scheduleType, vendorId);
             }
           }
-          //Date changed hence delete all the existing schedules for buyers
+          //Delete Buyer Schedules if reverse auction is disabled
           for (const scheduleType of deleteScheduleTypesForbuyers) {
             await deleteSchedule(rfq_id, scheduleType);
           }
-          //Create new schedules for vendors
-          await raSchedulerForVendor(req, rfq_id , vendorProductmap);
+        } else if (data.reverse_auction === prevRfqDetails.reverse_auction) {
+          //further processing for schedules
 
-          //create new schedules for buyers
-         await raSchedulerForBuyer(rfq_id, req , productsData);
-
-        }
-        else{
-          //handle the case where reverse auction is enabled but date is not changed
-          //vendors might have been added or removed
-          //So we need to add or remove some of the vendors schedules who have been deleted or added
-          //We will not delete the existing schedules as date is not changed
-          
-          if (deletedVendorsFromExistingProductsArray.length > 0) {
-            for (const vendor of deletedVendorsFromExistingProductsArray) {
-              const { vendor_id } = vendor;
+          if (reverseAuctionDateChanged) {
+            //Date changed hence delete all the existing schedules for vendors
+            for (const vendorId of Object.keys(vendorProductmap)) {
               for (const scheduleType of deleteScheduleTypesForVendors) {
-                const whereClause = `rfq_id = ${rfq_id} AND user_id = ${vendor_id}`;
-                // Check if vendor is still present in RFQ
-                const vendorPresentInRfq = await rfqModel.checkIfExists(
-                  'tbl_rfq_product_vendors',whereClause)
+                await deleteSchedule(rfq_id, scheduleType, vendorId);
+              }
+            }
+            //Date changed hence delete all the existing schedules for buyers
+            for (const scheduleType of deleteScheduleTypesForbuyers) {
+              await deleteSchedule(rfq_id, scheduleType);
+            }
+            //Create new schedules for vendors
+            await raSchedulerForVendor(req, rfq_id, vendorProductmap);
 
-                  if(!vendorPresentInRfq || vendorPresentInRfq.length === 0) {
-                   await deleteSchedule(rfq_id, scheduleType, vendor_id);
+            //create new schedules for buyers
+            await raSchedulerForBuyer(rfq_id, req, productsData);
+          } else {
+            //handle the case where reverse auction is enabled but date is not changed
+            //vendors might have been added or removed
+            //So we need to add or remove some of the vendors schedules who have been deleted or added
+            //We will not delete the existing schedules as date is not changed
+
+            if (deletedVendorsFromExistingProductsArray.length > 0) {
+              for (const vendor of deletedVendorsFromExistingProductsArray) {
+                const { vendor_id } = vendor;
+                for (const scheduleType of deleteScheduleTypesForVendors) {
+                  const whereClause = `rfq_id = ${rfq_id} AND user_id = ${vendor_id}`;
+                  // Check if vendor is still present in RFQ
+                  const vendorPresentInRfq = await rfqModel.checkIfExists(
+                    'tbl_rfq_product_vendors',
+                    whereClause
+                  );
+
+                  if (!vendorPresentInRfq || vendorPresentInRfq.length === 0) {
+                    await deleteSchedule(rfq_id, scheduleType, vendor_id);
                   }
+                }
               }
             }
-          }
 
-          
-          if (deletedProductVendorsArray.length > 0) {
-            for (const vendor of deletedProductVendorsArray) {
-              const { vendor_id } = vendor;
-              for (const scheduleType of deleteScheduleTypesForVendors) {
+            if (deletedProductVendorsArray.length > 0) {
+              for (const vendor of deletedProductVendorsArray) {
+                const { vendor_id } = vendor;
+                for (const scheduleType of deleteScheduleTypesForVendors) {
+                  const whereClause = `rfq_id = ${rfq_id} AND user_id = ${vendor_id}`;
+                  // Check if vendor is still present in RFQ
+                  const vendorPresentInRfq = await rfqModel.checkIfExists(
+                    'tbl_rfq_product_vendors',
+                    whereClause
+                  );
 
-                const whereClause = `rfq_id = ${rfq_id} AND user_id = ${vendor_id}`;
-                // Check if vendor is still present in RFQ
-                const vendorPresentInRfq = await rfqModel.checkIfExists(
-                  'tbl_rfq_product_vendors',whereClause)
-                
-                await deleteSchedule(rfq_id, scheduleType, vendor_id);
+                  await deleteSchedule(rfq_id, scheduleType, vendor_id);
+                }
               }
             }
-          }
 
-          //create  a new product vendor map for new added vendors either in new products or existing products
-    
-          // Step 1: Collect all target vendor IDs from both arrays
-          const targetVendorIds = new Set([
-            ...newAddedproductVendorsArray.map((v) => v.vendor_id),
-            ...addedVednorsToExistingProductsArray.map((v) => v.vendor_id)
-          ]);
+            //create  a new product vendor map for new added vendors either in new products or existing products
 
-          // Step 2: Filter vendorProductmap to include only those IDs
-          const filteredProductVendorMap = Object.fromEntries(
-            Object.entries(vendorProductmap).filter(([vendorId, vendorData]) =>
-              targetVendorIds.has(Number(vendorId))
-            )
-          );
+            // Step 1: Collect all target vendor IDs from both arrays
+            const targetVendorIds = new Set([
+              ...newAddedproductVendorsArray.map((v) => v.vendor_id),
+              ...addedVednorsToExistingProductsArray.map((v) => v.vendor_id)
+            ]);
 
-          // Step 3: Done
-          console.log('✅ filteredProductVendorMap:', filteredProductVendorMap);
-          //Create new schedules for vendors
-          if(Object.keys(filteredProductVendorMap).length > 0)
-            {
+            // Step 2: Filter vendorProductmap to include only those IDs
+            const filteredProductVendorMap = Object.fromEntries(
+              Object.entries(vendorProductmap).filter(
+                ([vendorId, vendorData]) =>
+                  targetVendorIds.has(Number(vendorId))
+              )
+            );
+
+            // Step 3: Done
+            console.log(
+              '✅ filteredProductVendorMap:',
+              filteredProductVendorMap
+            );
+            //Create new schedules for vendors
+            if (Object.keys(filteredProductVendorMap).length > 0) {
               await raSchedulerForVendor(req, rfq_id, filteredProductVendorMap);
             }
-         }
-      }
-      
-      else if(data.reverse_auction && !prevRfqDetails.reverse_auction){
+          }
+        } else if (data.reverse_auction && !prevRfqDetails.reverse_auction) {
           //Create new schedules for vendors
-          await raSchedulerForVendor(req, rfq_id , vendorProductmap);
+          await raSchedulerForVendor(req, rfq_id, vendorProductmap);
 
           //create new schedules for buyers
-        await raSchedulerForBuyer(rfq_id, req , productsData);
-        
-      }
-      
+          await raSchedulerForBuyer(rfq_id, req, productsData);
+        }
 
+        await sendRfqUpdatedMailToVendors(
+          newAddedproductVendorsArray,
+          rfq_id,
+          rfqNo,
+          buyerName,
+          RFQ_EMAIL_TYPE.NEW_PRODUCT
+        ); //for new add produccts
 
+        await sendRfqUpdatedMailToVendors(
+          deletedProductVendorsArray,
+          rfq_id,
+          rfqNo,
+          buyerName,
+          RFQ_EMAIL_TYPE.REMOVED_VENDOR
+        ); //for deleted products from RFQ
 
+        await sendRfqUpdatedMailToVendors(
+          deletedVendorsFromExistingProductsArray,
+          rfq_id,
+          rfqNo,
+          buyerName,
+          RFQ_EMAIL_TYPE.REMOVED_VENDOR
+        ); //for deleted vendors from existing products
 
-      await sendRfqUpdatedMailToVendors(
-        newAddedproductVendorsArray,
-        rfq_id,
-        rfqNo,
-        buyerName,
-        RFQ_EMAIL_TYPE.NEW_PRODUCT
-      ); //for new add produccts
+        await sendRfqUpdatedMailToVendors(
+          addedVednorsToExistingProductsArray,
+          rfq_id,
+          rfqNo,
+          buyerName,
+          RFQ_EMAIL_TYPE.NEW_PRODUCT
+        ); //for added vendors to existing products
 
-      await sendRfqUpdatedMailToVendors(
-        deletedProductVendorsArray,
-        rfq_id,
-        rfqNo,
-        buyerName,
-        RFQ_EMAIL_TYPE.REMOVED_VENDOR
-      ); //for deleted products from RFQ
+        // Send updated RFQ mail to vendors
+        await sendRfqUpdatedMailToVendors(
+          updatedDataVendorsArray,
+          rfq_id,
+          rfqNo,
+          buyerName,
+          RFQ_EMAIL_TYPE.UPDATED_RFQ
+        );
 
-      await sendRfqUpdatedMailToVendors(
-        deletedVendorsFromExistingProductsArray,
-        rfq_id,
-        rfqNo,
-        buyerName,
-        RFQ_EMAIL_TYPE.REMOVED_VENDOR
-      ); //for deleted vendors from existing products
-
-      await sendRfqUpdatedMailToVendors(
-        addedVednorsToExistingProductsArray,
-        rfq_id,
-        rfqNo,
-        buyerName,
-        RFQ_EMAIL_TYPE.ADDED_VENDOR_TO_EXISTING_PRODUCT
-      ); //for added vendors to existing products
-
-      // Send updated RFQ mail to vendors
-      await sendRfqUpdatedMailToVendors(
-        updatedDataVendorsArray,
-        rfq_id,
-        rfqNo,
-        buyerName,
-        RFQ_EMAIL_TYPE.UPDATED_VENDOR
-      );
-
-      res.status(200).json({
-        status: 1,
-        data: updatedData || {},
-        vendors: vendorData,
-        rfqDetails: updatedData,
-        message: 'RFQ updated successfully'
+        res.status(200).json({
+          status: 1,
+          data: updatedData || {},
+          vendors: vendorData,
+          rfqDetails: updatedData,
+          message: 'RFQ updated successfully'
+        });
       });
-    }
-   )
-   } catch (error) {  
+    } catch (error) {
       logError(error);
       res
         .status(400)
@@ -3217,7 +3687,6 @@ const rfqController = {
 
   saveDraft: async (req, res) => {
     try {
-  
       const response = await saveRfqDraft(req.user.id, req.body);
 
       res.status(200).json({
@@ -3229,166 +3698,172 @@ const rfqController = {
       res.status(500).json({
         status: 3,
         message: 'An error occurred while saving the draft',
-        errors: {rfq: error.message ?? 'An error occurred while saving the draft'},
-      });
-    }
-  },  
-deleteDraft: async (req, res) => {
-  try {
-    const { id } = req.params;
-    const user_id = req.user.id;
-
-    
-
-    const rfqDraft = await rfqModel.checkIfExists(
-      'tbl_rfq',
-      `id = ${id} AND is_published = 0 AND created_by = ${user_id}`
-    );
-   
-    if (!rfqDraft || rfqDraft.length === 0) {
-      return res.status(404).json({
-        status: 2,
-        message: "Draft RFQ not found or does not belong to the user!",
-      });
-    }
-    db.tx(async (t)=>{
-      // Delete main RFQ
-    await rfqModel.delete('tbl_rfq', { id });
-
-    // Delete RFQ-related records
-    const rfqProductIdList = await rfqModel.deleteWithReturnIds(
-      'tbl_rfq_products',
-      { rfq_id: id },
-      t
-    );
-
-    await rfqModel.delete('tbl_rfq_product_vendors', { rfq_id: id });
-    await rfqModel.delete('tbl_rfq_products_specs', { rfq_id: id });
-    await rfqModel.delete('tbl_rfq_product_files', { rfq_product_id: id });
-
-    await rfqModel.delete('tbl_rfq_draft_sheets', {rfq_id:id})
-
-    // Delete tech evaluations and associated data
-    const techEvaluationCondition = { rfq_id: id };
-    const techEvaluationDeletedRecordsIds = await rfqModel.deleteWithReturnIds(
-      'tbl_rfq_product_tech_evaluation',
-      techEvaluationCondition,
-      t
-    );
-
-    let techEvalClauseFilesId = [];
-
-    if (Array.isArray(techEvaluationDeletedRecordsIds) && techEvaluationDeletedRecordsIds.length > 0) {
-      for (const evaluationClauseId of techEvaluationDeletedRecordsIds) {
-        const clauseCondition = {
-          tbl_rfq_product_tech_evaluation_id: evaluationClauseId,
-        };
-
-        const clauseFiles = await rfqModel.deleteWithReturnIds(
-          'tbl_rfq_product_tech_evaluation_clauses',
-          clauseCondition,
-          t
-        );
-
-        if (Array.isArray(clauseFiles) && clauseFiles.length > 0) {
-          techEvalClauseFilesId.push(...clauseFiles);
+        errors: {
+          rfq: error.message ?? 'An error occurred while saving the draft'
         }
-      }
+      });
     }
+  },
+  deleteDraft: async (req, res) => {
+    try {
+      const { id } = req.params;
+      const user_id = req.user.id;
 
-    // Delete clause files
-    if (techEvalClauseFilesId.length > 0) {
-      for (const techEvalClauseFileId of techEvalClauseFilesId) {
-        const clauseFileCondition = {
-          tbl_rfq_product_tech_evaluation_clauses_id: techEvalClauseFileId,
-        };
+      const rfqDraft = await rfqModel.checkIfExists(
+        'tbl_rfq',
+        `id = ${id} AND is_published = 0 AND created_by = ${user_id}`
+      );
 
-        await rfqModel.delete(
-          'tbl_rfq_product_tech_evaluation_clauses_files',
-          clauseFileCondition,
+      if (!rfqDraft || rfqDraft.length === 0) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Draft RFQ not found or does not belong to the user!'
+        });
+      }
+      db.tx(async (t) => {
+        // Delete main RFQ
+        await rfqModel.delete('tbl_rfq', { id });
+
+        // Delete RFQ-related records
+        const rfqProductIdList = await rfqModel.deleteWithReturnIds(
+          'tbl_rfq_products',
+          { rfq_id: id },
           t
         );
-      }
+
+        await rfqModel.delete('tbl_rfq_product_vendors', { rfq_id: id });
+        await rfqModel.delete('tbl_rfq_products_specs', { rfq_id: id });
+        await rfqModel.delete('tbl_rfq_product_files', { rfq_product_id: id });
+
+        await rfqModel.delete('tbl_rfq_draft_sheets', { rfq_id: id });
+
+        // Delete tech evaluations and associated data
+        const techEvaluationCondition = { rfq_id: id };
+        const techEvaluationDeletedRecordsIds =
+          await rfqModel.deleteWithReturnIds(
+            'tbl_rfq_product_tech_evaluation',
+            techEvaluationCondition,
+            t
+          );
+
+        let techEvalClauseFilesId = [];
+
+        if (
+          Array.isArray(techEvaluationDeletedRecordsIds) &&
+          techEvaluationDeletedRecordsIds.length > 0
+        ) {
+          for (const evaluationClauseId of techEvaluationDeletedRecordsIds) {
+            const clauseCondition = {
+              tbl_rfq_product_tech_evaluation_id: evaluationClauseId
+            };
+
+            const clauseFiles = await rfqModel.deleteWithReturnIds(
+              'tbl_rfq_product_tech_evaluation_clauses',
+              clauseCondition,
+              t
+            );
+
+            if (Array.isArray(clauseFiles) && clauseFiles.length > 0) {
+              techEvalClauseFilesId.push(...clauseFiles);
+            }
+          }
+        }
+
+        // Delete clause files
+        if (techEvalClauseFilesId.length > 0) {
+          for (const techEvalClauseFileId of techEvalClauseFilesId) {
+            const clauseFileCondition = {
+              tbl_rfq_product_tech_evaluation_clauses_id: techEvalClauseFileId
+            };
+
+            await rfqModel.delete(
+              'tbl_rfq_product_tech_evaluation_clauses_files',
+              clauseFileCondition,
+              t
+            );
+          }
+        }
+
+        // Delete terms and conditions
+        await rfqModel.delete('tbl_rfq_terms_map', { rfq_id: id }, t);
+
+        return res.status(200).json({
+          status: 1,
+          message: 'RFQ draft and all associated records deleted successfully'
+        });
+      });
+    } catch (error) {
+      console.error('Error deleting RFQ draft:', error);
+      logError('Error deleting RFQ draft:', error);
+      return res.status(500).json({
+        status: 3,
+        message: 'An error occurred while deleting the RFQ draft'
+      });
     }
-
-    // Delete terms and conditions
-    await rfqModel.delete('tbl_rfq_terms_map', { rfq_id: id },t);
-
-    return res.status(200).json({
-      status: 1,
-      message: "RFQ draft and all associated records deleted successfully",
-    });
-    })
-    
-  } catch (error) {
-    console.error("Error deleting RFQ draft:", error);
-    logError("Error deleting RFQ draft:", error);
-    return res.status(500).json({
-      status: 3,
-      message: "An error occurred while deleting the RFQ draft",
-    });
-  }
-},
-
-
+  },
 
   getRFQDraftData: async (req, res) => {
     try {
-        // Changes by Agnij 2025-06-17 [Modified to use create-fresh-draft query parameter]
-        const createFreshDraft = req.query.fresh === 'true';
-        
-        if (createFreshDraft) {
-            // Return empty draft data structure
-            return res.status(200).json({
-                status: 1,
-                data: {
-                    rfq_id: null,
-                    rfq_no: null,
-                    rfq_form_data: {
-                        is_published: 0,
-                        comment: '',
-                        response_email: '',
-                        contact_name: '',
-                        contact_number: '',
-                        company_name: '',
-                        bid_end_date: '',
-                        rfq_type: '',
-                        reverse_auction: 0,
-                        ra_start_date: null,
-                        ra_end_date: null,
-                        project_id: null,
-                        location: '',
-                        terms: [],
-                        term_and_condition_files: []
-                    },
-                    rfq_products: []
-                }
-            });
-        }
-        
-        // Original behavior - get existing draft
-        const rfqList = await rfqModel.findAll('tbl_rfq', { is_published: 0, created_by: req.user.id });
+      // Changes by Agnij 2025-06-17 [Modified to use create-fresh-draft query parameter]
+      const createFreshDraft = req.query.fresh === 'true';
 
-        if (!rfqList.length) {
-            return res.status(204).json({ status: 2, message: 'Draft RFQ doesnot exist' });
-        }
-
-        const rfqData = rfqList[0];
-        const id = rfqData.id;
-
-        const rfqItem = await rfqModel.getRfqDraftById(id);
-
-        res.status(200).json({
-            status: 1,
-            data: rfqItem.length > 0 ? rfqItem[0] : rfqItem
+      if (createFreshDraft) {
+        // Return empty draft data structure
+        return res.status(200).json({
+          status: 1,
+          data: {
+            rfq_id: null,
+            rfq_no: null,
+            rfq_form_data: {
+              is_published: 0,
+              comment: '',
+              response_email: '',
+              contact_name: '',
+              contact_number: '',
+              company_name: '',
+              bid_end_date: '',
+              rfq_type: '',
+              reverse_auction: 0,
+              ra_start_date: null,
+              ra_end_date: null,
+              project_id: null,
+              location: '',
+              terms: [],
+              term_and_condition_files: []
+            },
+            rfq_products: []
+          }
         });
+      }
+
+      // Original behavior - get existing draft
+      const rfqList = await rfqModel.findAll('tbl_rfq', {
+        is_published: 0,
+        created_by: req.user.id
+      });
+
+      if (!rfqList.length) {
+        return res
+          .status(204)
+          .json({ status: 2, message: 'Draft RFQ doesnot exist' });
+      }
+
+      const rfqData = rfqList[0];
+      const id = rfqData.id;
+
+      const rfqItem = await rfqModel.getRfqDraftById(id);
+
+      res.status(200).json({
+        status: 1,
+        data: rfqItem.length > 0 ? rfqItem[0] : rfqItem
+      });
     } catch (error) {
-        console.log(error)
-        logError("Error fetching RFQ creation data:", error);
-        res.status(500).json({
-            status: 3,
-            message: "An error occurred while fetching RFQ draft data"
-        });
+      console.log(error);
+      logError('Error fetching RFQ creation data:', error);
+      res.status(500).json({
+        status: 3,
+        message: 'An error occurred while fetching RFQ draft data'
+      });
     }
   },
 
@@ -3396,7 +3871,7 @@ deleteDraft: async (req, res) => {
   getDraftRFQs: async (req, res) => {
     try {
       const user_id = req.user.id;
-      
+
       const page = parseInt(req.body.page) || 1;
       const limit = parseInt(req.body.limit) || 10;
       const offset = (page - 1) * limit;
@@ -3407,13 +3882,13 @@ deleteDraft: async (req, res) => {
       const rfq_no = req.body.rfq_no || null;
 
       const result = await rfqModel.getAllDraftRfqs(
-        limit, 
-        offset, 
-        user_id, 
-        project_id, 
-        sort, 
-        reverse_auction, 
-        rfq_type, 
+        limit,
+        offset,
+        user_id,
+        project_id,
+        sort,
+        reverse_auction,
+        rfq_type,
         rfq_no
       );
 
@@ -3423,10 +3898,10 @@ deleteDraft: async (req, res) => {
         total_items: parseInt(result.total_count)
       });
     } catch (error) {
-      logError("Error fetching draft RFQs:", error);
+      logError('Error fetching draft RFQs:', error);
       res.status(500).json({
         status: 3,
-        message: "An error occurred while fetching draft RFQs"
+        message: 'An error occurred while fetching draft RFQs'
       });
     }
   },
@@ -3434,15 +3909,15 @@ deleteDraft: async (req, res) => {
   getProcessingRFQs: async (req, res) => {
     try {
       const user_id = req.user.id;
-      
+
       const page = parseInt(req.body.page) || 1;
       const limit = parseInt(req.body.limit) || 10;
       const offset = (page - 1) * limit;
       const sort = req.body.sort || 'DESC';
 
       const result = await rfqModel.getAllProcessingRfqs(
-        limit, 
-        offset, 
+        limit,
+        offset,
         user_id,
         sort
       );
@@ -3453,10 +3928,10 @@ deleteDraft: async (req, res) => {
         total_items: parseInt(result.total_count)
       });
     } catch (error) {
-      logError("Error fetching processing RFQs:", error);
+      logError('Error fetching processing RFQs:', error);
       res.status(500).json({
         status: 3,
-        message: "An error occurred while fetching processing RFQs"
+        message: 'An error occurred while fetching processing RFQs'
       });
     }
   },
@@ -3472,16 +3947,28 @@ deleteDraft: async (req, res) => {
       let sheetData = null;
       const sheets = await rfqModel.getSheetsForDraftRfq(id, null, sheetId);
 
-      if(sheets) {
+      if (sheets) {
         sheetData = sheets[0];
       }
 
-      if(sheetData && !sheetData.is_processed) {
+      if (sheetData && !sheetData.is_processed) {
         try {
-          const [,processedData] = await rfqController.processRfqDraftSheetWise(null, req.user, id, sheetId);
-          await saveMagicSearchInDraft(processedData, user_id, null, id, sheetId);
+          const [, processedData] =
+            await rfqController.processRfqDraftSheetWise(
+              null,
+              req.user,
+              id,
+              sheetId
+            );
+          await saveMagicSearchInDraft(
+            processedData,
+            user_id,
+            null,
+            id,
+            sheetId
+          );
         } catch (error) {
-          console.log(error)
+          console.log(error);
           return res.status(500).json({
             status: 0,
             success: false,
@@ -3492,45 +3979,47 @@ deleteDraft: async (req, res) => {
       }
 
       const draftData = await rfqModel.getRfqDraftById(id, sheetData);
-      
+
       if (!draftData || draftData.length === 0) {
-        return res.status(404).json({ 
-          status: 2, 
-          message: "Draft RFQ details not found" 
+        return res.status(404).json({
+          status: 2,
+          message: 'Draft RFQ details not found'
         });
       }
-      
+
       if (draftData[0].rfq_form_data.is_published !== 0) {
-        return res.status(403).json({ 
-          status: 2, 
-          message: "This is not a draft RFQ" 
+        return res.status(403).json({
+          status: 2,
+          message: 'This is not a draft RFQ'
         });
       }
 
       const isMagicRfq = draftData[0].rfq_form_data.rfq_added_from === 'magic';
-      
-      if (isMagicRfq && (!draftData[0].sheets || draftData[0].sheets.length === 0)) {
+
+      if (
+        isMagicRfq &&
+        (!draftData[0].sheets || draftData[0].sheets.length === 0)
+      ) {
         const sheets = await rfqModel.getSheetsForDraftRfq(id);
         if (sheets && sheets.length > 0) {
           draftData[0].sheets = sheets;
         }
       }
-      
+
       // Return in the same format as getRFQDraftData
       res.status(200).json({
         status: 1,
         data: draftData[0]
       });
     } catch (error) {
-      
       // Changes by Agnij 2025-05-24 [Fixed error handling to properly use logError]
-      const err = new Error("Error fetching draft RFQ by ID");
+      const err = new Error('Error fetching draft RFQ by ID');
       err.original = error;
       logError(err);
-      
+
       res.status(500).json({
         status: 3,
-        message: "An error occurred while fetching the draft RFQ"
+        message: 'An error occurred while fetching the draft RFQ'
       });
     }
   },
@@ -3541,333 +4030,374 @@ deleteDraft: async (req, res) => {
       const { rfqProductId } = req.query;
       const buyerId = req.user.id;
 
-      if(!validateNumber(rfqProductId))
-        return res.status(400).json({ 
-          status: 2, 
-          message: "`rfqProductId` is required to fetch vendors." 
-        });
-      
-      const draftData = rfqModel.checkIfExists('tbl_rfq', `id = ${draftId} AND is_published = 0`)
-      if(!draftData || draftData.length <= 0)
-        return res.status(400).json({ 
-          status: 2, 
-          message: "Draft either does not exist or is already published." 
+      if (!validateNumber(rfqProductId))
+        return res.status(400).json({
+          status: 2,
+          message: '`rfqProductId` is required to fetch vendors.'
         });
 
-      const filters = generalModel.generateFilters(req.body, VENDORS_FILTER_KEYS);
-
-      const vendors = await rfqModel.getDraftProductVendors(draftId, rfqProductId, buyerId, filters)
-
-      return res.json({ 
-          status: 1, 
-          message: `Vendors fetched for ${rfqProductId}`,
-          data: vendors ?? [],
+      const draftData = rfqModel.checkIfExists(
+        'tbl_rfq',
+        `id = ${draftId} AND is_published = 0`
+      );
+      if (!draftData || draftData.length <= 0)
+        return res.status(400).json({
+          status: 2,
+          message: 'Draft either does not exist or is already published.'
         });
 
+      const filters = generalModel.generateFilters(
+        req.body,
+        VENDORS_FILTER_KEYS
+      );
+
+      const vendors = await rfqModel.getDraftProductVendors(
+        draftId,
+        rfqProductId,
+        buyerId,
+        filters
+      );
+
+      return res.json({
+        status: 1,
+        message: `Vendors fetched for ${rfqProductId}`,
+        data: vendors ?? []
+      });
     } catch (error) {
-      const err = new Error("Error fetching vendors");
+      const err = new Error('Error fetching vendors');
       err.original = error;
       logError(err);
-      
+
       res.status(500).json({
         status: 3,
-        message: "An error occurred while fetching the vendors for this product."
+        message:
+          'An error occurred while fetching the vendors for this product.'
       });
     }
   },
 
-  createOrUpdateRfqDraftWithProductVendors : async (req, res) => {
+  createOrUpdateRfqDraftWithProductVendors: async (req, res) => {
     try {
-        const user_id = req.user.id;
+      const user_id = req.user.id;
 
-        const user = await userModel.userinfo(user_id);
-        if (!user) {
-            return res.status(404).json({ status: 2, message: 'User not found' });
+      const user = await userModel.userinfo(user_id);
+      if (!user) {
+        return res.status(404).json({ status: 2, message: 'User not found' });
+      }
+
+      let rfq_id;
+      let rfqData;
+      let sheetData;
+      let isNew = false;
+
+      const sheet_id = req.body.sheet_id;
+
+      // Changes by Agnij 2025-06-17 [Improved handling of specific RFQ ID]
+      // If rfq_id is provided in request, use that specific ID instead of creating a new draft
+      if (req.body.rfq_id) {
+        const specificRfq = await rfqModel.findOne('tbl_rfq', {
+          id: req.body.rfq_id,
+          created_by: user_id,
+          is_published: 0
+        });
+
+        if (!specificRfq) {
+          return res.status(404).json({
+            status: 2,
+            message: 'Specified draft RFQ not found or not authorized'
+          });
         }
 
-        let rfq_id;
-        let rfqData;
-        let sheetData;
-        let isNew = false;
+        rfqData = specificRfq;
+        rfq_id = specificRfq.id;
 
-        const sheet_id = req.body.sheet_id;
+        const sheetRes = await rfqModel.findOne('tbl_rfq_draft_sheets', {
+          id: sheet_id,
+          rfq_id
+        });
 
-        // Changes by Agnij 2025-06-17 [Improved handling of specific RFQ ID]
-        // If rfq_id is provided in request, use that specific ID instead of creating a new draft
-        if (req.body.rfq_id) {
-            const specificRfq = await rfqModel.findOne('tbl_rfq', { 
-                id: req.body.rfq_id, 
-                created_by: user_id,
-                is_published: 0 
-            });
-            
-            if (!specificRfq) {
-                return res.status(404).json({ 
-                    status: 2, 
-                    message: 'Specified draft RFQ not found or not authorized' 
-                });
-            }
+        sheetData = sheetRes || null;
+      } else {
+        // Create a new RFQ
 
-            rfqData = specificRfq;
-            rfq_id = specificRfq.id;
+        const currentDate = new Date();
+        let bidEndDate = new Date();
+        bidEndDate.setDate(currentDate.getDate() + 30);
 
-            const sheetRes = await rfqModel.findOne('tbl_rfq_draft_sheets', {
-              id: sheet_id,
-              rfq_id,
-            })
+        rfqData = {
+          company_name: user.organization_name || '',
+          response_email: user.email,
+          contact_name: user.name,
+          contact_number: user.mobile || '',
+          comment: req.body.comment || '',
+          bid_end_date:
+            req.body.bid_end_date || bidEndDate.toISOString().split('T')[0],
+          location: req.body.location || '',
+          is_published: 0,
+          created_by: user_id,
+          updated_by: user_id,
+          status: 1
+          // timestamp: currentDate,
+        };
 
-            sheetData = sheetRes || null;
-        } else {
-            // Create a new RFQ
+        const nextRFQNumber = await getNextRfQNumber();
+        rfqData.rfq_no = nextRFQNumber;
 
-            const currentDate = new Date();
-            let bidEndDate = new Date();
-            bidEndDate.setDate(currentDate.getDate() + 30);
+        const response = await rfqModel.insert('tbl_rfq', rfqData);
+        rfq_id = response[0].id;
+        isNew = true;
 
-            rfqData = {
-                company_name: user.organization_name || '',
-                response_email: user.email,
-                contact_name: user.name,
-                contact_number: user.mobile || '',
-                comment: req.body.comment || '',
-                bid_end_date: req.body.bid_end_date || bidEndDate.toISOString().split('T')[0],
-                location: req.body.location || '',
-                is_published: 0,
-                created_by: user_id,
-                updated_by: user_id,
-                status: 1,
-                // timestamp: currentDate,
-            };
-
-            const nextRFQNumber = await getNextRfQNumber();
-            rfqData.rfq_no = nextRFQNumber;
-
-            const response = await rfqModel.insert('tbl_rfq', rfqData);
-            rfq_id = response[0].id;
-            isNew = true
-
-            const rfqTerms = [];
-            for(let i=1; i<9; i++){
-              rfqTerms.push({ rfq_id, terms_id: i });
-            }
-            await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
+        const rfqTerms = [];
+        for (let i = 1; i < 9; i++) {
+          rfqTerms.push({ rfq_id, terms_id: i });
         }
+        await rfqModel.insertArray(
+          rfqTerms,
+          ['rfq_id', 'terms_id'],
+          'tbl_rfq_terms_map'
+        );
+      }
 
-        // Add products to the RFQ
-        const product = req.body;
-        if (!product || !product.variant_id) {
-          return res.status(400).json({ status: 2, message: 'Invalid product data' });
+      // Add products to the RFQ
+      const product = req.body;
+      if (!product || !product.variant_id) {
+        return res
+          .status(400)
+          .json({ status: 2, message: 'Invalid product data' });
+      }
+
+      if (!product.vendors || product.vendors.length === 0) {
+        const vendors = await rfqModel.genericSearchVendors(
+          user_id,
+          product.variant_id
+        );
+        if (vendors && vendors.length > 0) {
+          product.vendors = vendors.map((vendor) => ({ vendor_id: vendor.id }));
         }
+      }
 
-        if(!product.vendors || product.vendors.length === 0) {
-          const vendors = await rfqModel.genericSearchVendors(user_id, product.variant_id);
-          if(vendors && vendors.length > 0) {
-            product.vendors = vendors.map(vendor => ({ vendor_id: vendor.id }));
-          }
-        }
+      const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
 
-        const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
+      const productData = {
+        rfq_id,
+        product_variant_id: product.variant_id,
+        variant: variant,
+        comment: '',
+        datasheet: '',
+        spec_file: '',
+        qap_file: '',
+        qap: '',
+        datasheet_file: '',
+        sheet_id
+      };
 
-        const productData = {
+      await rfqModel.insert('tbl_rfq_products', productData);
+
+      const vendorPromises = product.vendors.map(async (vendor) => {
+        const vendorData = {
+          rfq_id,
+          product_variant_id: product.variant_id,
+          user_id: vendor.vendor_id,
+          variant: variant,
+          sheet_id
+        };
+        return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
+      });
+
+      await Promise.all(vendorPromises);
+
+      if (product?.specs && typeof product.specs == 'object') {
+        for (const [key, value] of Object.entries(product.specs)) {
+          const specData = {
+            title: key,
+            value,
             rfq_id,
             product_variant_id: product.variant_id,
             variant: variant,
-            comment: "",
-            datasheet: "",
-            spec_file: "",
-            qap_file: "",
-            qap: "",
-            datasheet_file: "",
-            sheet_id,
-        };
+            sheet_id
+          };
 
-        await rfqModel.insert('tbl_rfq_products', productData);
-
-        const vendorPromises = product.vendors.map(async (vendor) => {
-
-            const vendorData = {
-                rfq_id,
-                product_variant_id: product.variant_id,
-                user_id: vendor.vendor_id,
-                variant: variant,
-                sheet_id,
-            };
-            return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
-        });
-
-        await Promise.all(vendorPromises);
-
-        if(product?.specs && typeof product.specs == 'object') {
-          for(const [key, value] of Object.entries(product.specs)) {
-            const specData = {
-              title: key,
-              value,
-              rfq_id,
-              product_variant_id: product.variant_id,
-              variant: variant,
-              sheet_id,
-            }
-            
-            await rfqModel.insert('tbl_rfq_products_specs', specData);
-          }
+          await rfqModel.insert('tbl_rfq_products_specs', specData);
         }
+      }
 
-        // if(product.isUnfoundProduct && product.unfoundName) {
-        //   let validationErrors = sheetData.validation_errors;
-        //   if(validationErrors && Array.isArray(validationErrors) && validationErrors.length > 0) {
-        //     const updatedErrors = validationErrors.filter(error => error.name != product.unfoundName);
+      // if(product.isUnfoundProduct && product.unfoundName) {
+      //   let validationErrors = sheetData.validation_errors;
+      //   if(validationErrors && Array.isArray(validationErrors) && validationErrors.length > 0) {
+      //     const updatedErrors = validationErrors.filter(error => error.name != product.unfoundName);
 
-        //     const updatedSheetData = {
-        //       validation_errors: JSON.stringify(updatedErrors)
-        //     }
-        //     await rfqModel.update('tbl_rfq_draft_sheets', updatedSheetData, sheet_id);
-        //   }
-        // }
+      //     const updatedSheetData = {
+      //       validation_errors: JSON.stringify(updatedErrors)
+      //     }
+      //     await rfqModel.update('tbl_rfq_draft_sheets', updatedSheetData, sheet_id);
+      //   }
+      // }
 
-        res.status(200).json({
-            status: 1,
-            message: 'RFQ draft created/updated successfully',
-            data: {
-                rfq_id,
-                isNew
-            }
-        });
-
+      res.status(200).json({
+        status: 1,
+        message: 'RFQ draft created/updated successfully',
+        data: {
+          rfq_id,
+          isNew
+        }
+      });
     } catch (error) {
-        logError("Error while creating or updating RFQ with products:", error);    
-        res.status(500).json({
-            status: 3,
-            message: "An error occurred while processing your request"
-        });
+      logError('Error while creating or updating RFQ with products:', error);
+      res.status(500).json({
+        status: 3,
+        message: 'An error occurred while processing your request'
+      });
     }
   },
-  addProductVendorsInEditRfq : async (req, res) => {
+  addProductVendorsInEditRfq: async (req, res) => {
     try {
-        // Add products to the RFQ
-        const product = req.body;
-        const rfq_id = product.rfq_id || product.rfqId;
-        const specs = product.specs;
+      // Add products to the RFQ
+      const product = req.body;
+      const rfq_id = product.rfq_id || product.rfqId;
+      const specs = product.specs;
 
-        if (!product || !product.variant_id || !Array.isArray(product.vendors) || product.vendors.length === 0) {
-          return res.status(400).json({ status: 2, message: 'Invalid product or vendors data' });
-        }
+      if (
+        !product ||
+        !product.variant_id ||
+        !Array.isArray(product.vendors) ||
+        product.vendors.length === 0
+      ) {
+        return res
+          .status(400)
+          .json({ status: 2, message: 'Invalid product or vendors data' });
+      }
 
-        const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
+      const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
 
-        const productData = {
+      const productData = {
+        rfq_id,
+        product_variant_id: product.variant_id,
+        variant,
+        comment: '',
+        datasheet: '',
+        spec_file: '',
+        qap_file: '',
+        qap: '',
+        datasheet_file: ''
+      };
+
+      let addedRfqProduct = await rfqModel.insert(
+        'tbl_rfq_products',
+        productData
+      );
+
+      if (!addedRfqProduct || !addedRfqProduct.length > 0) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Something want wrong, please try again!'
+        });
+      }
+
+      addedRfqProduct = addedRfqProduct[0];
+
+      if (specs && specs.Quantity && specs.Unit) {
+        Object.entries(specs).forEach(async ([title, value]) => {
+          const specsData = {
             rfq_id,
             product_variant_id: product.variant_id,
             variant,
-            comment: "",
-            datasheet: "",
-            spec_file: "",
-            qap_file: "",
-            qap: "",
-            datasheet_file: ""
+            title: title,
+            value: value
+          };
+
+          await rfqModel.insert('tbl_rfq_products_specs', specsData);
+        });
+      }
+
+      const vendorPromises = product.vendors.map(async (vendor) => {
+        const vendorData = {
+          rfq_id,
+          product_variant_id: product.variant_id,
+          user_id: vendor,
+          variant: variant
         };
+        return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
+      });
 
-        let addedRfqProduct = await rfqModel.insert('tbl_rfq_products', productData);
+      await Promise.all(vendorPromises);
 
-        if(!addedRfqProduct || !addedRfqProduct.length > 0) {
-          return res.status(400).json({
-            status: 3,
-            message: 'Something want wrong, please try again!'
-          })
-        }
-
-        addedRfqProduct = addedRfqProduct[0]
-
-        if(specs && specs.Quantity && specs.Unit) {
-          Object.entries(specs).forEach(async ([title, value]) => {
-            const specsData = {
-              rfq_id,
-              product_variant_id: product.variant_id,
-              variant,
-              title: title,
-              value: value
-            };
-  
-            await rfqModel.insert(
-              'tbl_rfq_products_specs',
-              specsData
-            );
-          })
-        }
-
-        const vendorPromises = product.vendors.map(async (vendor) => {
-            const vendorData = {
-                rfq_id,
-                product_variant_id: product.variant_id,
-                user_id: vendor,
-                variant: variant
-            };
-            return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
-        });
-
-        await Promise.all(vendorPromises);
-
-        res.status(200).json({
-            status: 1,
-            message: 'Product and Vendors added successfully!',
-            rfqProductId: addedRfqProduct?.id ?? -1,
-            rfq_id
-        });
-
+      res.status(200).json({
+        status: 1,
+        message: 'Product and Vendors added successfully!',
+        rfqProductId: addedRfqProduct?.id ?? -1,
+        rfq_id
+      });
     } catch (error) {
-        console.log(error)
-        logError("Error while adding Product and Vendors:", error);    
-        res.status(500).json({
-            status: 3,
-            message: "An error occurred while processing your request"
-        });
+      console.log(error);
+      logError('Error while adding Product and Vendors:', error);
+      res.status(500).json({
+        status: 3,
+        message: 'An error occurred while processing your request'
+      });
     }
   },
 
   removeVendorFromDraft: async (req, res) => {
-    const {
-        rfq_id,
-        product_id,
-        variant,
-        vendor_ids
-    } = req.body;
+    const { rfq_id, product_id, variant, vendor_ids } = req.body;
 
-    if (!rfq_id || !product_id || !variant || !vendor_ids || vendor_ids.length == 0) {
-        return res.status(400).json({ status : 3,  message: "Missing required fields." });
+    if (
+      !rfq_id ||
+      !product_id ||
+      !variant ||
+      !vendor_ids ||
+      vendor_ids.length == 0
+    ) {
+      return res
+        .status(400)
+        .json({ status: 3, message: 'Missing required fields.' });
     }
 
     try {
-        const conditions = {
-            rfq_id: rfq_id,
-            product_variant_id: product_id,
-            user_ids: vendor_ids,
-            variant: variant
-        };
+      const conditions = {
+        rfq_id: rfq_id,
+        product_variant_id: product_id,
+        user_ids: vendor_ids,
+        variant: variant
+      };
 
-        const result = await rfqModel.delete('tbl_rfq_product_vendors', conditions);
+      const result = await rfqModel.delete(
+        'tbl_rfq_product_vendors',
+        conditions
+      );
 
-        if (result.length > 0) {
-            return res.status(200).json({ status : 1, message: "Vendor removed successfully.", deletedRows: result });
-        } else {
-            return res.status(404).json({ status : 3, message: "No matching record found to delete." });
-        }
+      if (result.length > 0) {
+        return res
+          .status(200)
+          .json({
+            status: 1,
+            message: 'Vendor removed successfully.',
+            deletedRows: result
+          });
+      } else {
+        return res
+          .status(404)
+          .json({ status: 3, message: 'No matching record found to delete.' });
+      }
     } catch (error) {
-        logError("Error removing vendor from draft:", error);
-        return res.status(500).json({ status: 3, message: "Internal server error." });
+      logError('Error removing vendor from draft:', error);
+      return res
+        .status(500)
+        .json({ status: 3, message: 'Internal server error.' });
     }
   },
- 
+
   getRfqDetailsById: async (req, res) => {
     try {
       const { rfq_id } = req.body;
 
       const result = await rfqModel.getRFQDetails(rfq_id);
       res
-      .status(200)
-      .json({
-        status: 1,
-        data: result[0]
-      })
-      .end();
+        .status(200)
+        .json({
+          status: 1,
+          data: result[0]
+        })
+        .end();
     } catch (error) {
       logError(error);
       res
@@ -3996,7 +4526,13 @@ deleteDraft: async (req, res) => {
 
     try {
       const { startDate, endDate } = getDateRange(chartFilter);
-      const rfq_data = await rfqModel.getRfqChartData(user_id, chartFilter, startDate, endDate, project_id);         
+      const rfq_data = await rfqModel.getRfqChartData(
+        user_id,
+        chartFilter,
+        startDate,
+        endDate,
+        project_id
+      );
 
       res
         .status(200)
@@ -4023,7 +4559,9 @@ deleteDraft: async (req, res) => {
       user_id = req.body.user_id;
     }
     try {
-      let page, limit = req.body.limit || Config.globalAdminLimit, offset;
+      let page,
+        limit = req.body.limit || Config.globalAdminLimit,
+        offset;
       if (req.body.page && req.body.page > 0) {
         page = req.body.page;
         offset = (page - 1) * limit;
@@ -4032,7 +4570,7 @@ deleteDraft: async (req, res) => {
       }
 
       const listRfq = await rfqModel.getRfqByUser(limit, offset, user_id);
-      const  totalRFQ = await rfqModel.getVendorRfqCount(user_id);
+      const totalRFQ = await rfqModel.getVendorRfqCount(user_id);
 
       res
         .status(200)
@@ -4060,7 +4598,10 @@ deleteDraft: async (req, res) => {
 
     if (withoutLoginUserToken) {
       // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+      const tokenData = await rfqModel.checkIfExists(
+        'tbl_vendor_rfq_tokens_non_login',
+        `token = '${withoutLoginUserToken}'`
+      );
 
       if (!tokenData || tokenData.length === 0) {
         // Token is not valid
@@ -4074,7 +4615,10 @@ deleteDraft: async (req, res) => {
       }
 
       // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+      const userData = await rfqModel.checkIfExists(
+        'tbl_users',
+        `id = ${tokenData[0].vendor_id}`
+      );
 
       if (!userData || userData.length === 0) {
         // User data is not valid
@@ -4090,21 +4634,24 @@ deleteDraft: async (req, res) => {
       const { password, ...userWithoutPassword } = userData[0];
       // Assign the user data to req.user
       req.user = userWithoutPassword;
-
     }
 
-        const { user_type, id:user_id } = req.user;
-        let { includeVendors = false } = req.query;
+    const { user_type, id: user_id } = req.user;
+    let { includeVendors = false } = req.query;
 
-        if(includeVendors) {
-          includeVendors = includeVendors == 'true';
-        }
+    if (includeVendors) {
+      includeVendors = includeVendors == 'true';
+    }
 
     try {
       if (user_type == 2 || user_type == 8) {
         // for buyer
         // check if the user is part of the team
-        let allowBuyerViewAccess = await userModel.user_rfq_access_review(id, user_id, user_type);
+        let allowBuyerViewAccess = await userModel.user_rfq_access_review(
+          id,
+          user_id,
+          user_type
+        );
         if (!allowBuyerViewAccess) {
           res
             .status(200)
@@ -4125,8 +4672,9 @@ deleteDraft: async (req, res) => {
         if (availability.length > 0) {
           // Update is_rfq_viewed status for vendor when they view RFQ
           try {
-            await rfqModel.updateWhere('tbl_rfq_product_vendors', 
-              { is_rfq_viewed: 1 }, 
+            await rfqModel.updateWhere(
+              'tbl_rfq_product_vendors',
+              { is_rfq_viewed: 1 },
               `rfq_id = ${id} AND user_id = ${req.user.id} AND is_rfq_viewed = 0`
             );
           } catch (error) {
@@ -4151,7 +4699,6 @@ deleteDraft: async (req, res) => {
         includeVendors
       );
 
-
       res
         .status(200)
         .json({
@@ -4171,35 +4718,37 @@ deleteDraft: async (req, res) => {
     }
   },
   getTargetPricehistory: async (req, res) => {
-  try {
-    const { rfq_product_id } = req.params;
+    try {
+      const { rfq_product_id } = req.params;
 
-    const result  =  await rfqModel.getPricehistory(rfq_product_id);
+      const result = await rfqModel.getPricehistory(rfq_product_id);
 
-    // const query = `
-    //   SELECT * 
-    //   FROM tbl_rfq_product_target_price
-    //   WHERE tbl_rfq_product_id = $1
-    //   ORDER BY created_at DESC
-    // `;
+      // const query = `
+      //   SELECT *
+      //   FROM tbl_rfq_product_target_price
+      //   WHERE tbl_rfq_product_id = $1
+      //   ORDER BY created_at DESC
+      // `;
 
-    // const data = await db.query(query, [rfq_product_id]);
+      // const data = await db.query(query, [rfq_product_id]);
 
-    if (result.length > 0) {
-      return res.json({ status: 1, data: result });
-    } else {
-      return res.json({ status: 0, message: 'No target price history found' });
+      if (result.length > 0) {
+        return res.json({ status: 1, data: result });
+      } else {
+        return res.json({
+          status: 0,
+          message: 'No target price history found'
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching target price history:', error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Internal server error',
+        error: error.message
+      });
     }
-  } catch (error) {
-    console.error('Error fetching target price history:', error);
-    return res.status(500).json({
-      status: 0,
-      message: 'Internal server error',
-      error: error.message
-    });
-  }
-},
-
+  },
 
   rfqList: async (req, res, next) => {
     try {
@@ -4321,21 +4870,35 @@ deleteDraft: async (req, res) => {
         offset = 0;
       }
 
-      let {project_id,sort,reverse_auction,rfq_type,rfq_no} = req.body;
-      if(project_id==-1){
-        project_id=null;
+      let { project_id, sort, reverse_auction, rfq_type, rfq_no } = req.body;
+      if (project_id == -1) {
+        project_id = null;
       }
-      if(rfq_type==''){
-        rfq_type=null;
+      if (rfq_type == '') {
+        rfq_type = null;
       }
-      if(reverse_auction=='-1'){
-        reverse_auction=null;
+      if (reverse_auction == '-1') {
+        reverse_auction = null;
       }
 
+      const listRfq = await rfqModel.getAllBuyerRfq(
+        limit,
+        offset,
+        user_id,
+        project_id,
+        sort,
+        reverse_auction,
+        rfq_type,
+        rfq_no
+      );
 
-      const listRfq = await rfqModel.getAllBuyerRfq(limit, offset, user_id,project_id,sort,reverse_auction,rfq_type,rfq_no);
-
-      let count = await rfqModel.getBuyerRfqCount(user_id,project_id,rfq_type,reverse_auction,rfq_no);
+      let count = await rfqModel.getBuyerRfqCount(
+        user_id,
+        project_id,
+        rfq_type,
+        reverse_auction,
+        rfq_no
+      );
       res
         .status(200)
         .json({
@@ -4379,10 +4942,15 @@ deleteDraft: async (req, res) => {
     }
   },
   getVendorsForProduct: async (req, res) => {
-    let {productId, excludeIds, searchTerm} = req.body;
+    let { productId, excludeIds, searchTerm } = req.body;
     let userId = req.user.id;
     try {
-      const vendorsList = await rfqModel.getVendorsForProduct(productId, excludeIds, userId, searchTerm);
+      const vendorsList = await rfqModel.getVendorsForProduct(
+        productId,
+        excludeIds,
+        userId,
+        searchTerm
+      );
 
       res
         .status(200)
@@ -4404,8 +4972,8 @@ deleteDraft: async (req, res) => {
     }
   },
   getVendorsByRfqProduct: async (req, res) => {
-    let {rfq_product_id} = req.query;
-    
+    let { rfq_product_id } = req.query;
+
     try {
       if (!rfq_product_id) {
         return res
@@ -4456,7 +5024,10 @@ deleteDraft: async (req, res) => {
 
     if (withoutLoginUserToken) {
       // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+      const tokenData = await rfqModel.checkIfExists(
+        'tbl_vendor_rfq_tokens_non_login',
+        `token = '${withoutLoginUserToken}'`
+      );
 
       if (!tokenData || tokenData.length === 0) {
         // Token is not valid
@@ -4470,7 +5041,10 @@ deleteDraft: async (req, res) => {
       }
 
       // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+      const userData = await rfqModel.checkIfExists(
+        'tbl_users',
+        `id = ${tokenData[0].vendor_id}`
+      );
 
       if (!userData || userData.length === 0) {
         // User data is not valid
@@ -4503,166 +5077,219 @@ deleteDraft: async (req, res) => {
 
     try {
       // check if the rfq is belongs to the vendor
-      const checkRFQExist = await userModel.user_rfq_access_review(rfq_id, user.id, user.user_type);
+      const checkRFQExist = await userModel.user_rfq_access_review(
+        rfq_id,
+        user.id,
+        user.user_type
+      );
       if (checkRFQExist) {
-          // Get RFQ details to check dates
-          const rfqDetails = await rfqModel.getRFQDetails(rfq_id);
-          if (!rfqDetails || rfqDetails.length === 0) {
-            return res
-              .status(404)
-              .json({
-                status: 0,
-                message: 'RFQ not found!'
-              })
-              .end();
-          }
-          
-          const now = new Date();
-          const bidEndDate = rfqDetails[0].bid_end_date ? new Date(rfqDetails[0].bid_end_date) : null;
-          const raStartDate = rfqDetails[0].ra_start_date ? new Date(rfqDetails[0].ra_start_date) : null;
-          const raEndDate = rfqDetails[0].ra_end_date ? new Date(rfqDetails[0].ra_end_date) : null;
-          const isReverseAuction = rfqDetails[0].reverse_auction === 1;
-          
-          // Create end of day date for bid end date (to match frontend logic)
-          const bidEndDateEndOfDay = bidEndDate ? new Date(bidEndDate.getFullYear(), bidEndDate.getMonth(), bidEndDate.getDate(), 23, 59, 59, 999) : null;
+        // Get RFQ details to check dates
+        const rfqDetails = await rfqModel.getRFQDetails(rfq_id);
+        if (!rfqDetails || rfqDetails.length === 0) {
+          return res
+            .status(404)
+            .json({
+              status: 0,
+              message: 'RFQ not found!'
+            })
+            .end();
+        }
 
-          // Check if RFQ is closed (highest priority)
-          if (rfqDetails[0].status === 2) {
+        const now = new Date();
+        const bidEndDate = rfqDetails[0].bid_end_date
+          ? new Date(rfqDetails[0].bid_end_date)
+          : null;
+        const raStartDate = rfqDetails[0].ra_start_date
+          ? new Date(rfqDetails[0].ra_start_date)
+          : null;
+        const raEndDate = rfqDetails[0].ra_end_date
+          ? new Date(rfqDetails[0].ra_end_date)
+          : null;
+        const isReverseAuction = rfqDetails[0].reverse_auction === 1;
+
+        // Create end of day date for bid end date (to match frontend logic)
+        const bidEndDateEndOfDay = bidEndDate
+          ? new Date(
+              bidEndDate.getFullYear(),
+              bidEndDate.getMonth(),
+              bidEndDate.getDate(),
+              23,
+              59,
+              59,
+              999
+            )
+          : null;
+
+        // Check if RFQ is closed (highest priority)
+        if (rfqDetails[0].status === 2) {
+          return res
+            .status(400)
+            .json({
+              status: 3,
+              message: 'RFQ is Closed'
+            })
+            .end();
+        }
+
+        // Check if reverse auction is active (second priority)
+        const isReverseAuctionActive =
+          isReverseAuction &&
+          raStartDate &&
+          raEndDate &&
+          now >= raStartDate &&
+          now <= raEndDate;
+
+        // If reverse auction is active, allow quote submission
+        if (isReverseAuctionActive) {
+          // Continue with quote submission - this is allowed
+        }
+        // Otherwise check other conditions
+        else {
+          // Check if all products are finalized
+          const productsFinalized = await rfqModel.checkAllProductsFinalized(
+            rfq_id,
+            user.id
+          );
+          if (productsFinalized) {
             return res
               .status(400)
               .json({
                 status: 3,
-                message: 'RFQ is Closed'
+                message: 'All Products are Finalized'
               })
               .end();
           }
-          
-          // Check if reverse auction is active (second priority)
-          const isReverseAuctionActive = isReverseAuction && raStartDate && raEndDate && now >= raStartDate && now <= raEndDate;
 
-          // If reverse auction is active, allow quote submission
-          if (isReverseAuctionActive) {
-            // Continue with quote submission - this is allowed
-          }
-          // Otherwise check other conditions
-          else {
-            // Check if all products are finalized
-            const productsFinalized = await rfqModel.checkAllProductsFinalized(rfq_id, user.id);
-            if (productsFinalized) {
-            return res
-              .status(400)
-              .json({
-                status: 3,
-                  message: 'All Products are Finalized'
-              })
-              .end();
-            }
+          // Check if past bid end date
+          if (bidEndDateEndOfDay && now > bidEndDateEndOfDay) {
+            // Different messages based on reverse auction status
+            let message = 'Bidding Period has Ended';
 
-            // Check if past bid end date
-            if (bidEndDateEndOfDay && now > bidEndDateEndOfDay) {
-              // Different messages based on reverse auction status
-              let message = 'Bidding Period has Ended';
-
-              if (isReverseAuction) {
-                if (raEndDate && now > raEndDate) {
-                  message = 'Reverse Auction has Ended';
-                } else if (raStartDate && now < raStartDate) {
-                  message = 'Bidding Period Ended (Reverse Auction Pending)';
-                } else if (!raStartDate || !raEndDate) {
-                  message = 'Bidding Period Ended (RA Dates Invalid)';
-                }
+            if (isReverseAuction) {
+              if (raEndDate && now > raEndDate) {
+                message = 'Reverse Auction has Ended';
+              } else if (raStartDate && now < raStartDate) {
+                message = 'Bidding Period Ended (Reverse Auction Pending)';
+              } else if (!raStartDate || !raEndDate) {
+                message = 'Bidding Period Ended (RA Dates Invalid)';
               }
-
-              return res
-                .status(400)
-                .json({
-                  status: 3,
-                  message: message
-                })
-                .end();
             }
 
-            // Check if RFQ has no bid end date
-            if (!bidEndDate) {
-              return res
-                .status(400)
-                .json({
-                  status: 3,
-                  message: 'RFQ Not Open for Bidding'
-                })
-                .end();
-            }
+            return res
+              .status(400)
+              .json({
+                status: 3,
+                message: message
+              })
+              .end();
           }
 
-          // Check if technical evaluation is required for any products and if vendor is accepted
-          if (isReverseAuction && products && products.length > 0) {
-            let rejectedProducts = [];
-            
-            for (const product of products) {
-              if (!product.product_id) continue;
+          // Check if RFQ has no bid end date
+          if (!bidEndDate) {
+            return res
+              .status(400)
+              .json({
+                status: 3,
+                message: 'RFQ Not Open for Bidding'
+              })
+              .end();
+          }
+        }
 
-              // Get RFQ product ID from the database
-              const rfqProductResult = await rfqModel.checkIfExists(
-                'tbl_rfq_products',
-                `rfq_id=${rfq_id} AND product_variant_id=${product.product_id} AND variant='${product.variant}'`
+        // Check if technical evaluation is required for any products and if vendor is accepted
+        if (isReverseAuction && products && products.length > 0) {
+          let rejectedProducts = [];
+
+          for (const product of products) {
+            if (!product.product_id) continue;
+
+            // Get RFQ product ID from the database
+            const rfqProductResult = await rfqModel.checkIfExists(
+              'tbl_rfq_products',
+              `rfq_id=${rfq_id} AND product_variant_id=${product.product_id} AND variant='${product.variant}'`
+            );
+
+            if (rfqProductResult && rfqProductResult.length > 0) {
+              const rfqProductId = rfqProductResult[0].id;
+
+              // Check if this product has technical evaluation
+              const techEvalResult = await rfqModel.getTechEvaluationResult(
+                rfqProductId,
+                user.id
               );
 
-              if (rfqProductResult && rfqProductResult.length > 0) {
-                const rfqProductId = rfqProductResult[0].id;
-
-                // Check if this product has technical evaluation
-                const techEvalResult = await rfqModel.getTechEvaluationResult(rfqProductId, user.id);
-
-                // If product has technical evaluation but vendor is not accepted, add to rejected list
-                if (techEvalResult && techEvalResult.data &&
-                    techEvalResult.data.has_tech_eval === true &&
-                    techEvalResult.data.status !== 1) {
-                  rejectedProducts.push(product.product_id);
-                }
+              // If product has technical evaluation but vendor is not accepted, add to rejected list
+              if (
+                techEvalResult &&
+                techEvalResult.data &&
+                techEvalResult.data.has_tech_eval === true &&
+                techEvalResult.data.status !== 1
+              ) {
+                rejectedProducts.push(product.product_id);
               }
-            }
-            
-            // If any products were rejected, return error
-            if (rejectedProducts.length > 0) {
-              return res
-                .status(400)
-                .json({
-                  status: 3,
-                  message: `You cannot submit a quote for products that have not passed technical evaluation. ${rejectedProducts.length} product(s) not technically accepted.`
-                })
-                .end();
             }
           }
 
-          return await db.tx(async t => {
+          // If any products were rejected, return error
+          if (rejectedProducts.length > 0) {
+            return res
+              .status(400)
+              .json({
+                status: 3,
+                message: `You cannot submit a quote for products that have not passed technical evaluation. ${rejectedProducts.length} product(s) not technically accepted.`
+              })
+              .end();
+          }
+        }
 
-            const tbl_quotes_data = {
-              rfq_id,
-              rfq_no,
-              status,
-              created_by: user.id,
-              updated_by: user.id,
-              is_regret: req.body.is_regret ? req.body.is_regret : 0,
-              global_payment_term: globalPaymentTerms,
-              global_comment: globalComment,
-              regret_reason
-            };
-  
-            // check quote is already exists or not
-            // console.log("mukul 1870")
-            let alreadyExists = await rfqModel.checkIfExists(
-              'tbl_quotes',
-              `rfq_id=${rfq_id} AND created_by=${user.id} LIMIT 1`,
-              t
-            );
-            if (alreadyExists.length > 0) {
-              throw new Error('Quote is alredy present for this RFQ!')
-            }
-  
-            var quote_items_data = [];
-              products.map(
-                ({
-                  product_id,
+        return await db.tx(async (t) => {
+          const tbl_quotes_data = {
+            rfq_id,
+            rfq_no,
+            status,
+            created_by: user.id,
+            updated_by: user.id,
+            is_regret: req.body.is_regret ? req.body.is_regret : 0,
+            global_payment_term: globalPaymentTerms,
+            global_comment: globalComment,
+            regret_reason
+          };
+
+          // check quote is already exists or not
+          // console.log("mukul 1870")
+          let alreadyExists = await rfqModel.checkIfExists(
+            'tbl_quotes',
+            `rfq_id=${rfq_id} AND created_by=${user.id} LIMIT 1`,
+            t
+          );
+          if (alreadyExists.length > 0) {
+            throw new Error('Quote is alredy present for this RFQ!');
+          }
+
+          var quote_items_data = [];
+          products.map(
+            ({
+              product_id,
+              product_name,
+              unit_price,
+              package_price,
+              tax,
+              freight_price,
+              total_price,
+              comment,
+              delivery_period,
+              quantity,
+              variant,
+              document_files,
+              freight_mode,
+              package_mode,
+              tax_mode
+            }) => {
+              if (unit_price != '') {
+                quote_items_data.push({
+                  rfq_id,
+                  rfq_no,
+                  product_variant_id: product_id,
                   product_name,
                   unit_price,
                   package_price,
@@ -4673,189 +5300,70 @@ deleteDraft: async (req, res) => {
                   delivery_period,
                   quantity,
                   variant,
-                  document_files,
                   freight_mode,
                   package_mode,
-                  tax_mode,
-                }) => {
-                  if(unit_price!=""){
-                    quote_items_data.push({
-                      rfq_id,
-                      rfq_no,
-                      product_variant_id: product_id,
-                      product_name,
-                      unit_price,
-                      package_price,
-                      tax,
-                      freight_price,
-                      total_price,
-                      comment,
-                      delivery_period,
-                      quantity,
-                      variant,
-                      freight_mode,
-                      package_mode,
-                      tax_mode,
-                    });
-                  }else if(comment!="" || document_files?.length>0){
-                    quote_items_data.push({
-                      rfq_id,
-                      rfq_no,
-                      product_variant_id: product_id,
-                      product_name,
-                      unit_price:0,
-                      package_price,
-                      tax,
-                      freight_price,
-                      total_price,
-                      comment,
-                      delivery_period,
-                      quantity,
-                      variant,
-                      freight_mode,
-                      package_mode,
-                      tax_mode,
-                    });
-                  } else if(is_regret){
-                    quote_items_data.push({
-                      rfq_id,
-                      rfq_no,
-                      product_variant_id: product_id,
-                      product_name,
-                      unit_price:0,
-                      package_price,
-                      tax,
-                      freight_price,
-                      total_price,
-                      comment,
-                      delivery_period,
-                      quantity,
-                      variant,
-                      freight_mode,
-                      package_mode,
-                      tax_mode,
-                    })
-                  }
-                }
+                  tax_mode
+                });
+              } else if (comment != '' || document_files?.length > 0) {
+                quote_items_data.push({
+                  rfq_id,
+                  rfq_no,
+                  product_variant_id: product_id,
+                  product_name,
+                  unit_price: 0,
+                  package_price,
+                  tax,
+                  freight_price,
+                  total_price,
+                  comment,
+                  delivery_period,
+                  quantity,
+                  variant,
+                  freight_mode,
+                  package_mode,
+                  tax_mode
+                });
+              } else if (is_regret) {
+                quote_items_data.push({
+                  rfq_id,
+                  rfq_no,
+                  product_variant_id: product_id,
+                  product_name,
+                  unit_price: 0,
+                  package_price,
+                  tax,
+                  freight_price,
+                  total_price,
+                  comment,
+                  delivery_period,
+                  quantity,
+                  variant,
+                  freight_mode,
+                  package_mode,
+                  tax_mode
+                });
+              }
+            }
+          );
+
+          if (is_regret) {
+            let quote_rsp = await rfqModel.insert(
+              'tbl_quotes',
+              tbl_quotes_data,
+              t
+            );
+            const created_quote_id = quote_rsp?.[0]?.id;
+
+            if (created_quote_id) {
+              const buyer = await userModel.getUserById(
+                rfqDetails[0].created_by
               );
-  
-              if(is_regret){
-                let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data, t);
-                const created_quote_id = quote_rsp?.[0]?.id;
 
-                if(created_quote_id) {
-                  const buyer = await userModel.getUserById(rfqDetails[0].created_by);
-                  
-                  // adding the quote_id
-                  quote_items_data.map((item)=> item.quote_id=created_quote_id);
-                  
-                  const quote_items_keys = [
-                    'rfq_id',
-                    'rfq_no',
-                    'quote_id',
-                    'product_variant_id',
-                    'product_name',
-                    'unit_price',
-                    'package_price',
-                    'tax',
-                    'freight_price',
-                    'total_price',
-                    'comment',
-                    'delivery_period',
-                    'quantity',
-                    'variant',
-                    'freight_mode',
-                    'package_mode',
-                    'tax_mode',
-                  ];
-                  await rfqModel.insertArray(
-                    quote_items_data,
-                    quote_items_keys,
-                    'tbl_quote_items',
-                    t
-                  );
-
-                  await sendMailToBuyerForRegret(buyer[0], rfqDetails[0].rfq_no, req.user, rfq_id, regret_reason);
-
-                  return res
-                  .status(200)
-                  .json({
-                    status: 3,
-                    message: 'Your quote is regretted.',
-                    regret_reason: regret_reason,
-                    data: quote_rsp
-                  })
-                  .end();
-                }
-  
-
-                return res
-                  .status(400)
-                  .json({
-                    status: 3,
-                    message: 'Something went wrong!',
-                    regret_reason: regret_reason,
-                    data: null,
-                    error: 'Entry in table quote didn\'t exexuted as expected!'
-                  })
-                  .end();
-              }
-  
-              // if quote item data is empty because of errors
-              if(quote_items_data.length < 1){
-                throw new Error('Not able to send the Quote')
-              }
-  
-            // Insertion of the quote
-            let quote_rsp = await rfqModel.insert('tbl_quotes', tbl_quotes_data, t);
-            if (quote_rsp.length > 0) {
-  
-              const created_quote_id = quote_rsp[0].id;
-  
-              if (term_and_condition_files && term_and_condition_files.length > 0) {
-                const quote_files = term_and_condition_files.map(url => ({
-                  quote_id:created_quote_id,
-                  file_type: 'term_and_condition',
-                  file_url: url
-                }));
-                for (const fileData of quote_files) {
-                  await rfqModel.insert('tbl_quotes_files', fileData, t);
-                }
-              }
-
-             // Payment Terms (tbl_quotes_payment_terms)
-             if (Array.isArray(global_payment_term_list) && global_payment_term_list.length) {
-               const rows = global_payment_term_list
-                 .filter(r => r && r.type && r.value != null)
-                 .map(r => {
-                   const type = String(r.type).toLowerCase();
-                   return ['advance','credit','other'].includes(type) ? {
-                     quote_id: created_quote_id,
-                     value: Number(r.value) || 0,
-                     type,
-                     days: type === 'credit' && r.days != null ? Number(r.days) : null,
-                     comment: r.comment?.trim() || null,
-                     created_by: req.user.id,
-                   } : null;
-                 })
-                 .filter(Boolean);
-             
-               if (rows.length) {
-                 await rfqModel.insertArray(
-                   rows,
-                   ['quote_id','value','type','days','comment','created_by'],
-                   'tbl_quotes_payment_terms',
-                   t
-                 );
-               }
-             }
-           //  save payment term array
-  
               // adding the quote_id
-              quote_items_data.map((item)=> item.quote_id=created_quote_id);
-  
-              // console.log("mukul 1959")
-  
+              quote_items_data.map(
+                (item) => (item.quote_id = created_quote_id)
+              );
+
               const quote_items_keys = [
                 'rfq_id',
                 'rfq_no',
@@ -4873,72 +5381,211 @@ deleteDraft: async (req, res) => {
                 'variant',
                 'freight_mode',
                 'package_mode',
-                'tax_mode',
+                'tax_mode'
               ];
-              let quotes_items = await rfqModel.insertArray(
+              await rfqModel.insertArray(
                 quote_items_data,
                 quote_items_keys,
                 'tbl_quote_items',
                 t
               );
-  
-              // New code to insert file links into tbl_quote_item_files
-              if (quotes_items.length > 0) {
-                quotes_items.forEach(async (item, index) => {
-                  const file_links = products[index].document_files;
-                  if (file_links && file_links.length > 0) {
-                    const file_records = file_links.map(link => ({
-                      quote_item_id: item.id,
-                      file_type: "DOC",
-                      file_url: link,
-                      created_at: new Date()
-                    }));
-                    await rfqModel.insertArray( file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files', t
-                    );
-                  }
-                });
-              }
-  
-              await sendQuoteNotificationEmail(req);
-              await sendQuoteNotificationToVendor(req);
-  
-              //  send whatsapp notification
-              const buyerDetails = await rfqModel.getRFQCreatedBy(rfq_id);
-              const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id)
-              const projectID = rfqDetails[0]?.project_id
-              const projectDetails = await projectModel.getProjectTableDataById(projectID, buyerDetails[0]?.id)
-  
-              
-              const payload = {
-                mobile:buyerDetails[0]?.mobile,
-                rfqNumber:rfq_no,
-                rfqID:rfq_id,
-                projectName:projectDetails[0]?.name || "-",
-                vendorName:req?.user?.name,
-                buyerName:buyerDetails[0]?.name
-              }
-       
-              await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(payload);
-  
-  
+
+              await sendMailToBuyerForRegret(
+                buyer[0],
+                rfqDetails[0].rfq_no,
+                req.user,
+                rfq_id,
+                regret_reason
+              );
+
               return res
                 .status(200)
                 .json({
-                  status: 1,
-                  data: quotes_items[0],
-                })
-                .end();
-            } else {
-              return res
-                .status(400)
-                .json({
                   status: 3,
-                  message: Config.errorText.value
+                  message: 'Your quote is regretted.',
+                  regret_reason: regret_reason,
+                  data: quote_rsp
                 })
                 .end();
             }
-          })
 
+            return res
+              .status(400)
+              .json({
+                status: 3,
+                message: 'Something went wrong!',
+                regret_reason: regret_reason,
+                data: null,
+                error: "Entry in table quote didn't exexuted as expected!"
+              })
+              .end();
+          }
+
+          // if quote item data is empty because of errors
+          if (quote_items_data.length < 1) {
+            throw new Error('Not able to send the Quote');
+          }
+
+          // Insertion of the quote
+          let quote_rsp = await rfqModel.insert(
+            'tbl_quotes',
+            tbl_quotes_data,
+            t
+          );
+          if (quote_rsp.length > 0) {
+            const created_quote_id = quote_rsp[0].id;
+
+            if (
+              term_and_condition_files &&
+              term_and_condition_files.length > 0
+            ) {
+              const quote_files = term_and_condition_files.map((url) => ({
+                quote_id: created_quote_id,
+                file_type: 'term_and_condition',
+                file_url: url
+              }));
+              for (const fileData of quote_files) {
+                await rfqModel.insert('tbl_quotes_files', fileData, t);
+              }
+            }
+
+            // Payment Terms (tbl_quotes_payment_terms)
+            if (
+              Array.isArray(global_payment_term_list) &&
+              global_payment_term_list.length
+            ) {
+              const rows = global_payment_term_list
+                .filter((r) => r && r.type && r.value != null)
+                .map((r) => {
+                  const type = String(r.type).toLowerCase();
+                  return ['advance', 'credit', 'other'].includes(type)
+                    ? {
+                        quote_id: created_quote_id,
+                        value: Number(r.value) || 0,
+                        type,
+                        days:
+                          type === 'credit' && r.days != null
+                            ? Number(r.days)
+                            : null,
+                        comment: r.comment?.trim() || null,
+                        created_by: req.user.id
+                      }
+                    : null;
+                })
+                .filter(Boolean);
+
+              if (rows.length) {
+                await rfqModel.insertArray(
+                  rows,
+                  [
+                    'quote_id',
+                    'value',
+                    'type',
+                    'days',
+                    'comment',
+                    'created_by'
+                  ],
+                  'tbl_quotes_payment_terms',
+                  t
+                );
+              }
+            }
+            //  save payment term array
+
+            // adding the quote_id
+            quote_items_data.map((item) => (item.quote_id = created_quote_id));
+
+            // console.log("mukul 1959")
+
+            const quote_items_keys = [
+              'rfq_id',
+              'rfq_no',
+              'quote_id',
+              'product_variant_id',
+              'product_name',
+              'unit_price',
+              'package_price',
+              'tax',
+              'freight_price',
+              'total_price',
+              'comment',
+              'delivery_period',
+              'quantity',
+              'variant',
+              'freight_mode',
+              'package_mode',
+              'tax_mode'
+            ];
+            let quotes_items = await rfqModel.insertArray(
+              quote_items_data,
+              quote_items_keys,
+              'tbl_quote_items',
+              t
+            );
+
+            // New code to insert file links into tbl_quote_item_files
+            if (quotes_items.length > 0) {
+              quotes_items.forEach(async (item, index) => {
+                const file_links = products[index].document_files;
+                if (file_links && file_links.length > 0) {
+                  const file_records = file_links.map((link) => ({
+                    quote_item_id: item.id,
+                    file_type: 'DOC',
+                    file_url: link,
+                    created_at: new Date()
+                  }));
+                  await rfqModel.insertArray(
+                    file_records,
+                    ['quote_item_id', 'file_type', 'file_url', 'created_at'],
+                    'tbl_quote_item_files',
+                    t
+                  );
+                }
+              });
+            }
+
+            await sendQuoteNotificationEmail(req);
+            await sendQuoteNotificationToVendor(req);
+
+            //  send whatsapp notification
+            const buyerDetails = await rfqModel.getRFQCreatedBy(rfq_id);
+            const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+            const projectID = rfqDetails[0]?.project_id;
+            const projectDetails = await projectModel.getProjectTableDataById(
+              projectID,
+              buyerDetails[0]?.id
+            );
+
+            const payload = {
+              mobile: buyerDetails[0]?.mobile,
+              rfqNumber: rfq_no,
+              rfqID: rfq_id,
+              projectName: projectDetails[0]?.name || '-',
+              vendorName: req?.user?.name,
+              buyerName: buyerDetails[0]?.name
+            };
+
+            await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(
+              payload
+            );
+
+            return res
+              .status(200)
+              .json({
+                status: 1,
+                data: quotes_items[0]
+              })
+              .end();
+          } else {
+            return res
+              .status(400)
+              .json({
+                status: 3,
+                message: Config.errorText.value
+              })
+              .end();
+          }
+        });
       } else {
         res
           .status(400)
@@ -4956,18 +5603,24 @@ deleteDraft: async (req, res) => {
         .json({
           status: 3,
           message: error.message ?? Config.errorText.value,
-          error,
+          error
         })
         .end();
     }
   },
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const {TA_Vendors, no_freight} = req.query;
+    const { TA_Vendors, no_freight } = req.query;
     const { id, company_id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqById2(rfq_id, id, company_id, TA_Vendors, no_freight);
+      let rfQItem = await rfqModel.getQuotesByRfqById2(
+        rfq_id,
+        id,
+        company_id,
+        TA_Vendors,
+        no_freight
+      );
       // rfQItem = filterQuotations(rfQItem);
       // rfQItem = processQuotations(rfQItem);
       res
@@ -5022,41 +5675,50 @@ deleteDraft: async (req, res) => {
   },
   downloadQuoteResultsProductWise: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const {TA_Vendors, no_freight} = req.query;
+    const { TA_Vendors, no_freight } = req.query;
 
     const { id, company_id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(rfq_id, id, company_id, TA_Vendors, no_freight);
-      
-      rfQItem.forEach(product => {
+      let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(
+        rfq_id,
+        id,
+        company_id,
+        TA_Vendors,
+        no_freight
+      );
+
+      rfQItem.forEach((product) => {
         const vendorMap = new Map();
-        product.all_vendors.forEach(vendor => vendorMap.set(vendor.id, vendor));
-    
-        const updatedQuotations = product.all_vendors.map(vendor => {
-            const existingQuote = product.quotations.find(q => q.created_by === vendor.id);
-            if (existingQuote) {
-                return existingQuote;
-            } else {
-                // Creating a placeholder for missing quotation
-                return {
-                    id: null,
-                    timestamp: null,
-                    status: null,
-                    created_by: vendor.id,
-                    is_regret: null,
-                    global_payment_term: null,
-                    global_comment: null,
-                    vendor_details: [vendor],
-                    quote_details: []
-                };
-            }
+        product.all_vendors.forEach((vendor) =>
+          vendorMap.set(vendor.id, vendor)
+        );
+
+        const updatedQuotations = product.all_vendors.map((vendor) => {
+          const existingQuote = product.quotations.find(
+            (q) => q.created_by === vendor.id
+          );
+          if (existingQuote) {
+            return existingQuote;
+          } else {
+            // Creating a placeholder for missing quotation
+            return {
+              id: null,
+              timestamp: null,
+              status: null,
+              created_by: vendor.id,
+              is_regret: null,
+              global_payment_term: null,
+              global_comment: null,
+              vendor_details: [vendor],
+              quote_details: []
+            };
+          }
         });
-    
+
         product.quotations = updatedQuotations;
-    });
-    
-      
+      });
+
       res
         .status(200)
         .json({
@@ -5064,7 +5726,6 @@ deleteDraft: async (req, res) => {
           data: rfQItem
         })
         .end();
-      
     } catch (error) {
       logError(error);
       res
@@ -5076,29 +5737,23 @@ deleteDraft: async (req, res) => {
         .end();
     }
   },
-  getLprLqrByVariantId : async (  req , res ,next) => {
-   
-   const { variant_id, type } = req.query; 
-    const {id} = req.user;
+  getLprLqrByVariantId: async (req, res, next) => {
+    const { variant_id, type } = req.query;
+    const { id } = req.user;
     try {
-         
-      if(variant_id){
-         const data =  await rfqModel.getLprLqrByVariantId(id, variant_id, type);
+      if (variant_id) {
+        const data = await rfqModel.getLprLqrByVariantId(id, variant_id, type);
 
-       res
-            .status(200)
-            .json({
-              status: 1,
-              data: data
-            })
-            .end();
-       
+        res
+          .status(200)
+          .json({
+            status: 1,
+            data: data
+          })
+          .end();
       }
-      
-
-      
     } catch (error) {
-       logError(error);
+      logError(error);
       res
         .status(400)
         .json({
@@ -5106,7 +5761,6 @@ deleteDraft: async (req, res) => {
           message: Config.errorText.value
         })
         .end();
-      
     }
   },
   closeRFQ: async (req, res, next) => {
@@ -5115,10 +5769,10 @@ deleteDraft: async (req, res) => {
 
     try {
       const rfQItem = await rfqModel.changeRFQStatus(rfq_id, id);
-      const vendorList = await rfqModel.getRfqVendorListAlongWithSPOC(rfq_id)    
+      const vendorList = await rfqModel.getRfqVendorListAlongWithSPOC(rfq_id);
 
       sendRFQClosedMail(req.user, rfQItem[0], vendorList);
-      
+
       res
         .status(200)
         .json({
@@ -5140,53 +5794,51 @@ deleteDraft: async (req, res) => {
 
   /**
    * @description This function sends a reminder to vendors for a specific RFQ. who have not submited the quote for all products.
-   * @users can send max 3 reminder in a day, foradmin there are no limit, 1 - admin, 5 subadmin - 6 data entry 
+   * @users can send max 3 reminder in a day, foradmin there are no limit, 1 - admin, 5 subadmin - 6 data entry
    */
   sendReminder: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { organization_name, name, id, email } = req.user;
-    const isCurrentUserAdmin = [1,5,6].includes(req.user.user_type);
-
+    const isCurrentUserAdmin = [1, 5, 6].includes(req.user.user_type);
 
     try {
-
       // const date = new Date('2024-11-28').toISOString().slice(0, 10);  // Format, YYYY-MM-DD
-      const date = new Date().toISOString().slice(0, 10); 
+      const date = new Date().toISOString().slice(0, 10);
 
       //  if admin then skip this check
-      if(!isCurrentUserAdmin){
-      const lastActivity = await rfqModel.getRFQActivity(rfq_id, id, date);
-      if ( lastActivity?.length > 2) {
+      if (!isCurrentUserAdmin) {
+        const lastActivity = await rfqModel.getRFQActivity(rfq_id, id, date);
+        if (lastActivity?.length > 2) {
           return res
             .status(403)
             .json({
               status: 1,
-              message: "You have already sent a reminder today for this RFQ!"
+              message: 'You have already sent a reminder today for this RFQ!'
             })
             .end();
-      }
+        }
       }
 
       const rfqBasicDetails = await rfqModel.getRfqDetailsById(rfq_id);
 
-      if(!rfqBasicDetails) {
+      if (!rfqBasicDetails) {
         return res
-            .status(400)
-            .json({
-              status: 1,
-              message: "RFQ not found, or is no longer available!"
-            })
-            .end(); 
+          .status(400)
+          .json({
+            status: 1,
+            message: 'RFQ not found, or is no longer available!'
+          })
+          .end();
       }
 
-      if(rfqBasicDetails.status == '2') {
+      if (rfqBasicDetails.status == '2') {
         return res
-            .status(400)
-            .json({
-              status: 1,
-              message: "Cannot send reminder for a closed RFQ!"
-            })
-            .end(); 
+          .status(400)
+          .json({
+            status: 1,
+            message: 'Cannot send reminder for a closed RFQ!'
+          })
+          .end();
       }
 
       let vendors = await rfqModel.gerRFQVendors(rfq_id);
@@ -5201,37 +5853,58 @@ deleteDraft: async (req, res) => {
         await Promise.all(
           vendors.map(async (vendor) => {
             let q = `rfq_id = ${rfq_id} AND created_by = ${vendor.user_id} AND is_regret = 1`;
-            const isRegret = await rfqModel.checkIfExists('tbl_quotes', q)
+            const isRegret = await rfqModel.checkIfExists('tbl_quotes', q);
 
-            if(isRegret && isRegret.length > 0) return null;
+            if (isRegret && isRegret.length > 0) return null;
 
-            const vendorProducts = await rfqModel.getVendorProductsCount(rfq_id, vendor.user_id);
-            const vendorProductsQuoted = await rfqModel.getVendorProductsQuoted(rfq_id, vendor.user_id);
-      
+            const vendorProducts = await rfqModel.getVendorProductsCount(
+              rfq_id,
+              vendor.user_id
+            );
+            const vendorProductsQuoted = await rfqModel.getVendorProductsQuoted(
+              rfq_id,
+              vendor.user_id
+            );
+
             const requiredCount = vendorProducts.length;
             const quotedCount = vendorProductsQuoted.length;
-      
+
             const isUnmatched = requiredCount !== quotedCount;
-      
-            return isUnmatched ? {
-              vendor,
-              remainingProducts: vendorProducts.filter(product => !vendorProductsQuoted.some(_product => _product.product_id == product.product_id))
-            } : null;
+
+            return isUnmatched
+              ? {
+                  vendor,
+                  remainingProducts: vendorProducts.filter(
+                    (product) =>
+                      !vendorProductsQuoted.some(
+                        (_product) => _product.product_id == product.product_id
+                      )
+                  )
+                }
+              : null;
           })
         )
       ).filter(Boolean);
-      
+
       vendors = unmatchedVendors;
 
-      Promise.all(vendors.map((item) => sendReminderRFQMAIL(item.vendor, item.remainingProducts, org_name, rfq_id,rfqBasicDetails  )))
+      Promise.all(
+        vendors.map((item) =>
+          sendReminderRFQMAIL(
+            item.vendor,
+            item.remainingProducts,
+            org_name,
+            rfq_id,
+            rfqBasicDetails
+          )
+        )
+      )
         .then(async () => {
           try {
             await rfqModel.insertRFQActivity(rfq_id, id);
-          }
-          catch (error) {
-            throw new Error(error)
-          }
-          finally {
+          } catch (error) {
+            throw new Error(error);
+          } finally {
             res
               .status(200)
               .json({
@@ -5277,7 +5950,7 @@ deleteDraft: async (req, res) => {
           .status(400)
           .json({
             status: 1,
-            message: "RFQ not found, or is no longer available!"
+            message: 'RFQ not found, or is no longer available!'
           })
           .end();
       }
@@ -5287,22 +5960,27 @@ deleteDraft: async (req, res) => {
           .status(400)
           .json({
             status: 1,
-            message: "Cannot get vendors for a closed RFQ!"
+            message: 'Cannot get vendors for a closed RFQ!'
           })
           .end();
       }
 
-      return res.status(200).json({
-        status: 1,
-        data: result.vendors
-      }).end();
-
+      return res
+        .status(200)
+        .json({
+          status: 1,
+          data: result.vendors
+        })
+        .end();
     } catch (error) {
       logError(error);
-      return res.status(400).json({
-        status: 3,
-        message: Config.errorText.value
-      }).end();
+      return res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
     }
   },
 
@@ -5315,12 +5993,16 @@ deleteDraft: async (req, res) => {
     const { id } = req.user;
 
     try {
-      if (!vendor_ids || !Array.isArray(vendor_ids) || vendor_ids.length === 0) {
+      if (
+        !vendor_ids ||
+        !Array.isArray(vendor_ids) ||
+        vendor_ids.length === 0
+      ) {
         return res
           .status(400)
           .json({
             status: 1,
-            message: "Please select at least one vendor!"
+            message: 'Please select at least one vendor!'
           })
           .end();
       }
@@ -5332,7 +6014,7 @@ deleteDraft: async (req, res) => {
           .status(400)
           .json({
             status: 1,
-            message: "RFQ not found, or is no longer available!"
+            message: 'RFQ not found, or is no longer available!'
           })
           .end();
       }
@@ -5342,12 +6024,12 @@ deleteDraft: async (req, res) => {
           .status(400)
           .json({
             status: 1,
-            message: "Cannot send reminder for a closed RFQ!"
+            message: 'Cannot send reminder for a closed RFQ!'
           })
           .end();
       }
 
-      const selectedVendors = result.vendors.filter(vendor => 
+      const selectedVendors = result.vendors.filter((vendor) =>
         vendor_ids.includes(vendor.user_id)
       );
 
@@ -5356,7 +6038,7 @@ deleteDraft: async (req, res) => {
           .status(400)
           .json({
             status: 1,
-            message: "No valid vendors found for the selected IDs!"
+            message: 'No valid vendors found for the selected IDs!'
           })
           .end();
       }
@@ -5383,7 +6065,6 @@ deleteDraft: async (req, res) => {
             message: 'Reminder has been sent successfully to selected vendors!'
           })
           .end();
-
       } catch (error) {
         logError(error);
         res
@@ -5394,18 +6075,21 @@ deleteDraft: async (req, res) => {
           })
           .end();
       }
-
     } catch (error) {
       logError(error);
-      return res.status(400).json({
-        status: 3,
-        message: Config.errorText.value
-      }).end();
+      return res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
     }
-  },  
-  
+  },
+
   finalize: async (req, res, next) => {
-    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, variant } = req.body;
+    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, variant } =
+      req.body;
 
     try {
       const vendor_details = await userModel.user_profile_detail(vendor_id);
@@ -5416,7 +6100,9 @@ deleteDraft: async (req, res) => {
       let winning_vendor_name = null;
 
       if (vendor_details.length > 0) {
-        winning_vendor_organization = vendor_details[0]?.organization_name ?? vendor_details[0]?.company_name;
+        winning_vendor_organization =
+          vendor_details[0]?.organization_name ??
+          vendor_details[0]?.company_name;
         winning_vendor_email = vendor_details[0].email;
         winning_vendor_name = vendor_details[0].name;
       }
@@ -5432,8 +6118,8 @@ deleteDraft: async (req, res) => {
         winning_vendor_email
       ) {
         // changes by Mukul Jatav 30-08-2024
-        // removed  AND quote_id=${quote_id} condition from query, 
-        // return 09 Conflict status code if vendor already exist for same product + variant, 
+        // removed  AND quote_id=${quote_id} condition from query,
+        // return 09 Conflict status code if vendor already exist for same product + variant,
 
         const response = await db.tx(async (t) => {
           let alreadyExists = await rfqModel.checkIfExists(
@@ -5456,17 +6142,21 @@ deleteDraft: async (req, res) => {
               created_by: alreadyExists.created_by,
               timestamp: alreadyExists.timestamp,
               variant: alreadyExists.variant,
-              changed_by: req.user.id,
+              changed_by: req.user.id
             };
 
             const res = await rfqModel.insert(
               'tbl_quote_finalization_history',
               history_data,
-              t,
+              t
             );
-            await rfqModel.delete('tbl_quote_finalization', {
-              id: alreadyExists.id
-            }, t);
+            await rfqModel.delete(
+              'tbl_quote_finalization',
+              {
+                id: alreadyExists.id
+              },
+              t
+            );
             reFinalized = true;
           }
 
@@ -5505,13 +6195,13 @@ deleteDraft: async (req, res) => {
 
           // Pre-initiate PO as if this throws error after this, it will trigger mail without ever finalizing anyone!
           const result = await initiatePO(req.body, req.user, t);
-          if(result.approval_required) {
+          if (result.approval_required) {
             const purchaseOrder = await t.oneOrNone(
               `SELECT * FROM tbl_rfq_purchase_order
               WHERE id = $1`,
               [result.po_id]
             );
-  
+
             await sendApprovalNotification(
               purchaseOrder,
               result.current_approver_id
@@ -5541,25 +6231,24 @@ deleteDraft: async (req, res) => {
           return {
             reFinalized,
             result
-          }
+          };
         });
 
-        return res
-          .status(200)
-          .json({
-            status: 1,
-            message: response.reFinalized
-              ? 'Another vendor has been finalized, both vendors has been notified!'
-              : 'Vendor has been finalized and notified!',
-            data: response.result,
-            isRefinalized: response.reFinalized
-          })
+        return res.status(200).json({
+          status: 1,
+          message: response.reFinalized
+            ? 'Another vendor has been finalized, both vendors has been notified!'
+            : 'Vendor has been finalized and notified!',
+          data: response.result,
+          isRefinalized: response.reFinalized
+        });
       } else {
         res
           .status(400)
           .json({
             status: 3,
-            message: "Required fields are not present for vendors, aborting finalization."
+            message:
+              'Required fields are not present for vendors, aborting finalization.'
           })
           .end();
       }
@@ -5583,9 +6272,13 @@ deleteDraft: async (req, res) => {
     try {
       // Skip processing for 'all'
       if (search_key === 'all') {
-        const productResult = await rfqModel.searchProduct(search_key, category_id, approved_by_id);
+        const productResult = await rfqModel.searchProduct(
+          search_key,
+          category_id,
+          approved_by_id
+        );
         const categoryResult = await rfqModel.getCategoryList(search_key);
-        
+
         return res.status(200).json({
           status: 1,
           data: removeDuplicates(productResult),
@@ -5599,19 +6292,22 @@ deleteDraft: async (req, res) => {
 
       if (search_key.includes('-')) {
         const segments = search_key.split('-');
-        
+
         if (segments.length >= 2) {
           const lastSegment = segments[segments.length - 1];
           const stateResult = await cmsModel.findStateByName(lastSegment);
-          
+
           if (stateResult) {
             locationFilters.state_id = stateResult.id;
             locationFilters.country_id = stateResult.country_id;
-            
+
             if (segments.length >= 3) {
               const secondLastSegment = segments[segments.length - 2];
-              const cityResult = await cmsModel.findCityByNameAndState(stateResult.id, secondLastSegment);
-              
+              const cityResult = await cmsModel.findCityByNameAndState(
+                stateResult.id,
+                secondLastSegment
+              );
+
               if (cityResult) {
                 locationFilters.city_id = cityResult.id;
                 productSlug = segments.slice(0, -2).join('-');
@@ -5622,8 +6318,11 @@ deleteDraft: async (req, res) => {
               productSlug = segments.slice(0, -1).join('-');
             }
           } else {
-            const cityResult = await cmsModel.findCityByNameAndState(null, lastSegment);
-            
+            const cityResult = await cmsModel.findCityByNameAndState(
+              null,
+              lastSegment
+            );
+
             if (cityResult) {
               locationFilters.city_id = cityResult.id;
               locationFilters.state_id = cityResult.state_id;
@@ -5633,7 +6332,7 @@ deleteDraft: async (req, res) => {
           }
         }
       }
-      
+
       // // Default to India
       // if (!locationFilters.country_id) {
       //   const indiaResult = await cmsModel.findCountryByName('India');
@@ -5642,19 +6341,24 @@ deleteDraft: async (req, res) => {
       //   }
       // }
 
-      const productResult = await rfqModel.searchProduct(productSlug, category_id, approved_by_id, locationFilters);
+      const productResult = await rfqModel.searchProduct(
+        productSlug,
+        category_id,
+        approved_by_id,
+        locationFilters
+      );
       const categoryResult = await rfqModel.getCategoryList(productSlug);
 
       res.status(200).json({
-          status: 1,
+        status: 1,
         data: removeDuplicates(productResult),
-          categoryData: categoryResult
+        categoryData: categoryResult
       });
     } catch (error) {
       logError(error);
       res.status(400).json({
-          status: 3,
-          message: Config.errorText.value
+        status: 3,
+        message: Config.errorText.value
       });
     }
   },
@@ -5662,20 +6366,22 @@ deleteDraft: async (req, res) => {
     try {
       const category_id = req.body?.category_id ? req.body?.category_id : '';
 
-      const subCategoryList = await rfqModel.getSubcategories(category_id)
-   
-      if(!subCategoryList || subCategoryList?.length==0){
+      const subCategoryList = await rfqModel.getSubcategories(category_id);
+
+      if (!subCategoryList || subCategoryList?.length == 0) {
         return res
-        .status(404)
-        .json({
-          status: 3,
-          message: "Products Not Found for the requested category",
-          subCategoryList: subCategoryList,
-        })
-        .end();
+          .status(404)
+          .json({
+            status: 3,
+            message: 'Products Not Found for the requested category',
+            subCategoryList: subCategoryList
+          })
+          .end();
       }
 
-      const productList = await rfqModel.getProductsByCategories(subCategoryList)
+      const productList = await rfqModel.getProductsByCategories(
+        subCategoryList
+      );
 
       res
         .status(200)
@@ -5687,7 +6393,6 @@ deleteDraft: async (req, res) => {
           totalCategory: subCategoryList.length
         })
         .end();
-
     } catch (error) {
       logError(error);
       res
@@ -5705,7 +6410,6 @@ deleteDraft: async (req, res) => {
    * @last_changes - mukul 28-08-2025 without login senf 2 vendors details
    */
   searchVendor: async (req, res, next) => {
-
     // Extracting parameters from the request
 
     // const { search_key, category_id, approved_by_id, state, city } = req.query;
@@ -5719,7 +6423,7 @@ deleteDraft: async (req, res) => {
     let vendorType = '';
     let prevWorkedWith = '';
     let myVendorType = '';
-    const productMakes = req.body?.productMakes || [] 
+    const productMakes = req.body?.productMakes || [];
     search_key = req.body?.search_key ? req.body?.search_key : '';
     category_id = req.body?.category_id ? req.body?.category_id : '';
     approved_by_id = req.body?.approved_by_id ? req.body?.approved_by_id : '';
@@ -5731,13 +6435,22 @@ deleteDraft: async (req, res) => {
     prevWorkedWith = req.body?.prevWorkedWith ? req.body?.prevWorkedWith : '';
     myVendorType = req.body?.myVendorType ? req.body?.myVendorType : '';
     let vendor_name = req.body.vendor_name;
-    
+
     // If user is not logged in
     if (!req.is_verified) {
       try {
-
         // Call the searchVendor method
-        const vendorResult = await rfqModel.searchVendorWithoutLogin(search_key, category_id, approved_by_id, state, city, country, turnOver, vendorType, prevWorkedWith);
+        const vendorResult = await rfqModel.searchVendorWithoutLogin(
+          search_key,
+          category_id,
+          approved_by_id,
+          state,
+          city,
+          country,
+          turnOver,
+          vendorType,
+          prevWorkedWith
+        );
         // console.log(vendorResult);
 
         // Check if vendorResult is not empty and has the expected structure
@@ -5760,7 +6473,7 @@ deleteDraft: async (req, res) => {
             total: 0,
             message: 'No vendor found matching the criteria',
             logged_In: false,
-            subscription: false,
+            subscription: false
           });
         }
       } catch (error) {
@@ -5770,15 +6483,13 @@ deleteDraft: async (req, res) => {
         res.status(500).json({
           success: false,
           message: 'An error occurred while searching for the vendor',
-          error: error.message,
+          error: error.message
         });
       }
     } else {
-
       // if user is not logged!
       let user = req.user;
       if (user && user.user_type != 3) {
-
         try {
           const vendorResult = await rfqModel.searchVendor(
             req.user.id,
@@ -5793,7 +6504,7 @@ deleteDraft: async (req, res) => {
             prevWorkedWith,
             vendor_name,
             myVendorType,
-            "", // responseKeys : function accepting this - need to recheck it's use and remove it if not required 
+            '', // responseKeys : function accepting this - need to recheck it's use and remove it if not required
             productMakes
           );
 
@@ -5812,9 +6523,7 @@ deleteDraft: async (req, res) => {
             )
               .then((result) => {
                 shuffleArray(result);
-                Array.apply(null, { length: rest_items }).map((item) => {
-
-                });
+                Array.apply(null, { length: rest_items }).map((item) => {});
 
                 res
                   .status(200)
@@ -5831,7 +6540,9 @@ deleteDraft: async (req, res) => {
                 console.error('Error inserting data:', error);
               });
           } else {
-            Promise.all(vendorResult.map((item) => getVendorDetails(item, true)))
+            Promise.all(
+              vendorResult.map((item) => getVendorDetails(item, true))
+            )
               .then((result) => {
                 // shuffleArray(result);
                 res
@@ -5875,16 +6586,16 @@ deleteDraft: async (req, res) => {
       const result = await rfqModel.fetchVendorTypes();
       return res.status(200).json({
         status: 1,
-        data: result?.[0]?.nature_of_business_options ?? [],
+        data: result?.[0]?.nature_of_business_options ?? []
       });
     } catch (error) {
       logError(error);
-        // Error handling and response
-        res.status(500).json({
-          success: false,
-          message: 'An error occurred while fetching vendor types',
-          error: error.message,
-        });
+      // Error handling and response
+      res.status(500).json({
+        success: false,
+        message: 'An error occurred while fetching vendor types',
+        error: error.message
+      });
     }
   },
 
@@ -7188,10 +7899,20 @@ deleteDraft: async (req, res) => {
     }
   },
 
-  processRfqDraftSheetWise: async (processedUrl, user, rfqId = null, sheetId = null, availableSheets) => {
+  processRfqDraftSheetWise: async (
+    processedUrl,
+    user,
+    rfqId = null,
+    sheetId = null,
+    availableSheets
+  ) => {
     try {
-      
-      if (rfqId && !isNaN(parseInt(rfqId)) && sheetId && !isNaN(parseInt(sheetId))) {
+      if (
+        rfqId &&
+        !isNaN(parseInt(rfqId)) &&
+        sheetId &&
+        !isNaN(parseInt(sheetId))
+      ) {
         let rfqDetails = await rfqModel.checkIfExists(
           'tbl_rfq',
           `id = ${rfqId}`
@@ -7202,60 +7923,69 @@ deleteDraft: async (req, res) => {
             'tbl_rfq_draft_sheets',
             `rfq_id = ${rfqId} AND id = ${sheetId}`
           );
-          if(sheetDetails) {
+          if (sheetDetails) {
             sheetDetails = sheetDetails[0];
             processedUrl = sheetDetails.processed_url;
-          } else
-            processedUrl = rfqDetails.processed_url;
+          } else processedUrl = rfqDetails.processed_url;
 
           if (!processedUrl)
-            throw new Error('Processed URL does not exist for given Sheet OR RFQ')
+            throw new Error(
+              'Processed URL does not exist for given Sheet OR RFQ'
+            );
         }
       }
 
-      if (process.env.NODE_ENV=='uat' &&  processedUrl.startsWith('http:')) {
+      if (process.env.NODE_ENV == 'uat' && processedUrl.startsWith('http:')) {
         processedUrl = processedUrl.replace('http:', 'https:');
       }
-  
+
       const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
 
       const termList = await rfqModel.getAllTerms();
-      const transformedTermList = termList.map(term => ({ id: term.id, name: term.term_content }));
-  
+      const transformedTermList = termList.map((term) => ({
+        id: term.id,
+        name: term.term_content
+      }));
+
       const validationErrors = [];
       const products = [];
       const sheetNameList = new Set();
       const globalVariantCount = {};
 
       const allVariantsCount = await rfqModel.getVariantsCountForRFQ(rfqId);
-      if(allVariantsCount && allVariantsCount.length > 0) {
-        allVariantsCount.forEach(variantCount => {
+      if (allVariantsCount && allVariantsCount.length > 0) {
+        allVariantsCount.forEach((variantCount) => {
           const productId = variantCount.product_variant_id;
           const maxVariant = variantCount.max_variant;
 
           globalVariantCount[productId] = maxVariant + 1;
-        })
+        });
       }
-  
-      const allProductIds = boqDataJson.map(item => item.variant_id).filter(item => typeof item == 'number' || typeof item == 'string');
-  
+
+      const allProductIds = boqDataJson
+        .map((item) => item.variant_id)
+        .filter((item) => typeof item == 'number' || typeof item == 'string');
+
       const uniqueProductIds = [...new Set(allProductIds)];
       const existingProducts = await rfqModel.checkIfExists(
         'tbl_product',
         `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
       );
-      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
-  
+      const existingProductIdSet = new Set(existingProducts.map((p) => p.id));
+
       const vendorCache = {};
-  
+
       for (const item of boqDataJson) {
-        if (item.is_product == "No") {
-          continue
-       }
+        if (item.is_product == 'No') {
+          continue;
+        }
 
         const cleanId = item?.variant_id;
-        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
-  
+        const productName =
+          item.core_product_name ||
+          item.fetched_product_name ||
+          'Unknown Product';
+
         if (!cleanId || item.fetched_product_name === 'Product not found') {
           validationErrors.push({
             errors: { product: `${productName} - Product not found` },
@@ -7265,13 +7995,15 @@ deleteDraft: async (req, res) => {
             unit: item.unit || '',
             sheet_name: item.sheet_name || '',
             description: item.full_product_description || '',
-            similar_products: item.reranked_variants || [],
+            similar_products: item.reranked_variants || []
           });
           continue;
         }
-  
-        const validProductId = existingProductIdSet.has(cleanId) ? cleanId : null;
-  
+
+        const validProductId = existingProductIdSet.has(cleanId)
+          ? cleanId
+          : null;
+
         if (!validProductId) {
           validationErrors.push({
             errors: { product: `${productName} - Product not found` },
@@ -7281,12 +8013,13 @@ deleteDraft: async (req, res) => {
             unit: item.unit || '',
             sheet_name: item.sheet_name || '',
             description: item.full_product_description || '',
-            similar_products: item.reranked_variants || [],
+            similar_products: item.reranked_variants || []
           });
           continue;
         }
-  
-        const finalProductName = item.fetched_product_name || item.core_product_name;
+
+        const finalProductName =
+          item.fetched_product_name || item.core_product_name;
 
         if (!vendorCache[validProductId]) {
           const vendors = await rfqModel.genericSearchVendors(
@@ -7297,54 +8030,55 @@ deleteDraft: async (req, res) => {
           );
           vendorCache[validProductId] = vendors;
         }
-  
+
         const vendorResult = vendorCache[validProductId];
-  
+
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             errors: {
-              vendor: `${finalProductName} - No Vendors Found` },
+              vendor: `${finalProductName} - No Vendors Found`
+            },
             name: finalProductName,
             size: item.size || '',
             quantity: item.quantity || '',
             unit: item.unit || '',
             sheet_name: item.sheet_name || '',
             description: item.full_product_description || '',
-            similar_products: item.reranked_variants || [],
+            similar_products: item.reranked_variants || []
           });
           continue;
         }
-  
+
         const variantCount = globalVariantCount[validProductId] ?? 0;
-  
+
         products.push({
           product_id: validProductId,
-          name: finalProductName || "Unnamed Product",
+          name: finalProductName || 'Unnamed Product',
           variant: variantCount,
           spec: [
-            { title: "Size", value: item.size || "" },
-            { title: "Spec", value: item.feature_or_specifications || "" },
-            { title: "Quantity", value: item.quantity || 0 },
-            { title: "Unit", value: item.unit || "NA" },
-            { title: "total_price", value: item.total_price || "0" }
+            { title: 'Size', value: item.size || '' },
+            { title: 'Spec', value: item.feature_or_specifications || '' },
+            { title: 'Quantity', value: item.quantity || 0 },
+            { title: 'Unit', value: item.unit || 'NA' },
+            { title: 'total_price', value: item.total_price || '0' }
           ],
           vendors: vendorResult,
-          comment: item.full_product_description || "",
-          defaultSelectedVAB: "",
-          datasheet: "0",
+          comment: item.full_product_description || '',
+          defaultSelectedVAB: '',
+          datasheet: '0',
           datasheet_file: [],
           spec_file: [],
-          qap: "0",
+          qap: '0',
           qap_file: [],
           user_selected_predefined_tds: false,
           user_selected_predefined_qap: false,
-          sheet_name: item.sheet_name || "",
+          sheet_name: item.sheet_name || ''
         });
-  
+
         globalVariantCount[validProductId] = variantCount + 1;
-        sheetNameList.add(item.sheet_name || "");
+        sheetNameList.add(item.sheet_name || '');
       }
-  
+
       const finalObject = {
         response_email: user.email,
         contact_name: user.name,
@@ -7354,22 +8088,33 @@ deleteDraft: async (req, res) => {
         terms: transformedTermList,
         termList,
         term_and_condition_files: [],
-        sheetNameList: (availableSheets && availableSheets.length > 0) ? availableSheets.map(sheet => sheet.sheet_name) : Array.from(sheetNameList),
+        sheetNameList:
+          availableSheets && availableSheets.length > 0
+            ? availableSheets.map((sheet) => sheet.sheet_name)
+            : Array.from(sheetNameList),
         availableSheets,
-        validationErrors,
+        validationErrors
       };
 
       // Send email notification for products or vendors not found
-      const hasProductNotFound = validationErrors.some(err => err.errors && err.errors.product);
-      const hasVendorNotFound = validationErrors.some(err => err.errors && err.errors.vendor);
+      const hasProductNotFound = validationErrors.some(
+        (err) => err.errors && err.errors.product
+      );
+      const hasVendorNotFound = validationErrors.some(
+        (err) => err.errors && err.errors.vendor
+      );
 
       // Comment if not needed
-      const uniqueErrors = validationErrors.filter((err, index, self) => 
-        index === self.findIndex(e => 
-          (e.errors?.product === err.errors?.product) && 
-          (e.errors?.vendor === err.errors?.vendor) && 
-          ((e.name || e.productName || '') === (err.name || err.productName || ''))
-        )
+      const uniqueErrors = validationErrors.filter(
+        (err, index, self) =>
+          index ===
+          self.findIndex(
+            (e) =>
+              e.errors?.product === err.errors?.product &&
+              e.errors?.vendor === err.errors?.vendor &&
+              (e.name || e.productName || '') ===
+                (err.name || err.productName || '')
+          )
       );
       if (hasProductNotFound || hasVendorNotFound) {
         try {
@@ -7379,7 +8124,9 @@ deleteDraft: async (req, res) => {
             <p>Needs to work on these missing products or Vendors urgently.</p>
             <p><strong>RFQ Number:</strong> ${rfqNumber}</p>
             <p><strong>User:</strong> ${user.name} (${user.email})</p>
-            <p><strong>Organization:</strong> ${user.organization_name || 'N/A'}</p> 
+            <p><strong>Organization:</strong> ${
+              user.organization_name || 'N/A'
+            }</p> 
             <h3>Details:</h3>
             <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; width: 100%;">
               <thead>
@@ -7390,8 +8137,13 @@ deleteDraft: async (req, res) => {
               </thead>
               <tbody>
           `;
-          uniqueErrors.forEach(err => {
-            let errorType = err.errors && err.errors.product ? 'Product Not Found' : (err.errors && err.errors.vendor ? 'Vendor Not Found' : 'Other');
+          uniqueErrors.forEach((err) => {
+            let errorType =
+              err.errors && err.errors.product
+                ? 'Product Not Found'
+                : err.errors && err.errors.vendor
+                ? 'Vendor Not Found'
+                : 'Other';
             let productName = err.name || err.productName || '';
             emailContent += `
               <tr>
@@ -7405,13 +8157,17 @@ deleteDraft: async (req, res) => {
             </table>
             <p><em>This email was automatically generated by WorkWise RFQ processing system.</em></p>
           `;
-          
+
           const mailOptions = {
             from: Config.webmasterMail,
             // to:'mukul@letsworkwise.com',
             // cc:'vineet@letsworkwise.com',
             to: 'siddharth@letsworkwise.com',
-            cc: ['sayankaworkwise@gmail.com', 'prashant@letsworkwise.com', 'mukul@letsworkwise.com'],
+            cc: [
+              'sayankaworkwise@gmail.com',
+              'prashant@letsworkwise.com',
+              'mukul@letsworkwise.com'
+            ],
             subject: `Workwise Magic Search - Product And Vendor Not Found Error List`,
             html: emailContent
           };
@@ -7420,6 +8176,115 @@ deleteDraft: async (req, res) => {
           logError('Error sending product/vendor not found email:', emailError);
         }
       }
+
+      return [uniqueErrors, finalObject];
+    } catch (error) {
+      logError(error);
+      return [null, null];
+    }
+  },
+
+  getCostEstimates: async (processedUrl) => {
+    try {
+
+      if (process.env.NODE_ENV=='uat' &&  processedUrl.startsWith('http:')) {
+        processedUrl = processedUrl.replace('http:', 'https:');
+      }
+  
+      const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
+  
+      const validationErrors = [];
+      const products = [];
+      const sheetNameList = new Set();
+      const globalVariantCount = {};
+  
+      const allProductIds = boqDataJson.map(item => item.variant_id).filter(item => typeof item == 'number' || typeof item == 'string');
+  
+      const uniqueProductIds = [...new Set(allProductIds)];
+      const existingProducts = await rfqModel.checkIfExists(
+        'tbl_product',
+        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+      );
+      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
+  
+      const quoteCache = {};
+  
+      for (const item of boqDataJson) {
+        if (item.is_product == "No") {
+          continue
+       }
+
+        const cleanId = item?.variant_id;
+        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
+  
+        if (!cleanId || item.fetched_product_name === 'Product not found') {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const validProductId = existingProductIdSet.has(cleanId) ? cleanId : null;
+  
+        if (!validProductId) {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const finalProductName = item.fetched_product_name || item.core_product_name;
+
+        if (!quoteCache[validProductId]) {
+          const quotes = await rfqModel.getEstimateQuotes(
+            validProductId,
+          );
+          quoteCache[validProductId] = quotes;
+        }
+  
+        const quotesResult = quoteCache[validProductId];
+  
+        if (!quotesResult || quotesResult.length === 0) {
+          validationErrors.push({
+            errors: {
+              quote: `${finalProductName} - No Quotes Found` },
+            name: finalProductName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const variantCount = globalVariantCount[validProductId] ?? 0;
+  
+        products.push({
+          product_id: validProductId,
+          name: finalProductName || "Unnamed Product",
+          variant: variantCount,
+          quantity: item.quantity,
+          quotes: quotesResult,
+        });
+  
+        globalVariantCount[validProductId] = variantCount + 1;
+        sheetNameList.add(item.sheet_name || "");
+      }
+  
+      const finalObject = {
+        products,
+        validationErrors,
+      };
+
+      // Comment if not needed
+      const uniqueErrors = validationErrors.filter((err, index, self) => 
+        index === self.findIndex(e => 
+          (e.errors?.product === err.errors?.product) && 
+          (e.errors?.quote === err.errors?.quote) && 
+          ((e.name || e.productName || '') === (err.name || err.productName || ''))
+        )
+      );
 
       return [uniqueErrors, finalObject];
     }
@@ -7544,10 +8409,11 @@ deleteDraft: async (req, res) => {
       const { id } = req.user;
       const { file_name, type = 'rfq', raw_file_url } = req.body;
 
-      if(!file_name) return res.status(400).json({
-        status: 3,
-        message: 'File name is required for persistant processing.'
-      })
+      if (!file_name)
+        return res.status(400).json({
+          status: 3,
+          message: 'File name is required for persistant processing.'
+        });
 
       const result = await rfqController.handleMagicSearchInsertion(file_name, type, id, raw_file_url);
 
@@ -7575,8 +8441,13 @@ deleteDraft: async (req, res) => {
         const nowIst = moment().tz('Asia/Kolkata');
 
         const diffInHours = nowIst.diff(inputIstMoment, 'hours', true);
-        if(diffInHours > 1) {
-          await rfqModel.updatePersistenceJobStatus(processing.id, PERSISTENCE_STATUSES.TERMINATED, null, 'Due to a longer processing time, we have terminated this BOQ Processing, please upload this BOQ again to retry the processing');
+        if (diffInHours > 1) {
+          await rfqModel.updatePersistenceJobStatus(
+            processing.id,
+            PERSISTENCE_STATUSES.TERMINATED,
+            null,
+            'Due to a longer processing time, we have terminated this BOQ Processing, please upload this BOQ again to retry the processing'
+          );
         } else {
           return {
             status: 5,
@@ -7585,12 +8456,12 @@ deleteDraft: async (req, res) => {
           }
         }
       }
-      
+
       const baseUrl = process.env.APP_BASE_PATH;
       const secret = process.env.WEBHOOK_SECRET;
       const expires = Math.floor(Date.now() / 1000) + 12 * 60 * 60;
-      
-      const message = `${file_name}_${id}_${expires}`
+
+      const message = `${file_name}_${id}_${expires}`;
       const signature = generateSignature(message, secret);
 
       return db.tx(async t => {
@@ -7602,7 +8473,7 @@ deleteDraft: async (req, res) => {
             message: 'Something went wrong while saving job, please try again!'
           }
         }
-  
+
         persistence = persistence[0];
   
         const signedUrl = `${baseUrl}/api/v1/rfq/magic-webhook?persistence_id=${
@@ -7640,7 +8511,7 @@ deleteDraft: async (req, res) => {
         return res.json({
           status: 2,
           message: 'Webhook triggered, errors handled!'
-        })
+        });
       }
 
       if (type == 'simplified') {
@@ -7649,7 +8520,7 @@ deleteDraft: async (req, res) => {
           PERSISTENCE_STATUSES.COMPLETED,
           null,
           errors ? normalizeErrors({ type: 'ai-error', actual: errors }) : null,
-          jsonFileUrl,
+          jsonFileUrl
         );
       } else if (type == 'rfq') {
         const response = await rfqController.magicSearchRfqCreate(
@@ -7671,25 +8542,6 @@ deleteDraft: async (req, res) => {
         } else {
           throw new Error(response.error || 'Magic search failed to be saved in the Database, please try again after some time...')
         }
-      } else if (type == 'cost-estimation') {
-        const response = await rfqController.createCostEstimation(
-          jsonFileUrl,
-          user
-        );
-        if (response.success) {
-          await rfqModel.updatePersistenceJobStatus(
-            persistence_id,
-            (response.validation_errors ?? []).length > 0
-              ? PERSISTENCE_STATUSES.PARTIAL_COMPLETED
-              : PERSISTENCE_STATUSES.COMPLETED,
-            response.saveEstimate,
-            (response.validation_errors ?? []).length > 0 ? normalizeErrors({ type: 'ai-error', actual: response.validation_errors }) : null,
-            jsonFileUrl,
-          );
-
-        } else {
-          throw new Error(response.error || 'Magic search failed to be saved in the Database, please try again after some time...')
-        }
       } else {
         await rfqModel.updatePersistenceJobStatus(
           persistence_id,
@@ -7697,10 +8549,13 @@ deleteDraft: async (req, res) => {
           null,
           normalizeErrors({
             type: 'db-error',
-            actual: [{
-              status: 'failed',
-              error: 'Something went wrong while saving RFQ in the Database, please try again!',
-            }]
+            actual: [
+              {
+                status: 'failed',
+                error:
+                  'Something went wrong while saving RFQ in the Database, please try again!'
+              }
+            ]
           })
         );
       }
@@ -7708,7 +8563,7 @@ deleteDraft: async (req, res) => {
       return res.json({
         status: 1,
         message: 'Webhook triggered!'
-      })
+      });
     } catch (error) {
       const { persistence_id } = req.query;
       await rfqModel.updatePersistenceJobStatus(persistence_id, PERSISTENCE_STATUSES.FAILED, null, normalizeErrors({
@@ -7719,7 +8574,6 @@ deleteDraft: async (req, res) => {
         }]
       }));
 
-      logError(error);
       return res.status(400).json({
         status: 3,
         message: 'Something went wrong while handling AI Webhook, please try again!',
@@ -7727,8 +8581,117 @@ deleteDraft: async (req, res) => {
       })
     }
   },
+   getCostEstimates: async (processedUrl) => {
+    try {
 
-  getCostEstimatesData: async (req, res) => {
+      if (process.env.NODE_ENV=='uat' &&  processedUrl.startsWith('http:')) {
+        processedUrl = processedUrl.replace('http:', 'https:');
+      }
+  
+      const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
+  
+      const validationErrors = [];
+      const products = [];
+      const sheetNameList = new Set();
+      const globalVariantCount = {};
+  
+      const allProductIds = boqDataJson.map(item => item.variant_id).filter(item => typeof item == 'number' || typeof item == 'string');
+  
+      const uniqueProductIds = [...new Set(allProductIds)];
+      const existingProducts = await rfqModel.checkIfExists(
+        'tbl_product',
+        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+      );
+      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
+  
+      const quoteCache = {};
+  
+      for (const item of boqDataJson) {
+        if (item.is_product == "No") {
+          continue
+       }
+
+        const cleanId = item?.variant_id;
+        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
+  
+        if (!cleanId || item.fetched_product_name === 'Product not found') {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const validProductId = existingProductIdSet.has(cleanId) ? cleanId : null;
+  
+        if (!validProductId) {
+          validationErrors.push({
+            errors: { product: `${productName} - Product not found` },
+            name: productName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const finalProductName = item.fetched_product_name || item.core_product_name;
+
+        if (!quoteCache[validProductId]) {
+          const quotes = await rfqModel.getEstimateQuotes(
+            validProductId,
+          );
+          quoteCache[validProductId] = quotes;
+        }
+  
+        const quotesResult = quoteCache[validProductId];
+  
+        if (!quotesResult || quotesResult.length === 0) {
+          validationErrors.push({
+            errors: {
+              quote: `${finalProductName} - No Quotes Found` },
+            name: finalProductName,
+            quantity: item.quantity || '',
+          });
+          continue;
+        }
+  
+        const variantCount = globalVariantCount[validProductId] ?? 0;
+  
+        products.push({
+          product_id: validProductId,
+          name: finalProductName || "Unnamed Product",
+          variant: variantCount,
+          quantity: item.quantity,
+          quotes: quotesResult,
+        });
+  
+        globalVariantCount[validProductId] = variantCount + 1;
+        sheetNameList.add(item.sheet_name || "");
+      }
+  
+      const finalObject = {
+        products,
+        validationErrors,
+      };
+
+      // Comment if not needed
+      const uniqueErrors = validationErrors.filter((err, index, self) => 
+        index === self.findIndex(e => 
+          (e.errors?.product === err.errors?.product) && 
+          (e.errors?.quote === err.errors?.quote) && 
+          ((e.name || e.productName || '') === (err.name || err.productName || ''))
+        )
+      );
+
+      return [uniqueErrors, finalObject];
+    }
+    catch (error) {
+      logError(error);
+      return [null, null];
+    }
+  },
+
+   getCostEstimatesData: async (req, res) => {
     try {
       const { persistent_id } = req.params;
       const estimates = await rfqModel.getEstimatesData(persistent_id);
@@ -7744,7 +8707,8 @@ deleteDraft: async (req, res) => {
     }
   },
 
-  estimateCost: async (req, res) => {
+
+   estimateCost: async (req, res) => {
     try {
       const { email, phone, file_name, type } = req.body;
       let user = req.user ?? null;
@@ -7783,6 +8747,7 @@ deleteDraft: async (req, res) => {
       })
     }
   },
+
 
   tenderSummary : async (req , res) =>{
 
@@ -7851,26 +8816,71 @@ deleteDraft: async (req, res) => {
     try {
       let aiProcessedBoqJson = jsonFileUrl;
 
-      if(availableSheets && availableSheets.length > 0) {
-        aiProcessedBoqJson = availableSheets[0]?.download_url ?? aiProcessedBoqJson
+      if (availableSheets && availableSheets.length > 0) {
+        aiProcessedBoqJson =
+          availableSheets[0]?.download_url ?? aiProcessedBoqJson;
       }
+
+      let user = await userModel.getUserById(user_id);
+      if (!user) throw new Error('User dont exist with id: ', user_id);
+
+      user = user[0];
+
+      const [validationErrors, processedData] =
+        await rfqController.processRfqDraftSheetWise(
+          aiProcessedBoqJson,
+          user,
+          null,
+          null,
+          availableSheets
+        );
+      if (!processedData && !validationErrors)
+        throw new Error('No Data processed!');
+
+      const savedRfq = await saveMagicSearchInDraft(
+        processedData,
+        user_id,
+        aiProcessedBoqJson
+      );
+      const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq);
+
+      return {
+        status: 1,
+        success: true,
+        savedRfq,
+        sheets,
+        data: processedData, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
+        validation_errors: validationErrors.length ? validationErrors : null
+      };
+    } catch (error) {
+      logError(error);
+      return {
+        success: false,
+        message:
+          'Magic search failed to complete the action, Please try again.',
+        error: error
+      };
+    }
+  },
+
+  createCostEstimation: async (jsonFileUrl, user_id) => {
+    try {
+      let aiProcessedBoqJson = jsonFileUrl;
   
       let user = await userModel.getUserById(user_id);
       if(!user) throw new Error('User dont exist with id: ', user_id);
 
       user = user[0];
 
-      const [validationErrors, processedData] = await rfqController.processRfqDraftSheetWise(aiProcessedBoqJson, user, null, null, availableSheets)
+      const [validationErrors, processedData] = await rfqController.getCostEstimates(aiProcessedBoqJson, user)
       if(!processedData && !validationErrors) throw new Error("No Data processed!")
 
-      const savedRfq = await saveMagicSearchInDraft(processedData, user_id, aiProcessedBoqJson)
-      const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq)
+      const saveEstimate = await saveEstimates(processedData, user_id)
   
       return {
         status: 1,
         success: true,
-        savedRfq,
-        sheets,
+        saveEstimate,
         data: processedData, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
         validation_errors: validationErrors.length ? validationErrors : null,
       };
@@ -7919,21 +8929,18 @@ deleteDraft: async (req, res) => {
 
   processMagicSearchDraft: async (req, res, next) => {
     try {
-      const {rfqId, sheetId} = req.query;
+      const { rfqId, sheetId } = req.query;
       const user = req.user;
 
-
-      if(!rfqId || isNaN(parseInt(rfqId))) {
-        
+      if (!rfqId || isNaN(parseInt(rfqId))) {
         return res.status(400).json({
           status: 0,
           success: false,
           message: 'RFQ Id is required to process a draft sheet!'
         });
       }
-      
-      if(!sheetId || isNaN(parseInt(sheetId))) {
-        
+
+      if (!sheetId || isNaN(parseInt(sheetId))) {
         return res.status(400).json({
           status: 0,
           success: false,
@@ -7941,9 +8948,20 @@ deleteDraft: async (req, res) => {
         });
       }
       try {
-        const [,processedData] = await rfqController.processRfqDraftSheetWise(null, user, rfqId, sheetId);
-        const savedRfq = await saveMagicSearchInDraft(processedData, req.user.id, null, rfqId, sheetId);
-        
+        const [, processedData] = await rfqController.processRfqDraftSheetWise(
+          null,
+          user,
+          rfqId,
+          sheetId
+        );
+        const savedRfq = await saveMagicSearchInDraft(
+          processedData,
+          req.user.id,
+          null,
+          rfqId,
+          sheetId
+        );
+
         const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq);
         return res.status(200).json({
           status: 1,
@@ -7965,7 +8983,8 @@ deleteDraft: async (req, res) => {
       return res.status(500).json({
         status: 0,
         success: false,
-        message: 'Failed to fetch drafted RFQ data, either the sheet id is invalid or this rfq is no longer available!',
+        message:
+          'Failed to fetch drafted RFQ data, either the sheet id is invalid or this rfq is no longer available!',
         error: error.message
       });
     }
@@ -7975,7 +8994,7 @@ deleteDraft: async (req, res) => {
     try {
       let { rfqId, sheetId } = req.query;
 
-      if(!rfqId || isNaN(parseInt(rfqId)) || parseInt(rfqId) < 0) {
+      if (!rfqId || isNaN(parseInt(rfqId)) || parseInt(rfqId) < 0) {
         return res.status(400).json({
           status: 0,
           success: false,
@@ -7985,11 +9004,11 @@ deleteDraft: async (req, res) => {
 
       // Convert to integers
       rfqId = parseInt(rfqId);
-      
+
       // Get sheets for this RFQ
       const sheets = await rfqModel.getSheetsForDraftRfq(rfqId);
 
-      if(!sheets || !sheets.length > 0) {
+      if (!sheets || !sheets.length > 0) {
         return res.status(200).json({
           status: 0,
           success: false,
@@ -7997,22 +9016,26 @@ deleteDraft: async (req, res) => {
           sheets: []
         });
       }
-      
+
       // Validate and select sheetId
-      if(!sheetId || isNaN(parseInt(sheetId)) || parseInt(sheetId) < 0) {
+      if (!sheetId || isNaN(parseInt(sheetId)) || parseInt(sheetId) < 0) {
         sheetId = sheets[0].id;
       } else {
         sheetId = parseInt(sheetId);
       }
 
       // Verify the sheet exists for this RFQ
-      let sheetData = await rfqModel.checkIfExists('tbl_rfq_draft_sheets', `rfq_id = ${rfqId} AND id = ${sheetId}`);
-      
-      if(!sheetData || !sheetData.length > 0) {
+      let sheetData = await rfqModel.checkIfExists(
+        'tbl_rfq_draft_sheets',
+        `rfq_id = ${rfqId} AND id = ${sheetId}`
+      );
+
+      if (!sheetData || !sheetData.length > 0) {
         return res.status(400).json({
           status: 0,
           success: false,
-          message: 'Sheet does not exist, either it is inactive or does not exist!',
+          message:
+            'Sheet does not exist, either it is inactive or does not exist!',
           sheets
         });
       }
@@ -8020,12 +9043,24 @@ deleteDraft: async (req, res) => {
       sheetData = sheetData[0];
 
       // Process unprocessed sheet if needed
-      if(!sheetData.is_processed) {
+      if (!sheetData.is_processed) {
         try {
-          const [,processedData] = await rfqController.processRfqDraftSheetWise(null, req.user, rfqId, sheetId);
-          await saveMagicSearchInDraft(processedData, req.user.id, null, rfqId, sheetId);
+          const [, processedData] =
+            await rfqController.processRfqDraftSheetWise(
+              null,
+              req.user,
+              rfqId,
+              sheetId
+            );
+          await saveMagicSearchInDraft(
+            processedData,
+            req.user.id,
+            null,
+            rfqId,
+            sheetId
+          );
         } catch (error) {
-          console.log(error)
+          console.log(error);
           return res.status(500).json({
             status: 0,
             success: false,
@@ -8038,7 +9073,7 @@ deleteDraft: async (req, res) => {
       // Get the data for this sheet
       try {
         const data = await rfqModel.getDraftRfqSheetWise(rfqId, sheetId);
-        
+
         return res.status(200).json({
           status: 1,
           success: true,
@@ -8059,7 +9094,8 @@ deleteDraft: async (req, res) => {
       return res.status(500).json({
         status: 0,
         success: false,
-        message: 'Failed to fetch drafted RFQ data, either the sheet id is invalid or this rfq is no longer available!',
+        message:
+          'Failed to fetch drafted RFQ data, either the sheet id is invalid or this rfq is no longer available!',
         error: error.message
       });
     }
@@ -8069,26 +9105,26 @@ deleteDraft: async (req, res) => {
     try {
       const { rfqId } = req.query;
 
-      if(!rfqId || isNaN(rfqId) || parseInt(rfqId) < 0) 
+      if (!rfqId || isNaN(rfqId) || parseInt(rfqId) < 0)
         return res.status(400).json({
           success: false,
-          message: 'RFQ id is invalid, please provide a valid RFQ id!',
+          message: 'RFQ id is invalid, please provide a valid RFQ id!'
         });
 
-      const sheets = await rfqModel.getSheetsForDraftRfq(rfqId)
+      const sheets = await rfqModel.getSheetsForDraftRfq(rfqId);
 
       return res.status(200).json({
         status: 1,
-        sheets,
+        sheets
       });
-
     } catch (error) {
-      console.log(error)
+      console.log(error);
       logError(error);
       return res.status(500).json({
         success: false,
-        message: 'Failed to fetch drafted RFQ data, either the sheet id is invalid or this rfq is no longer available!',
-        error: error.message,
+        message:
+          'Failed to fetch drafted RFQ data, either the sheet id is invalid or this rfq is no longer available!',
+        error: error.message
       });
     }
   },
@@ -8106,12 +9142,15 @@ deleteDraft: async (req, res) => {
       term_and_condition_files
     } = req.body;
 
-       // Determine the user ID to check based on the verification status
+    // Determine the user ID to check based on the verification status
     const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
 
     if (withoutLoginUserToken) {
       // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists("tbl_vendor_rfq_tokens_non_login", `token = '${withoutLoginUserToken}'`);
+      const tokenData = await rfqModel.checkIfExists(
+        'tbl_vendor_rfq_tokens_non_login',
+        `token = '${withoutLoginUserToken}'`
+      );
 
       if (!tokenData || tokenData.length === 0) {
         // Token is not valid
@@ -8125,7 +9164,10 @@ deleteDraft: async (req, res) => {
       }
 
       // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists("tbl_users", `id = ${tokenData[0].vendor_id}`);
+      const userData = await rfqModel.checkIfExists(
+        'tbl_users',
+        `id = ${tokenData[0].vendor_id}`
+      );
 
       if (!userData || userData.length === 0) {
         // User data is not valid
@@ -8146,9 +9188,7 @@ deleteDraft: async (req, res) => {
     const user = req.user;
 
     // Check if all required fields are present in each product
-    if (
-      !products.every((product) => product.product_id)
-    ) {
+    if (!products.every((product) => product.product_id)) {
       return res.status(400).json({
         message: 'Missing required fields in product items.',
         data: products
@@ -8168,20 +9208,36 @@ deleteDraft: async (req, res) => {
       // Get RFQ details to check dates
       const rfqDetails = await rfqModel.getRFQDetails(quoteExists[0].rfq_id);
       if (!rfqDetails || rfqDetails.length === 0) {
-        return res.status(404).json({ 
+        return res.status(404).json({
           status: 0,
-          message: 'RFQ not found!' 
+          message: 'RFQ not found!'
         });
       }
-      
+
       const now = new Date();
-      const bidEndDate = rfqDetails[0].bid_end_date ? new Date(rfqDetails[0].bid_end_date) : null;
-      const raStartDate = rfqDetails[0].ra_start_date ? new Date(rfqDetails[0].ra_start_date) : null;
-      const raEndDate = rfqDetails[0].ra_end_date ? new Date(rfqDetails[0].ra_end_date) : null;
+      const bidEndDate = rfqDetails[0].bid_end_date
+        ? new Date(rfqDetails[0].bid_end_date)
+        : null;
+      const raStartDate = rfqDetails[0].ra_start_date
+        ? new Date(rfqDetails[0].ra_start_date)
+        : null;
+      const raEndDate = rfqDetails[0].ra_end_date
+        ? new Date(rfqDetails[0].ra_end_date)
+        : null;
       const isReverseAuction = rfqDetails[0].reverse_auction === 1;
-      
+
       // Create end of day date for bid end date (to match frontend logic)
-      const bidEndDateEndOfDay = bidEndDate ? new Date(bidEndDate.getFullYear(), bidEndDate.getMonth(), bidEndDate.getDate(), 23, 59, 59, 999) : null;
+      const bidEndDateEndOfDay = bidEndDate
+        ? new Date(
+            bidEndDate.getFullYear(),
+            bidEndDate.getMonth(),
+            bidEndDate.getDate(),
+            23,
+            59,
+            59,
+            999
+          )
+        : null;
 
       // Check if RFQ is closed (highest priority)
       if (rfqDetails[0].status === 2) {
@@ -8192,7 +9248,12 @@ deleteDraft: async (req, res) => {
       }
 
       // Check if reverse auction is active (second priority)
-      const isReverseAuctionActive = isReverseAuction && raStartDate && raEndDate && now >= raStartDate && now <= raEndDate;
+      const isReverseAuctionActive =
+        isReverseAuction &&
+        raStartDate &&
+        raEndDate &&
+        now >= raStartDate &&
+        now <= raEndDate;
 
       // If reverse auction is active, allow quote submission
       if (isReverseAuctionActive) {
@@ -8201,7 +9262,10 @@ deleteDraft: async (req, res) => {
       // Otherwise check other conditions
       else {
         // Check if all products are finalized
-        const productsFinalized = await rfqModel.checkAllProductsFinalized(quoteExists[0].rfq_id, user.id);
+        const productsFinalized = await rfqModel.checkAllProductsFinalized(
+          quoteExists[0].rfq_id,
+          user.id
+        );
         if (productsFinalized) {
           return res.status(400).json({
             status: 3,
@@ -8214,7 +9278,7 @@ deleteDraft: async (req, res) => {
           // Different messages based on reverse auction status
           let message = 'Bidding Period has Ended';
 
-      if (isReverseAuction) {
+          if (isReverseAuction) {
             if (raEndDate && now > raEndDate) {
               message = 'Reverse Auction has Ended';
             } else if (raStartDate && now < raStartDate) {
@@ -8262,22 +9326,32 @@ deleteDraft: async (req, res) => {
         paymentTermAndCommentChanges = true;
       }
 
-            // Process each product in the request
-        const quoteItemChanges = await Promise.all(
-          products.map((product) => {
-            console.log("UPDATING: ", product);
-            if ((product.comment == "" && product.document_files?.length <= 0) && (product.unit_price=='' || product.unit_price==0)) {
+      // Process each product in the request
+      const quoteItemChanges = await Promise.all(
+        products
+          .map((product) => {
+            console.log('UPDATING: ', product);
+            if (
+              product.comment == '' &&
+              product.document_files?.length <= 0 &&
+              (product.unit_price == '' || product.unit_price == 0)
+            ) {
               return null;
             }
-            return rfqModel.updateQuoteItemWithHistory(quoteId, product,quoteExists[0]);
-          }).filter(Boolean)
-        );
+            return rfqModel.updateQuoteItemWithHistory(
+              quoteId,
+              product,
+              quoteExists[0]
+            );
+          })
+          .filter(Boolean)
+      );
 
-        console.log("QUOTE ITEM CHANGES: ", quoteItemChanges)
+      console.log('QUOTE ITEM CHANGES: ', quoteItemChanges);
 
       // Check if global terms & conditions file are uploaded
       if (term_and_condition_files && term_and_condition_files.length > 0) {
-        const global_files = term_and_condition_files.map(url => ({
+        const global_files = term_and_condition_files.map((url) => ({
           quote_id: quoteId,
           file_type: 'term_and_condition',
           file_url: url
@@ -8289,31 +9363,39 @@ deleteDraft: async (req, res) => {
 
       // delete payment terms list
       const deletedTerms = global_payment_term_list.deletedTerms || [];
-      if(deletedTerms.length>0){
-        await generalModel.deleteManyByIds("tbl_quotes_payment_terms", deletedTerms)
+      if (deletedTerms.length > 0) {
+        await generalModel.deleteManyByIds(
+          'tbl_quotes_payment_terms',
+          deletedTerms
+        );
       }
 
       // update payment terms list
       const updatedTerms = global_payment_term_list.updatedTerms || [];
-     if (updatedTerms.length>0) {
-       await generalModel.updateMany("tbl_quotes_payment_terms", updatedTerms, "id");
-     }
+      if (updatedTerms.length > 0) {
+        await generalModel.updateMany(
+          'tbl_quotes_payment_terms',
+          updatedTerms,
+          'id'
+        );
+      }
 
-      // insert new payment terms list       
+      // insert new payment terms list
       const createdTerms = global_payment_term_list?.createdTerms ?? [];
       if (createdTerms.length > 0) {
         const termsWithQuoteId = createdTerms.map(({ action, ...t }) => ({
           value: Number(t.value) || 0,
-          type: t.type || "advance",
+          type: t.type || 'advance',
           days: t.type === 'credit' && t.days != null ? Number(t.days) : null,
           comment: t.comment?.trim() || null,
           quote_id: quoteId,
-          created_by: user.id,
+          created_by: user.id
         }));
-        await generalModel.insertMany("tbl_quotes_payment_terms", termsWithQuoteId);
+        await generalModel.insertMany(
+          'tbl_quotes_payment_terms',
+          termsWithQuoteId
+        );
       }
-
-
 
       // Insert new document_files for each product if exists
       const fileUpdates = await Promise.all(
@@ -8322,21 +9404,26 @@ deleteDraft: async (req, res) => {
           const file_links = prodItem.document_files;
 
           if (file_links && file_links.length > 0) {
-            const file_records = file_links.map(link => ({
+            const file_records = file_links.map((link) => ({
               quote_item_id: quote_item.id,
-              file_type: "DOC",
+              file_type: 'DOC',
               file_url: link,
               created_at: new Date()
             }));
 
             if (file_records.length > 0) {
-              return rfqModel.insertArray(file_records, ['quote_item_id', 'file_type', 'file_url', 'created_at'], 'tbl_quote_item_files');
+              return rfqModel.insertArray(
+                file_records,
+                ['quote_item_id', 'file_type', 'file_url', 'created_at'],
+                'tbl_quote_item_files'
+              );
             }
           }
         })
       );
 
-      const anyQuoteChanged = fileUpdates || quoteItemChanges.some((result) => result.changed);
+      const anyQuoteChanged =
+        fileUpdates || quoteItemChanges.some((result) => result.changed);
       // const changedProducts = quoteItemChanges.filter((result) =>  result.changed);
       // console.log(" quoteItemChanges ", changedProducts)
 
@@ -8345,19 +9432,34 @@ deleteDraft: async (req, res) => {
         status = false;
       }
 
-      if(status){
-        const buyerDetails =  await rfqModel.getRFQCreatedBy(rfq_id) 
-        await sendRevisedQuotationEmailToVendor(buyerDetails, user, rfq_id, rfq_no)
-        await sendRevisedQuotationEmailToBuyer(buyerDetails, quoteItemChanges, user, rfq_id, rfq_no)
+      if (status) {
+        const buyerDetails = await rfqModel.getRFQCreatedBy(rfq_id);
+        await sendRevisedQuotationEmailToVendor(
+          buyerDetails,
+          user,
+          rfq_id,
+          rfq_no
+        );
+        await sendRevisedQuotationEmailToBuyer(
+          buyerDetails,
+          quoteItemChanges,
+          user,
+          rfq_id,
+          rfq_no
+        );
       }
 
       return res.status(200).json({
         status: status,
-        message: status ? 'Quote items updated successfully' : "No updates made as the quotes and global terms remain unchanged",
+        message: status
+          ? 'Quote items updated successfully'
+          : 'No updates made as the quotes and global terms remain unchanged',
         data: {
           quoteItems: quoteItemChanges,
           globalFilesAdded: fileUpdates,
-          globalTermComment: paymentTermAndCommentChanges ? "global comment and payment term is updated" : "global comment and payment term is remain unchanged"
+          globalTermComment: paymentTermAndCommentChanges
+            ? 'global comment and payment term is updated'
+            : 'global comment and payment term is remain unchanged'
         }
       });
     } catch (error) {
@@ -8368,13 +9470,12 @@ deleteDraft: async (req, res) => {
     }
   },
   productPriceStats: async (req, res, next) => {
-
     if (!req.is_verified) {
       res
         .status(400)
         .json({
           success: false,
-          message: 'you are not login',
+          message: 'you are not login'
         })
         .end();
     }
@@ -8391,13 +9492,18 @@ deleteDraft: async (req, res) => {
     }
 
     try {
-
-      const { search_key } = req.body
+      const { search_key } = req.body;
       const user_id = req.user.id;
 
       // find product price stats like, min, avg, max
-      const priceHistoryMarket = await rfqModel.productPriceStatsMarket(search_key);
-      const priceHistoryPersonal = await rfqModel.productPriceStatsLastQuoteAndFinilizeForUser(search_key, user_id);
+      const priceHistoryMarket = await rfqModel.productPriceStatsMarket(
+        search_key
+      );
+      const priceHistoryPersonal =
+        await rfqModel.productPriceStatsLastQuoteAndFinilizeForUser(
+          search_key,
+          user_id
+        );
 
       res
         .status(200)
@@ -8409,71 +9515,78 @@ deleteDraft: async (req, res) => {
           }
         })
         .end();
-
     } catch (error) {
       logError(error);
-      res
-        .status(500)
-        .json({
-          success: false,
-          message: 'error in finding product price stats',
-          error: error.message,
-        });
+      res.status(500).json({
+        success: false,
+        message: 'error in finding product price stats',
+        error: error.message
+      });
     }
-},
+  },
 
-sendQueryMessage: async (req, res) => {
-  const { rfq_id, receiver_id, message_text } = req.body;
-  const files = req.files;
-  const sender_id = req.user.id;
-  const sender_type = req.user.user_type;
+  sendQueryMessage: async (req, res) => {
+    const { rfq_id, receiver_id, message_text } = req.body;
+    const files = req.files;
+    const sender_id = req.user.id;
+    const sender_type = req.user.user_type;
 
-  try {
-    const data = {
-      rfq_id,
-      sender_id,
-      receiver_id,
-      sender_type,
-      message_text
-    };
+    try {
+      const data = {
+        rfq_id,
+        sender_id,
+        receiver_id,
+        sender_type,
+        message_text
+      };
 
-    const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
-    if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
+      const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+      if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
 
-    const rfqNumber = rfqDetails.rfq_no;
+      const rfqNumber = rfqDetails.rfq_no;
 
-    const result = await rfqModel.insertReturnId('tbl_query_messages', data);
-    const message_id = result[0].id;
+      const result = await rfqModel.insertReturnId('tbl_query_messages', data);
+      const message_id = result[0].id;
 
-    const filesData = files.map(file => ({
-      message_id: message_id,
-      file_name: file.originalname,
-      file_url: file.location
-    }));
-    // console.log("--------------------->filedata", filesData);
+      const filesData = files.map((file) => ({
+        message_id: message_id,
+        file_name: file.originalname,
+        file_url: file.location
+      }));
+      // console.log("--------------------->filedata", filesData);
 
-    if (filesData.length) await rfqModel.insertArray(filesData, ['message_id', 'file_name', 'file_url'], 'tbl_query_message_files');
+      if (filesData.length)
+        await rfqModel.insertArray(
+          filesData,
+          ['message_id', 'file_name', 'file_url'],
+          'tbl_query_message_files'
+        );
 
-    const sender_details = await userModel.user_profile_detail(sender_id);
-    const senderDetails = sender_details[0];
+      const sender_details = await userModel.user_profile_detail(sender_id);
+      const senderDetails = sender_details[0];
 
-    const receiver_details = await userModel.user_profile_detail(receiver_id);
-    if (receiver_details.length > 0) {
-      const receiverDetails = receiver_details[0];
-      const spocList = await vendorModel.getSpocDetails(receiver_id);
+      const receiver_details = await userModel.user_profile_detail(receiver_id);
+      if (receiver_details.length > 0) {
+        const receiverDetails = receiver_details[0];
+        const spocList = await vendorModel.getSpocDetails(receiver_id);
 
-
-      const headerContent = ` <div>
-           <h2>Hello ${receiverDetails?.organization_name || receiverDetails?.name} </h2>
+        const headerContent = ` <div>
+           <h2>Hello ${
+             receiverDetails?.organization_name || receiverDetails?.name
+           } </h2>
            </div>`;
 
-
-           const containerContent = `
+        const containerContent = `
               <div>
                 <div style="font-size:16px;">
-                  ${sender_type == 2 ?
-                   `${senderDetails?.organization_name || senderDetails?.name} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`:
-                    `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}` }
+                  ${
+                    sender_type == 2
+                      ? `${
+                          senderDetails?.organization_name ||
+                          senderDetails?.name
+                        } has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`
+                      : `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}`
+                  }
                 </div>
                               
                <h4> Query </h4>
@@ -8481,268 +9594,285 @@ sendQueryMessage: async (req, res) => {
                   ${message_text}
                 </blockquote>
               
-                <a href=${process.env.FRONT_END_WEBSITE}/dashboard/${sender_type == 2 ? "buyer" : "vendor"}/query?rfq_id=${rfq_id}&role=${sender_type == 2 ? "buyer" : "vendor"}
-                  style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+                <a href=${process.env.FRONT_END_WEBSITE}/dashboard/${
+          sender_type == 2 ? 'buyer' : 'vendor'
+        }/query?rfq_id=${rfq_id}&role=${sender_type == 2 ? 'buyer' : 'vendor'}
+                  style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                   Respond to Query
                 </a>
               
                 <p style="font-size:16px; text-align:center;">  
-                  ${sender_type == 2 ?
-                    "Your quick response can help avoid delays!" :
-                    "Thank you for helping ensure a smooth, transparent process."
+                  ${
+                    sender_type == 2
+                      ? 'Your quick response can help avoid delays!'
+                      : 'Thank you for helping ensure a smooth, transparent process.'
                   }
                 </p>
               </div>
               `;
 
-      const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
+        const dynamicHTML = generateEmailTemplate(
+          headerContent,
+          containerContent
+        );
 
-    const emailSubject = sender_type==3? `Vendor Query on Your RFQ #${rfqNumber}`:  `Buyer Query for #${rfqNumber} – Your Response Needed`
+        const emailSubject =
+          sender_type == 3
+            ? `Vendor Query on Your RFQ #${rfqNumber}`
+            : `Buyer Query for #${rfqNumber} – Your Response Needed`;
 
-    const mailRecipients = {
-      from: `${senderDetails?.organization_name || senderDetails?.name} ${Config.masterEmail}`,
-      subject: emailSubject,
-      html: dynamicHTML
-    };
-    
-    if (spocList && spocList.length > 0) {
-      mailRecipients.to = spocList.map(spoc => spoc.email);
-      mailRecipients.cc = receiverDetails.email;
-    } else {
-      mailRecipients.to = receiverDetails.email;
-    }
-    
-    sendMail(mailRecipients);
-    
-    const notificationData = {
-      type: 'New Message',
-      title: 'New RFQ Message Received',
-      message: `You have received a new message from ${senderDetails.name}.`,
-      additional_data: { user_type: receiverDetails.user_type }
-    };
-    const payload = {
-      title: `Hello ${receiverDetails.name}`,
-      body: 'You have a new message regarding an RFQ.'
-    };
-    const ss = JSON.parse(receiverDetails.endpoint);
-    sendNotification(receiver_id, '', notificationData, payload, ss);
-    
-    }
+        const mailRecipients = {
+          from: `${senderDetails?.organization_name || senderDetails?.name} ${
+            Config.masterEmail
+          }`,
+          subject: emailSubject,
+          html: dynamicHTML
+        };
 
-    res
-      .status(200)
-      .json({
-        status: 1,
-        data: {
-          message: 'Message sent successfully'
+        if (spocList && spocList.length > 0) {
+          mailRecipients.to = spocList.map((spoc) => spoc.email);
+          mailRecipients.cc = receiverDetails.email;
+        } else {
+          mailRecipients.to = receiverDetails.email;
         }
-      })
-      .end();
-  } catch (error) {
-    logError(error);
-    res
-      .status(500)
-      .json({
+
+        sendMail(mailRecipients);
+
+        const notificationData = {
+          type: 'New Message',
+          title: 'New RFQ Message Received',
+          message: `You have received a new message from ${senderDetails.name}.`,
+          additional_data: { user_type: receiverDetails.user_type }
+        };
+        const payload = {
+          title: `Hello ${receiverDetails.name}`,
+          body: 'You have a new message regarding an RFQ.'
+        };
+        const ss = JSON.parse(receiverDetails.endpoint);
+        sendNotification(receiver_id, '', notificationData, payload, ss);
+      }
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: {
+            message: 'Message sent successfully'
+          }
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
         success: false,
         message: 'Error in sending message',
-        error: error.message,
+        error: error.message
       });
-  }
-},
-sendBroadcastQueryMessageToVendors: async (req, res) => {
-  const { rfq_id, receiver_ids, message_text } = req.body;
-  const files = req.files;
-  const sender_id = req.user.id;
-  const sender_type = req.user.user_type;
+    }
+  },
+  sendBroadcastQueryMessageToVendors: async (req, res) => {
+    const { rfq_id, receiver_ids, message_text } = req.body;
+    const files = req.files;
+    const sender_id = req.user.id;
+    const sender_type = req.user.user_type;
 
-  try {
-    // Get RFQ and sender details (unchanged)
-    const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
-    if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
-    
-    const rfqNumber = rfqDetails.rfq_no;
-    const sender_details = await userModel.user_profile_detail(sender_id);
-    const senderDetails = sender_details[0];
+    try {
+      // Get RFQ and sender details (unchanged)
+      const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+      if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
 
-    // Prepare messages for bulk insert
-    const messagesData = receiver_ids.map(receiver => ({
-      rfq_id,
-      sender_id,
-      receiver_id: receiver.id,
-      sender_type,
-      message_text,
-      created_at: new Date()
-    }));
+      const rfqNumber = rfqDetails.rfq_no;
+      const sender_details = await userModel.user_profile_detail(sender_id);
+      const senderDetails = sender_details[0];
 
-    // Bulk insert messages
-    const insertedMessages = await rfqModel.insertArray(
-      messagesData, 
-      ['rfq_id', 'sender_id', 'receiver_id', 'sender_type', 'message_text', 'created_at'], 
-      'tbl_query_messages'
-    );
+      // Prepare messages for bulk insert
+      const messagesData = receiver_ids.map((receiver) => ({
+        rfq_id,
+        sender_id,
+        receiver_id: receiver.id,
+        sender_type,
+        message_text,
+        created_at: new Date()
+      }));
 
-    // Handle file attachments if present
-    if (files && files.length > 0) {
-      const filesData = [];
-      
-      insertedMessages.forEach(message => {
-        files.forEach(file => {
-          filesData.push({
-            message_id: message.id,
-            file_name: file.originalname,
-            file_url: file.location
+      // Bulk insert messages
+      const insertedMessages = await rfqModel.insertArray(
+        messagesData,
+        [
+          'rfq_id',
+          'sender_id',
+          'receiver_id',
+          'sender_type',
+          'message_text',
+          'created_at'
+        ],
+        'tbl_query_messages'
+      );
+
+      // Handle file attachments if present
+      if (files && files.length > 0) {
+        const filesData = [];
+
+        insertedMessages.forEach((message) => {
+          files.forEach((file) => {
+            filesData.push({
+              message_id: message.id,
+              file_name: file.originalname,
+              file_url: file.location
+            });
           });
         });
+
+        await rfqModel.insertArray(
+          filesData,
+          ['message_id', 'file_name', 'file_url'],
+          'tbl_query_message_files'
+        );
+      }
+
+      // Get all receiver details in one query
+      // const receiverDetails = await userModel.getUsersByIds(receiver_ids.map(r => r.id));
+
+      // Prepare notifications (if needed)
+      // const notifications = receiverDetails.map(receiver => ({
+      //   type: 'New Message',
+      //   title: 'New RFQ Message Received',
+      //   message: `You have received a new message from ${senderDetails.name}.`,
+      //   additional_data: { user_type: receiver.user_type }
+      // }));
+
+      // Bulk insert notifications if needed
+      // await notificationModel.insertArray(notifications, [...fields...], 'notifications_table');
+
+      res.status(200).json({
+        status: 1,
+        message: 'Broadcast message sent to all vendors successfully.'
+      });
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
+        success: false,
+        message: 'Error broadcasting message',
+        error: error.message
+      });
+    }
+  },
+  negotiatePrice: async (req, res) => {
+    const { productId, vendorIds, targetPrice } = req.body;
+    const user_id = req.user.id;
+    try {
+      // Create payload for multiple vendors
+      let payload = vendorIds.map((vendorId) => {
+        return {
+          tbl_rfq_product_id: productId,
+          target_price: targetPrice,
+          created_by: user_id,
+          vendor_id: vendorId
+        };
       });
 
-      await rfqModel.insertArray(
-        filesData,
-        ['message_id', 'file_name', 'file_url'],
-        'tbl_query_message_files'
+      // console.log("checking the payload here vendor ID", payload);
+
+      // Keys for pg-promise insert
+      const keys = [
+        'tbl_rfq_product_id',
+        'target_price',
+        'created_by',
+        'vendor_id'
+      ];
+      const vendorProductList =
+        await rfqModel.getRfqProductvendorsForTargetPrice(productId, vendorIds);
+
+      // Insert using insertArray helper
+      const result = await rfqModel.insertArray(
+        payload,
+        keys,
+        'tbl_rfq_product_target_price'
       );
-    }
 
-    // Get all receiver details in one query
-    // const receiverDetails = await userModel.getUsersByIds(receiver_ids.map(r => r.id));
+      console.log(
+        ' vendorProductList  , targetPrice , user_id ',
+        vendorProductList,
+        targetPrice,
+        user_id
+      );
 
-    // Prepare notifications (if needed)
-    // const notifications = receiverDetails.map(receiver => ({
-    //   type: 'New Message',
-    //   title: 'New RFQ Message Received',
-    //   message: `You have received a new message from ${senderDetails.name}.`,
-    //   additional_data: { user_type: receiver.user_type }
-    // }));
+      await sendMailToVendorsForTargetPrice(
+        vendorProductList,
+        targetPrice,
+        user_id
+      );
 
-    // Bulk insert notifications if needed
-    // await notificationModel.insertArray(notifications, [...fields...], 'notifications_table');
-
-    res.status(200).json({
-      status: 1,
-      message: 'Broadcast message sent to all vendors successfully.'
-    });
-  } catch (error) {
-    logError(error);
-    res.status(500).json({
-      success: false,
-      message: 'Error broadcasting message',
-      error: error.message
-    });
-  }
-},
-negotiatePrice : async (req, res ) => { 
-  const { productId, vendorIds, targetPrice } = req.body;
-  const user_id = req.user.id;
-  try {
-
-  // if (!rfq_product_id || !target_price) {
-  //   return res.status(400).json({
-  //     status: 0,
-  //     message: 'rfq_product_id and target_price are required'
-  //   });
-  // }
-  // const validate  = await rfqModel.checkIfExists('tbl_rfq_products', `id = ${rfq_product_id}`);
-
-  // if( !validate || validate.length === 0) {
-  //   return res.status(404).json({
-  //     status: 0,
-  //     message: 'RFQ Product not found'
-  //   });
-  // }
-
-  // Create payload for multiple vendors
-  let payload = vendorIds.map((vendorId) => {
-    return {
-      tbl_rfq_product_id: productId,
-      target_price: targetPrice,
-      created_by: user_id,
-      vendor_id: vendorId,
-    };
-  });
-
-  // console.log("checking the payload here vendor ID", payload);
-
-  // Keys for pg-promise insert
-  const keys = [
-    'tbl_rfq_product_id',
-    'target_price',
-    'created_by',
-    'vendor_id'
-  ];
-  const vendorProductList =  await rfqModel.getRfqProductvendorsForTargetPrice(productId,vendorIds); 
-
-  // Insert using insertArray helper
-  const result = await rfqModel.insertArray(
-    payload,
-    keys,
-    'tbl_rfq_product_target_price'
-  );
-
-  console.log(" vendorProductList  , targetPrice , user_id ", vendorProductList  , targetPrice , user_id)
-
-    await sendMailToVendorsForTargetPrice(vendorProductList  , targetPrice , user_id  );
-
-
-  res.json({
-    status: 1,
-    message: 'Target price(s) set successfully',
-    data: result
-  });
-
-} catch (error) {
-  console.error('Error setting target price:', error);
-  res.status(500).json({
-    status: 0,
-    message: 'Internal server error'
-  });
-}
-
-},
-
-getTargetPriceHistrory : async (req, res) => {
-  const { rfq_product_id } = req.params;
-  const limit = req.query.limit === "1" ? 1 : null;
-  const user_id = req.user.id;
-  try {
-    if (!rfq_product_id) {
-      return res.status(400).json({
+      res.json({
+        status: 1,
+        message: 'Target price(s) set successfully',
+        data: result
+      });
+    } catch (error) {
+      console.error('Error setting target price:', error);
+      res.status(500).json({
         status: 0,
-        message: 'rfq_product_id is required'
+        message: 'Internal server error'
       });
     }
-    const validate  = await rfqModel.checkIfExists('tbl_rfq_products', `id = ${rfq_product_id}`);
-    if( !validate || validate.length === 0) {
-      return res.status(404).json({
+  },
+
+  getTargetPriceHistrory: async (req, res) => {
+    const { rfq_product_id } = req.params;
+    const limit = req.query.limit === '1' ? 1 : null;
+    const user_id = req.user.id;
+    try {
+      if (!rfq_product_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'rfq_product_id is required'
+        });
+      }
+      const validate = await rfqModel.checkIfExists(
+        'tbl_rfq_products',
+        `id = ${rfq_product_id}`
+      );
+      if (!validate || validate.length === 0) {
+        return res.status(404).json({
+          status: 0,
+          message: 'RFQ Product not found'
+        });
+      }
+      const history = await rfqModel.getTargetPriceHistory(
+        rfq_product_id,
+        user_id,
+        limit
+      );
+      if (!history || history.length === 0) {
+        return res.status(404).json({
+          status: 0,
+          message: 'No target price history found for this RFQ product'
+        });
+      }
+      res.status(200).json({
+        status: 1,
+        message: 'Target price history retrieved successfully',
+        data: history
+      });
+    } catch (error) {
+      res.status(500).json({
         status: 0,
-        message: 'RFQ Product not found'
+        message: 'Error retrieving target price history',
+        error: error.message
       });
     }
-    const history = await rfqModel.getTargetPriceHistory(rfq_product_id, user_id, limit );
-    if (!history || history.length === 0) {
-      return res.status(404).json({
-        status: 0,
-        message: 'No target price history found for this RFQ product'
-      });
-    }
-    res.status(200).json({
-      status: 1,
-      message: 'Target price history retrieved successfully',
-      data: history
-    });
-  } catch (error) { 
-    res.status(500).json({
-      status: 0,
-      message: 'Error retrieving target price history',
-      error: error.message
-    });
-  }
-},
+  },
 
-listQueryMessages: async (req, res) => {
-  const { rfq_id, receiver_id } = req.body;
-  const sender_id = req.user.id;
+  listQueryMessages: async (req, res) => {
+    const { rfq_id, receiver_id } = req.body;
+    const sender_id = req.user.id;
 
-  try {
-      const messages = await rfqModel.getQueryMessages(rfq_id, sender_id, receiver_id);
+    try {
+      const messages = await rfqModel.getQueryMessages(
+        rfq_id,
+        sender_id,
+        receiver_id
+      );
       res
         .status(200)
         .json({
@@ -8750,72 +9880,86 @@ listQueryMessages: async (req, res) => {
           data: messages
         })
         .end();
-  } catch (error) {
-      logError(error);
-      res
-        .status(500)
-        .json({
-          success: false,
-          message: 'Error in listing messages for vendor',
-          error: error.message,
-        });
-  }
-},
-
-listQueries: async (req, res) => {
-  const { rfq_id, user_name } = req.body;
-  const user_id = req.user.id;
-  const user_type = req.user.user_type;
-
-  try {
-      let users;
-      
-      if ([2, 8, 9, 10].includes(user_type)) {
-          const vendorResult = await rfqModel.getVendorsForRfq(rfq_id, user_name);
-          users = vendorResult.map(row => row.user_id);
-      } else if (user_type === 3) {
-          const buyerResult = await rfqModel.getBuyerForRfq(rfq_id);
-          users = buyerResult.length ? [buyerResult[0].user_id] : [];
-      } else {
-          return res.status(400).json({
-              success: false,
-              message: 'Invalid user type'
-          });
-      }
-
-      const summaries = await Promise.all(users.map(async (other_user_id) => {
-          const summaryResult = await rfqModel.getQueryMessageSummary(rfq_id, user_id, other_user_id);
-          return {
-              user_id: other_user_id,
-              user_name: summaryResult[0]?.user_name || '',
-              company_name: summaryResult[0]?.company_name || '',
-              unseen_count: summaryResult[0]?.unseen_count || 0,
-              last_message: summaryResult[0]?.last_message || '',
-              last_message_timestamp: summaryResult[0]?.last_message_timestamp || null
-          };
-      }));
-
-    summaries.sort((a, b) => {
-        if (a.last_message_timestamp === null && b.last_message_timestamp === null) return 0;
-        if (a.last_message_timestamp === null) return 1;
-        if (b.last_message_timestamp === null) return -1;
-        return new Date(b.last_message_timestamp) - new Date(a.last_message_timestamp);
-    });
-
-      res.status(200).json({
-          status: 1,
-          data: summaries
-      }).end();
-
-  } catch (error) {
+    } catch (error) {
       logError(error);
       res.status(500).json({
-          success: false,
-          message: 'Error in listing queries for RFQ',
-          error: error.message
+        success: false,
+        message: 'Error in listing messages for vendor',
+        error: error.message
       });
-  }
-},
+    }
+  },
+
+  listQueries: async (req, res) => {
+    const { rfq_id, user_name } = req.body;
+    const user_id = req.user.id;
+    const user_type = req.user.user_type;
+
+    try {
+      let users;
+
+      if ([2, 8, 9, 10].includes(user_type)) {
+        const vendorResult = await rfqModel.getVendorsForRfq(rfq_id, user_name);
+        users = vendorResult.map((row) => row.user_id);
+      } else if (user_type === 3) {
+        const buyerResult = await rfqModel.getBuyerForRfq(rfq_id);
+        users = buyerResult.length ? [buyerResult[0].user_id] : [];
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid user type'
+        });
+      }
+
+      const summaries = await Promise.all(
+        users.map(async (other_user_id) => {
+          const summaryResult = await rfqModel.getQueryMessageSummary(
+            rfq_id,
+            user_id,
+            other_user_id
+          );
+          return {
+            user_id: other_user_id,
+            user_name: summaryResult[0]?.user_name || '',
+            company_name: summaryResult[0]?.company_name || '',
+            unseen_count: summaryResult[0]?.unseen_count || 0,
+            last_message: summaryResult[0]?.last_message || '',
+            last_message_timestamp:
+              summaryResult[0]?.last_message_timestamp || null
+          };
+        })
+      );
+
+      summaries.sort((a, b) => {
+        if (
+          a.last_message_timestamp === null &&
+          b.last_message_timestamp === null
+        )
+          return 0;
+        if (a.last_message_timestamp === null) return 1;
+        if (b.last_message_timestamp === null) return -1;
+        return (
+          new Date(b.last_message_timestamp) -
+          new Date(a.last_message_timestamp)
+        );
+      });
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: summaries
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
+        success: false,
+        message: 'Error in listing queries for RFQ',
+        error: error.message
+      });
+    }
+  },
 
 
 
@@ -8886,10 +10030,12 @@ addClauseUsingFile : async (req, res) => {
     // const result = await generativeAI.extractClauses(file, productName);
     const result = await extractDatasheetSummary(file);
 
-  const techEvaluationClauses = result?.structuredData.map(item => {
-    if(item.key && item.value) return `${item.key} - ${item.value}`
-    return JSON.stringify(item);
-  }).filter(Boolean);
+      const techEvaluationClauses = result?.structuredData
+        .map((item) => {
+          if (item.key && item.value) return `${item.key} - ${item.value}`;
+          return JSON.stringify(item);
+        })
+        .filter(Boolean);
 
     if (!result.status) {
       let userMessage = result.message || "Failed to extract information";
@@ -8924,659 +10070,747 @@ processBoqAndDownload : async (req, res) => {
 
     const response = await generativeAI.processBoqAndDownload(req.file);
 
-    res
-    .status(200)
-    .json({
-      status: 1,
-      data: response,
-      mail_sent: true
-    })
-    .end();
-    
-  } catch (error) {
-    logError(error);
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: response,
+          mail_sent: true
+        })
+        .end();
+    } catch (error) {
+      logError(error);
       res
         .status(400)
         .json({
           status: 3,
-          error:error,
+          error: error,
           message: Config.errorText.value
         })
         .end();
-  }
-},
-addClause: async (req, res) => {
-  try {
-    // console.log("add clause controller");
-    const { rfq_id,rfq_product_id, clause_text,file_url } = req.body;
-    // console.log("bodyy = ",req.body);
+    }
+  },
+  addClause: async (req, res) => {
+    try {
+      // console.log("add clause controller");
+      const { rfq_id, rfq_product_id, clause_text, file_url } = req.body;
+      // console.log("bodyy = ",req.body);
 
-    if (!rfq_id ||!rfq_product_id || !clause_text) {
-      return res.status(400).json({
-        status: 0,
-        message: "Invalid input. Ensure RFQ_ID, rfq_product_id and clauses are provided correctly.",
+      if (!rfq_id || !rfq_product_id || !clause_text) {
+        return res.status(400).json({
+          status: 0,
+          message:
+            'Invalid input. Ensure RFQ_ID, rfq_product_id and clauses are provided correctly.'
+        });
+      }
+      // Calling  the model function
+      // console.log("add clause controller working");
+
+      const result = await rfqModel.addClause(
+        rfq_id,
+        rfq_product_id,
+        clause_text,
+        file_url
+      );
+
+      res.status(200).json(result).end();
+    } catch (error) {
+      // console.log("controller error")
+      console.error('Error in addClause:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error in adding clauses to technical evaluation.',
+        error: error.message
       });
     }
-    // Calling  the model function
-    // console.log("add clause controller working");
+  },
 
-    const result = await rfqModel.addClause(rfq_id, rfq_product_id, clause_text,file_url );
+  updateClause: async (req, res) => {
+    try {
+      const { clause_id, clause_text, file_url } = req.body;
+      // console.log("data from update clause controller = ",clause_id,clause_text,file_url);
 
-    res.status(200).json(result).end();
-  } catch (error) {
-    // console.log("controller error")
-    console.error("Error in addClause:", error);
-    res.status(500).json({
-      success: false,
-      message: "Error in adding clauses to technical evaluation.",
-      error: error.message,
-    });
-  }
-},
+      const result = await rfqModel.updateClause(
+        clause_id,
+        clause_text,
+        file_url
+      );
 
-updateClause: async (req, res) => {
-  try {
-    const {clause_id, clause_text,file_url} = req.body;
-    // console.log("data from update clause controller = ",clause_id,clause_text,file_url);
-
-    const result = await rfqModel.updateClause(clause_id, clause_text,file_url);
-
-    res
-      .status(200)
-      .json(result)
-      .end();
-  } catch (error) {
-    logError(error);
-    res.status(500).json({
+      res.status(200).json(result).end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
         success: false,
         message: 'Error in updating technical evaluation clause.',
         error: error.message
-    });
-  }
-},
-
-removeClause: async (req, res) => {
-  try {
-    const clause_id = parseInt(req.params.id);
-
-    const result = await rfqModel.removeClause(clause_id);
-    // console.log("result of remove clause = ",result);
-
-    res
-      .status(200)
-      .json(result)
-      .end();
-  } catch (error) {
-    logError(error);
-    res.status(500).json({
-        success: false,
-        message: 'Error in deleting clause.',
-        error: error.message
-    });
-  }
-},
-
-getClauses: async (req, res) => {
-  try {
-    const rfq_id = req.params.id;
-
-    const result = await rfqModel.getClauses(rfq_id);
-    // console.log("Result main of get clauses = ",result);
-
-    console.log("ehckinh th evendor result",JSON.stringify(result));
-
-    res
-      .status(200)
-      .json(result)
-      .end();
-  } catch (error) {
-    logError(error);
-    res.status(500).json({
-        success: false,
-        message: 'Error in deleting clause.',
-        error: error.message
-    });
-  }
-},
-
-addTechComment: async (req, res) => {
-  try{
-    const { clause_id, sender_id, receiver_id, text, file_url } = req.body;
-
-    // Save tech comment 
-    const response = await rfqModel.addTechComment(clause_id, sender_id, receiver_id, text, file_url);
-    res
-      .status(200)
-      .json(response)
-      .end();
-  } catch (error) {
-    res.status(500).json({
-      status: 0,
-      message: "Error storing comment.",
-      error: error.message,
-    });
-  }
-},
-
-getTechComments: async (req, res) => {
-  try{
-    const { clause_id, sender_id, receiver_id } = req.body;
-    const user_id = req.user.id;
-    const user_type = req.user.user_type;
-
-    const response = await rfqModel.getTechComments(clause_id, sender_id, receiver_id, user_id, user_type);
-
-    res
-      .status(200)
-      .json(response)
-      .end();
-  } catch (error) {
-    res.status(500).json({
-      status: 0,
-      message: "Error storing comment.",
-      error: error.message,
-    });
-  }
-},
-getSummarisedDeviation: async (req, res) => {
-  try {
-    const { rfq_id } = req.body;
-    
-    if (!rfq_id) {
-      return res.status(400).json({
-        status: 0,
-        message: "rfq_id is required"
       });
     }
+  },
 
-    const result = await rfqModel.getSummarisedDeviation(rfq_id);
-    
-    if (!result || result.length === 0) {
-      return res.status(404).json({
-        status: 0,
-        message: "No deviations found for this RFQ"
-      });
-    }
-
-    const genresult = await generativeAI.summariseTechDeviation(result);
-    
-    // Parse the response in case it's returned as a string
-    let parsedResult;
+  removeClause: async (req, res) => {
     try {
-      parsedResult = typeof genresult === 'string' ? JSON.parse(genresult) : genresult;
-    } catch (parseError) {
-      console.error("Failed to parse Gemini response:", parseError);
-      throw new Error("Invalid response format from AI service");
-    }
+      const clause_id = parseInt(req.params.id);
 
-    res.status(200).json({
-      status: 1,
-      data: parsedResult,
-    });
+      const result = await rfqModel.removeClause(clause_id);
+      // console.log("result of remove clause = ",result);
 
-  } catch (error) {
-    console.error("Error in getSummarisedDeviation API:", error.message);
-    res.status(500).json({
-      status: 0,
-      message: "Error processing deviation summary",
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  }
-},
-
-
-addVendorResponse: async (req, res) => {
-  try {
-    const data = req.body;
-    // console.log("API Input: ", req.body);
-
-    // Validate input
-    if (!data) {
-      return res.status(400).json({
-        status: 0,
-        message: "Invalid input. Please provide vendor responses",
-      });
-    }
-
-    const response = await rfqModel.addVendorResponse(data);
-
-    res
-      .status(200)
-      .json(response)
-      .end();
-  } catch (error) {
-    console.error("Error in addVendorResponse API: ", error.message);
-    res.status(500).json({
-      status: 0,
-      message: "Error processing vendor response.",
-      error: error.message,
-    });
-  }
-},
-
-addtechEvaluationClearedVendors: async (req, res) => {
-  try {
-    const {vendor_id, rfq_product_tech_evaluation_id,status, reject_message} = req.body;
-    // console.log("API Input: ", vendor_id,rfq_product_tech_evaluation_id,status,reject_message);
-    const user_id = req.user.id
-
-    // Validate input
-    if (!vendor_id || !rfq_product_tech_evaluation_id ) {
-      return res.status(400).json({
-        status: 0,
-        message: "Invalid input. Please provide vendor ID , rfq_product_tech_evaluation_id and status",
-      });
-    }
-
-    const response = await rfqModel.addtechEvaluationClearedVendors(vendor_id, rfq_product_tech_evaluation_id,status, reject_message, user_id);
-
-    res
-      .status(200)
-      .json(response)
-      .end();
-  } catch (error) {
-    console.error("Error in addVendorResponse API: ", error.message);
-    res.status(500).json({
-      status: 0,
-      message: "Error processing vendor response.",
-      error: error.message,
-    });
-  }
-},
-
-getVendorNames: async (req, res) => {
-  try {
-    const {rfq_id, rfq_product_id} = req.body;
-    // console.log("API Input: ", req.body);
-
-    // Validate input
-    if (!rfq_id || ! rfq_product_id) {
-      return res.status(400).json({
-        status: 0,
-        message: "Invalid input. Please provide RFQ ID and rfq_product_id",
-      });
-    }
-
-    const response = await rfqModel.getVendorNames(rfq_id, rfq_product_id);
-
-    res
-      .status(200)
-      .json(response)
-      .end();
-  } catch (error) {
-    console.error("Error in addVendorResponse API: ", error.message);
-    res.status(500).json({
-      status: 0,
-      message: "Error processing vendor response.",
-      error: error.message,
-    });
-  }
-},
-getVendorResponses: async (req, res) => {
-  try {
-    const {rfq_id, rfq_product_id, vendor_id} = req.body;
-    // console.log("API Input: ", req.body);
-
-    // Validate input
-    if (!rfq_id || ! rfq_product_id || !vendor_id) {
-      return res.status(400).json({
-        status: 0,
-        message: "Invalid input. Please provide RFQ ID and rfq_product_id and Vendor ID",
-      });
-    }
-
-    const response = await rfqModel.getVendorResponses(rfq_id, rfq_product_id, vendor_id);
-
-    res
-      .status(200)
-      .json(response)
-      .end();
-  } catch (error) {
-    console.error("Error in addVendorResponse API: ", error.message);
-    res.status(500).json({
-      status: 0,
-      message: "Error processing vendor response.",
-      error: error.message,
-    });
-  }
-},
-
-getTechEvaluationRFQDetails: async (req, res) => {
-  try {
-
-    const user_id = req.user.id;    
-
-    let {rfq_no, project_id} = req.body;
-
-    if(!project_id || project_id==-1){
-      project_id=null;
-    }
-
-    // Validate input
-    if (!user_id) {
-      return res.status(400).json({
-        status: 0,
-        message: "User not found!",
-      });
-    }
-
-
-    const response = await rfqModel.getTechEvaluationRFQDetails(user_id, rfq_no, project_id);
-
-
-    res
-      .status(200)
-      .json(response)
-      .end();
-  } catch (error) {
-    console.error("Error in addVendorResponse API: ", error.message);
-    res.status(500).json({
-      status: 0,
-      message: "Error processing vendor response.",
-      error: error.message,
-    });
-  }
-},
-
-getClausesOfProduct: async (req, res) => {
-  try {
-    const {rfq_product_id, vendor_id = null} = req.body;
-
-    const result = await rfqModel.getClausesOfProduct(rfq_product_id, vendor_id);
-
-    res
-      .status(200)
-      .json(result)
-      .end();
-  } catch (error) {
-    logError(error);
-    res.status(500).json({
+      res.status(200).json(result).end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
         success: false,
         message: 'Error in deleting clause.',
         error: error.message
-    });
-  }
-},
-
-getTechEvaluationResult: async (req, res) => {
-  try {
-    const {rfq_product_id, vendor_id} = req.body;
-
-    // Validate input
-    if (!rfq_product_id || !vendor_id) {
-      return res.status(400).json({
-        status: 0,
-        message: "Invalid input. Please provide RFQ ID and RFQ product ID",
       });
     }
+  },
 
-    const result = await rfqModel.getTechEvaluationResult(rfq_product_id,vendor_id);
+  getClauses: async (req, res) => {
+    try {
+      const rfq_id = req.params.id;
 
-    res
-      .status(200)
-      .json(result)
-      .end();
-  } catch (error) {
-    logError(error);
-    res.status(500).json({
+      const result = await rfqModel.getClauses(rfq_id);
+      // console.log("Result main of get clauses = ",result);
+
+      console.log('ehckinh th evendor result', JSON.stringify(result));
+
+      res.status(200).json(result).end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
         success: false,
         message: 'Error in deleting clause.',
         error: error.message
-    });
-  }
-},
+      });
+    }
+  },
 
-rfqProductWiseReport: async (req, res) => {
-  try {
-    const { startDate, endDate ,productName, productId} = req.query;
-    const userId = req.user.id;
+  addTechComment: async (req, res) => {
+    try {
+      const {
+        clause_id,
+        sender_id,
+        receiver_id,
+        text,
+        file_url,
+        product,
+        vendor,
+        rfq_no
+      } = req.body;
 
+      // Save tech comment
+      const response = await rfqModel.addTechComment(
+        clause_id,
+        sender_id,
+        receiver_id,
+        text,
+        file_url
+      );
+     const clause = await rfqModel.checkIfExists('tbl_rfq_product_tech_evaluation_clauses', `id = ${clause_id}`);
+     const clausText = clause && clause.length > 0 ? clause[0].clause_text : '';
 
-    const rfqData = await rfqModel.rfqProductReport(userId, productId, productName, startDate, endDate);
+      if (response) {
+        if (req.user.user_type == 3) {
+          //Notice the vendor object is passed as buyer since this requet is coming from vendor and concerend prop value at frontend is same hence
+          await sendAddTechCommentMailForBuyer(
+            vendor,
+            sender_id,
+            product,
+            clausText
+          );
+        } else if (req.user.user_type == 2) {
+          //Mail t0 vendor from buyer
+          await sendAddTechCommentMailForVendor(
+            vendor,
+            product,
+            rfq_no,
+            sender_id,
+            clausText
+          );
+        }
+      }
 
-    res
-      .status(200)
-      .json(rfqData)
-      .end();
-  } catch (error) {
-    console.log(error)
-    logError(error);
-    res.status(500).json({
+      res.status(200).json(response).end();
+    } catch (error) {
+      res.status(500).json({
+        status: 0,
+        message: 'Error storing comment.',
+        error: error.message
+      });
+    }
+  },
+
+  getTechComments: async (req, res) => {
+    try {
+      const { clause_id, sender_id, receiver_id } = req.body;
+      const user_id = req.user.id;
+      const user_type = req.user.user_type;
+
+      const response = await rfqModel.getTechComments(
+        clause_id,
+        sender_id,
+        receiver_id,
+        user_id,
+        user_type
+      );
+
+      res.status(200).json(response).end();
+    } catch (error) {
+      res.status(500).json({
+        status: 0,
+        message: 'Error storing comment.',
+        error: error.message
+      });
+    }
+  },
+  getSummarisedDeviation: async (req, res) => {
+    try {
+      const { rfq_id } = req.body;
+
+      if (!rfq_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'rfq_id is required'
+        });
+      }
+
+      const result = await rfqModel.getSummarisedDeviation(rfq_id);
+
+      if (!result || result.length === 0) {
+        return res.status(404).json({
+          status: 0,
+          message: 'No deviations found for this RFQ'
+        });
+      }
+
+      const genresult = await generativeAI.summariseTechDeviation(result);
+
+      // Parse the response in case it's returned as a string
+      let parsedResult;
+      try {
+        parsedResult =
+          typeof genresult === 'string' ? JSON.parse(genresult) : genresult;
+      } catch (parseError) {
+        console.error('Failed to parse Gemini response:', parseError);
+        throw new Error('Invalid response format from AI service');
+      }
+
+      res.status(200).json({
+        status: 1,
+        data: parsedResult
+      });
+    } catch (error) {
+      console.error('Error in getSummarisedDeviation API:', error.message);
+      res.status(500).json({
+        status: 0,
+        message: 'Error processing deviation summary',
+        error:
+          process.env.NODE_ENV === 'development' ? error.message : undefined
+      });
+    }
+  },
+
+  addVendorResponse: async (req, res) => {
+    try {
+      const data = req.body;
+      // console.log("API Input: ", req.body);
+
+      // Validate input
+      if (!data) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Invalid input. Please provide vendor responses'
+        });
+      }
+
+      const response = await rfqModel.addVendorResponse(data);
+
+      res.status(200).json(response).end();
+    } catch (error) {
+      console.error('Error in addVendorResponse API: ', error.message);
+      res.status(500).json({
+        status: 0,
+        message: 'Error processing vendor response.',
+        error: error.message
+      });
+    }
+  },
+
+  addtechEvaluationClearedVendors: async (req, res) => {
+    try {
+      const {
+        rfq_id,
+        product,
+        vendor,
+        vendor_id,
+        rfq_product_tech_evaluation_id,
+        status,
+        reject_message
+      } = req.body;
+      // console.log("API Input: ", vendor_id,rfq_product_tech_evaluation_id,status,reject_message);
+      const user_id = req.user.id;
+
+      // Validate input
+      if (!vendor_id || !rfq_product_tech_evaluation_id) {
+        return res.status(400).json({
+          status: 0,
+          message:
+            'Invalid input. Please provide vendor ID , rfq_product_tech_evaluation_id and status'
+        });
+      }
+
+      const response = await rfqModel.addtechEvaluationClearedVendors(
+        vendor_id,
+        rfq_product_tech_evaluation_id,
+        status,
+        reject_message,
+        user_id
+      );
+
+      await sendTechEvalAccepOrRejectMailToVendor(
+        rfq_id,
+        product,
+        vendor_id,
+        user_id,
+        reject_message)
+
+      res.status(200).json(response).end();
+    } catch (error) {
+      console.error('Error in addVendorResponse API: ', error.message);
+      res.status(500).json({
+        status: 0,
+        message: 'Error processing vendor response.',
+        error: error.message
+      });
+    }
+  },
+
+  getVendorNames: async (req, res) => {
+    try {
+      const { rfq_id, rfq_product_id } = req.body;
+      // console.log("API Input: ", req.body);
+
+      // Validate input
+      if (!rfq_id || !rfq_product_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Invalid input. Please provide RFQ ID and rfq_product_id'
+        });
+      }
+
+      const response = await rfqModel.getVendorNames(rfq_id, rfq_product_id);
+
+      res.status(200).json(response).end();
+    } catch (error) {
+      console.error('Error in addVendorResponse API: ', error.message);
+      res.status(500).json({
+        status: 0,
+        message: 'Error processing vendor response.',
+        error: error.message
+      });
+    }
+  },
+  getVendorResponses: async (req, res) => {
+    try {
+      const { rfq_id, rfq_product_id, vendor_id } = req.body;
+      // console.log("API Input: ", req.body);
+
+      // Validate input
+      if (!rfq_id || !rfq_product_id || !vendor_id) {
+        return res.status(400).json({
+          status: 0,
+          message:
+            'Invalid input. Please provide RFQ ID and rfq_product_id and Vendor ID'
+        });
+      }
+
+      const response = await rfqModel.getVendorResponses(
+        rfq_id,
+        rfq_product_id,
+        vendor_id
+      );
+
+      res.status(200).json(response).end();
+    } catch (error) {
+      console.error('Error in addVendorResponse API: ', error.message);
+      res.status(500).json({
+        status: 0,
+        message: 'Error processing vendor response.',
+        error: error.message
+      });
+    }
+  },
+
+  getTechEvaluationRFQDetails: async (req, res) => {
+    try {
+      const user_id = req.user.id;
+
+      let { rfq_no, project_id } = req.body;
+
+      if (!project_id || project_id == -1) {
+        project_id = null;
+      }
+
+      // Validate input
+      if (!user_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'User not found!'
+        });
+      }
+
+      const response = await rfqModel.getTechEvaluationRFQDetails(
+        user_id,
+        rfq_no,
+        project_id
+      );
+
+      res.status(200).json(response).end();
+    } catch (error) {
+      console.error('Error in addVendorResponse API: ', error.message);
+      res.status(500).json({
+        status: 0,
+        message: 'Error processing vendor response.',
+        error: error.message
+      });
+    }
+  },
+
+  getClausesOfProduct: async (req, res) => {
+    try {
+      const { rfq_product_id, vendor_id = null } = req.body;
+
+      const result = await rfqModel.getClausesOfProduct(
+        rfq_product_id,
+        vendor_id
+      );
+
+      res.status(200).json(result).end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
+        success: false,
+        message: 'Error in deleting clause.',
+        error: error.message
+      });
+    }
+  },
+
+  getTechEvaluationResult: async (req, res) => {
+    try {
+      const { rfq_product_id, vendor_id } = req.body;
+
+      // Validate input
+      if (!rfq_product_id || !vendor_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Invalid input. Please provide RFQ ID and RFQ product ID'
+        });
+      }
+
+      const result = await rfqModel.getTechEvaluationResult(
+        rfq_product_id,
+        vendor_id
+      );
+
+      res.status(200).json(result).end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
+        success: false,
+        message: 'Error in deleting clause.',
+        error: error.message
+      });
+    }
+  },
+
+  rfqProductWiseReport: async (req, res) => {
+    try {
+      const { startDate, endDate, productName, productId } = req.query;
+      const userId = req.user.id;
+
+      const rfqData = await rfqModel.rfqProductReport(
+        userId,
+        productId,
+        productName,
+        startDate,
+        endDate
+      );
+
+      res.status(200).json(rfqData).end();
+    } catch (error) {
+      console.log(error);
+      logError(error);
+      res.status(500).json({
         success: false,
         message: 'no data to return',
         error: error
-    });
-  }
-},
-
-projectWiseReport: async (req, res) => {
-  try {
-    const { projectId, startDate, endDate } = req.query;
-    const userId = req.user.id;
-    const company_id = req.user.company_id
-
-
-    const rfqDetails = await rfqModel.getProjectDetailsReport(projectId, startDate, endDate);
-    const  quoteList = []
-
-    //  fetch quotes for each rfq preent in the project
-    for (let i = 0; i < rfqDetails.length; i++) {
-      for (let j = 0; j < rfqDetails[i].rfq_details.length; j++) {
-        const rfqId = rfqDetails[i].rfq_details[j].rfq_id;
-        let quoteDetails = await rfqModel.getQuotesByRfqById2(rfqId, company_id, userId, false);
-        quoteList.push(quoteDetails)
-      }
+      });
     }
+  },
 
-    res.status(200).json({quoteList: quoteList,  rfqDetails:rfqDetails});
-  } catch (error) {
-    console.error("Error fetching project report:", error);
-    res.status(500).json({
-      success: false,
-      message: 'Error processing RFQ details',
-      error: error.toString()
-    });
-  }
-},
+  projectWiseReport: async (req, res) => {
+    try {
+      const { projectId, startDate, endDate } = req.query;
+      const userId = req.user.id;
+      const company_id = req.user.company_id;
 
-sendReportOnEmail: async (req, res) => {
-  try {
-    // Extracting email addresses from the request
-    const {emails, startDate, endDate} = req.body // Assuming 'emails' is a comma-separated list passed as a query parameter
-    const file = req.file;  // Assuming file data is sent via a multipart/form-data request
-    const fileName = file?.originalname?.split(".")[0] || "report"
-    const userDetails = req.user
+      const rfqDetails = await rfqModel.getProjectDetailsReport(
+        projectId,
+        startDate,
+        endDate
+      );
+      const quoteList = [];
 
-    const headerContent = ` <p style="height:10px " > </p> `;
+      //  fetch quotes for each rfq preent in the project
+      for (let i = 0; i < rfqDetails.length; i++) {
+        for (let j = 0; j < rfqDetails[i].rfq_details.length; j++) {
+          const rfqId = rfqDetails[i].rfq_details[j].rfq_id;
+          let quoteDetails = await rfqModel.getQuotesByRfqById2(
+            rfqId,
+            company_id,
+            userId,
+            false
+          );
+          quoteList.push(quoteDetails);
+        }
+      }
 
-    const containerContent =  `
+      res.status(200).json({ quoteList: quoteList, rfqDetails: rfqDetails });
+    } catch (error) {
+      console.error('Error fetching project report:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error processing RFQ details',
+        error: error.toString()
+      });
+    }
+  },
+
+  sendReportOnEmail: async (req, res) => {
+    try {
+      // Extracting email addresses from the request
+      const { emails, startDate, endDate } = req.body; // Assuming 'emails' is a comma-separated list passed as a query parameter
+      const file = req.file; // Assuming file data is sent via a multipart/form-data request
+      const fileName = file?.originalname?.split('.')[0] || 'report';
+      const userDetails = req.user;
+
+      const headerContent = ` <p style="height:10px " > </p> `;
+
+      const containerContent = `
        <h2>Greetings,</h2>
         <div style=" font-size:16px ">
-        <p>Please find attached the zipped folder containing the complete data set for <strong> ${fileName}  </strong> covering the period <strong> ${ startDate + " to " +  endDate } </strong>. This report includes all relevant RFQ records, Quotes, and transaction logs compiled for auditing and review purposes.</p>
+        <p>Please find attached the zipped folder containing the complete data set for <strong> ${fileName}  </strong> covering the period <strong> ${
+        startDate + ' to ' + endDate
+      } </strong>. This report includes all relevant RFQ records, Quotes, and transaction logs compiled for auditing and review purposes.</p>
         <p>If you have any questions or need additional information, please feel free to reach out.</p>
         <p>Thank you for your time and consideration.</p>
         <p>Best regards,</p>
         <p>${userDetails.name}<br>
-        ${userDetails.organization_name}</p>
+        ${userDetails.organization_name || ''}</p>
     </div>
-    `
+    `;
 
-    const emailTemplate = generateEmailTemplate(headerContent, containerContent);
+      const emailTemplate = generateEmailTemplate(
+        headerContent,
+        containerContent,
+        userDetails.id
+      );
 
+      // Preparing email options with an attachment
+      const mailOptions = {
+        from: Config.webmasterMail, // Sender address
+        to: emails, // Sending email to all recipients directly from the query string
+        subject: `Project Report for ${fileName} of ${
+          userDetails.organization_name || userDetails.name
+        } `, // subject: `${file.originalname.split(".")[0] || "Project Report"} || Workwise ` , // Subject line
+        html: emailTemplate, // HTML body content
+        attachments: [
+          {
+            filename: file.originalname, // Using original file name
+            content: file.buffer // Assuming the file is available as a buffer
+          }
+        ]
+      };
 
-    // Preparing email options with an attachment
-    const mailOptions = {
-      from: Config.webmasterMail, // Sender address
-      to: emails, // Sending email to all recipients directly from the query string
-      subject: `Project Report for ${fileName} of ${userDetails.organization_name || userDetails.name} `,     // subject: `${file.originalname.split(".")[0] || "Project Report"} || Workwise ` , // Subject line
-      html: emailTemplate, // HTML body content
-     attachments: [
-        {
-          filename: file.originalname,  // Using original file name
-          content: file.buffer          // Assuming the file is available as a buffer
-        }
-      ]
-    };
+      // Sending the email with the attachment
+      sendMail(mailOptions);
 
-    // Sending the email with the attachment
-    sendMail(mailOptions);
-
-    res.status(200).json({ message: "Report sent successfully." });
-
-  } catch (error) {
-    console.error("Error fetching project report:", error);
-    res.status(500).json({
-      success: false,
-      message: 'Error processing RFQ details',
-      error: error.toString()
-    });
-  }
-},
-
-// Changes by Agnij May 01, 2025 [Added endpoint to search variant products]
-searchVariantProducts: async (req, res, next) => {
-  try {
-    const search_key = req.body?.search_key ? req.body?.search_key : '';
-    
-    if (!search_key || search_key.trim() === '') {
-      return res.status(200).json([]).end();
+      res.status(200).json({ message: 'Report sent successfully.' });
+    } catch (error) {
+      console.error('Error fetching project report:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error processing RFQ details',
+        error: error.toString()
+      });
     }
-    
-    // Use the model to search for variant mappings
-    const variantProductResults = await rfqModel.searchVariantProducts(search_key);
-    
-    if (!variantProductResults || variantProductResults.length === 0) {
-      return res.status(200).json([]).end();
+  },
+
+  // Changes by Agnij May 01, 2025 [Added endpoint to search variant products]
+  searchVariantProducts: async (req, res, next) => {
+    try {
+      const search_key = req.body?.search_key ? req.body?.search_key : '';
+
+      if (!search_key || search_key.trim() === '') {
+        return res.status(200).json([]).end();
+      }
+
+      // Use the model to search for variant mappings
+      const variantProductResults = await rfqModel.searchVariantProducts(
+        search_key
+      );
+
+      if (!variantProductResults || variantProductResults.length === 0) {
+        return res.status(200).json([]).end();
+      }
+
+      res.status(200).json(variantProductResults).end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
     }
-    
-    res.status(200).json(variantProductResults).end();
-  } catch (error) {
-    logError(error);
-    res.status(400).json({
-      status: 3,
-      message: Config.errorText.value
-    }).end();
-  }
-},
+  },
 
+  // Changes by Agnij May 01, 2025 [Added endpoint to search variant vendors]
+  searchVariantVendors: async (req, res, next) => {
+    try {
+      const { product_id, variant_id } = req.body;
 
-// Changes by Agnij May 01, 2025 [Added endpoint to search variant vendors]
-searchVariantVendors: async (req, res, next) => {
-  try {
-    const { product_id, variant_id } = req.body;
-    
-    if (!product_id && !variant_id) {
-      return res.status(200).json([]).end();
+      if (!product_id && !variant_id) {
+        return res.status(200).json([]).end();
+      }
+
+      // Use the model to search for vendors associated with this variant
+      const variantVendorResults = await rfqModel.searchVariantVendors(
+        product_id,
+        variant_id
+      );
+
+      if (!variantVendorResults || variantVendorResults.length === 0) {
+        return res.status(200).json([]).end();
+      }
+
+      res.status(200).json(variantVendorResults).end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
     }
-    
-    // Use the model to search for vendors associated with this variant
-    const variantVendorResults = await rfqModel.searchVariantVendors(product_id, variant_id);
-    
-    if (!variantVendorResults || variantVendorResults.length === 0) {
-      return res.status(200).json([]).end();
-    }
-    
-    res.status(200).json(variantVendorResults).end();
-  } catch (error) {
-    logError(error);
-    res.status(400).json({
-      status: 3,
-      message: Config.errorText.value
-    }).end();
-  }
-},
+  },
 
-getClausesByRfqProductId: async (req,res) =>{
-    try{
-        const {rfq_id, rfq_product_id, vendor_id} = req.body;
+  getClausesByRfqProductId: async (req, res) => {
+    try {
+      const { rfq_id, rfq_product_id, vendor_id } = req.body;
 
-        if (!rfq_product_id) {
-            return res.status(400).json({
-                status: 0,
-                message: "Invalid input. Ensure RFQ_PRODUCT_ID is provided.",
-            });
-        }
-        // Changes by Agnij May 13, 2025 [Fixed clause display limitation]
-        const result = await rfqModel.getClausesOfProduct(rfq_product_id, vendor_id);
-
-        res.status(200).json(result).end();
-
-    }catch(error){
-        logError(error);
-        res.status(500).json({
-            success: false,
-            message: 'Error in fetching clauses by rfq product id',
-            error: error.message
+      if (!rfq_product_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Invalid input. Ensure RFQ_PRODUCT_ID is provided.'
         });
+      }
+      // Changes by Agnij May 13, 2025 [Fixed clause display limitation]
+      const result = await rfqModel.getClausesOfProduct(
+        rfq_product_id,
+        vendor_id
+      );
+
+      res.status(200).json(result).end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
+        success: false,
+        message: 'Error in fetching clauses by rfq product id',
+        error: error.message
+      });
     }
-},
+  },
 
-// New unified controller method for sidebar data
-getRfqs: async (req, res) => {
-  try {
-    const user_id = req.user.id;
-    let { tech_eval, po = 'false', page = 1, limit = 10, project_id, rfq_no, sort = 'DESC' } = req.query;
-    
-    // Convert string query parameters to proper types
-    tech_eval = tech_eval === 'true';
-    po = po === 'true';
+  // New unified controller method for sidebar data
+  getRfqs: async (req, res) => {
+    try {
+      const user_id = req.user.id;
+      let {
+        tech_eval,
+        po = 'false',
+        page = 1,
+        limit = 10,
+        project_id,
+        rfq_no,
+        sort = 'DESC'
+      } = req.query;
 
-    page = parseInt(page) || 1;
-    limit = parseInt(limit) || 10;
-    project_id = project_id ? parseInt(project_id) : null;
-    rfq_no = rfq_no ? parseInt(rfq_no) : null;
-    
-    // Calculate offset
-    const offset = (page - 1) * limit;
-    
-    // Handle project_id filter
-    if (project_id === -1) {
-      project_id = null;
+      // Convert string query parameters to proper types
+      tech_eval = tech_eval === 'true';
+      po = po === 'true';
+
+      page = parseInt(page) || 1;
+      limit = parseInt(limit) || 10;
+      project_id = project_id ? parseInt(project_id) : null;
+      rfq_no = rfq_no ? parseInt(rfq_no) : null;
+
+      // Calculate offset
+      const offset = (page - 1) * limit;
+
+      // Handle project_id filter
+      if (project_id === -1) {
+        project_id = null;
+      }
+
+      // Get RFQs
+      const rfqs = await rfqModel.getRfqs(
+        user_id,
+        tech_eval,
+        po,
+        limit,
+        offset,
+        project_id,
+        rfq_no,
+        sort
+      );
+
+      res.status(200).json({
+        status: 1,
+        data: rfqs,
+        total_items: rfqs.length
+      });
+    } catch (error) {
+      console.error('Error in getRfqs:', error);
+      res.status(500).json({
+        status: 0,
+        message: 'Error fetching sidebar RFQs',
+        error: error.message
+      });
     }
-    
-    // Get RFQs
-    const rfqs = await rfqModel.getRfqs(
-      user_id, 
-      tech_eval, 
-      po,
-      limit, 
-      offset, 
-      project_id, 
-      rfq_no, 
-      sort
-    );
-    
-    res.status(200).json({
-      status: 1,
-      data: rfqs,
-      total_items: rfqs.length
-    });
-  } catch (error) {
-    console.error('Error in getRfqs:', error);
-    res.status(500).json({
-      status: 0,
-      message: 'Error fetching sidebar RFQs',
-      error: error.message
-    });
-  }
-},
+  },
 
-// Saves user downloaded excel in database
-saveExcel: async (req, res) => {
-  try {
-    const { rfq_id, file_path } = req.body;
-    const user = req.user;
+  // Saves user downloaded excel in database
+  saveExcel: async (req, res) => {
+    try {
+      const { rfq_id, file_path } = req.body;
+      const user = req.user;
 
-    await rfqModel.saveExcel(rfq_id, user.id, file_path);
-    return res.status(201).end();
-  } catch (error) {
-    console.error('Error in saveExcel:', error);
-    return res.status(500).json({
-      status: 0,
-      message: 'Error saving Excel to database',
-      error: error.message
-    });
+      await rfqModel.saveExcel(rfq_id, user.id, file_path);
+      return res.status(201).end();
+    } catch (error) {
+      console.error('Error in saveExcel:', error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Error saving Excel to database',
+        error: error.message
+      });
+    }
   }
-}
 };
 export default rfqController;

@@ -2838,7 +2838,6 @@ const productQuery = `
        AND _TQF.vendor_id = TU.id 
        AND _TQF.product_variant_id = TRP.product_variant_id 
        AND _TQF.variant = TRP.variant 
-       AND _TQF.created_by = $2
     WHERE TQ.rfq_id = TRP.rfq_id
     ORDER BY TU.id ASC
 ) AS "all_vendors",
@@ -2873,7 +2872,7 @@ const productQuery = `
                         ))
                         FROM tbl_users TU
                         LEFT JOIN tbl_company TCC2 ON TCC2.id = TU.company_id
-                        LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant AND _TQF.created_by = $2
+                        LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant
                         WHERE TU.id = TQ.created_by
                         ${TA_Vendors === 'TA' ? vendorCondition : ''}
                     ),

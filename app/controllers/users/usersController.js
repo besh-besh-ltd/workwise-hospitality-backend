@@ -3512,7 +3512,7 @@ update_user_detail: async (req, res, next) => {
                    We recommend changing your password after your first login for security reasons.
                  </p>
                  <a href="https://letsworkwise.com"
-                   style="background-color: #f87171; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+                   style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                     Login
                  </a>    
                  <p style="margin-top:20px; text-align:center;">

@@ -28,11 +28,14 @@ const companyObj = [
 ];
 
 const defaultEmailTemplate = {
-  logo: 'https://api.letsworkwise.com/user_document/1738825197968-2d5fea6d-0266-451e-96d0-025781f2a119.png',
+  // Use WorkWise logo to avoid company-specific overrides
+  logo: 'https://letsworkwise.com/assets/images/logo.png',
   address: `1st Floor, 271 Business Park, Model Industrial Estate, near Virwani Industrial Estate <br/>
       off Western Express Highway, Vishveshwar Nagar, Goregaon, Mumbai, Maharashtra 400063`,
-  displayAddress: true,
-  primaryColor: '#ffe4e4eb',
+  displayAddress: false,
+  // Bluish-green gradient to match website theming. Using 'background' later keeps
+  // company-specific solid colors working without any change to their objects.
+  primaryColor: 'linear-gradient(135deg, #0ea5e9 0%, #06b6d4 50%, #10b981 100%)',
   primaryTextColor: '#000000',
   seconderyColor: '#ffffff',
   seconderyTextColor: '#000000'
@@ -62,28 +65,28 @@ function generateEmailTemplate(headerContent, containerContent, userID = null) {
       }
     : defaultEmailTemplate;
 
+  const headerBackground = userID && (companyObj.find((c) => c.userID === userID))
+    ? primaryColor
+    : 'linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%)';
+
   return `
-    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background-color: ${primaryColor}; color: ${primaryTextColor}; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
-        <div>
-        
-            <img style="width: 200px;  margin-left: -18px;" src="${logo}" alt="Company Logo" />
-            ${
-              displayAddress
-                ? `<p style="font-size: 16px; font-weight: 600; color: ${primaryTextColor}; margin-top: -7px;">${address}</p>`
-                : ''
-            }
+    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background: ${primaryColor}; color: ${primaryTextColor}; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
+        <div style="background: ${headerBackground}; padding: 32px 28px; border-radius: 16px; text-align: center; margin-bottom: 16px;">
+            <img style="width: 190px; max-width: 100%; height: auto; display: inline-block; margin: 0 auto;" src="${logo}" alt="Company Logo" />
+            <div style="margin-top: 0; font-size: 16px; font-weight: 600; color: #ffffff; letter-spacing: 0.4px;">Procurement Se Profit Banao</div>
         </div>
         <hr style="border-color: ${seconderyColor}" />
-        ${headerContent}
-            
-        <div style="border-radius: 24px; padding: 32px 16px; margin-bottom: 24px; background-color: ${seconderyColor}; color: ${seconderyTextColor}; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+        <div style="border-radius: 24px; padding: 32px 16px; margin-bottom: 24px; background-color: #ffffff; color: #333333; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+            ${headerContent}
             ${containerContent}
             </div>
             
 
         <hr style="border-color: ${seconderyColor}" />
-        <p style="font-size: 16px; color: ${primaryTextColor};">If you need assistance, contact us at <a href="mailto:hello@letsworkwise.com" style="color: ${primaryTextColor};">hello@letsworkwise.com</a></p>
-        <p style="font-size: 16px; color: ${primaryTextColor};">© WorkWise. All Rights Reserved.</p>
+        <div style="text-align: center; padding: 8px 0 0;">
+          <p style="font-size: 16px; color: #ffffff; margin: 0; font-weight: 500;">If you need assistance, contact us at <a href="mailto:hello@letsworkwise.com" style="color: #ffffff; text-decoration: underline;">hello@letsworkwise.com</a></p>
+          <p style="font-size: 14px; color: #ffffff; margin: 6px 0 0; font-weight: 500;">© WorkWise. All Rights Reserved.</p>
+        </div>
     </div>
     `;
 }
@@ -110,7 +113,7 @@ function getRfqEmailContent({
             A new RFQ #${rfq_no} has been created by ${buyer_name}. You are invited to participate.
           </p>
           <a href="${baseUrl}"
-             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+             style="background-color: #059669; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
             View RFQ
           </a>
         `
@@ -136,7 +139,7 @@ function getRfqEmailContent({
             RFQ #${rfq_no} has been updated by ${buyer_name}. Please review the latest details.
           </p>
           <a href="${baseUrl}"
-             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+             style="background-color: #059669; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
             View RFQ
           </a>
         `
@@ -161,7 +164,7 @@ function getRfqEmailContent({
               : ''
           }
           <a href="${baseUrl}"
-             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+             style="background-color: #059669; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
             View RFQ
           </a>
         `
@@ -175,7 +178,7 @@ function getRfqEmailContent({
             RFQ #${rfq_no} has been updated by ${buyer_name}. Please review the latest details.
           </p>
           <a href="${baseUrl}"
-             style="background-color: #2563eb; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
+             style="background-color: #059669; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin-top: 10px;">
             View RFQ
           </a>
         `
