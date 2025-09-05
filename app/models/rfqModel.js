@@ -96,14 +96,14 @@ const rfqModel = {
       SELECT DISTINCT product_variant_id, variant
       FROM tbl_rfq_products rp
           WHERE rp.rfq_id = $1
-          ${selectedSheets ? `AND rp.sheet_id IN (${selectedSheets.join(",")})` : ''};
+          ${(selectedSheets && Array.isArray(selectedSheets) && selectedSheets.length > 0) ? `AND rp.sheet_id IN (${selectedSheets.join(",")})` : ''};
       `;
 
       let qualifiedQ = `
         SELECT s.product_variant_id, s.variant
           FROM tbl_rfq_products_specs s
           WHERE s.rfq_id = $1
-            ${selectedSheets ? `AND s.sheet_id IN (${selectedSheets.join(",")})` : ''}
+            ${(selectedSheets && Array.isArray(selectedSheets) && selectedSheets.length > 0) ? `AND s.sheet_id IN (${selectedSheets.join(",")})` : ''}
             AND s.title IN ('Quantity', 'Unit')
             AND TRIM(s.value) != ''
             AND TRIM(s.value) != 'NA'
