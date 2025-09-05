@@ -138,8 +138,7 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const [pos, { total }] = await db.tx(async t => {
-      const data = await t.any(
-        `SELECT po.*,
+      const dataQuery = `SELECT po.*,
                 VENDOR.organization_name AS finalized_vendor_name,
                 PRJ.name AS project_name,
                 TU.name AS initiated_by,
@@ -159,16 +158,24 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
                   ELSE NULL
                 END AS approval_status,
                 (
-                  SELECT PM.* 
-                    FROM tbl_payment_milestone PM 
-                    WHERE PM.po_id = PO.id 
-                      AND NOT PM.is_done 
+                    SELECT array_agg(
+                            json_build_object(
+                              'id',            PM.id,
+                              'milestone_name',PM.milestone_name,
+                              'milestone_description',PM.milestone_description,
+                              'due_date',      PM.due_date,
+                              'amount',        PM.amount,
+                              'amount_mode',   PM.amount_mode
+                            )
+                            ORDER BY PM.due_date
+                          )
+                    FROM tbl_payment_milestone PM
+                    WHERE PM.po_id   = PO.id
+                      AND NOT PM.is_done
                       AND PM.due_date > NOW()
-                    
-                    LIMIT 1
-                ) AS upcoming_milestone
+                ) AS upcoming_milestones
          FROM tbl_rfq_purchase_order po
-         JOIN tbl_projects PRJ ON PRJ.id = PO.project_id
+         LEFT JOIN tbl_projects PRJ ON PRJ.id = PO.project_id
          LEFT JOIN tbl_approval_hierarchy_transactions trx
            ON trx.hierarchy_type = 'po'
            AND trx.target_entity_id = po.id
@@ -178,7 +185,9 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
         JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
          ${whereClause}
          ORDER BY po.created_at DESC
-         LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+         LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`
+
+      const data = await t.any(dataQuery,
         [...values, limit, offset]
       );
 
@@ -319,7 +328,32 @@ export const getPODetailsById = async (po_id, user_id) => {
                 WHERE M.po_id = po.id
               ),
               '[]'::json
-            ) AS tasks
+            ) AS tasks,
+            (
+                SELECT array_agg(
+                    json_build_object(
+                      'id',            TQ.id,
+                      'quote_id', TQuotes.id,
+                      'vendor_name', TUser.name,
+                      'unit_price', TQ.unit_price,
+                      'package_price', TQ.package_price,
+                      'freight_price',      TQ.freight_price,
+                      'tax',        TQ.tax,
+                      'freight_mode', TQ.freight_mode,
+                      'package_mode', TQ.package_mode,
+                      'tax_mode', TQ.tax_mode,
+                      'comment',   TQ.comment,
+                      'delivery_period', TQ.delivery_period
+                    )
+                )
+
+                FROM tbl_quote_items TQ
+                JOIN tbl_quotes TQuotes ON TQ.quote_id = TQuotes.id
+                JOIN tbl_users TUser ON TUser.id = TQuotes.created_by
+                WHERE PO.rfq_id   = TQ.rfq_id
+                  AND TQ.product_variant_id = TRP.product_variant_id
+                  AND TQ.variant = TRP.variant
+            ) AS quotations
 
        FROM tbl_rfq_purchase_order po
        LEFT JOIN tbl_approval_hierarchy_transactions trx

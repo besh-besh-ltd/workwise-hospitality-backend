@@ -5614,7 +5614,7 @@ const rfqController = {
   },
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { TA_Vendors, no_freight } = req.query;
+    const { TA_Vendors, no_freight, rfq_product_id } = req.query;
     const { id, company_id } = req.user;
 
     try {
@@ -5623,7 +5623,8 @@ const rfqController = {
         id,
         company_id,
         TA_Vendors,
-        no_freight
+        no_freight,
+        rfq_product_id
       );
       // rfQItem = filterQuotations(rfQItem);
       // rfQItem = processQuotations(rfQItem);
@@ -5679,7 +5680,7 @@ const rfqController = {
   },
   downloadQuoteResultsProductWise: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { TA_Vendors, no_freight } = req.query;
+    const { TA_Vendors, no_freight, rfq_product_id } = req.query;
 
     const { id, company_id } = req.user;
 
@@ -5689,7 +5690,8 @@ const rfqController = {
         id,
         company_id,
         TA_Vendors,
-        no_freight
+        no_freight,
+        rfq_product_id
       );
 
       rfQItem.forEach((product) => {

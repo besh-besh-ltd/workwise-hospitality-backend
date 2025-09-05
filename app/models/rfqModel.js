@@ -2693,7 +2693,8 @@ const productQuery = `
     user_id,
     company_id,
     TA_Vendors,
-    no_freight
+    no_freight,
+    rfq_product_id
   ) => {
     return new Promise(function (resolve, reject) {
       const vendorCondition = `
@@ -2931,9 +2932,10 @@ const productQuery = `
                 FROM tbl_rfq_products_specs TPS
                 WHERE TPS.product_variant_id = TRP.product_variant_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
             ) AS "product_specs"
-            FROM tbl_rfq_products TRP WHERE TRP.rfq_id=$1`;
+            FROM tbl_rfq_products TRP WHERE TRP.rfq_id=$1
+            ${rfq_product_id ? 'AND TRP.id = $4' : ''}`;
 
-      db.query(mainQuery, [id, user_id, company_id])
+      db.query(mainQuery, [id, user_id, company_id, rfq_product_id])
         .then(function (data) {
           resolve(data);
         })
@@ -3011,7 +3013,8 @@ const productQuery = `
     user_id,
     company_id,
     TA_Vendors,
-    no_freight
+    no_freight,
+    rfq_product_id
   ) => {
     return new Promise(function (resolve, reject) {
       const vendorCondition = `
@@ -3312,9 +3315,11 @@ const productQuery = `
               ${TA_Vendors === 'TA' ? vendorCondition : ''}
           ) AS "quotations"
         FROM tbl_rfq_products TRF
-        WHERE TRF.rfq_id = $1;`;
+        WHERE TRF.rfq_id = $1
+        ${rfq_product_id ? `AND TRF.id = $4` : ''}
+        ;`;
 
-      db.query(mainQuery, [id, user_id, company_id])
+      db.query(mainQuery, [id, user_id, company_id, rfq_product_id])
         .then(function (data) {
           resolve(data);
         })
