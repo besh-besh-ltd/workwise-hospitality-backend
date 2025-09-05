@@ -1581,7 +1581,7 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
         <div>
           <h2>Hello ${vendor_name}</h2>
           <p style="font-size:16px;">
-            The buyer has added a new <strong> Deviation in The Technical Clause</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no}</strong>. 
+            The buyer has added a new <strong> Deviation in The Technical Clause</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no.rfq_no}</strong>. 
             Kindly review it at the earliest.
           </p>
         </div>
@@ -1664,7 +1664,7 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
   reject_message
 ) => {
   try {
-    const productName = product.name;
+    const productName = product[0].name;
 
     const vendor_details = await userModel.user_profile_detail(vendor_id);
     const vendor = vendor_details[0];
@@ -1761,9 +1761,9 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
       );
 
       let mailRecipients = {
-        from: `"${buyer_details[0]?.company_name || 'Workwise'}" <${
+        from: `"${buyer_details[0]?.company_name || 'Workwise'}" ${
           Config.masterEmail
-        }>`,
+        }`,
         subject: subjectLine,
         html: dynamicHTML
       };
