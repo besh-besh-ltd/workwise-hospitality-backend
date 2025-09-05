@@ -1581,7 +1581,7 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
         <div>
           <h2>Hello ${vendor_name}</h2>
           <p style="font-size:16px;">
-            The buyer has added a new <strong> Deviation in The Technical Clause</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no}</strong>. 
+            The buyer has added a new <strong> Deviation in The Technical Clause</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no.rfq_no}</strong>. 
             Kindly review it at the earliest.
           </p>
         </div>
@@ -1664,7 +1664,7 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
   reject_message
 ) => {
   try {
-    const productName = product.name;
+    const productName = product[0].name;
 
     const vendor_details = await userModel.user_profile_detail(vendor_id);
     const vendor = vendor_details[0];
@@ -1761,9 +1761,9 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
       );
 
       let mailRecipients = {
-        from: `"${buyer_details[0]?.company_name || 'Workwise'}" <${
+        from: `"${buyer_details[0]?.company_name || 'Workwise'}" ${
           Config.masterEmail
-        }>`,
+        }`,
         subject: subjectLine,
         html: dynamicHTML
       };
@@ -2706,7 +2706,7 @@ const rfqController = {
       }
       await saveRfqDraft(user_id, req.body);
 
-      const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id);
+      const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id, selectedSheets);
 
       if (!isRFQComplete) {
         return res
@@ -4184,6 +4184,10 @@ const rfqController = {
         );
         if (vendors && vendors.length > 0) {
           product.vendors = vendors.map((vendor) => ({ vendor_id: vendor.id }));
+        } else {
+          return res
+            .status(400)
+            .json({ status: 2, errors: { vendors: "No Vendors found for your selected product, please select some other product!" } });
         }
       }
 
