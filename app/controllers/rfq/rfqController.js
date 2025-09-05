@@ -2706,7 +2706,7 @@ const rfqController = {
       }
       await saveRfqDraft(user_id, req.body);
 
-      const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id);
+      const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id, selectedSheets);
 
       if (!isRFQComplete) {
         return res
@@ -4184,6 +4184,10 @@ const rfqController = {
         );
         if (vendors && vendors.length > 0) {
           product.vendors = vendors.map((vendor) => ({ vendor_id: vendor.id }));
+        } else {
+          return res
+            .status(400)
+            .json({ status: 2, errors: { vendors: "No Vendors found for your selected product, please select some other product!" } });
         }
       }
 
