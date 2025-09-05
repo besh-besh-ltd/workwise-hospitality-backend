@@ -5634,6 +5634,13 @@ const rfqController = {
       );
       // rfQItem = filterQuotations(rfQItem);
       // rfQItem = processQuotations(rfQItem);
+       const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+                                                          rfq_id: rfq_id,
+                                                          current_status: "QC",
+                                                          created_by: req.user.id
+                                                        });
+
+      console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
       res
         .status(200)
         .json({
@@ -5729,7 +5736,13 @@ const rfqController = {
 
         product.quotations = updatedQuotations;
       });
+       const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+                                                          rfq_id: rfq_id,
+                                                          current_status: "QC",
+                                                          created_by: req.user.id
+                                                        });
 
+      console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
       res
         .status(200)
         .json({
@@ -10179,23 +10192,35 @@ processBoqAndDownload : async (req, res) => {
     }
   },
 
-  getClauses: async (req, res) => {
-    try {
-      const rfq_id = req.params.id;
+ getClauses: async (req, res) => {
+  try {
+    const rfq_id = req.params.id;
+    const { pageSource } = req.query;   // 👈 capture from query string
 
-      const result = await rfqModel.getClauses(rfq_id);
-     
+    const result = await rfqModel.getClauses(rfq_id);
 
-      res.status(200).json(result).end();
-    } catch (error) {
-      logError(error);
-      res.status(500).json({
-        success: false,
-        message: 'Error in deleting clause.',
-        error: error.message
+    if (pageSource === "tech_evaluation") {
+      const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+        rfq_id: rfq_id,
+        current_status: "TE",
+        created_by: req.user.id
       });
+      console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+    } else {
+      console.log(`Skipped insert for pageSource: ${pageSource}`);
     }
-  },
+
+    res.status(200).json(result).end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+      success: false,
+      message: 'Error in fetching clauses.',
+      error: error.message
+    });
+  }
+},
+
 
   addTechComment: async (req, res) => {
     try {
