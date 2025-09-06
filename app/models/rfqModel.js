@@ -90,18 +90,20 @@ const rfqModel = {
     }
   },
 
-  checkRFQCompletion: async (rfq_id) => {
+  checkRFQCompletion: async (rfq_id, selectedSheets) => {
     try {
       let totalQ = `
       SELECT DISTINCT product_variant_id, variant
       FROM tbl_rfq_products rp
-          WHERE rp.rfq_id = $1;
+          WHERE rp.rfq_id = $1
+          ${(selectedSheets && Array.isArray(selectedSheets) && selectedSheets.length > 0) ? `AND rp.sheet_id IN (${selectedSheets.join(",")})` : ''};
       `;
 
       let qualifiedQ = `
         SELECT s.product_variant_id, s.variant
           FROM tbl_rfq_products_specs s
           WHERE s.rfq_id = $1
+            ${(selectedSheets && Array.isArray(selectedSheets) && selectedSheets.length > 0) ? `AND s.sheet_id IN (${selectedSheets.join(",")})` : ''}
             AND s.title IN ('Quantity', 'Unit')
             AND TRIM(s.value) != ''
             AND TRIM(s.value) != 'NA'
@@ -118,9 +120,6 @@ const rfqModel = {
 
       const totalRes = await db.any(totalQ, [rfq_id]);
       const qualifiedRes = await db.any(qualifiedQ, [rfq_id]);
-
-      console.log('TOTAL RES -> ', totalRes);
-      console.log('QUALIFIED RES -> ', qualifiedRes);
 
       return (totalRes ?? []).length === (qualifiedRes ?? []).length;
     } catch (error) {
@@ -8236,10 +8235,12 @@ ORDER BY m.created_at;
           SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
           `}
       )) AND RFQ.is_published = 1
-      AND EXISTS (
-        SELECT 1 FROM tbl_quotes ITQ
-        WHERE ITQ.rfq_id = RFQ.id
-      )
+      ${!tech_eval ? `
+        AND EXISTS (
+          SELECT 1 FROM tbl_quotes ITQ
+          WHERE ITQ.rfq_id = RFQ.id
+        )
+        ` : ''}
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
       ${dynamicConditions}
@@ -8350,6 +8351,85 @@ getRfqProductvendorsForTargetPrice: async (rfq_product_id, vendorIds) => {
           reject(error);
         });
     });
+  },
+
+  // This function will delete all the entries from all the rfq related tables 
+  // for sheets other than the specified one
+  removeRFQData: async (id, selectedSheets) => {
+    try {
+      if(!Array.isArray(selectedSheets) || selectedSheets.length <= 0) return false;
+
+      return db.tx(async (t) => {
+        // Delete RFQ-related records
+        await t.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = $1 AND sheet_id NOT IN (${selectedSheets.join(",")})`, id)
+
+        await t.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = $1 AND sheet_id NOT IN (${selectedSheets.join(",")})`, id)
+        await t.none(`DELETE FROM tbl_rfq_products_specs WHERE rfq_id = $1 AND sheet_id NOT IN (${selectedSheets.join(",")})`, id)
+        await db.none(`
+          DELETE FROM tbl_rfq_product_files  AS f
+          USING  tbl_rfq_products            AS p
+          WHERE  p.id       = f.rfq_product_id
+            AND  p.rfq_id   = $1
+            AND  p.sheet_id <> ALL($2)
+        `, [id, selectedSheets]);
+
+        // Delete tech evaluations and associated data
+        const techEvaluationCondition = { rfq_id: id };
+        const techEvaluationDeletedRecordsIds =
+          await rfqModel.deleteWithReturnIds(
+            'tbl_rfq_product_tech_evaluation',
+            techEvaluationCondition,
+            null,
+            { key: 'sheet_id', value: selectedSheets },
+            t
+          );
+
+        let techEvalClauseFilesId = [];
+
+        if (
+          Array.isArray(techEvaluationDeletedRecordsIds) &&
+          techEvaluationDeletedRecordsIds.length > 0
+        ) {
+          for (const evaluationClauseId of techEvaluationDeletedRecordsIds) {
+            const clauseCondition = {
+              tbl_rfq_product_tech_evaluation_id: evaluationClauseId
+            };
+
+            const clauseFiles = await rfqModel.deleteWithReturnIds(
+              'tbl_rfq_product_tech_evaluation_clauses',
+              clauseCondition,
+              t
+            );
+
+            if (Array.isArray(clauseFiles) && clauseFiles.length > 0) {
+              techEvalClauseFilesId.push(...clauseFiles);
+            }
+          }
+        }
+
+        // Delete clause files
+        if (techEvalClauseFilesId.length > 0) {
+          for (const techEvalClauseFileId of techEvalClauseFilesId) {
+            const clauseFileCondition = {
+              tbl_rfq_product_tech_evaluation_clauses_id: techEvalClauseFileId
+            };
+
+            await rfqModel.delete(
+              'tbl_rfq_product_tech_evaluation_clauses_files',
+              clauseFileCondition,
+              t
+            );
+          }
+        }
+
+        // Finally Delete all the sheets 
+        await rfqModel.delete('tbl_rfq_draft_sheets', { rfq_id: id }, t);
+
+        return true;
+      });
+    } catch (error) {
+      throw error;
+    }
   }
 };
 export default rfqModel;

@@ -825,7 +825,8 @@ const sendMailToVendorsForTargetPrice = async (
 
         const dynamicHTML = generateEmailTemplate(
           headerContent,
-          containerContent
+          containerContent,
+          sender_id
         );
 
         let mailRecipients = {
@@ -1343,7 +1344,16 @@ const containerContent = `
 
   // console.log(containerContent)
   
-  const dynamicHTML = generateEmailTemplate(headerContent, containerContent, rfqBasicDetails.created_by)
+  // Resolve theming user id: prefer RFQ.created_by; fallback to explicit DB fetch
+  let themingUserId = rfqBasicDetails?.created_by;
+  if (!themingUserId) {
+    try {
+      const buyerRows = await rfqModel.getBuyerForRfq(rfq_id);
+      themingUserId = buyerRows?.[0]?.user_id || themingUserId;
+    } catch (e) {}
+  }
+
+  const dynamicHTML = generateEmailTemplate(headerContent, containerContent, themingUserId)
 
     const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
 
@@ -1571,7 +1581,7 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
         <div>
           <h2>Hello ${vendor_name}</h2>
           <p style="font-size:16px;">
-            The buyer has added a new <strong> Deviation in The Technical Clause</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no}</strong>. 
+            The buyer has added a new <strong> Deviation in The Technical Clause</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no.rfq_no}</strong>. 
             Kindly review it at the earliest.
           </p>
         </div>
@@ -1654,12 +1664,11 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
   reject_message
 ) => {
   try {
-    const productName = product.name;
+    const productName = product[0].name;
 
     const vendor_details = await userModel.user_profile_detail(vendor_id);
     const vendor = vendor_details[0];
-    
-
+ 
     const buyer_details = await userModel.user_profile_detail(buyer_id);
     const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = '${rfq_id}'`);
 
@@ -1752,9 +1761,11 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
       );
 
       let mailRecipients = {
-        from: buyer_details[0]?.company_name || Config.masterEmail,
+        from: `"${buyer_details[0]?.company_name || 'Workwise'}" ${
+          Config.masterEmail
+        }`,
         subject: subjectLine,
-        html: dynamicHTML,
+        html: dynamicHTML
       };
 
       if (spocList && spocList.length > 0) {
@@ -2643,13 +2654,7 @@ const rfqController = {
     }
 
     try {
-      let {
-        rfq_id,
-        ra_start_date,
-        ra_end_date,
-        bid_end_date,
-        reverse_auction
-      } = req.body;
+      let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction, selectedSheets } = req.body;
       const user_id = req.user.id;
       if (!rfq_id) {
         return res
@@ -2701,7 +2706,7 @@ const rfqController = {
       }
       await saveRfqDraft(user_id, req.body);
 
-      const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id);
+      const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id, selectedSheets);
 
       if (!isRFQComplete) {
         return res
@@ -2716,6 +2721,8 @@ const rfqController = {
           .end();
       }
       // const products = await rfqModel.getProductsByRfqId(rfq_id);
+
+      await rfqModel.removeRFQData(rfq_id, selectedSheets);
 
       const responseUpdate = await rfqModel.update(
         'tbl_rfq',
@@ -4177,6 +4184,10 @@ const rfqController = {
         );
         if (vendors && vendors.length > 0) {
           product.vendors = vendors.map((vendor) => ({ vendor_id: vendor.id }));
+        } else {
+          return res
+            .status(400)
+            .json({ status: 2, errors: { vendors: "No Vendors found for your selected product, please select some other product!" } });
         }
       }
 
@@ -8421,7 +8432,7 @@ const rfqController = {
           message: 'File name is required for persistant processing.'
         });
 
-      const result = await rfqController.handleMagicSearchInsertion(file_name, type, id);
+      const result = await rfqController.handleMagicSearchInsertion(file_name, type, id, raw_file_url);
 
       return res.json(result);
     } catch (error) {
@@ -8435,7 +8446,7 @@ const rfqController = {
     }
   },
 
-  handleMagicSearchInsertion: async (file_name, type, id) => {
+  handleMagicSearchInsertion: async (file_name, type, id, raw_file_url) => {
     try {
       let processing = await rfqModel.checkIfExists('tbl_rfq_persistent_jobs', `file_name = '${file_name}' AND status = 'processing' AND user_id = ${id} AND type = '${type}'`)
       if(processing && processing.length > 0) {
@@ -8471,7 +8482,7 @@ const rfqController = {
       const signature = generateSignature(message, secret);
 
       return db.tx(async t => {
-        let persistence = await rfqModel.persistAIJobInDB(id, file_name, null, signature, type, t);
+        let persistence = await rfqModel.persistAIJobInDB(id, file_name, raw_file_url, signature, type, t);
   
         if(!persistence || persistence.length <= 0) {
           return {
@@ -9550,6 +9561,8 @@ const rfqController = {
       if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
 
       const rfqNumber = rfqDetails.rfq_no;
+      const userIdForTheme = rfqDetails?.created_by || sender_id;
+     
 
       const result = await rfqModel.insertReturnId('tbl_query_messages', data);
       const message_id = result[0].id;
@@ -9619,7 +9632,8 @@ const rfqController = {
 
         const dynamicHTML = generateEmailTemplate(
           headerContent,
-          containerContent
+          containerContent,
+          userIdForTheme
         );
 
         const emailSubject =
@@ -10176,9 +10190,7 @@ processBoqAndDownload : async (req, res) => {
       const rfq_id = req.params.id;
 
       const result = await rfqModel.getClauses(rfq_id);
-      // console.log("Result main of get clauses = ",result);
-
-      console.log('ehckinh th evendor result', JSON.stringify(result));
+     
 
       res.status(200).json(result).end();
     } catch (error) {
