@@ -565,6 +565,46 @@ const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret
   }
 };
 
+const sendFollowUpEmails = async (payload) => {
+  try {
+    const { buyer, vendor, rfqNumber, rfq_id } = payload;
+    const { name, email } = buyer;
+    const { name: vendor_name } = vendor;
+
+    
+
+    const headerContent = `<h2> Dear ${name},</h2>`;
+    const containerContent = `<div>
+      <p style="font-size: 15px; padding-bottom: 3px;">
+        Vendor <strong>${vendor_name}</strong> has sent you a follow-up mail for RFQ <strong>${rfqNumber}</strong>.
+      </p>
+      
+      <p style="font-size: 15px; padding-bottom: 3px;">
+        The vendor is awaiting your action. Kindly respond at the earliest.
+      </p>
+
+      <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}"
+        style="background-color: #2563eb; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 220px; margin: 0 auto; text-decoration: none;">
+        View RFQ & Respond
+      </a>
+    </div>`;
+
+    const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      to: email,
+      subject: `Work Wise | RFQ ${rfqNumber} Follow-up Notification`,
+      html: dynamicHTML
+    };
+
+    await sendMailWithRetry(mailRecipients);
+  } catch (error) {
+    throw error;
+  }
+};
+
+
 /**
  * 
  * @param {*} vendor 
@@ -3813,6 +3853,24 @@ const rfqController = {
     }
   },
 
+  getVendorQuoteStatus : async (req, res) => {
+    try {
+      const { rfq_id} = req.params;
+      const user_id = req.user.id;
+      const response = await rfqModel.findAll("tbl_quote_activity", {rfq_id});
+
+      console.log("response ------------->", response)
+      res.status(200).json({
+        status: 1,
+        data: response
+      });
+    }
+    catch(error)
+    {
+      console.log(error)
+    }
+    },
+
   getRFQDraftData: async (req, res) => {
     try {
       // Changes by Agnij 2025-06-17 [Modified to use create-fresh-draft query parameter]
@@ -5621,7 +5679,7 @@ const rfqController = {
   },
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { TA_Vendors, no_freight } = req.query;
+    const { TA_Vendors, no_freight , pageSource } = req.query;
     const { id, company_id } = req.user;
 
     try {
@@ -5634,13 +5692,27 @@ const rfqController = {
       );
       // rfQItem = filterQuotations(rfQItem);
       // rfQItem = processQuotations(rfQItem);
-       const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
-                                                          rfq_id: rfq_id,
-                                                          current_status: "QC",
-                                                          created_by: req.user.id
-                                                        });
+       if (pageSource === "quote_compare") {
+      // 👇 Check if an entry already exists
+      const existingActivity = await rfqModel.checkIfExists(
+        'tbl_quote_activity',
+        `rfq_id = ${rfq_id} AND created_by = ${req.user.id} AND current_status = 'QC'`
+      );
 
-      console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+      if (existingActivity.length === 0) {
+        const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+          rfq_id: rfq_id,
+          current_status: "QC",
+          created_by: req.user.id
+        });
+        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+      } else {
+        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+      }
+    } else {
+      console.log(`Skipped insert for pageSource: ${pageSource}`);
+    }
+
       res
         .status(200)
         .json({
@@ -8772,6 +8844,22 @@ const rfqController = {
     }
   },
 
+  sendFollowUpEmails : async (req , res ) =>{
+    try {
+      const {payload } = req.body;
+      await sendFollowUpEmails(payload);
+      res.json({ status: 1, message: 'Follow up emails sent successfully!' });
+
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while sending follow up emails, please try again!',
+        error,
+      })
+    }
+  },
+
 
   tenderSummary : async (req , res) =>{
 
@@ -10192,20 +10280,30 @@ processBoqAndDownload : async (req, res) => {
     }
   },
 
- getClauses: async (req, res) => {
+getClauses: async (req, res) => {
   try {
     const rfq_id = req.params.id;
-    const { pageSource } = req.query;   // 👈 capture from query string
+    const { pageSource } = req.query;
 
     const result = await rfqModel.getClauses(rfq_id);
 
     if (pageSource === "tech_evaluation") {
-      const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
-        rfq_id: rfq_id,
-        current_status: "TE",
-        created_by: req.user.id
-      });
-      console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+      // 👇 Check if an entry already exists
+      const existingActivity = await rfqModel.checkIfExists(
+        'tbl_quote_activity',
+        `rfq_id = ${rfq_id} AND current_status = 'TE' AND created_by = ${req.user.id}`
+      );
+      console.log("Existing activity check:", existingActivity);
+      if (existingActivity.length === 0) {
+        const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+          rfq_id: rfq_id,
+          current_status: "TE",
+          created_by: req.user.id
+        });
+        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+      } else {
+        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+      }
     } else {
       console.log(`Skipped insert for pageSource: ${pageSource}`);
     }
@@ -10220,6 +10318,7 @@ processBoqAndDownload : async (req, res) => {
     });
   }
 },
+
 
 
   addTechComment: async (req, res) => {
