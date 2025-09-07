@@ -565,7 +565,7 @@ const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret
   }
 };
 
-const sendFollowUpEmails = async (payload) => {
+const sendFollowUpEmailsService = async (payload) => {
   try {
     const { buyer, vendor, rfqNumber, rfq_id } = payload;
     const { name, email } = buyer;
@@ -599,6 +599,7 @@ const sendFollowUpEmails = async (payload) => {
     };
 
     await sendMailWithRetry(mailRecipients);
+    console.log(`Follow-up email sent to buyer ${email} for RFQ ${rfqNumber}`);
   } catch (error) {
     throw error;
   }
@@ -8846,8 +8847,8 @@ const rfqController = {
 
   sendFollowUpEmails : async (req , res ) =>{
     try {
-      const {payload } = req.body;
-      await sendFollowUpEmails(payload);
+      const payload = req.body;
+      await sendFollowUpEmailsService(payload);
       res.json({ status: 1, message: 'Follow up emails sent successfully!' });
 
     } catch (error) {

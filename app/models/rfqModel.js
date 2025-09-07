@@ -1286,6 +1286,7 @@ WHERE NOT EXISTS (
           RFQ.id,
           RFQ.rfq_no,
           RFQ.company_name,
+          RFQ.response_email,
           RFQ.is_published,
           RFQ.status,
           RFQ.bid_end_date,

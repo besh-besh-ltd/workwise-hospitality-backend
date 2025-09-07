@@ -320,12 +320,12 @@ RfqRoutes.post('/magic-webhook',
 RfqRoutes.post('/estimate-cost',
   noLogin.customer_auth,
   rfqController.estimateCost,
-)
+);
 RfqRoutes.post('/send-follow-up-emails',
   passportSignIn,
-  acl[3],
+  acl([2,3]),
   rfqController.sendFollowUpEmails,
-)
+);
 
 RfqRoutes.get('/get-cost-estimation/:persistent_id',
   passportSignIn,
