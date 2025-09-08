@@ -6139,6 +6139,38 @@ const rfqController = {
         // return 09 Conflict status code if vendor already exist for same product + variant,
 
         const response = await db.tx(async (t) => {
+          // const userInHierarchy = t.oneOrNone(
+          //   `SELECT * FROM tbl_approval_hierarchy
+          //   WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND is_active = true`,
+          //   [req.user.company_id, req.user.id, 'po']
+          // );
+
+          // if(!userInHierarchy) 
+          //   return res
+          //     .status(400)
+          //     .json({
+          //       status: 3,
+          //       message:
+          //         'Failed to finalize a vendor as you are not the part of your company\'s approval hierarchy!'
+          //     })
+          //     .end();
+
+          const isFinalApprover = t.oneOrNone(
+            `SELECT * FROM tbl_approval_hierarchy
+            WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND approval_level = -1`,
+            [req.user.company_id, req.user.id, 'po']
+          );
+
+          if(isFinalApprover) 
+            return res
+              .status(400)
+              .json({
+                status: 3,
+                message:
+                  'Failed to finalize a vendor as you are not the part of your company\'s approval hierarchy!'
+              })
+              .end();
+
           let alreadyExists = await rfqModel.checkIfExists(
             'tbl_quote_finalization',
             `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} LIMIT 1`,

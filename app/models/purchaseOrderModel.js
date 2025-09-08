@@ -137,7 +137,7 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const [pos, { total }] = await db.tx(async t => {
+    const [pos, { total }, { approval_level }] = await db.tx(async t => {
       const dataQuery = `SELECT po.*,
                 VENDOR.organization_name AS finalized_vendor_name,
                 PRJ.name AS project_name,
@@ -198,7 +198,13 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
         values
       );
 
-      return [data, count];
+      const approverLevel = await t.one(
+        `SELECT approval_level FROM tbl_approval_hierarchy TAH
+         WHERE user_id = $1 AND hierarchy_type = 'po'`,
+         [user_id]
+      )
+
+      return [data, count, approverLevel];
     });
 
     return {
@@ -206,7 +212,8 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
       page,
       limit,
       total: parseInt(total, 10),
-      totalPages: Math.ceil(total / limit)
+      totalPages: Math.ceil(total / limit),
+      approval_level,
     };
   } catch (error) {
     throw error;
