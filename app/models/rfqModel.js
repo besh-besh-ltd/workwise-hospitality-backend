@@ -129,18 +129,20 @@ WHERE NOT EXISTS (
     }
   },
 
-  checkRFQCompletion: async (rfq_id) => {
+  checkRFQCompletion: async (rfq_id, selectedSheets) => {
     try {
       let totalQ = `
       SELECT DISTINCT product_variant_id, variant
       FROM tbl_rfq_products rp
-          WHERE rp.rfq_id = $1;
+          WHERE rp.rfq_id = $1
+          ${(selectedSheets && Array.isArray(selectedSheets) && selectedSheets.length > 0) ? `AND rp.sheet_id IN (${selectedSheets.join(",")})` : ''};
       `;
 
       let qualifiedQ = `
         SELECT s.product_variant_id, s.variant
           FROM tbl_rfq_products_specs s
           WHERE s.rfq_id = $1
+            ${(selectedSheets && Array.isArray(selectedSheets) && selectedSheets.length > 0) ? `AND s.sheet_id IN (${selectedSheets.join(",")})` : ''}
             AND s.title IN ('Quantity', 'Unit')
             AND TRIM(s.value) != ''
             AND TRIM(s.value) != 'NA'
@@ -157,9 +159,6 @@ WHERE NOT EXISTS (
 
       const totalRes = await db.any(totalQ, [rfq_id]);
       const qualifiedRes = await db.any(qualifiedQ, [rfq_id]);
-
-      console.log('TOTAL RES -> ', totalRes);
-      console.log('QUALIFIED RES -> ', qualifiedRes);
 
       return (totalRes ?? []).length === (qualifiedRes ?? []).length;
     } catch (error) {

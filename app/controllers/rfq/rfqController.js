@@ -1622,7 +1622,7 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
         <div>
           <h2>Hello ${vendor_name}</h2>
           <p style="font-size:16px;">
-            The buyer has added a new <strong> Deviation in The Technical Clause</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no}</strong>. 
+            The buyer has added a new <strong> Deviation in The Technical Clause</strong> for product <strong>${productName}</strong> under RFQ <strong>${rfq_no.rfq_no}</strong>. 
             Kindly review it at the earliest.
           </p>
         </div>
@@ -1705,7 +1705,7 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
   reject_message
 ) => {
   try {
-    const productName = product.name;
+    const productName = product[0].name;
 
     const vendor_details = await userModel.user_profile_detail(vendor_id);
     const vendor = vendor_details[0];
@@ -1802,9 +1802,9 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
       );
 
       let mailRecipients = {
-        from: `"${buyer_details[0]?.company_name || 'Workwise'}" <${
+        from: `"${buyer_details[0]?.company_name || 'Workwise'}" ${
           Config.masterEmail
-        }>`,
+        }`,
         subject: subjectLine,
         html: dynamicHTML
       };
@@ -2747,7 +2747,7 @@ const rfqController = {
       }
       await saveRfqDraft(user_id, req.body);
 
-      const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id);
+      const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id, selectedSheets);
 
       if (!isRFQComplete) {
         return res
@@ -4243,6 +4243,10 @@ const rfqController = {
         );
         if (vendors && vendors.length > 0) {
           product.vendors = vendors.map((vendor) => ({ vendor_id: vendor.id }));
+        } else {
+          return res
+            .status(400)
+            .json({ status: 2, errors: { vendors: "No Vendors found for your selected product, please select some other product!" } });
         }
       }
 
@@ -10346,6 +10350,54 @@ getClauses: async (req, res) => {
      const clause = await rfqModel.checkIfExists('tbl_rfq_product_tech_evaluation_clauses', `id = ${clause_id}`);
      const clausText = clause && clause.length > 0 ? clause[0].clause_text : '';
 
+
+
+      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
+
+      
+
+    if (withoutLoginUserToken) {
+      // Check if the token exists
+      const tokenData = await rfqModel.checkIfExists(
+        'tbl_vendor_rfq_tokens_non_login',
+        `token = '${withoutLoginUserToken}'`
+      );
+     
+      if (!tokenData || tokenData.length === 0) {
+        // Token is not valid
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'Invalid or expired token!'
+          })
+          .end();
+      }
+
+      // Retrieve user data associated with the token
+      const userData = await rfqModel.checkIfExists(
+        'tbl_users',
+        `id = ${tokenData[0].vendor_id}`
+      );
+      
+      if (!userData || userData.length === 0) {
+        // User data is not valid
+        return res
+          .status(404)
+          .json({
+            status: 0,
+            message: 'User not found!'
+          })
+          .end();
+      }
+      // Remove password from user data
+      const { password, ...userWithoutPassword } = userData[0];
+      // Assign the user data to req.user
+      req.user = userWithoutPassword;
+      
+    }
+
+
       if (response) {
         if (req.user.user_type == 3) {
           //Notice the vendor object is passed as buyer since this requet is coming from vendor and concerend prop value at frontend is same hence
@@ -10380,8 +10432,54 @@ getClauses: async (req, res) => {
   getTechComments: async (req, res) => {
     try {
       const { clause_id, sender_id, receiver_id } = req.body;
-      const user_id = req.user.id;
-      const user_type = req.user.user_type;
+      
+
+
+
+       const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
+
+    if (withoutLoginUserToken) {
+      // Check if the token exists
+      const tokenData = await rfqModel.checkIfExists(
+        'tbl_vendor_rfq_tokens_non_login',
+        `token = '${withoutLoginUserToken}'`
+      );
+
+      if (!tokenData || tokenData.length === 0) {
+        // Token is not valid
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'Invalid or expired token!'
+          })
+          .end();
+      }
+
+      // Retrieve user data associated with the token
+      const userData = await rfqModel.checkIfExists(
+        'tbl_users',
+        `id = ${tokenData[0].vendor_id}`
+      );
+
+      if (!userData || userData.length === 0) {
+        // User data is not valid
+        return res
+          .status(404)
+          .json({
+            status: 0,
+            message: 'User not found!'
+          })
+          .end();
+      }
+      // Remove password from user data
+      const { password, ...userWithoutPassword } = userData[0];
+      // Assign the user data to req.user
+      req.user = userWithoutPassword;
+    }
+
+    const user_id = req.user.id;
+    const user_type = req.user.user_type;
 
       const response = await rfqModel.getTechComments(
         clause_id,
