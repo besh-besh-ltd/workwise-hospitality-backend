@@ -6334,7 +6334,25 @@ const rfqController = {
             result
           };
         });
-
+      
+      // 👇 Check if an entry already exists 
+      //Record the finalization activity with status 'FIN'
+      const existingActivity = await rfqModel.checkIfExists(
+        'tbl_quote_activity',
+        `rfq_id = ${rfq_id} AND current_status = 'FIN' AND created_by = ${req.user.id}`
+      );
+      console.log("Existing activity check:", existingActivity);
+      if (existingActivity.length === 0) {
+        const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+          rfq_id: rfq_id,
+          current_status: "FIN",
+          created_by: req.user.id
+        });
+        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+      } else {
+        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+      }
+    
         return res.status(200).json({
           status: 1,
           message: response.reFinalized
@@ -8849,21 +8867,57 @@ const rfqController = {
     }
   },
 
-  sendFollowUpEmails : async (req , res ) =>{
-    try {
-      const payload = req.body;
-      await sendFollowUpEmailsService(payload);
-      res.json({ status: 1, message: 'Follow up emails sent successfully!' });
+sendFollowUpEmails: async (req, res) => {
+  try {
+    const payload = req.body;
+    const user_id = req.user?.id ?? null;
+    const { rfq_id } = payload;
 
-    } catch (error) {
-      logError(error);
+    if (!rfq_id || !user_id) {
       return res.status(400).json({
-        status: 3,
-        message: 'Something went wrong while sending follow up emails, please try again!',
-        error,
-      })
+        status: 2,
+        message: "Missing rfq_id or user_id",
+      });
     }
-  },
+
+    // Step 1: Check how many reminders already sent
+    const reminders = await rfqModel.findAll('tbl_rfq_activity', {
+      rfq_id: Number(rfq_id),
+      user_id: Number(user_id)
+    });
+
+
+    if (reminders && reminders.length >= 2) {
+      return res.json({
+        status: 2,
+        message: "Maximum number of follow-ups reached",
+      });
+    }
+
+    // Step 2: Insert activity record
+    await rfqModel.insert("tbl_rfq_activity", {
+      rfq_id: Number(rfq_id),
+      user_id: Number(user_id),
+    });
+
+    // Step 3: Send email
+    await sendFollowUpEmailsService(payload);
+
+    return res.json({
+      status: 1,
+      message: "Follow up email sent successfully",
+    });
+
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({
+      status: 3,
+      message: "Something went wrong while sending follow up emails, please try again!",
+      error,
+    });
+  }
+},
+
 
 
   tenderSummary : async (req , res) =>{
@@ -9878,7 +9932,7 @@ const rfqController = {
     }
   },
   negotiatePrice: async (req, res) => {
-    const { productId, vendorIds, targetPrice } = req.body;
+    const { productId, vendorIds, targetPrice , rfq_id} = req.body;
     const user_id = req.user.id;
     try {
       // Create payload for multiple vendors
@@ -9910,18 +9964,31 @@ const rfqController = {
         'tbl_rfq_product_target_price'
       );
 
-      console.log(
-        ' vendorProductList  , targetPrice , user_id ',
-        vendorProductList,
-        targetPrice,
-        user_id
-      );
 
       await sendMailToVendorsForTargetPrice(
         vendorProductList,
         targetPrice,
         user_id
       );
+
+    
+      // 👇 Check if an entry already exists
+      const existingActivity = await rfqModel.checkIfExists(
+        'tbl_quote_activity',
+        `rfq_id = ${rfq_id} AND current_status = 'NEG' AND created_by = ${req.user.id}`
+      );
+      console.log("Existing activity check:", existingActivity);
+      if (existingActivity.length === 0) {
+        const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+          rfq_id: rfq_id,
+          current_status: "NEG",
+          created_by: req.user.id
+        });
+        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+      } else {
+        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+      }
+    
 
       res.json({
         status: 1,

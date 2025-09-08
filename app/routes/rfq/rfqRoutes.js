@@ -281,7 +281,7 @@ RfqRoutes.post('/rfq-list', passportSignIn, rfqController.rfqList);
 
 RfqRoutes.get('/get-vendor-quote-status/:rfq_id',
    passportSignIn,
-   acl([3]),
+   acl([2,3]),
    rfqController.getVendorQuoteStatus);
 
 // mukul 07-06-2025 ,  not in use, cross check and remove even if this is wokrong move this to another roue folder as this file belongs to rfq only
