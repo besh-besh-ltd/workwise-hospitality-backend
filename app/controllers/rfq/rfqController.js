@@ -1664,7 +1664,18 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
   reject_message
 ) => {
   try {
-    const productName = product[0].name;
+    let productName;
+
+    if (Array.isArray(product)) {
+      // If it's an array, take the first element’s name
+      productName = product[0]?.name;
+    } else if (product && typeof product === 'object') {
+      // If it's a single object, use its name
+      productName = product.name;
+    } else {
+      productName = null; // fallback
+    }
+
 
     const vendor_details = await userModel.user_profile_detail(vendor_id);
     const vendor = vendor_details[0];
