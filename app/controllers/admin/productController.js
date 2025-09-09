@@ -2690,6 +2690,85 @@ const productController = {
       });
     }
   },
+  // Bulk map multiple variant-vendor pairs efficiently
+  bulkMapVariantWithVendor: async (req, res) => {
+    try {
+      const { mappings } = req.body || {};
+      if (!Array.isArray(mappings) || mappings.length === 0) {
+        return res.status(400).json({ status: 3, message: 'mappings must be a non-empty array' });
+      }
+
+      let successCount = 0;
+      let failures = [];
+
+      for await (const item of mappings) {
+        try {
+          const variantId = item.variant_id || item.product_variant_id;
+          const vendorId = item.vendor_id;
+          const approvedBy = item.approved_by ?? [];
+          const makeList = item.make_list || [];
+
+          if (!variantId || !vendorId) {
+            failures.push({ item, error: 'Missing variant_id or vendor_id' });
+            continue;
+          }
+
+          // Skip if already mapped
+          const existing = await productModel.checkDuplicateVariantVendorMapping(variantId, vendorId);
+          if (existing && existing.length > 0) {
+            continue;
+          }
+
+          const productResult = await productModel.getProductByVariant(variantId);
+          const productId = productResult?.[0]?.id || 0;
+
+          const mappingObj = {
+            product_variant_id: variantId,
+            vendor_id: vendorId,
+            created_at: new Date(),
+            updated_at: new Date(),
+            status: true,
+            is_approved: false,
+            created_by: req.user.id,
+            updated_by: req.user.id,
+          };
+          const mappingResult = await productModel.createProductVariantVendorMapping(mappingObj);
+
+          // Insert makes
+          const makeData = (makeList || [])
+            .filter(name => name && name.trim())
+            .map(name => ({ variant_vendor_map_id: mappingResult.id, make_name: name.trim() }));
+          if (makeData.length > 0) {
+            await generalModel.insertMany('tbl_product_variant_vendor_make', makeData);
+          }
+
+          // Approved_by mapping
+          if (Array.isArray(approvedBy) && approvedBy.length > 0) {
+            const approvePayload = approvedBy.map(id => ({
+              product_id: productId,
+              variant_vendor_mapping_id: mappingResult.id,
+              vendor_approve_id: id
+            }));
+            await productModel.addProductApproveBy(approvePayload, productId);
+          }
+
+          successCount++;
+        } catch (e) {
+          failures.push({ item, error: e.message || 'Unknown error' });
+        }
+      }
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Bulk mapping processed',
+        success: successCount,
+        failed: failures.length,
+        failures
+      });
+    } catch (error) {
+      return res.status(500).json({ status: 3, message: Config?.errorText?.value || 'Bulk mapping failed', error: error.message });
+    }
+  },
   createProductVariant: async (variantObj) => {
     return new Promise(function (resolve, reject) {
       // Construct the dynamic SQL query
