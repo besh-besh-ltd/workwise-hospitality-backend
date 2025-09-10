@@ -188,10 +188,19 @@ RfqRoutes.get(
 RfqRoutes.get(
   '/get-lpr-lqr',
    passportSignIn,
-   acl([2, 8, 10]),
+   acl([2,3, 8, 10]),
    validateDbBody.user_id_profileexists,
    rfqController.getLprLqrByVariantId
 )
+
+RfqRoutes.get(
+  '/get-quote-history',
+  passportSignIn,
+  acl([3]),
+  validateDbBody.user_id_profileexists,
+  rfqController.getQuoteHistoryForvendor
+);
+
 RfqRoutes.get(
   '/close-rfq/:id',
   passportSignIn,

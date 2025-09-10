@@ -8082,7 +8082,7 @@ ORDER BY m.created_at;
               AND TQF.product_variant_id = TQI.product_variant_id 
               AND TQF.variant = TQI.variant
             LEFT JOIN tbl_users FINALIZER ON FINALIZER.id = TQF.created_by
-            WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,8,10))
+            WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,3 ,8,10))
               AND TQI.product_variant_id = $1
               AND TQI.unit_price > 0
             ORDER BY TQ.timestamp DESC;
@@ -8095,6 +8095,25 @@ ORDER BY m.created_at;
       else return [];
     } catch (error) {
       console.error(`[MODEL ERROR] Failed to execute ${type} query:`, error);
+      throw error;
+    }
+  },
+
+  getQuoteHistoryForvendor : async (user_id, variant_id) => {
+    const query = `
+    select tqi.*, tu.name as buyer_name , tq.timestamp 
+from tbl_quote_items tqi
+join tbl_quotes tq on tq.id = tqi.quote_id 
+join tbl_rfq rfq on tq.rfq_id = rfq.id 
+join tbl_users tu on tu.id = rfq.created_by 
+where tq.created_by = $1 and tqi.product_variant_id = $2;
+    `;
+    try {
+      const result = await db.query(query, [user_id, variant_id]);
+      if (result.length > 0) return result;
+      else return [];
+    } catch (error) {
+      console.error(`[MODEL ERROR] Failed to execute quote history query:`, error);
       throw error;
     }
   },
