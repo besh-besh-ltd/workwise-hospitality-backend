@@ -42,6 +42,9 @@ const globalAdminLimit = process.env.LIMIT || 20;
 const sgst = process.env.SGST || 0.0015;
 const cgst = process.env.CGST || 0.0015;
 const app_version = process.env.APP_VERSION || 1.0;
+
+// Sentry configuration
+const sentryDsn = process.env.SENTRY_DSN || "";
 const base_url =
   // process.env.BASE_URL || 'https://panacheapi.indusnettechnologies.com';
   process.env.BASE_URL || "http://api.localhost:3001";
@@ -328,6 +331,10 @@ const config = {
     razorpay_key: process.env.RAZORPAY_KEY,
     razorpay_secret: process.env.RAZORPAY_SECRET,
     razorpay_signature: process.env.RAZORPAY_SIGNATURE,
+  },
+  sentry: {
+    dsn: sentryDsn,
+    environment: env,
   },
 };
 export default config;

@@ -1634,7 +1634,7 @@ const rfqModel = {
             SELECT 1
             FROM tbl_product_variant_vendor_make pvmm
             WHERE pvmm.variant_vendor_map_id = pvvm.id
-            AND pvmm.id IN (${productMakes.join(', ')})
+            AND LOWER(pvmm.make_name) IN (${productMakes.map(pm => `'${pm.toLowerCase()}'`).join(', ')})
           )
         `;
       } else if (
@@ -1646,7 +1646,7 @@ const rfqModel = {
             SELECT 1
             FROM tbl_product_variant_vendor_make pvmm
             WHERE pvmm.variant_vendor_map_id = pvvm.id
-            AND pvmm.id = '${productMakes}'::INT
+            AND LOWER(pvmm.make_name) = '${String(productMakes).toLowerCase()}'
           )
         `;
       }
@@ -1699,6 +1699,8 @@ const rfqModel = {
             
           ORDER BY tu.name
         `;
+
+      console.log("GET DRAFT VENDORS:", q);
 
       return db.any(q, [draftId, rfqProductId, vendor_name]);
     } catch (error) {
@@ -4112,6 +4114,8 @@ WHERE row_num_by_name_category = 1
       ORDER BY is_premium DESC, 
          ${vendor_name ? 'similarity_score DESC, group_rand' : 'group_rand'};
   `;
+
+  console.log("QUERY SEARCH VENDOR:", q);
 
     const values = vendor_name ? [vendor_name] : [];
     return new Promise(function (resolve, reject) {
