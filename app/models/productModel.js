@@ -3615,6 +3615,11 @@ getProductTechSpecByID: async (productId) => {
             u.email AS vendor_email,
             COALESCE(c.company_name, u.organization_name, u.name) AS vendor_organization,
             COALESCE(c.company_name, u.organization_name, u.name, 'Unknown Vendor') AS vendor_display_name,
+            (
+              SELECT COALESCE(json_agg(t.make_name) FILTER (WHERE t.make_name IS NOT NULL), '[]'::json)
+              FROM tbl_product_variant_vendor_make t
+              WHERE t.variant_vendor_map_id = m.id
+            ) AS make_list,
             ${searchTerm ? `
               similarity(v.name, '${searchTerm}') AS v_similarity_score,
               similarity(p.name, '${searchTerm}') AS p_similarity_score,

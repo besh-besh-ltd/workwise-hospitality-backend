@@ -2698,72 +2698,114 @@ const productController = {
         return res.status(400).json({ status: 3, message: 'mappings must be a non-empty array' });
       }
 
-      let successCount = 0;
-      let failures = [];
+      // Normalize and validate payload once
+      const now = new Date();
+      const normalized = mappings
+        .map(m => ({
+          variant_id: m.variant_id || m.product_variant_id,
+          vendor_id: m.vendor_id,
+          approved_by: Array.isArray(m.approved_by) ? m.approved_by.filter(Number).map(Number) : [],
+          make_list: Array.isArray(m.make_list) ? m.make_list.filter(x => x && String(x).trim()) : []
+        }))
+        .filter(m => m.variant_id && m.vendor_id);
 
-      for await (const item of mappings) {
-        try {
-          const variantId = item.variant_id || item.product_variant_id;
-          const vendorId = item.vendor_id;
-          const approvedBy = item.approved_by ?? [];
-          const makeList = item.make_list || [];
+      if (normalized.length === 0) {
+        return res.status(400).json({ status: 3, message: 'No valid mapping rows after normalization' });
+      }
 
-          if (!variantId || !vendorId) {
-            failures.push({ item, error: 'Missing variant_id or vendor_id' });
-            continue;
-          }
+      // Build fast lookup lists
+      const variantIds = [...new Set(normalized.map(r => Number(r.variant_id)))]
+        .filter(Boolean);
+      const vendorIds = [...new Set(normalized.map(r => Number(r.vendor_id)))]
+        .filter(Boolean);
 
-          // Skip if already mapped
-          const existing = await productModel.checkDuplicateVariantVendorMapping(variantId, vendorId);
-          if (existing && existing.length > 0) {
-            continue;
-          }
+      // Fetch existing mappings in one query and skip duplicates in-memory
+      const existingPairs = new Set();
+      if (variantIds.length > 0 && vendorIds.length > 0) {
+        const existing = await db.any(
+          `SELECT product_variant_id AS variant_id, vendor_id
+           FROM tbl_product_variant_vendor_mapping
+           WHERE product_variant_id IN ($1:csv) AND vendor_id IN ($2:csv)`,
+          [variantIds, vendorIds]
+        );
+        existing.forEach(r => existingPairs.add(`${r.variant_id}|${r.vendor_id}`));
+      }
 
-          const productResult = await productModel.getProductByVariant(variantId);
-          const productId = productResult?.[0]?.id || 0;
+      const fresh = normalized.filter(r => !existingPairs.has(`${r.variant_id}|${r.vendor_id}`));
+      if (fresh.length === 0) {
+        return res.status(200).json({ status: 1, message: 'Nothing to insert', success: 0, failed: 0, failures: [] });
+      }
 
-          const mappingObj = {
-            product_variant_id: variantId,
-            vendor_id: vendorId,
-            created_at: new Date(),
-            updated_at: new Date(),
-            status: true,
-            is_approved: false,
-            created_by: req.user.id,
-            updated_by: req.user.id,
-          };
-          const mappingResult = await productModel.createProductVariantVendorMapping(mappingObj);
+      // Fetch product ids for all variants in one query
+      const variantToProduct = new Map();
+      const vpRows = await db.any(
+        `SELECT pv.id AS variant_id, p.id AS product_id
+         FROM tbl_product_variant pv
+         JOIN tbl_product p ON p.id = pv.product_id
+         WHERE pv.id IN ($1:csv)`,
+        [variantIds]
+      );
+      vpRows.forEach(row => variantToProduct.set(Number(row.variant_id), Number(row.product_id)));
 
-          // Insert makes
-          const makeData = (makeList || [])
-            .filter(name => name && name.trim())
-            .map(name => ({ variant_vendor_map_id: mappingResult.id, make_name: name.trim() }));
-          if (makeData.length > 0) {
-            await generalModel.insertMany('tbl_product_variant_vendor_make', makeData);
-          }
+      // Prepare bulk rows for mapping
+      const mappingRows = fresh.map(r => ({
+        product_variant_id: Number(r.variant_id),
+        vendor_id: Number(r.vendor_id),
+        created_at: now,
+        updated_at: now,
+        status: true,
+        is_approved: false,
+        created_by: req.user.id,
+        updated_by: req.user.id,
+      }));
 
-          // Approved_by mapping
-          if (Array.isArray(approvedBy) && approvedBy.length > 0) {
-            const approvePayload = approvedBy.map(id => ({
-              product_id: productId,
-              variant_vendor_mapping_id: mappingResult.id,
-              vendor_approve_id: id
-            }));
-            await productModel.addProductApproveBy(approvePayload, productId);
-          }
+      // Insert all mappings in one statement; get back ids
+      const insertedMappings = await generalModel.insertMany('tbl_product_variant_vendor_mapping', mappingRows);
 
-          successCount++;
-        } catch (e) {
-          failures.push({ item, error: e.message || 'Unknown error' });
-        }
+      // Build a quick map (variant_id|vendor_id) -> mapping_id for follow-up inserts
+      const pairToMappingId = new Map();
+      insertedMappings.forEach(row => {
+        pairToMappingId.set(`${row.product_variant_id}|${row.vendor_id}`, row.id);
+      });
+
+      // Prepare bulk make rows
+      const makeRows = [];
+      // Prepare bulk approved-by rows
+      const approveRows = [];
+
+      fresh.forEach(r => {
+        const key = `${Number(r.variant_id)}|${Number(r.vendor_id)}`;
+        const mappingId = pairToMappingId.get(key);
+        if (!mappingId) return;
+        // makes
+        r.make_list.forEach(name => {
+          makeRows.push({ variant_vendor_map_id: mappingId, make_name: String(name).trim() });
+        });
+        // approved_by
+        const productId = variantToProduct.get(Number(r.variant_id)) || 0;
+        r.approved_by.forEach(vendorApproveId => {
+          approveRows.push({
+            product_id: productId,
+            variant_vendor_mapping_id: mappingId,
+            vendor_approve_id: Number(vendorApproveId)
+          });
+        });
+      });
+
+      // Bulk insert makes and approvals (if any)
+      if (makeRows.length > 0) {
+        await generalModel.insertMany('tbl_product_variant_vendor_make', makeRows);
+      }
+      if (approveRows.length > 0) {
+        await generalModel.insertMany('tbl_vendorapprove_product_mapping', approveRows);
       }
 
       return res.status(200).json({
         status: 1,
         message: 'Bulk mapping processed',
-        success: successCount,
-        failed: failures.length,
-        failures
+        success: insertedMappings.length,
+        failed: 0,
+        failures: []
       });
     } catch (error) {
       return res.status(500).json({ status: 3, message: Config?.errorText?.value || 'Bulk mapping failed', error: error.message });
