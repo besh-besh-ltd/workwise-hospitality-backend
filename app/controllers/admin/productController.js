@@ -2698,115 +2698,16 @@ const productController = {
         return res.status(400).json({ status: 3, message: 'mappings must be a non-empty array' });
       }
 
-      // Normalize and validate payload once
-      const now = new Date();
-      const normalized = mappings
-        .map(m => ({
-          variant_id: m.variant_id || m.product_variant_id,
-          vendor_id: m.vendor_id,
-          approved_by: Array.isArray(m.approved_by) ? m.approved_by.filter(Number).map(Number) : [],
-          make_list: Array.isArray(m.make_list) ? m.make_list.filter(x => x && String(x).trim()) : []
-        }))
-        .filter(m => m.variant_id && m.vendor_id);
-
-      if (normalized.length === 0) {
-        return res.status(400).json({ status: 3, message: 'No valid mapping rows after normalization' });
-      }
-
-      // Build fast lookup lists
-      const variantIds = [...new Set(normalized.map(r => Number(r.variant_id)))]
-        .filter(Boolean);
-      const vendorIds = [...new Set(normalized.map(r => Number(r.vendor_id)))]
-        .filter(Boolean);
-
-      // Fetch existing mappings in one query and skip duplicates in-memory
-      const existingPairs = new Set();
-      if (variantIds.length > 0 && vendorIds.length > 0) {
-        const existing = await db.any(
-          `SELECT product_variant_id AS variant_id, vendor_id
-           FROM tbl_product_variant_vendor_mapping
-           WHERE product_variant_id IN ($1:csv) AND vendor_id IN ($2:csv)`,
-          [variantIds, vendorIds]
-        );
-        existing.forEach(r => existingPairs.add(`${r.variant_id}|${r.vendor_id}`));
-      }
-
-      const fresh = normalized.filter(r => !existingPairs.has(`${r.variant_id}|${r.vendor_id}`));
-      if (fresh.length === 0) {
-        return res.status(200).json({ status: 1, message: 'Nothing to insert', success: 0, failed: 0, failures: [] });
-      }
-
-      // Fetch product ids for all variants in one query
-      const variantToProduct = new Map();
-      const vpRows = await db.any(
-        `SELECT pv.id AS variant_id, p.id AS product_id
-         FROM tbl_product_variant pv
-         JOIN tbl_product p ON p.id = pv.product_id
-         WHERE pv.id IN ($1:csv)`,
-        [variantIds]
-      );
-      vpRows.forEach(row => variantToProduct.set(Number(row.variant_id), Number(row.product_id)));
-
-      // Prepare bulk rows for mapping
-      const mappingRows = fresh.map(r => ({
-        product_variant_id: Number(r.variant_id),
-        vendor_id: Number(r.vendor_id),
-        created_at: now,
-        updated_at: now,
-        status: true,
-        is_approved: false,
-        created_by: req.user.id,
-        updated_by: req.user.id,
+      // Normalize payload: variant_id, vendor_id, approved_by[], make_list[]
+      const normalized = mappings.map(m => ({
+        variant_id: m.variant_id || m.product_variant_id,
+        vendor_id: m.vendor_id,
+        approved_by: Array.isArray(m.approved_by) ? m.approved_by : [],
+        make_list: Array.isArray(m.make_list) ? m.make_list : []
       }));
 
-      // Insert all mappings in one statement; get back ids
-      const insertedMappings = await generalModel.insertMany('tbl_product_variant_vendor_mapping', mappingRows);
-
-      // Build a quick map (variant_id|vendor_id) -> mapping_id for follow-up inserts
-      const pairToMappingId = new Map();
-      insertedMappings.forEach(row => {
-        pairToMappingId.set(`${row.product_variant_id}|${row.vendor_id}`, row.id);
-      });
-
-      // Prepare bulk make rows
-      const makeRows = [];
-      // Prepare bulk approved-by rows
-      const approveRows = [];
-
-      fresh.forEach(r => {
-        const key = `${Number(r.variant_id)}|${Number(r.vendor_id)}`;
-        const mappingId = pairToMappingId.get(key);
-        if (!mappingId) return;
-        // makes
-        r.make_list.forEach(name => {
-          makeRows.push({ variant_vendor_map_id: mappingId, make_name: String(name).trim() });
-        });
-        // approved_by
-        const productId = variantToProduct.get(Number(r.variant_id)) || 0;
-        r.approved_by.forEach(vendorApproveId => {
-          approveRows.push({
-            product_id: productId,
-            variant_vendor_mapping_id: mappingId,
-            vendor_approve_id: Number(vendorApproveId)
-          });
-        });
-      });
-
-      // Bulk insert makes and approvals (if any)
-      if (makeRows.length > 0) {
-        await generalModel.insertMany('tbl_product_variant_vendor_make', makeRows);
-      }
-      if (approveRows.length > 0) {
-        await generalModel.insertMany('tbl_vendorapprove_product_mapping', approveRows);
-      }
-
-      return res.status(200).json({
-        status: 1,
-        message: 'Bulk mapping processed',
-        success: insertedMappings.length,
-        failed: 0,
-        failures: []
-      });
+      const result = await productModel.bulkInsertVariantVendorMappings(normalized, req.user.id);
+      return res.status(200).json({ status: 1, message: 'Bulk mapping processed', ...result });
     } catch (error) {
       return res.status(500).json({ status: 3, message: Config?.errorText?.value || 'Bulk mapping failed', error: error.message });
     }
