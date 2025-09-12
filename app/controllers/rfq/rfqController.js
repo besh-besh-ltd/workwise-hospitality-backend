@@ -3905,11 +3905,13 @@ const rfqController = {
       const { rfq_id} = req.params;
       const user_id = req.user.id;
       const response = await rfqModel.findAll("tbl_quote_activity", {rfq_id});
+      const rfqClosed = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}  AND status = 2`);
 
-      console.log("response ------------->", response)
+      
       res.status(200).json({
         status: 1,
-        data: response
+        data:  response || [],
+        rfqClosed: rfqClosed && rfqClosed.length > 0 ? true : false
       });
     }
     catch(error)
