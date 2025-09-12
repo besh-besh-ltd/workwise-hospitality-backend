@@ -3301,7 +3301,6 @@ const productQuery = `
                   FROM tbl_quote_item_history TH
                   WHERE TH.quote_item_id = TQI.id
                   ORDER BY TH.timestamp DESC
-                  LIMIT 1
                 ) TH
               )
             )

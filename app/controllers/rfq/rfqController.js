@@ -1002,7 +1002,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
 
   const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
       <p style="padding-bottom: 3px;">
-                   Your updated quotation for #${rfq_no} has been successfully shared with ${buyerDetails[0]?.organization_name}. This update keeps you competitive and responsive to buyer requirements.      </p>
+                   Your updated quotation for #${rfq_no} has been successfully shared with ${buyerDetails[0]?.organization_name || buyerDetails[0]?.name || 'the buyer'}. This update keeps you competitive and responsive to buyer requirements.      </p>
                    </p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0]?.token || ""}"
