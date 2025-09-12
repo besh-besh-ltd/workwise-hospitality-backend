@@ -12,6 +12,7 @@ import portalTourRoutes from './portalTour/portalTourRoutes.js';
 import seoRoutes from './seo/seoRoutes.js';
 import Project from './project/projectRoutes.js';
 import PORoutes from './purchase_order/poRoutes.js';
+import PackageRoutes from './package/packageRoutes.js'
 
 const v1 = Router();
 
@@ -26,5 +27,6 @@ v1.use('/portal-tour', portalTourRoutes);
 v1.use('/seo', seoRoutes);
 v1.use('/project', Project);
 v1.use('/po', PORoutes);
+v1.use('/packages', PackageRoutes);
 
 export default v1;

@@ -184,7 +184,6 @@ RfqRoutes.get(
   acl([2, 8, 10]),
   validateDbBody.user_id_profileexists,
   validateDbBody.rfq_access_check,
-  // rfqController.downloadQuoteResults
   rfqController.downloadQuoteResultsProductWise
 );
 RfqRoutes.get(
@@ -545,13 +544,6 @@ RfqRoutes.post('/report/send-on-email',
   rfqController.sendReportOnEmail
 )
 
-RfqRoutes.get(
-  '/rfq-draft-data',
-  passportSignIn,
-  acl([2, 8]),
-  rfqController.getRFQDraftData
-);
-
 RfqRoutes.post(
   '/get-draft-rfqs',
   passportSignIn,
@@ -578,13 +570,6 @@ RfqRoutes.post('/get-draft-vendors/:draftId',
   acl([2, 8]),
   rfqController.getDraftProductVendors
 )
-
-RfqRoutes.post(
-  '/draft-product-vendors',
-  passportSignIn,
-  acl([2, 8]),
-  rfqController.createOrUpdateRfqDraftWithProductVendors
-);
 
 RfqRoutes.post(
   '/save-excel',
