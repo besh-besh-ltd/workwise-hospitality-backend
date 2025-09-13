@@ -28,6 +28,8 @@
     "@aws-sdk/client-lambda": "^3.830.0",
     "@aws-sdk/client-s3": "^3.782.0",
     "@aws-sdk/client-scheduler": "^3.830.0",
+    "@sentry/node": "^10.11.0",
+    "@sentry/profiling-node": "^10.11.0",
     "axios": "^1.8.4",
     "bcryptjs": "^3.0.2",
     "bluebird": "^3.7.2",
