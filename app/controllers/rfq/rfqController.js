@@ -8526,7 +8526,7 @@ const rfqController = {
 
       persistence_id = parseInt(persistence_id);
 
-      if((errors && errors.length > 0) || (!jsonFileUrl || !availableSheets)) {
+      if((errors && errors.length > 0) && (!jsonFileUrl || !availableSheets)) {
         await rfqModel.updatePersistenceJobStatus(
           persistence_id,
           PERSISTENCE_STATUSES.FAILED,
