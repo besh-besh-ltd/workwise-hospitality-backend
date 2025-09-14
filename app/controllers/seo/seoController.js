@@ -8,7 +8,12 @@ import seoModel from '../../models/seoModel.js';
 const seoController = {
   productSlugForSitemap: async (req, res, next) => {
     try {
-      const productSlugList = await seoModel.productSlugSitemap();
+      const { page = 1, limit = 50000 } = req.query;
+      const pageNumber = parseInt(page);
+      const limitNumber = parseInt(limit);
+      const offset = (pageNumber - 1) * limitNumber;
+
+      const { productSlugList, total } = await seoModel.productSlugSitemap(limitNumber, offset);
       const slugArray = productSlugList.map((item) => item.slug);
 
       res
@@ -16,7 +21,9 @@ const seoController = {
         .json({
           status: 1,
           data: slugArray,
-          total:slugArray.length
+          total: total,
+          page: pageNumber,
+          limit: limitNumber
         })
         .end();
     } catch (error) {
