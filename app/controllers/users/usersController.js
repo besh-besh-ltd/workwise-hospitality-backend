@@ -1929,6 +1929,155 @@ update_user_detail: async (req, res, next) => {
         .end();
     }
   },
+
+enhance_vendor_profile: async (req, res, next) => {
+  try {
+    const user_id = req.user.id;
+    const user_type = req.user.user_type; // assuming this is set in passport
+    const { text_content,payment_terms, record_id , is_approved , doc_type } = req.body;
+
+    const files = req.files && req.files.file ? req.files.file : [];
+
+    // If admin (user_type = 1) → just approve instead of inserting
+    if (user_type === 1) {
+      if (!record_id) {
+        return res.status(400).json({
+          status: 0,
+          message: "record_id required for approval"
+        }).end();
+      }
+
+      await userModel.approveAsset(record_id,is_approved, user_id);
+
+      return res.status(200).json({
+        status: 1,
+        message: "Vendor profile approved successfully"
+      }).end();
+    }
+
+    // // Normal vendor upload flow
+    // if (!files.length && !text_content) {
+    //   return res.status(400).json({
+    //     status: 0,
+    //     message: "No files or text provided"
+    //   }).end();
+    // }
+  console.log("doc type ", doc_type);
+    const result = await userModel.insertAssets(
+      user_id,
+      files,
+      text_content,
+      payment_terms,
+      doc_type
+    );
+
+    res.status(200).json({
+      status: 1,
+      message: "Vendor profile updated successfully",
+      inserted_ids: result.map(r => r.id)
+    }).end();
+
+  } catch (error) {
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    }).end();
+  }
+},
+
+get_vendor_profile_documents  : async (req, res, next) => {
+  try {
+    let user_id = req.user.id;
+    
+
+    const user_type = req.user // assuming this is set in passport
+    let result;
+    if(user_type === 1) {
+      // Admin can view all vendor assets
+       result = userModel.getAllVendorAssets();
+    }
+
+ const user = await rfqModel.findAll(
+  'tbl_vendor_profile',
+  { vendor_id: user_id }
+);
+
+
+
+    if (user) {
+      res.status(200).json({
+        status: 1,
+        data: user
+      }).end();
+    }
+    else if(result.length>0){
+      res.status(200).json({
+        status: 1,
+        data: result
+      }).end();
+    }
+  } catch (error) {
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    }).end();
+  }
+},
+
+get_vendor_profile_reviews : async (req , res , next) => {
+  try {
+    let user_id = req.user.id;
+    const reviews = await userModel.getVendorReviews(user_id);
+
+    res.status(200).json({
+      status: 1,
+      data: reviews
+    }).end();
+  } catch (error) {
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    }).end();
+  } 
+
+    
+},
+
+publish_profile_reviews: async (req, res, next) => {
+  try {
+    const { review_ids, is_published } = req.body;
+
+    if (!review_ids || !Array.isArray(review_ids) || review_ids.length === 0) {
+      return res.status(400).json({ status: 0, message: "review_ids array is required" });
+    }
+
+    const payload = {
+      is_published :1,
+      review_ids
+    };
+
+   
+
+    await userModel.publishProfileReviews(payload);
+
+    res.status(200).json({
+      status: 1,
+      message: "Review publish status updated"
+    });
+  } catch (error) {
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    });
+  }
+},
+
+
+
   // uploading the documents for the users without authenticatiion
   upload_document_without_auth: async (req, res, next) => {
    
