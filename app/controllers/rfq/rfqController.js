@@ -365,167 +365,6 @@ const saveEstimates = async (data, createdBy) => {
   }
 }
 
-const insertProduct = async (
-  {
-    product_id,
-    variant,
-    comment,
-    datasheet,
-    spec_file,
-    qap_file,
-    spec,
-    vendors,
-    datasheet_file,
-    qap
-  },
-  created_rfq_id,
-  sheet_id,
-) => {
-  try {
-    let tbl_rfq_products_data = {
-      product_variant_id: product_id,
-      variant,
-      comment,
-      datasheet: datasheet || '', // Changes by Agnij 2025-06-18 [Fixed not-null constraint violation]
-      spec_file:'',// this field we have to remove from database
-      qap_file:'',// this field we have to remove from database
-      rfq_id: created_rfq_id,
-      datasheet_file:"",// this field we have to remove from database
-      qap: qap || '', // Also ensuring qap is not null
-      sheet_id,
-    };
-    
-    let spec_array = spec?.map((item) => {
-      item.rfq_id = created_rfq_id;
-      item.product_variant_id = product_id;
-      item.variant = variant;
-      item.sheet_id = sheet_id;
-      return item;
-    });
-    const spec_keys = ['title', 'value', 'rfq_id', 'product_variant_id', 'variant', 'sheet_id'];
-
-    const vendor_keys = ['user_id', 'rfq_id', 'product_variant_id', 'variant', 'sheet_id'];
-    var vendor_array = [];
-    // Changes by Agnij 2025-06-18 [Added null check for vendors]
-    if (vendors && vendors.length > 0) {
-      vendor_array = vendors.map((item) => {
-        // Changes by Agnij 2025-06-18 [Fixed missing user_id property]
-        // Check if vendor has user_id property, if not try to get it from id
-        if (!item.user_id && item.id) {
-          item.user_id = item.id;
-        }
-        
-        item.rfq_id = created_rfq_id;
-        item.product_variant_id = product_id;
-        item.variant = variant;
-        item.sheet_id = sheet_id;
-        return item;
-      });
-      
-      // Filter out any vendors that still don't have user_id
-      vendor_array = vendor_array.filter(item => item.user_id);
-    }
-
-    const productResult = await rfqModel.insert(
-      'tbl_rfq_products',
-      tbl_rfq_products_data
-    );
-
-    const spec_info = spec_array && await rfqModel.insertArray(
-      spec_array,
-      spec_keys,
-      'tbl_rfq_products_specs'
-    );
-
-    var vendor_info = [];
-    // Changes by Agnij 2025-06-18 [Added null check for vendors and vendor_array]
-    if (vendors && vendors.length > 0 && vendor_array.length > 0) {
-      vendor_info = await rfqModel.insertArray(
-        vendor_array,
-        vendor_keys,
-        'tbl_rfq_product_vendors'
-      );
-    }
-
-    // Handle multiple datasheet files
-    if (datasheet_file && datasheet_file.length > 0) {
-      const fileDataArray = datasheet_file.map(url => ({
-        rfq_product_id:productResult[0].id,
-        file_type: 'TDS',
-        file_url: url
-      }));
-      for (const fileData of fileDataArray) {
-        await rfqModel.insert('tbl_rfq_product_files', fileData);
-      }
-    }
-
-    if (qap_file && qap_file.length > 0) {
-      const qapFiles = qap_file.map(url => ({
-        rfq_product_id:productResult[0].id,
-        file_type: 'QAP',
-        file_url: url
-      }));
-      for (const fileData of qapFiles) {
-        await rfqModel.insert('tbl_rfq_product_files', fileData);
-      }
-    }
-
-    if (spec_file && spec_file.length > 0) {
-      const specFiles = spec_file.map(url => ({
-        rfq_product_id:productResult[0].id,
-        file_type: 'SPEC',
-        file_url: url
-      }));
-      for (const fileData of specFiles) {
-        await rfqModel.insert('tbl_rfq_product_files', fileData);
-      }
-    }
-
-    return { product_info: productResult[0], spec_info, vendor_info };
-  } catch (error) {
-    console.error('Error inserting data:', error);
-    throw error;
-  }
-};
-
-const updateRfqProductIdInTechEvaluation = async (oldProductId, newProductId) => {
-  try {
-
-    const records = await rfqModel.getTechEvaluationRecordsByProductId(oldProductId);
-
-    if (records.length > 0) {
-      await Promise.all(
-        records.map((record) =>
-          rfqModel.update(
-            'tbl_rfq_product_tech_evaluation',
-            { tbl_rfq_product_id: newProductId },
-            record.id
-          )
-        )
-      );
-    }
-
-  } catch (error) {
-    console.error('Error updating RFQ Product IDs:', error.message);
-    throw error;
-  }
-};
-
-const getQUOTES = async ({ id }, user_id) => {
-  try {
-    const rfQItem = await rfqModel.getQuotesByRfqById(id, user_id);
-    // const rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(id, user_id);
-    if (rfQItem && rfQItem.length > 0) {
-      return rfQItem[0];
-    } else {
-      return {};
-    }
-  } catch (error) {
-    console.error('Error inserting data:', error);
-    throw error;
-  }
-};
-
 const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret_reason) => {
   try {
     const { name, email } = buyer;
@@ -2084,27 +1923,6 @@ const shuffleArray = (array) => {
   }
 };
 
-const deleteRelatedRecords = async (rfq_id) => {
-  try {
-      await Promise.all([
-          rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }),
-          rfqModel.deleteWithReturnIds('tbl_rfq_product_vendors', { rfq_id }),
-          rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id }),
-          rfqModel.deleteWithReturnIds('tbl_rfq_products_specs', { rfq_id })
-      ]);
-
-      const rfqProductIds = await rfqModel.deleteWithReturnIds('tbl_rfq_products', { rfq_id });
-
-      // Delete from tbl_rfq_product_files based on retrieved rfq_product_ids
-      if (rfqProductIds.length > 0) {
-          await rfqModel.deleteProductFilesByIds(rfqProductIds);
-      }
-  } catch (error) {
-      logError("Error deleting related records:", error);
-      throw error;
-  }
-};
-
 const saveRfqDraft = async (user_id, reqBody) => {
   const {
       rfq_id,
@@ -2197,9 +2015,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
           delete products.updatable.specs[rfqProductId].variant;
           delete products.updatable.specs[rfqProductId].product_id;
 
-          let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${
-            variant ?? '0'
-          })::INT`;
+          let whereClause = `rfq_id = (${rfq_id})::INT AND rfq_item_id = (${rfqProductId})::INT`;
 
           for (const spec of Object.keys(products.updatable.specs[rfqProductId])) {
             let value = products.updatable.specs[rfqProductId][spec]
@@ -2211,13 +2027,13 @@ const saveRfqDraft = async (user_id, reqBody) => {
               };
               const currentWhereClause = whereClause + ` AND title = '${spec}'`;
               const doesExist = await rfqModel.checkIfExists(
-                'tbl_rfq_products_specs',
+                'tbl_rfq_item_specs',
                 currentWhereClause,
                 t,
               );
               if (doesExist && doesExist.length > 0) {
                 await rfqModel.updateWhere(
-                  'tbl_rfq_products_specs',
+                  'tbl_rfq_item_specs',
                   data,
                   currentWhereClause,
                   t
@@ -2226,12 +2042,11 @@ const saveRfqDraft = async (user_id, reqBody) => {
                 const insertData = {
                   ...data,
                   rfq_id,
-                  product_variant_id: productId,
-                  title: spec,
-                  variant: parseInt(variant ?? '0')
+                  rfq_item_id: rfqProductId,
+                  title: spec
                 };
                 await rfqModel.insert(
-                  'tbl_rfq_products_specs',
+                  'tbl_rfq_item_specs',
                   insertData,
                   t
                 );
@@ -2341,18 +2156,17 @@ const saveRfqDraft = async (user_id, reqBody) => {
         // Delete vendor mapping
         const vendorConditions = {
           rfq_id,
-          product_variant_id: deletedRecord.product_variant_id,
-          variant: deletedRecord.variant
+          rfq_item_id: deletedRecord.id,
         };
         await rfqModel.delete(
-          'tbl_rfq_product_vendors',
+          'tbl_rfq_item_vendors',
           vendorConditions,
           t
         );
 
         // Directly deleting specs
         await rfqModel.delete(
-          'tbl_rfq_products_specs',
+          'tbl_rfq_item_specs',
           vendorConditions,
           t
         );
@@ -2914,9 +2728,7 @@ const rfqController = {
                 updatableKeys.add(rfqProductId);
               }
 
-              let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${
-                variant ?? '0'
-              })::INT`;
+              let whereClause = `rfq_id = (${rfq_id})::INT AND rfq_item_id = (${rfqProductId ?? '0'})::INT`;
 
               Object.keys(products.updatable.specs[rfqProductId]).forEach(
                 async (spec) => {
@@ -2927,12 +2739,12 @@ const rfqController = {
                     whereClause + ` AND title = '${spec}'`;
                   const doesExist =
                     await transactingModels.rfqModel.checkIfExists(
-                      'tbl_rfq_products_specs',
+                      'tbl_rfq_item_specs',
                       currentWhereClause
                     );
                   if (doesExist && doesExist.length > 0) {
                     await transactingModels.rfqModel.updateWhere(
-                      'tbl_rfq_products_specs',
+                      'tbl_rfq_item_specs',
                       data,
                       currentWhereClause
                     );
@@ -2940,12 +2752,11 @@ const rfqController = {
                     const insertData = {
                       ...data,
                       rfq_id,
-                      product_variant_id: productId,
-                      title: spec,
-                      variant: parseInt(variant ?? '0')
+                      rfq_item_id: rfqProductId,
+                      title: spec
                     };
                     await transactingModels.rfqModel.insert(
-                      'tbl_rfq_products_specs',
+                      'tbl_rfq_item_specs',
                       insertData
                     );
                   }
@@ -3163,24 +2974,23 @@ const rfqController = {
             // Delete vendor mapping
             const vendorConditions = {
               rfq_id,
-              product_variant_id: deletedRecord.product_variant_id,
-              variant: deletedRecord.variant
+              rfq_item_id: deletedRecord.id
             };
             await transactingModels.rfqModel.delete(
-              'tbl_rfq_product_vendors',
+              'tbl_rfq_item_vendors',
               vendorConditions
             );
 
             // Directly deleting product specs as well
             await transactingModels.rfqModel.delete(
-              'tbl_rfq_products_specs',
+              'tbl_rfq_item_specs',
               vendorConditions
             );
 
             // Delete associated files
-            const directRfqProductConditions = { rfq_product_id: rfqProductId };
+            const directRfqProductConditions = { rfq_item_id: rfqProductId };
             await transactingModels.rfqModel.delete(
-              'tbl_rfq_product_files',
+              'tbl_rfq_item_files',
               directRfqProductConditions
             );
 
@@ -3748,14 +3558,14 @@ const rfqController = {
 
         // Delete RFQ-related records
         const rfqProductIdList = await rfqModel.deleteWithReturnIds(
-          'tbl_rfq_products',
+          'tbl_rfq_items',
           { rfq_id: id },
           t
         );
 
-        await rfqModel.delete('tbl_rfq_product_vendors', { rfq_id: id });
-        await rfqModel.delete('tbl_rfq_products_specs', { rfq_id: id });
-        await rfqModel.delete('tbl_rfq_product_files', { rfq_product_id: id });
+        await rfqModel.delete('tbl_rfq_item_vendors', { rfq_id: id });
+        await rfqModel.delete('tbl_rfq_item_specs', { rfq_id: id });
+        await rfqModel.delete('tbl_rfq_item_files', { rfq_product_id: id });
 
         await rfqModel.delete('tbl_rfq_draft_sheets', { rfq_id: id });
 
@@ -4217,17 +4027,18 @@ const rfqController = {
         sheet_id
       };
 
-      await rfqModel.insert('tbl_rfq_products', productData);
+      let itemResponse = await rfqModel.insertReturnId('tbl_rfq_items', productData);
+
+      itemResponse = itemResponse[0];
 
       const vendorPromises = product.vendors.map(async (vendor) => {
         const vendorData = {
           rfq_id,
-          product_variant_id: product.variant_id,
+          rfq_item_id: itemResponse.id,
           user_id: vendor.vendor_id,
-          variant: variant,
           sheet_id
         };
-        return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
+        return await rfqModel.insert('tbl_rfq_item_vendors', vendorData);
       });
 
       await Promise.all(vendorPromises);
@@ -4238,12 +4049,11 @@ const rfqController = {
             title: key,
             value,
             rfq_id,
-            product_variant_id: product.variant_id,
-            variant: variant,
+            rfq_item_id: itemResponse.id,
             sheet_id
           };
 
-          await rfqModel.insert('tbl_rfq_products_specs', specData);
+          await rfqModel.insert('tbl_rfq_item_specs', specData);
         }
       }
 
@@ -4308,7 +4118,7 @@ const rfqController = {
       };
 
       let addedRfqProduct = await rfqModel.insert(
-        'tbl_rfq_products',
+        'tbl_rfq_items',
         productData
       );
 
@@ -4325,24 +4135,22 @@ const rfqController = {
         Object.entries(specs).forEach(async ([title, value]) => {
           const specsData = {
             rfq_id,
-            product_variant_id: product.variant_id,
-            variant,
+            rfq_item_id: addedRfqProduct.id,
             title: title,
             value: value
           };
 
-          await rfqModel.insert('tbl_rfq_products_specs', specsData);
+          await rfqModel.insert('tbl_rfq_item_specs', specsData);
         });
       }
 
       const vendorPromises = product.vendors.map(async (vendor) => {
         const vendorData = {
           rfq_id,
-          product_variant_id: product.variant_id,
+          rfq_item_id: addedRfqProduct.id,
           user_id: vendor,
-          variant: variant
         };
-        return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
+        return await rfqModel.insert('tbl_rfq_item_vendors', vendorData);
       });
 
       await Promise.all(vendorPromises);
@@ -5656,38 +5464,6 @@ const rfqController = {
           data: rfQItem
         })
         .end();
-    } catch (error) {
-      logError(error);
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
-  downloadQuoteResults: async (req, res, next) => {
-    let rfq_id = req.params.id;
-    const { id } = req.user;
-
-    try {
-      const rfQItem = await rfqModel.getQuotesByRfqById(rfq_id, id);
-      //Get all RFQs
-      const listRfq = await rfqModel.getAllBuyerRfq(100000, 0, id);
-      Promise.all(listRfq.map((item) => getQUOTES(item, id)))
-        .then((results) => {
-          res
-            .status(200)
-            .json({
-              status: 1,
-              data: results
-            })
-            .end();
-        })
-        .catch((error) => {
-          console.error('Error inserting data:', error);
-        });
     } catch (error) {
       logError(error);
       res
@@ -8320,116 +8096,6 @@ const rfqController = {
     }
   },
 
-  getCostEstimates: async (processedUrl) => {
-    try {
-
-      if (process.env.NODE_ENV=='uat' &&  processedUrl.startsWith('http:')) {
-        processedUrl = processedUrl.replace('http:', 'https:');
-      }
-  
-      const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
-  
-      const validationErrors = [];
-      const products = [];
-      const sheetNameList = new Set();
-      const globalVariantCount = {};
-  
-      const allProductIds = boqDataJson.map(item => item.variant_id).filter(item => typeof item == 'number' || typeof item == 'string');
-  
-      const uniqueProductIds = [...new Set(allProductIds)];
-      const existingProducts = await rfqModel.checkIfExists(
-        'tbl_product',
-        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
-      );
-      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
-  
-      const quoteCache = {};
-  
-      for (const item of boqDataJson) {
-        if (item.is_product == "No") {
-          continue
-       }
-
-        const cleanId = item?.variant_id;
-        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
-  
-        if (!cleanId || item.fetched_product_name === 'Product not found') {
-          validationErrors.push({
-            errors: { product: `${productName} - Product not found` },
-            name: productName,
-            quantity: item.quantity || '',
-          });
-          continue;
-        }
-  
-        const validProductId = existingProductIdSet.has(cleanId) ? cleanId : null;
-  
-        if (!validProductId) {
-          validationErrors.push({
-            errors: { product: `${productName} - Product not found` },
-            name: productName,
-            quantity: item.quantity || '',
-          });
-          continue;
-        }
-  
-        const finalProductName = item.fetched_product_name || item.core_product_name;
-
-        if (!quoteCache[validProductId]) {
-          const quotes = await rfqModel.getEstimateQuotes(
-            validProductId,
-          );
-          quoteCache[validProductId] = quotes;
-        }
-  
-        const quotesResult = quoteCache[validProductId];
-  
-        if (!quotesResult || quotesResult.length === 0) {
-          validationErrors.push({
-            errors: {
-              quote: `${finalProductName} - No Quotes Found` },
-            name: finalProductName,
-            quantity: item.quantity || '',
-          });
-          continue;
-        }
-  
-        const variantCount = globalVariantCount[validProductId] ?? 0;
-  
-        products.push({
-          product_id: validProductId,
-          name: finalProductName || "Unnamed Product",
-          variant: variantCount,
-          quantity: item.quantity,
-          quotes: quotesResult,
-        });
-  
-        globalVariantCount[validProductId] = variantCount + 1;
-        sheetNameList.add(item.sheet_name || "");
-      }
-  
-      const finalObject = {
-        products,
-        validationErrors,
-      };
-
-      // Comment if not needed
-      const uniqueErrors = validationErrors.filter((err, index, self) => 
-        index === self.findIndex(e => 
-          (e.errors?.product === err.errors?.product) && 
-          (e.errors?.quote === err.errors?.quote) && 
-          ((e.name || e.productName || '') === (err.name || err.productName || ''))
-        )
-      );
-
-      return [uniqueErrors, finalObject];
-    }
-    catch (error) {
-      logError(error);
-      return [null, null];
-    }
-  },
-
   initiateMagicSearch: async (req, res) => {
     try {
       const { id } = req.user;
@@ -8607,115 +8273,6 @@ const rfqController = {
       })
     }
   },
-   getCostEstimates: async (processedUrl) => {
-    try {
-
-      if (process.env.NODE_ENV=='uat' &&  processedUrl.startsWith('http:')) {
-        processedUrl = processedUrl.replace('http:', 'https:');
-      }
-  
-      const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
-  
-      const validationErrors = [];
-      const products = [];
-      const sheetNameList = new Set();
-      const globalVariantCount = {};
-  
-      const allProductIds = boqDataJson.map(item => item.variant_id).filter(item => typeof item == 'number' || typeof item == 'string');
-  
-      const uniqueProductIds = [...new Set(allProductIds)];
-      const existingProducts = await rfqModel.checkIfExists(
-        'tbl_product',
-        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
-      );
-      const existingProductIdSet = new Set(existingProducts.map(p => p.id));
-  
-      const quoteCache = {};
-  
-      for (const item of boqDataJson) {
-        if (item.is_product == "No") {
-          continue
-       }
-
-        const cleanId = item?.variant_id;
-        const productName = item.core_product_name || item.fetched_product_name || 'Unknown Product';
-  
-        if (!cleanId || item.fetched_product_name === 'Product not found') {
-          validationErrors.push({
-            errors: { product: `${productName} - Product not found` },
-            name: productName,
-            quantity: item.quantity || '',
-          });
-          continue;
-        }
-  
-        const validProductId = existingProductIdSet.has(cleanId) ? cleanId : null;
-  
-        if (!validProductId) {
-          validationErrors.push({
-            errors: { product: `${productName} - Product not found` },
-            name: productName,
-            quantity: item.quantity || '',
-          });
-          continue;
-        }
-  
-        const finalProductName = item.fetched_product_name || item.core_product_name;
-
-        if (!quoteCache[validProductId]) {
-          const quotes = await rfqModel.getEstimateQuotes(
-            validProductId,
-          );
-          quoteCache[validProductId] = quotes;
-        }
-  
-        const quotesResult = quoteCache[validProductId];
-  
-        if (!quotesResult || quotesResult.length === 0) {
-          validationErrors.push({
-            errors: {
-              quote: `${finalProductName} - No Quotes Found` },
-            name: finalProductName,
-            quantity: item.quantity || '',
-          });
-          continue;
-        }
-  
-        const variantCount = globalVariantCount[validProductId] ?? 0;
-  
-        products.push({
-          product_id: validProductId,
-          name: finalProductName || "Unnamed Product",
-          variant: variantCount,
-          quantity: item.quantity,
-          quotes: quotesResult,
-        });
-  
-        globalVariantCount[validProductId] = variantCount + 1;
-        sheetNameList.add(item.sheet_name || "");
-      }
-  
-      const finalObject = {
-        products,
-        validationErrors,
-      };
-
-      // Comment if not needed
-      const uniqueErrors = validationErrors.filter((err, index, self) => 
-        index === self.findIndex(e => 
-          (e.errors?.product === err.errors?.product) && 
-          (e.errors?.quote === err.errors?.quote) && 
-          ((e.name || e.productName || '') === (err.name || err.productName || ''))
-        )
-      );
-
-      return [uniqueErrors, finalObject];
-    }
-    catch (error) {
-      logError(error);
-      return [null, null];
-    }
-  },
 
    getCostEstimatesData: async (req, res) => {
     try {
@@ -8885,38 +8442,6 @@ const rfqController = {
         message:
           'Magic search failed to complete the action, Please try again.',
         error: error
-      };
-    }
-  },
-
-  createCostEstimation: async (jsonFileUrl, user_id) => {
-    try {
-      let aiProcessedBoqJson = jsonFileUrl;
-  
-      let user = await userModel.getUserById(user_id);
-      if(!user) throw new Error('User dont exist with id: ', user_id);
-
-      user = user[0];
-
-      const [validationErrors, processedData] = await rfqController.getCostEstimates(aiProcessedBoqJson, user)
-      if(!processedData && !validationErrors) throw new Error("No Data processed!")
-
-      const saveEstimate = await saveEstimates(processedData, user_id)
-  
-      return {
-        status: 1,
-        success: true,
-        saveEstimate,
-        data: processedData, // Whole data will not be returned, client will request again for the first sheet's data from the backend after the initial save
-        validation_errors: validationErrors.length ? validationErrors : null,
-      };
-  
-    } catch (error) {
-      logError(error);
-      return {
-        success: false,
-        message: 'Magic search failed to complete the action, Please try again.',
-        error: error,
       };
     }
   },
@@ -10932,6 +10457,6 @@ processBoqAndDownload : async (req, res) => {
         error: error.message
       });
     }
-  }
+  },
 };
 export default rfqController;
