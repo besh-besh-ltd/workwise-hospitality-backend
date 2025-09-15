@@ -1,4 +1,4 @@
-import db from "../config/dbConn";
+import db from "../config/dbConn.js";
 
 // Create package with optional items and vendors in one transaction
 export async function createPackage({ name, created_by, updated_by, items = [], vendors = [] }) {

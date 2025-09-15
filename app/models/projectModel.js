@@ -141,13 +141,13 @@ const projectModel = {
                                                     WHERE tq.rfq_id = r.id
                                                 )
                                             )
-                                            FROM tbl_rfq_product_vendors trpv
+                                            FROM tbl_rfq_item_vendors trpv
                                             WHERE trpv.rfq_id = r.id
                                             GROUP BY trpv.rfq_id
                                         ),
                                         'no_of_products', (
                                             SELECT COUNT(*)
-                                            FROM tbl_rfq_products rfq_p
+                                            FROM tbl_rfq_items rfq_p
                                             WHERE rfq_p.rfq_id = r.id
                                         )
                                     )
@@ -579,13 +579,13 @@ ORDER BY
                               WHERE tq.rfq_id = r.id
                           )
                       )
-                      FROM tbl_rfq_product_vendors trpv
+                      FROM tbl_rfq_item_vendors trpv
                       WHERE trpv.rfq_id = r.id
                       GROUP BY trpv.rfq_id
                   ),
                   'no_of_products', (
                       SELECT COUNT(*)
-                      FROM tbl_rfq_products rfq_p
+                      FROM tbl_rfq_items rfq_p
                       WHERE rfq_p.rfq_id = r.id
                   )
               )

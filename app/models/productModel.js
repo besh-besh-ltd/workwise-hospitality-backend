@@ -2650,7 +2650,7 @@ WHERE tbl_product.name = $1`,
                   COUNT(TR.id)::INT AS rfq_count,
                   ROW_NUMBER() OVER (PARTITION BY TP.name ORDER BY COUNT(TR.id) DESC) AS rn
               FROM tbl_rfq TR
-              JOIN tbl_rfq_products TRP
+              JOIN tbl_rfq_items TRP
                   ON TRP.rfq_id = TR.id
               JOIN tbl_product_variant PV ON PV.id = TRP.product_variant_id
             JOIN tbl_product TP ON TP.id = PV.product_id

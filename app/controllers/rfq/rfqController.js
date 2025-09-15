@@ -2060,7 +2060,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
           delete products.updatable.files[rfqProductId].variant;
           delete products.updatable.files[rfqProductId].product_id;
 
-          let whereClause = `rfq_product_id = (${rfqProductId})::INT`;
+          let whereClause = `rfq_item_id = (${rfqProductId})::INT`;
 
           for (const fileType of Object.keys(
             products.updatable.files[rfqProductId]
@@ -2075,7 +2075,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
             const currentWhereClause =
               whereClause + ` AND file_type = '${transformedFileType}'`;
             const doesExist = await rfqModel.checkIfExists(
-              'tbl_rfq_product_files',
+              'tbl_rfq_item_files',
               currentWhereClause,
               t
             );
@@ -2084,33 +2084,33 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
             if (doesExist && doesExist.length > 0) {
               const conditions = {
-                rfq_product_id: rfqProductId,
+                rfq_item_id: rfqProductId,
                 file_type: transformedFileType
               };
-              await rfqModel.delete('tbl_rfq_product_files', conditions, t);
+              await rfqModel.delete('tbl_rfq_item_files', conditions, t);
               if (!isRemovable) {
                 const insertableData = data.map((file_url) => ({
-                  rfq_product_id: rfqProductId,
+                  rfq_item_id: rfqProductId,
                   file_type: transformedFileType,
                   file_url
                 }));
                 await rfqModel.insertArray(
                   insertableData,
                   Object.keys(insertableData[0]),
-                  'tbl_rfq_product_files',
+                  'tbl_rfq_item_files',
                   t
                 );
               }
             } else if (!isRemovable) {
               const insertableData = data.map((file_url) => ({
-                rfq_product_id: rfqProductId,
+                rfq_item_id: rfqProductId,
                 file_type: transformedFileType,
                 file_url
               }));
               await rfqModel.insertArray(
                 insertableData,
                 Object.keys(insertableData[0]),
-                'tbl_rfq_product_files',
+                'tbl_rfq_item_files',
                 t
               );
             }
@@ -2131,7 +2131,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
               comment
             };
             await rfqModel.updateWhere(
-              'tbl_rfq_products',
+              'tbl_rfq_items',
               data,
               whereClause,
               t
@@ -2141,9 +2141,9 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
     if (products && products?.deletable && products.deletable.length > 0) {
       for (const rfqProductId of products.deletable) {
-        // Delete records from tbl_rfq_products
+        // Delete records from tbl_rfq_items
         let deletedRecord = await rfqModel.delete(
-          'tbl_rfq_products',
+          'tbl_rfq_items',
           {
             id: rfqProductId
           },
@@ -2172,9 +2172,9 @@ const saveRfqDraft = async (user_id, reqBody) => {
         );
 
         // Delete associated files
-        const directRfqProductConditions = { rfq_product_id: rfqProductId };
+        const directRfqProductConditions = { rfq_item_id: rfqProductId };
         await rfqModel.delete(
-          'tbl_rfq_product_files',
+          'tbl_rfq_item_files',
           directRfqProductConditions,
           t
         );
@@ -2298,7 +2298,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       );
 
       const rfqProducts = await rfqModel.checkIfExists(
-        'tbl_rfq_products',
+        'tbl_rfq_items',
         `rfq_id = ${rfq_id} AND id IN (${Object.keys(filters.local)
           .map((key) => parseInt(key))
           .filter(Boolean)
@@ -2335,8 +2335,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
           const deletingCondition = {
             rfq_id,
-            product_variant_id: product.product_variant_id,
-            variant: product.variant,
+            rfq_item_id: product.id,
             '-user_ids': remainingVendors
               .map((vendor) => vendor.user_id)
               .filter(Boolean)
@@ -2352,7 +2351,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
           }
 
           await rfqModel.delete(
-            'tbl_rfq_product_vendors',
+            'tbl_rfq_item_vendors',
             deletingCondition,
             t,
           );
@@ -2361,10 +2360,10 @@ const saveRfqDraft = async (user_id, reqBody) => {
           const vendorChecks = await Promise.all(
             remainingVendors.map(async (vendor) => {
               const exists = await rfqModel.checkIfExists(
-                'tbl_rfq_product_vendors',
-                `rfq_id = ${rfq_id} AND product_variant_id = ${
-                  product.product_variant_id
-                } AND variant = '${product.variant}' AND user_id = ${
+                'tbl_rfq_item_vendors',
+                `rfq_id = ${rfq_id} AND rfq_item_id = ${
+                  product.id
+                } AND user_id = ${
                   vendor.user_id
                 } ${
                   sheet_id
@@ -2387,8 +2386,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
           // Step 3: Prepare for insertion
           const insertVendors = filteredVendors.map(vendor => ({
             rfq_id,
-            product_variant_id: product.product_variant_id,
-            variant: product.variant,
+            rfq_item_id: product.id,
             user_id: vendor.user_id,
             sheet_id,
           }));
@@ -2398,7 +2396,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
             await rfqModel.insertArray(
               insertVendors,
               Object.keys(insertVendors[0]),
-              'tbl_rfq_product_vendors',
+              'tbl_rfq_item_vendors',
               t
             );
           }
@@ -2420,15 +2418,14 @@ const saveRfqDraft = async (user_id, reqBody) => {
         if (!hasGlobalOrLocalFilters && addable.length > 0) {
           const addableData = addable.map((vendor) => ({
             rfq_id,
-            product_variant_id: productId,
+            rfq_item_id: rfqProductId,
             user_id: vendor,
-            variant
           }));
 
           await rfqModel.insertArray(
             addableData,
             Object.keys(addableData[0]),
-            'tbl_rfq_product_vendors',
+            'tbl_rfq_item_vendors',
             t
           );
         }
@@ -2447,13 +2444,12 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
             const conditions = {
               rfq_id,
-              product_variant_id: productId,
+              rfq_item_id: rfqProductId,
               user_id: vendor,
-              variant
             };
 
             await rfqModel.delete(
-              'tbl_rfq_product_vendors',
+              'tbl_rfq_item_vendors',
               conditions,
               t
             );
@@ -2781,7 +2777,7 @@ const rfqController = {
                 updatableKeys.add(rfqProductId);
               }
 
-              let whereClause = `rfq_product_id = (${rfqProductId})::INT`;
+              let whereClause = `rfq_item_id = (${rfqProductId})::INT`;
 
               Object.keys(products.updatable.files[rfqProductId]).forEach(
                 async (fileType) => {
@@ -2796,7 +2792,7 @@ const rfqController = {
                     whereClause + ` AND file_type = '${transformedFileType}'`;
                   const doesExist =
                     await transactingModels.rfqModel.checkIfExists(
-                      'tbl_rfq_product_files',
+                      'tbl_rfq_item_files',
                       currentWhereClause
                     );
                   const data = products.updatable.files[rfqProductId][fileType];
@@ -2804,36 +2800,36 @@ const rfqController = {
 
                   if (doesExist && doesExist.length > 0) {
                     const conditions = {
-                      rfq_product_id: rfqProductId,
+                      rfq_item_id: rfqProductId,
                       file_type: transformedFileType
                     };
                     await transactingModels.rfqModel.delete(
-                      'tbl_rfq_product_files',
+                      'tbl_rfq_item_files',
                       conditions,
                       t
                     );
                     if (!isRemovable) {
                       const insertableData = data.map((file_url) => ({
-                        rfq_product_id: rfqProductId,
+                        rfq_item_id: rfqProductId,
                         file_type: transformedFileType,
                         file_url
                       }));
                       await rfqModel.insertArray(
                         insertableData,
                         Object.keys(insertableData[0]),
-                        'tbl_rfq_product_files'
+                        'tbl_rfq_item_files'
                       );
                     }
                   } else if (!isRemovable) {
                     const insertableData = data.map((file_url) => ({
-                      rfq_product_id: rfqProductId,
+                      rfq_item_id: rfqProductId,
                       file_type: transformedFileType,
                       file_url
                     }));
                     await transactingModels.rfqModel.insertArray(
                       insertableData,
                       Object.keys(insertableData[0]),
-                      'tbl_rfq_product_files'
+                      'tbl_rfq_item_files'
                     );
                   }
                 }
@@ -2867,7 +2863,7 @@ const rfqController = {
                   comment
                 };
                 await transactingModels.rfqModel.updateWhere(
-                  'tbl_rfq_products',
+                  'tbl_rfq_items',
                   data,
                   whereClause
                 );
@@ -2960,9 +2956,9 @@ const rfqController = {
               }
             }
 
-            // Delete records from tbl_rfq_products
+            // Delete records from tbl_rfq_items
             let deletedRecord = await transactingModels.rfqModel.delete(
-              'tbl_rfq_products',
+              'tbl_rfq_items',
               {
                 id: rfqProductId
               }
@@ -3139,15 +3135,14 @@ const rfqController = {
             if (addable.length > 0) {
               const addableData = addable.map((vendor) => ({
                 rfq_id,
-                product_variant_id: productId,
+                rfq_item_id: rfqProductId,
                 user_id: vendor,
-                variant
               }));
 
               await transactingModels.rfqModel.insertArray(
                 addableData,
                 Object.keys(addableData[0]),
-                'tbl_rfq_product_vendors'
+                'tbl_rfq_item_vendors'
               );
             }
 
@@ -3165,13 +3160,12 @@ const rfqController = {
 
                 const conditions = {
                   rfq_id,
-                  product_variant_id: productId,
+                  rfq_item_id: rfqProductId,
                   user_id: vendor,
-                  variant
                 };
 
                 await transactingModels.rfqModel.delete(
-                  'tbl_rfq_product_vendors',
+                  'tbl_rfq_item_vendors',
                   conditions
                 );
               }
@@ -3395,7 +3389,7 @@ const rfqController = {
                   const whereClause = `rfq_id = ${rfq_id} AND user_id = ${vendor_id}`;
                   // Check if vendor is still present in RFQ
                   const vendorPresentInRfq = await rfqModel.checkIfExists(
-                    'tbl_rfq_product_vendors',
+                    'tbl_rfq_item_vendors',
                     whereClause
                   );
 
@@ -3413,7 +3407,7 @@ const rfqController = {
                   const whereClause = `rfq_id = ${rfq_id} AND user_id = ${vendor_id}`;
                   // Check if vendor is still present in RFQ
                   const vendorPresentInRfq = await rfqModel.checkIfExists(
-                    'tbl_rfq_product_vendors',
+                    'tbl_rfq_item_vendors',
                     whereClause
                   );
 
@@ -4172,12 +4166,11 @@ const rfqController = {
   },
 
   removeVendorFromDraft: async (req, res) => {
-    const { rfq_id, product_id, variant, vendor_ids } = req.body;
+    const { rfq_id, rfq_item_id, vendor_ids } = req.body;
 
     if (
       !rfq_id ||
-      !product_id ||
-      !variant ||
+      !rfq_item_id ||
       !vendor_ids ||
       vendor_ids.length == 0
     ) {
@@ -4189,13 +4182,12 @@ const rfqController = {
     try {
       const conditions = {
         rfq_id: rfq_id,
-        product_variant_id: product_id,
+        rfq_item_id,
         user_ids: vendor_ids,
-        variant: variant
       };
 
       const result = await rfqModel.delete(
-        'tbl_rfq_product_vendors',
+        'tbl_rfq_item_vendors',
         conditions
       );
 
@@ -4507,7 +4499,7 @@ const rfqController = {
           // Update is_rfq_viewed status for vendor when they view RFQ
           try {
             await rfqModel.updateWhere(
-              'tbl_rfq_product_vendors',
+              'tbl_rfq_item_vendors',
               { is_rfq_viewed: 1 },
               `rfq_id = ${id} AND user_id = ${req.user.id} AND is_rfq_viewed = 0`
             );
@@ -5039,7 +5031,7 @@ const rfqController = {
 
             // Get RFQ product ID from the database
             const rfqProductResult = await rfqModel.checkIfExists(
-              'tbl_rfq_products',
+              'tbl_rfq_items',
               `rfq_id=${rfq_id} AND product_variant_id=${product.product_id} AND variant='${product.variant}'`
             );
 
@@ -5103,7 +5095,7 @@ const rfqController = {
           var quote_items_data = [];
           products.map(
             ({
-              product_id,
+              id,
               product_name,
               unit_price,
               package_price,
@@ -5113,7 +5105,6 @@ const rfqController = {
               comment,
               delivery_period,
               quantity,
-              variant,
               document_files,
               freight_mode,
               package_mode,
@@ -5123,7 +5114,7 @@ const rfqController = {
                 quote_items_data.push({
                   rfq_id,
                   rfq_no,
-                  product_variant_id: product_id,
+                  rfq_item_id: id,
                   product_name,
                   unit_price,
                   package_price,
@@ -5133,7 +5124,6 @@ const rfqController = {
                   comment,
                   delivery_period,
                   quantity,
-                  variant,
                   freight_mode,
                   package_mode,
                   tax_mode
@@ -5142,7 +5132,7 @@ const rfqController = {
                 quote_items_data.push({
                   rfq_id,
                   rfq_no,
-                  product_variant_id: product_id,
+                  rfq_item_id: id,
                   product_name,
                   unit_price: 0,
                   package_price,
@@ -5152,7 +5142,6 @@ const rfqController = {
                   comment,
                   delivery_period,
                   quantity,
-                  variant,
                   freight_mode,
                   package_mode,
                   tax_mode
@@ -5161,7 +5150,7 @@ const rfqController = {
                 quote_items_data.push({
                   rfq_id,
                   rfq_no,
-                  product_variant_id: product_id,
+                  rfq_item_id: id,
                   product_name,
                   unit_price: 0,
                   package_price,
@@ -5171,7 +5160,6 @@ const rfqController = {
                   comment,
                   delivery_period,
                   quantity,
-                  variant,
                   freight_mode,
                   package_mode,
                   tax_mode
@@ -5202,7 +5190,7 @@ const rfqController = {
                 'rfq_id',
                 'rfq_no',
                 'quote_id',
-                'product_variant_id',
+                'rfq_item_id',
                 'product_name',
                 'unit_price',
                 'package_price',
@@ -5212,7 +5200,6 @@ const rfqController = {
                 'comment',
                 'delivery_period',
                 'quantity',
-                'variant',
                 'freight_mode',
                 'package_mode',
                 'tax_mode'
@@ -5335,7 +5322,7 @@ const rfqController = {
               'rfq_id',
               'rfq_no',
               'quote_id',
-              'product_variant_id',
+              'rfq_item_id',
               'product_name',
               'unit_price',
               'package_price',
@@ -5345,7 +5332,6 @@ const rfqController = {
               'comment',
               'delivery_period',
               'quantity',
-              'variant',
               'freight_mode',
               'package_mode',
               'tax_mode'
@@ -5890,7 +5876,7 @@ const rfqController = {
   },
 
   finalize: async (req, res, next) => {
-    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, variant } =
+    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, variant, rfq_item_id } =
       req.body;
 
     try {
@@ -5910,7 +5896,7 @@ const rfqController = {
       }
       if (rfQItem.length > 0 && rfQItem[0].products.length > 0) {
         winning_product = rfQItem[0].products.filter(
-          (p) => p.product_id == product_variant_id && p.variant == variant
+          (p) => p.id = rfq_item_id
         );
       }
 
@@ -5926,7 +5912,7 @@ const rfqController = {
         const response = await db.tx(async (t) => {
           let alreadyExists = await rfqModel.checkIfExists(
             'tbl_quote_finalization',
-            `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} LIMIT 1`,
+            `rfq_id=${rfq_id} AND rfq_item_id=${rfq_item_id} LIMIT 1`,
             t
           );
 
@@ -5938,12 +5924,11 @@ const rfqController = {
             const history_data = {
               rfq_id: alreadyExists.rfq_id,
               rfq_no: alreadyExists.rfq_no,
-              product_variant_id: alreadyExists.product_variant_id,
+              rfq_item_id: alreadyExists.rfq_item_id,
               vendor_id: alreadyExists.vendor_id,
               quote_id: alreadyExists.quote_id,
               created_by: alreadyExists.created_by,
               timestamp: alreadyExists.timestamp,
-              variant: alreadyExists.variant,
               changed_by: req.user.id
             };
 
@@ -5965,11 +5950,10 @@ const rfqController = {
           const tbl_quote_finalization_data = {
             rfq_id,
             rfq_no,
-            product_variant_id,
+            rfq_item_id,
             vendor_id,
             quote_id,
             created_by: req.user.id,
-            variant
           };
 
           const response = await rfqModel.insert(
@@ -9383,7 +9367,7 @@ const rfqController = {
         });
       }
       const validate = await rfqModel.checkIfExists(
-        'tbl_rfq_products',
+        'tbl_rfq_items',
         `id = ${rfq_product_id}`
       );
       if (!validate || validate.length === 0) {
