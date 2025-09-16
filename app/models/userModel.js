@@ -1008,24 +1008,34 @@ user_book_demo: async (mobile) => {
            END AS profile_image_url`;
 
       // Additional fields if current_user is not null
-      if (current_user !== null) {
-        baseQuery += `,
-             tbl_users.mobile,
-tbl_users.email,
-ARRAY(
-    SELECT json_build_object(
-        'reviewed_by', vr.reviewed_by,
-        'review_date', vr.review_date,
-        'rating', vr.rating,
-        'description', vr.description,
-        'buyer', BU.name,
-        'buyer_email', BU.email
-    )
-    FROM tbl_vendor_reviews vr
-    LEFT JOIN tbl_users BU ON BU.id = vr.reviewed_by
-    WHERE vr.reviewed_to = tbl_users.id
-      AND vr.is_published = 1
-) AS reviews`;
+     if (current_user !== null) {
+    baseQuery += `,
+        tbl_users.mobile,
+        tbl_users.email,
+        ARRAY(
+            SELECT json_build_object(
+                'reviewed_by', vr.reviewed_by,
+                'review_date', vr.review_date,
+                'rating', vr.rating,
+                'description', vr.description,
+                'buyer', BU.name,
+                'buyer_email', BU.email
+            )
+            FROM tbl_vendor_reviews vr
+            LEFT JOIN tbl_users BU ON BU.id = vr.reviewed_by
+            WHERE vr.reviewed_to = tbl_users.id
+              AND vr.is_published = 1
+        ) AS reviews,
+
+        (
+    SELECT json_agg(tvp)
+    FROM tbl_vendor_profile tvp
+    WHERE tvp.vendor_id = tbl_users.id and tvp.is_approved = true
+) AS vendor_info
+
+    `;
+
+
       }
 
       // Completing the query with the FROM clause
@@ -3204,23 +3214,37 @@ getVendorReviews: async (vendor_id) => {
 },
 
 publishProfileReviews: async (reviewObj) => {
+  const client = await db.connect();
   try {
-    const query = `
-      UPDATE tbl_vendor_reviews 
-      SET is_published = $1
-      WHERE id = ANY($2::int[])
+    await client.query("BEGIN");
+
+    // 1. First, set all reviews for that vendor to 0
+    const resetQuery = `
+      UPDATE tbl_vendor_reviews
+      SET is_published = 0
+      WHERE reviewed_to = $1
+    `;
+    await db.query(resetQuery, [reviewObj.user_id]);
+
+    // 2. Then, set selected ones to 1
+    const updateQuery = `
+      UPDATE tbl_vendor_reviews
+      SET is_published = 1
+      WHERE reviewed_to = $1 AND id = ANY($2::int[])
       RETURNING *;
     `;
+    const values = [reviewObj.user_id, reviewObj.review_ids];
+    const result = await db.query(updateQuery, values);
 
-    const values = [reviewObj.is_published, reviewObj.review_ids];
-
-    const result = await db.query(query, values);
+    await db.query("COMMIT");
     return result || [];
   } catch (error) {
+    await db.query("ROLLBACK");
     console.error("Error publishing vendor reviews:", error);
     throw error;
   }
 },
+
  
 
  uploadFiless: async (files, user_id, doc_type) => {

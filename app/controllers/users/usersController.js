@@ -2045,18 +2045,17 @@ get_vendor_profile_reviews : async (req , res , next) => {
 
 publish_profile_reviews: async (req, res, next) => {
   try {
-    const { review_ids, is_published } = req.body;
+    const { review_ids } = req.body;
+    const user_id = req.user.id; // vendor ID from auth
 
     if (!review_ids || !Array.isArray(review_ids) || review_ids.length === 0) {
       return res.status(400).json({ status: 0, message: "review_ids array is required" });
     }
 
     const payload = {
-      is_published :1,
-      review_ids
+      review_ids,
+      user_id
     };
-
-   
 
     await userModel.publishProfileReviews(payload);
 
@@ -2072,6 +2071,7 @@ publish_profile_reviews: async (req, res, next) => {
     });
   }
 },
+
 
 
 
