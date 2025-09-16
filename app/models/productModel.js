@@ -24,74 +24,118 @@ const productModel = {
         if (!Array.isArray(items) || items.length === 0) {
           return resolve({ inserted: 0, skipped: 0, makes: 0, approvals: 0 });
         }
-
-        // 1) De-duplicate input combos and skip ones already existing in DB
-        const unique = [];
-        const seen = new Set();
-        for (const it of items) {
-          if (!it?.variant_id || !it?.vendor_id) continue;
-          const key = `${it.variant_id}::${it.vendor_id}`;
-          if (!seen.has(key)) { seen.add(key); unique.push(it); }
-        }
-
-        if (unique.length === 0) return resolve({ inserted: 0, skipped: items.length, makes: 0, approvals: 0 });
-
-        // Fetch existing mappings in one go
-        const existRows = await db.any(
-          `SELECT product_variant_id, vendor_id, id FROM tbl_product_variant_vendor_mapping
-           WHERE (product_variant_id, vendor_id) IN ($1:csv)`,
-          [unique.map(u => `(${u.variant_id},${u.vendor_id})`)]
-        ).catch(() => []);
-        const existSet = new Set(existRows.map(r => `${r.product_variant_id}::${r.vendor_id}`));
-
-        const toInsert = unique.filter(u => !existSet.has(`${u.variant_id}::${u.vendor_id}`));
-        const skipped = unique.length - toInsert.length;
-
-        if (toInsert.length === 0) {
-          return resolve({ inserted: 0, skipped, makes: 0, approvals: 0 });
-        }
-
-        // 2) Insert mappings in a single INSERT ... VALUES ... RETURNING id, product_variant_id
-        const mappingValues = [];
-        const placeholders = toInsert.map((u, idx) => {
-          mappingValues.push(u.variant_id, u.vendor_id, true, false, userId, userId); // status=true, is_approved=false
-          const base = idx * 6;
-          return `($${base+1}, $${base+2}, NOW(), NOW(), $${base+3}, $${base+4}, $${base+5}, $${base+6})`;
-        }).join(', ');
-
-        const insertQuery = `
-          INSERT INTO tbl_product_variant_vendor_mapping
-            (product_variant_id, vendor_id, created_at, updated_at, status, is_approved, created_by, updated_by)
-          VALUES ${placeholders}
-          RETURNING id, product_variant_id
+        const payload = JSON.stringify(items);
+        const sql = `
+          WITH input_raw AS (
+            SELECT
+              (it->>'variant_id')::bigint AS variant_id,
+              (it->>'vendor_id')::bigint AS vendor_id,
+              COALESCE(it->'make_list', '[]'::jsonb) AS make_list,
+              COALESCE(it->'approved_by', '[]'::jsonb) AS approved_by
+            FROM jsonb_array_elements($1::jsonb) it
+            WHERE (it ? 'variant_id') AND (it ? 'vendor_id')
+          ),
+          input_grouped AS (
+            SELECT
+              variant_id,
+              vendor_id,
+              -- flatten and distinct all makes per (variant_id, vendor_id)
+              COALESCE(
+                jsonb_agg(DISTINCT ml.m) FILTER (WHERE ml.m IS NOT NULL),
+                '[]'::jsonb
+              ) AS make_list,
+              -- distinct approved_by ids per (variant_id, vendor_id)
+              COALESCE(
+                jsonb_agg(DISTINCT ab.approver) FILTER (WHERE ab.approver IS NOT NULL),
+                '[]'::jsonb
+              ) AS approved_by
+            FROM input_raw ir
+            LEFT JOIN LATERAL (
+              SELECT jsonb_array_elements_text(ir.make_list)::text AS m
+            ) ml ON true
+            LEFT JOIN LATERAL (
+              SELECT to_jsonb((jsonb_array_elements_text(ir.approved_by))::bigint) AS approver
+            ) ab ON true
+            GROUP BY variant_id, vendor_id
+          ),
+          missing AS (
+            SELECT ig.*
+            FROM input_grouped ig
+            LEFT JOIN tbl_product_variant_vendor_mapping m
+              ON m.product_variant_id = ig.variant_id AND m.vendor_id = ig.vendor_id
+            WHERE m.id IS NULL
+          ),
+          ins AS (
+            INSERT INTO tbl_product_variant_vendor_mapping
+              (product_variant_id, vendor_id, created_at, updated_at, status, is_approved, created_by, updated_by)
+            SELECT variant_id, vendor_id, NOW(), NOW(), true, false, $2, $2
+            FROM missing
+            RETURNING id, product_variant_id, vendor_id
+          ),
+          all_mappings AS (
+            SELECT id, product_variant_id, vendor_id FROM ins
+            UNION ALL
+            SELECT m.id, m.product_variant_id, m.vendor_id
+            FROM tbl_product_variant_vendor_mapping m
+            JOIN input_grouped ig
+              ON m.product_variant_id = ig.variant_id AND m.vendor_id = ig.vendor_id
+          ),
+          makes AS (
+            SELECT
+              am.id AS map_id,
+              trim(elem, ' "') AS make_name
+            FROM input_grouped ig
+            JOIN all_mappings am
+              ON am.product_variant_id = ig.variant_id AND am.vendor_id = ig.vendor_id
+            CROSS JOIN LATERAL jsonb_array_elements_text(ig.make_list) AS elem
+            WHERE NULLIF(trim(elem, ' '), '') IS NOT NULL
+          ),
+          ins_makes AS (
+            INSERT INTO tbl_product_variant_vendor_make (variant_vendor_map_id, make_name)
+            SELECT map_id, make_name FROM makes
+            RETURNING 1
+          ),
+          -- Build desired approvals and remove ones that already exist
+          approvals_desired AS (
+            SELECT DISTINCT
+              am.id AS map_id,
+              pv.product_id AS product_id,
+              (jsonb_array_elements_text(ig.approved_by))::bigint AS approver_id
+            FROM input_grouped ig
+            JOIN all_mappings am
+              ON am.product_variant_id = ig.variant_id AND am.vendor_id = ig.vendor_id
+            JOIN tbl_product_variant pv ON pv.id = am.product_variant_id
+            WHERE jsonb_array_length(ig.approved_by) > 0
+          ),
+          approvals_existing AS (
+            SELECT variant_vendor_mapping_id AS map_id, vendor_approve_id AS approver_id
+            FROM tbl_vendorapprove_product_mapping
+            WHERE variant_vendor_mapping_id IN (SELECT id FROM all_mappings)
+          ),
+          approvals_missing AS (
+            SELECT ad.map_id, ad.product_id, ad.approver_id
+            FROM approvals_desired ad
+            LEFT JOIN approvals_existing ae
+              ON ae.map_id = ad.map_id AND ae.approver_id = ad.approver_id
+            WHERE ae.map_id IS NULL
+          ),
+          ins_approvals AS (
+            INSERT INTO tbl_vendorapprove_product_mapping (product_id, variant_vendor_mapping_id, vendor_approve_id)
+            SELECT product_id, map_id, approver_id FROM approvals_missing
+            RETURNING 1
+          ),
+          counts AS (
+            SELECT
+              (SELECT COUNT(*) FROM ins)::int AS inserted,
+              (SELECT COUNT(*) FROM input_grouped)::int - (SELECT COUNT(*) FROM missing)::int AS skipped,
+              (SELECT COUNT(*) FROM ins_makes)::int AS makes,
+              (SELECT COUNT(*) FROM ins_approvals)::int AS approvals
+          )
+          SELECT inserted, skipped, makes, approvals FROM counts;
         `;
 
-        const newMappings = await db.any(insertQuery, mappingValues);
-
-        // Map variant_id -> mapping_id for follow-up inserts
-        const variantToMapping = new Map(newMappings.map(r => [String(r.product_variant_id), r.id]));
-
-        // 3) Build bulk rows for makes and approvals
-        const makeRows = [];
-        for (const u of toInsert) {
-          const mapId = variantToMapping.get(String(u.variant_id));
-          if (!mapId) continue;
-          if (Array.isArray(u.make_list) && u.make_list.length > 0) {
-            for (const m of u.make_list) {
-              if (m && String(m).trim()) {
-                makeRows.push({ variant_vendor_map_id: mapId, make_name: String(m).trim() });
-              }
-            }
-          }
-        }
-
-        // 4) Bulk insert makes and approvals using generalModel.insertMany if rows exist
-        let insertedMakes = 0;
-        if (makeRows.length > 0) {
-          const res = await generalModel.insertMany('tbl_product_variant_vendor_make', makeRows).catch(() => []);
-          insertedMakes = Array.isArray(res) ? res.length : 0;
-        }
-        resolve({ inserted: newMappings.length, skipped, makes: insertedMakes });
+        const result = await db.one(sql, [payload, userId]);
+        resolve({ inserted: result.inserted, skipped: result.skipped, makes: result.makes, approvals: result.approvals });
       } catch (error) {
         console.error('bulkInsertVariantVendorMappings failed:', error);
         reject(error);
