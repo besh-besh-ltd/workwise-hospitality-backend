@@ -1993,10 +1993,7 @@ get_vendor_profile_documents  : async (req, res, next) => {
 
     const user_type = req.user // assuming this is set in passport
     let result;
-    if(user_type === 1) {
-      // Admin can view all vendor assets
-       result = userModel.getAllVendorAssets();
-    }
+   
 
  const user = await rfqModel.findAll(
   'tbl_vendor_profile',

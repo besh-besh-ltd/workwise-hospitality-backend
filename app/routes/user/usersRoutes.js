@@ -197,7 +197,7 @@ UsersRoutes.get
 (
   '/get-vendor-profile-documents',
   passportSignIn,
-  acl([1,3]),
+  acl([3]),
   UsersController.get_vendor_profile_documents
 );
 
