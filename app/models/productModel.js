@@ -16,6 +16,88 @@ const productModel = {
         });
     });
   },
+  // Efficient bulk mapping: insert mappings, makes and approvals in minimum statements
+  bulkInsertVariantVendorMappings: async (items, userId) => {
+    // items: [{ variant_id, vendor_id, approved_by: number[] | null, make_list: string[] | null }]
+    return new Promise(async (resolve, reject) => {
+      try {
+        if (!Array.isArray(items) || items.length === 0) {
+          return resolve({ inserted: 0, skipped: 0, makes: 0, approvals: 0 });
+        }
+
+        // 1) De-duplicate input combos and skip ones already existing in DB
+        const unique = [];
+        const seen = new Set();
+        for (const it of items) {
+          if (!it?.variant_id || !it?.vendor_id) continue;
+          const key = `${it.variant_id}::${it.vendor_id}`;
+          if (!seen.has(key)) { seen.add(key); unique.push(it); }
+        }
+
+        if (unique.length === 0) return resolve({ inserted: 0, skipped: items.length, makes: 0, approvals: 0 });
+
+        // Fetch existing mappings in one go
+        const existRows = await db.any(
+          `SELECT product_variant_id, vendor_id, id FROM tbl_product_variant_vendor_mapping
+           WHERE (product_variant_id, vendor_id) IN ($1:csv)`,
+          [unique.map(u => `(${u.variant_id},${u.vendor_id})`)]
+        ).catch(() => []);
+        const existSet = new Set(existRows.map(r => `${r.product_variant_id}::${r.vendor_id}`));
+
+        const toInsert = unique.filter(u => !existSet.has(`${u.variant_id}::${u.vendor_id}`));
+        const skipped = unique.length - toInsert.length;
+
+        if (toInsert.length === 0) {
+          return resolve({ inserted: 0, skipped, makes: 0, approvals: 0 });
+        }
+
+        // 2) Insert mappings in a single INSERT ... VALUES ... RETURNING id, product_variant_id
+        const mappingValues = [];
+        const placeholders = toInsert.map((u, idx) => {
+          mappingValues.push(u.variant_id, u.vendor_id, true, false, userId, userId); // status=true, is_approved=false
+          const base = idx * 6;
+          return `($${base+1}, $${base+2}, NOW(), NOW(), $${base+3}, $${base+4}, $${base+5}, $${base+6})`;
+        }).join(', ');
+
+        const insertQuery = `
+          INSERT INTO tbl_product_variant_vendor_mapping
+            (product_variant_id, vendor_id, created_at, updated_at, status, is_approved, created_by, updated_by)
+          VALUES ${placeholders}
+          RETURNING id, product_variant_id
+        `;
+
+        const newMappings = await db.any(insertQuery, mappingValues);
+
+        // Map variant_id -> mapping_id for follow-up inserts
+        const variantToMapping = new Map(newMappings.map(r => [String(r.product_variant_id), r.id]));
+
+        // 3) Build bulk rows for makes and approvals
+        const makeRows = [];
+        for (const u of toInsert) {
+          const mapId = variantToMapping.get(String(u.variant_id));
+          if (!mapId) continue;
+          if (Array.isArray(u.make_list) && u.make_list.length > 0) {
+            for (const m of u.make_list) {
+              if (m && String(m).trim()) {
+                makeRows.push({ variant_vendor_map_id: mapId, make_name: String(m).trim() });
+              }
+            }
+          }
+        }
+
+        // 4) Bulk insert makes and approvals using generalModel.insertMany if rows exist
+        let insertedMakes = 0;
+        if (makeRows.length > 0) {
+          const res = await generalModel.insertMany('tbl_product_variant_vendor_make', makeRows).catch(() => []);
+          insertedMakes = Array.isArray(res) ? res.length : 0;
+        }
+        resolve({ inserted: newMappings.length, skipped, makes: insertedMakes });
+      } catch (error) {
+        console.error('bulkInsertVariantVendorMappings failed:', error);
+        reject(error);
+      }
+    });
+  },
   parentNameExists: async (name, parent_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -3615,6 +3697,11 @@ getProductTechSpecByID: async (productId) => {
             u.email AS vendor_email,
             COALESCE(c.company_name, u.organization_name, u.name) AS vendor_organization,
             COALESCE(c.company_name, u.organization_name, u.name, 'Unknown Vendor') AS vendor_display_name,
+            (
+              SELECT COALESCE(json_agg(t.make_name) FILTER (WHERE t.make_name IS NOT NULL), '[]'::json)
+              FROM tbl_product_variant_vendor_make t
+              WHERE t.variant_vendor_map_id = m.id
+            ) AS make_list,
             ${searchTerm ? `
               similarity(v.name, '${searchTerm}') AS v_similarity_score,
               similarity(p.name, '${searchTerm}') AS p_similarity_score,
