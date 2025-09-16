@@ -3732,7 +3732,12 @@ getProductTechSpecByID: async (productId) => {
             rr.reject_reason,
             TC.name AS created_by,
             TU.name AS updated_by,
-            TA.name AS approved_by,
+            (
+              SELECT COALESCE(string_agg(va.vendor_approve, ', '), '')
+              FROM tbl_vendorapprove_product_mapping vpm
+              LEFT JOIN tbl_vendor_approve va ON va.id = vpm.vendor_approve_id
+              WHERE vpm.variant_vendor_mapping_id = m.id
+            ) AS approved_by,
             p.id AS product_id,
             p.name AS product_name,
             p.created_by AS product_created_by,
