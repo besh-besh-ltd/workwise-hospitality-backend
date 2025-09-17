@@ -250,9 +250,27 @@ RfqRoutes.post(
   rfqController.searchVariantVendors
 );
 
+// Package vendors for a package-type product
+RfqRoutes.post(
+  '/search-package-vendors',
+  rfqController.searchPackageVendors
+);
+
 RfqRoutes.post(
   '/search-product-by-category',
   rfqController.searchProductByCategory
+);
+
+// Variants of a product
+RfqRoutes.post(
+  '/product-variants',
+  rfqController.getVariantsByProduct
+);
+
+// Common vendors for selected variants
+RfqRoutes.post(
+  '/common-variant-vendors',
+  rfqController.getCommonVendorsForVariants
 );
 
 RfqRoutes.post(

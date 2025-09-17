@@ -7751,6 +7751,108 @@ ORDER BY m.created_at;
     }
   },
 
+  // Return all approved, active variants for a given product
+  getVariantsByProduct: async (product_id) => {
+    try {
+      const q = `
+        SELECT 
+          pv.id AS variant_id,
+          pv.name AS variant_name,
+          pv.product_id,
+          p.name AS product_name,
+          pv.is_approve,
+          pv.status
+        FROM tbl_product_variant pv
+        JOIN tbl_product p ON p.id = pv.product_id
+        WHERE pv.product_id = $1
+          AND pv.is_deleted = 0
+          AND pv.is_approve = 1
+          AND pv.status = 1
+        ORDER BY pv.name ASC;`;
+      const { rows } = await db.query(q, [product_id]);
+      return rows;
+    } catch (error) {
+      console.error('[RFQ Model] Error in getVariantsByProduct:', error.message);
+      return [];
+    }
+  },
+
+  // Fetch vendors common to ALL provided variant IDs
+  getCommonVendorsForVariants: async (variantIds = [], buyer_id = null) => {
+    if (!Array.isArray(variantIds) || variantIds.length === 0) return [];
+    try {
+      const placeholders = variantIds.map((_, i) => `$${i + 1}`).join(',');
+      const baseIndex = variantIds.length + 1;
+      const q = `
+        WITH vendor_sets AS (
+          SELECT pvvm.vendor_id
+          FROM tbl_product_variant_vendor_mapping pvvm
+          WHERE pvvm.status = 1 AND pvvm.is_approved = 1
+            AND pvvm.product_variant_id = ANY(ARRAY[${placeholders}]::int[])
+        ),
+        common_vendors AS (
+          SELECT vendor_id, COUNT(*) AS cnt
+          FROM vendor_sets
+          GROUP BY vendor_id
+          HAVING COUNT(*) = ${variantIds.length}
+        )
+        SELECT 
+          u.id AS vendor_id,
+          COALESCE(c.company_name, u.organization_name, u.name) AS vendor_name,
+          u.email AS vendor_email,
+          u.mobile AS vendor_phone,
+          u.city,
+          u.state
+        FROM common_vendors cv
+        JOIN tbl_users u ON u.id = cv.vendor_id AND u.user_type IN (3,4) AND u.is_deleted = 0 AND u.status = 1
+        LEFT JOIN tbl_company c ON c.id = u.company_id
+        ${buyer_id ? `LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON bvm.vendor_id = u.id AND bvm.company_id = (SELECT company_id FROM tbl_users WHERE id = $${baseIndex})` : ''}
+        WHERE (
+          COALESCE(c.is_private, 0) = 0
+          ${buyer_id ? `OR (c.is_private = 1 AND bvm.vendor_id IS NOT NULL)` : ''}
+        )
+        ORDER BY COALESCE(c.company_name, u.organization_name, u.name) ASC;`;
+      const params = buyer_id ? [...variantIds, buyer_id] : variantIds;
+      const { rows } = await db.query(q, params);
+      return rows;
+    } catch (error) {
+      console.error('[RFQ Model] Error in getCommonVendorsForVariants:', error.message);
+      return [];
+    }
+  },
+
+  // Fetch vendors mapped to a package-type product via tbl_product_package_vendor_mapping
+  searchPackageVendors: async (product_id, buyer_id = null) => {
+    try {
+      // Fetch vendors mapped to a package-type product via tbl_product_package_vendor_mapping
+      const q = `
+        SELECT 
+          u.id AS vendor_id,
+          COALESCE(c.company_name, u.organization_name, u.name) AS vendor_name,
+          u.email AS vendor_email,
+          u.mobile AS vendor_phone,
+          u.city,
+          u.state
+        FROM tbl_product_package_vendor_mapping pvm
+        JOIN tbl_users u ON u.id = pvm.vendor_id
+        LEFT JOIN tbl_company c ON c.id = u.company_id
+        ${buyer_id ? `LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON bvm.vendor_id = u.id AND bvm.company_id = (SELECT company_id FROM tbl_users WHERE id = $2)` : ''}
+        WHERE pvm.package_product_id = $1
+        ORDER BY COALESCE(c.company_name, u.organization_name, u.name) ASC;
+      `;
+
+      const params = buyer_id ? [product_id, buyer_id] : [product_id];
+      const result = await db.query(q, params);
+      
+      // Handle different result formats
+      const rows = result.rows || result || [];
+      return rows;
+    } catch (error) {
+      console.error('[RFQ Model] Error in searchPackageVendors:', error.message);
+      return [];
+    }
+  },
+
   /**
    * @mukul_jatav 11/07/2025
    * Reason for Changes:

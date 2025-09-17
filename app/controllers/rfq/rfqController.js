@@ -10352,6 +10352,47 @@ processBoqAndDownload : async (req, res) => {
     }
   },
 
+  // Get vendors for a package product using tbl_product_package_vendor_mapping
+  searchPackageVendors: async (req, res, next) => {
+    try {
+      const { product_id } = req.body;
+      if (!product_id) return res.status(200).json([]).end();
+
+      const buyerId = req?.user?.id || null;
+      const vendors = await rfqModel.searchPackageVendors(product_id, buyerId);
+      return res.status(200).json(vendors);
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: Config.errorText.value }).end();
+    }
+  },
+
+  // Return all variants for a given product id
+  getVariantsByProduct: async (req, res) => {
+    try {
+      const { product_id } = req.body;
+      if (!product_id) return res.status(200).json([]).end();
+      const variants = await rfqModel.getVariantsByProduct(product_id);
+      return res.status(200).json(variants).end();
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: Config.errorText.value }).end();
+    }
+  },
+
+  // Get vendors that are common across all selected variants
+  getCommonVendorsForVariants: async (req, res) => {
+    try {
+      const { variant_ids } = req.body;
+      const buyerId = req?.user?.id || null;
+      const list = await rfqModel.getCommonVendorsForVariants(variant_ids || [], buyerId);
+      return res.status(200).json(list).end();
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: Config.errorText.value }).end();
+    }
+  },
+
   getClausesByRfqProductId: async (req, res) => {
     try {
       const { rfq_id, rfq_product_id, vendor_id } = req.body;
