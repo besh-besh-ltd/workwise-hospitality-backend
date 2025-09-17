@@ -6137,10 +6137,12 @@ const rfqController = {
 
       res.status(200).json({
         status: 1,
-        data: removeDuplicates(productResult),
+        // data: removeDuplicates(productResult),
+        data:productResult,
         categoryData: categoryResult
       });
     } catch (error) {
+      console.log("------------- ", error)
       logError(error);
       res.status(400).json({
         status: 3,

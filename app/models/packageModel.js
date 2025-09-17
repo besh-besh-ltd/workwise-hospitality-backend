@@ -52,10 +52,15 @@ export async function getPackageById(id, cn = db) {
   );
 
   const vendors = await cn.manyOrNone(
-    `SELECT id, package_id, vendor_id
-     FROM tbl_package_vendors
-     WHERE package_id = $1
-     ORDER BY id`,
+    `SELECT pv.id,
+            pv.package_id,
+            pv.vendor_id,
+            COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name
+     FROM tbl_package_vendors pv
+     LEFT JOIN tbl_users tu ON tu.id = pv.vendor_id
+     LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+     WHERE pv.package_id = $1
+     ORDER BY pv.id`,
     [id]
   );
 
@@ -80,10 +85,10 @@ export async function listPackages({ q = null, created_by = null, page = 1, limi
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const data = await db.manyOrNone(
-    `SELECT *
-     FROM tbl_package
+    `SELECT p.*
+     FROM tbl_package p
      ${where}
-     ORDER BY id ${sort === 'ASC' ? 'ASC' : 'DESC'}
+     ORDER BY p.id ${sort === 'ASC' ? 'ASC' : 'DESC'}
      LIMIT ${Math.max(1, Number(limit))} OFFSET ${offset}`,
     values
   );

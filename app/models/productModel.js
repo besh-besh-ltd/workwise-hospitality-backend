@@ -16,6 +16,132 @@ const productModel = {
         });
     });
   },
+  // Efficient bulk mapping: insert mappings, makes and approvals in minimum statements
+  bulkInsertVariantVendorMappings: async (items, userId) => {
+    // items: [{ variant_id, vendor_id, approved_by: number[] | null, make_list: string[] | null }]
+    return new Promise(async (resolve, reject) => {
+      try {
+        if (!Array.isArray(items) || items.length === 0) {
+          return resolve({ inserted: 0, skipped: 0, makes: 0, approvals: 0 });
+        }
+        const payload = JSON.stringify(items);
+        const sql = `
+          WITH input_raw AS (
+            SELECT
+              (it->>'variant_id')::bigint AS variant_id,
+              (it->>'vendor_id')::bigint AS vendor_id,
+              COALESCE(it->'make_list', '[]'::jsonb) AS make_list,
+              COALESCE(it->'approved_by', '[]'::jsonb) AS approved_by
+            FROM jsonb_array_elements($1::jsonb) it
+            WHERE (it ? 'variant_id') AND (it ? 'vendor_id')
+          ),
+          input_grouped AS (
+            SELECT
+              variant_id,
+              vendor_id,
+              -- flatten and distinct all makes per (variant_id, vendor_id)
+              COALESCE(
+                jsonb_agg(DISTINCT ml.m) FILTER (WHERE ml.m IS NOT NULL),
+                '[]'::jsonb
+              ) AS make_list,
+              -- distinct approved_by ids per (variant_id, vendor_id)
+              COALESCE(
+                jsonb_agg(DISTINCT ab.approver) FILTER (WHERE ab.approver IS NOT NULL),
+                '[]'::jsonb
+              ) AS approved_by
+            FROM input_raw ir
+            LEFT JOIN LATERAL (
+              SELECT jsonb_array_elements_text(ir.make_list)::text AS m
+            ) ml ON true
+            LEFT JOIN LATERAL (
+              SELECT to_jsonb((jsonb_array_elements_text(ir.approved_by))::bigint) AS approver
+            ) ab ON true
+            GROUP BY variant_id, vendor_id
+          ),
+          missing AS (
+            SELECT ig.*
+            FROM input_grouped ig
+            LEFT JOIN tbl_product_variant_vendor_mapping m
+              ON m.product_variant_id = ig.variant_id AND m.vendor_id = ig.vendor_id
+            WHERE m.id IS NULL
+          ),
+          ins AS (
+            INSERT INTO tbl_product_variant_vendor_mapping
+              (product_variant_id, vendor_id, created_at, updated_at, status, is_approved, created_by, updated_by)
+            SELECT variant_id, vendor_id, NOW(), NOW(), true, false, $2, $2
+            FROM missing
+            RETURNING id, product_variant_id, vendor_id
+          ),
+          all_mappings AS (
+            SELECT id, product_variant_id, vendor_id FROM ins
+            UNION ALL
+            SELECT m.id, m.product_variant_id, m.vendor_id
+            FROM tbl_product_variant_vendor_mapping m
+            JOIN input_grouped ig
+              ON m.product_variant_id = ig.variant_id AND m.vendor_id = ig.vendor_id
+          ),
+          makes AS (
+            SELECT
+              am.id AS map_id,
+              trim(elem, ' "') AS make_name
+            FROM input_grouped ig
+            JOIN all_mappings am
+              ON am.product_variant_id = ig.variant_id AND am.vendor_id = ig.vendor_id
+            CROSS JOIN LATERAL jsonb_array_elements_text(ig.make_list) AS elem
+            WHERE NULLIF(trim(elem, ' '), '') IS NOT NULL
+          ),
+          ins_makes AS (
+            INSERT INTO tbl_product_variant_vendor_make (variant_vendor_map_id, make_name)
+            SELECT map_id, make_name FROM makes
+            RETURNING 1
+          ),
+          -- Build desired approvals and remove ones that already exist
+          approvals_desired AS (
+            SELECT DISTINCT
+              am.id AS map_id,
+              pv.product_id AS product_id,
+              (jsonb_array_elements_text(ig.approved_by))::bigint AS approver_id
+            FROM input_grouped ig
+            JOIN all_mappings am
+              ON am.product_variant_id = ig.variant_id AND am.vendor_id = ig.vendor_id
+            JOIN tbl_product_variant pv ON pv.id = am.product_variant_id
+            WHERE jsonb_array_length(ig.approved_by) > 0
+          ),
+          approvals_existing AS (
+            SELECT variant_vendor_mapping_id AS map_id, vendor_approve_id AS approver_id
+            FROM tbl_vendorapprove_product_mapping
+            WHERE variant_vendor_mapping_id IN (SELECT id FROM all_mappings)
+          ),
+          approvals_missing AS (
+            SELECT ad.map_id, ad.product_id, ad.approver_id
+            FROM approvals_desired ad
+            LEFT JOIN approvals_existing ae
+              ON ae.map_id = ad.map_id AND ae.approver_id = ad.approver_id
+            WHERE ae.map_id IS NULL
+          ),
+          ins_approvals AS (
+            INSERT INTO tbl_vendorapprove_product_mapping (product_id, variant_vendor_mapping_id, vendor_approve_id)
+            SELECT product_id, map_id, approver_id FROM approvals_missing
+            RETURNING 1
+          ),
+          counts AS (
+            SELECT
+              (SELECT COUNT(*) FROM ins)::int AS inserted,
+              (SELECT COUNT(*) FROM input_grouped)::int - (SELECT COUNT(*) FROM missing)::int AS skipped,
+              (SELECT COUNT(*) FROM ins_makes)::int AS makes,
+              (SELECT COUNT(*) FROM ins_approvals)::int AS approvals
+          )
+          SELECT inserted, skipped, makes, approvals FROM counts;
+        `;
+
+        const result = await db.one(sql, [payload, userId]);
+        resolve({ inserted: result.inserted, skipped: result.skipped, makes: result.makes, approvals: result.approvals });
+      } catch (error) {
+        console.error('bulkInsertVariantVendorMappings failed:', error);
+        reject(error);
+      }
+    });
+  },
   parentNameExists: async (name, parent_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -3606,7 +3732,12 @@ getProductTechSpecByID: async (productId) => {
             rr.reject_reason,
             TC.name AS created_by,
             TU.name AS updated_by,
-            TA.name AS approved_by,
+            (
+              SELECT COALESCE(string_agg(va.vendor_approve, ', '), '')
+              FROM tbl_vendorapprove_product_mapping vpm
+              LEFT JOIN tbl_vendor_approve va ON va.id = vpm.vendor_approve_id
+              WHERE vpm.variant_vendor_mapping_id = m.id
+            ) AS approved_by,
             p.id AS product_id,
             p.name AS product_name,
             p.created_by AS product_created_by,
@@ -3615,6 +3746,11 @@ getProductTechSpecByID: async (productId) => {
             u.email AS vendor_email,
             COALESCE(c.company_name, u.organization_name, u.name) AS vendor_organization,
             COALESCE(c.company_name, u.organization_name, u.name, 'Unknown Vendor') AS vendor_display_name,
+            (
+              SELECT COALESCE(json_agg(t.make_name) FILTER (WHERE t.make_name IS NOT NULL), '[]'::json)
+              FROM tbl_product_variant_vendor_make t
+              WHERE t.variant_vendor_map_id = m.id
+            ) AS make_list,
             ${searchTerm ? `
               similarity(v.name, '${searchTerm}') AS v_similarity_score,
               similarity(p.name, '${searchTerm}') AS p_similarity_score,
