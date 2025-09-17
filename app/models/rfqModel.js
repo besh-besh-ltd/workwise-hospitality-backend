@@ -3407,105 +3407,182 @@ const productQuery = `
     approved_by_id,
     locationFilters = {}
   ) => {
-    // query change by mukul 28-08-2024
-    // query change by mukul 08-09-2024, added one more filter for created by 1 or 111 to exclude product for them
-    // Changes by Agnij: Modified to support slug-based search for better SEO and URL structure
+  const toIntOrNull = (v) => {
+    if (v === undefined || v === null || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+  };
 
-    // Check if search_key looks like a slug (no spaces and either contains hyphens or is a single word)
-    const isSlugSearch =
-      search_key &&
-      !search_key.includes(' ') &&
-      (search_key.includes('-') || search_key.length > 0);
+  const limit  = toIntOrNull(locationFilters.limit)  ?? null; // $7  -> default 50
+  const offset = toIntOrNull(locationFilters.offset) ?? null; // $8  -> default 0
 
-    let q = `
-      SELECT DISTINCT p.id AS product_id,
-                      p.name AS product_name,
-                      CONCAT(pv.name, ' - ', p.name) AS unified_name,
-                      pv.id AS variant_id,
-                      pv.name AS variant_name,
-                      p.description,
-                      pv.slug AS slug,
-                      c.title AS category_name,
-                      c.id AS category_id,
-                      c.parent_id AS parent_category_id,
-                      img.new_image_name AS image_url,
-                      similarity(CONCAT(pv.name, ' - ', p.name), $1) AS similarity_score,
-                      ts_rank_cd(to_tsvector('english', CONCAT(pv.name, ' - ', p.name)), plainto_tsquery('english', $1)) AS rank
-      FROM tbl_product_variant pv
-      JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
-      JOIN tbl_users u ON u.id = pvvm.vendor_id
-        ${
-          locationFilters.country_id
-            ? `AND u.country::int = ${locationFilters.country_id}`
-            : ''
-        }
-        ${
-          locationFilters.state_id
-            ? `AND u.state::int = ${locationFilters.state_id}`
-            : ''
-        }
-        ${
-          locationFilters.city_id
-            ? `AND u.city::int = ${locationFilters.city_id}`
-            : ''
-        }
-      JOIN tbl_product p ON pv.product_id = p.id
-      JOIN tbl_product_categories pc ON p.id = pc.product_id
-      JOIN tbl_category c ON pc.category_id = c.id
-      LEFT JOIN tbl_product_images img ON p.id = img.product_id
-      ${
-        approved_by_id
-          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id`
-          : ``
-      }
-      WHERE p.status = 1
-        AND p.is_deleted = 0
-        AND p.is_review = 0
-        AND p.is_approve = 1
-        AND pv.is_approve = 1
-        AND (
-          pv.slug = $1
-          OR to_tsvector('english', CONCAT(pv.name, ' - ', p.name)) @@ plainto_tsquery('english', $1)
-          OR similarity(CONCAT(pv.name, ' - ', p.name), $1) > 0.1
-        )
-        ${category_id ? `AND c.id = $2` : ``}
-        ${
-          approved_by_id
-            ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)`
-            : ``
-        }
-      ORDER BY rank DESC, similarity_score DESC, CONCAT(pv.name, ' - ', p.name) ASC ;
-    `;
+  // Per-type caps so packages don’t get starved
+  const variantLimit = toIntOrNull(locationFilters.variant_limit) ?? null; // $9  -> default 25
+  const productLimit = toIntOrNull(locationFilters.product_limit) ?? null; // $10 -> default 25
+  const packageLimit = toIntOrNull(locationFilters.package_limit) ?? null; // $11 -> default 25
+
+  const params = [
+    (search_key ?? '').toString(),               // $1 term
+    toIntOrNull(category_id),                    // $2 category_id
+    toIntOrNull(locationFilters.country_id),     // $3 country_id
+    toIntOrNull(locationFilters.state_id),       // $4 state_id
+    toIntOrNull(locationFilters.city_id),        // $5 city_id
+    toIntOrNull(approved_by_id),                 // $6 approved_by_id
+    limit,                                       // $7 global limit
+    offset,                                      // $8 global offset
+    variantLimit,                                // $9 variant per-type limit
+    productLimit,                                // $10 product per-type limit
+    packageLimit                                 // $11 package per-type limit
+  ];
+
+  const q = `WITH q AS (
+  SELECT $1::text AS term
+)
+
+-- 1) VARIANTS
+, variant_rows_raw AS (
+  SELECT DISTINCT
+    p.id AS product_id,
+    p.name AS product_name,
+    CONCAT(pv.name, ' - ', p.name) AS unified_name,
+    pv.id AS variant_id,
+    pv.name AS variant_name,
+    p.description,
+    pv.slug AS slug,
+    c.title AS category_name,
+    c.id AS category_id,
+    c.parent_id AS parent_category_id,
+    img.new_image_name AS image_url,
+    similarity(CONCAT(pv.name, ' - ', p.name), q.term) AS similarity_score,
+    ts_rank_cd(
+      to_tsvector('english', CONCAT(pv.name, ' - ', p.name)),
+      plainto_tsquery('english', q.term)
+    ) + CASE WHEN CONCAT(pv.name, ' - ', p.name) ILIKE '%' || q.term || '%' THEN 1.0 ELSE 0 END AS rank,
+    'variant' AS type
+  FROM q
+  JOIN tbl_product_variant pv ON TRUE
+  JOIN tbl_product_variant_vendor_mapping pvvm
+    ON pvvm.product_variant_id = pv.id
+    AND pvvm.status = TRUE
+    AND pvvm.is_approved = TRUE
+  JOIN tbl_users u ON u.id = pvvm.vendor_id
+  JOIN tbl_product p ON pv.product_id = p.id
+  JOIN tbl_product_categories pc ON p.id = pc.product_id
+  JOIN tbl_category c ON pc.category_id = c.id
+  LEFT JOIN tbl_product_images img ON p.id = img.product_id
+  WHERE p.status = 1
+    AND p.is_deleted = 0
+    AND p.is_review = 0
+    AND p.is_approve = 1
+    AND pv.is_approve = 1
+    AND COALESCE(p.created_by, 0) NOT IN (1, 111)
+    AND (
+      pv.slug = q.term
+      OR to_tsvector('english', CONCAT(pv.name, ' - ', p.name)) @@ plainto_tsquery('english', q.term)
+      OR to_tsvector('english', pv.name) @@ plainto_tsquery('english', q.term)
+      OR to_tsvector('english', p.name) @@ plainto_tsquery('english', q.term)
+      OR similarity(CONCAT(pv.name, ' - ', p.name), q.term) > 0.1
+      OR similarity(pv.name, q.term) > 0.1
+      OR similarity(p.name, q.term) > 0.1
+      OR CONCAT(pv.name, ' - ', p.name) ILIKE '%' || q.term || '%'
+    )
+    AND ($2::int IS NULL OR c.id = $2::int)
+    AND ($3::int IS NULL OR u.country::int = $3::int)
+    AND ($4::int IS NULL OR u.state::int = $4::int)
+    AND ($5::int IS NULL OR u.city::int = $5::int)
+    AND (
+      $6::int IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM tbl_vendorapprove_product_mapping vum
+        WHERE vum.product_id = p.id
+          AND (vum.vendor_approve_id = $6::int OR vum.vendor_approve_id IS NULL)
+      )
+    )
+  ORDER BY rank DESC, similarity_score DESC
+  LIMIT COALESCE($9::int, 25)
+),
+variant_rows AS (
+  SELECT * FROM variant_rows_raw
+)
+
+-- 2) PRODUCTS
+, product_rows_raw AS (
+  SELECT DISTINCT
+    p.id AS product_id,
+    p.name AS product_name,
+    p.name AS unified_name,
+    NULL::int AS variant_id,
+    NULL::text AS variant_name,
+    p.description,
+    NULL::text AS slug,
+    c.title AS category_name,
+    c.id AS category_id,
+    c.parent_id AS parent_category_id,
+    img.new_image_name AS image_url,
+    similarity(p.name, q.term) AS similarity_score,
+    ts_rank_cd(
+      to_tsvector('english', p.name),
+      plainto_tsquery('english', q.term)
+    ) + CASE WHEN p.name ILIKE '%' || q.term || '%' THEN 1.0 ELSE 0 END AS rank,
+   p.product_type::text AS type
+
+  FROM q
+  JOIN tbl_product p ON TRUE
+  JOIN tbl_product_categories pc ON p.id = pc.product_id
+  JOIN tbl_category c ON pc.category_id = c.id
+  LEFT JOIN tbl_product_images img ON p.id = img.product_id
+  WHERE p.status = 1
+    AND p.is_deleted = 0
+    AND p.is_review = 0
+    AND p.is_approve = 1
+    AND (
+      to_tsvector('english', p.name) @@ plainto_tsquery('english', q.term)
+      OR similarity(p.name, q.term) > 0.1
+      OR p.name ILIKE '%' || q.term || '%'
+    )
+    AND ($2::int IS NULL OR c.id = $2::int)
+    AND (
+  p.product_type = 'package'
+  OR (
+    $6::int IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM tbl_vendorapprove_product_mapping vum
+      WHERE vum.product_id = p.id
+        AND (vum.vendor_approve_id = $6::int OR vum.vendor_approve_id IS NULL)
+    )
+  )
+)
 
 
-    console.log(" ===============================================  ")
-    console.log(q)
-    console.log(" ===============================================  ")
+  ORDER BY rank DESC, similarity_score DESC
+  LIMIT COALESCE($10::int, 25)
+),
+product_rows AS (
+  SELECT * FROM product_rows_raw
+)
+
+-- FINAL UNION & ORDERING
+SELECT *
+FROM (
+  SELECT * FROM variant_rows
+  UNION ALL
+  SELECT * FROM product_rows
+) AS all_rows
+ORDER BY rank DESC, similarity_score DESC, unified_name ASC
+LIMIT COALESCE($7::int, 50)
+OFFSET COALESCE($8::int, 0);
+`
+
+  return new Promise((resolve, reject) => {
+    db.query(q, params)
+      .then((data) => resolve(data))
+      .catch((err) => reject(new Error(err)));
+  });
+},
 
 
-
-    // Assuming db.query can handle parameterized queries:
-    return new Promise(function (resolve, reject) {
-      db.query(
-        q,
-        [
-          search_key,
-          category_id,
-          approved_by_id,
-          locationFilters.country_id,
-          locationFilters.state_id,
-          locationFilters.city_id
-        ].filter(Boolean)
-      ) // Filters out any undefined or empty values
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
   // Location lookup functions removed - using cmsModel.findStateByName, cmsModel.findCityByNameAndState, cmsModel.findCountryByName instead
 
   getCategoryList: async (search_key) => {
