@@ -1229,101 +1229,153 @@ const rfqModel = {
 
   getRfqDraftById: async (id, oldestSheet) => {
     const q = `SELECT
-      RFQ.id AS rfq_id,
-      RFQ.rfq_no,
-
-      -- Encapsulate RFQ fields in rfqFormData
-      json_build_object(
-          'is_published', RFQ.is_published,
-          'comment', RFQ.comment,
-          'response_email', RFQ.response_email,
-          'contact_name', RFQ.contact_name,
-          'contact_number', RFQ.contact_number,
-          'company_name', RFQ.company_name,
-          'bid_end_date', RFQ.bid_end_date,
-          'rfq_type', RFQ.rfq_type,
-          'reverse_auction', RFQ.reverse_auction,
-          'ra_start_date', RFQ.ra_start_date,
-          'ra_end_date', RFQ.ra_end_date,
-          'project_id', RFQ.project_id,
-          'location', RFQ.location,
-          'rfq_added_from', RFQ.rfq_added_from,
-
-          -- Selected Terms
-          'terms', (
-              SELECT COALESCE(json_agg(
-                  json_build_object(
-                      'id', RFQ_TM.terms_id,
-                      'term_content', RFQ_T.term_content,
-                      'name', RFQ_T.term_content
-                  )
-              ), '[]'::json)
-              FROM tbl_rfq_terms_map RFQ_TM
-              JOIN tbl_rfq_terms RFQ_T ON RFQ_T.id = RFQ_TM.terms_id
-              WHERE RFQ_TM.rfq_id = RFQ.id
-          ),
-
-          -- Term and condition files
-          'term_and_condition_files', (
-              SELECT COALESCE(json_agg(RF.file_url), '[]'::json)
-              FROM tbl_rfq_files RF
-              WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
-          )
-      ) AS rfq_form_data,
-
-      -- Products
-      ARRAY(
-          SELECT json_build_object(
-              'id', RFQ_P.id,
-              'product_id', RFQ_P.product_variant_id,
-              'predefined_tds_file', RFQ_P.datasheet_file,
-              'predefined_qap_file', RFQ_P.qap_file,
-              'name', TV.name,
-              'product_name', T_P.name,
-              'variant', RFQ_P.variant,
-              'spec', (
-                  SELECT json_agg(json_build_object(
-                      'title', RFQ_P_SPEC.title,
-                      'value', RFQ_P_SPEC.value
-                  ))
-                  FROM tbl_rfq_item_specs RFQ_P_SPEC
-                  WHERE RFQ_P.id = RFQ_P_SPEC.rfq_item_id 
-                    AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
-              ),
-              'comment', RFQ_P.comment,
-              'datasheet', (RFQ_P.datasheet::TEXT),
-              'datasheet_file', (
-                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                  FROM tbl_rfq_item_files RPF
-                  WHERE RPF.rfq_item_id = RFQ_P.id AND RPF.file_type = 'TDS'
-              ),
-              'spec_file', (
-                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                  FROM tbl_rfq_item_files RPF
-                  WHERE RPF.rfq_item_id = RFQ_P.id AND RPF.file_type = 'SPEC'
-              ),
-              'qap', (RFQ_P.qap::TEXT),
-              'qap_file', (
-                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                  FROM tbl_rfq_item_files RPF
-                  WHERE RPF.rfq_item_id = RFQ_P.id AND RPF.file_type = 'QAP'
-              ),
-              'user_selected_predefined_tds', (RFQ_P.datasheet = '1'),
-              'user_selected_predefined_qap', (RFQ_P.qap = '1'),
-              'sheet_id', RFQ_P.sheet_id
-          )
-          FROM tbl_rfq_items RFQ_P
-          LEFT JOIN tbl_product_variant TV ON RFQ_P.product_variant_id = TV.id
-          LEFT JOIN tbl_product T_P ON T_P.id = TV.product_id
-          WHERE RFQ.id = RFQ_P.rfq_id
-          ${oldestSheet && oldestSheet.id ? ` AND RFQ_P.sheet_id = $2` : ``}
-          ORDER BY RFQ_P.id
-      ) AS rfq_products
+        RFQ.id AS rfq_id,
+        RFQ.rfq_no,
+        json_build_object(
+                'is_published', RFQ.is_published,
+                'comment', RFQ.comment,
+                'response_email', RFQ.response_email,
+                'contact_name', RFQ.contact_name,
+                'contact_number', RFQ.contact_number,
+                'company_name', RFQ.company_name,
+                'bid_end_date', RFQ.bid_end_date,
+                'rfq_type', RFQ.rfq_type,
+                'reverse_auction', RFQ.reverse_auction,
+                'ra_start_date', RFQ.ra_start_date,
+                'ra_end_date', RFQ.ra_end_date,
+                'project_id', RFQ.project_id,
+                'location', RFQ.location,
+                'rfq_added_from', RFQ.rfq_added_from,
+                'terms', (
+                    SELECT COALESCE(
+                                  json_agg(
+                                          json_build_object(
+                                                  'id', RFQ_TM.terms_id,
+                                                  'term_content', RFQ_T.term_content,
+                                                  'name', RFQ_T.term_content
+                                          )
+                                  ),
+                                  '[]'::json
+                          )
+                    FROM tbl_rfq_terms_map RFQ_TM
+                            JOIN tbl_rfq_terms RFQ_T ON RFQ_T.id = RFQ_TM.terms_id
+                    WHERE RFQ_TM.rfq_id = RFQ.id
+                ),
+                'term_and_condition_files', (
+                    SELECT COALESCE(json_agg(RF.file_url), '[]'::json)
+                    FROM tbl_rfq_files RF
+                    WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
+                )
+        ) AS rfq_form_data,
+        (
+            WITH RECURSIVE item_tree AS (
+                SELECT
+                    p.id,
+                    p.rfq_id,
+                    p.product_variant_id,
+                    COALESCE(tp.name, tv.name) AS name,
+                    p.comment,
+                    p.type AS item_type,
+                    p.parent_item_id,
+                    p.sheet_id,
+                    (
+                        SELECT json_agg(json_build_object('title', s.title, 'value', s.value))
+                        FROM tbl_rfq_item_specs s
+                        WHERE s.rfq_item_id = p.id AND s.rfq_id = p.rfq_id
+                    ) AS spec,
+                    (
+                        SELECT COALESCE(json_agg(f.file_url), '[]'::json)
+                        FROM tbl_rfq_item_files f
+                        WHERE f.rfq_item_id = p.id AND f.file_type = 'TDS'
+                    ) AS datasheet_file,
+                    (
+                        SELECT COALESCE(json_agg(f.file_url), '[]'::json)
+                        FROM tbl_rfq_item_files f
+                        WHERE f.rfq_item_id = p.id AND f.file_type = 'SPEC'
+                    ) AS spec_file,
+                    (
+                        SELECT COALESCE(json_agg(f.file_url), '[]'::json)
+                        FROM tbl_rfq_item_files f
+                        WHERE f.rfq_item_id = p.id AND f.file_type = 'QAP'
+                    ) AS qap_file
+                FROM tbl_rfq_items p
+                        LEFT JOIN tbl_product_variant tv ON p.product_variant_id = tv.id
+                        LEFT JOIN tbl_product tp ON tp.id = tv.product_id
+                WHERE p.rfq_id = RFQ.id
+                    ${oldestSheet && oldestSheet.id ? `AND p.sheet_id = $2` : ``}
+            )
+            SELECT COALESCE(json_agg(node_json ORDER BY n.id), '[]'::json)
+            FROM (
+                    SELECT
+                        n.id,
+                        json_build_object(
+                                'id', n.id,
+                                'product_id', n.product_variant_id,
+                                'name', n.name,
+                                'spec', n.spec,
+                                'comment', n.comment,
+                                'datasheet_file', n.datasheet_file,
+                                'spec_file', n.spec_file,
+                                'qap_file', n.qap_file,
+                                'item_type', n.item_type,
+                                'parent_item_id', n.parent_item_id,
+                                'associated_items', (
+                                    SELECT COALESCE(json_agg(child.node_json ORDER BY child.id), '[]'::json)
+                                    FROM (
+                                              SELECT
+                                                  child.id,
+                                                  json_build_object(
+                                                          'id', child.id,
+                                                          'product_id', child.product_variant_id,
+                                                          'name', child.name,
+                                                          'spec', child.spec,
+                                                          'comment', child.comment,
+                                                          'datasheet_file', child.datasheet_file,
+                                                          'spec_file', child.spec_file,
+                                                          'qap_file', child.qap_file,
+                                                          'item_type', child.item_type,
+                                                          'parent_item_id', child.parent_item_id,
+                                                          'associated_items', (
+                                                              SELECT COALESCE(json_agg(grandchild.node_json ORDER BY grandchild.id), '[]'::json)
+                                                              FROM (
+                                                                      SELECT
+                                                                          grandchild.id,
+                                                                          json_build_object(
+                                                                                  'id', grandchild.id,
+                                                                                  'product_id', grandchild.product_variant_id,
+                                                                                  'name', grandchild.name,
+                                                                                  'spec', grandchild.spec,
+                                                                                  'comment', grandchild.comment,
+                                                                                  'datasheet_file', grandchild.datasheet_file,
+                                                                                  'spec_file', grandchild.spec_file,
+                                                                                  'qap_file', grandchild.qap_file,
+                                                                                  'item_type', grandchild.item_type,
+                                                                                  'parent_item_id', grandchild.parent_item_id,
+                                                                                  'associated_items', '[]'::json,
+                                                                                  'sheet_id', grandchild.sheet_id
+                                                                          ) AS node_json
+                                                                      FROM item_tree grandchild
+                                                                      WHERE grandchild.parent_item_id = child.id
+                                                                  ) AS grandchild
+                                                          ),
+                                                          'sheet_id', child.sheet_id
+                                                  ) AS node_json
+                                              FROM item_tree child
+                                              WHERE child.parent_item_id = n.id
+                                          ) AS child
+                                ),
+                                'sheet_id', n.sheet_id
+                        ) AS node_json
+                    FROM item_tree n
+                    WHERE n.parent_item_id IS NULL OR n.parent_item_id = 0
+                ) AS n
+        ) AS rfq_products
     FROM tbl_rfq RFQ
     WHERE RFQ.id = $1
     ORDER BY RFQ.id DESC
     LIMIT 1;
     `;
+
     try {
       const values = [id];
       if (oldestSheet && oldestSheet.id) values.push(oldestSheet.id);
@@ -1798,8 +1850,8 @@ const productQuery = `
         ) AS spec_file,
           'latest_target_price', (
             SELECT tptp.target_price
-            FROM tbl_rfq_item_target_price tptp
-            WHERE tptp.tbl_rfq_item_id = RFQ_P.id and vendor_id = ${user_id}
+            FROM tbl_rfq_product_target_price tptp
+            WHERE tptp.tbl_rfq_product_id = RFQ_P.id and vendor_id = ${user_id}
             ORDER BY tptp.created_at DESC
             LIMIT 1
             ),
@@ -2001,6 +2053,7 @@ const productQuery = `
     ORDER BY
         RFQ_P.id;
   `;
+
 
     return new Promise(function (resolve, reject) {
       db.query(q,[id])
