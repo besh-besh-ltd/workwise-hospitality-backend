@@ -3906,7 +3906,7 @@ const rfqController = {
     try {
       const user_id = req.user.id;
 
-      const user = await userModel.userinfo(user_id);
+      const user = req.user
       if (!user) {
         return res.status(404).json({ status: 2, message: 'User not found' });
       }
@@ -3917,6 +3917,10 @@ const rfqController = {
       let isNew = false;
 
       const sheet_id = req.body.sheet_id;
+      const parent_item_id = req.body.parent_item_id || null;
+      const product_id = req.body.product_id || null;
+      const variant_id = req.body.variant_id || null;
+      const type = req.body.type
 
       // Changes by Agnij 2025-06-17 [Improved handling of specific RFQ ID]
       // If rfq_id is provided in request, use that specific ID instead of creating a new draft
@@ -3986,11 +3990,6 @@ const rfqController = {
 
       // Add products to the RFQ
       const product = req.body;
-      if (!product || !product.variant_id) {
-        return res
-          .status(400)
-          .json({ status: 2, message: 'Invalid product data' });
-      }
 
       if (!product.vendors || product.vendors.length === 0) {
         const vendors = await rfqModel.genericSearchVendors(
@@ -4008,9 +4007,18 @@ const rfqController = {
 
       const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
 
+      let item_type = 'PRODUCT'; // default
+      if (type === 'single') {
+        item_type = 'GROUP';
+      } else if (type === 'package') {
+        item_type = 'PACKAGE';
+      }
+      
       const productData = {
         rfq_id,
-        product_variant_id: product.variant_id,
+        product_variant_id: (item_type === 'PRODUCT' || item_type === 'GROUP')
+          ? product_id
+          : variant_id,
         variant: variant,
         comment: '',
         datasheet: '',
@@ -4018,7 +4026,9 @@ const rfqController = {
         qap_file: '',
         qap: '',
         datasheet_file: '',
-        sheet_id
+        sheet_id,
+        parent_item_id: parent_item_id || null,
+        type: item_type,
       };
 
       let itemResponse = await rfqModel.insertReturnId('tbl_rfq_items', productData);
@@ -4037,19 +4047,19 @@ const rfqController = {
 
       await Promise.all(vendorPromises);
 
-      if (product?.specs && typeof product.specs == 'object') {
-        for (const [key, value] of Object.entries(product.specs)) {
-          const specData = {
-            title: key,
-            value,
-            rfq_id,
-            rfq_item_id: itemResponse.id,
-            sheet_id
-          };
+      // if (product?.specs && typeof product.specs == 'object') {
+      //   for (const [key, value] of Object.entries(product.specs)) {
+      //     const specData = {
+      //       title: key,
+      //       value,
+      //       rfq_id,
+      //       rfq_item_id: itemResponse.id,
+      //       sheet_id
+      //     };
 
-          await rfqModel.insert('tbl_rfq_item_specs', specData);
-        }
-      }
+      //     await rfqModel.insert('tbl_rfq_item_specs', specData);
+      //   }
+      // }
 
       // if(product.isUnfoundProduct && product.unfoundName) {
       //   let validationErrors = sheetData.validation_errors;
