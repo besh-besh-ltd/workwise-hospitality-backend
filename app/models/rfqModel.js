@@ -1364,7 +1364,12 @@ const rfqModel = {
                                               WHERE child.parent_item_id = n.id
                                           ) AS child
                                 ),
-                                'sheet_id', n.sheet_id
+                                'sheet_id', n.sheet_id,
+                                'vendorCount', (
+                                     SELECT COUNT(*)
+                                     FROM tbl_rfq_item_vendors v
+                                     WHERE v.rfq_item_id = n.id
+                                 )
                         ) AS node_json
                     FROM item_tree n
                     WHERE n.parent_item_id IS NULL OR n.parent_item_id = 0
