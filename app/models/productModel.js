@@ -1605,7 +1605,7 @@ const productModel = {
 
         // Handle product type filter (e.g., package/single)
         if (productType && String(productType).trim() !== '') {
-          conditions.push(`LOWER(p.product_type) = LOWER($${paramIndex})`);
+          conditions.push(`LOWER(COALESCE(p.product_type::text, '')) = LOWER($${paramIndex})`);
           params.push(String(productType).trim());
           paramIndex++;
         }
@@ -4526,19 +4526,20 @@ WHERE m.id = $1;
     });
   },
 
-  createPackageVendorMapping: async (productId, vendors) => {
+  createPackageVendorMapping: async (productId, vendors, userId = null) => {
     return new Promise(function (resolve, reject) {
       if (!Array.isArray(vendors) || vendors.length === 0) {
         resolve([]);
         return;
       }
 
-      const values = vendors.map((vendor, index) => `($${index * 2 + 1}, $${index * 2 + 2})`).join(',');
-      const params = vendors.flatMap(vendor => [productId, vendor]);
+      const values = vendors.map((vendor, index) => `($${index * 6 + 1}, $${index * 6 + 2}, 0, 0, $${index * 6 + 3}, $${index * 6 + 4}, NOW(), NOW())`).join(',');
+      const params = vendors.flatMap(vendor => [productId, vendor, userId, userId]);
       
       const query = `
-        INSERT INTO tbl_product_package_vendor_mapping (parent_id, vendor_id)
-        VALUES ${values}
+        INSERT INTO tbl_product_package_vendor_mapping (
+          package_product_id, vendor_id, status, is_approved, created_by, updated_by, created_at, updated_at
+        ) VALUES ${values}
         RETURNING *
       `;
 
@@ -4576,12 +4577,15 @@ WHERE m.id = $1;
   getPackageVendorMappings: async (productId) => {
     return new Promise(function (resolve, reject) {
       const query = `
-        SELECT pvm.id, pvm.parent_id AS product_id, pvm.vendor_id, pvm.created_at,
-               COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name
+        SELECT pvm.id, pvm.package_product_id AS product_id, pvm.vendor_id, pvm.status, 
+               pvm.is_approved, pvm.approved_by, pvm.approved_at, pvm.created_at,
+               COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name,
+               approver.name AS approved_by_name
         FROM tbl_product_package_vendor_mapping pvm
         LEFT JOIN tbl_users tu ON tu.id = pvm.vendor_id
         LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-        WHERE pvm.parent_id = $1
+        LEFT JOIN tbl_users approver ON approver.id = pvm.approved_by
+        WHERE pvm.package_product_id = $1
         ORDER BY pvm.id
       `;
 
@@ -4631,7 +4635,7 @@ WHERE m.id = $1;
     return new Promise(function (resolve, reject) {
       db.tx(async t => {
         // Delete existing mappings
-        await t.none('DELETE FROM tbl_product_package_vendor_mapping WHERE parent_id = $1', [productId]);
+        await t.none('DELETE FROM tbl_product_package_vendor_mapping WHERE package_product_id = $1', [productId]);
         
         // Insert new mappings if provided
         if (Array.isArray(vendors) && vendors.length > 0) {
@@ -4639,7 +4643,7 @@ WHERE m.id = $1;
           const params = vendors.flatMap(vendor => [productId, vendor]);
           
           const query = `
-            INSERT INTO tbl_product_package_vendor_mapping (parent_id, vendor_id)
+            INSERT INTO tbl_product_package_vendor_mapping (package_product_id, vendor_id)
             VALUES ${values}
             RETURNING *
           `;
@@ -4655,6 +4659,53 @@ WHERE m.id = $1;
         let error = new Error(err);
         reject(error);
       });
+    });
+  },
+
+  updatePackageVendorMappingStatus: async (mappingId, isApproved, userId) => {
+    return new Promise(function (resolve, reject) {
+      let query, params;
+      
+      // Convert boolean to smallint (0 or 1)
+      const approvedValue = isApproved ? 1 : 0;
+      const status = isApproved ? 1 : 0; // 1 for active, 0 for inactive
+      
+      if (isApproved) {
+        query = `
+          UPDATE tbl_product_package_vendor_mapping 
+          SET is_approved = $1, 
+              approved_by = $2, 
+              approved_at = NOW(),
+              status = $3,
+              updated_by = $4, 
+              updated_at = NOW()
+          WHERE id = $5
+          RETURNING *
+        `;
+        params = [approvedValue, userId, status, userId, mappingId];
+      } else {
+        query = `
+          UPDATE tbl_product_package_vendor_mapping 
+          SET is_approved = $1, 
+              approved_by = NULL, 
+              approved_at = NULL,
+              status = $2,
+              updated_by = $3, 
+              updated_at = NOW()
+          WHERE id = $4
+          RETURNING *
+        `;
+        params = [approvedValue, status, userId, mappingId];
+      }
+      
+      db.oneOrNone(query, params)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
     });
   },
 
@@ -4675,7 +4726,7 @@ WHERE m.id = $1;
 
   deletePackageVendorMappings: async (productId) => {
     return new Promise(function (resolve, reject) {
-      const query = 'DELETE FROM tbl_product_package_vendor_mapping WHERE parent_id = $1';
+      const query = 'DELETE FROM tbl_product_package_vendor_mapping WHERE package_product_id = $1';
       
       db.none(query, [productId])
         .then(function () {
@@ -4703,7 +4754,7 @@ WHERE m.id = $1;
                   FROM tbl_product_package_vendor_mapping pvm
                   LEFT JOIN tbl_users tu ON tu.id = pvm.vendor_id
                   LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-                  WHERE pvm.parent_id = p.id)
+                  WHERE pvm.package_product_id = p.id)
                ELSE NULL END AS package_vendors
         FROM tbl_product p
         WHERE p.id = $1

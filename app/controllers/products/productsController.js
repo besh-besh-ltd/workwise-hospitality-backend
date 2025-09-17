@@ -1500,7 +1500,7 @@ const ProductsController = {
       }
 
       const vendors = [vendor_id];
-      const result = await productModel.createPackageVendorMapping(productId, vendors);
+      const result = await productModel.createPackageVendorMapping(productId, vendors, req.user?.id || null);
 
       res.status(201).json({
         status: 1,
@@ -1581,6 +1581,32 @@ const ProductsController = {
         message: 'Failed to fetch package vendors',
         error: err.message
       });
+    }
+  },
+
+  updatePackageVendorMapping: async (req, res, next) => {
+    try {
+      const mappingId = req.params.id;
+      const { is_approved } = req.body;
+
+      if (is_approved === undefined || is_approved === null) {
+        return res.status(400).json({ status: 3, message: 'is_approved field is required' });
+      }
+
+      const result = await productModel.updatePackageVendorMappingStatus(mappingId, is_approved, req.user?.id || null);
+      
+      if (!result) {
+        return res.status(404).json({ status: 3, message: 'Package vendor mapping not found' });
+      }
+
+      res.status(200).json({ 
+        status: 1, 
+        message: `Package vendor mapping ${is_approved ? 'approved' : 'disapproved'} successfully`, 
+        data: result 
+      });
+    } catch (err) {
+      logError(err);
+      res.status(500).json({ status: 3, message: 'Failed to update package vendor mapping', error: err.message });
     }
   }
 

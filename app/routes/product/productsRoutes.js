@@ -188,7 +188,7 @@ ProductsRoutes.delete(
 ProductsRoutes.post(
   '/package-product/:id/vendors',
   passportSignIn,
-  acl([3, 4]),
+  // acl([2, 3, 4]),
   validateParam(schemas.id),
   ProductsController.addPackageVendor
 );
@@ -214,6 +214,14 @@ ProductsRoutes.get(
   acl([1, 2, 3, 4]),
   validateParam(schemas.id),
   ProductsController.getPackageVendors
+);
+
+ProductsRoutes.put(
+  '/package-vendor-mapping/:id',
+  passportSignIn,
+  acl([1, 2, 3, 4]),
+  validateParam(schemas.id),
+  ProductsController.updatePackageVendorMapping
 );
 
 export default ProductsRoutes;
