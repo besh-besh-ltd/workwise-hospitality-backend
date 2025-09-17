@@ -1,6 +1,7 @@
 import userModel from '../../models/userModel.js';
 import productModel from '../../models/productModel.js';
 import vendorapproveModel from '../../models/vendorapproveModel.js';
+import db from '../../config/dbConn.js';
 import Config from '../../config/app.config.js';
 import {
   logError,
@@ -1267,6 +1268,319 @@ const ProductsController = {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+
+  // Package-related controller methods
+  createPackageProduct: async (req, res, next) => {
+    try {
+      const {
+        name,
+        description,
+        manufacturer,
+        availability,
+        slug,
+        sku,
+        status,
+        created_by,
+        vendor,
+        is_review,
+        is_approve,
+        added_by,
+        brochure_file,
+        product_type = 'package',
+        package_items = [],
+        package_vendors = []
+      } = req.body;
+
+      // Create the product with product_type
+      const productObj = {
+        name,
+        description,
+        manufacturer,
+        availability,
+        slug,
+        sku,
+        status,
+        created_by,
+        vendor,
+        is_review,
+        is_approve,
+        added_by,
+        brochure_file,
+        product_type
+      };
+
+      const product = await productModel.createProduct(productObj);
+
+      // If it's a package, create package items and vendor mappings
+      if (product_type === 'package') {
+        if (package_items && package_items.length > 0) {
+          await productModel.createPackageItems(product.id, package_items);
+        }
+        if (package_vendors && package_vendors.length > 0) {
+          await productModel.createPackageVendorMapping(product.id, package_vendors);
+        }
+      }
+
+      res.status(201).json({
+        status: 1,
+        message: 'Package product created successfully',
+        data: { id: product.id }
+      });
+    } catch (err) {
+      logError(err);
+      res.status(500).json({
+        status: 3,
+        message: 'Failed to create package product',
+        error: err.message
+      });
+    }
+  },
+
+  updatePackageProduct: async (req, res, next) => {
+    try {
+      const productId = req.params.id;
+      const {
+        name,
+        description,
+        manufacturer,
+        availability,
+        slug,
+        sku,
+        status,
+        updated_by,
+        brochure_file,
+        product_type,
+        package_items,
+        package_vendors
+      } = req.body;
+
+      // Update the product
+      const productObj = {
+        name,
+        description,
+        manufacturer,
+        availability,
+        slug,
+        sku,
+        status,
+        updated_by,
+        brochure_file,
+        product_type
+      };
+
+      // Remove undefined values
+      const cleanProductObj = Object.fromEntries(
+        Object.entries(productObj).filter(([_, value]) => value !== undefined)
+      );
+
+      const updatedProduct = await productModel.updateProduct(cleanProductObj, productId);
+
+      // If it's a package, update package items and vendor mappings
+      if (product_type === 'package') {
+        if (package_items !== undefined) {
+          await productModel.updatePackageItems(productId, package_items);
+        }
+        if (package_vendors !== undefined) {
+          await productModel.updatePackageVendorMappings(productId, package_vendors);
+        }
+      }
+
+      res.status(200).json({
+        status: 1,
+        message: 'Package product updated successfully',
+        data: updatedProduct
+      });
+    } catch (err) {
+      logError(err);
+      res.status(500).json({
+        status: 3,
+        message: 'Failed to update package product',
+        error: err.message
+      });
+    }
+  },
+
+  getPackageProductDetails: async (req, res, next) => {
+    try {
+      const productId = req.params.id;
+      const productDetails = await productModel.getProductWithPackageDetails(productId);
+
+      if (!productDetails) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Product not found'
+        });
+      }
+
+      res.status(200).json({
+        status: 1,
+        data: productDetails
+      });
+    } catch (err) {
+      logError(err);
+      res.status(500).json({
+        status: 3,
+        message: 'Failed to fetch package product details',
+        error: err.message
+      });
+    }
+  },
+
+  addPackageItem: async (req, res, next) => {
+    try {
+      const productId = req.params.id;
+      const { item_name } = req.body;
+
+      if (!item_name) {
+        return res.status(400).json({
+          status: 3,
+          message: 'item_name is required'
+        });
+      }
+
+      const items = [{ name: item_name }];
+      const result = await productModel.createPackageItems(productId, items);
+
+      res.status(201).json({
+        status: 1,
+        message: 'Package item added successfully',
+        data: result[0]
+      });
+    } catch (err) {
+      logError(err);
+      res.status(500).json({
+        status: 3,
+        message: 'Failed to add package item',
+        error: err.message
+      });
+    }
+  },
+
+  removePackageItem: async (req, res, next) => {
+    try {
+      const itemId = req.params.itemId;
+      
+      const query = 'DELETE FROM tbl_product_package_item WHERE id = $1 RETURNING *';
+      const result = await db.oneOrNone(query, [itemId]);
+
+      if (!result) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Package item not found'
+        });
+      }
+
+      res.status(200).json({
+        status: 1,
+        message: 'Package item removed successfully',
+        data: result
+      });
+    } catch (err) {
+      logError(err);
+      res.status(500).json({
+        status: 3,
+        message: 'Failed to remove package item',
+        error: err.message
+      });
+    }
+  },
+
+  addPackageVendor: async (req, res, next) => {
+    try {
+      const productId = req.params.id;
+      const { vendor_id } = req.body;
+
+      if (!vendor_id) {
+        return res.status(400).json({
+          status: 3,
+          message: 'vendor_id is required'
+        });
+      }
+
+      const vendors = [vendor_id];
+      const result = await productModel.createPackageVendorMapping(productId, vendors);
+
+      res.status(201).json({
+        status: 1,
+        message: 'Package vendor added successfully',
+        data: result[0]
+      });
+    } catch (err) {
+      logError(err);
+      res.status(500).json({
+        status: 3,
+        message: 'Failed to add package vendor',
+        error: err.message
+      });
+    }
+  },
+
+  removePackageVendor: async (req, res, next) => {
+    try {
+      const mappingId = req.params.id;
+      
+      const query = 'DELETE FROM tbl_product_package_vendor_mapping WHERE id = $1 RETURNING *';
+      const result = await db.oneOrNone(query, [mappingId]);
+
+      if (!result) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Package vendor mapping not found'
+        });
+      }
+
+      res.status(200).json({
+        status: 1,
+        message: 'Package vendor removed successfully',
+        data: result
+      });
+    } catch (err) {
+      logError(err);
+      res.status(500).json({
+        status: 3,
+        message: 'Failed to remove package vendor',
+        error: err.message
+      });
+    }
+  },
+
+  getPackageItems: async (req, res, next) => {
+    try {
+      const productId = req.params.id;
+      const items = await productModel.getPackageItems(productId);
+
+      res.status(200).json({
+        status: 1,
+        data: items
+      });
+    } catch (err) {
+      logError(err);
+      res.status(500).json({
+        status: 3,
+        message: 'Failed to fetch package items',
+        error: err.message
+      });
+    }
+  },
+
+  getPackageVendors: async (req, res, next) => {
+    try {
+      const productId = req.params.id;
+      const vendors = await productModel.getPackageVendorMappings(productId);
+
+      res.status(200).json({
+        status: 1,
+        data: vendors
+      });
+    } catch (err) {
+      logError(err);
+      res.status(500).json({
+        status: 3,
+        message: 'Failed to fetch package vendors',
+        error: err.message
+      });
     }
   }
 

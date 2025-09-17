@@ -1525,7 +1525,8 @@ const productModel = {
           addedBy,
           dateFrom,
           dateTo,
-          is_approve, } = filters;
+          is_approve,
+          productType } = filters;
 
         page = parseInt(page) || 1;
         limit = parseInt(limit) || 10;
@@ -1600,6 +1601,13 @@ const productModel = {
            conditions.push(`p.is_approve = $${paramIndex}`);
            params.push(approvalValue);
            paramIndex++;
+        }
+
+        // Handle product type filter (e.g., package/single)
+        if (productType && String(productType).trim() !== '') {
+          conditions.push(`LOWER(p.product_type) = LOWER($${paramIndex})`);
+          params.push(String(productType).trim());
+          paramIndex++;
         }
 
         const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -4488,7 +4496,229 @@ WHERE m.id = $1;
         reject(error);
       });
   });
-}
+},
+
+  // Package-related functions
+  createPackageItems: async (productId, items) => {
+    return new Promise(function (resolve, reject) {
+      if (!Array.isArray(items) || items.length === 0) {
+        resolve([]);
+        return;
+      }
+
+      const values = items.map((item, index) => `($${index * 2 + 1}, $${index * 2 + 2})`).join(',');
+      const params = items.flatMap(item => [productId, item.name]);
+      
+      const query = `
+        INSERT INTO tbl_product_package_item (parent_id, name)
+        VALUES ${values}
+        RETURNING *
+      `;
+
+      db.any(query, params)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  createPackageVendorMapping: async (productId, vendors) => {
+    return new Promise(function (resolve, reject) {
+      if (!Array.isArray(vendors) || vendors.length === 0) {
+        resolve([]);
+        return;
+      }
+
+      const values = vendors.map((vendor, index) => `($${index * 2 + 1}, $${index * 2 + 2})`).join(',');
+      const params = vendors.flatMap(vendor => [productId, vendor]);
+      
+      const query = `
+        INSERT INTO tbl_product_package_vendor_mapping (parent_id, vendor_id)
+        VALUES ${values}
+        RETURNING *
+      `;
+
+      db.any(query, params)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  getPackageItems: async (productId) => {
+    return new Promise(function (resolve, reject) {
+      const query = `
+        SELECT id, parent_id AS product_id, name AS item_name, created_at
+        FROM tbl_product_package_item
+        WHERE parent_id = $1
+        ORDER BY id
+      `;
+
+      db.any(query, [productId])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  getPackageVendorMappings: async (productId) => {
+    return new Promise(function (resolve, reject) {
+      const query = `
+        SELECT pvm.id, pvm.parent_id AS product_id, pvm.vendor_id, pvm.created_at,
+               COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name
+        FROM tbl_product_package_vendor_mapping pvm
+        LEFT JOIN tbl_users tu ON tu.id = pvm.vendor_id
+        LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+        WHERE pvm.parent_id = $1
+        ORDER BY pvm.id
+      `;
+
+      db.any(query, [productId])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  updatePackageItems: async (productId, items) => {
+    return new Promise(function (resolve, reject) {
+      db.tx(async t => {
+        // Delete existing items
+        await t.none('DELETE FROM tbl_product_package_item WHERE parent_id = $1', [productId]);
+        
+        // Insert new items if provided
+        if (Array.isArray(items) && items.length > 0) {
+          const values = items.map((item, index) => `($${index * 2 + 1}, $${index * 2 + 2})`).join(',');
+          const params = items.flatMap(item => [productId, item.name]);
+          
+          const query = `
+            INSERT INTO tbl_product_package_item (parent_id, name)
+            VALUES ${values}
+            RETURNING *
+          `;
+          
+          return await t.any(query, params);
+        }
+        return [];
+      })
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
+  updatePackageVendorMappings: async (productId, vendors) => {
+    return new Promise(function (resolve, reject) {
+      db.tx(async t => {
+        // Delete existing mappings
+        await t.none('DELETE FROM tbl_product_package_vendor_mapping WHERE parent_id = $1', [productId]);
+        
+        // Insert new mappings if provided
+        if (Array.isArray(vendors) && vendors.length > 0) {
+          const values = vendors.map((vendor, index) => `($${index * 2 + 1}, $${index * 2 + 2})`).join(',');
+          const params = vendors.flatMap(vendor => [productId, vendor]);
+          
+          const query = `
+            INSERT INTO tbl_product_package_vendor_mapping (parent_id, vendor_id)
+            VALUES ${values}
+            RETURNING *
+          `;
+          
+          return await t.any(query, params);
+        }
+        return [];
+      })
+      .then(function (data) {
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+    });
+  },
+
+  deletePackageItems: async (productId) => {
+    return new Promise(function (resolve, reject) {
+      const query = 'DELETE FROM tbl_product_package_item WHERE parent_id = $1';
+      
+      db.none(query, [productId])
+        .then(function () {
+          resolve(true);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  deletePackageVendorMappings: async (productId) => {
+    return new Promise(function (resolve, reject) {
+      const query = 'DELETE FROM tbl_product_package_vendor_mapping WHERE parent_id = $1';
+      
+      db.none(query, [productId])
+        .then(function () {
+          resolve(true);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  getProductWithPackageDetails: async (productId) => {
+    return new Promise(function (resolve, reject) {
+      const query = `
+        SELECT p.*, 
+               CASE WHEN p.product_type = 'package' THEN
+                 (SELECT json_agg(json_build_object('id', ppi.id, 'item_name', ppi.name))
+                  FROM tbl_product_package_item ppi 
+                  WHERE ppi.parent_id = p.id)
+               ELSE NULL END AS package_items,
+               CASE WHEN p.product_type = 'package' THEN
+                 (SELECT json_agg(json_build_object('id', pvm.id, 'vendor_id', pvm.vendor_id, 'vendor_name', 
+                   COALESCE(tc.company_name, tu.organization_name, tu.name)))
+                  FROM tbl_product_package_vendor_mapping pvm
+                  LEFT JOIN tbl_users tu ON tu.id = pvm.vendor_id
+                  LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+                  WHERE pvm.parent_id = p.id)
+               ELSE NULL END AS package_vendors
+        FROM tbl_product p
+        WHERE p.id = $1
+      `;
+
+      db.oneOrNone(query, [productId])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  }
 };
 
 export default productModel;

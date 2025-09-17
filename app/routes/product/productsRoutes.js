@@ -146,4 +146,74 @@ ProductsController.getProductMakeList
 );
 //End API
 
+// Package-related routes
+ProductsRoutes.post(
+  '/package-product',
+  passportSignIn,
+  acl([3, 4]),
+  ProductsController.createPackageProduct
+);
+
+ProductsRoutes.put(
+  '/package-product/:id',
+  passportSignIn,
+  acl([3, 4]),
+  validateParam(schemas.id),
+  ProductsController.updatePackageProduct
+);
+
+ProductsRoutes.get(
+  '/package-product/:id',
+  passportSignIn,
+  acl([1, 2, 3, 4]),
+  validateParam(schemas.id),
+  ProductsController.getPackageProductDetails
+);
+
+ProductsRoutes.post(
+  '/package-product/:id/items',
+  passportSignIn,
+  acl([3, 4]),
+  validateParam(schemas.id),
+  ProductsController.addPackageItem
+);
+
+ProductsRoutes.delete(
+  '/package-items/:itemId',
+  passportSignIn,
+  acl([3, 4]),
+  ProductsController.removePackageItem
+);
+
+ProductsRoutes.post(
+  '/package-product/:id/vendors',
+  passportSignIn,
+  acl([3, 4]),
+  validateParam(schemas.id),
+  ProductsController.addPackageVendor
+);
+
+ProductsRoutes.delete(
+  '/package-vendors/:id',
+  passportSignIn,
+  acl([3, 4]),
+  ProductsController.removePackageVendor
+);
+
+ProductsRoutes.get(
+  '/package-product/:id/items',
+  passportSignIn,
+  acl([1, 2, 3, 4]),
+  validateParam(schemas.id),
+  ProductsController.getPackageItems
+);
+
+ProductsRoutes.get(
+  '/package-product/:id/vendors',
+  passportSignIn,
+  acl([1, 2, 3, 4]),
+  validateParam(schemas.id),
+  ProductsController.getPackageVendors
+);
+
 export default ProductsRoutes;

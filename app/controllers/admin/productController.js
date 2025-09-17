@@ -1703,6 +1703,7 @@ const productController = {
         dateFrom,
         dateTo,
         is_approve,
+        productType,
         page,
         limit,
       } = req.query;
@@ -1717,6 +1718,7 @@ const productController = {
         dateFrom,
         dateTo,
         is_approve,
+        productType,
       };
 
       const result = await productModel.getMasterProductsPaginated(
@@ -1958,7 +1960,9 @@ const productController = {
         approved_id,
         approved_name,
         vendor,
-        is_featured
+        is_featured,
+        product_type,
+        package_items
       } = req.body;
   
       let vendorApproveId = 0;
@@ -1999,6 +2003,10 @@ const productController = {
         updated_by: req.user.id,
       };
 
+      if (product_type === 'package') {
+        productObj.product_type = 'package';
+      }
+
       let product = await productModel.createProduct(productObj);
       let productId = product.id;
       if (vendorApproveId.length > 0) {
@@ -2014,6 +2022,16 @@ const productController = {
         await productModel.createProductCategories(categoryId, productId);
       }
   
+      // ---------------- package items (if package) ----------------
+      if (product_type === 'package' && Array.isArray(package_items) && package_items.length > 0) {
+        try {
+          await productModel.createPackageItems(productId, package_items);
+        } catch (e) {
+          // don't fail whole request; log and continue
+          console.error('Failed to insert package items', e?.message || e);
+        }
+      }
+
       // ---------------- variations ----------------
       for await (const { attribute, attributeValue } of variations) {
         // Changes by Agnij May 02, 2025 [Added check for empty attribute name]
