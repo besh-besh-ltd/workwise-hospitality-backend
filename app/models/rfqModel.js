@@ -1229,101 +1229,158 @@ const rfqModel = {
 
   getRfqDraftById: async (id, oldestSheet) => {
     const q = `SELECT
-      RFQ.id AS rfq_id,
-      RFQ.rfq_no,
-
-      -- Encapsulate RFQ fields in rfqFormData
-      json_build_object(
-          'is_published', RFQ.is_published,
-          'comment', RFQ.comment,
-          'response_email', RFQ.response_email,
-          'contact_name', RFQ.contact_name,
-          'contact_number', RFQ.contact_number,
-          'company_name', RFQ.company_name,
-          'bid_end_date', RFQ.bid_end_date,
-          'rfq_type', RFQ.rfq_type,
-          'reverse_auction', RFQ.reverse_auction,
-          'ra_start_date', RFQ.ra_start_date,
-          'ra_end_date', RFQ.ra_end_date,
-          'project_id', RFQ.project_id,
-          'location', RFQ.location,
-          'rfq_added_from', RFQ.rfq_added_from,
-
-          -- Selected Terms
-          'terms', (
-              SELECT COALESCE(json_agg(
-                  json_build_object(
-                      'id', RFQ_TM.terms_id,
-                      'term_content', RFQ_T.term_content,
-                      'name', RFQ_T.term_content
-                  )
-              ), '[]'::json)
-              FROM tbl_rfq_terms_map RFQ_TM
-              JOIN tbl_rfq_terms RFQ_T ON RFQ_T.id = RFQ_TM.terms_id
-              WHERE RFQ_TM.rfq_id = RFQ.id
-          ),
-
-          -- Term and condition files
-          'term_and_condition_files', (
-              SELECT COALESCE(json_agg(RF.file_url), '[]'::json)
-              FROM tbl_rfq_files RF
-              WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
-          )
-      ) AS rfq_form_data,
-
-      -- Products
-      ARRAY(
-          SELECT json_build_object(
-              'id', RFQ_P.id,
-              'product_id', RFQ_P.product_variant_id,
-              'predefined_tds_file', RFQ_P.datasheet_file,
-              'predefined_qap_file', RFQ_P.qap_file,
-              'name', TV.name,
-              'product_name', T_P.name,
-              'variant', RFQ_P.variant,
-              'spec', (
-                  SELECT json_agg(json_build_object(
-                      'title', RFQ_P_SPEC.title,
-                      'value', RFQ_P_SPEC.value
-                  ))
-                  FROM tbl_rfq_item_specs RFQ_P_SPEC
-                  WHERE RFQ_P.id = RFQ_P_SPEC.rfq_item_id 
-                    AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
-              ),
-              'comment', RFQ_P.comment,
-              'datasheet', (RFQ_P.datasheet::TEXT),
-              'datasheet_file', (
-                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                  FROM tbl_rfq_item_files RPF
-                  WHERE RPF.rfq_item_id = RFQ_P.id AND RPF.file_type = 'TDS'
-              ),
-              'spec_file', (
-                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                  FROM tbl_rfq_item_files RPF
-                  WHERE RPF.rfq_item_id = RFQ_P.id AND RPF.file_type = 'SPEC'
-              ),
-              'qap', (RFQ_P.qap::TEXT),
-              'qap_file', (
-                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                  FROM tbl_rfq_item_files RPF
-                  WHERE RPF.rfq_item_id = RFQ_P.id AND RPF.file_type = 'QAP'
-              ),
-              'user_selected_predefined_tds', (RFQ_P.datasheet = '1'),
-              'user_selected_predefined_qap', (RFQ_P.qap = '1'),
-              'sheet_id', RFQ_P.sheet_id
-          )
-          FROM tbl_rfq_items RFQ_P
-          LEFT JOIN tbl_product_variant TV ON RFQ_P.product_variant_id = TV.id
-          LEFT JOIN tbl_product T_P ON T_P.id = TV.product_id
-          WHERE RFQ.id = RFQ_P.rfq_id
-          ${oldestSheet && oldestSheet.id ? ` AND RFQ_P.sheet_id = $2` : ``}
-          ORDER BY RFQ_P.id
-      ) AS rfq_products
+        RFQ.id AS rfq_id,
+        RFQ.rfq_no,
+        json_build_object(
+                'is_published', RFQ.is_published,
+                'comment', RFQ.comment,
+                'response_email', RFQ.response_email,
+                'contact_name', RFQ.contact_name,
+                'contact_number', RFQ.contact_number,
+                'company_name', RFQ.company_name,
+                'bid_end_date', RFQ.bid_end_date,
+                'rfq_type', RFQ.rfq_type,
+                'reverse_auction', RFQ.reverse_auction,
+                'ra_start_date', RFQ.ra_start_date,
+                'ra_end_date', RFQ.ra_end_date,
+                'project_id', RFQ.project_id,
+                'location', RFQ.location,
+                'rfq_added_from', RFQ.rfq_added_from,
+                'terms', (
+                    SELECT COALESCE(
+                                  json_agg(
+                                          json_build_object(
+                                                  'id', RFQ_TM.terms_id,
+                                                  'term_content', RFQ_T.term_content,
+                                                  'name', RFQ_T.term_content
+                                          )
+                                  ),
+                                  '[]'::json
+                          )
+                    FROM tbl_rfq_terms_map RFQ_TM
+                            JOIN tbl_rfq_terms RFQ_T ON RFQ_T.id = RFQ_TM.terms_id
+                    WHERE RFQ_TM.rfq_id = RFQ.id
+                ),
+                'term_and_condition_files', (
+                    SELECT COALESCE(json_agg(RF.file_url), '[]'::json)
+                    FROM tbl_rfq_files RF
+                    WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
+                )
+        ) AS rfq_form_data,
+        (
+            WITH RECURSIVE item_tree AS (
+                SELECT
+                    p.id,
+                    p.rfq_id,
+                    p.product_variant_id,
+                    COALESCE(tp.name, tv.name) AS name,
+                    p.comment,
+                    p.type AS item_type,
+                    p.parent_item_id,
+                    p.sheet_id,
+                    (
+                        SELECT json_agg(json_build_object('title', s.title, 'value', s.value))
+                        FROM tbl_rfq_item_specs s
+                        WHERE s.rfq_item_id = p.id AND s.rfq_id = p.rfq_id
+                    ) AS spec,
+                    (
+                        SELECT COALESCE(json_agg(f.file_url), '[]'::json)
+                        FROM tbl_rfq_item_files f
+                        WHERE f.rfq_item_id = p.id AND f.file_type = 'TDS'
+                    ) AS datasheet_file,
+                    (
+                        SELECT COALESCE(json_agg(f.file_url), '[]'::json)
+                        FROM tbl_rfq_item_files f
+                        WHERE f.rfq_item_id = p.id AND f.file_type = 'SPEC'
+                    ) AS spec_file,
+                    (
+                        SELECT COALESCE(json_agg(f.file_url), '[]'::json)
+                        FROM tbl_rfq_item_files f
+                        WHERE f.rfq_item_id = p.id AND f.file_type = 'QAP'
+                    ) AS qap_file
+                FROM tbl_rfq_items p
+                        LEFT JOIN tbl_product_variant tv ON p.product_variant_id = tv.id
+                        LEFT JOIN tbl_product tp ON tp.id = tv.product_id
+                WHERE p.rfq_id = RFQ.id
+                    ${oldestSheet && oldestSheet.id ? `AND p.sheet_id = $2` : ``}
+            )
+            SELECT COALESCE(json_agg(node_json ORDER BY n.id), '[]'::json)
+            FROM (
+                    SELECT
+                        n.id,
+                        json_build_object(
+                                'id', n.id,
+                                'product_id', n.product_variant_id,
+                                'name', n.name,
+                                'spec', n.spec,
+                                'comment', n.comment,
+                                'datasheet_file', n.datasheet_file,
+                                'spec_file', n.spec_file,
+                                'qap_file', n.qap_file,
+                                'item_type', n.item_type,
+                                'parent_item_id', n.parent_item_id,
+                                'associated_items', (
+                                    SELECT COALESCE(json_agg(child.node_json ORDER BY child.id), '[]'::json)
+                                    FROM (
+                                              SELECT
+                                                  child.id,
+                                                  json_build_object(
+                                                          'id', child.id,
+                                                          'product_id', child.product_variant_id,
+                                                          'name', child.name,
+                                                          'spec', child.spec,
+                                                          'comment', child.comment,
+                                                          'datasheet_file', child.datasheet_file,
+                                                          'spec_file', child.spec_file,
+                                                          'qap_file', child.qap_file,
+                                                          'item_type', child.item_type,
+                                                          'parent_item_id', child.parent_item_id,
+                                                          'associated_items', (
+                                                              SELECT COALESCE(json_agg(grandchild.node_json ORDER BY grandchild.id), '[]'::json)
+                                                              FROM (
+                                                                      SELECT
+                                                                          grandchild.id,
+                                                                          json_build_object(
+                                                                                  'id', grandchild.id,
+                                                                                  'product_id', grandchild.product_variant_id,
+                                                                                  'name', grandchild.name,
+                                                                                  'spec', grandchild.spec,
+                                                                                  'comment', grandchild.comment,
+                                                                                  'datasheet_file', grandchild.datasheet_file,
+                                                                                  'spec_file', grandchild.spec_file,
+                                                                                  'qap_file', grandchild.qap_file,
+                                                                                  'item_type', grandchild.item_type,
+                                                                                  'parent_item_id', grandchild.parent_item_id,
+                                                                                  'associated_items', '[]'::json,
+                                                                                  'sheet_id', grandchild.sheet_id
+                                                                          ) AS node_json
+                                                                      FROM item_tree grandchild
+                                                                      WHERE grandchild.parent_item_id = child.id
+                                                                  ) AS grandchild
+                                                          ),
+                                                          'sheet_id', child.sheet_id
+                                                  ) AS node_json
+                                              FROM item_tree child
+                                              WHERE child.parent_item_id = n.id
+                                          ) AS child
+                                ),
+                                'sheet_id', n.sheet_id,
+                                'vendorCount', (
+                                     SELECT COUNT(*)
+                                     FROM tbl_rfq_item_vendors v
+                                     WHERE v.rfq_item_id = n.id
+                                 )
+                        ) AS node_json
+                    FROM item_tree n
+                    WHERE n.parent_item_id IS NULL OR n.parent_item_id = 0
+                ) AS n
+        ) AS rfq_products
     FROM tbl_rfq RFQ
     WHERE RFQ.id = $1
     ORDER BY RFQ.id DESC
     LIMIT 1;
     `;
+
     try {
       const values = [id];
       if (oldestSheet && oldestSheet.id) values.push(oldestSheet.id);
@@ -1798,8 +1855,8 @@ const productQuery = `
         ) AS spec_file,
           'latest_target_price', (
             SELECT tptp.target_price
-            FROM tbl_rfq_item_target_price tptp
-            WHERE tptp.tbl_rfq_item_id = RFQ_P.id and vendor_id = ${user_id}
+            FROM tbl_rfq_product_target_price tptp
+            WHERE tptp.tbl_rfq_product_id = RFQ_P.id and vendor_id = ${user_id}
             ORDER BY tptp.created_at DESC
             LIMIT 1
             ),
@@ -2001,6 +2058,7 @@ const productQuery = `
     ORDER BY
         RFQ_P.id;
   `;
+
 
     return new Promise(function (resolve, reject) {
       db.query(q,[id])
@@ -3407,105 +3465,182 @@ const productQuery = `
     approved_by_id,
     locationFilters = {}
   ) => {
-    // query change by mukul 28-08-2024
-    // query change by mukul 08-09-2024, added one more filter for created by 1 or 111 to exclude product for them
-    // Changes by Agnij: Modified to support slug-based search for better SEO and URL structure
+  const toIntOrNull = (v) => {
+    if (v === undefined || v === null || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+  };
 
-    // Check if search_key looks like a slug (no spaces and either contains hyphens or is a single word)
-    const isSlugSearch =
-      search_key &&
-      !search_key.includes(' ') &&
-      (search_key.includes('-') || search_key.length > 0);
+  const limit  = toIntOrNull(locationFilters.limit)  ?? null; // $7  -> default 50
+  const offset = toIntOrNull(locationFilters.offset) ?? null; // $8  -> default 0
 
-    let q = `
-      SELECT DISTINCT p.id AS product_id,
-                      p.name AS product_name,
-                      CONCAT(pv.name, ' - ', p.name) AS unified_name,
-                      pv.id AS variant_id,
-                      pv.name AS variant_name,
-                      p.description,
-                      pv.slug AS slug,
-                      c.title AS category_name,
-                      c.id AS category_id,
-                      c.parent_id AS parent_category_id,
-                      img.new_image_name AS image_url,
-                      similarity(CONCAT(pv.name, ' - ', p.name), $1) AS similarity_score,
-                      ts_rank_cd(to_tsvector('english', CONCAT(pv.name, ' - ', p.name)), plainto_tsquery('english', $1)) AS rank
-      FROM tbl_product_variant pv
-      JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
-      JOIN tbl_users u ON u.id = pvvm.vendor_id
-        ${
-          locationFilters.country_id
-            ? `AND u.country::int = ${locationFilters.country_id}`
-            : ''
-        }
-        ${
-          locationFilters.state_id
-            ? `AND u.state::int = ${locationFilters.state_id}`
-            : ''
-        }
-        ${
-          locationFilters.city_id
-            ? `AND u.city::int = ${locationFilters.city_id}`
-            : ''
-        }
-      JOIN tbl_product p ON pv.product_id = p.id
-      JOIN tbl_product_categories pc ON p.id = pc.product_id
-      JOIN tbl_category c ON pc.category_id = c.id
-      LEFT JOIN tbl_product_images img ON p.id = img.product_id
-      ${
-        approved_by_id
-          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id`
-          : ``
-      }
-      WHERE p.status = 1
-        AND p.is_deleted = 0
-        AND p.is_review = 0
-        AND p.is_approve = 1
-        AND pv.is_approve = 1
-        AND (
-          pv.slug = $1
-          OR to_tsvector('english', CONCAT(pv.name, ' - ', p.name)) @@ plainto_tsquery('english', $1)
-          OR similarity(CONCAT(pv.name, ' - ', p.name), $1) > 0.1
-        )
-        ${category_id ? `AND c.id = $2` : ``}
-        ${
-          approved_by_id
-            ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)`
-            : ``
-        }
-      ORDER BY rank DESC, similarity_score DESC, CONCAT(pv.name, ' - ', p.name) ASC ;
-    `;
+  // Per-type caps so packages don’t get starved
+  const variantLimit = toIntOrNull(locationFilters.variant_limit) ?? null; // $9  -> default 25
+  const productLimit = toIntOrNull(locationFilters.product_limit) ?? null; // $10 -> default 25
+  const packageLimit = toIntOrNull(locationFilters.package_limit) ?? null; // $11 -> default 25
+
+  const params = [
+    (search_key ?? '').toString(),               // $1 term
+    toIntOrNull(category_id),                    // $2 category_id
+    toIntOrNull(locationFilters.country_id),     // $3 country_id
+    toIntOrNull(locationFilters.state_id),       // $4 state_id
+    toIntOrNull(locationFilters.city_id),        // $5 city_id
+    toIntOrNull(approved_by_id),                 // $6 approved_by_id
+    limit,                                       // $7 global limit
+    offset,                                      // $8 global offset
+    variantLimit,                                // $9 variant per-type limit
+    productLimit,                                // $10 product per-type limit
+    packageLimit                                 // $11 package per-type limit
+  ];
+
+  const q = `WITH q AS (
+  SELECT $1::text AS term
+)
+
+-- 1) VARIANTS
+, variant_rows_raw AS (
+  SELECT DISTINCT
+    p.id AS product_id,
+    p.name AS product_name,
+    CONCAT(pv.name, ' - ', p.name) AS unified_name,
+    pv.id AS variant_id,
+    pv.name AS variant_name,
+    p.description,
+    pv.slug AS slug,
+    c.title AS category_name,
+    c.id AS category_id,
+    c.parent_id AS parent_category_id,
+    img.new_image_name AS image_url,
+    similarity(CONCAT(pv.name, ' - ', p.name), q.term) AS similarity_score,
+    ts_rank_cd(
+      to_tsvector('english', CONCAT(pv.name, ' - ', p.name)),
+      plainto_tsquery('english', q.term)
+    ) + CASE WHEN CONCAT(pv.name, ' - ', p.name) ILIKE '%' || q.term || '%' THEN 1.0 ELSE 0 END AS rank,
+    'variant' AS type
+  FROM q
+  JOIN tbl_product_variant pv ON TRUE
+  JOIN tbl_product_variant_vendor_mapping pvvm
+    ON pvvm.product_variant_id = pv.id
+    AND pvvm.status = TRUE
+    AND pvvm.is_approved = TRUE
+  JOIN tbl_users u ON u.id = pvvm.vendor_id
+  JOIN tbl_product p ON pv.product_id = p.id
+  JOIN tbl_product_categories pc ON p.id = pc.product_id
+  JOIN tbl_category c ON pc.category_id = c.id
+  LEFT JOIN tbl_product_images img ON p.id = img.product_id
+  WHERE p.status = 1
+    AND p.is_deleted = 0
+    AND p.is_review = 0
+    AND p.is_approve = 1
+    AND pv.is_approve = 1
+    AND COALESCE(p.created_by, 0) NOT IN (1, 111)
+    AND (
+      pv.slug = q.term
+      OR to_tsvector('english', CONCAT(pv.name, ' - ', p.name)) @@ plainto_tsquery('english', q.term)
+      OR to_tsvector('english', pv.name) @@ plainto_tsquery('english', q.term)
+      OR to_tsvector('english', p.name) @@ plainto_tsquery('english', q.term)
+      OR similarity(CONCAT(pv.name, ' - ', p.name), q.term) > 0.1
+      OR similarity(pv.name, q.term) > 0.1
+      OR similarity(p.name, q.term) > 0.1
+      OR CONCAT(pv.name, ' - ', p.name) ILIKE '%' || q.term || '%'
+    )
+    AND ($2::int IS NULL OR c.id = $2::int)
+    AND ($3::int IS NULL OR u.country::int = $3::int)
+    AND ($4::int IS NULL OR u.state::int = $4::int)
+    AND ($5::int IS NULL OR u.city::int = $5::int)
+    AND (
+      $6::int IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM tbl_vendorapprove_product_mapping vum
+        WHERE vum.product_id = p.id
+          AND (vum.vendor_approve_id = $6::int OR vum.vendor_approve_id IS NULL)
+      )
+    )
+  ORDER BY rank DESC, similarity_score DESC
+  LIMIT COALESCE($9::int, 25)
+),
+variant_rows AS (
+  SELECT * FROM variant_rows_raw
+)
+
+-- 2) PRODUCTS
+, product_rows_raw AS (
+  SELECT DISTINCT
+    p.id AS product_id,
+    p.name AS product_name,
+    p.name AS unified_name,
+    NULL::int AS variant_id,
+    NULL::text AS variant_name,
+    p.description,
+    NULL::text AS slug,
+    c.title AS category_name,
+    c.id AS category_id,
+    c.parent_id AS parent_category_id,
+    img.new_image_name AS image_url,
+    similarity(p.name, q.term) AS similarity_score,
+    ts_rank_cd(
+      to_tsvector('english', p.name),
+      plainto_tsquery('english', q.term)
+    ) + CASE WHEN p.name ILIKE '%' || q.term || '%' THEN 1.0 ELSE 0 END AS rank,
+   p.product_type::text AS type
+
+  FROM q
+  JOIN tbl_product p ON TRUE
+  JOIN tbl_product_categories pc ON p.id = pc.product_id
+  JOIN tbl_category c ON pc.category_id = c.id
+  LEFT JOIN tbl_product_images img ON p.id = img.product_id
+  WHERE p.status = 1
+    AND p.is_deleted = 0
+    AND p.is_review = 0
+    AND p.is_approve = 1
+    AND (
+      to_tsvector('english', p.name) @@ plainto_tsquery('english', q.term)
+      OR similarity(p.name, q.term) > 0.1
+      OR p.name ILIKE '%' || q.term || '%'
+    )
+    AND ($2::int IS NULL OR c.id = $2::int)
+    AND (
+  p.product_type = 'package'
+  OR (
+    $6::int IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM tbl_vendorapprove_product_mapping vum
+      WHERE vum.product_id = p.id
+        AND (vum.vendor_approve_id = $6::int OR vum.vendor_approve_id IS NULL)
+    )
+  )
+)
 
 
-    console.log(" ===============================================  ")
-    console.log(q)
-    console.log(" ===============================================  ")
+  ORDER BY rank DESC, similarity_score DESC
+  LIMIT COALESCE($10::int, 25)
+),
+product_rows AS (
+  SELECT * FROM product_rows_raw
+)
+
+-- FINAL UNION & ORDERING
+SELECT *
+FROM (
+  SELECT * FROM variant_rows
+  UNION ALL
+  SELECT * FROM product_rows
+) AS all_rows
+ORDER BY rank DESC, similarity_score DESC, unified_name ASC
+LIMIT COALESCE($7::int, 50)
+OFFSET COALESCE($8::int, 0);
+`
+
+  return new Promise((resolve, reject) => {
+    db.query(q, params)
+      .then((data) => resolve(data))
+      .catch((err) => reject(new Error(err)));
+  });
+},
 
 
-
-    // Assuming db.query can handle parameterized queries:
-    return new Promise(function (resolve, reject) {
-      db.query(
-        q,
-        [
-          search_key,
-          category_id,
-          approved_by_id,
-          locationFilters.country_id,
-          locationFilters.state_id,
-          locationFilters.city_id
-        ].filter(Boolean)
-      ) // Filters out any undefined or empty values
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
   // Location lookup functions removed - using cmsModel.findStateByName, cmsModel.findCityByNameAndState, cmsModel.findCountryByName instead
 
   getCategoryList: async (search_key) => {
