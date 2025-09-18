@@ -4061,6 +4061,8 @@ searchVendor: async (
     }
   }
 
+  const orderNameCol = isPackage ? 'company_name' : vendorNameCol;
+  
   // 11) Final SQL
   const sql = `
     SELECT *,
@@ -4095,9 +4097,9 @@ searchVendor: async (
       ${fromJoin}
       WHERE ${where.join(' AND ')}
       ORDER BY tu.id, COALESCE(sub_info.is_premium,0) DESC
-    ) t
-    ORDER BY is_premium DESC ${vendor_name ? ', similarity_score DESC' : ''}, ${isPackage ? 'company_name' : 'tu_name'};
-  `;
+    ) ORDER BY is_premium DESC
+       ${vendor_name ? ', similarity_score DESC' : ''}
+       , ${orderNameCol}`;
 
   // 12) Execute
   return db.any(sql, params);
