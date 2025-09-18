@@ -3471,13 +3471,13 @@ const productQuery = `
     return Number.isFinite(n) ? Math.trunc(n) : null;
   };
 
-  const limit  = toIntOrNull(locationFilters.limit)  ?? null; // $7  -> default 50
-  const offset = toIntOrNull(locationFilters.offset) ?? null; // $8  -> default 0
+  const limit  = toIntOrNull(locationFilters.limit)  ?? 75; // $7  -> default 50
+  const offset = toIntOrNull(locationFilters.offset) ?? 0; // $8  -> default 0
 
   // Per-type caps so packages don’t get starved
-  const variantLimit = toIntOrNull(locationFilters.variant_limit) ?? null; // $9  -> default 25
-  const productLimit = toIntOrNull(locationFilters.product_limit) ?? null; // $10 -> default 25
-  const packageLimit = toIntOrNull(locationFilters.package_limit) ?? null; // $11 -> default 25
+  const variantLimit = toIntOrNull(locationFilters.variant_limit) ?? 25; // $9  -> default 25
+  const productLimit = toIntOrNull(locationFilters.product_limit) ?? 25; // $10 -> default 25
+  const packageLimit = toIntOrNull(locationFilters.package_limit) ?? 25; // $11 -> default 25
 
   const params = [
     (search_key ?? '').toString(),               // $1 term
@@ -3594,11 +3594,27 @@ variant_rows AS (
     AND p.is_deleted = 0
     AND p.is_review = 0
     AND p.is_approve = 1
-    AND (
-      to_tsvector('english', p.name) @@ plainto_tsquery('english', q.term)
-      OR similarity(p.name, q.term) > 0.1
-      OR p.name ILIKE '%' || q.term || '%'
+  AND (
+    -- product-level match
+    p.slug = q.term
+    OR to_tsvector('english', p.name) @@ plainto_tsquery('english', q.term)
+    OR similarity(p.name, q.term) > 0.1
+    OR p.name ILIKE '%' || q.term || '%'
+    -- OR any variant under the product matches like in variant search
+    OR EXISTS (
+      SELECT 1
+      FROM tbl_product_variant pv2
+      WHERE pv2.product_id = p.id
+        AND (
+          pv2.slug = q.term
+          OR to_tsvector('english', CONCAT(pv2.name, ' - ', p.name)) @@ plainto_tsquery('english', q.term)
+          OR to_tsvector('english', pv2.name) @@ plainto_tsquery('english', q.term)
+          OR similarity(CONCAT(pv2.name, ' - ', p.name), q.term) > 0.1
+          OR similarity(pv2.name, q.term) > 0.1
+          OR CONCAT(pv2.name, ' - ', p.name) ILIKE '%' || q.term || '%'
+        )
     )
+  )
     AND ($2::int IS NULL OR c.id = $2::int)
     AND (
   p.product_type = 'package'

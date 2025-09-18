@@ -3921,6 +3921,7 @@ const rfqController = {
       const product_id = req.body.product_id || null;
       const variant_id = req.body.variant_id || null;
       const type = req.body.type
+      const groupItemId = req.body.groupItemId || null;
 
       // Changes by Agnij 2025-06-17 [Improved handling of specific RFQ ID]
       // If rfq_id is provided in request, use that specific ID instead of creating a new draft
@@ -4013,10 +4014,11 @@ const rfqController = {
       } else if (type === 'package') {
         item_type = 'PACKAGE';
       }
+
       
       const productData = {
         rfq_id,
-        product_variant_id: (item_type === 'PRODUCT' || item_type === 'GROUP')
+        product_variant_id: (item_type === 'PACKAGE' || item_type === 'GROUP')
           ? product_id
           : variant_id,
         variant: variant,
@@ -4031,7 +4033,12 @@ const rfqController = {
         type: item_type,
       };
 
+      console.log(" => productData: ", productData);
+
       let itemResponse = await rfqModel.insertReturnId('tbl_rfq_items', productData);
+
+      
+      console.log(" => itemResponse: ", itemResponse);
 
       itemResponse = itemResponse[0];
 
@@ -4047,31 +4054,40 @@ const rfqController = {
 
       await Promise.all(vendorPromises);
 
-      // if (product?.specs && typeof product.specs == 'object') {
-      //   for (const [key, value] of Object.entries(product.specs)) {
-      //     const specData = {
-      //       title: key,
-      //       value,
-      //       rfq_id,
-      //       rfq_item_id: itemResponse.id,
-      //       sheet_id
-      //     };
+      // ➕ Insert children only if type is PACKAGE/GROUP and child_items are present
+  if ( item_type === 'PACKAGE' || item_type === 'GROUP' ) {
+    
+  let child_items = [];
 
-      //     await rfqModel.insert('tbl_rfq_item_specs', specData);
-      //   }
-      // }
+  if (item_type === 'PACKAGE') {
+    child_items = await rfqModel.checkIfExists(
+      'tbl_product_package_item',
+      `parent_id = ${product_id}`
+    );
+  } else if (item_type === 'GROUP') {
+    child_items = groupItemId?.map((id) => ({ id })) || [];
+  }
 
-      // if(product.isUnfoundProduct && product.unfoundName) {
-      //   let validationErrors = sheetData.validation_errors;
-      //   if(validationErrors && Array.isArray(validationErrors) && validationErrors.length > 0) {
-      //     const updatedErrors = validationErrors.filter(error => error.name != product.unfoundName);
+  const childData = child_items.map((child) => ({
+    rfq_id,
+    product_variant_id: child.id,       // or pass if needed
+    variant:0,      // using name as variant label
+    comment: '',
+    datasheet: '',
+    spec_file: '',
+    qap_file: '',
+    qap: '',
+    datasheet_file: '',
+    sheet_id,
+    parent_item_id: itemResponse.id,
+    type: 'PRODUCT',
+  }));
+if (Array.isArray(childData) && childData.length > 0) {
+  const res = await generalModel.insertMany('tbl_rfq_items', childData);
+  console.log('Inserted child items:', res.length);
+}
+}
 
-      //     const updatedSheetData = {
-      //       validation_errors: JSON.stringify(updatedErrors)
-      //     }
-      //     await rfqModel.update('tbl_rfq_draft_sheets', updatedSheetData, sheet_id);
-      //   }
-      // }
 
       res.status(200).json({
         status: 1,
@@ -4082,6 +4098,7 @@ const rfqController = {
         }
       });
     } catch (error) {
+      console.log("error ---------------------   ", error)
       logError('Error while creating or updating RFQ with products:', error);
       res.status(500).json({
         status: 3,
@@ -6143,13 +6160,15 @@ const rfqController = {
         approved_by_id,
         locationFilters
       );
-      const categoryResult = await rfqModel.getCategoryList(productSlug);
+      // const categoryResult = await rfqModel.getCategoryList(productSlug);
+
+      console.log("productResult.length ", productResult)
 
       res.status(200).json({
         status: 1,
         data: removeDuplicates(productResult),
         // data:productResult,
-        categoryData: categoryResult
+        // categoryData: categoryResult
       });
     } catch (error) {
       console.log("------------- ", error)
