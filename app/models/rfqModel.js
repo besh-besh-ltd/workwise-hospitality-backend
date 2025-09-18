@@ -3818,7 +3818,10 @@ WHERE row_num_by_name_category = 1
     vendor_name, // Added vendor_name parameter
     myVendorType,
     responseKeys,
-    productMakes
+    productMakes,
+    variantIdList, // [1,2,3] 
+    product_id,  // fetch vendors tbl_product_package_vendor_mapping
+    getVendorsForProductType
   ) => {
     // get company_id for this buyer
     const buyer = await db.oneOrNone(
@@ -7769,7 +7772,7 @@ ORDER BY m.created_at;
           AND pv.is_approve = 1
           AND pv.status = 1
         ORDER BY pv.name ASC;`;
-      const { rows } = await db.query(q, [product_id]);
+      const rows  = await db.query(q, [product_id]);
       return rows;
     } catch (error) {
       console.error('[RFQ Model] Error in getVariantsByProduct:', error.message);

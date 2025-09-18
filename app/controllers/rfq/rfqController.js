@@ -6147,8 +6147,8 @@ const rfqController = {
 
       res.status(200).json({
         status: 1,
-        // data: removeDuplicates(productResult),
-        data:productResult,
+        data: removeDuplicates(productResult),
+        // data:productResult,
         categoryData: categoryResult
       });
     } catch (error) {
@@ -6221,6 +6221,11 @@ const rfqController = {
     let vendorType = '';
     let prevWorkedWith = '';
     let myVendorType = '';
+
+    const variantIdList = req.body.variantIdList  // only to fetch vendors for product variants
+    const product_id =  req.body.product_id     // only to fetch vendors for package ( type of product only )
+    const getVendorsForProductType = req.body.getVendorsForProductType   // 'variant' refer to  tbl_product_variants_vendor_mapping | 'package'  refer to tbl_product_package_venro_mapping  
+  
     const productMakes = req.body?.productMakes || [];
     search_key = req.body?.search_key ? req.body?.search_key : '';
     category_id = req.body?.category_id ? req.body?.category_id : '';
@@ -6303,7 +6308,10 @@ const rfqController = {
             vendor_name,
             myVendorType,
             '', // responseKeys : function accepting this - need to recheck it's use and remove it if not required
-            productMakes
+            productMakes,
+            variantIdList,
+            product_id,
+            getVendorsForProductType
           );
 
           let items_to_show = 1;
@@ -10373,6 +10381,7 @@ processBoqAndDownload : async (req, res) => {
       const { product_id } = req.body;
       if (!product_id) return res.status(200).json([]).end();
       const variants = await rfqModel.getVariantsByProduct(product_id);
+      console.log(" 10376 =>>>>>>>>>>>>>>>>>>  ", variants)
       return res.status(200).json(variants).end();
     } catch (error) {
       logError(error);
