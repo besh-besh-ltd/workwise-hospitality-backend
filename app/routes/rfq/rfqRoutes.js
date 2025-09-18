@@ -267,11 +267,6 @@ RfqRoutes.post(
   rfqController.getVariantsByProduct
 );
 
-// Common vendors for selected variants
-RfqRoutes.post(
-  '/common-variant-vendors',
-  rfqController.getCommonVendorsForVariants
-);
 
 RfqRoutes.post(
   '/search-vendor',

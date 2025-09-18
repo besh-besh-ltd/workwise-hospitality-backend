@@ -10391,18 +10391,6 @@ processBoqAndDownload : async (req, res) => {
     }
   },
 
-  // Get vendors that are common across all selected variants
-  getCommonVendorsForVariants: async (req, res) => {
-    try {
-      const { variant_ids } = req.body;
-      const buyerId = req?.user?.id || null;
-      const list = await rfqModel.getCommonVendorsForVariants(variant_ids || [], buyerId);
-      return res.status(200).json(list).end();
-    } catch (error) {
-      logError(error);
-      return res.status(400).json({ status: 3, message: Config.errorText.value }).end();
-    }
-  },
 
   getClausesByRfqProductId: async (req, res) => {
     try {
