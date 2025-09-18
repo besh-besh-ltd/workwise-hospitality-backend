@@ -4014,13 +4014,14 @@ const rfqController = {
       } else if (type === 'package') {
         item_type = 'PACKAGE';
       }
+      const product_variant_id = (item_type === 'PACKAGE' || item_type === 'GROUP')
+          ? product_id
+          : variant_id
 
       
       const productData = {
         rfq_id,
-        product_variant_id: (item_type === 'PACKAGE' || item_type === 'GROUP')
-          ? product_id
-          : variant_id,
+        product_variant_id: product_variant_id,
         variant: variant,
         comment: '',
         datasheet: '',
@@ -4033,12 +4034,7 @@ const rfqController = {
         type: item_type,
       };
 
-      console.log(" => productData: ", productData);
-
       let itemResponse = await rfqModel.insertReturnId('tbl_rfq_items', productData);
-
-      
-      console.log(" => itemResponse: ", itemResponse);
 
       itemResponse = itemResponse[0];
 
@@ -4055,6 +4051,7 @@ const rfqController = {
       await Promise.all(vendorPromises);
 
       // ➕ Insert children only if type is PACKAGE/GROUP and child_items are present
+      let nestedProductId = null;
   if ( item_type === 'PACKAGE' || item_type === 'GROUP' ) {
     
   let child_items = [];
@@ -4083,10 +4080,49 @@ const rfqController = {
     type: 'PRODUCT',
   }));
 if (Array.isArray(childData) && childData.length > 0) {
-  const res = await generalModel.insertMany('tbl_rfq_items', childData);
-  console.log('Inserted child items:', res.length);
+  nestedProductId = await generalModel.insertMany('tbl_rfq_items', childData);
+}
+
+//  ---- add line item
+  const lineItems = nestedProductId.map((item) => ({
+    rfq_id,
+    product_variant_id: item.product_variant_id  ,       // or pass if needed
+    variant:0,      // using name as variant label
+    comment: '',
+    datasheet: '',
+    spec_file: '',
+    qap_file: '',
+    qap: '',
+    datasheet_file: '',
+    sheet_id,
+    parent_item_id: item.id,
+    type: 'LINE ITEM',
+  }));
+if (Array.isArray(lineItems) && lineItems.length > 0) {
+   const insertedLineItem =  await generalModel.insertMany('tbl_rfq_items', lineItems);
 }
 }
+
+if(item_type === 'PRODUCT'){
+        const lineItemOb = {
+        rfq_id,
+        product_variant_id: product_variant_id,
+        variant: 0,
+        comment: '',
+        datasheet: '',
+        spec_file: '',
+        qap_file: '',
+        qap: '',
+        datasheet_file: '',
+        sheet_id,
+        parent_item_id: itemResponse.id || null,
+        type: "LINE ITEM",
+      };
+
+     await rfqModel.insertReturnId('tbl_rfq_items', lineItemOb);
+}
+
+
 
 
       res.status(200).json({
