@@ -7769,7 +7769,8 @@ ORDER BY m.created_at;
           AND pv.is_approve = 1
           AND pv.status = 1
         ORDER BY pv.name ASC;`;
-      const { rows } = await db.query(q, [product_id]);
+      const result = await db.query(q, [product_id]);
+      const rows = result.rows || result || [];
       return rows;
     } catch (error) {
       console.error('[RFQ Model] Error in getVariantsByProduct:', error.message);

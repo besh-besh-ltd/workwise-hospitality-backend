@@ -10373,8 +10373,9 @@ processBoqAndDownload : async (req, res) => {
       const { product_id } = req.body;
       if (!product_id) return res.status(200).json([]).end();
       const variants = await rfqModel.getVariantsByProduct(product_id);
-      return res.status(200).json(variants).end();
+      return res.status(200).json(variants);
     } catch (error) {
+      console.error('Error in getVariantsByProduct:', error);
       logError(error);
       return res.status(400).json({ status: 3, message: Config.errorText.value }).end();
     }
