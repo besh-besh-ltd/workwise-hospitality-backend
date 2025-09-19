@@ -1801,8 +1801,7 @@ const rfqModel = {
         'products', (
           SELECT json_agg(
             json_build_object(
-              'product_id', TQI.product_variant_id,
-              'variant', TQI.variant,
+             
               'product_name', TQI.product_name,
               'unit_price', TQI.unit_price,
               'package_price', TQI.package_price,
