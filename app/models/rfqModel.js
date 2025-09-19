@@ -1154,7 +1154,7 @@ const rfqModel = {
                         WHERE TPC.product_id = RFQ_P.id
                     ),
                     'product_specs', (
-                        SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'product_id', RFQ_P_SPEC.product_variant_id, 'rfq_id', RFQ_P_SPEC.rfq_id))
+                        SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'rfq_id', RFQ_P_SPEC.rfq_id))
                         FROM tbl_rfq_item_specs RFQ_P_SPEC
                         WHERE RFQ_P.id = RFQ_P_SPEC.rfq_item_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
                     ),
