@@ -4013,7 +4013,10 @@ const rfqController = {
         item_type = 'GROUP';
       } else if (type === 'package') {
         item_type = 'PACKAGE';
-      }
+      } else if (type == "LINE ITEM") {
+        item_type = "LINE ITEM";
+      } 
+
       const product_variant_id = (item_type === 'PACKAGE' || item_type === 'GROUP')
           ? product_id
           : variant_id
@@ -4048,8 +4051,13 @@ const rfqController = {
         };
         return await rfqModel.insert('tbl_rfq_item_vendors', vendorData);
       });
-
+      
       await Promise.all(vendorPromises);
+      
+      console.log(" =>>>>>>>>>>>>>>>>> vendorPromises ", vendorPromises)
+
+
+
 
       // ➕ Insert children only if type is PACKAGE/GROUP and child_items are present
       let nestedProductId = null;
@@ -4125,10 +4133,6 @@ if(item_type === 'PRODUCT'){
 
      await rfqModel.insertReturnId('tbl_rfq_items', lineItemOb);
 }
-
-
-
-
       res.status(200).json({
         status: 1,
         message: 'RFQ draft created/updated successfully',
