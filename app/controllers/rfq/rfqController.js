@@ -3922,6 +3922,7 @@ const rfqController = {
       const variant_id = req.body.variant_id || null;
       const type = req.body.type
       const groupItemId = req.body.groupItemId || null;
+      const item_name = req.body.item_name || null;
 
       // Changes by Agnij 2025-06-17 [Improved handling of specific RFQ ID]
       // If rfq_id is provided in request, use that specific ID instead of creating a new draft
@@ -4032,6 +4033,7 @@ const rfqController = {
         sheet_id,
         parent_item_id: parent_item_id || null,
         type: item_type,
+        name: item_name || null,
       };
 
       let itemResponse = await rfqModel.insertReturnId('tbl_rfq_items', productData);
@@ -4062,7 +4064,7 @@ const rfqController = {
       `parent_id = ${product_id}`
     );
   } else if (item_type === 'GROUP') {
-    child_items = groupItemId?.map((id) => ({ id })) || [];
+    child_items = groupItemId?.map((item) => ({ id:item.id, name:item.name })) || [];
   }
 
   const childData = child_items.map((child) => ({
@@ -4078,6 +4080,7 @@ const rfqController = {
     sheet_id,
     parent_item_id: itemResponse.id,
     type: 'PRODUCT',
+    name:child.name || null,
   }));
 if (Array.isArray(childData) && childData.length > 0) {
   nestedProductId = await generalModel.insertMany('tbl_rfq_items', childData);
@@ -4097,6 +4100,7 @@ if (Array.isArray(childData) && childData.length > 0) {
     sheet_id,
     parent_item_id: item.id,
     type: 'LINE ITEM',
+    name: item.name || null,
   }));
 if (Array.isArray(lineItems) && lineItems.length > 0) {
    const insertedLineItem =  await generalModel.insertMany('tbl_rfq_items', lineItems);
@@ -4117,6 +4121,7 @@ if(item_type === 'PRODUCT'){
         sheet_id,
         parent_item_id: itemResponse.id || null,
         type: "LINE ITEM",
+        name: item_name || null,
       };
 
      await rfqModel.insertReturnId('tbl_rfq_items', lineItemOb);
