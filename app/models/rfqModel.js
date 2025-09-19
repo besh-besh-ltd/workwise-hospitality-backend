@@ -346,13 +346,75 @@ const rfqModel = {
     }
   },
 
+  addErrorsToPersistence: async (
+    persistenceId,
+    errors = null,
+  ) => {
+    try {
+      const persistenceQuery = `id = ${persistenceId}`;
+      let persistence = await rfqModel.checkIfExists(
+        'tbl_rfq_persistent_jobs',
+        persistenceQuery
+      );
+
+      if (!persistence || persistence.length <= 0) {
+        throw new Error('Persistence does not exist!');
+      }
+
+      persistence = persistence[0];
+
+      let user = await userModel.getUserById(persistence.user_id);
+
+      if (!user || user.length <= 0) {
+        throw new Error('User does not exist for this persistence!');
+      }
+
+      user = user[0];
+
+      const q = `
+        UPDATE tbl_rfq_persistent_jobs
+        SET errors = 
+          CASE
+            WHEN errors->>'type' IS NOT NULL THEN
+              jsonb_set(
+                errors,
+                '{actual}',
+                (errors->'actual') || $2::jsonb
+              )
+            WHEN jsonb_typeof(errors) = 'array' THEN
+              errors || $2::jsonb
+            ELSE
+              $2::jsonb
+          END
+        WHERE id = $1
+        RETURNING *;
+      `;
+
+      const errorsToAppend = Array.isArray(errors)
+        ? JSON.stringify(errors)
+        : typeof errors === 'string'
+        ? errors
+        : JSON.stringify(errors.actual || []);
+
+      const updatedPersistence = await db.any(q, [
+        persistenceId,
+        errorsToAppend
+      ]);
+
+      return updatedPersistence;
+    } catch (error) {
+      throw error;
+    }
+  },
+
   saveMagicSearchInDraft: async (
     data,
     nextRFQNumber,
     createdBy,
     processedUrl,
     rfqId,
-    sheetId
+    sheetId,
+    currentProcessingSheet
   ) => {
     try {
       return await db.tx(async (t) => {
@@ -371,7 +433,7 @@ const rfqModel = {
           sheetValues.push(rfqId);
         } else {
           sheetToProcess = {
-            sheet_name: data?.sheetNameList?.[0]
+            sheet_name: currentProcessingSheet ?? data?.sheetNameList?.[0]
           };
         }
 
@@ -514,6 +576,8 @@ const rfqModel = {
         else throw new Error('Sheet to be processed does not exist!');
 
         for (const product of data.products) {
+          const sub_items = product.sub_items;
+
           const productQuery = `
             INSERT INTO tbl_rfq_items (
               rfq_id, 
@@ -524,9 +588,11 @@ const rfqModel = {
               spec_file, 
               qap_file, 
               qap, 
-              sheet_id
+              sheet_id,
+              type,
+              name
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING id
           `;
 
@@ -534,12 +600,14 @@ const rfqModel = {
             rfq_id,
             product.product_id,
             product.variant,
-            product.comment,
+            "",
             0, // datasheet - using 0 as a default value to avoid null constraint
             '', // spec_file - this field will be removed from database
             '', // qap_file - this field will be removed from database
             '', // qap - using empty string as default
-            sheet.id
+            sheet.id,
+            'PRODUCT',
+            product.name,
           ];
 
           const productInsertionResult = await t.one(
@@ -547,22 +615,65 @@ const rfqModel = {
             productValues
           );
 
-          // Insert into tbl_rfq_item_specs
-          for (const spec of product.spec || []) {
-            if (spec.title == 'Quantity')
-              spec.value = parseInt(spec.value) ?? 0;
-
-            await t.none(
-              `INSERT INTO tbl_rfq_item_specs (rfq_id, rfq_item_id, title, value, sheet_id)
-              VALUES ($1, $2, $3, $4, $5)`,
-              [
+          if(sub_items) {
+            for (const sub of sub_items) {
+              const subProductQuery = `
+                INSERT INTO tbl_rfq_items (
+                  rfq_id, 
+                  product_variant_id, 
+                  variant, 
+                  comment, 
+                  datasheet, 
+                  spec_file, 
+                  qap_file, 
+                  qap, 
+                  sheet_id,
+                  type,
+                  parent_item_id,
+                  name
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                RETURNING id
+              `;
+  
+              const subProductValues = [
                 rfq_id,
+                sub.product_id,
+                sub.variant,
+                sub.comment ?? "",
+                0, // datasheet - using 0 as a default value to avoid null constraint
+                '', // spec_file - this field will be removed from database
+                '', // qap_file - this field will be removed from database
+                '', // qap - using empty string as default
+                sheet.id,
+                'LINE ITEM',
                 productInsertionResult.id,
-                spec.title,
-                spec.value,
-                sheet.id
-              ]
-            );
+                sub.name,
+              ];
+  
+              const subProductInsertionResult = await t.one(
+                subProductQuery,
+                subProductValues
+              );
+  
+              // Insert into tbl_rfq_item_specs
+              for (const spec of product.spec || []) {
+                if (spec.title == 'Quantity')
+                  spec.value = parseInt(spec.value) ?? 0;
+  
+                await t.none(
+                  `INSERT INTO tbl_rfq_item_specs (rfq_id, rfq_item_id, title, value, sheet_id)
+                  VALUES ($1, $2, $3, $4, $5)`,
+                  [
+                    rfq_id,
+                    subProductInsertionResult.id,
+                    spec.title,
+                    spec.value,
+                    sheet.id
+                  ]
+                );
+              }
+            }
           }
 
           // 4. Insert into tbl_rfq_item_vendors
@@ -4260,14 +4371,9 @@ ${
       LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
 
 
-      WHERE ${
-  getVendorsForProductType === "package" && product_id
-    ? `p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1
-       AND (pvvm.is_approved = 1 OR bvm.vendor_id IS NOT NULL)`
-    : `p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1
-       AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)`
-}
-  AND tu.is_deleted = 0 AND tu.status = 1
+      WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1
+       AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
+      AND tu.is_deleted = 0 AND tu.status = 1
 
       
 

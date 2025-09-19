@@ -346,12 +346,10 @@ function processQuotCompare(data) {
   return data;
 }
 
-const saveMagicSearchInDraft = async (data, createdBy, processedUrl, rfqId, sheetId) => {
+const saveMagicSearchInDraft = async (data, createdBy, processedUrl, rfqId, sheetId, currentProcessingSheet) => {
   try {
-
-   
     const nextRfqNumber = await getNextRfQNumber()
-    return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy, processedUrl, rfqId, sheetId);
+    return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy, processedUrl, rfqId, sheetId, currentProcessingSheet);
   } catch (error) {
     throw error
   }
@@ -3775,7 +3773,7 @@ const rfqController = {
       const sheets = await rfqModel.getSheetsForDraftRfq(id, null, sheetId);
 
       if (sheets) {
-        sheetData = sheets[0];
+        sheetData = sheets.find(sheet => sheet.is_processed);
       }
 
       if (sheetData && !sheetData.is_processed) {
@@ -7766,14 +7764,283 @@ if(item_type === 'PRODUCT'){
     }
   },
 
+  // processRfqDraftSheetWise: async (
+  //   processedJSON,
+  //   user,
+  //   rfqId = null,
+  //   sheetId = null,
+  //   availableSheets
+  // ) => {
+  //   try {
+  //     if (
+  //       rfqId &&
+  //       !isNaN(parseInt(rfqId)) &&
+  //       sheetId &&
+  //       !isNaN(parseInt(sheetId))
+  //     ) {
+  //       let rfqDetails = await rfqModel.checkIfExists(
+  //         'tbl_rfq',
+  //         `id = ${rfqId}`
+  //       );
+  //       if (rfqDetails) {
+  //         rfqDetails = rfqDetails[0];
+  //         let sheetDetails = await rfqModel.checkIfExists(
+  //           'tbl_rfq_draft_sheets',
+  //           `rfq_id = ${rfqId} AND id = ${sheetId}`
+  //         );
+  //         if (sheetDetails) {
+  //           sheetDetails = sheetDetails[0];
+  //         }
+  //       }
+  //     }
+
+  //     let boqDataJson = processedJSON;
+  //     if(typeof boqDataJson == 'object') {
+  //       boqDataJson = Object.values(boqDataJson);
+  //     }
+
+  //     const termList = await rfqModel.getAllTerms();
+  //     const transformedTermList = termList.map((term) => ({
+  //       id: term.id,
+  //       name: term.term_content
+  //     }));
+
+  //     const validationErrors = [];
+  //     const products = [];
+  //     const sheetNameList = new Set();
+  //     const globalVariantCount = {};
+
+  //     const allProductIds = boqDataJson
+  //       .map((item) => item.variant_id)
+  //       .filter((item) => typeof item == 'number' || typeof item == 'string');
+
+  //     const uniqueProductIds = [...new Set(allProductIds)];
+  //     const existingProducts = await rfqModel.checkIfExists(
+  //       'tbl_product',
+  //       `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
+  //     );
+  //     const existingProductIdSet = new Set(existingProducts.map((p) => p.id));
+
+  //     const vendorCache = {};
+
+  //     for (const item of boqDataJson) {
+  //       if (item.is_product == 'No') {
+  //         continue;
+  //       }
+
+  //       const cleanId = item?.variant_id;
+  //       const productName =
+  //         item.core_product_name ||
+  //         item.fetched_product_name ||
+  //         'Unknown Product';
+
+  //       if (!cleanId || item.fetched_product_name === 'Product not found') {
+  //         validationErrors.push({
+  //           errors: { product: `${productName} - Product not found` },
+  //           name: productName,
+  //           size: item.size || '',
+  //           quantity: item.quantity || '',
+  //           unit: item.unit || '',
+  //           sheet_name: item.sheet_name || '',
+  //           description: item.full_product_description || '',
+  //           similar_products: item.reranked_variants || []
+  //         });
+  //         continue;
+  //       }
+
+  //       const validProductId = existingProductIdSet.has(cleanId)
+  //         ? cleanId
+  //         : null;
+
+  //       if (!validProductId) {
+  //         validationErrors.push({
+  //           errors: { product: `${productName} - Product not found` },
+  //           name: productName,
+  //           size: item.size || '',
+  //           quantity: item.quantity || '',
+  //           unit: item.unit || '',
+  //           sheet_name: item.sheet_name || '',
+  //           description: item.full_product_description || '',
+  //           similar_products: item.reranked_variants || []
+  //         });
+  //         continue;
+  //       }
+
+  //       const finalProductName =
+  //         item.fetched_product_name || item.core_product_name;
+
+  //       if (!vendorCache[validProductId]) {
+  //         const vendors = await rfqModel.genericSearchVendors(
+  //           user.id,
+  //           validProductId,
+  //           null,
+  //           { vendorId: 'user_id', vendorName: 'name' }
+  //         );
+  //         vendorCache[validProductId] = vendors;
+  //       }
+
+  //       const vendorResult = vendorCache[validProductId];
+
+  //       if (!vendorResult || vendorResult.length === 0) {
+  //         validationErrors.push({
+  //           errors: {
+  //             vendor: `${finalProductName} - No Vendors Found`
+  //           },
+  //           name: finalProductName,
+  //           size: item.size || '',
+  //           quantity: item.quantity || '',
+  //           unit: item.unit || '',
+  //           sheet_name: item.sheet_name || '',
+  //           description: item.full_product_description || '',
+  //           similar_products: item.reranked_variants || []
+  //         });
+  //         continue;
+  //       }
+
+  //       const variantCount = globalVariantCount[validProductId] ?? 0;
+
+  //       products.push({
+  //         product_id: validProductId,
+  //         name: finalProductName || 'Unnamed Product',
+  //         variant: variantCount,
+  //         spec: [
+  //           { title: 'Size', value: item.size || '' },
+  //           { title: 'Spec', value: item.feature_or_specifications || '' },
+  //           { title: 'Quantity', value: item.quantity || 0 },
+  //           { title: 'Unit', value: item.unit || 'NA' },
+  //           { title: 'total_price', value: item.total_price || '0' }
+  //         ],
+  //         vendors: vendorResult,
+  //         comment: item.full_product_description || '',
+  //         defaultSelectedVAB: '',
+  //         datasheet: '0',
+  //         datasheet_file: [],
+  //         spec_file: [],
+  //         qap: '0',
+  //         qap_file: [],
+  //         user_selected_predefined_tds: false,
+  //         user_selected_predefined_qap: false,
+  //         sheet_name: item.sheet_name || ''
+  //       });
+
+  //       globalVariantCount[validProductId] = variantCount + 1;
+  //       sheetNameList.add(item.sheet_name || '');
+  //     }
+
+  //     const finalObject = {
+  //       response_email: user.email,
+  //       contact_name: user.name,
+  //       contact_number: user.mobile,
+  //       company_name: user.organization_name || user.name,
+  //       products,
+  //       terms: transformedTermList,
+  //       termList,
+  //       term_and_condition_files: [],
+  //       sheetNameList:
+  //         availableSheets && availableSheets.length > 0
+  //           ? availableSheets.map((sheet) => sheet.sheet_name)
+  //           : Array.from(sheetNameList),
+  //       availableSheets,
+  //       validationErrors
+  //     };
+
+  //     // Send email notification for products or vendors not found
+  //     const hasProductNotFound = validationErrors.some(
+  //       (err) => err.errors && err.errors.product
+  //     );
+  //     const hasVendorNotFound = validationErrors.some(
+  //       (err) => err.errors && err.errors.vendor
+  //     );
+
+  //     // Comment if not needed
+  //     const uniqueErrors = validationErrors.filter(
+  //       (err, index, self) =>
+  //         index ===
+  //         self.findIndex(
+  //           (e) =>
+  //             e.errors?.product === err.errors?.product &&
+  //             e.errors?.vendor === err.errors?.vendor &&
+  //             (e.name || e.productName || '') ===
+  //               (err.name || err.productName || '')
+  //         )
+  //     );
+  //     if (hasProductNotFound || hasVendorNotFound) {
+  //       try {
+  //         const rfqNumber = await getNextRfQNumber();
+  //         let emailContent = `
+  //           <h2>Products or Vendors Not Found in Workwise Magic Search</h2>
+  //           <p>Needs to work on these missing products or Vendors urgently.</p>
+  //           <p><strong>RFQ Number:</strong> ${rfqNumber}</p>
+  //           <p><strong>User:</strong> ${user.name} (${user.email})</p>
+  //           <p><strong>Organization:</strong> ${
+  //             user.organization_name || 'N/A'
+  //           }</p> 
+  //           <h3>Details:</h3>
+  //           <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; width: 100%;">
+  //             <thead>
+  //               <tr style="background-color: #f0f0f0;">
+  //                 <th>Error Type</th>
+  //                 <th>Product Name</th>
+  //               </tr>
+  //             </thead>
+  //             <tbody>
+  //         `;
+  //         uniqueErrors.forEach((err) => {
+  //           let errorType =
+  //             err.errors && err.errors.product
+  //               ? 'Product Not Found'
+  //               : err.errors && err.errors.vendor
+  //               ? 'Vendor Not Found'
+  //               : 'Other';
+  //           let productName = err.name || err.productName || '';
+  //           emailContent += `
+  //             <tr>
+  //               <td>${errorType}</td>
+  //               <td>${productName}</td>
+  //             </tr>
+  //           `;
+  //         });
+  //         emailContent += `
+  //             </tbody>
+  //           </table>
+  //           <p><em>This email was automatically generated by WorkWise RFQ processing system.</em></p>
+  //         `;
+
+  //         const mailOptions = {
+  //           from: Config.webmasterMail,
+  //           // to:'mukul@letsworkwise.com',
+  //           // cc:'vineet@letsworkwise.com',
+  //           to: 'siddharth@letsworkwise.com',
+  //           cc: [
+  //             'sayankaworkwise@gmail.com',
+  //             'prashant@letsworkwise.com',
+  //             'mukul@letsworkwise.com'
+  //           ],
+  //           subject: `Workwise Magic Search - Product And Vendor Not Found Error List`,
+  //           html: emailContent
+  //         };
+  //         sendMail(mailOptions);
+  //       } catch (emailError) {
+  //         logError('Error sending product/vendor not found email:', emailError);
+  //       }
+  //     }
+
+  //     return [uniqueErrors, finalObject];
+  //   } catch (error) {
+  //     logError(error);
+  //     return [null, null];
+  //   }
+  // },
+
   processRfqDraftSheetWise: async (
-    processedUrl,
+    processedJSON,
     user,
     rfqId = null,
     sheetId = null,
     availableSheets
   ) => {
     try {
+      // Fetch RFQ and sheet details if required (as before)
       if (
         rfqId &&
         !isNaN(parseInt(rfqId)) &&
@@ -7792,21 +8059,31 @@ if(item_type === 'PRODUCT'){
           );
           if (sheetDetails) {
             sheetDetails = sheetDetails[0];
-            processedUrl = sheetDetails.processed_url;
-          } else processedUrl = rfqDetails.processed_url;
-
-          if (!processedUrl)
-            throw new Error(
-              'Processed URL does not exist for given Sheet OR RFQ'
-            );
+          }
         }
       }
 
-      if (process.env.NODE_ENV == 'uat' && processedUrl.startsWith('http:')) {
-        processedUrl = processedUrl.replace('http:', 'https:');
-      }
-
-      const boqDataJson = await generativeAI.processBOQWithAI(processedUrl);
+      // NEW FORMAT: processedJSON is always object with keys like "2_5"
+      const allLineItems = [];
+      Object.values(processedJSON).forEach((arr) => {
+        arr.forEach((item) => {
+          if (item.is_grouped && Array.isArray(item.group_items)) {
+            // Grouped: push all .main_line_item of group_items
+            allLineItems.push({
+              is_grouped: true,
+              group_items: item.group_items
+                .filter((g) => g.main_line_item && g.main_line_item.match_result?.variant_id_workwise)
+                .map((g) => g.main_line_item)
+            });
+          } else if (item.main_line_item && item.main_line_item.match_result?.variant_id_workwise) {
+            // Not grouped: just one
+            allLineItems.push({
+              is_grouped: false,
+              group_items: [item.main_line_item]
+            });
+          }
+        });
+      });
 
       const termList = await rfqModel.getAllTerms();
       const transformedTermList = termList.map((term) => ({
@@ -7818,110 +8095,91 @@ if(item_type === 'PRODUCT'){
       const products = [];
       const sheetNameList = new Set();
       const globalVariantCount = {};
-
-      const allVariantsCount = await rfqModel.getVariantsCountForRFQ(rfqId);
-      if (allVariantsCount && allVariantsCount.length > 0) {
-        allVariantsCount.forEach((variantCount) => {
-          const productId = variantCount.product_variant_id;
-          const maxVariant = variantCount.max_variant;
-
-          globalVariantCount[productId] = maxVariant + 1;
-        });
-      }
-
-      const allProductIds = boqDataJson
-        .map((item) => item.variant_id)
-        .filter((item) => typeof item == 'number' || typeof item == 'string');
-
-      const uniqueProductIds = [...new Set(allProductIds)];
-      const existingProducts = await rfqModel.checkIfExists(
-        'tbl_product',
-        `id = ANY(ARRAY[${uniqueProductIds.join(',')}])`
-      );
-      const existingProductIdSet = new Set(existingProducts.map((p) => p.id));
-
       const vendorCache = {};
 
-      for (const item of boqDataJson) {
-        if (item.is_product == 'No') {
-          continue;
-        }
+      // Gather all unique variant_ids for batch DB lookup
+      const allVariantIds = allLineItems.flatMap(grouped =>
+        grouped.group_items.map(x => x.match_result.variant_id_workwise)
+      );
+      const uniqueVariantIds = [...new Set(allVariantIds)];
 
-        const cleanId = item?.variant_id;
-        const productName =
-          item.core_product_name ||
-          item.fetched_product_name ||
-          'Unknown Product';
+      // 1. Lookup all variant_ids' product_id mapping
+      const variantMapQ = `
+        SELECT id, product_id
+        FROM tbl_product_variant
+        WHERE id = ANY(ARRAY[${uniqueVariantIds.join(',')}])
+      `;
+      const variantMapRows = uniqueVariantIds.length
+        ? await db.query(variantMapQ)
+        : [];
+      const variantToProductMap = {};
+      variantMapRows.forEach(row => {
+        variantToProductMap[row.id] = row.product_id;
+      });
 
-        if (!cleanId || item.fetched_product_name === 'Product not found') {
+      // 2. Lookup all valid product_ids existence for validation
+      const allProductIds = [...new Set(variantMapRows.map(row => row.product_id))];
+      const existingProducts = allProductIds.length
+        ? await rfqModel.checkIfExists(
+          'tbl_product',
+          `id = ANY(ARRAY[${allProductIds.join(',')}])`
+        )
+        : [];
+      const existingProductIdSet = new Set(existingProducts.map((p) => p.id));
+
+      for (const group of allLineItems) {
+        const firstLine = group.group_items[0];
+        const variantId = firstLine.match_result.variant_id_workwise;
+        const productId = variantToProductMap[variantId];
+        const productName = firstLine.core_product_name || firstLine.fetched_product_name || 'Unknown Product';
+
+        // 1. Validation: skip if any variant/group variant invalid
+        if (!variantId || !productId || !existingProductIdSet.has(productId) || firstLine.fetched_product_name === 'Product not found') {
           validationErrors.push({
             errors: { product: `${productName} - Product not found` },
             name: productName,
-            size: item.size || '',
-            quantity: item.quantity || '',
-            unit: item.unit || '',
-            sheet_name: item.sheet_name || '',
-            description: item.full_product_description || '',
-            similar_products: item.reranked_variants || []
+            size: firstLine.size || '',
+            quantity: firstLine.quantity || '',
+            unit: firstLine.unit || '',
+            sheet_name: firstLine.sheet_name || '',
+            description: firstLine.full_product_description || '',
+            similar_products: firstLine.reranked_variants || []
           });
           continue;
         }
 
-        const validProductId = existingProductIdSet.has(cleanId)
-          ? cleanId
-          : null;
-
-        if (!validProductId) {
-          validationErrors.push({
-            errors: { product: `${productName} - Product not found` },
-            name: productName,
-            size: item.size || '',
-            quantity: item.quantity || '',
-            unit: item.unit || '',
-            sheet_name: item.sheet_name || '',
-            description: item.full_product_description || '',
-            similar_products: item.reranked_variants || []
-          });
-          continue;
-        }
-
-        const finalProductName =
-          item.fetched_product_name || item.core_product_name;
-
-        if (!vendorCache[validProductId]) {
+        // 2. Vendors fetch (once per product_id)
+        if (!vendorCache[variantId]) {
           const vendors = await rfqModel.genericSearchVendors(
             user.id,
-            validProductId,
+            variantId,
             null,
             { vendorId: 'user_id', vendorName: 'name' }
           );
-          vendorCache[validProductId] = vendors;
+          vendorCache[variantId] = vendors;
         }
-
-        const vendorResult = vendorCache[validProductId];
-
+        const vendorResult = vendorCache[variantId];
         if (!vendorResult || vendorResult.length === 0) {
           validationErrors.push({
             errors: {
-              vendor: `${finalProductName} - No Vendors Found`
+              vendor: `${productName} - No Vendors Found`
             },
-            name: finalProductName,
-            size: item.size || '',
-            quantity: item.quantity || '',
-            unit: item.unit || '',
-            sheet_name: item.sheet_name || '',
-            description: item.full_product_description || '',
-            similar_products: item.reranked_variants || []
+            name: productName,
+            size: firstLine.size || '',
+            quantity: firstLine.quantity || '',
+            unit: firstLine.unit || '',
+            sheet_name: firstLine.sheet_name || '',
+            description: firstLine.full_product_description || '',
+            similar_products: firstLine.reranked_variants || []
           });
           continue;
         }
 
-        const variantCount = globalVariantCount[validProductId] ?? 0;
-
-        products.push({
-          product_id: validProductId,
-          name: finalProductName || 'Unnamed Product',
-          variant: variantCount,
+        // 3. Build sub_items (all variants under this product). Use old product structure.
+        const variantCount = globalVariantCount[productId] ?? 0;
+        const sub_items = group.group_items.map((item) => ({
+          product_id: variantToProductMap[item.match_result.variant_id_workwise],
+          name: item.fetched_product_name || item.core_product_name || 'Unnamed Product',
           spec: [
             { title: 'Size', value: item.size || '' },
             { title: 'Spec', value: item.feature_or_specifications || '' },
@@ -7929,22 +8187,24 @@ if(item_type === 'PRODUCT'){
             { title: 'Unit', value: item.unit || 'NA' },
             { title: 'total_price', value: item.total_price || '0' }
           ],
+          variant: variantCount,
           vendors: vendorResult,
-          comment: item.full_product_description || '',
-          defaultSelectedVAB: '',
-          datasheet: '0',
-          datasheet_file: [],
-          spec_file: [],
-          qap: '0',
-          qap_file: [],
-          user_selected_predefined_tds: false,
-          user_selected_predefined_qap: false,
           sheet_name: item.sheet_name || ''
+        }));
+
+        products.push({
+          product_id: productId,
+          name: firstLine.fetched_product_name || firstLine.core_product_name || 'Unnamed Product',
+          sheet_name: firstLine.sheet_name || '',
+          variant: variantCount,
+          sub_items
         });
 
-        globalVariantCount[validProductId] = variantCount + 1;
-        sheetNameList.add(item.sheet_name || '');
+        globalVariantCount[productId] = variantCount + 1;
+        sheetNameList.add(firstLine.sheet_name || '');
       }
+
+      console.log("WEBHOOK TEST -> AVAILABLE SHEETS:", availableSheets);
 
       const finalObject = {
         response_email: user.email,
@@ -7955,23 +8215,18 @@ if(item_type === 'PRODUCT'){
         terms: transformedTermList,
         termList,
         term_and_condition_files: [],
-        sheetNameList:
-          availableSheets && availableSheets.length > 0
-            ? availableSheets.map((sheet) => sheet.sheet_name)
-            : Array.from(sheetNameList),
-        availableSheets,
+        sheetNameList: Object.keys(availableSheets),
+        availableSheets: Object.keys(availableSheets),
         validationErrors
       };
 
-      // Send email notification for products or vendors not found
+      // Send email notification for products or vendors not found (unchanged)
       const hasProductNotFound = validationErrors.some(
         (err) => err.errors && err.errors.product
       );
       const hasVendorNotFound = validationErrors.some(
         (err) => err.errors && err.errors.vendor
       );
-
-      // Comment if not needed
       const uniqueErrors = validationErrors.filter(
         (err, index, self) =>
           index ===
@@ -7991,9 +8246,7 @@ if(item_type === 'PRODUCT'){
             <p>Needs to work on these missing products or Vendors urgently.</p>
             <p><strong>RFQ Number:</strong> ${rfqNumber}</p>
             <p><strong>User:</strong> ${user.name} (${user.email})</p>
-            <p><strong>Organization:</strong> ${
-              user.organization_name || 'N/A'
-            }</p> 
+            <p><strong>Organization:</strong> ${user.organization_name || 'N/A'}</p> 
             <h3>Details:</h3>
             <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; width: 100%;">
               <thead>
@@ -8024,11 +8277,8 @@ if(item_type === 'PRODUCT'){
             </table>
             <p><em>This email was automatically generated by WorkWise RFQ processing system.</em></p>
           `;
-
           const mailOptions = {
             from: Config.webmasterMail,
-            // to:'mukul@letsworkwise.com',
-            // cc:'vineet@letsworkwise.com',
             to: 'siddharth@letsworkwise.com',
             cc: [
               'sayankaworkwise@gmail.com',
@@ -8045,6 +8295,7 @@ if(item_type === 'PRODUCT'){
       }
 
       return [uniqueErrors, finalObject];
+
     } catch (error) {
       logError(error);
       return [null, null];
@@ -8253,16 +8504,15 @@ if(item_type === 'PRODUCT'){
   handleAIWebhook: async (req, res) => {
     try {
       let { persistence_id, user } = req.query;
-      const { jsonFileUrl, availableSheets, errors, type } = req.body;
+      const { processedJSON, availableSheets, currentProcessingSheet, errors, type } = req.body;
+
 
       persistence_id = parseInt(persistence_id);
 
-      if((errors && errors.length > 0) && (!jsonFileUrl || !availableSheets)) {
-        await rfqModel.updatePersistenceJobStatus(
+      if((errors && errors.length > 0) && (!processedJSON || !availableSheets)) {
+        await rfqModel.addErrorsToPersistence(
           persistence_id,
-          PERSISTENCE_STATUSES.FAILED,
-          null,
-          errors ? normalizeErrors({ type: 'ai-error', actual: errors }) : null
+          errors
         );
 
         return res.json({
@@ -8271,20 +8521,24 @@ if(item_type === 'PRODUCT'){
         });
       }
 
+
       if (type == 'simplified') {
         await rfqModel.updatePersistenceJobStatus(
           persistence_id,
           PERSISTENCE_STATUSES.COMPLETED,
           null,
           errors ? normalizeErrors({ type: 'ai-error', actual: errors }) : null,
-          jsonFileUrl
         );
       } else if (type == 'rfq') {
+        const alreadyCreatedDraft = await db.oneOrNone("SELECT persisted_rfq_id FROM tbl_rfq_persistent_jobs TRPJ WHERE TRPJ.id = $1", [persistence_id]);
         const response = await rfqController.magicSearchRfqCreate(
-          jsonFileUrl,
+          processedJSON,
           availableSheets,
-          user
+          currentProcessingSheet,
+          user,
+          alreadyCreatedDraft?.persisted_rfq_id
         );
+        console.log("WEBHOOK TEST -> MAGIC SEARCH RFQ HAS BEEN CREATED!")
         if (response.success) {
           await rfqModel.updatePersistenceJobStatus(
             persistence_id,
@@ -8293,7 +8547,6 @@ if(item_type === 'PRODUCT'){
               : PERSISTENCE_STATUSES.COMPLETED,
             response.savedRfq,
             (response.validation_errors ?? []).length > 0 ? normalizeErrors({ type: 'ai-error', actual: response.validation_errors }) : null,
-            jsonFileUrl,
           );
 
         } else {
@@ -8333,7 +8586,7 @@ if(item_type === 'PRODUCT'){
 
       return res.status(400).json({
         status: 3,
-        message: 'Something went wrong while handling AI Webhook, please try again!',
+        message: 'Something went wrong while handling AI Webhook 1, please try again!',
         error,
       })
     }
@@ -8390,7 +8643,7 @@ if(item_type === 'PRODUCT'){
       logError(error);
       return res.status(400).json({
         status: 3,
-        message: 'Something went wrong while handling AI Webhook, please try again!',
+        message: 'Something went wrong while handling AI Webhook 2, please try again!',
         error,
       })
     }
@@ -8449,7 +8702,7 @@ if(item_type === 'PRODUCT'){
       logError(error);
       return res.status(400).json({
         status: 3,
-        message: 'Something went wrong while handling AI Webhook, please try again!',
+        message: 'Something went wrong while handling AI Webhook 3, please try again!',
         error,
       })
     }
@@ -8460,14 +8713,8 @@ if(item_type === 'PRODUCT'){
   // mukul - 21-05-2025, removed file handling as now we just get json url in request, also reviewed we handling many fields in payload but in api call we just get json url, not removing them now as very soon we start this flow enhancements
   // Kushal - 21-05-2025, Highly optimized to handle large datasets
   // Kushal - 23-05-2025, Completed Sheet wise processing while saving Draft of Magic Search
-  magicSearchRfqCreate: async (jsonFileUrl, availableSheets, user_id) => {
+  magicSearchRfqCreate: async (processedJSON, availableSheets, currentProcessingSheet, user_id, persisted_rfq_id) => {
     try {
-      let aiProcessedBoqJson = jsonFileUrl;
-
-      if (availableSheets && availableSheets.length > 0) {
-        aiProcessedBoqJson =
-          availableSheets[0]?.download_url ?? aiProcessedBoqJson;
-      }
 
       let user = await userModel.getUserById(user_id);
       if (!user) throw new Error('User dont exist with id: ', user_id);
@@ -8476,7 +8723,7 @@ if(item_type === 'PRODUCT'){
 
       const [validationErrors, processedData] =
         await rfqController.processRfqDraftSheetWise(
-          aiProcessedBoqJson,
+          processedJSON,
           user,
           null,
           null,
@@ -8488,7 +8735,10 @@ if(item_type === 'PRODUCT'){
       const savedRfq = await saveMagicSearchInDraft(
         processedData,
         user_id,
-        aiProcessedBoqJson
+        null,
+        persisted_rfq_id,
+        null,
+        currentProcessingSheet,
       );
       const sheets = await rfqModel.getSheetsForDraftRfq(savedRfq);
 

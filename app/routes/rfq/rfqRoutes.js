@@ -321,7 +321,7 @@ RfqRoutes.post('/initiate-magic-search',
 RfqRoutes.post('/magic-webhook',
   // passportSignIn,
   // acl([2, 8]),
-  verifyAIWebhookBody,
+  // verifyAIWebhookBody,
   rfqController.handleAIWebhook,
 );
 
