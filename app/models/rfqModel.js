@@ -1273,7 +1273,7 @@ const rfqModel = {
                     p.id,
                     p.rfq_id,
                     p.product_variant_id,
-                    COALESCE(tp.name, tv.name) AS name,
+                    COALESCE(tp.name, tv.name, 'product_xyz') AS name,
                     p.comment,
                     p.type AS item_type,
                     p.parent_item_id,
