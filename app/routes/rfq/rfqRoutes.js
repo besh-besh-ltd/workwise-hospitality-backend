@@ -130,14 +130,16 @@ RfqRoutes.post(
 
 RfqRoutes.get('/get-terms', rfqController.getTerms);
 
-RfqRoutes.post(
-  '/get-vendors',
-  passportSignIn,
-  acl([2, 8]),
-  validateDbBody.rfq_access_check,
-  validateDbBody.user_id_profileexists,
-  rfqController.getVendors
-);
+// To be removed, not being used in the forntend
+// --
+// RfqRoutes.post(
+//   '/get-vendors',
+//   passportSignIn,
+//   acl([2, 8]),
+//   validateDbBody.rfq_access_check,
+//   validateDbBody.user_id_profileexists,
+//   rfqController.getVendors
+// );
 
 RfqRoutes.post(
   '/get-vendors-for-product',
@@ -182,7 +184,6 @@ RfqRoutes.get(
   acl([2, 8, 10]),
   validateDbBody.user_id_profileexists,
   validateDbBody.rfq_access_check,
-  // rfqController.downloadQuoteResults
   rfqController.downloadQuoteResultsProductWise
 );
 RfqRoutes.get(
@@ -249,10 +250,23 @@ RfqRoutes.post(
   rfqController.searchVariantVendors
 );
 
+// Package vendors for a package-type product
+RfqRoutes.post(
+  '/search-package-vendors',
+  rfqController.searchPackageVendors
+);
+
 RfqRoutes.post(
   '/search-product-by-category',
   rfqController.searchProductByCategory
 );
+
+// Variants of a product
+RfqRoutes.post(
+  '/product-variants',
+  rfqController.getVariantsByProduct
+);
+
 
 RfqRoutes.post(
   '/search-vendor',
@@ -307,7 +321,7 @@ RfqRoutes.post('/initiate-magic-search',
 RfqRoutes.post('/magic-webhook',
   // passportSignIn,
   // acl([2, 8]),
-  verifyAIWebhookBody,
+  // verifyAIWebhookBody,
   rfqController.handleAIWebhook,
 );
 
@@ -331,14 +345,16 @@ RfqRoutes.post('/technical-summary',
   rfqController.addClauseUsingFile
 )
 
-RfqRoutes.get('/process-magic-search-draft',
-  passportSignIn, 
-  validateDbBody.user_id_profileexists,
-  acl([2, 8]),
-  validateDbBody.project_access_check,
-  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
-  rfqController.processMagicSearchDraft
-);
+// NOT IN USE IN THE FRONTEND
+// --
+// RfqRoutes.get('/process-magic-search-draft',
+//   passportSignIn, 
+//   validateDbBody.user_id_profileexists,
+//   acl([2, 8]),
+//   validateDbBody.project_access_check,
+//   // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
+//   rfqController.processMagicSearchDraft
+// );
 
 RfqRoutes.get('/draft-sheets',
   passportSignIn, 
@@ -349,14 +365,16 @@ RfqRoutes.get('/draft-sheets',
   rfqController.getRfqDraftSheets
 );
 
-RfqRoutes.get('/draft-sheet-wise',
-  passportSignIn, 
-  validateDbBody.user_id_profileexists,
-  acl([2, 8]),
-  validateDbBody.project_access_check,
-  // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
-  rfqController.getDraftRfqSheetWise
-);
+// NOT IN USE IN FRONTEND
+// --
+// RfqRoutes.get('/draft-sheet-wise',
+//   passportSignIn, 
+//   validateDbBody.user_id_profileexists,
+//   acl([2, 8]),
+//   validateDbBody.project_access_check,
+//   // schema_posts.magicSearchExcelUpload, // mukul 21-05-2025,  this is not required as we are not uploading any file, need to remove it completely 
+//   rfqController.getDraftRfqSheetWise
+// );
 
 RfqRoutes.post(
   '/send-query-message',
@@ -407,22 +425,6 @@ RfqRoutes.get(
 );
 
 // to create the rfq using magic search rfq feature
-RfqRoutes.post('/magic-search-rfq-create',
-  passportSignIn,
-  validateDbBody.user_id_profileexists,
-  acl([2, 8]),
-  validateDbBody.project_access_check,
-  validateBody(rfqSchemas.create),
-  rfqController.create  
-)
-
-RfqRoutes.post(
-  '/boq/process-and-download',
-  passportSignIn,
-  acl([2, 8]),
-  schema_posts.magicSearchExcelUpload,
-  rfqController.processBoqAndDownload
-);
 
 RfqRoutes.post('/add-clause-using-file',
   passportSignIn,
@@ -555,13 +557,6 @@ RfqRoutes.post('/report/send-on-email',
   rfqController.sendReportOnEmail
 )
 
-RfqRoutes.get(
-  '/rfq-draft-data',
-  passportSignIn,
-  acl([2, 8]),
-  rfqController.getRFQDraftData
-);
-
 RfqRoutes.post(
   '/get-draft-rfqs',
   passportSignIn,
@@ -588,13 +583,6 @@ RfqRoutes.post('/get-draft-vendors/:draftId',
   acl([2, 8]),
   rfqController.getDraftProductVendors
 )
-
-RfqRoutes.post(
-  '/draft-product-vendors',
-  passportSignIn,
-  acl([2, 8]),
-  rfqController.createOrUpdateRfqDraftWithProductVendors
-);
 
 RfqRoutes.post(
   '/save-excel',

@@ -894,7 +894,7 @@ negotiateModule: async (req, res, next) => {
 
     // ✅ Check if product exists
     const productCheck = await rfqModel.checkIfExists(
-      "tbl_rfq_products",
+      "tbl_rfq_items",
       `id = ${productId}`
     );
     if (productCheck.length === 0) {

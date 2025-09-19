@@ -792,11 +792,12 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
               TU.address AS address,
               TUC.company_name,
               COUNT(DISTINCT TR.id)::INT AS rfq_count
-          FROM tbl_rfq_product_vendors TRPV
+          FROM tbl_rfq_item_vendors TRPV
+          JOIN tbl_rfq_items TRP ON TRP.id = TRPV.rfq_item_id
           JOIN tbl_rfq TR
               ON TR.id = TRPV.rfq_id
           JOIN tbl_product_variant TPV
-              ON TPV.id = TRPV.product_variant_id
+              ON TPV.id = TRP.product_variant_id
           JOIN tbl_product TP ON TP.id = TPV.product_id
           JOIN tbl_product_categories TPC
               ON TPC.product_id = TP.id
