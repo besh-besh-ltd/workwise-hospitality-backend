@@ -1801,8 +1801,8 @@ const rfqModel = {
         'products', (
           SELECT json_agg(
             json_build_object(
-              'product_id', TQI.product_variant_id,
-              'variant', TQI.variant,
+              'product_id', TQI.rfq_item_id,
+             -- 'variant', TQI.variant,
               'product_name', TQI.product_name,
               'unit_price', TQI.unit_price,
               'package_price', TQI.package_price,
@@ -2799,8 +2799,8 @@ const productQuery = `
                     ),
                     'quote_details', (
                         SELECT json_agg(json_build_object(
-                            'product_id', TQI.product_variant_id,
-                            'variant', TQI.variant,
+                            'product_id', TQI.rfq_item_id,
+                            -- 'variant', TQI.variant,
                             'product_name', TQI.product_name,
                             'unit_price', TQI.unit_price,
                             'total_price', ${
@@ -2827,7 +2827,7 @@ const productQuery = `
                             ),
                             'rfq_details', (
                                 SELECT json_agg(json_build_object('title', TPS.title, 'value', TPS.value))
-                                FROM tbl_rfq_items_specs TPS 
+                                FROM tbl_rfq_item_specs TPS 
                                 WHERE TPS.rfq_item_id = TQI.rfq_item_id AND TPS.rfq_id = TRP.rfq_id
                             )
                         ))
@@ -2963,8 +2963,8 @@ const productQuery = `
           ARRAY(
           SELECT json_build_object(
             'quote_id', TQFH.quote_id,
-            'product_variant_id', TQFH.product_variant_id,
-            'variant', TQFH.variant,
+           'product_name', RFI.name,
+            -- 'variant', TQFH.variant,
             'vendor_id', TQFH.vendor_id,
             'vendor_name', TU.organization_name,
             'changed_by', _TU.name,
@@ -2981,16 +2981,21 @@ const productQuery = `
               'total_price', TQI.total_price
             )
           )
-          FROM tbl_quote_finalization_history TQFH
-          JOIN tbl_quote_items TQI
-            ON TQI.quote_id = TQFH.quote_id
-            AND TQI.rfq_item_id = TQFH.rfq_item_id
-          JOIN tbl_users TU
-            ON TU.id = TQFH.vendor_id
-          JOIN tbl_users _TU
-            ON _TU.id = TQFH.changed_by
+
+FROM tbl_quote_finalization_history TQFH
+JOIN tbl_quote_items TQI
+  ON TQI.quote_id = TQFH.quote_id
+  AND TQI.rfq_item_id = TQFH.rfq_item_id
+JOIN tbl_rfq_items RFI
+  ON RFI.id = TQFH.rfq_item_id         -- <- needed for RFI.name
+JOIN tbl_users TU
+  ON TU.id = TQFH.vendor_id
+JOIN tbl_users _TU
+  ON _TU.id = TQFH.changed_by
+
+
           WHERE TQFH.rfq_id = TRF.rfq_id 
-            AND TQFH.rfq_item_id = TRF.rfq_item_id 
+            AND TQFH.rfq_item_id = TRF.id 
           ORDER BY TQFH.changed_at DESC
         ) AS "finalization_history",
         (
@@ -3024,7 +3029,7 @@ const productQuery = `
                 'tax_mode', TQI.tax_mode,
                 'total_price', TQI.total_price,
                 'quantity', TQI.quantity,
-                'product_name', TQI.product_name,
+                'product_name', TRF.name,
                 'rfq_no', TQI.rfq_no,
                 'timestamp', TQ.timestamp
               )
@@ -3032,31 +3037,31 @@ const productQuery = `
               JOIN tbl_quotes TQ ON RFQ.id = TQ.rfq_id
               JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
             WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = $3 AND user_type IN (2,8,10))
-            AND TQI.product_variant_id = TRF.product_variant_id
+            AND TQI.rfq_item_id = TRF.id
             AND TQI.unit_price > 0
             AND RFQ.id != $1
           ORDER BY TQ.timestamp DESC
           LIMIT 1
-        ) AS "last_quote_rate",
-          ARRAY(
-            SELECT json_build_object(
-              'product_name', TV.name,
-              'rfq_details', (
-                SELECT json_agg(
-                  json_build_object(
-                    'title', TPS.title,
-                    'value', TPS.value
-                  )
-                )
-                FROM tbl_rfq_item_specs TPS
-                WHERE TPS.rfq_item_id = TRF.id
-                  AND TPS.rfq_id = $1
-              )
-            )
-            FROM tbl_product_variant TV
-            JOIN tbl_product TP ON TP.id = TV.product_id
-            WHERE TV.id = TRF.product_variant_id
-          ) AS "product_details",
+        ) AS "last_quote_rate", ARRAY[
+  json_build_object(
+   'product_name', TRF.name,
+    'specs', (
+      SELECT COALESCE(
+        json_agg(
+          json_build_object('title', TPS.title, 'value', TPS.value)
+          ORDER BY TPS.id
+        ),
+        '[]'::json
+      )
+      FROM tbl_rfq_item_specs TPS
+      WHERE TPS.rfq_item_id = TRF.id
+        AND TPS.rfq_id = $1
+    )
+  )
+] AS "product_details",
+
+
+        
           ARRAY(
             SELECT json_build_object(
               'quote_id', TQI.quote_id,
@@ -3080,7 +3085,7 @@ const productQuery = `
               'finalization', (
                 SELECT json_build_object(
                   'id', TQF.id,
-                  'product_id', TQF.product_variant_id,
+                  'product_id', TQF.rfq_item_id,
                   'timestamp', TQF.timestamp,
 
                   'finilized_by', (
@@ -3191,8 +3196,9 @@ const productQuery = `
                     'id', TH.id,
                     'quote_item_id', TH.quote_item_id,
                     'rfq_id', TH.rfq_id,
-                    'product_id', TH.product_variant_id,
+                    'product_id', TRF.id,
                     'unit_price', TH.unit_price,
+                    'product_name', TRF.name,
                     'package_price', TH.package_price,
                     'tax', TH.tax,
                     'freight_price', ${
@@ -3223,7 +3229,7 @@ const productQuery = `
             FROM tbl_quote_items TQI
             JOIN tbl_quotes TQ ON TQI.quote_id = TQ.id
             WHERE TQI.rfq_id = $1
-              AND TQI.rfq_item_id = TRF.rfq_item_id              
+              AND TQI.rfq_item_id = TRF.id              
               ${TA_Vendors === 'TA' ? vendorCondition : ''}
           ) AS "quotations"
         FROM tbl_rfq_items TRF

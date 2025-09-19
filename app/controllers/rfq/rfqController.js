@@ -2125,7 +2125,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
             const variant = products.updatable.comment[rfqProductId].variant;
             const comment = products.updatable.comment[rfqProductId].comment;
 
-            let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${variant})::INT`;
+            let whereClause = `id = (${rfqProductId})::INT`;
+
 
             const data = {
               comment
@@ -2857,7 +2858,7 @@ const rfqController = {
                   updatableKeys.add(rfqProductId);
                 }
 
-                let whereClause = `rfq_id = (${rfq_id})::INT AND product_variant_id = (${productId})::INT AND variant = (${variant})::INT`;
+                let whereClause = `rfq_id = (${rfq_id})::INT AND rfq_item_id = (${rfqProductId ?? '0'})::INT`;
 
                 const data = {
                   comment
@@ -5100,7 +5101,7 @@ if(item_type === 'PRODUCT'){
             // Get RFQ product ID from the database
             const rfqProductResult = await rfqModel.checkIfExists(
               'tbl_rfq_items',
-              `rfq_id=${rfq_id} AND product_variant_id=${product.product_id} AND variant='${product.variant}'`
+              `rfq_id = (${rfq_id})::INT AND rfq_item_id = (${rfqProductId ?? '0'})::INT`
             );
 
             if (rfqProductResult && rfqProductResult.length > 0) {
