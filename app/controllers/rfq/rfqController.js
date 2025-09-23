@@ -1086,7 +1086,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
 
   const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
       <p style="padding-bottom: 3px;">
-                   Your updated quotation for #${rfq_no} has been successfully shared with ${buyerDetails[0]?.organization_name}. This update keeps you competitive and responsive to buyer requirements.      </p>
+                   Your updated quotation for #${rfq_no} has been successfully shared with ${buyerDetails[0]?.organization_name || buyerDetails[0]?.name || 'the buyer'}. This update keeps you competitive and responsive to buyer requirements.      </p>
                    </p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0]?.token || ""}"
@@ -1748,7 +1748,18 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
   reject_message
 ) => {
   try {
-    const productName = product[0].name;
+    let productName;
+
+    if (Array.isArray(product)) {
+      // If it's an array, take the first element’s name
+      productName = product[0]?.name;
+    } else if (product && typeof product === 'object') {
+      // If it's a single object, use its name
+      productName = product.name;
+    } else {
+      productName = null; // fallback
+    }
+
 
     const vendor_details = await userModel.user_profile_detail(vendor_id);
     const vendor = vendor_details[0];
@@ -8695,7 +8706,7 @@ const rfqController = {
 
       persistence_id = parseInt(persistence_id);
 
-      if((errors && errors.length > 0) || (!jsonFileUrl || !availableSheets)) {
+      if((errors && errors.length > 0) && (!jsonFileUrl || !availableSheets)) {
         await rfqModel.updatePersistenceJobStatus(
           persistence_id,
           PERSISTENCE_STATUSES.FAILED,
