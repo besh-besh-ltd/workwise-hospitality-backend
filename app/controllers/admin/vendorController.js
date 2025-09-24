@@ -690,6 +690,86 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         .end();
     }
   },
+
+  getVendorProfileDocuments: async (req, res, next) => {
+  try {
+    const user_type = req.user.user_type;
+
+    // 🔹 Only allow admin (user_type = 1)
+    if (user_type !== 1) {
+      return res.status(403).json({
+        status: 0,
+        message: "Unauthorized access"
+      });
+    }
+
+    // 🔹 Pagination parameters
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+
+    const { data, total } = await userModel.getAllVendorAssets({ limit, offset });
+
+    return res.status(200).json({
+      status: 1,
+      data,
+      total_items: total,
+      total_pages: Math.ceil(total / limit),
+      current_page: page
+    });
+  } catch (error) {
+    console.error("Error in getVendorProfileDocuments:", error);
+    logError(error);
+    return res.status(500).json({
+      status: 3,
+      message: Config.errorText.value
+    });
+  }
+ },
+
+  approveVendorProfileDocuments: async (req, res, next) => {
+  try {
+    const { id, is_approved } = req.body;
+
+    const user_id = req.user.id;  //for approval 
+
+    
+
+    // Prepare data for update
+    const updateData = {
+      is_approved: is_approved,
+      approved_by : user_id
+    };
+
+    // Call the update model
+    const result = await rfqModel.update(
+      'tbl_vendor_profile', // table_name
+      updateData,           // data to update
+      id,                   // primary_key value   
+    );
+
+    // Check if update was successful
+    if (result &&  result.length > 0) {
+      res.status(200).json({
+        status: 1,
+        message: "Vendor profile document status updated successfully",
+        data: result
+      });
+    } else {
+      res.status(404).json({
+        status: 0,
+        message: "Document not found or no changes made"
+      });
+    }
+
+  } catch (error) {
+    console.error('Error updating vendor document:', error);
+    res.status(500).json({
+      status: 3,
+      message: "Internal server error"
+    });
+  }
+ },
   vendorDropdownList: async (req, res, next) => {
     const search = req.query.search;
     try {

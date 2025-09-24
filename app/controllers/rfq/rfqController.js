@@ -565,6 +565,47 @@ const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret
   }
 };
 
+const sendFollowUpEmailsService = async (payload) => {
+  try {
+    const { buyer, vendor, rfqNumber, rfq_id } = payload;
+    const { name, email } = buyer;
+    const { name: vendor_name } = vendor;
+
+    
+
+    const headerContent = `<h2> Dear ${name},</h2>`;
+    const containerContent = `<div>
+      <p style="font-size: 15px; padding-bottom: 3px;">
+        Vendor <strong>${vendor_name}</strong> has sent you a follow-up mail for RFQ <strong>${rfqNumber}</strong>.
+      </p>
+      
+      <p style="font-size: 15px; padding-bottom: 3px;">
+        The vendor is awaiting your action. Kindly respond at the earliest.
+      </p>
+
+      <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/quote-compare?rfq=${rfq_id}"
+        style="background-color: #2563eb; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 220px; margin: 0 auto; text-decoration: none;">
+        View RFQ & Respond
+      </a>
+    </div>`;
+
+    const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+    let mailRecipients = {
+      from: Config.webmasterMail,
+      to: email,
+      subject: `Work Wise | RFQ ${rfqNumber} Follow-up Notification`,
+      html: dynamicHTML
+    };
+
+    await sendMailWithRetry(mailRecipients);
+    console.log(`Follow-up email sent to buyer ${email} for RFQ ${rfqNumber}`);
+  } catch (error) {
+    throw error;
+  }
+};
+
+
 /**
  * 
  * @param {*} vendor 
@@ -573,37 +614,50 @@ const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret
  * @param {*} products - array 
  * @last_update by mukul on 2023-11-01, for company wise email template
  */
-const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
+const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auction, location) => {
   try {
+    // Validate email addresses
     let organization_name = user?.organization_name || user?.name;
-    const buyerUserId = user?.id || null // 
-    const buyerEmail = user?.email || ""
+    const buyerUserId = user?.id || null;
+    const buyerEmail = user?.email || "";
 
     // Fetch user details of the vendor
+    const techEval = await rfqModel.findAll('tbl_rfq_product_tech_evaluation', { rfq_id: rfqNumber });
+
+   
     const user_details = await userModel.user_profile_detail(vendor.user_id);
-
-    const spocList = await vendorModel.getSpocDetails(vendor.user_id)
-
-    // console.log(" rfq contoller spoc console ", vendor.user_id, spocList)
-
+    const spocList = await vendorModel.getSpocDetails(vendor.user_id);
 
     if (user_details.length > 0) {
       // Insert token into the table and get the token value
       const token = await rfqModel.insertVendorRfqToken(user_details[0].id, rfqNumber);
 
-      // Construct dynamic HTML for products list
-      let productHTML = products.slice(0, 3).map((product) => {
+      // Create a map of products with technical evaluation status
+      const productsWithTechEval = products.map(product => {
+        const hasTechEval = techEval.some(evaluation => evaluation.tbl_rfq_product_id === product.id);
+        return {
+          ...product,
+          hasTechEvaluation: hasTechEval
+        };
+      });
+
+      // Construct dynamic HTML for products list with tech eval info
+      let productHTML = productsWithTechEval.slice(0, 3).map((product) => {
         const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
         return `
             <tr>
-              <td style="font-size: 15px; padding-bottom: 3px;">${product.name}</td>
+              <td style="font-size: 15px; padding-bottom: 3px;">
+                ${product.name}
+                ${product.hasTechEvaluation ? 
+                  '<span style="color: #dc3545; font-size: 12px; margin-left: 5px;">(Technical Evaluation Required)</span>' : 
+                  ''}
+              </td>
               <td style="font-size: 15px; text-align: right; padding-bottom: 3px;">${quantitySpec.value || '--'}</td>
             </tr>
           `;
-      })
-        .join('');
+      }).join('');
 
-      if (products.length > 3) {
+      if (productsWithTechEval.length > 3) {
         productHTML += `
             <tr>
               <td colspan="2" style="text-align: right; padding-bottom: 3px;">
@@ -616,41 +670,63 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
           `;
       }
 
-      const headerContent = ` <div>
-        <h2>Hello ${user_details[0].name}</h2>
-        <p style="font-size:16px;"> Great news! You've received a new enquiry from ${organization_name} </p>
-        </div>`
+      // Add RFQ details section
+      const rfqDetailsHTML = `
+        <div style="margin-bottom: 15px; padding: 10px; background-color: #f8f9fa; border-radius: 5px;">
+          <h4 style="margin-bottom: 10px; font-size: 16px;">RFQ Details:</h4>
+          <p style="margin: 5px 0; font-size: 14px;">
+            <strong>Delivery Location:</strong> ${location || 'Not specified'}
+          </p>
+          <p style="margin: 5px 0; font-size: 14px;">
+            <strong>Reverse Auction:</strong> ${reverse_auction ? 'Enabled' : 'Disabled'}
+          </p>
+          ${techEval.length > 0 ? 
+            `<p style="margin: 5px 0; font-size: 14px; color: #dc3545;">
+              <strong>Note:</strong> Some products require technical evaluation
+            </p>` : 
+            ''}
+        </div>
+      `;
+
+      const headerContent = ` 
+        <div>
+          <h2>Hello ${user_details[0].name}</h2>
+          <p style="font-size:16px;">Great news! You've received a new enquiry from ${organization_name}</p>
+        </div>`;
 
       // Construct the email content with the list of products
-      const containerContent = `   <div>
-      <h3 style="font-family: 'Roboto', sans-serif; text-align: center; font-size: 24px; margin-bottom: 8px;">
-        Enquiry Details
-      </h3>
+      const containerContent = `   
+        <div>
+          <h3 style="font-family: 'Roboto', sans-serif; text-align: center; font-size: 24px; margin-bottom: 8px;">
+            Enquiry Details
+          </h3>
+          
+          ${rfqDetailsHTML}
 
           <table style="width: 100%; padding: 8px;">
             <tbody>
-            ${productHTML}
-            <tr>
-            <td></td>
-          </tr>
+              ${productHTML}
+              <tr>
+                <td></td>
+              </tr>
             </tbody>
           </table>
 
-            <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}
-        style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-        Submit Your Quote Now
-      </a>
+          <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}
+            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+            Submit Your Quote Now
+          </a>
 
-      <p style="margin-top:20px" >
-               Submit your quote promptly to access this opportunity with ${organization_name} and stand out as a preferred vendor.
-      </p>
-
+          <p style="margin-top:20px">
+            Submit your quote promptly to access this opportunity with ${organization_name} and stand out as a preferred vendor.
+            ${reverse_auction ? '<strong>This RFQ includes reverse auction functionality.</strong>' : ''}
+          </p>
         </div>`;
 
-      const dynamicHTML = generateEmailTemplate(headerContent, containerContent, buyerUserId)
+      const dynamicHTML = generateEmailTemplate(headerContent, containerContent, buyerUserId);
 
-        const org_name = user_details[0].organization_name || user_details[0].name || ""
-       let mailRecipients = {
+      const org_name = user_details[0].organization_name || user_details[0].name || "";
+      let mailRecipients = {
         from: `${organization_name} ${Config.masterEmail}`,
         subject: `New RFQ Opportunity from ${organization_name}`,
         html: dynamicHTML
@@ -658,49 +734,54 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
 
       if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
-        // mailRecipients.cc = [user_details[0].email];
       } else {
         mailRecipients.to = user_details[0].email;
-        // mailRecipients.cc = buyerEmail
       }
 
-      // console.log(" rfq contoller 377 spoc console ", user_details[0]?.id, spocList)
+      // Construct an array of product descriptions
+      const productDescriptions = productsWithTechEval.map((product) => {
+        const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
+        const techEvalText = product.hasTechEvaluation ? ' (Tech Evaluation Required)' : '';
+        return `${product.name} - ${quantitySpec.value || '--'} ${product.unit || ''}${techEvalText}`.trim();
+      }).join(', ');
 
-            // Construct an array of product descriptions
-            const productDescriptions = products.map((product) => {
-              const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
-              return `${product.name} - ${quantitySpec.value || '--'} ${product.unit || ''}`.trim();
-            }).join(', ');
       sendMail(mailRecipients);
 
-      // here we have to implement await Promise.allSettled(promises); for better perfomance
-      spocList.map( async (spoc) =>  {
+      // Send WhatsApp notifications to SPOCs
+      await Promise.allSettled(
+        spocList.map(async (spoc) => {
+          if (spoc?.mobile) {
+            const payloadForWhatsApp = {
+              mobile: spoc.mobile,
+              vendorName: user_details[0]?.organization_name || user_details[0]?.name || "",
+              buyerName: organization_name,
+              rfq_id: rfqNumber,
+              token: token,
+              productDetails: productDescriptions,
+              location: location || 'Not specified',
+              reverseAuction: reverse_auction ? 'Enabled' : 'Disabled',
+              hasTechEvaluation: techEval.length > 0 ? 'Some products require technical evaluation' : ''
+            };
+            
+            await whatsappNotificationFluxChat.vendorReceivesRFQNotification(payloadForWhatsApp);
+          }
+        })
+      );
 
-        if(spoc?.mobile){
+      // Send WhatsApp notification to the main vendor contact
       const payloadForWhatsApp = {
-        mobile: spoc.mobile, // Assuming `mobile` is a property on the `vendor` object
-        vendorName: user_details[0]?.organization_name || user_details[0]?.name || "" ,
-        buyerName: organization_name ,
+        mobile: user_details[0]?.mobile,
+        vendorName: user_details[0]?.organization_name || user_details[0]?.name || "",
+        buyerName: organization_name,
         rfq_id: rfqNumber,
         token: token,
-        productDetails: productDescriptions // Joining all product details into a single string for message
+        productDetails: productDescriptions,
+        location: location || 'Not specified',
+        reverseAuction: reverse_auction ? 'Enabled' : 'Disabled',
+        hasTechEvaluation: techEval.length > 0 ? 'Some products require technical evaluation' : ''
       };
-      
+
       await whatsappNotificationFluxChat.vendorReceivesRFQNotification(payloadForWhatsApp);
-      }
-      });
-
-            // Here, productDescriptions will be an array of strings like ["Product1 - 10 Units", "Product2 - 5 Units"]
-       const payloadForWhatsApp = {
-         mobile: user_details[0]?.mobile, // Assuming `mobile` is a property on the `vendor` object
-         vendorName: user_details[0]?.organization_name || user_details[0]?.name || "" ,
-         buyerName: organization_name ,
-         rfq_id: rfqNumber,
-         token: token,
-         productDetails: productDescriptions // Joining all product details into a single string for message
-       };
-
-       await whatsappNotificationFluxChat.vendorReceivesRFQNotification(payloadForWhatsApp);
 
       // Send notification if applicable
       if (user_details[0].endpoint) {
@@ -714,7 +795,10 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products) => {
           title: `RFQ created`,
           message: `RFQ created successfully`,
           additional_data: {
-            user_type: user_details[0].user_type
+            user_type: user_details[0].user_type,
+            location: location,
+            reverse_auction: reverse_auction,
+            has_tech_evaluation: techEval.length > 0
           }
         };
 
@@ -876,7 +960,7 @@ const sendMailToVendorsForTargetPrice = async (
 // Update the sendMailtoVendors function
 const sendMailtoVendors = async (req, rfqNumber) => {
   try {
-    const {reverse_auction} = req.body;
+    const {reverse_auction , location} = req.body;
     const vendorProductMap = {};
 
     const products = await rfqModel.getProductsByRfqId(rfqNumber);
@@ -924,7 +1008,7 @@ const sendMailtoVendors = async (req, rfqNumber) => {
     const emailPromises = Object.keys(vendorProductMap).map(async (vendorId) => {
       const vendorInfo = vendorProductMap[vendorId];
       try {
-        await sendMailEachVendor(vendorInfo.vendorDetails, req.user, rfqNumber, vendorInfo.products);
+        await sendMailEachVendor(vendorInfo.vendorDetails, req.user, rfqNumber, vendorInfo.products ,reverse_auction , location );
       
       } catch (error) {
         console.error(`Failed to send email to vendor ${vendorId}:`, error);
@@ -2666,6 +2750,9 @@ const rfqController = {
 
     try {
       let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction, selectedSheets } = req.body;
+
+
+      console.log(" rfq controller  create body ", req.body)
       const user_id = req.user.id;
       if (!rfq_id) {
         return res
@@ -3823,6 +3910,26 @@ const rfqController = {
       });
     }
   },
+
+  getVendorQuoteStatus : async (req, res) => {
+    try {
+      const { rfq_id} = req.params;
+      const user_id = req.user.id;
+      const response = await rfqModel.findAll("tbl_quote_activity", {rfq_id});
+      const rfqClosed = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}  AND status = 2`);
+
+      
+      res.status(200).json({
+        status: 1,
+        data:  response || [],
+        rfqClosed: rfqClosed && rfqClosed.length > 0 ? true : false
+      });
+    }
+    catch(error)
+    {
+      console.log(error)
+    }
+    },
 
   getRFQDraftData: async (req, res) => {
     try {
@@ -5636,7 +5743,7 @@ const rfqController = {
   },
   getQuotesByRfqById: async (req, res, next) => {
     let rfq_id = req.params.id;
-    const { TA_Vendors, no_freight, rfq_product_id } = req.query;
+    const { TA_Vendors, no_freight, rfq_product_id , pageSource } = req.query;
     const { id, company_id } = req.user;
 
     try {
@@ -5650,6 +5757,27 @@ const rfqController = {
       );
       // rfQItem = filterQuotations(rfQItem);
       // rfQItem = processQuotations(rfQItem);
+       if (pageSource === "quote_compare") {
+      // 👇 Check if an entry already exists
+      const existingActivity = await rfqModel.checkIfExists(
+        'tbl_quote_activity',
+        `rfq_id = ${rfq_id} AND created_by = ${req.user.id} AND current_status = 'QC'`
+      );
+
+      if (existingActivity.length === 0) {
+        const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+          rfq_id: rfq_id,
+          current_status: "QC",
+          created_by: req.user.id
+        });
+        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+      } else {
+        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+      }
+    } else {
+      console.log(`Skipped insert for pageSource: ${pageSource}`);
+    }
+
       res
         .status(200)
         .json({
@@ -5746,7 +5874,13 @@ const rfqController = {
 
         product.quotations = updatedQuotations;
       });
+       const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+                                                          rfq_id: rfq_id,
+                                                          current_status: "QC",
+                                                          created_by: req.user.id
+                                                        });
 
+      console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
       res
         .status(200)
         .json({
@@ -5791,6 +5925,34 @@ const rfqController = {
         .end();
     }
   },
+
+  getQuoteHistoryForvendor : async (req, res, next) => {
+    const { variant_id } = req.query;
+    const { id } = req.user;
+    try {
+      if (variant_id) {
+        const data = await rfqModel.getQuoteHistoryForvendor(id, variant_id);
+        res
+          .status(200)
+          .json({
+            status: 1,
+            data: data
+          })
+          .end();
+      }
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
+
   closeRFQ: async (req, res, next) => {
     let rfq_id = req.params.id;
     const { id } = req.user;
@@ -6293,7 +6455,25 @@ const rfqController = {
             result
           };
         });
-
+      
+      // 👇 Check if an entry already exists 
+      //Record the finalization activity with status 'FIN'
+      const existingActivity = await rfqModel.checkIfExists(
+        'tbl_quote_activity',
+        `rfq_id = ${rfq_id} AND current_status = 'FIN' AND created_by = ${req.user.id}`
+      );
+      console.log("Existing activity check:", existingActivity);
+      if (existingActivity.length === 0) {
+        const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+          rfq_id: rfq_id,
+          current_status: "FIN",
+          created_by: req.user.id
+        });
+        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+      } else {
+        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+      }
+    
         return res.status(200).json({
           status: 1,
           message: response.reFinalized
@@ -8808,6 +8988,58 @@ const rfqController = {
     }
   },
 
+sendFollowUpEmails: async (req, res) => {
+  try {
+    const payload = req.body;
+    const user_id = req.user?.id ?? null;
+    const { rfq_id } = payload;
+
+    if (!rfq_id || !user_id) {
+      return res.status(400).json({
+        status: 2,
+        message: "Missing rfq_id or user_id",
+      });
+    }
+
+    // Step 1: Check how many reminders already sent
+    const reminders = await rfqModel.findAll('tbl_rfq_activity', {
+      rfq_id: Number(rfq_id),
+      user_id: Number(user_id)
+    });
+
+
+    if (reminders && reminders.length >= 2) {
+      return res.json({
+        status: 2,
+        message: "Maximum number of follow-ups reached",
+      });
+    }
+
+    // Step 2: Insert activity record
+    await rfqModel.insert("tbl_rfq_activity", {
+      rfq_id: Number(rfq_id),
+      user_id: Number(user_id),
+    });
+
+    // Step 3: Send email
+    await sendFollowUpEmailsService(payload);
+
+    return res.json({
+      status: 1,
+      message: "Follow up email sent successfully",
+    });
+
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({
+      status: 3,
+      message: "Something went wrong while sending follow up emails, please try again!",
+      error,
+    });
+  }
+},
+
+
 
   tenderSummary : async (req , res) =>{
 
@@ -9821,7 +10053,7 @@ const rfqController = {
     }
   },
   negotiatePrice: async (req, res) => {
-    const { productId, vendorIds, targetPrice } = req.body;
+    const { productId, vendorIds, targetPrice , rfq_id} = req.body;
     const user_id = req.user.id;
     try {
       // Create payload for multiple vendors
@@ -9853,18 +10085,31 @@ const rfqController = {
         'tbl_rfq_product_target_price'
       );
 
-      console.log(
-        ' vendorProductList  , targetPrice , user_id ',
-        vendorProductList,
-        targetPrice,
-        user_id
-      );
 
       await sendMailToVendorsForTargetPrice(
         vendorProductList,
         targetPrice,
         user_id
       );
+
+    
+      // 👇 Check if an entry already exists
+      const existingActivity = await rfqModel.checkIfExists(
+        'tbl_quote_activity',
+        `rfq_id = ${rfq_id} AND current_status = 'NEG' AND created_by = ${req.user.id}`
+      );
+      console.log("Existing activity check:", existingActivity);
+      if (existingActivity.length === 0) {
+        const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+          rfq_id: rfq_id,
+          current_status: "NEG",
+          created_by: req.user.id
+        });
+        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+      } else {
+        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+      }
+    
 
       res.json({
         status: 1,
@@ -10228,23 +10473,46 @@ processBoqAndDownload : async (req, res) => {
     }
   },
 
-  getClauses: async (req, res) => {
-    try {
-      const rfq_id = req.params.id;
+getClauses: async (req, res) => {
+  try {
+    const rfq_id = req.params.id;
+    const { pageSource } = req.query;
 
-      const result = await rfqModel.getClauses(rfq_id);
-     
+    const result = await rfqModel.getClauses(rfq_id);
 
-      res.status(200).json(result).end();
-    } catch (error) {
-      logError(error);
-      res.status(500).json({
-        success: false,
-        message: 'Error in deleting clause.',
-        error: error.message
-      });
+    if (pageSource === "tech_evaluation") {
+      // 👇 Check if an entry already exists
+      const existingActivity = await rfqModel.checkIfExists(
+        'tbl_quote_activity',
+        `rfq_id = ${rfq_id} AND current_status = 'TE' AND created_by = ${req.user.id}`
+      );
+      console.log("Existing activity check:", existingActivity);
+      if (existingActivity.length === 0) {
+        const insertIntoQuoteActivity = await rfqModel.insertIntoQuoteActivity({
+          rfq_id: rfq_id,
+          current_status: "TE",
+          created_by: req.user.id
+        });
+        console.log("Inserted value into quote activity:", insertIntoQuoteActivity);
+      } else {
+        console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
+      }
+    } else {
+      console.log(`Skipped insert for pageSource: ${pageSource}`);
     }
-  },
+
+    res.status(200).json(result).end();
+  } catch (error) {
+    logError(error);
+    res.status(500).json({
+      success: false,
+      message: 'Error in fetching clauses.',
+      error: error.message
+    });
+  }
+},
+
+
 
   addTechComment: async (req, res) => {
     try {
