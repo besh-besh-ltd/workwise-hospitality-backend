@@ -28,7 +28,7 @@ import generalModel from '../../models/generalModel.js';
 import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
-import { initiatePO } from '../po/purchaseOrderController.js';
+import { draftPO } from '../po/purchaseOrderController.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
@@ -6277,6 +6277,26 @@ const rfqController = {
     }
   },
 
+  getExistingPO: async (req, res) => {
+    try {
+      const { vendor_id, rfq_id } = req.query;
+      const user = req.user;
+
+      const existingPOS = await rfqModel.getDraftPOByVendor(vendor_id, rfq_id, user);
+
+      return res.json({
+        status: 1, 
+        existingPOS
+      })
+    } catch (error) {
+      logError(error);
+      res.status(400).json({
+        status: 3,
+        message: "Error fetching existing PO"
+      });
+    }
+  },
+
   finalize: async (req, res, next) => {
     const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, variant } =
       req.body;
@@ -6328,21 +6348,33 @@ const rfqController = {
           //     })
           //     .end();
 
-          const isFinalApprover = t.oneOrNone(
+          const isFinalApprover = await t.oneOrNone(
             `SELECT * FROM tbl_approval_hierarchy
             WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND approval_level = -1`,
             [req.user.company_id, req.user.id, 'po']
           );
 
           if(isFinalApprover) 
-            return res
-              .status(400)
-              .json({
-                status: 3,
-                message:
-                  'Failed to finalize a vendor as you are not the part of your company\'s approval hierarchy!'
-              })
-              .end();
+            throw new Error('Failed to finalize a vendor as you are not the part of your company\'s approval hierarchy!')
+
+          const isEligibleInHierarcy = await t.oneOrNone(
+            `SELECT 1
+              FROM tbl_approval_hierarchy
+              WHERE company_id = $1
+                AND user_id = $2 
+                AND hierarchy_type = $3
+              UNION
+              SELECT 1
+              WHERE NOT EXISTS (
+                SELECT 1
+                FROM tbl_approval_hierarchy
+                WHERE company_id = $1
+              )`,
+            [req.user.company_id, req.user.id, 'po']
+          );
+
+          if(!isEligibleInHierarcy)
+            throw new Error('Failed to finalize a vendor, as you don\'t belong to the company\'s approval hierarchy!')
 
           let alreadyExists = await rfqModel.checkIfExists(
             'tbl_quote_finalization',
@@ -6402,7 +6434,12 @@ const rfqController = {
             vendor_id,
             rfq_id
           );
-
+          
+          await userModel.mapBuyerToVendor(req.user.id, vendor_id);
+          
+          // Pre-initiate PO as if this throws error after this, it will trigger mail without ever finalizing anyone!
+          const result = await draftPO(req.body, req.user, t);
+          
           await sendWinningNotificaion(
             vendorNonLoginRfqAccessToken,
             vendor_id,
@@ -6412,23 +6449,6 @@ const rfqController = {
             winning_vendor_email,
             winning_vendor_name
           );
-
-          await userModel.mapBuyerToVendor(req.user.id, vendor_id);
-
-          // Pre-initiate PO as if this throws error after this, it will trigger mail without ever finalizing anyone!
-          const result = await initiatePO(req.body, req.user, t);
-          if (result.approval_required) {
-            const purchaseOrder = await t.oneOrNone(
-              `SELECT * FROM tbl_rfq_purchase_order
-              WHERE id = $1`,
-              [result.po_id]
-            );
-
-            await sendApprovalNotification(
-              purchaseOrder,
-              result.current_approver_id
-            );
-          }
 
           if (reFinalized) {
             const lostVendorDetails = await userModel.user_profile_detail(

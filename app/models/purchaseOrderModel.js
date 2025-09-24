@@ -14,7 +14,7 @@ const getNextPONumber = async () => {
   });
 };
 
-export const initiatePurchaseOrder = async (rfq_id, project_id, quote_id, total_value, product_info, initiated_by, company_id, user, t) => {
+export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, t) => {
     try {
       const { rfq_product_id, quantity, unit_price, finalized_vendor_id } =
         product_info;
@@ -22,7 +22,7 @@ export const initiatePurchaseOrder = async (rfq_id, project_id, quote_id, total_
       // 1. Check if a pending PO already exists for this RFQ Product
       const existing = await t.oneOrNone(
         `SELECT id FROM tbl_rfq_purchase_order
-      WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = $3`,
+      WHERE rfq_id = $1 AND $2 = ANY(rfq_product_id) AND status = $3`,
         [rfq_id, rfq_product_id, PO_STATUSES.PENDING_APPROVAL]
       );
 
@@ -30,35 +30,86 @@ export const initiatePurchaseOrder = async (rfq_id, project_id, quote_id, total_
         await t.none(
           `UPDATE tbl_rfq_purchase_order
           SET status = $3, updated_at = NOW()
-          WHERE rfq_id = $1 AND rfq_product_id = $2`,
+          WHERE rfq_id = $1 AND $2 = ANY(rfq_product_id)`,
           [rfq_id, rfq_product_id, PO_STATUSES.CANCELLED]
         );
       }
 
-      // 2. Insert new PO record
-      const poNumber = await getNextPONumber();
-      const po = await t.one(
-        `INSERT INTO tbl_rfq_purchase_order (
-          rfq_id, project_id, quote_id, po_number, total_value, rfq_product_id, quantity,
-          unit_price, finalized_vendor_id, initiated_by, status
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-      RETURNING id`,
-        [
-          rfq_id,
-          project_id,
-          quote_id,
-          poNumber,
-          total_value,
-          rfq_product_id,
-          quantity,
-          unit_price,
-          finalized_vendor_id,
-          initiated_by,
-          PO_STATUSES.PENDING_APPROVAL
-        ]
-      );
+      let po = null;
 
+      if(existing_po_id) {
+        if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id]))) 
+          throw new Error("No Purchase Order found from id:", existing_po_id);
+
+        po = await t.one(
+          `UPDATE tbl_rfq_purchase_order 
+            SET
+              rfq_product_id = array_append(rfq_product_id, $1),
+              total_value = total_value + $2,
+              quantity = quantity + $3,
+              unit_price = unit_price + $4
+
+            WHERE id = $5
+            RETURNING id`,
+          [
+            rfq_product_id,
+            total_value,
+            quantity,
+            unit_price,
+            existing_po_id
+          ]
+        );
+      } else {
+        // 2. Insert new PO record
+        const poNumber = await getNextPONumber();
+        po = await t.one(
+          `INSERT INTO tbl_rfq_purchase_order (
+            rfq_id, project_id, quote_id, po_number, total_value, rfq_product_id, quantity,
+            unit_price, finalized_vendor_id, initiated_by, status
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          RETURNING id`,
+          [
+            rfq_id,
+            project_id,
+            quote_id,
+            poNumber,
+            total_value,
+            [rfq_product_id],
+            quantity,
+            unit_price,
+            finalized_vendor_id,
+            initiated_by,
+            PO_STATUSES.DRAFT
+          ]
+        );
+      }
+
+      return {
+        po_id: po.id,
+        status: true,
+        message: "PO has been drafted successfully!"
+      };
+    } catch (error) {
+      throw error;
+    }
+};
+
+export const initiatePurchaseOrder = async (po_id, initiator) => {
+  try {
+    return await db.tx(async t => {
+      const purchaseOrder = await t.oneOrNone(
+        `SELECT * FROM tbl_rfq_purchase_order
+        WHERE id = $1`,
+        [po_id]
+      );
+  
+      if(!purchaseOrder) {
+        throw new Error("No Purchase Order found by id:", po_id);
+      }
+  
+      const { rfq_id, project_id, total_value, rfq_product_id, quantity, unit_price, finalized_vendor_id } = purchaseOrder;
+  
       // 3. Call Approval Logic
       const meta = {
         rfq_id,
@@ -68,34 +119,35 @@ export const initiatePurchaseOrder = async (rfq_id, project_id, quote_id, total_
         unit_price,
         finalized_vendor_id,
         total_value,
-        po_id: po.id
+        po_id: purchaseOrder.id
       };
-
+  
       const approvalResult = await generalModel.initiateApproval(
         AVAILABLE_HIERARCHY_TYPES.po.type,
-        po.id,
-        company_id,
-        initiated_by,
+        purchaseOrder.id,
+        initiator.company_id,
+        initiator.id,
         meta,
         {
           exist: `You cannot change the finalized vendor because an approved Purchase Order already exists for them.`
         },
         t,
       );
-
+  
       // 4. If no further approval required → mark PO as approved
       if (!approvalResult.approval_required) {
-        await markPOStatusChange(po.id, t, false, user);
+        await markPOStatusChange(purchaseOrder.id, t, false, initiator);
       }
-
+  
       return {
-        po_id: po.id,
+        po_id: purchaseOrder.id,
         approval_required: approvalResult.approval_required,
         current_approver_id: approvalResult.current_approver_id ?? null
       };
-    } catch (error) {
-      throw error;
-    }
+    })
+  } catch (error) {
+    throw error;
+  }
 };
 
 export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filters = {}) => {
@@ -143,10 +195,20 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
                 PRJ.name AS project_name,
                 TU.name AS initiated_by,
                 CASE WHEN trx.current_approver_id = $2 THEN TRUE ELSE FALSE END AS is_approver,
-                JSON_BUILD_OBJECT(
-                    'id', TPV.id,
-                    'name', TPV.name
-                ) AS product_details,
+                COALESCE(
+                (
+                  SELECT JSON_AGG(
+                      JSON_BUILD_OBJECT(
+                          'id', TPV.id,
+                          'name', TPV.name
+                      )
+                  )
+                  FROM tbl_rfq_products TRP
+                  JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
+                  WHERE TRP.id = ANY(po.rfq_product_id)
+                ),
+                '[]'::json
+              ) AS product_details,
                 CASE
                   WHEN trx.id IS NOT NULL THEN json_build_object(
                     'id', trx.id,
@@ -179,8 +241,6 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
          LEFT JOIN tbl_approval_hierarchy_transactions trx
            ON trx.hierarchy_type = 'po'
            AND trx.target_entity_id = po.id
-        JOIN tbl_rfq_products TRP ON TRP.id = po.rfq_product_id
-        JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
         JOIN tbl_users TU ON TU.id = po.initiated_by
         JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
          ${whereClause}
@@ -198,13 +258,13 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
         values
       );
 
-      const approverLevel = await t.one(
+      const approverLevel = await t.oneOrNone(
         `SELECT approval_level FROM tbl_approval_hierarchy TAH
          WHERE user_id = $1 AND hierarchy_type = 'po'`,
          [user_id]
       )
 
-      return [data, count, approverLevel];
+      return [data, count, approverLevel || -1];
     });
 
     return {
@@ -240,13 +300,21 @@ export const getPODetailsById = async (po_id, user_id) => {
               ) AS logged_in_user,
               TU.name AS initiated_by_name,
               CASE WHEN trx.current_approver_id = $2 THEN TRUE ELSE FALSE END AS is_approver,
-              
-              JSON_BUILD_OBJECT(
-                  'id', TPV.id,
-                  'name', TPV.name,
-                  'product_id', TPV.product_id
+              COALESCE(
+                (
+                  SELECT JSON_AGG(
+                      JSON_BUILD_OBJECT(
+                          'id', TPV.id,
+                          'name', TPV.name,
+                          'product_id', TPV.product_id
+                      )
+                  )
+                  FROM tbl_rfq_products TRP
+                  JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
+                  WHERE TRP.id = ANY(po.rfq_product_id)
+                ),
+                '[]'::json
               ) AS product_details,
-              
               CASE
                 WHEN trx.id IS NOT NULL THEN json_build_object(
                   'id', trx.id,
@@ -357,6 +425,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                 FROM tbl_quote_items TQ
                 JOIN tbl_quotes TQuotes ON TQ.quote_id = TQuotes.id
                 JOIN tbl_users TUser ON TUser.id = TQuotes.created_by
+                JOIN tbl_rfq_products TRP ON TRP.id = ANY(po.rfq_product_id)
                 WHERE PO.rfq_id   = TQ.rfq_id
                   AND TQ.product_variant_id = TRP.product_variant_id
                   AND TQ.variant = TRP.variant
@@ -367,10 +436,7 @@ export const getPODetailsById = async (po_id, user_id) => {
          ON trx.hierarchy_type = 'po'
          AND trx.target_entity_id = po.id
        LEFT JOIN tbl_projects PD ON PD.id = po.project_id
-
        LEFT JOIN tbl_users trx_user ON trx_user.id = trx.current_approver_id
-       JOIN tbl_rfq_products TRP ON TRP.id = po.rfq_product_id
-       JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
        JOIN tbl_users TU ON TU.id = po.initiated_by
        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2

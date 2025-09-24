@@ -233,6 +233,13 @@ RfqRoutes.post(
   validateDbBody.rfq_access_check,
   rfqController.sendSelectiveReminder
 );
+
+RfqRoutes.get(
+  '/get-existing-po',
+  passportSignIn,
+  rfqController.getExistingPO
+);
+
 RfqRoutes.post(
   '/finalize',
   passportSignIn,

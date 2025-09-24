@@ -5,6 +5,7 @@ import userModel from './userModel.js';
 import cmsModel from './cmsModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
+import { PO_STATUSES } from '../util/constants.js';
 
 
 const rfqModel = {
@@ -2761,6 +2762,10 @@ LIMIT 1;`;
     no_freight,
     rfq_product_id
   ) => {
+    if(rfq_product_id) {
+      rfq_product_id = rfq_product_id.split(",").map(Number);
+    }
+
     return new Promise(function (resolve, reject) {
       const vendorCondition = `
         AND EXISTS (
@@ -2998,7 +3003,7 @@ LIMIT 1;`;
                 WHERE TPS.product_variant_id = TRP.product_variant_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
             ) AS "product_specs"
             FROM tbl_rfq_products TRP WHERE TRP.rfq_id=$1
-            ${rfq_product_id ? 'AND TRP.id = $4' : ''}`;
+            ${rfq_product_id ? 'AND TRP.id = ANY($4)' : ''}`;
 
       db.query(mainQuery, [id, user_id, company_id, rfq_product_id])
         .then(function (data) {
@@ -3083,6 +3088,10 @@ LIMIT 1;`;
     no_freight,
     rfq_product_id
   ) => {
+    if(rfq_product_id) {
+      rfq_product_id = rfq_product_id.split(",").map(Number);
+    }
+
     return new Promise(function (resolve, reject) {
       const vendorCondition = `
       AND EXISTS (
@@ -3382,7 +3391,7 @@ LIMIT 1;`;
           ) AS "quotations"
         FROM tbl_rfq_products TRF
         WHERE TRF.rfq_id = $1
-        ${rfq_product_id ? `AND TRF.id = $4` : ''}
+        ${rfq_product_id ? `AND TRF.id = ANY($4)` : ''}
         ;`;
 
       db.query(mainQuery, [id, user_id, company_id, rfq_product_id])
@@ -8560,6 +8569,19 @@ where tq.created_by = $1 and tqi.product_variant_id = $2;
 
         return true;
       });
+    } catch (error) {
+      throw error;
+    }
+  },
+
+  getDraftPOByVendor: async (vendor_id, rfq_id, initiator) => {
+    try {
+      const existings = await db.any(
+        `SELECT PO.* FROM tbl_rfq_purchase_order PO WHERE status = $1 AND finalized_vendor_id = $2 AND rfq_id = $3`, 
+        [PO_STATUSES.DRAFT, vendor_id, rfq_id, initiator.company_id]
+      );
+
+      return existings;
     } catch (error) {
       throw error;
     }

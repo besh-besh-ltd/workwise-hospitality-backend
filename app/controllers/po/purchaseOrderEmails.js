@@ -15,7 +15,7 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
     else reject('User not found!');
 
     let product = await db.oneOrNone(
-      `SELECT P.id, P.name FROM tbl_rfq_products trp JOIN tbl_product_variant P ON P.id = trp.product_variant_id WHERE trp.id = $1`,
+      `SELECT P.id, P.name FROM tbl_rfq_products trp JOIN tbl_product_variant P ON P.id = trp.product_variant_id WHERE trp.id = ANY($1)`,
       [purchaseOrder.rfq_product_id]
     );
 
@@ -81,7 +81,7 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
         if(company) company = company[0];
 
         const product = await db.one(
-            `SELECT P.id, P.name FROM tbl_rfq_products TRP JOIN tbl_product_variant P ON TRP.product_variant_id = P.id WHERE TRP.id = $1`,
+            `SELECT P.id, P.name FROM tbl_rfq_products TRP JOIN tbl_product_variant P ON TRP.product_variant_id = P.id WHERE TRP.id = ANY($1)`,
             [purchaseOrder.rfq_product_id]
         )
 
