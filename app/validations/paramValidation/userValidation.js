@@ -66,6 +66,28 @@ const store_document = multerS3({
   }
 });
 
+const store_vendor_document = multerS3({
+  s3: s3Client,
+  bucket: process.env.AWS_S3_BUCKET,
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const newFileName = `${Date.now()}-${uuidv4()}${ext}`;
+
+    let folder = "vendor-documents";
+    if (file.mimetype.startsWith("image/")) {
+      folder = "vendor-images";
+    } else if (file.mimetype.startsWith("video/")) {
+      folder = "vendor-videos";
+    }
+
+    cb(null, `${folder}/${newFileName}`);
+  }
+});
+
+
+
+
 
 // var store_document = multer.diskStorage({
 //   destination: function (req, file, callback) {
@@ -602,7 +624,6 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      
       res.status(400).json({
         status: 3,
         message: 'server error'
@@ -796,20 +817,15 @@ const schema_posts = {
   },
   upload_user_document: async (req, res, next) => {
     try {
-      
-
       var upload = multer({
         storage: store_document,
         limits: {
           // fileSize: 2000000 // Compliant: 8MB
           fileSize: 26214400 // Compliant: 25MB, changes by mukul, 27-11-2024
-        },
-       
+        }
       }).fields([{ name: 'file', maxCount: 8 }]);
       upload(req, res, async function (err) {
-      
         if (err) {
-         
           let data = {};
           data.file = err;
           res
@@ -824,13 +840,41 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
       res.status(400).json({
         status: 3,
         message: 'server error'
       });
     }
   },
+  upload_vendor_document: async (req, res, next) => {
+    try {
+      const upload = multer({
+        storage: store_vendor_document,
+        limits: {
+          fileSize: 26214400 // 25MB limit
+        }
+      }).fields([
+        { name: 'file', maxCount: 8 } // generic files/images
+        // if you want separate inputs for videos: { name: "video", maxCount: 3 }
+      ]);
+
+      upload(req, res, function (err) {
+        if (err) {
+          return res.status(400).json({
+            status: 2,
+            errors: { file: err }
+          });
+        }
+        next();
+      });
+    } catch (err) {
+      res.status(400).json({
+        status: 3,
+        message: 'server error'
+      });
+    }
+  },
+
   upload_document_without_auth: async (req, res, next) => {
     try {
       var upload = multer({
@@ -954,9 +998,6 @@ const schema_posts = {
   },
   buyerExcelUploadVendorFileHandler: async (req, res, next) => {
     try {
-
-
-
       let upload = multer({
         storage: store_buyer_excel_upload_vendor_file,
         limits: {
@@ -974,21 +1015,23 @@ const schema_posts = {
         }
       }).single('file');
       upload(req, res, async function (err) {
-       
-      // Check for isPrivate field
-      const isPrivate = !req.body.private ? undefined : parseInt(req.body.is_private);
-      if (isPrivate !== undefined) { // Check if isPrivate is provided
-        if (isPrivate !== 0 && isPrivate !== 1) {
-          res
-          .status(400)
-          .json({
-            status: 2,
-            "message":'Invalid isPrivate value (must be either 0 or 1)' 
-          })
-          .end();
-         return 
+        // Check for isPrivate field
+        const isPrivate = !req.body.private
+          ? undefined
+          : parseInt(req.body.is_private);
+        if (isPrivate !== undefined) {
+          // Check if isPrivate is provided
+          if (isPrivate !== 0 && isPrivate !== 1) {
+            res
+              .status(400)
+              .json({
+                status: 2,
+                message: 'Invalid isPrivate value (must be either 0 or 1)'
+              })
+              .end();
+            return;
+          }
         }
-      }
 
         if (err) {
           let data = {};
@@ -1011,7 +1054,6 @@ const schema_posts = {
         message: 'server error'
       });
     }
-
   }
 };
 
