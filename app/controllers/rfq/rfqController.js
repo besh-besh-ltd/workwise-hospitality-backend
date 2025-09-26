@@ -6373,7 +6373,16 @@ const rfqController = {
         approved_by_id,
         locationFilters
       );
-      const categoryResult = await rfqModel.getCategoryList(productSlug);
+
+     
+     const categoryResult = await rfqModel.getCategoryList(productSlug);
+
+
+    // record product search
+     const searchedData = [
+       { product_slug: productSlug, user_id: null }
+     ];
+     const result1 = await generalModel.insertMany('product_search_record', searchedData);
 
       res.status(200).json({
         status: 1,
