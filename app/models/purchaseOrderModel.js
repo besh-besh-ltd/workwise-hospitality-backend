@@ -160,7 +160,7 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
          LEFT JOIN tbl_approval_hierarchy_transactions trx
            ON trx.hierarchy_type = 'po'
            AND trx.target_entity_id = po.id
-        JOIN tbl_rfq_products TRP ON TRP.id = po.rfq_product_id
+        JOIN tbl_rfq_items TRP ON TRP.id = po.rfq_product_id
         JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
         JOIN tbl_users TU ON TU.id = po.initiated_by
          ${whereClause}
@@ -315,7 +315,7 @@ export const getPODetailsById = async (po_id, user_id) => {
        LEFT JOIN tbl_projects PD ON PD.id = po.project_id
 
        LEFT JOIN tbl_users trx_user ON trx_user.id = trx.current_approver_id
-       JOIN tbl_rfq_products TRP ON TRP.id = po.rfq_product_id
+       JOIN tbl_rfq_items TRP ON TRP.id = po.rfq_product_id
        JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
        JOIN tbl_users TU ON TU.id = po.initiated_by
        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id

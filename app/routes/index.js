@@ -12,7 +12,6 @@ import portalTourRoutes from './portalTour/portalTourRoutes.js';
 import seoRoutes from './seo/seoRoutes.js';
 import Project from './project/projectRoutes.js';
 import PORoutes from './purchase_order/poRoutes.js';
-
 const v1 = Router();
 
 // v1.use('/user', User);

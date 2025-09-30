@@ -39,10 +39,9 @@ const rfqModel = {
                       'title', rps.title,
                       'value', rps.value
                                 ))
-                FROM tbl_rfq_products_specs rps
+                FROM tbl_rfq_item_specs rps
                 WHERE rps.rfq_id = rfq.id
-                  AND rps.product_variant_id = rp.product_variant_id
-                  AND rps.variant = rp.variant) AS spec,
+                  AND rps.rfq_item_id = rp.id) AS spec,
               (SELECT JSON_AGG(JSON_BUILD_OBJECT(
                       'user_id', u.id,
                       'name', u.name,
@@ -50,15 +49,14 @@ const rfqModel = {
                       'mobile', u.mobile,
                       'organization_name', COALESCE(c.company_name, u.organization_name, u.name, u.email, u.mobile)
                                 ))
-                FROM tbl_rfq_product_vendors rpv
+                FROM tbl_rfq_item_vendors rpv
                         JOIN tbl_users u ON rpv.user_id = u.id
                         JOIN tbl_company c ON u.company_id = c.id
                 WHERE rpv.rfq_id = rfq.id
-                  AND rpv.product_variant_id = rp.product_variant_id
-                  AND rpv.variant = rp.variant) AS vendors
+                  AND rpv.rfq_item_id = rp.id) AS vendors
 
         FROM tbl_rfq rfq
-                JOIN tbl_rfq_products rp ON rp.rfq_id = rfq.id
+                JOIN tbl_rfq_items rp ON rp.rfq_id = rfq.id
                 JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
 
         WHERE rfq.id = $1;
@@ -76,7 +74,7 @@ const rfqModel = {
     try {
       let q = `
       SELECT product_variant_id, MAX(variant) AS max_variant
-        FROM tbl_rfq_products
+        FROM tbl_rfq_items
         WHERE rfq_id = $1
         GROUP BY product_variant_id;
       `;
@@ -94,14 +92,14 @@ const rfqModel = {
     try {
       let totalQ = `
       SELECT DISTINCT product_variant_id, variant
-      FROM tbl_rfq_products rp
+      FROM tbl_rfq_items rp
           WHERE rp.rfq_id = $1
           ${(selectedSheets && Array.isArray(selectedSheets) && selectedSheets.length > 0) ? `AND rp.sheet_id IN (${selectedSheets.join(",")})` : ''};
       `;
 
       let qualifiedQ = `
         SELECT s.product_variant_id, s.variant
-          FROM tbl_rfq_products_specs s
+          FROM tbl_rfq_item_specs s
           WHERE s.rfq_id = $1
             ${(selectedSheets && Array.isArray(selectedSheets) && selectedSheets.length > 0) ? `AND s.sheet_id IN (${selectedSheets.join(",")})` : ''}
             AND s.title IN ('Quantity', 'Unit')
@@ -161,9 +159,8 @@ const rfqModel = {
                     'value', s.value
                   )
                 )
-                FROM tbl_rfq_products_specs s
-                WHERE s.product_variant_id = rp.product_variant_id
-                  AND s.variant = rp.variant
+                FROM tbl_rfq_item_specs s
+                WHERE s.rfq_item_id = rp.id
                   AND s.rfq_id = rfq.id
               ),
               'vendors', (
@@ -183,47 +180,46 @@ const rfqModel = {
                     'country_name', lcn.country_name
                   )
                 )
-                FROM tbl_rfq_product_vendors rpv
+                FROM tbl_rfq_item_vendors rpv
                 JOIN tbl_users tu ON tu.id = rpv.user_id
                 LEFT JOIN tbl_company tc ON tc.user_id = tu.id
                 LEFT JOIN tbl_location_cities lc ON lc.id = tu.city
                 LEFT JOIN tbl_location_states ls ON ls.id = tu.state
                 LEFT JOIN tbl_location_country lcn ON lcn.id = tu.country::INT
-                WHERE rpv.product_variant_id = rp.product_variant_id
-                  AND rpv.variant = rp.variant
+                WHERE rpv.rfq_item_id = rp.id
                   AND rpv.rfq_id = rfq.id
               ),
               'comment', COALESCE(rp.comment, ''),
               'defaultSelectedVAB', '',
               'TDS_flies', (
                 SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'TDS'
+                FROM tbl_rfq_item_files RPF
+                WHERE RPF.rfq_item_id = rp.id AND RPF.file_type = 'TDS'
               ),
               'QAP_files', (
                 SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'QAP'
+                FROM tbl_rfq_item_files RPF
+                WHERE RPF.rfq_item_id = rp.id AND RPF.file_type = 'QAP'
               ),
               'SPEC_files', (
                 SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'SPEC'
+                FROM tbl_rfq_item_files RPF
+                WHERE RPF.rfq_item_id = rp.id AND RPF.file_type = 'SPEC'
               ),
               'datasheet_file', (
                 SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'TDS'
+                FROM tbl_rfq_item_files RPF
+                WHERE RPF.rfq_item_id = rp.id AND RPF.file_type = 'TDS'
               ),
               'spec_file', (
                 SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'SPEC'
+                FROM tbl_rfq_item_files RPF
+                WHERE RPF.rfq_item_id = rp.id AND RPF.file_type = 'SPEC'
               ),
               'qap_file', (
                 SELECT json_agg(RPF.file_url)
-                FROM tbl_rfq_product_files RPF
-                WHERE RPF.rfq_product_id = rp.id AND RPF.file_type = 'QAP'
+                FROM tbl_rfq_item_files RPF
+                WHERE RPF.rfq_item_id = rp.id AND RPF.file_type = 'QAP'
               ),
               'sheet_name', COALESCE(rds.sheet_name, '')
             )
@@ -231,7 +227,7 @@ const rfqModel = {
 
         FROM tbl_rfq rfq
         JOIN tbl_rfq_draft_sheets rds ON rds.rfq_id = rfq.id
-        JOIN tbl_rfq_products rp ON rp.rfq_id = rfq.id AND rp.sheet_id = rds.id
+        JOIN tbl_rfq_items rp ON rp.rfq_id = rfq.id AND rp.sheet_id = rds.id
         JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
 
         WHERE rfq.id = $1 AND rds.id = $2 AND rds.is_processed
@@ -350,13 +346,75 @@ const rfqModel = {
     }
   },
 
+  addErrorsToPersistence: async (
+    persistenceId,
+    errors = null,
+  ) => {
+    try {
+      const persistenceQuery = `id = ${persistenceId}`;
+      let persistence = await rfqModel.checkIfExists(
+        'tbl_rfq_persistent_jobs',
+        persistenceQuery
+      );
+
+      if (!persistence || persistence.length <= 0) {
+        throw new Error('Persistence does not exist!');
+      }
+
+      persistence = persistence[0];
+
+      let user = await userModel.getUserById(persistence.user_id);
+
+      if (!user || user.length <= 0) {
+        throw new Error('User does not exist for this persistence!');
+      }
+
+      user = user[0];
+
+      const q = `
+        UPDATE tbl_rfq_persistent_jobs
+        SET errors = 
+          CASE
+            WHEN errors->>'type' IS NOT NULL THEN
+              jsonb_set(
+                errors,
+                '{actual}',
+                (errors->'actual') || $2::jsonb
+              )
+            WHEN jsonb_typeof(errors) = 'array' THEN
+              errors || $2::jsonb
+            ELSE
+              $2::jsonb
+          END
+        WHERE id = $1
+        RETURNING *;
+      `;
+
+      const errorsToAppend = Array.isArray(errors)
+        ? JSON.stringify(errors)
+        : typeof errors === 'string'
+        ? errors
+        : JSON.stringify(errors.actual || []);
+
+      const updatedPersistence = await db.any(q, [
+        persistenceId,
+        errorsToAppend
+      ]);
+
+      return updatedPersistence;
+    } catch (error) {
+      throw error;
+    }
+  },
+
   saveMagicSearchInDraft: async (
     data,
     nextRFQNumber,
     createdBy,
     processedUrl,
     rfqId,
-    sheetId
+    sheetId,
+    currentProcessingSheet
   ) => {
     try {
       return await db.tx(async (t) => {
@@ -375,7 +433,7 @@ const rfqModel = {
           sheetValues.push(rfqId);
         } else {
           sheetToProcess = {
-            sheet_name: data?.sheetNameList?.[0]
+            sheet_name: currentProcessingSheet ?? data?.sheetNameList?.[0]
           };
         }
 
@@ -506,7 +564,7 @@ const rfqModel = {
             await rfqModel.insert('tbl_rfq_terms_map', dataToInsert, t);
           }
 
-        // Insert into tbl_rfq_products and get back their IDs
+        // Insert into tbl_rfq_items and get back their IDs
         let parameter = `rfq_id = ${rfq_id} AND sheet_name = '${sheetToProcess.sheet_name}'`;
         let sheet = await rfqModel.checkIfExists(
           'tbl_rfq_draft_sheets',
@@ -518,8 +576,10 @@ const rfqModel = {
         else throw new Error('Sheet to be processed does not exist!');
 
         for (const product of data.products) {
+          const sub_items = product.sub_items;
+
           const productQuery = `
-            INSERT INTO tbl_rfq_products (
+            INSERT INTO tbl_rfq_items (
               rfq_id, 
               product_variant_id, 
               variant, 
@@ -528,9 +588,11 @@ const rfqModel = {
               spec_file, 
               qap_file, 
               qap, 
-              sheet_id
+              sheet_id,
+              type,
+              name
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING id
           `;
 
@@ -538,12 +600,14 @@ const rfqModel = {
             rfq_id,
             product.product_id,
             product.variant,
-            product.comment,
+            "",
             0, // datasheet - using 0 as a default value to avoid null constraint
             '', // spec_file - this field will be removed from database
             '', // qap_file - this field will be removed from database
             '', // qap - using empty string as default
-            sheet.id
+            sheet.id,
+            'PRODUCT',
+            product.name,
           ];
 
           const productInsertionResult = await t.one(
@@ -551,26 +615,68 @@ const rfqModel = {
             productValues
           );
 
-          // Insert into tbl_rfq_products_specs
-          for (const spec of product.spec || []) {
-            if (spec.title == 'Quantity')
-              spec.value = parseInt(spec.value) ?? 0;
-
-            await t.none(
-              `INSERT INTO tbl_rfq_products_specs (rfq_id, product_variant_id, variant, title, value, sheet_id)
-              VALUES ($1, $2, $3, $4, $5, $6)`,
-              [
+          if(sub_items) {
+            for (const sub of sub_items) {
+              const subProductQuery = `
+                INSERT INTO tbl_rfq_items (
+                  rfq_id, 
+                  product_variant_id, 
+                  variant, 
+                  comment, 
+                  datasheet, 
+                  spec_file, 
+                  qap_file, 
+                  qap, 
+                  sheet_id,
+                  type,
+                  parent_item_id,
+                  name
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                RETURNING id
+              `;
+  
+              const subProductValues = [
                 rfq_id,
-                product.product_id,
-                product.variant,
-                spec.title,
-                spec.value,
-                sheet.id
-              ]
-            );
+                sub.product_id,
+                sub.variant,
+                sub.comment ?? "",
+                0, // datasheet - using 0 as a default value to avoid null constraint
+                '', // spec_file - this field will be removed from database
+                '', // qap_file - this field will be removed from database
+                '', // qap - using empty string as default
+                sheet.id,
+                'LINE ITEM',
+                productInsertionResult.id,
+                sub.name,
+              ];
+  
+              const subProductInsertionResult = await t.one(
+                subProductQuery,
+                subProductValues
+              );
+  
+              // Insert into tbl_rfq_item_specs
+              for (const spec of product.spec || []) {
+                if (spec.title == 'Quantity')
+                  spec.value = parseInt(spec.value) ?? 0;
+  
+                await t.none(
+                  `INSERT INTO tbl_rfq_item_specs (rfq_id, rfq_item_id, title, value, sheet_id)
+                  VALUES ($1, $2, $3, $4, $5)`,
+                  [
+                    rfq_id,
+                    subProductInsertionResult.id,
+                    spec.title,
+                    spec.value,
+                    sheet.id
+                  ]
+                );
+              }
+            }
           }
 
-          // 4. Insert into tbl_rfq_product_vendors
+          // 4. Insert into tbl_rfq_item_vendors
           for (const vendor of product.vendors || []) {
             // Skip vendors without user_id
             if (!vendor.user_id && !vendor.id) continue;
@@ -579,9 +685,9 @@ const rfqModel = {
             const userId = vendor.user_id || vendor.id;
 
             const vendorInsertionResult = await t.none(
-              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id)
-              VALUES ($1, $2, $3, $4, $5)`,
-              [rfq_id, product.product_id, product.variant, userId, sheet.id]
+              `INSERT INTO tbl_rfq_item_vendors (rfq_id, rfq_item_id, user_id, sheet_id)
+              VALUES ($1, $2, $3, $4)`,
+              [rfq_id, productInsertionResult.id, userId, sheet.id]
             );
           }
         }
@@ -693,7 +799,7 @@ const rfqModel = {
   getVendorsForRfq: async (rfq_id, user_name = '') => {
     const query = `
           SELECT DISTINCT TRPV.user_id AS user_id
-          FROM tbl_rfq_product_vendors TRPV
+          FROM tbl_rfq_item_vendors TRPV
           LEFT JOIN tbl_users TU
           ON TRPV.user_id = TU.id
           WHERE rfq_id = $1
@@ -884,13 +990,13 @@ const rfqModel = {
     });
   },
 
-  // Separate function to delete from tbl_rfq_product_files based on rfq_product_id list
+  // Separate function to delete from tbl_rfq_item_files based on rfq_product_id list
   deleteProductFilesByIds: async (rfqProductIds) => {
     if (rfqProductIds.length === 0) return Promise.resolve(0); // If no IDs, return immediately
 
     const query = `
-        DELETE FROM tbl_rfq_product_files
-        WHERE rfq_product_id = ANY($1::int[])
+        DELETE FROM tbl_rfq_item_files
+        WHERE rfq_item_id = ANY($1::int[])
     `;
 
     return new Promise((resolve, reject) => {
@@ -950,69 +1056,6 @@ const rfqModel = {
     }
   },
 
-  getAll: async (limit, offset) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `SELECT RFQ.*,
-            ARRAY(
-                SELECT json_build_object('id', RFQ_P.id, 'product_id', RFQ_P.product_id,
-                    'product_specs', (
-                        SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'product_id', RFQ_P_SPEC.product_id, 'rfq_id', RFQ_P_SPEC.rfq_id))
-                        FROM tbl_rfq_products_specs RFQ_P_SPEC
-                        WHERE RFQ_P.product_id = RFQ_P_SPEC.product_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
-                    ),
-                    'product_details', (
-                      SELECT json_agg(json_build_object('id', T_P.id,'name', T_P.name, 'description', T_P.description, 'manufacturer', T_P.manufacturer, 'availability', T_P.availability, 'description', T_P.description ))
-                      FROM tbl_product T_P
-                      WHERE RFQ_P.product_id = T_P.id
-                    ),
-                    'vendor_details', (
-                      SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id,
-                      'user_details', (
-                        SELECT json_build_object(
-                            'user_id', U.id,
-                            'name', U.name,
-                            'email', U.email
-                        )
-                        FROM tbl_users U
-                        WHERE RFQ_P_V.user_id = U.id
-                    )
-                      ))
-                      FROM tbl_rfq_product_vendors RFQ_P_V
-                      WHERE RFQ_P.product_id = RFQ_P_V.product_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
-                  )
-                )
-                FROM tbl_rfq_products RFQ_P
-                WHERE RFQ.id = RFQ_P.rfq_id
-            ) AS "products"
-
-            FROM tbl_rfq RFQ
-            WHERE RFQ.is_published = 1
-            ORDER BY RFQ.id DESC
-            LIMIT ${limit} OFFSET $1;`,
-        [offset]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  getRfqCount: async () => {
-    return new Promise(function (resolve, reject) {
-      db.any(`select * from tbl_rfq WHERE RFQ.is_published = 1`)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
   update: async (table_name, data, primary_key, db_con = db) => {
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
@@ -1078,24 +1121,6 @@ const rfqModel = {
     });
   },
 
-  getTechEvaluationRecordsByProductId: async (productId) => {
-    const fetchQuery = `
-      SELECT id
-      FROM tbl_rfq_product_tech_evaluation
-      WHERE tbl_rfq_product_id = $1`;
-
-    return new Promise((resolve, reject) => {
-      db.query(fetchQuery, [productId])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-
   checkAllProductsFinalized: async (rfq_id, user_id) => {
     // This function checks if all products in an RFQ are finalized
     // Returns true if all products are finalized, false otherwise
@@ -1105,15 +1130,13 @@ const rfqModel = {
                   WHEN EXISTS (
                     SELECT 1 FROM tbl_quote_finalization TQF
                     WHERE TQF.rfq_id = RP.rfq_id
-                    AND TQF.product_variant_id = RP.product_variant_id
-                    AND TQF.variant = RP.variant
+                    AND TQF.rfq_item_id = RP.id
                   ) THEN 1
                   ELSE 0
                 END) AS finalized_products
-      FROM tbl_rfq_products RP
-      JOIN tbl_rfq_product_vendors RPV ON RP.rfq_id = RPV.rfq_id
-                                      AND RP.product_variant_id = RPV.product_variant_id
-                                      AND RP.variant = RPV.variant
+      FROM tbl_rfq_items RP
+      JOIN tbl_rfq_item_vendors RPV ON RP.rfq_id = RPV.rfq_id
+                                      AND RP.id = RPV.rfq_item_id
       WHERE RP.rfq_id = $1 AND RPV.user_id = $2
     `;
 
@@ -1212,28 +1235,6 @@ const rfqModel = {
         });
     });
   },
-  getAllRfqBuyerExport: async (user_id, month, year) => {
-    const query = `SELECT RFQ.id,RFQ.rfq_no,RFQ.is_published,RFQ.created_by,RFQ.status,RFQ.timestamp,
-      ARRAY(
-      SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id
-    ) AS "quotations",
-
-    ARRAY(
-      SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = '${user_id}'
-    ) AS "finilize"
-    FROM tbl_rfq RFQ
-    WHERE RFQ.is_published = 1 AND created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC  `;
-    return new Promise(function (resolve, reject) {
-      db.query(query, [month, year])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
   getRfqByUser: async (limit, offset, user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -1264,9 +1265,9 @@ const rfqModel = {
                         WHERE TPC.product_id = RFQ_P.id
                     ),
                     'product_specs', (
-                        SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'product_id', RFQ_P_SPEC.product_variant_id, 'rfq_id', RFQ_P_SPEC.rfq_id))
-                        FROM tbl_rfq_products_specs RFQ_P_SPEC
-                        WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
+                        SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title, 'value', RFQ_P_SPEC.value, 'id', RFQ_P_SPEC.id, 'rfq_id', RFQ_P_SPEC.rfq_id))
+                        FROM tbl_rfq_item_specs RFQ_P_SPEC
+                        WHERE RFQ_P.id = RFQ_P_SPEC.rfq_item_id AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
                     ),
                     'product_details', (
                         SELECT json_agg(json_build_object('id', T_V.id,'name', T_V.name, 'description', T_P.description ))
@@ -1286,14 +1287,14 @@ const rfqModel = {
                                 WHERE RFQ_P_V.user_id = U.id
                             )
                         ))
-                        FROM tbl_rfq_product_vendors RFQ_P_V
-                        WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
+                        FROM tbl_rfq_item_vendors RFQ_P_V
+                        WHERE RFQ_P.id = RFQ_P_V.rfq_item_id AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
                         AND RFQ_P_V.user_id = ${user_id} 
                     )
                 )
-                FROM tbl_rfq_products RFQ_P
-                JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.product_variant_id = RFQ_P.product_variant_id
-                WHERE RFQ.id = RFQ_P.rfq_id AND trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.product_variant_id = RFQ_P.product_variant_id
+                FROM tbl_rfq_items RFQ_P
+                JOIN tbl_rfq_item_vendors trpv ON trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.rfq_item_id = RFQ_P.id
+                WHERE RFQ.id = RFQ_P.rfq_id AND trpv.rfq_id = RFQ.id AND trpv.user_id = ${user_id} AND trpv.rfq_item_id = RFQ_P.id
             ) AS "products" ,
           CASE
               WHEN EXISTS (
@@ -1319,7 +1320,7 @@ const rfqModel = {
         FROM tbl_rfq RFQ
         WHERE EXISTS (
                   SELECT 1
-            FROM tbl_rfq_product_vendors RFQ_P_V
+            FROM tbl_rfq_item_vendors RFQ_P_V
             WHERE RFQ.id = RFQ_P_V.rfq_id
             AND RFQ_P_V.user_id = $3
         ) AND RFQ.is_published = 1
@@ -1339,102 +1340,158 @@ const rfqModel = {
 
   getRfqDraftById: async (id, oldestSheet) => {
     const q = `SELECT
-      RFQ.id AS rfq_id,
-      RFQ.rfq_no,
-
-      -- Encapsulate RFQ fields in rfqFormData
-      json_build_object(
-          'is_published', RFQ.is_published,
-          'comment', RFQ.comment,
-          'response_email', RFQ.response_email,
-          'contact_name', RFQ.contact_name,
-          'contact_number', RFQ.contact_number,
-          'company_name', RFQ.company_name,
-          'bid_end_date', RFQ.bid_end_date,
-          'rfq_type', RFQ.rfq_type,
-          'reverse_auction', RFQ.reverse_auction,
-          'ra_start_date', RFQ.ra_start_date,
-          'ra_end_date', RFQ.ra_end_date,
-          'project_id', RFQ.project_id,
-          'location', RFQ.location,
-          'rfq_added_from', RFQ.rfq_added_from,
-
-          -- Selected Terms
-          'terms', (
-              SELECT COALESCE(json_agg(
-                  json_build_object(
-                      'id', RFQ_TM.terms_id,
-                      'term_content', RFQ_T.term_content,
-                      'name', RFQ_T.term_content
-                  )
-              ), '[]'::json)
-              FROM tbl_rfq_terms_map RFQ_TM
-              JOIN tbl_rfq_terms RFQ_T ON RFQ_T.id = RFQ_TM.terms_id
-              WHERE RFQ_TM.rfq_id = RFQ.id
-          ),
-
-          -- Term and condition files
-          'term_and_condition_files', (
-              SELECT COALESCE(json_agg(RF.file_url), '[]'::json)
-              FROM tbl_rfq_files RF
-              WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
-          )
-      ) AS rfq_form_data,
-
-      -- Products
-      ARRAY(
-          SELECT json_build_object(
-              'id', RFQ_P.id,
-              'product_id', RFQ_P.product_variant_id,
-              'predefined_tds_file', RFQ_P.datasheet_file,
-              'predefined_qap_file', RFQ_P.qap_file,
-              'name', TV.name,
-              'product_name', T_P.name,
-              'variant', RFQ_P.variant,
-              'spec', (
-                  SELECT json_agg(json_build_object(
-                      'title', RFQ_P_SPEC.title,
-                      'value', RFQ_P_SPEC.value
-                  ))
-                  FROM tbl_rfq_products_specs RFQ_P_SPEC
-                  WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id 
-                    AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
-                    AND RFQ_P.variant = RFQ_P_SPEC.variant
-              ),
-              'comment', RFQ_P.comment,
-              'datasheet', (RFQ_P.datasheet::TEXT),
-              'datasheet_file', (
-                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                  FROM tbl_rfq_product_files RPF
-                  WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'TDS'
-              ),
-              'spec_file', (
-                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                  FROM tbl_rfq_product_files RPF
-                  WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'SPEC'
-              ),
-              'qap', (RFQ_P.qap::TEXT),
-              'qap_file', (
-                  SELECT COALESCE(json_agg(RPF.file_url), '[]'::json)
-                  FROM tbl_rfq_product_files RPF
-                  WHERE RPF.rfq_product_id = RFQ_P.id AND RPF.file_type = 'QAP'
-              ),
-              'user_selected_predefined_tds', (RFQ_P.datasheet = '1'),
-              'user_selected_predefined_qap', (RFQ_P.qap = '1'),
-              'sheet_id', RFQ_P.sheet_id
-          )
-          FROM tbl_rfq_products RFQ_P
-          LEFT JOIN tbl_product_variant TV ON RFQ_P.product_variant_id = TV.id
-          LEFT JOIN tbl_product T_P ON T_P.id = TV.product_id
-          WHERE RFQ.id = RFQ_P.rfq_id
-          ${oldestSheet && oldestSheet.id ? ` AND RFQ_P.sheet_id = $2` : ``}
-          ORDER BY RFQ_P.id
-      ) AS rfq_products
+        RFQ.id AS rfq_id,
+        RFQ.rfq_no,
+        json_build_object(
+                'is_published', RFQ.is_published,
+                'comment', RFQ.comment,
+                'response_email', RFQ.response_email,
+                'contact_name', RFQ.contact_name,
+                'contact_number', RFQ.contact_number,
+                'company_name', RFQ.company_name,
+                'bid_end_date', RFQ.bid_end_date,
+                'rfq_type', RFQ.rfq_type,
+                'reverse_auction', RFQ.reverse_auction,
+                'ra_start_date', RFQ.ra_start_date,
+                'ra_end_date', RFQ.ra_end_date,
+                'project_id', RFQ.project_id,
+                'location', RFQ.location,
+                'rfq_added_from', RFQ.rfq_added_from,
+                'terms', (
+                    SELECT COALESCE(
+                                  json_agg(
+                                          json_build_object(
+                                                  'id', RFQ_TM.terms_id,
+                                                  'term_content', RFQ_T.term_content,
+                                                  'name', RFQ_T.term_content
+                                          )
+                                  ),
+                                  '[]'::json
+                          )
+                    FROM tbl_rfq_terms_map RFQ_TM
+                            JOIN tbl_rfq_terms RFQ_T ON RFQ_T.id = RFQ_TM.terms_id
+                    WHERE RFQ_TM.rfq_id = RFQ.id
+                ),
+                'term_and_condition_files', (
+                    SELECT COALESCE(json_agg(RF.file_url), '[]'::json)
+                    FROM tbl_rfq_files RF
+                    WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
+                )
+        ) AS rfq_form_data,
+        (
+            WITH RECURSIVE item_tree AS (
+                SELECT
+                    p.id,
+                    p.rfq_id,
+                    p.product_variant_id,
+                    p.name AS name,
+                    p.comment,
+                    p.type AS item_type,
+                    p.parent_item_id,
+                    p.sheet_id,
+                    (
+                        SELECT json_agg(json_build_object('title', s.title, 'value', s.value))
+                        FROM tbl_rfq_item_specs s
+                        WHERE s.rfq_item_id = p.id AND s.rfq_id = p.rfq_id
+                    ) AS spec,
+                    (
+                        SELECT COALESCE(json_agg(f.file_url), '[]'::json)
+                        FROM tbl_rfq_item_files f
+                        WHERE f.rfq_item_id = p.id AND f.file_type = 'TDS'
+                    ) AS datasheet_file,
+                    (
+                        SELECT COALESCE(json_agg(f.file_url), '[]'::json)
+                        FROM tbl_rfq_item_files f
+                        WHERE f.rfq_item_id = p.id AND f.file_type = 'SPEC'
+                    ) AS spec_file,
+                    (
+                        SELECT COALESCE(json_agg(f.file_url), '[]'::json)
+                        FROM tbl_rfq_item_files f
+                        WHERE f.rfq_item_id = p.id AND f.file_type = 'QAP'
+                    ) AS qap_file
+                FROM tbl_rfq_items p
+                        LEFT JOIN tbl_product_variant tv ON p.product_variant_id = tv.id
+                        LEFT JOIN tbl_product tp ON tp.id = tv.product_id
+                WHERE p.rfq_id = RFQ.id
+                    ${oldestSheet && oldestSheet.id ? `AND p.sheet_id = $2` : ``}
+            )
+            SELECT COALESCE(json_agg(node_json ORDER BY n.id), '[]'::json)
+            FROM (
+                    SELECT
+                        n.id,
+                        json_build_object(
+                                'id', n.id,
+                                'product_id', n.product_variant_id,
+                                'name', n.name,
+                                'spec', n.spec,
+                                'comment', n.comment,
+                                'datasheet_file', n.datasheet_file,
+                                'spec_file', n.spec_file,
+                                'qap_file', n.qap_file,
+                                'item_type', n.item_type,
+                                'parent_item_id', n.parent_item_id,
+                                'associated_items', (
+                                    SELECT COALESCE(json_agg(child.node_json ORDER BY child.id), '[]'::json)
+                                    FROM (
+                                              SELECT
+                                                  child.id,
+                                                  json_build_object(
+                                                          'id', child.id,
+                                                          'product_id', child.product_variant_id,
+                                                          'name', child.name,
+                                                          'spec', child.spec,
+                                                          'comment', child.comment,
+                                                          'datasheet_file', child.datasheet_file,
+                                                          'spec_file', child.spec_file,
+                                                          'qap_file', child.qap_file,
+                                                          'item_type', child.item_type,
+                                                          'parent_item_id', child.parent_item_id,
+                                                          'associated_items', (
+                                                              SELECT COALESCE(json_agg(grandchild.node_json ORDER BY grandchild.id), '[]'::json)
+                                                              FROM (
+                                                                      SELECT
+                                                                          grandchild.id,
+                                                                          json_build_object(
+                                                                                  'id', grandchild.id,
+                                                                                  'product_id', grandchild.product_variant_id,
+                                                                                  'name', grandchild.name,
+                                                                                  'spec', grandchild.spec,
+                                                                                  'comment', grandchild.comment,
+                                                                                  'datasheet_file', grandchild.datasheet_file,
+                                                                                  'spec_file', grandchild.spec_file,
+                                                                                  'qap_file', grandchild.qap_file,
+                                                                                  'item_type', grandchild.item_type,
+                                                                                  'parent_item_id', grandchild.parent_item_id,
+                                                                                  'associated_items', '[]'::json,
+                                                                                  'sheet_id', grandchild.sheet_id
+                                                                          ) AS node_json
+                                                                      FROM item_tree grandchild
+                                                                      WHERE grandchild.parent_item_id = child.id
+                                                                  ) AS grandchild
+                                                          ),
+                                                          'sheet_id', child.sheet_id
+                                                  ) AS node_json
+                                              FROM item_tree child
+                                              WHERE child.parent_item_id = n.id
+                                          ) AS child
+                                ),
+                                'sheet_id', n.sheet_id,
+                                'vendorCount', (
+                                     SELECT COUNT(*)
+                                     FROM tbl_rfq_item_vendors v
+                                     WHERE v.rfq_item_id = n.id
+                                 )
+                        ) AS node_json
+                    FROM item_tree n
+                    WHERE n.parent_item_id IS NULL OR n.parent_item_id = 0
+                ) AS n
+        ) AS rfq_products
     FROM tbl_rfq RFQ
     WHERE RFQ.id = $1
     ORDER BY RFQ.id DESC
     LIMIT 1;
     `;
+
     try {
       const values = [id];
       if (oldestSheet && oldestSheet.id) values.push(oldestSheet.id);
@@ -1539,7 +1596,7 @@ const rfqModel = {
         dynamicJoin += `
           LEFT JOIN (
             SELECT DISTINCT rpv.user_id
-            FROM tbl_rfq_product_vendors rpv
+            FROM tbl_rfq_item_vendors rpv
             JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
             WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
           ) rfqv ON rfqv.user_id = tu.id
@@ -1679,11 +1736,10 @@ const rfqModel = {
             'mobile', tu.mobile
           ) AS user_details
   
-          FROM tbl_rfq_products trp
-          JOIN tbl_rfq_product_vendors trpv 
+          FROM tbl_rfq_items trp
+          JOIN tbl_rfq_item_vendors trpv 
             ON trpv.rfq_id = trp.rfq_id 
-              AND trpv.product_variant_id = trp.product_variant_id 
-              AND trpv.variant = trp.variant
+              AND trpv.rfq_item_id = trp.id 
           JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
           JOIN tbl_users tu ON trpv.user_id = tu.id
           LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
@@ -1712,7 +1768,7 @@ const rfqModel = {
   getNextVariant: async (rfq_id, product_id) => {
     const query = `
           SELECT COALESCE(MAX(variant), -1) AS max_variant
-          FROM tbl_rfq_products
+          FROM tbl_rfq_items
           WHERE rfq_id = $1 AND product_variant_id = $2
       `;
     const values = [rfq_id, product_id];
@@ -1856,8 +1912,8 @@ const rfqModel = {
         'products', (
           SELECT json_agg(
             json_build_object(
-              'product_id', TQI.product_variant_id,
-              'variant', TQI.variant,
+              'product_id', TQI.rfq_item_id,
+             -- 'variant', TQI.variant,
               'product_name', TQI.product_name,
               'unit_price', TQI.unit_price,
               'package_price', TQI.package_price,
@@ -1898,14 +1954,14 @@ const productQuery = `
         RFQ_P.comment,
         (
             SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id
+            FROM tbl_rfq_item_files RPF
+            WHERE RPF.rfq_item_id = RFQ_P.id
               AND RPF.file_type = 'QAP'
         ) AS qap_file,
         (
             SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id
+            FROM tbl_rfq_item_files RPF
+            WHERE RPF.rfq_item_id = RFQ_P.id
               AND RPF.file_type = 'SPEC'
         ) AS spec_file,
           'latest_target_price', (
@@ -1917,16 +1973,15 @@ const productQuery = `
             ),
         (
             SELECT json_agg(RPF.file_url)
-            FROM tbl_rfq_product_files RPF
-            WHERE RPF.rfq_product_id = RFQ_P.id
+            FROM tbl_rfq_item_files RPF
+            WHERE RPF.rfq_item_id = RFQ_P.id
               AND RPF.file_type = 'TDS'
         ) AS datasheet_file,
         (
             SELECT json_agg(json_build_object('title', RFQ_P_SPEC.title,'value', RFQ_P_SPEC.value))
-            FROM tbl_rfq_products_specs RFQ_P_SPEC
-            WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id
+            FROM tbl_rfq_item_specs RFQ_P_SPEC
+            WHERE RFQ_P.id = RFQ_P_SPEC.rfq_item_id
               AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
-              AND RFQ_P.variant = RFQ_P_SPEC.variant
         ) AS product_specs,
         (
             SELECT json_agg(json_build_object('id', T_V.id, 'name', T_V.name, 'description', T_P.description))
@@ -1943,8 +1998,7 @@ const productQuery = `
               END
             FROM tbl_quote_finalization TQF
             WHERE TQF.rfq_id = RFQ_P.rfq_id
-              AND TQF.product_variant_id = RFQ_P.product_variant_id
-              AND TQF.variant = RFQ_P.variant
+              AND TQF.rfq_item_id = RFQ_P.id
             LIMIT 1
           ),
           'No vendor finalized yet'
@@ -1983,8 +2037,7 @@ const productQuery = `
                         total_price,
                         ROW_NUMBER() OVER (PARTITION BY product_variant_id, variant ORDER BY total_price ASC) AS rn
                     FROM tbl_quote_items
-                    WHERE product_variant_id = RFQ_P.product_variant_id
-                    AND variant = RFQ_P.variant
+                    WHERE rfq_item_id = RFQ_P.id
                     AND rfq_id = RFQ_P.rfq_id
                     AND total_price > 0
                 ) TQI
@@ -2083,35 +2136,32 @@ const productQuery = `
                   WHERE RFQ_P_V.user_id = U.id
                 )
               ))
-            FROM tbl_rfq_product_vendors RFQ_P_V
+            FROM tbl_rfq_item_vendors RFQ_P_V
             JOIN tbl_users U ON RFQ_P_V.user_id = U.id
-            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
+            WHERE RFQ_P.id = RFQ_P_V.rfq_item_id 
               AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
-              AND RFQ_P.variant = RFQ_P_V.variant
               AND U.status = 1
           ) AS vendor_details
           ` : ''}
         ${user_type != 3 ? `
         ,(
             SELECT COUNT(RFQ_P_V.id)
-            FROM tbl_rfq_product_vendors RFQ_P_V
+            FROM tbl_rfq_item_vendors RFQ_P_V
             JOIN tbl_users U ON RFQ_P_V.user_id = U.id
-            WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id
+            WHERE RFQ_P.id = RFQ_P_V.rfq_item_id
               AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
-              AND RFQ_P.variant = RFQ_P_V.variant
               AND U.status = 1
         ) AS vendors_count
         ` : ''}
 
     FROM
-        tbl_rfq_products RFQ_P
+        tbl_rfq_items RFQ_P
         JOIN tbl_rfq RFQ ON RFQ.id = $1
         JOIN tbl_product_variant _TPV ON _TPV.id = RFQ_P.product_variant_id
         ${(user_type != 2 && user_type != 8 && user_type != 9 && user_type != 10)  ? 
-          `JOIN tbl_rfq_product_vendors RPV 
+          `JOIN tbl_rfq_item_vendors RPV 
             ON RPV.rfq_id = $1 
-            AND RPV.product_variant_id = RFQ_P.product_variant_id 
-            AND RPV.variant = RFQ_P.variant 
+            AND RPV.rfq_item_id = RFQ_P.id 
             AND RPV.user_id = $2` 
           : ''}
     WHERE
@@ -2119,6 +2169,7 @@ const productQuery = `
     ORDER BY
         RFQ_P.id;
   `;
+
 
     return new Promise(function (resolve, reject) {
       db.query(q,[id])
@@ -2304,21 +2355,6 @@ const productQuery = `
       throw new Error(err);
     }
   },
-  getUserProducts: async (rfq_id, user_id) => {
-    return new Promise(function (resolve, reject) {
-      db.any(
-        `select DISTINCT product_variant_id AS product_id, variant from tbl_rfq_product_vendors where rfq_id = $1 AND user_id=$2`,
-        [rfq_id, user_id]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
   getAllBuyerRfq: async (
     limit,
     offset,
@@ -2347,7 +2383,7 @@ const productQuery = `
                 ELSE
                   (
                     SELECT COUNT(*) 
-                      FROM tbl_rfq_products _rpv 
+                      FROM tbl_rfq_items _rpv 
                       WHERE _rpv.rfq_id = RFQ.id
                   ) = (
                     SELECT COUNT(*)
@@ -2372,12 +2408,11 @@ const productQuery = `
                   SELECT
                     trpv.user_id
                   FROM
-                    tbl_rfq_product_vendors trpv
+                    tbl_rfq_item_vendors trpv
                   LEFT JOIN tbl_quotes tq
                     ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
                   LEFT JOIN tbl_quote_items qi
-                    ON trpv.product_variant_id = qi.product_variant_id 
-                    AND trpv.variant = qi.variant
+                    ON trpv.rfq_item_id = qi.rfq_item_id 
                     AND trpv.rfq_id = qi.rfq_id 
                     AND qi.quote_id = tq.id
                     AND (qi.unit_price > 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
@@ -2391,7 +2426,7 @@ const productQuery = `
                 ) AS fully_quoted_vendors
               )
             )
-            FROM tbl_rfq_product_vendors trpv
+            FROM tbl_rfq_item_vendors trpv
             WHERE trpv.rfq_id = rfq.id
             GROUP BY trpv.rfq_id
           ) AS "vendors",
@@ -2404,12 +2439,11 @@ const productQuery = `
                           'title', RFQ_P_SPEC.title, 
                           'value', RFQ_P_SPEC.value, 
                           'id', RFQ_P_SPEC.id, 
-                          'product_id', RFQ_P_SPEC.product_variant_id, 
+                          'product_id', RFQ_P.product_variant_id, 
                           'rfq_id', RFQ_P_SPEC.rfq_id))
-                      FROM tbl_rfq_products_specs RFQ_P_SPEC
-                      WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id 
+                      FROM tbl_rfq_item_specs RFQ_P_SPEC
+                      WHERE RFQ_P.id = RFQ_P_SPEC.rfq_item_id 
                         AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id 
-                        AND RFQ_P.variant = RFQ_P_SPEC.variant
                   ),
                   'product_details', (
                       SELECT json_agg(json_build_object(
@@ -2430,13 +2464,12 @@ const productQuery = `
                               FROM tbl_users U
                               WHERE RFQ_P_V.user_id = U.id
                           )))
-                      FROM tbl_rfq_product_vendors RFQ_P_V
-                      WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id 
+                      FROM tbl_rfq_item_vendors RFQ_P_V
+                      WHERE RFQ_P.id = RFQ_P_V.rfq_item_id 
                         AND RFQ_P.rfq_id = RFQ_P_V.rfq_id 
-                        AND RFQ_P.variant = RFQ_P_V.variant
                   )
               )
-              FROM tbl_rfq_products RFQ_P
+              FROM tbl_rfq_items RFQ_P
               WHERE RFQ.id = RFQ_P.rfq_id
           ) AS "products"
       FROM tbl_rfq RFQ
@@ -2513,7 +2546,7 @@ const productQuery = `
       JOIN tbl_company TC ON TU.company_id = TC.id
       ${
         rfq_id
-          ? 'LEFT JOIN tbl_rfq_product_vendors TRPV ON TU.id = TRPV.user_id AND TRPV.rfq_id = ' +
+          ? 'LEFT JOIN tbl_rfq_item_vendors TRPV ON TU.id = TRPV.user_id AND TRPV.rfq_id = ' +
             rfq_id
           : ''
       }
@@ -2623,10 +2656,9 @@ const productQuery = `
           U.address,
           C.company_name,
           COALESCE(RPV.is_rfq_viewed, 0) AS is_rfq_viewed
-        FROM tbl_rfq_products RP
-        JOIN tbl_rfq_product_vendors RPV ON RP.rfq_id = RPV.rfq_id 
-          AND RP.product_variant_id = RPV.product_variant_id 
-          AND RP.variant = RPV.variant
+        FROM tbl_rfq_items RP
+        JOIN tbl_rfq_item_vendors RPV ON RP.rfq_id = RPV.rfq_id 
+          AND RP.id = RPV.rfq_item_id 
         JOIN tbl_users U ON RPV.user_id = U.id
         JOIN tbl_company C ON U.company_id = C.id
         WHERE RP.id = $1
@@ -2669,7 +2701,7 @@ const productQuery = `
                 'products', (
                     SELECT json_agg(json_build_object('product_id', TQI.product_id,'product_name', TQI.product_name, 'unit_price', TQI.unit_price, 'package_price', TQI.package_price, 'tax', TQI.tax, 'freight_price', TQI.freight_price, 'total_price', TQI.total_price, 'comment', TQI.comment, 'delivery_period', TQI.delivery_period,
                     'rfq_details', (
-                        SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_products_specs TPS WHERE TPS.product_id = TQI.product_id AND TPS.rfq_id = ${id}
+                        SELECT json_agg(json_build_object('title' , TPS.title, 'value' , TPS.value)) FROM tbl_rfq_item_specs TPS WHERE TPS.rfq_item_id = TQI.rfq_item_id AND TPS.rfq_id = ${id}
                     )
                     )) FROM tbl_quote_items TQI WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id
                 )
@@ -2738,7 +2770,7 @@ const productQuery = `
                 FROM tbl_quote_items TQI1
                 JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
                 WHERE TQF1.created_by = $2
-                AND TQI1.product_variant_id = TRP.product_variant_id
+                AND TQI1.rfq_item_id = TRP.id
                 AND TQF1.rfq_id != $1
                 ORDER BY TQF1.timestamp DESC
                 LIMIT 1
@@ -2765,7 +2797,7 @@ const productQuery = `
                       JOIN tbl_users U ON TQ.created_by = U.id
                       JOIN tbl_users BUYER ON BUYER.id = RFQ.created_by
               WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = $3 AND user_type IN (2,8,10))
-                AND TQI.product_variant_id = TRP.product_variant_id
+                AND TQI.rfq_item_id = TRP.id
                 AND TQI.unit_price > 0
                 AND RFQ.id != $1
               ORDER BY TQ.timestamp DESC
@@ -2837,8 +2869,7 @@ const productQuery = `
     LEFT JOIN tbl_quote_finalization _TQF 
         ON _TQF.rfq_id = $1 
        AND _TQF.vendor_id = TU.id 
-       AND _TQF.product_variant_id = TRP.product_variant_id 
-       AND _TQF.variant = TRP.variant 
+       AND _TQF.rfq_item_id = TRP.id 
     WHERE TQ.rfq_id = TRP.rfq_id
     ORDER BY TU.id ASC
 ) AS "all_vendors",
@@ -2864,7 +2895,7 @@ const productQuery = `
                             'organization_name', COALESCE(TCC2.company_name, TU.organization_name, TU.name),
                             'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END),
                             'prev_worked', (SELECT 1
-                                              FROM tbl_rfq_product_vendors rpv
+                                              FROM tbl_rfq_item_vendors rpv
                                               JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
                                               WHERE rfq.id != $1 AND rfq.created_by = ${user_id} AND rfq.is_published = 1
                                                 AND rpv.user_id = TU.id
@@ -2873,14 +2904,14 @@ const productQuery = `
                         ))
                         FROM tbl_users TU
                         LEFT JOIN tbl_company TCC2 ON TCC2.id = TU.company_id
-                        LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant
+                        LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.rfq_item_id = TRP.id
                         WHERE TU.id = TQ.created_by
                         ${TA_Vendors === 'TA' ? vendorCondition : ''}
                     ),
                     'quote_details', (
                         SELECT json_agg(json_build_object(
-                            'product_id', TQI.product_variant_id,
-                            'variant', TQI.variant,
+                            'product_id', TQI.rfq_item_id,
+                            -- 'variant', TQI.variant,
                             'product_name', TQI.product_name,
                             'unit_price', TQI.unit_price,
                             'total_price', ${
@@ -2907,14 +2938,14 @@ const productQuery = `
                             ),
                             'rfq_details', (
                                 SELECT json_agg(json_build_object('title', TPS.title, 'value', TPS.value))
-                                FROM tbl_rfq_products_specs TPS 
-                                WHERE TPS.product_variant_id = TQI.product_variant_id AND TPS.variant = TQI.variant AND TPS.rfq_id = TRP.rfq_id
+                                FROM tbl_rfq_item_specs TPS 
+                                WHERE TPS.rfq_item_id = TQI.rfq_item_id AND TPS.rfq_id = TRP.rfq_id
                             )
                         ))
                         FROM tbl_quote_items TQI
                         JOIN tbl_quotes TQ_inner ON TQI.quote_id = TQ_inner.id
                         JOIN tbl_users TU_inner ON TU_inner.id = TQ_inner.created_by
-                        WHERE TQI.quote_id = TQ.id AND TQI.product_variant_id = TRP.product_variant_id AND TQI.variant = TRP.variant
+                        WHERE TQI.quote_id = TQ.id AND TQI.rfq_item_id = TRP.id
                         ${TA_Vendors === 'TA' ? vendorCondition : ''}
                     )
                 )
@@ -2922,17 +2953,16 @@ const productQuery = `
                 JOIN tbl_users TU ON TU.id = TQ.created_by
                 JOIN tbl_quote_items TQI ON TQI.quote_id = TQ.id 
                 WHERE TQ.rfq_id = TRP.rfq_id AND 
-                      TQI.product_variant_id = TRP.product_variant_id AND 
-                      TQI.variant = TRP.variant 
+                      TQI.rfq_item_id = TRP.id
                       ${TA_Vendors === 'TA' ? vendorCondition : ''}
                 ORDER BY TQ.created_by ASC
             ) AS "quotations",
             ARRAY(
                 SELECT json_build_object('title', TPS.title, 'value', TPS.value)
-                FROM tbl_rfq_products_specs TPS
-                WHERE TPS.product_variant_id = TRP.product_variant_id AND TPS.variant = TRP.variant AND TPS.rfq_id = TRP.rfq_id
+                FROM tbl_rfq_item_specs TPS
+                WHERE TPS.rfq_item_id = TRP.id AND TPS.rfq_id = TRP.rfq_id
             ) AS "product_specs"
-            FROM tbl_rfq_products TRP WHERE TRP.rfq_id=$1`;
+            FROM tbl_rfq_items TRP WHERE TRP.rfq_id=$1`;
 
       db.query(mainQuery, [id, user_id, company_id])
         .then(function (data) {
@@ -2991,7 +3021,8 @@ const productQuery = `
                       ROUND(AVG(unit_price)::numeric, 2) AS average_price,
                       MAX(unit_price) AS highest_price
                   FROM tbl_quote_items
-                  WHERE product_variant_id = $1
+                  JOIN tbl_rfq_items TRI ON rfq_item_id = TRI.id
+                  WHERE TRI.product_variant_id = $1
                   AND unit_price > 0
               ) t
           WHERE t.lowest_price IS NOT NULL
@@ -3043,8 +3074,8 @@ const productQuery = `
           ARRAY(
           SELECT json_build_object(
             'quote_id', TQFH.quote_id,
-            'product_variant_id', TQFH.product_variant_id,
-            'variant', TQFH.variant,
+           'product_name', RFI.name,
+            -- 'variant', TQFH.variant,
             'vendor_id', TQFH.vendor_id,
             'vendor_name', TU.organization_name,
             'changed_by', _TU.name,
@@ -3061,18 +3092,21 @@ const productQuery = `
               'total_price', TQI.total_price
             )
           )
-          FROM tbl_quote_finalization_history TQFH
-          JOIN tbl_quote_items TQI
-            ON TQI.quote_id = TQFH.quote_id
-            AND TQI.product_variant_id = TQFH.product_variant_id
-            AND TQI.variant = TQFH.variant
-          JOIN tbl_users TU
-            ON TU.id = TQFH.vendor_id
-          JOIN tbl_users _TU
-            ON _TU.id = TQFH.changed_by
+
+FROM tbl_quote_finalization_history TQFH
+JOIN tbl_quote_items TQI
+  ON TQI.quote_id = TQFH.quote_id
+  AND TQI.rfq_item_id = TQFH.rfq_item_id
+JOIN tbl_rfq_items RFI
+  ON RFI.id = TQFH.rfq_item_id         -- <- needed for RFI.name
+JOIN tbl_users TU
+  ON TU.id = TQFH.vendor_id
+JOIN tbl_users _TU
+  ON _TU.id = TQFH.changed_by
+
+
           WHERE TQFH.rfq_id = TRF.rfq_id 
-            AND TQFH.product_variant_id = TRF.product_variant_id 
-            AND TQFH.variant = TRF.variant
+            AND TQFH.rfq_item_id = TRF.id 
           ORDER BY TQFH.changed_at DESC
         ) AS "finalization_history",
         (
@@ -3088,7 +3122,7 @@ const productQuery = `
           FROM tbl_quote_items TQI1
           JOIN tbl_quote_finalization TQF1 ON TQI1.quote_id = TQF1.quote_id
           WHERE TQF1.created_by IN (SELECT id FROM tbl_users WHERE company_id = (SELECT company_id FROM tbl_users WHERE id = $2) AND user_type IN (2,8,10))
-            AND TQI1.product_variant_id = TRF.product_variant_id
+            AND TQI1.rfq_item_id = TRF.id
             AND TQF1.rfq_id != $1 -- different RFQ
           ORDER BY TQF1.timestamp DESC
           LIMIT 1
@@ -3106,7 +3140,7 @@ const productQuery = `
                 'tax_mode', TQI.tax_mode,
                 'total_price', TQI.total_price,
                 'quantity', TQI.quantity,
-                'product_name', TQI.product_name,
+                'product_name', TRF.name,
                 'rfq_no', TQI.rfq_no,
                 'timestamp', TQ.timestamp
               )
@@ -3114,32 +3148,31 @@ const productQuery = `
               JOIN tbl_quotes TQ ON RFQ.id = TQ.rfq_id
               JOIN tbl_quote_items TQI ON TQ.id = TQI.quote_id
             WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = $3 AND user_type IN (2,8,10))
-            AND TQI.product_variant_id = TRF.product_variant_id
+            AND TQI.rfq_item_id = TRF.id
             AND TQI.unit_price > 0
             AND RFQ.id != $1
           ORDER BY TQ.timestamp DESC
           LIMIT 1
-        ) AS "last_quote_rate",
-          ARRAY(
-            SELECT json_build_object(
-              'product_name', TV.name,
-              'rfq_details', (
-                SELECT json_agg(
-                  json_build_object(
-                    'title', TPS.title,
-                    'value', TPS.value
-                  )
-                )
-                FROM tbl_rfq_products_specs TPS
-                WHERE TPS.product_variant_id = TRF.product_variant_id
-                  AND TPS.variant = TRF.variant
-                  AND TPS.rfq_id = $1
-              )
-            )
-            FROM tbl_product_variant TV
-            JOIN tbl_product TP ON TP.id = TV.product_id
-            WHERE TV.id = TRF.product_variant_id
-          ) AS "product_details",
+        ) AS "last_quote_rate", ARRAY[
+  json_build_object(
+   'product_name', TRF.name,
+    'specs', (
+      SELECT COALESCE(
+        json_agg(
+          json_build_object('title', TPS.title, 'value', TPS.value)
+          ORDER BY TPS.id
+        ),
+        '[]'::json
+      )
+      FROM tbl_rfq_item_specs TPS
+      WHERE TPS.rfq_item_id = TRF.id
+        AND TPS.rfq_id = $1
+    )
+  )
+] AS "product_details",
+
+
+        
           ARRAY(
             SELECT json_build_object(
               'quote_id', TQI.quote_id,
@@ -3163,7 +3196,7 @@ const productQuery = `
               'finalization', (
                 SELECT json_build_object(
                   'id', TQF.id,
-                  'product_id', TQF.product_variant_id,
+                  'product_id', TQF.rfq_item_id,
                   'timestamp', TQF.timestamp,
 
                   'finilized_by', (
@@ -3193,8 +3226,7 @@ const productQuery = `
                 )
                 FROM tbl_quote_finalization TQF
                 WHERE TQF.quote_id = TQI.quote_id
-                  AND TQF.product_variant_id = TQI.product_variant_id
-                  AND TQF.variant = TQI.variant
+                  AND TQF.rfq_item_id = TQI.rfq_item_id
               ),
               'quote_details', (
                 SELECT json_build_object(
@@ -3220,7 +3252,7 @@ const productQuery = `
                       'address', TU.address,
                       'organization_name', COALESCE(TCC3.company_name, TU.organization_name, TU.name),
                       'prev_worked', (SELECT 1
-                                        FROM tbl_rfq_product_vendors rpv
+                                        FROM tbl_rfq_item_vendors rpv
                                         JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
                                         WHERE rfq.id != $1 AND rfq.created_by = $2 AND rfq.is_published = 1
                                           AND rpv.user_id = TU.id
@@ -3275,8 +3307,9 @@ const productQuery = `
                     'id', TH.id,
                     'quote_item_id', TH.quote_item_id,
                     'rfq_id', TH.rfq_id,
-                    'product_id', TH.product_variant_id,
+                    'product_id', TRF.id,
                     'unit_price', TH.unit_price,
+                    'product_name', TRF.name,
                     'package_price', TH.package_price,
                     'tax', TH.tax,
                     'freight_price', ${
@@ -3307,11 +3340,10 @@ const productQuery = `
             FROM tbl_quote_items TQI
             JOIN tbl_quotes TQ ON TQI.quote_id = TQ.id
             WHERE TQI.rfq_id = $1
-              AND TQI.product_variant_id = TRF.product_variant_id
-              AND TQI.variant = TRF.variant              
+              AND TQI.rfq_item_id = TRF.id              
               ${TA_Vendors === 'TA' ? vendorCondition : ''}
           ) AS "quotations"
-        FROM tbl_rfq_products TRF
+        FROM tbl_rfq_items TRF
         WHERE TRF.rfq_id = $1;`;
 
       db.query(mainQuery, [id, user_id, company_id])
@@ -3345,7 +3377,7 @@ const productQuery = `
   gerRFQVendors: async (id) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT DISTINCT  user_id FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = $1;`,
+        `SELECT DISTINCT  user_id FROM "tbl_rfq_item_vendors" WHERE "rfq_id" = $1;`,
         [id]
       )
         .then(function (data) {
@@ -3378,7 +3410,7 @@ const productQuery = `
               '[]'
               ) AS spocs
               FROM tbl_users u
-              INNER JOIN tbl_rfq_product_vendors v ON u.id = v.user_id
+              INNER JOIN tbl_rfq_item_vendors v ON u.id = v.user_id
               LEFT JOIN tbl_users_spoc s ON u.id = s.user_id AND (s.is_deleted IS NULL OR s.is_deleted = 0)
               WHERE v.rfq_id = $1
               GROUP BY u.id, u.name, u.email, u.mobile;
@@ -3415,9 +3447,11 @@ const productQuery = `
         pv.name,
         COUNT(rpv.id)
       FROM
-        tbl_rfq_product_vendors rpv
+        tbl_rfq_item_vendors rpv
+      JOIN 
+        tbl_rfq_items TRP ON rpv.rfq_item_id = TRP.id
       JOIN
-        tbl_product_variant pv ON pv.id = rpv.product_variant_id
+        tbl_product_variant pv ON pv.id = TRP.product_variant_id
       JOIN  
         tbl_product p ON p.id = pv.product_id
       WHERE
@@ -3436,7 +3470,7 @@ const productQuery = `
     try {
       const q = `
         SELECT
-          qi.product_variant_id,
+          TRI.product_variant_id,
           pv.name AS variant_name,
           p.name AS product_name,
           qi.unit_price,
@@ -3446,7 +3480,9 @@ const productQuery = `
         JOIN
           tbl_quote_items qi ON q.id = qi.quote_id
         JOIN
-          tbl_product_variant pv ON pv.id = qi.product_variant_id
+          tbl_rfq_items TRI ON TRI.id = qi.rfq_item_id
+        JOIN
+          tbl_product_variant pv ON pv.id = TRI.product_variant_id
         JOIN
           tbl_product p ON p.id = pv.product_id
         WHERE
@@ -3454,7 +3490,7 @@ const productQuery = `
           AND q.created_by = $2
           AND (qi.unit_price > 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
         GROUP BY
-          qi.product_variant_id, qi.variant, p.name, pv.name, qi.unit_price;
+          TRI.product_variant_id, TRI.variant, p.name, pv.name, qi.unit_price;
     `;
 
       return await db.query(q, [rfq_id, vendor_id]);
@@ -3546,105 +3582,198 @@ const productQuery = `
     approved_by_id,
     locationFilters = {}
   ) => {
-    // query change by mukul 28-08-2024
-    // query change by mukul 08-09-2024, added one more filter for created by 1 or 111 to exclude product for them
-    // Changes by Agnij: Modified to support slug-based search for better SEO and URL structure
+  const toIntOrNull = (v) => {
+    if (v === undefined || v === null || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+  };
 
-    // Check if search_key looks like a slug (no spaces and either contains hyphens or is a single word)
-    const isSlugSearch =
-      search_key &&
-      !search_key.includes(' ') &&
-      (search_key.includes('-') || search_key.length > 0);
+  const limit  = toIntOrNull(locationFilters.limit)  ?? 75; // $7  -> default 50
+  const offset = toIntOrNull(locationFilters.offset) ?? 0; // $8  -> default 0
 
-    let q = `
-      SELECT DISTINCT p.id AS product_id,
-                      p.name AS product_name,
-                      CONCAT(pv.name, ' - ', p.name) AS unified_name,
-                      pv.id AS variant_id,
-                      pv.name AS variant_name,
-                      p.description,
-                      pv.slug AS slug,
-                      c.title AS category_name,
-                      c.id AS category_id,
-                      c.parent_id AS parent_category_id,
-                      img.new_image_name AS image_url,
-                      similarity(CONCAT(pv.name, ' - ', p.name), $1) AS similarity_score,
-                      ts_rank_cd(to_tsvector('english', CONCAT(pv.name, ' - ', p.name)), plainto_tsquery('english', $1)) AS rank
-      FROM tbl_product_variant pv
-      JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
-      JOIN tbl_users u ON u.id = pvvm.vendor_id
-        ${
-          locationFilters.country_id
-            ? `AND u.country::int = ${locationFilters.country_id}`
-            : ''
-        }
-        ${
-          locationFilters.state_id
-            ? `AND u.state::int = ${locationFilters.state_id}`
-            : ''
-        }
-        ${
-          locationFilters.city_id
-            ? `AND u.city::int = ${locationFilters.city_id}`
-            : ''
-        }
-      JOIN tbl_product p ON pv.product_id = p.id
-      JOIN tbl_product_categories pc ON p.id = pc.product_id
-      JOIN tbl_category c ON pc.category_id = c.id
-      LEFT JOIN tbl_product_images img ON p.id = img.product_id
-      ${
-        approved_by_id
-          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id`
-          : ``
-      }
-      WHERE p.status = 1
-        AND p.is_deleted = 0
-        AND p.is_review = 0
-        AND p.is_approve = 1
-        AND pv.is_approve = 1
+  // Per-type caps so packages don’t get starved
+  const variantLimit = toIntOrNull(locationFilters.variant_limit) ?? 25; // $9  -> default 25
+  const productLimit = toIntOrNull(locationFilters.product_limit) ?? 25; // $10 -> default 25
+  const packageLimit = toIntOrNull(locationFilters.package_limit) ?? 25; // $11 -> default 25
+
+  const params = [
+    (search_key ?? '').toString(),               // $1 term
+    toIntOrNull(category_id),                    // $2 category_id
+    toIntOrNull(locationFilters.country_id),     // $3 country_id
+    toIntOrNull(locationFilters.state_id),       // $4 state_id
+    toIntOrNull(locationFilters.city_id),        // $5 city_id
+    toIntOrNull(approved_by_id),                 // $6 approved_by_id
+    limit,                                       // $7 global limit
+    offset,                                      // $8 global offset
+    variantLimit,                                // $9 variant per-type limit
+    productLimit,                                // $10 product per-type limit
+    packageLimit                                 // $11 package per-type limit
+  ];
+
+  const q = `WITH q AS (
+  SELECT $1::text AS term
+)
+
+-- 1) VARIANTS
+, variant_rows_raw AS (
+  SELECT DISTINCT
+    p.id AS product_id,
+    p.name AS product_name,
+    CONCAT(pv.name, ' - ', p.name) AS unified_name,
+    pv.id AS variant_id,
+    pv.name AS variant_name,
+    p.description,
+    pv.slug AS slug,
+    c.title AS category_name,
+    c.id AS category_id,
+    c.parent_id AS parent_category_id,
+    img.new_image_name AS image_url,
+    similarity(CONCAT(pv.name, ' - ', p.name), q.term) AS similarity_score,
+    ts_rank_cd(
+      to_tsvector('english', CONCAT(pv.name, ' - ', p.name)),
+      plainto_tsquery('english', q.term)
+    ) + CASE WHEN CONCAT(pv.name, ' - ', p.name) ILIKE '%' || q.term || '%' THEN 1.0 ELSE 0 END AS rank,
+    'variant' AS type
+  FROM q
+  JOIN tbl_product_variant pv ON TRUE
+  JOIN tbl_product_variant_vendor_mapping pvvm
+    ON pvvm.product_variant_id = pv.id
+    AND pvvm.status = TRUE
+    AND pvvm.is_approved = TRUE
+  JOIN tbl_users u ON u.id = pvvm.vendor_id
+  JOIN tbl_product p ON pv.product_id = p.id
+  JOIN tbl_product_categories pc ON p.id = pc.product_id
+  JOIN tbl_category c ON pc.category_id = c.id
+  LEFT JOIN tbl_product_images img ON p.id = img.product_id
+  WHERE p.status = 1
+    AND p.is_deleted = 0
+    AND p.is_review = 0
+    AND p.is_approve = 1
+    AND pv.is_approve = 1
+    AND COALESCE(p.created_by, 0) NOT IN (1, 111)
+    AND (
+      pv.slug = q.term
+      OR to_tsvector('english', CONCAT(pv.name, ' - ', p.name)) @@ plainto_tsquery('english', q.term)
+      OR to_tsvector('english', pv.name) @@ plainto_tsquery('english', q.term)
+      OR to_tsvector('english', p.name) @@ plainto_tsquery('english', q.term)
+      OR similarity(CONCAT(pv.name, ' - ', p.name), q.term) > 0.1
+      OR similarity(pv.name, q.term) > 0.1
+      OR similarity(p.name, q.term) > 0.1
+      OR CONCAT(pv.name, ' - ', p.name) ILIKE '%' || q.term || '%'
+    )
+    AND ($2::int IS NULL OR c.id = $2::int)
+    AND ($3::int IS NULL OR u.country::int = $3::int)
+    AND ($4::int IS NULL OR u.state::int = $4::int)
+    AND ($5::int IS NULL OR u.city::int = $5::int)
+    AND (
+      $6::int IS NULL
+      OR EXISTS (
+        SELECT 1
+        FROM tbl_vendorapprove_product_mapping vum
+        WHERE vum.product_id = p.id
+          AND (vum.vendor_approve_id = $6::int OR vum.vendor_approve_id IS NULL)
+      )
+    )
+  ORDER BY rank DESC, similarity_score DESC
+  LIMIT COALESCE($9::int, 25)
+),
+variant_rows AS (
+  SELECT * FROM variant_rows_raw
+)
+
+-- 2) PRODUCTS
+, product_rows_raw AS (
+  SELECT DISTINCT
+    p.id AS product_id,
+    p.name AS product_name,
+    p.name AS unified_name,
+    NULL::int AS variant_id,
+    NULL::text AS variant_name,
+    p.description,
+    NULL::text AS slug,
+    c.title AS category_name,
+    c.id AS category_id,
+    c.parent_id AS parent_category_id,
+    img.new_image_name AS image_url,
+    similarity(p.name, q.term) AS similarity_score,
+    ts_rank_cd(
+      to_tsvector('english', p.name),
+      plainto_tsquery('english', q.term)
+    ) + CASE WHEN p.name ILIKE '%' || q.term || '%' THEN 1.0 ELSE 0 END AS rank,
+   p.product_type::text AS type
+
+  FROM q
+  JOIN tbl_product p ON TRUE
+  JOIN tbl_product_categories pc ON p.id = pc.product_id
+  JOIN tbl_category c ON pc.category_id = c.id
+  LEFT JOIN tbl_product_images img ON p.id = img.product_id
+  WHERE p.status = 1
+    AND p.is_deleted = 0
+    AND p.is_review = 0
+    AND p.is_approve = 1
+  AND (
+    -- product-level match
+    p.slug = q.term
+    OR to_tsvector('english', p.name) @@ plainto_tsquery('english', q.term)
+    OR similarity(p.name, q.term) > 0.1
+    OR p.name ILIKE '%' || q.term || '%'
+    -- OR any variant under the product matches like in variant search
+    OR EXISTS (
+      SELECT 1
+      FROM tbl_product_variant pv2
+      WHERE pv2.product_id = p.id
         AND (
-          pv.slug = $1
-          OR to_tsvector('english', CONCAT(pv.name, ' - ', p.name)) @@ plainto_tsquery('english', $1)
-          OR similarity(CONCAT(pv.name, ' - ', p.name), $1) > 0.1
+          pv2.slug = q.term
+          OR to_tsvector('english', CONCAT(pv2.name, ' - ', p.name)) @@ plainto_tsquery('english', q.term)
+          OR to_tsvector('english', pv2.name) @@ plainto_tsquery('english', q.term)
+          OR similarity(CONCAT(pv2.name, ' - ', p.name), q.term) > 0.1
+          OR similarity(pv2.name, q.term) > 0.1
+          OR CONCAT(pv2.name, ' - ', p.name) ILIKE '%' || q.term || '%'
         )
-        ${category_id ? `AND c.id = $2` : ``}
-        ${
-          approved_by_id
-            ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)`
-            : ``
-        }
-      ORDER BY rank DESC, similarity_score DESC, CONCAT(pv.name, ' - ', p.name) ASC ;
-    `;
+    )
+  )
+    AND ($2::int IS NULL OR c.id = $2::int)
+    AND (
+  p.product_type = 'package'
+  OR (
+    $6::int IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM tbl_vendorapprove_product_mapping vum
+      WHERE vum.product_id = p.id
+        AND (vum.vendor_approve_id = $6::int OR vum.vendor_approve_id IS NULL)
+    )
+  )
+)
 
 
-    console.log(" ===============================================  ")
-    console.log(q)
-    console.log(" ===============================================  ")
+  ORDER BY rank DESC, similarity_score DESC
+  LIMIT COALESCE($10::int, 25)
+),
+product_rows AS (
+  SELECT * FROM product_rows_raw
+)
+
+-- FINAL UNION & ORDERING
+SELECT *
+FROM (
+  SELECT * FROM variant_rows
+  UNION ALL
+  SELECT * FROM product_rows
+) AS all_rows
+ORDER BY rank DESC, similarity_score DESC, unified_name ASC
+LIMIT COALESCE($7::int, 50)
+OFFSET COALESCE($8::int, 0);
+`
+
+  return new Promise((resolve, reject) => {
+    db.query(q, params)
+      .then((data) => resolve(data))
+      .catch((err) => reject(new Error(err)));
+  });
+},
 
 
-
-    // Assuming db.query can handle parameterized queries:
-    return new Promise(function (resolve, reject) {
-      db.query(
-        q,
-        [
-          search_key,
-          category_id,
-          approved_by_id,
-          locationFilters.country_id,
-          locationFilters.state_id,
-          locationFilters.city_id
-        ].filter(Boolean)
-      ) // Filters out any undefined or empty values
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
   // Location lookup functions removed - using cmsModel.findStateByName, cmsModel.findCityByNameAndState, cmsModel.findCountryByName instead
 
   getCategoryList: async (search_key) => {
@@ -3808,6 +3937,8 @@ WHERE row_num_by_name_category = 1
     });
   },
   // 25-05-2025 mukul jatav, product make added
+// Simple, parameterized, and supports both variant and package product types.
+  // 25-05-2025 mukul jatav, product make added
   searchVendor: async (
     buyerId,
     search_key = '',
@@ -3822,7 +3953,10 @@ WHERE row_num_by_name_category = 1
     vendor_name, // Added vendor_name parameter
     myVendorType,
     responseKeys,
-    productMakes
+    productMakes,
+    variantIdList,
+    product_id,
+    getVendorsForProductType
   ) => {
     // get company_id for this buyer
     const buyer = await db.oneOrNone(
@@ -3971,9 +4105,21 @@ WHERE row_num_by_name_category = 1
           END AS rfq_added,
           COALESCE(sub_info.is_premium, 0) AS is_premium,
           RANDOM() AS group_rand
-        FROM tbl_product_variant_vendor_mapping pvvm
-        JOIN tbl_product_variant pv ON pvvm.product_variant_id = pv.id 
-        JOIN tbl_product p ON p.id = pv.product_id
+
+          ${
+  getVendorsForProductType === "package" && product_id
+    ? `
+      FROM tbl_product_package_vendor_mapping pvvm
+      JOIN tbl_product p ON pvvm.package_product_id = p.id
+    `
+    : `
+      FROM tbl_product_variant_vendor_mapping pvvm
+      JOIN tbl_product_variant pv ON pvvm.product_variant_id = pv.id 
+      JOIN tbl_product p ON p.id = pv.product_id
+    `
+}
+
+          
         JOIN tbl_product_categories pc ON p.id = pc.product_id
         JOIN tbl_category c ON pc.category_id = c.id
         JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
@@ -3985,7 +4131,7 @@ WHERE row_num_by_name_category = 1
         LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
         LEFT JOIN (
           SELECT DISTINCT rpv.user_id
-          FROM tbl_rfq_product_vendors rpv
+          FROM tbl_rfq_item_vendors rpv
           JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
           WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
         ) rfqv ON rfqv.user_id = tu.id
@@ -4011,18 +4157,41 @@ WHERE row_num_by_name_category = 1
           GROUP BY tus.user_id
         ) sub_info ON sub_info.user_id = tu.id
 
-        ${
-          approved_by_id != ''
-            ? `
-          JOIN tbl_vendorapprove_product_mapping vum 
-            ON vum.variant_vendor_mapping_id = pvvm.id
-        `
-            : ``
-        }
+${
+  getVendorsForProductType !== "package" &&
+  Array.isArray(approved_by_id) && approved_by_id.length > 0
+    ? `
+  JOIN tbl_vendorapprove_product_mapping vum 
+    ON vum.variant_vendor_mapping_id = pvvm.id
+`
+    : ``
+}
 
-        WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
-          AND tu.is_deleted = 0 AND tu.status = 1 
-          AND pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER('${search_key}'))
+
+WHERE ${
+  getVendorsForProductType === "package" && product_id
+    ? `p.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1
+       AND (pvvm.is_approved = 1 OR bvm.vendor_id IS NOT NULL)`
+    : `p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1
+       AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)`
+}
+  AND tu.is_deleted = 0 AND tu.status = 1
+
+          
+${
+  getVendorsForProductType === "package" && product_id
+    ? `AND p.id = ${product_id}`
+    : (
+        variantIdList && variantIdList.length > 0
+          ? `AND pv.id IN (${variantIdList.join(',')})`
+          : `AND pv.id IN (
+              SELECT id FROM tbl_product_variant _pv
+              WHERE LOWER(_pv.name) = LOWER('${search_key}')
+            )`
+      )
+}
+
+
           AND tu.email IS NOT NULL
 
           ${
@@ -4069,7 +4238,7 @@ WHERE row_num_by_name_category = 1
               : ``
           }
           ${
-            approved_by_id != ''
+            getVendorsForProductType !== "package" && approved_by_id != ''
               ? `
             AND vum.vendor_approve_id IN (${approved_by_id
               .map((vui) => vui.id)
@@ -4095,7 +4264,7 @@ WHERE row_num_by_name_category = 1
           ${prevWorkedWith === 'rfq_sent' ? `AND rfqv.user_id IS NOT NULL` : ``}
 
           ${
-            productMakes && productMakes.length > 0
+            getVendorsForProductType !== "package" && productMakes && productMakes.length > 0
               ? `
           AND EXISTS (
             SELECT 1
@@ -4123,11 +4292,13 @@ WHERE row_num_by_name_category = 1
           resolve(data);
         })
         .catch(function (err) {
+          console.log('ERROR: =>>>>>>>>>>>>>>>>', err);
           let error = new Error(err);
           reject(error);
         });
     });
   },
+
 
   genericSearchVendors: async (
     buyerId,
@@ -4191,7 +4362,7 @@ WHERE row_num_by_name_category = 1
       LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
       LEFT JOIN (
         SELECT DISTINCT rpv.user_id
-        FROM tbl_rfq_product_vendors rpv
+        FROM tbl_rfq_item_vendors rpv
         JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
         WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
       ) rfqv ON rfqv.user_id = tu.id
@@ -4199,8 +4370,14 @@ WHERE row_num_by_name_category = 1
       LEFT JOIN tbl_location_states ls ON tu.state = ls.id
       LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
 
-      WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
-        AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
+
+      WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1
+       AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
+      AND tu.is_deleted = 0 AND tu.status = 1
+
+      
+
+      AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
         AND tu.is_deleted = 0 AND tu.status = 1 
         AND ${
           productId
@@ -4347,7 +4524,8 @@ WHERE row_num_by_name_category = 1
         `SELECT tbl_rfq.id,tbl_rfq.rfq_no, tbl_quote_finalization.rfq_id,tbl_quote_finalization.vendor_id,tbl_quote_finalization.product_variant_id, tbl_product_variant.name
         FROM tbl_rfq
         LEFT JOIN tbl_quote_finalization ON tbl_rfq.id = tbl_quote_finalization.rfq_id
-        LEFT JOIN tbl_product_variant ON tbl_quote_finalization.product_variant_id = tbl_product_variant.id
+        LEFT JOIN tbl_rfq_items TRI ON tbl_quote_finalization.rfq_item_id = TRI.id
+        LEFT JOIN tbl_product_variant ON TRI.product_variant_id = tbl_product_variant.id
         WHERE tbl_rfq.created_by = ${user_id} AND tbl_quote_finalization.vendor_id = $1;`,
         [vendor_id]
       )
@@ -4393,7 +4571,7 @@ WHERE row_num_by_name_category = 1
   checkVendorRFQResponsibility: async (rfq_id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT * FROM "tbl_rfq_product_vendors" WHERE "rfq_id" = $1 AND "user_id" = $2`,
+        `SELECT * FROM "tbl_rfq_item_vendors" WHERE "rfq_id" = $1 AND "user_id" = $2`,
         [rfq_id, user_id]
       )
         .then(function (data) {
@@ -4425,7 +4603,7 @@ WHERE row_num_by_name_category = 1
   getAllVendorRfq: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.query(
-        `SELECT DISTINCT RPV.rfq_id FROM tbl_rfq_product_vendors RPV
+        `SELECT DISTINCT RPV.rfq_id FROM tbl_rfq_item_vendors RPV
         JOIN tbl_rfq RFQ ON RFQ.id = RPV.rfq_id
         WHERE RFQ.is_published = 1 AND user_id = $1`,
         [vendorId]
@@ -4473,22 +4651,6 @@ WHERE row_num_by_name_category = 1
     return new Promise(function (resolve, reject) {
       db.query(
         `SELECT * FROM tbl_product WHERE created_by = $1 AND is_deleted = '0' AND is_review = '1'`,
-        [vendorId]
-      )
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-  getClosedRfqs: async (vendorId) => {
-    return new Promise(function (resolve, reject) {
-      db.query(
-        `SELECT DISTINCT (rfq_id) FROM tbl_rfq_product_vendors
-        left join tbl_rfq on tbl_rfq.id = tbl_rfq_product_vendors.rfq_id WHERE user_id = $1 and tbl_rfq.status = 2 and tbl_rfq.is_published = 1`,
         [vendorId]
       )
         .then(function (data) {
@@ -4556,12 +4718,11 @@ WHERE row_num_by_name_category = 1
                     WHERE tr.status = 1
                     AND tr.id IN (
                         SELECT trp.rfq_id
-                        FROM tbl_rfq_products trp
+                        FROM tbl_rfq_items trp
                         LEFT JOIN tbl_quote_finalization tqf 
-                            ON trp.product_variant_id = tqf.product_variant_id
-                            AND trp.variant = tqf.variant
+                            ON trp.id = tqf.rfq_item_id
                         GROUP BY trp.rfq_id
-                        HAVING count(trp.product_variant_id) = count(tqf.product_variant_id)
+                        HAVING count(trp.id) = count(tqf.rfq_item_id)
                     )
                 ) AS completed_rfqs
             FROM tbl_rfq tr
@@ -4768,10 +4929,9 @@ WHERE row_num_by_name_category = 1
         AND tr.created_by = $1
         AND tr.id IN (
           SELECT trp.rfq_id
-          FROM tbl_rfq_products trp
+          FROM tbl_rfq_items trp
           LEFT JOIN tbl_quote_finalization tqf
-            ON trp.product_variant_id = tqf.product_variant_id
-          AND trp.variant = tqf.variant
+            ON trp.id = tqf.rfq_item_id
           GROUP BY trp.rfq_id
           HAVING count(trp.product_variant_id) = count(tqf.product_variant_id)
         );
@@ -5005,12 +5165,11 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     return new Promise(async (resolve, reject) => {
       try {
         // For existing product or not
-        const existingProductQuery = `SELECT * FROM tbl_quote_items WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3`;
+        const existingProductQuery = `SELECT * FROM tbl_quote_items WHERE quote_id = $1 AND rfq_item_id = $2`;
         let existingProductWithNoChange = false;
         const existingProduct = await db.query(existingProductQuery, [
           quoteId,
-          product.product_id,
-          product.variant
+          product.id
         ]);
         if (existingProduct.length > 0) {
           existingProductWithNoChange = true;
@@ -5019,13 +5178,12 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         // Fetch existing quote item only if there are differences in specified fields
         const existingItemQuery = `
       SELECT * FROM tbl_quote_items
-      WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3
-       AND (unit_price != $4 OR package_price != $5 OR tax != $6 OR freight_price != $7 OR total_price != $8 OR comment != $9 OR delivery_period != $10 OR freight_mode != $11 OR package_mode != $12 OR tax_mode != $13)
+      WHERE quote_id = $1 AND rfq_item_id = $2
+       AND (unit_price != $3 OR package_price != $4 OR tax != $5 OR freight_price != $6 OR total_price != $7 OR comment != $8 OR delivery_period != $9 OR freight_mode != $10 OR package_mode != $11 OR tax_mode != $12)
    `;
         const result = await db.query(existingItemQuery, [
           quoteId,
-          product.product_id,
-          product.variant,
+          product.id,
           (product.unit_price =
             product.unit_price != '' ? product.unit_price : 0),
           product.package_price,
@@ -5105,7 +5263,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
                 rfq_id: quoteExists.rfq_id,
                 rfq_no: quoteExists.rfq_no,
                 quote_id: parseInt(quoteId),
-                product_variant_id: product.product_id,
+                rfq_item_id: product.id,
                 product_name: product.product_name,
                 unit_price: product.unit_price,
                 package_price: product.package_price,
@@ -5115,7 +5273,6 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
                 comment: product.comment,
                 delivery_period: product.delivery_period,
                 quantity: product.quantity,
-                variant: product.variant,
                 freight_mode: product.freight_mode,
                 package_mode: product.package_mode,
                 tax_mode: product.tax_mode
@@ -5134,7 +5291,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               'rfq_id',
               'rfq_no',
               'quote_id',
-              'product_variant_id',
+              'rfq_item_id',
               'product_name',
               'unit_price',
               'package_price',
@@ -5144,7 +5301,6 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               'comment',
               'delivery_period',
               'quantity',
-              'variant',
               'freight_mode',
               'package_mode',
               'tax_mode'
@@ -5210,12 +5366,11 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     try {
       const existingItemQuery = `
         SELECT * FROM tbl_quote_items
-        WHERE quote_id = $1 AND product_variant_id = $2 AND variant = $3`;
+        WHERE quote_id = $1 AND rfq_item_id = $2`;
 
       const result = await db.query(existingItemQuery, [
         quoteId,
-        product.product_id,
-        product.variant
+        product.id
       ]);
 
       const item = result[0] || null;
@@ -5235,8 +5390,9 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               MIN(qi.unit_price) AS min_price,
               MAX(qi.unit_price) AS max_price,
               AVG(qi.unit_price) AS avg_price
-          FROM tbl_product AS p
-          JOIN tbl_quote_items AS qi ON p.id = qi.product_id
+          FROM tbl_product_variant AS p
+          JOIN tbl_rfq_items TRI ON p.id = TRI.product_variant_id
+          JOIN tbl_quote_items AS qi ON TRI.id = qi.rfq_item_id
           JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
           WHERE p.name = $1
               AND q.timestamp >= NOW() - INTERVAL '1 year'
@@ -5248,7 +5404,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               AVG(qi.unit_price) AS avg_price,
               MAX(qi.unit_price) AS max_price
           FROM tbl_product AS p
-          JOIN tbl_quote_items AS qi ON p.id = qi.product_id
+          JOIN tbl_quote_items AS qi ON TRI.id = qi.rfq_item_id
           JOIN tbl_quotes AS q ON qi.rfq_id = q.rfq_id
           WHERE p.name = $1
               AND q.timestamp >= NOW() - INTERVAL '1 year'
@@ -5374,9 +5530,9 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     return new Promise((resolve, reject) => {
       db.one(
         `SELECT COUNT(DISTINCT v.rfq_id)
-         FROM tbl_rfq_product_vendors v
+         FROM tbl_rfq_item_vendors v
          JOIN tbl_rfq r ON v.rfq_id = r.id
-         WHERE v.user_id = $1 AND r.is_published = 1`, // Matching user_id in tbl_rfq_product_vendors
+         WHERE v.user_id = $1 AND r.is_published = 1`, // Matching user_id in tbl_rfq_item_vendors
         [user_id]
       )
         .then(function (data) {
@@ -5427,7 +5583,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
           P.name AS project_name,
           (
             SELECT COUNT(*)
-            FROM tbl_rfq_products RFQ_P
+            FROM tbl_rfq_items RFQ_P
             WHERE RFQ_P.rfq_id = RFQ.id
           ) AS total_products,
           (
@@ -5436,7 +5592,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
               'total_vendors', COUNT(DISTINCT TRPV.user_id)
             )
             FROM tbl_quotes TQ
-            RIGHT JOIN tbl_rfq_product_vendors TRPV ON TRPV.rfq_id = TQ.rfq_id
+            RIGHT JOIN tbl_rfq_item_vendors TRPV ON TRPV.rfq_id = TQ.rfq_id
             WHERE TRPV.rfq_id = RFQ.id
           ) AS stats,
           json_build_object(
@@ -5544,31 +5700,36 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
                 )
                 FROM tbl_quotes Q
                 JOIN tbl_quote_items QI ON Q.id = QI.quote_id
-                WHERE Q.rfq_id = RFQ.id AND Q.created_by = V.id AND QI.product_variant_id = RFQ_P.product_variant_id AND QI.variant = RFQ_P.variant
+                WHERE Q.rfq_id = RFQ.id AND Q.created_by = V.id AND QI.rfq_item_id = RFQ_P.id
               ),
               'finalization', (
                 SELECT json_build_object('id', TQF.id, 'rfq_no', TQF.rfq_no, 'vendor_id', TQF.vendor_id, 'timestamp', TQF.timestamp)
                 FROM tbl_quote_finalization TQF
-                WHERE TQF.rfq_id = RFQ_P.rfq_id AND TQF.product_variant_id = RFQ_P.product_variant_id AND TQF.variant = RFQ_P.variant
+                WHERE TQF.rfq_id = RFQ_P.rfq_id AND TQF.rfq_item_id = RFQ_P.id
               ),
               'product_specs', (
                 SELECT json_agg(json_build_object('title', SPEC.title, 'value', SPEC.value))
-                FROM tbl_rfq_products_specs SPEC
+                FROM tbl_rfq_item_specs SPEC
                 WHERE SPEC.rfq_id = RFQ_P.rfq_id
-                AND SPEC.product_variant_id = RFQ_P.product_variant_id
-                AND SPEC.variant = RFQ_P.variant
+                AND SPEC.rfq_item_id = RFQ_P.id
               )
             ))
-            FROM tbl_rfq_products RFQ_P
+            FROM tbl_rfq_items RFQ_P
             JOIN tbl_product_variant PV ON RFQ_P.product_variant_id = PV.id
             JOIN tbl_product P ON P.id = PV.product_id
             WHERE RFQ_P.rfq_id = RFQ.id
-            AND EXISTS (SELECT 1 FROM tbl_rfq_product_vendors RFQ_P_V WHERE RFQ_P_V.rfq_id = RFQ_P.rfq_id AND RFQ_P_V.user_id = V.id AND RFQ_P_V.product_variant_id = RFQ_P.product_variant_id AND RFQ_P_V.variant = RFQ_P.variant)
+            AND EXISTS (
+              SELECT 1 
+              FROM tbl_rfq_item_vendors RFQ_P_V 
+              WHERE RFQ_P_V.rfq_id = RFQ_P.rfq_id 
+              AND RFQ_P_V.user_id = V.id 
+              AND RFQ_P_V.rfq_item_id = RFQ_P.id
+            )
           )
         )
         FROM tbl_users V
         WHERE EXISTS (
-          SELECT 1 FROM tbl_rfq_product_vendors RFQ_P_V
+          SELECT 1 FROM tbl_rfq_item_vendors RFQ_P_V
           WHERE RFQ_P_V.rfq_id = RFQ.id AND RFQ_P_V.user_id = V.id
         )
       ) AS "vendor_details",
@@ -5707,7 +5868,7 @@ ORDER BY m.created_at;
         // Validate RFQ and Product existence
         const validateRfqQuery = 'SELECT id FROM tbl_rfq WHERE id = $1';
         const validateProductQuery =
-          'SELECT id FROM tbl_rfq_products WHERE id = $1';
+          'SELECT id FROM tbl_rfq_items WHERE id = $1';
 
         const [rfqExists, productExists] = await Promise.all([
           db.oneOrNone(validateRfqQuery, [rfq_id]),
@@ -5861,7 +6022,7 @@ ORDER BY m.created_at;
 
     const validateRfqProductQuery = `
       SELECT id
-      FROM tbl_rfq_products
+      FROM tbl_rfq_items
       WHERE id = $1;
     `;
 
@@ -7121,10 +7282,9 @@ ORDER BY m.created_at;
                                   'value', RFQ_P_SPEC.value
                               )
                           )
-                          FROM tbl_rfq_products_specs RFQ_P_SPEC
-                          WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id
+                          FROM tbl_rfq_item_specs RFQ_P_SPEC
+                          WHERE RFQ_P.id = RFQ_P_SPEC.rfq_item_id
                             AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
-                            AND RFQ_P.variant = RFQ_P_SPEC.variant
                       ),
                       'product_details', (
                           SELECT json_agg(
@@ -7138,7 +7298,7 @@ ORDER BY m.created_at;
                           WHERE RFQ_P.product_variant_id = TV.id
                       )
                   )
-                  FROM tbl_rfq_products RFQ_P
+                  FROM tbl_rfq_items RFQ_P
                   WHERE RFQ.id = RFQ_P.rfq_id
               ) AS "products"
         FROM tbl_rfq RFQ
@@ -7404,7 +7564,6 @@ ORDER BY m.created_at;
         JSONB_AGG(DISTINCT JSONB_BUILD_OBJECT(
             'spec_title', TRPS.title,
             'spec_value', TRPS.value,
-            'variant', TRPS.variant
         )) AS product_specs,
 
         JSONB_AGG(DISTINCT JSONB_BUILD_OBJECT(
@@ -7440,7 +7599,7 @@ ORDER BY m.created_at;
                                 )
                                 FROM tbl_quote_items TQI
                                 WHERE TQI.quote_id = TQ.id 
-                                    AND TQI.product_variant_id = TRPV.product_variant_id
+                                    AND TQI.rfq_item_id = TRPV.rfq_item_id
                             )
                         )
                     )
@@ -7474,14 +7633,14 @@ ORDER BY m.created_at;
             )
         )) AS vendors
 
-    FROM tbl_rfq_products TRP
+    FROM tbl_rfq_items TRP
     JOIN tbl_product_variant PV ON PV.id = TRP.product_variant_id
     JOIN tbl_product TP ON TP.id = PV.product_id
     JOIN tbl_rfq T ON T.id = TRP.rfq_id
-    LEFT JOIN tbl_rfq_products_specs TRPS 
-        ON TRPS.rfq_id = T.id AND TRPS.product_variant_id = TRP.product_variant_id
-    LEFT JOIN tbl_rfq_product_vendors TRPV 
-        ON TRPV.rfq_id = T.id AND TRPV.product_variant_id = TRP.product_variant_id
+    LEFT JOIN tbl_rfq_item_specs TRPS 
+        ON TRPS.rfq_id = T.id AND TRPS.rfq_item_id = TRP.id
+    LEFT JOIN tbl_rfq_item_vendors TRPV 
+        ON TRPV.rfq_id = T.id AND TRPV.rfq_item_id = TRP.id
     LEFT JOIN tbl_users TU ON TU.id = TRPV.user_id
     LEFT JOIN tbl_company TCC4 ON TCC4.id = TU.company_id
 
@@ -7516,7 +7675,7 @@ ORDER BY m.created_at;
       SELECT 
         PV.name AS variant_name,
         P.name AS product_name
-      FROM tbl_rfq_products RP
+      FROM tbl_rfq_items RP
       LEFT JOIN tbl_product_variant PV ON RP.product_variant_id = PV.id
       LEFT JOIN tbl_product P ON PV.product_id = P.id
       WHERE RP.id = $1
@@ -7604,8 +7763,8 @@ ORDER BY m.created_at;
                         'file_url', pf.file_url
                     )
                 )
-                FROM tbl_rfq_product_files pf
-                WHERE pf.rfq_product_id = prod.id
+                FROM tbl_rfq_item_files pf
+                WHERE pf.rfq_item_id = prod.id
             ),
             'specs', (
                 SELECT json_agg(
@@ -7614,8 +7773,8 @@ ORDER BY m.created_at;
                         'value', specs.value
                     )
                 )
-                FROM tbl_rfq_products_specs specs
-                WHERE specs.rfq_id = r.id AND specs.product_variant_id = prod.product_variant_id
+                FROM tbl_rfq_item_specs specs
+                WHERE specs.rfq_id = r.id AND specs.rfq_item_id = prod.id
             ),
             'vendors', (
                 SELECT json_agg(
@@ -7627,13 +7786,13 @@ ORDER BY m.created_at;
                         'vendor_address', v.address
                     )
                 )
-                FROM tbl_rfq_product_vendors pv
+                FROM tbl_rfq_item_vendors pv
                 JOIN tbl_users v ON pv.user_id = v.id
-                WHERE pv.product_variant_id = prod.product_variant_id AND pv.rfq_id = r.id  -- Assuming a filter condition here
+                WHERE pv.rfq_item_id = prod.id AND pv.rfq_id = r.id
             )
         )
     )
-    FROM tbl_rfq_products prod
+    FROM tbl_rfq_items prod
     JOIN tbl_product_variant tv ON prod.product_variant_id = tv.id
     JOIN tbl_product tp ON tp.id = tv.product_id
     WHERE prod.rfq_id = r.id
@@ -7773,13 +7932,72 @@ ORDER BY m.created_at;
     }
   },
 
+  // Return all approved, active variants for a given product
+  getVariantsByProduct: async (product_id) => {
+    try {
+      const q = `
+        SELECT 
+          pv.id AS variant_id,
+          pv.name AS variant_name,
+          pv.product_id,
+          p.name AS product_name,
+          pv.is_approve,
+          pv.status
+        FROM tbl_product_variant pv
+        JOIN tbl_product p ON p.id = pv.product_id
+        WHERE pv.product_id = $1
+          AND pv.is_deleted = 0
+          AND pv.is_approve = 1
+          AND pv.status = 1
+        ORDER BY pv.name ASC;`;
+      const rows  = await db.query(q, [product_id]);
+      return rows;
+    } catch (error) {
+      console.error('[RFQ Model] Error in getVariantsByProduct:', error.message);
+      return [];
+    }
+  },
+
+
+  // Fetch vendors mapped to a package-type product via tbl_product_package_vendor_mapping
+  searchPackageVendors: async (product_id, buyer_id = null) => {
+    try {
+      // Fetch vendors mapped to a package-type product via tbl_product_package_vendor_mapping
+      const q = `
+        SELECT 
+          u.id AS vendor_id,
+          COALESCE(c.company_name, u.organization_name, u.name) AS vendor_name,
+          u.email AS vendor_email,
+          u.mobile AS vendor_phone,
+          u.city,
+          u.state
+        FROM tbl_product_package_vendor_mapping pvm
+        JOIN tbl_users u ON u.id = pvm.vendor_id
+        LEFT JOIN tbl_company c ON c.id = u.company_id
+        ${buyer_id ? `LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON bvm.vendor_id = u.id AND bvm.company_id = (SELECT company_id FROM tbl_users WHERE id = $2)` : ''}
+        WHERE pvm.package_product_id = $1
+        ORDER BY COALESCE(c.company_name, u.organization_name, u.name) ASC;
+      `;
+
+      const params = buyer_id ? [product_id, buyer_id] : [product_id];
+      const result = await db.query(q, params);
+      
+      // Handle different result formats
+      const rows = result.rows || result || [];
+      return rows;
+    } catch (error) {
+      console.error('[RFQ Model] Error in searchPackageVendors:', error.message);
+      return [];
+    }
+  },
+
   /**
    * @mukul_jatav 11/07/2025
    * Reason for Changes:
    * - To optimize query performance and reduce payload size.
    * - To remove unnecessary or heavy data from the RFQ draft listing view.
    * Changes Made:
-   * - Removed: tbl_query_messages and tbl_rfq_products_specs (not needed for drafts).
+   * - Removed: tbl_query_messages and tbl_rfq_item_specs (not needed for drafts).
    * - Trimmed product_details: Only fetch basic product info (id, name) from tbl_product_variant.
    * - Limited products array: Return only 2 products per RFQ to minimize response time and frontend load.
    *
@@ -7812,7 +8030,7 @@ ORDER BY m.created_at;
                       WHERE RFQ_P.product_variant_id = T_P.id
                   )
               )
-              FROM tbl_rfq_products RFQ_P
+              FROM tbl_rfq_items RFQ_P
               WHERE RFQ.id = RFQ_P.rfq_id
               LIMIT 3
           ) AS "products"
@@ -7912,10 +8130,9 @@ ORDER BY m.created_at;
       tbu.name, 
       tbu.email,
       tpv.name AS product_name
-    FROM tbl_rfq_product_vendors trpv
-    JOIN tbl_rfq_products trp 
-      ON trp.product_variant_id = trpv.product_variant_id 
-      AND trp.variant = trpv.variant
+    FROM tbl_rfq_item_vendors trpv
+    JOIN tbl_rfq_items trp 
+      ON trp.id = trpv.rfq_item_id 
     JOIN tbl_product_variant tpv 
       ON trp.product_variant_id = tpv.id 
     JOIN tbl_users tbu 
@@ -7964,14 +8181,14 @@ ORDER BY m.created_at;
                   FINALIZER.name AS created_by
                   FROM tbl_quote_items TQI
                   JOIN tbl_quote_finalization TQF ON TQI.quote_id = TQF.quote_id 
-                    AND TQI.product_variant_id = TQF.product_variant_id 
-                    AND TQI.variant = TQF.variant
+                    AND TQI.rfq_item_id = TQF.rfq_item_id 
+                  JOIN tbl_rfq_items TRI ON TQF.rfq_item_id = TRI.id
                   JOIN tbl_quotes TQ ON TQ.id = TQF.quote_id
                   JOIN tbl_users TU ON TQ.created_by = TU.id
                   JOIN tbl_rfq RFQ ON RFQ.id = TQ.rfq_id
                   JOIN tbl_users FINALIZER ON FINALIZER.id = TQF.created_by
                   WHERE TQF.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,8,10))
-                    AND TQI.product_variant_id = $1
+                    AND TRI.product_variant_id = $1
                   ORDER BY TQF.timestamp DESC;
         `,
       lqr: `
@@ -7997,11 +8214,11 @@ ORDER BY m.created_at;
             JOIN tbl_users U ON TQ.created_by = U.id    -- ✅ Join with tbl_user
             JOIN tbl_users BUYER ON BUYER.id = RFQ.created_by
             LEFT JOIN tbl_quote_finalization TQF ON TQF.quote_id = TQ.id 
-              AND TQF.product_variant_id = TQI.product_variant_id 
-              AND TQF.variant = TQI.variant
+              AND TQF.rfq_item_id = TQI.rfq_item_id 
+            LEFT JOIN tbl_rfq_items TRP ON TQF.rfq_item_id = TRP.id
             LEFT JOIN tbl_users FINALIZER ON FINALIZER.id = TQF.created_by
             WHERE RFQ.created_by IN (SELECT id FROM tbl_users WHERE company_id = ${companyId} AND user_type IN (2,8,10))
-              AND TQI.product_variant_id = $1
+              AND TRP.product_variant_id = $1
               AND TQI.unit_price > 0
             ORDER BY TQ.timestamp DESC;
 
@@ -8065,10 +8282,9 @@ ORDER BY m.created_at;
         rp.product_variant_id,
         pv.name as product_name,
         rpv.variant
-      FROM tbl_rfq_product_vendors rpv
-      JOIN tbl_rfq_products rp ON rp.rfq_id = rpv.rfq_id 
-        AND rp.product_variant_id = rpv.product_variant_id 
-        AND rp.variant = rpv.variant
+      FROM tbl_rfq_item_vendors rpv
+      JOIN tbl_rfq_items rp ON rp.rfq_id = rpv.rfq_id 
+        AND rp.id = rpv.rfq_item_id 
       JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
       WHERE rpv.rfq_id = $1
     ),
@@ -8201,7 +8417,7 @@ ORDER BY m.created_at;
               ELSE
                 (
                   SELECT COUNT(*) 
-                    FROM tbl_rfq_products _rpv 
+                    FROM tbl_rfq_items _rpv 
                     WHERE _rpv.rfq_id = RFQ.id
                 ) = (
                   SELECT COUNT(*)
@@ -8278,7 +8494,7 @@ getRfqProductvendorsForTargetPrice: async (rfq_product_id, vendorIds) => {
       const query = `
         WITH rfq_info AS (
           SELECT rfq_id, product_variant_id 
-          FROM tbl_rfq_products
+          FROM tbl_rfq_items
           WHERE id = $1
         ),
         valid_quotes AS (
@@ -8359,13 +8575,13 @@ getRfqProductvendorsForTargetPrice: async (rfq_product_id, vendorIds) => {
 
       return db.tx(async (t) => {
         // Delete RFQ-related records
-        await t.none(`DELETE FROM tbl_rfq_products WHERE rfq_id = $1 AND sheet_id NOT IN (${selectedSheets.join(",")})`, id)
+        await t.none(`DELETE FROM tbl_rfq_items WHERE rfq_id = $1 AND sheet_id NOT IN (${selectedSheets.join(",")})`, id)
 
-        await t.none(`DELETE FROM tbl_rfq_product_vendors WHERE rfq_id = $1 AND sheet_id NOT IN (${selectedSheets.join(",")})`, id)
-        await t.none(`DELETE FROM tbl_rfq_products_specs WHERE rfq_id = $1 AND sheet_id NOT IN (${selectedSheets.join(",")})`, id)
+        await t.none(`DELETE FROM tbl_rfq_item_vendors WHERE rfq_id = $1 AND sheet_id NOT IN (${selectedSheets.join(",")})`, id)
+        await t.none(`DELETE FROM tbl_rfq_item_specs WHERE rfq_id = $1 AND sheet_id NOT IN (${selectedSheets.join(",")})`, id)
         await db.none(`
-          DELETE FROM tbl_rfq_product_files  AS f
-          USING  tbl_rfq_products            AS p
+          DELETE FROM tbl_rfq_item_files  AS f
+          USING  tbl_rfq_items         AS p
           WHERE  p.id       = f.rfq_product_id
             AND  p.rfq_id   = $1
             AND  p.sheet_id <> ALL($2)

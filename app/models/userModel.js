@@ -3646,7 +3646,7 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
       values = [rfq_id, user_id]; // Use parameterized values
     } else if (user_type === 3) {
       query = `SELECT 1
-               FROM tbl_rfq_product_vendors
+               FROM tbl_rfq_item_vendors
                WHERE rfq_id = $1
                AND user_id = $2;`;
       values = [rfq_id, user_id]; // Use parameterized values
