@@ -46,11 +46,22 @@ const seoModel = {
     // needed for the requested global offset/limit, fetch only that small product slice,
     // then construct URLs in memory using pre-fetched states and cities.
  // Assuming db is a configured database client (e.g., pg-promise)
- vendorSitemapUrls : async function* (limit = 50000, offset = 0) {
-  // 1) Get total states and cities
+ vendorSitemapUrls: async function* (limit = 50000, offset = 0) {
+  // 1) Get only states and cities for India (country_id = 1)
   const [states, cities] = await Promise.all([
-    db.any(`SELECT id, state_name FROM tbl_location_states ORDER BY state_name ASC`),
-    db.any(`SELECT tlc.city_name, tlc.state_id, tls.state_name FROM tbl_location_cities tlc JOIN tbl_location_states tls ON tlc.state_id = tls.id ORDER BY tlc.city_name ASC`)
+    db.any(`
+      SELECT id, state_name 
+      FROM tbl_location_states 
+      WHERE country_id = 1
+      ORDER BY state_name ASC
+    `),
+    db.any(`
+      SELECT tlc.city_name, tlc.state_id, tls.state_name
+      FROM tbl_location_cities tlc
+      JOIN tbl_location_states tls ON tlc.state_id = tls.id
+      WHERE tls.country_id = 1
+      ORDER BY tlc.city_name ASC
+    `)
   ]);
 
   const statesCount = states.length;
@@ -97,7 +108,11 @@ const seoModel = {
     const stateStart = Math.max(0, productLocalStartOffset);
     const stateEnd = Math.min(statesCount, productLocalEndExclusive);
     for (let s = stateStart; s < stateEnd; s++) {
-      yield `<url>\n  <loc>${baseUrl}/vendor/${slug}-${states[s].state_name}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
+      yield `<url>
+  <loc>${baseUrl}/vendor/${slug}-${states[s].state_name}</loc>
+  <changefreq>weekly</changefreq>
+  <priority>0.5</priority>
+</url>\n`;
       produced++;
       if (produced >= limit) return;
     }
@@ -107,12 +122,53 @@ const seoModel = {
     const cityLocalStart = Math.max(0, citySegmentStart - statesCount);
     const cityLocalEndExclusive = Math.min(totalCities, productLocalEndExclusive - statesCount);
     for (let c = cityLocalStart; c < cityLocalEndExclusive; c++) {
-      yield `<url>\n  <loc>${baseUrl}/vendor/${slug}-${cities[c].city_name}-${cities[c].state_name}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
+      yield `<url>
+  <loc>${baseUrl}/vendor/${slug}-${cities[c].city_name}-${cities[c].state_name}</loc>
+  <changefreq>weekly</changefreq>
+  <priority>0.5</priority>
+</url>\n`;
       produced++;
       if (produced >= limit) return;
     }
   }
+},
+getVendorSitemapTotal: async () => {
+  const [{ total_products }] = await db.any(`
+    SELECT COUNT(*) AS total_products
+    FROM tbl_product_variant pv
+    WHERE pv.slug IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm
+        WHERE pvvm.product_variant_id = pv.id
+          AND pvvm.status = TRUE
+          AND pvvm.is_approved = TRUE
+      )
+  `);
+
+  const [{ states_count }] = await db.any(`
+    SELECT COUNT(*) AS states_count 
+    FROM tbl_location_states 
+    WHERE country_id = 1
+  `);
+
+  const [{ cities_count }] = await db.any(`
+    SELECT COUNT(*) AS cities_count
+    FROM tbl_location_cities tlc
+    JOIN tbl_location_states tls ON tlc.state_id = tls.id
+    WHERE tls.country_id = 1
+  `);
+
+  const rowsPerProduct = parseInt(states_count) + parseInt(cities_count);
+  const totalProducts = parseInt(total_products);
+
+  return {
+    totalUrls: totalProducts * rowsPerProduct,
+    rowsPerProduct,
+    totalProducts
+  };
 }
+
+
 }
 
 
