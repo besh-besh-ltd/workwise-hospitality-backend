@@ -474,5 +474,139 @@ export const summaries = [
 
             </footer> </div>
     `
+  },
+  {
+    file_name: 'Tender Package- GCC for “PRESTIGE BKC 101- Plot 01” - SITC of MEP works',
+    markup: `<div class="container my-5 p-4 border rounded bg-light">
+
+  <h1 class="mb-4 text-center text-primary fw-bold">Tender Document Summary – Prestige BKC 101, Plot 1, Mumbai</h1>
+
+  <!-- Overview -->
+  <section class="mb-4">
+    <h3 class="fw-bold text-secondary">1. Overview</h3>
+    <p><span class="fw-bold">Project:</span> Design, Supply, Installation, Testing & Commissioning of MEP Works for Prestige BKC 101 – Plot 1, Mumbai.</p>
+    <p><span class="fw-bold">Employer:</span> Prestige BKC Realtors Pvt Ltd.</p>
+    <p><span class="fw-bold">Type:</span> Brownfield commercial project targeting <span class="text-primary">LEED Platinum</span> and <span class="text-primary">WELL</span> certification.</p>
+    <p><span class="fw-bold">Tender Package:</span> SITC (Supply, Installation, Testing, Commissioning) on re-measurable item-rate basis.</p>
+  </section>
+
+  <!-- Scope of Work -->
+  <section class="mb-4">
+    <h3 class="fw-bold text-secondary">2. Scope of Work</h3>
+    <ul class="list-group">
+      <li class="list-group-item">Complete <span class="fw-bold">MEP works</span>: design validation, labor, materials, plant, supervision, testing, commissioning.</li>
+      <li class="list-group-item">Contractor responsible for all <span class="fw-bold">statutory approvals</span> and certificates.</li>
+      <li class="list-group-item">Coordination with <span class="fw-bold">General Contractor</span> & specialist contractors.</li>
+    </ul>
+  </section>
+
+  <!-- Major Facilities -->
+  <section class="mb-4">
+    <h3 class="fw-bold text-secondary">3. Major Facilities & Structures</h3>
+    <ul class="list-unstyled">
+      <li><span class="fw-bold">Plot Area:</span> 17,941 sq.m</li>
+      <li><span class="fw-bold">Construction Area:</span> 2,44,051 sq.m (26,26,967 sq.ft)</li>
+      <li><span class="fw-bold">Tower 1:</span> Commercial Leasing</li>
+      <li><span class="fw-bold">Tower 2:</span> Commercial Leasing + 5-Star Hotel (~200 keys)</li>
+      <li><span class="fw-bold">Other Components:</span> Basements, Retail, F&amp;B, Social Amenities, Car Parking</li>
+      <li><span class="fw-bold">Configuration:</span> 4 Basements + Ground + 19 Floors</li>
+    </ul>
+  </section>
+
+  <!-- Qualification -->
+  <section class="mb-4">
+    <h3 class="fw-bold text-secondary">4. Bidder Qualification Criteria</h3>
+    <ul class="list-check">
+      <li>Similar project references since <span class="fw-bold">Jan 2017</span></li>
+      <li>Key staff CVs & deployment plans</li>
+      <li>Last 3 years <span class="fw-bold">Balance Sheets, GST, PAN, PF</span></li>
+      <li>Banker’s letter or <span class="fw-bold">CIBIL rating</span></li>
+      <li>Statement of arbitration/litigation (last 5 years)</li>
+    </ul>
+  </section>
+
+  <!-- Commercial -->
+  <section class="mb-4">
+    <h3 class="fw-bold text-secondary">5. Commercial & Contractual Conditions</h3>
+    <ul>
+      <li>Item-rate contract covering all duties/taxes (<span class="fw-bold">GST extra</span>)</li>
+      <li>No extra claims; contractor assumes full scope responsibility.</li>
+      <li>Mobilization advance, performance security, indemnity bond required.</li>
+      <li>Unconditional & irrevocable <span class="fw-bold">bank guarantees</span>.</li>
+    </ul>
+  </section>
+
+  <!-- Technical -->
+  <section class="mb-4">
+    <h3 class="fw-bold text-secondary">6. Technical Conditions</h3>
+    <ul>
+      <li><span class="fw-bold">BIM implementation</span>: 3D/4D/5D/6D, clash detection, shop & as-built drawings.</li>
+      <li>Execution plan: logistics, safety, quality, communication, schedule.</li>
+      <li>Coordination with façade, elevators, STP/WTP, parking systems, landscaping, finishes.</li>
+    </ul>
+  </section>
+
+  <!-- Tendering -->
+  <section class="mb-4">
+    <h3 class="fw-bold text-secondary">7. Tendering Process</h3>
+    <ul>
+      <li><span class="fw-bold">Bids:</span> Technical Bid (PDF, no pricing) & Price Bid (Excel BOQ + docs)</li>
+      <li><span class="fw-bold">Submission:</span> Soft copy email + sealed hard copy for Letters of Tender</li>
+      <li>Pre-bid clarifications allowed; post-submission limited to arithmetic corrections.</li>
+      <li>Employer reserves right to reject, split, or de-scope work.</li>
+      <li><span class="fw-bold">Confidential evaluation</span>.</li>
+    </ul>
+  </section>
+
+  <!-- Annexures -->
+  <section class="mb-4">
+    <h3 class="fw-bold text-secondary">8. Mandatory Annexures & Forms</h3>
+    <ul>
+      <li>Letters of Tender (Plot 1 & 2)</li>
+      <li>Performance BG, Mobilization Advance BG, Indemnity Bond</li>
+      <li>Safety guide, Project Management Plan samples</li>
+      <li>CVs of staff, org charts, equipment lists</li>
+    </ul>
+  </section>
+
+  <!-- Drawings and BOQ -->
+  <section class="mb-4">
+    <h3 class="fw-bold text-secondary">9. Drawings, SOR & Price Schedules</h3>
+    <ul>
+      <li><span class="fw-bold">Volume II:</span> Tender Drawings</li>
+      <li><span class="fw-bold">Volume V:</span> BOQ in Excel format</li>
+      <li>Pricing to include cash flow forecast & deviations list</li>
+    </ul>
+  </section>
+
+  <!-- Key Takeaways -->
+  <section class="mb-4">
+    <h3 class="fw-bold text-secondary">10. Key Takeaways</h3>
+    <ul>
+      <li>High-spec, global-standard commercial development at BKC</li>
+      <li>Strong focus on <span class="text-primary">Sustainability (LEED, WELL)</span></li>
+      <li>Mandatory BIM-led execution methodology</li>
+      <li>Stringent bidder qualification – financial & technical</li>
+      <li>Employer holds strong rights: split awards, de-scoping, confidentiality</li>
+      <li>Contractor bears full MEP responsibility</li>
+    </ul>
+  </section>
+
+  <!-- Executive Summary -->
+  <section>
+    <h3 class="fw-bold text-secondary">11. Executive Summary</h3>
+    <p>
+      This tender invites <span class="fw-bold">qualified contractors</span> for turnkey MEP execution at 
+      <span class="fw-bold text-primary">Prestige BKC 101 – Plot 1</span>, a landmark mixed-use development in Mumbai. 
+      The scope spans design validation, procurement, installation, testing, commissioning, and coordination with multiple specialist trades. 
+      Emphasis is laid on <span class="fw-bold">sustainability certifications</span>, advanced <span class="fw-bold">BIM execution</span>, and world-class finishes. 
+      Bids will undergo rigorous evaluation based on financial credibility, prior experience, and technical resources. 
+      Commercially structured as an <span class="fw-bold">item-rate contract</span> (GST extra), the employer retains significant discretion over award and de-scoping. 
+      Winning this tender ensures participation in a marquee development setting benchmarks in building standards at BKC.
+    </p>
+  </section>
+
+</div>
+`
   }
 ];
