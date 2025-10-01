@@ -48,8 +48,13 @@ const seoModel = {
     vendorSitemapUrls: async function* (limit = 50000, offset = 0) {
       const baseUrl = process.env.FRONTEND_URL || 'https://letsworkwise.com';
 
-      // Fetch India states and cities once
-      const [states, cities] = await Promise.all([
+      // Fetch countries, states and cities once
+      const [countries, states, cities] = await Promise.all([
+        db.any(`
+          SELECT id, country_name
+          FROM tbl_location_country
+          ORDER BY country_name ASC
+        `),
         db.any(`
           SELECT id, state_name 
           FROM tbl_location_states 
@@ -91,33 +96,58 @@ const seoModel = {
 
         for (const p of products) {
           // For each product, determine available states and cities where at least one vendor exists
-          const [availableStates, availableCities] = await Promise.all([
+          const [availableCountries, availableStates, availableCities] = await Promise.all([
             db.any(
-              `SELECT DISTINCT u.state::int AS state_id
+              `SELECT DISTINCT u.country AS country_id
                FROM tbl_product_variant_vendor_mapping pvvm
-               JOIN tbl_users u ON u.id = pvvm.user_id
+               JOIN tbl_users u ON u.id = pvvm.vendor_id
                WHERE pvvm.product_variant_id = $1
                  AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
                  AND u.is_deleted = 0 AND u.status = 1
-                 AND u.state ~ '^[0-9]+$'
+                 AND u.country IS NOT NULL
               `,
               [p.id]
             ),
             db.any(
-              `SELECT DISTINCT u.city::int AS city_id
+              `SELECT DISTINCT u.state AS state_id
                FROM tbl_product_variant_vendor_mapping pvvm
-               JOIN tbl_users u ON u.id = pvvm.user_id
+               JOIN tbl_users u ON u.id = pvvm.vendor_id
                WHERE pvvm.product_variant_id = $1
                  AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
                  AND u.is_deleted = 0 AND u.status = 1
-                 AND u.city ~ '^[0-9]+$'
+                 AND u.state IS NOT NULL
+              `,
+              [p.id]
+            ),
+            db.any(
+              `SELECT DISTINCT u.city AS city_id
+               FROM tbl_product_variant_vendor_mapping pvvm
+               JOIN tbl_users u ON u.id = pvvm.vendor_id
+               WHERE pvvm.product_variant_id = $1
+                 AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
+                 AND u.is_deleted = 0 AND u.status = 1
+                 AND u.city IS NOT NULL
               `,
               [p.id]
             )
           ]);
 
+          const availableCountryIds = new Set(availableCountries.map(s => s.country_id));
           const availableStateIds = new Set(availableStates.map(s => s.state_id));
           const availableCityIds = new Set(availableCities.map(c => c.city_id));
+
+          // Emit country URLs that have at least one vendor
+          for (const k of countries) {
+            if (!availableCountryIds.has(k.id)) continue;
+            if (skipped < offset) {
+              skipped++;
+              continue;
+            }
+            const countrySlug = (k.country_name || '').toLowerCase().replace(/\s+/g, '');
+            yield `<url>\n  <loc>${baseUrl}/vendor/${p.slug}-${countrySlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
+            yielded++;
+            if (yielded >= limit) return;
+          }
 
           // Emit state URLs that have at least one vendor
           for (const s of states) {
@@ -126,7 +156,8 @@ const seoModel = {
               skipped++;
               continue;
             }
-            yield `<url>\n  <loc>${baseUrl}/vendor/${p.slug}-${s.state_name}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
+            const stateSlug = (s.state_name || '').toLowerCase().replace(/\s+/g, '');
+            yield `<url>\n  <loc>${baseUrl}/vendor/${p.slug}-${stateSlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
             yielded++;
             if (yielded >= limit) return;
           }
@@ -138,7 +169,9 @@ const seoModel = {
               skipped++;
               continue;
             }
-            yield `<url>\n  <loc>${baseUrl}/vendor/${p.slug}-${c.city_name}-${c.state_name}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
+            const citySlug = (c.city_name || '').toLowerCase().replace(/\s+/g, '');
+            const stateSlug = (c.state_name || '').toLowerCase().replace(/\s+/g, '');
+            yield `<url>\n  <loc>${baseUrl}/vendor/${p.slug}-${citySlug}-${stateSlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
             yielded++;
             if (yielded >= limit) return;
           }
@@ -149,6 +182,22 @@ const seoModel = {
     },
 getVendorSitemapTotal: async () => {
   // Count only product-location combinations that actually have at least one vendor
+  const [{ eligible_countries_count }] = await db.any(`
+    SELECT COUNT(*) AS eligible_countries_count
+    FROM (
+      SELECT pv.id AS product_variant_id, lcn.id AS country_id
+      FROM tbl_product_variant pv
+      JOIN tbl_product_variant_vendor_mapping pvvm_check ON pvvm_check.product_variant_id = pv.id
+      JOIN tbl_users u_check ON u_check.id = pvvm_check.vendor_id
+      JOIN tbl_location_country lcn ON u_check.country = lcn.id
+      WHERE pv.slug IS NOT NULL
+        AND pvvm_check.status = TRUE AND pvvm_check.is_approved = TRUE
+        AND u_check.is_deleted = 0 AND u_check.status = 1
+        AND u_check.country IS NOT NULL
+      GROUP BY pv.id, lcn.id
+    ) t
+  `);
+
   const [{ eligible_states_count }] = await db.any(`
     SELECT COUNT(*) AS eligible_states_count
     FROM (
@@ -159,12 +208,12 @@ getVendorSitemapTotal: async () => {
       AND EXISTS (
         SELECT 1
         FROM tbl_product_variant_vendor_mapping pvvm
-        JOIN tbl_users u ON u.id = pvvm.user_id
+        JOIN tbl_users u ON u.id = pvvm.vendor_id
         WHERE pvvm.product_variant_id = pv.id
           AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
           AND u.is_deleted = 0 AND u.status = 1
-          AND u.state ~ '^[0-9]+$'
-          AND u.state::int = tls.id
+          AND u.state IS NOT NULL
+          AND u.state = tls.id
       )
     ) t
   `);
@@ -175,18 +224,19 @@ getVendorSitemapTotal: async () => {
       SELECT pv.id AS product_variant_id, tlc.id AS city_id
       FROM tbl_product_variant pv
       JOIN tbl_product_variant_vendor_mapping pvvm_check ON pvvm_check.product_variant_id = pv.id
-      JOIN tbl_users u_check ON u_check.id = pvvm_check.user_id
-      JOIN tbl_location_cities tlc ON (u_check.city ~ '^[0-9]+$' AND u_check.city::int = tlc.id)
+      JOIN tbl_users u_check ON u_check.id = pvvm_check.vendor_id
+      JOIN tbl_location_cities tlc ON u_check.city = tlc.id
       JOIN tbl_location_states tls ON tlc.state_id = tls.id
       WHERE pv.slug IS NOT NULL
         AND pvvm_check.status = TRUE AND pvvm_check.is_approved = TRUE
         AND u_check.is_deleted = 0 AND u_check.status = 1
+        AND u_check.city IS NOT NULL
         AND tls.country_id = 1
       GROUP BY pv.id, tlc.id
     ) t
   `);
 
-  const totalUrls = parseInt(eligible_states_count) + parseInt(eligible_cities_count);
+  const totalUrls = parseInt(eligible_countries_count) + parseInt(eligible_states_count) + parseInt(eligible_cities_count);
 
   return {
     totalUrls
