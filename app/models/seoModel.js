@@ -98,7 +98,7 @@ const seoModel = {
           // For each product, determine available states and cities where at least one vendor exists
           const [availableCountries, availableStates, availableCities] = await Promise.all([
             db.any(
-              `SELECT DISTINCT u.country AS country_id
+              `SELECT DISTINCT u.country::int AS country_id
                FROM tbl_product_variant_vendor_mapping pvvm
                JOIN tbl_users u ON u.id = pvvm.vendor_id
                WHERE pvvm.product_variant_id = $1
@@ -189,7 +189,7 @@ getVendorSitemapTotal: async () => {
       FROM tbl_product_variant pv
       JOIN tbl_product_variant_vendor_mapping pvvm_check ON pvvm_check.product_variant_id = pv.id
       JOIN tbl_users u_check ON u_check.id = pvvm_check.vendor_id
-      JOIN tbl_location_country lcn ON u_check.country = lcn.id
+      JOIN tbl_location_country lcn ON u_check.country::int = lcn.id
       WHERE pv.slug IS NOT NULL
         AND pvvm_check.status = TRUE AND pvvm_check.is_approved = TRUE
         AND u_check.is_deleted = 0 AND u_check.status = 1
