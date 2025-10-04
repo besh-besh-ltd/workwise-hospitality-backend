@@ -8119,12 +8119,17 @@ ORDER BY m.created_at;
 
   getQuoteHistoryForvendor : async (user_id, variant_id) => {
     const query = `
-    select tqi.*, tu.name as buyer_name , tq.timestamp 
-from tbl_quote_items tqi
-join tbl_quotes tq on tq.id = tqi.quote_id 
-join tbl_rfq rfq on tq.rfq_id = rfq.id 
-join tbl_users tu on tu.id = rfq.created_by 
-where tq.created_by = $1 and tqi.product_variant_id = $2;
+    SELECT 
+    tqi.*, 
+    tu.name AS buyer_name, 
+    tq.timestamp
+FROM tbl_quote_items tqi
+JOIN tbl_quotes tq ON tq.id = tqi.quote_id
+JOIN tbl_rfq rfq ON tq.rfq_id = rfq.id
+JOIN tbl_users tu ON tu.id = rfq.created_by
+WHERE tq.created_by = $1 
+  AND tqi.product_variant_id = $2
+ORDER BY tq.timestamp DESC;
     `;
     try {
       const result = await db.query(query, [user_id, variant_id]);
