@@ -1,4 +1,5 @@
 import db from "../config/dbConn.js";
+import seoController from "../controllers/seo/seoController.js";
 import { AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../util/constants.js";
 import generalModel, { markPOStatusChange } from "./generalModel.js";
 
@@ -14,7 +15,150 @@ const getNextPONumber = async () => {
   });
 };
 
-export const initiatePurchaseOrder = async (rfq_id, project_id, quote_id, total_value, product_info, initiated_by, company_id, user, t) => {
+const getItemTotalWOFreight = (item) => {
+  const quantity = parseFloat(item.quantity) || 0;
+    const unitPrice = parseFloat(item.unit_price) || 0;
+    const freightPrice = parseFloat(item.freight_price) || 0;
+    const packagePrice = parseFloat(item.package_price) || 0;
+    const tax = parseFloat(item.tax) || 0;
+    
+    // Base amount (unit_price * quantity)
+    const baseAmount = unitPrice * quantity;
+
+    let freightAmount = 0;
+    if (item.freight_mode === 'percentage') {
+      freightAmount = (freightPrice / 100) * baseAmount;
+    } else {
+      freightAmount = freightPrice; // flat amount
+    }
+    
+    // Calculate package amount based on mode
+    let packageAmount = 0;
+    if (item.package_mode === 'percentage') {
+      packageAmount = (packagePrice / 100) * baseAmount;
+    } else {
+      packageAmount = packagePrice; // flat amount
+    }
+    
+    // Calculate subtotal before tax for this item
+    const itemSubtotal = baseAmount + freightAmount + packageAmount;
+    
+    // Calculate tax amount based on mode
+    let taxAmount = 0;
+    if (item.tax_mode === 'percentage') {
+      taxAmount = (tax / 100) * itemSubtotal;
+    } else {
+      taxAmount = tax; // flat amount
+    }
+    
+    return (itemSubtotal + taxAmount) - freightAmount;
+}
+
+const getSingleItemTaxAmount = (item) => {
+  const quantity = parseFloat(item.quantity) || 0;
+    const unitPrice = parseFloat(item.unit_price) || 0;
+    const freightPrice = parseFloat(item.freight_price) || 0;
+    const packagePrice = parseFloat(item.package_price) || 0;
+    const tax = parseFloat(item.tax) || 0;
+    
+    // Base amount (unit_price * quantity)
+    const baseAmount = unitPrice * quantity;
+    
+    // Calculate freight amount based on mode
+    let freightAmount = 0;
+    if (item.freight_mode === 'percentage') {
+      freightAmount = (freightPrice / 100) * baseAmount;
+    } else {
+      freightAmount = freightPrice; // flat amount
+    }
+    
+    // Calculate package amount based on mode
+    let packageAmount = 0;
+    if (item.package_mode === 'percentage') {
+      packageAmount = (packagePrice / 100) * baseAmount;
+    } else {
+      packageAmount = packagePrice; // flat amount
+    }
+    
+    // Calculate subtotal before tax for this item
+    const itemSubtotal = baseAmount + freightAmount + packageAmount;
+    
+    // Calculate tax amount based on mode
+    let taxAmount = 0;
+    if (item.tax_mode === 'percentage') {
+      taxAmount = (tax / 100) * itemSubtotal;
+    } else {
+      taxAmount = tax; // flat amount
+    }
+    
+    return taxAmount;
+}
+
+function calculatePricing(items) {
+  let subtotal = 0;
+  let totalPrice = 0;
+  let totalFreight = 0;
+  
+  // Calculate subtotal first (unit_price * quantity for all items)
+  items.forEach(item => {
+    const quantity = parseFloat(item.quantity) || 0;
+    const unitPrice = parseFloat(item.unit_price) || 0;
+    subtotal += unitPrice * quantity;
+  });
+  
+  // Calculate total price with freight, package, and tax
+  items.forEach(item => {
+    const quantity = parseFloat(item.quantity) || 0;
+    const unitPrice = parseFloat(item.unit_price) || 0;
+    const freightPrice = parseFloat(item.freight_price) || 0;
+    const packagePrice = parseFloat(item.package_price) || 0;
+    const tax = parseFloat(item.tax) || 0;
+    
+    // Base amount (unit_price * quantity)
+    const baseAmount = unitPrice * quantity;
+    
+    // Calculate freight amount based on mode
+    let freightAmount = 0;
+    if (item.freight_mode === 'percentage') {
+      freightAmount = (freightPrice / 100) * baseAmount;
+    } else {
+      freightAmount = freightPrice; // flat amount
+    }
+
+    totalFreight += freightAmount;
+    
+    // Calculate package amount based on mode
+    let packageAmount = 0;
+    if (item.package_mode === 'percentage') {
+      packageAmount = (packagePrice / 100) * baseAmount;
+    } else {
+      packageAmount = packagePrice; // flat amount
+    }
+    
+    // Calculate subtotal before tax for this item
+    const itemSubtotal = baseAmount + freightAmount + packageAmount;
+    
+    // Calculate tax amount based on mode
+    let taxAmount = 0;
+    if (item.tax_mode === 'percentage') {
+      taxAmount = (tax / 100) * itemSubtotal;
+    } else {
+      taxAmount = tax; // flat amount
+    }
+    
+    // Add to total price
+    totalPrice += itemSubtotal + taxAmount;
+  });
+  
+  return {
+    subtotal: parseFloat(subtotal.toFixed(2)),
+    totalPrice: parseFloat(totalPrice.toFixed(2)),
+    taxAmount: parseFloat((totalPrice - subtotal).toFixed(2)),
+    totalFreight: parseFloat(totalFreight.toFixed(2)),
+  };
+}
+
+export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, t) => {
     try {
       const { rfq_product_id, quantity, unit_price, finalized_vendor_id } =
         product_info;
@@ -22,7 +166,7 @@ export const initiatePurchaseOrder = async (rfq_id, project_id, quote_id, total_
       // 1. Check if a pending PO already exists for this RFQ Product
       const existing = await t.oneOrNone(
         `SELECT id FROM tbl_rfq_purchase_order
-      WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = $3`,
+      WHERE rfq_id = $1 AND $2 = ANY(rfq_product_id) AND status = $3`,
         [rfq_id, rfq_product_id, PO_STATUSES.PENDING_APPROVAL]
       );
 
@@ -30,35 +174,110 @@ export const initiatePurchaseOrder = async (rfq_id, project_id, quote_id, total_
         await t.none(
           `UPDATE tbl_rfq_purchase_order
           SET status = $3, updated_at = NOW()
-          WHERE rfq_id = $1 AND rfq_product_id = $2`,
+          WHERE rfq_id = $1 AND $2 = ANY(rfq_product_id)`,
           [rfq_id, rfq_product_id, PO_STATUSES.CANCELLED]
         );
       }
 
-      // 2. Insert new PO record
-      const poNumber = await getNextPONumber();
-      const po = await t.one(
-        `INSERT INTO tbl_rfq_purchase_order (
-          rfq_id, project_id, quote_id, po_number, total_value, rfq_product_id, quantity,
-          unit_price, finalized_vendor_id, initiated_by, status
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-      RETURNING id`,
-        [
-          rfq_id,
-          project_id,
-          quote_id,
-          poNumber,
-          total_value,
-          rfq_product_id,
-          quantity,
-          unit_price,
-          finalized_vendor_id,
-          initiated_by,
-          PO_STATUSES.PENDING_APPROVAL
-        ]
-      );
+      let po = null;
 
+      if(existing_po_id) {
+        if(!(await t.oneOrNone(`SELECT id FROM tbl_rfq_purchase_order WHERE id = $1`, [existing_po_id]))) 
+          throw new Error("No Purchase Order found from id:", existing_po_id);
+
+        po = await t.one(
+          `UPDATE tbl_rfq_purchase_order 
+            SET
+              rfq_product_id = array_append(rfq_product_id, $1),
+              quote_id = array_append(quote_id, $2),
+              total_value = total_value + $3,
+              quantity = quantity + $4,
+              unit_price = unit_price + $5
+
+            WHERE id = $6
+            RETURNING id`,
+          [
+            rfq_product_id,
+            quote_id,
+            total_value,
+            quantity,
+            unit_price,
+            existing_po_id
+          ]
+        );
+      } else {
+        // 2. Insert new PO record
+        const poNumber = await getNextPONumber();
+        po = await t.one(
+          `INSERT INTO tbl_rfq_purchase_order (
+            rfq_id, project_id, quote_id, po_number, total_value, rfq_product_id, quantity,
+            unit_price, finalized_vendor_id, initiated_by, status
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          RETURNING id`,
+          [
+            rfq_id,
+            project_id,
+            [quote_id],
+            poNumber,
+            total_value,
+            [rfq_product_id],
+            quantity,
+            unit_price,
+            finalized_vendor_id,
+            initiated_by,
+            PO_STATUSES.DRAFT
+          ]
+        );
+      }
+
+      return {
+        po_id: po.id,
+        status: true,
+        message: "PO has been drafted successfully!"
+      };
+    } catch (error) {
+      throw error;
+    }
+};
+
+export const initiatePurchaseOrder = async (po_id, initiator) => {
+  try {
+    return await db.tx(async t => {
+      const purchaseOrder = await t.oneOrNone(
+        `SELECT 
+          PO.*, 
+          TC.company_name,
+          JSON_BUILD_OBJECT(
+            'id', SUP.id,
+            'name', SUP.name,
+            'email', SUP.email,
+            'phone', SUP.mobile,
+            'address', SUP.address
+          ) AS supplier,
+          JSON_BUILD_OBJECT(
+            'id', FIN.id,
+            'name', FIN.name,
+            'email', FIN.email,
+            'phone', FIN.mobile,
+            'address', FIN.address
+          ) AS company
+
+          FROM tbl_rfq_purchase_order PO
+          JOIN tbl_users SUP ON SUP.id = PO.finalized_vendor_id
+          JOIN tbl_users FIN ON FIN.id = PO.initiated_by
+          JOIN tbl_company TC ON TC.id = PO.company_id 
+
+        WHERE PO.id = $1`,
+        [po_id]
+      );
+  
+      if(!purchaseOrder) {
+        throw new Error("No Purchase Order found by id:", po_id);
+      }
+  
+      const { rfq_id, project_id, total_value, rfq_product_id, quantity, unit_price, finalized_vendor_id } = purchaseOrder;
+  
       // 3. Call Approval Logic
       const meta = {
         rfq_id,
@@ -68,34 +287,116 @@ export const initiatePurchaseOrder = async (rfq_id, project_id, quote_id, total_
         unit_price,
         finalized_vendor_id,
         total_value,
-        po_id: po.id
+        po_id: purchaseOrder.id
       };
-
+  
       const approvalResult = await generalModel.initiateApproval(
         AVAILABLE_HIERARCHY_TYPES.po.type,
-        po.id,
-        company_id,
-        initiated_by,
+        purchaseOrder.id,
+        initiator.company_id,
+        initiator.id,
         meta,
         {
           exist: `You cannot change the finalized vendor because an approved Purchase Order already exists for them.`
         },
         t,
       );
-
+  
       // 4. If no further approval required → mark PO as approved
       if (!approvalResult.approval_required) {
-        await markPOStatusChange(po.id, t, false, user);
+        await markPOStatusChange(purchaseOrder.id, t, false, initiator);
+      } else {
+        await t.oneOrNone(
+          `UPDATE tbl_rfq_purchase_order
+          SET status = 'pending_approval'
+          WHERE id = $1`,
+          [po_id]
+        );
+      }
+
+      const items = await getPOItemDetails(purchaseOrder)
+
+      const pdfSaveResult = await seoController.poPDF({
+        ...purchaseOrder,
+        ...items
+      });
+
+      console.log("PDF SAVE RESULT:", pdfSaveResult);
+  
+      return {
+        po_id: purchaseOrder.id,
+        approval_required: approvalResult.approval_required,
+        current_approver_id: approvalResult.current_approver_id ?? null,
+        poPdf: pdfSaveResult
+      };
+    })
+  } catch (error) {
+    throw error;
+  }
+};
+
+export const getPOItemDetails = async (purchase_order) => {
+  try {
+    const { rfq_product_id, quote_id } = purchase_order;
+
+    return await db.tx(async t => {
+      const q = `
+        SELECT 
+          qi.unit_price,
+          qi.package_price,
+          qi.tax,
+          qi.freight_price,
+          qi.total_price,
+          qi.comment,
+          qi.delivery_period,
+          qi.freight_mode,
+          qi.package_mode,
+          qi.tax_mode,
+          pv.name as product_name,
+          qi.quantity
+
+        FROM tbl_quote_items qi
+        INNER JOIN tbl_product_variant pv ON qi.product_variant_id = pv.id
+        WHERE qi.id = ANY($1)
+        ORDER BY qi.id;
+      `;
+      let items = await t.any(q, [quote_id])
+
+      items = items.map(i => ({
+        ...i,
+        taxAmount: getSingleItemTaxAmount(i),
+        total_price: getItemTotalWOFreight(i)
+      }))
+
+      let prices = calculatePricing(items);
+      prices.taxAmount = items.reduce((prev, cur) => prev + cur.taxAmount, 0);
+
+      if(prices.totalFreight && prices.totalFreight > 0) {
+        const freightItem = {
+          unit_price: prices.totalFreight,
+          package_price: 0,
+          tax: 0,
+          freight_price: 0,
+          total_price: prices.totalFreight,
+          comment: '',
+          delivery_period: '',
+          freight_mode: '',
+          package_mode: '',
+          tax_mode: '',
+          product_name: 'Overall Freight Price',
+          quantity: 'N/A',
+        }
+        items = [...items, freightItem]
       }
 
       return {
-        po_id: po.id,
-        approval_required: approvalResult.approval_required,
-        current_approver_id: approvalResult.current_approver_id ?? null
-      };
-    } catch (error) {
-      throw error;
-    }
+        items,
+        ...prices
+      }
+    })
+  } catch (error) {
+    throw error;
+  }
 };
 
 export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filters = {}) => {
@@ -137,15 +438,26 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const [pos, { total }] = await db.tx(async t => {
-      const data = await t.any(
-        `SELECT po.*,
+    const [pos, { total }, { approval_level }] = await db.tx(async t => {
+      const dataQuery = `SELECT po.*,
+                VENDOR.organization_name AS finalized_vendor_name,
+                PRJ.name AS project_name,
                 TU.name AS initiated_by,
                 CASE WHEN trx.current_approver_id = $2 THEN TRUE ELSE FALSE END AS is_approver,
-                JSON_BUILD_OBJECT(
-                    'id', TPV.id,
-                    'name', TPV.name
-                ) AS product_details,
+                COALESCE(
+                (
+                  SELECT JSON_AGG(
+                      JSON_BUILD_OBJECT(
+                          'id', TPV.id,
+                          'name', TPV.name
+                      )
+                  )
+                  FROM tbl_rfq_products TRP
+                  JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
+                  WHERE TRP.id = ANY(po.rfq_product_id)
+                ),
+                '[]'::json
+              ) AS product_details,
                 CASE
                   WHEN trx.id IS NOT NULL THEN json_build_object(
                     'id', trx.id,
@@ -155,19 +467,49 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
                     'final_decision_by', trx.final_decision_by
                   )
                   ELSE NULL
-                END AS approval_status
+                END AS approval_status,
+                (
+                    SELECT array_agg(
+                            json_build_object(
+                              'id',            PM.id,
+                              'milestone_name',PM.milestone_name,
+                              'milestone_description',PM.milestone_description,
+                              'due_date',      PM.due_date,
+                              'amount',        PM.amount,
+                              'amount_mode',   PM.amount_mode
+                            )
+                            ORDER BY PM.due_date
+                          )
+                    FROM tbl_payment_milestone PM
+                    WHERE PM.po_id   = PO.id
+                      AND NOT PM.is_done
+                      AND PM.due_date > NOW()
+                ) AS upcoming_milestones
          FROM tbl_rfq_purchase_order po
+         LEFT JOIN tbl_projects PRJ ON PRJ.id = PO.project_id
          LEFT JOIN tbl_approval_hierarchy_transactions trx
            ON trx.hierarchy_type = 'po'
            AND trx.target_entity_id = po.id
-        JOIN tbl_rfq_products TRP ON TRP.id = po.rfq_product_id
-        JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
         JOIN tbl_users TU ON TU.id = po.initiated_by
+        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
          ${whereClause}
          ORDER BY po.created_at DESC
-         LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+         LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`
+
+      let data = await t.any(dataQuery,
         [...values, limit, offset]
       );
+  
+      
+      data = data.map(po => {
+        const fileName = `po-${po.po_number}.pdf`;
+        const fullPath = `/app/storage/invoices/${fileName}`
+        
+        return {
+          ...po,
+          poPdfUrl: `${process.env.APP_BASE_PATH}${fullPath}`
+        }
+      })
 
       const count = await t.one(
         `SELECT COUNT(*) AS total
@@ -176,7 +518,13 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
         values
       );
 
-      return [data, count];
+      const approverLevel = await t.oneOrNone(
+        `SELECT approval_level FROM tbl_approval_hierarchy TAH
+         WHERE user_id = $1 AND hierarchy_type = 'po'`,
+         [user_id]
+      )
+
+      return [data, count, approverLevel || -1];
     });
 
     return {
@@ -184,7 +532,8 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
       page,
       limit,
       total: parseInt(total, 10),
-      totalPages: Math.ceil(total / limit)
+      totalPages: Math.ceil(total / limit),
+      approval_level,
     };
   } catch (error) {
     throw error;
@@ -193,7 +542,7 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
 
 export const getPODetailsById = async (po_id, user_id) => {
   try {
-    const result = await db.oneOrNone(
+    let result = await db.oneOrNone(
       `SELECT po.*,
               CASE
                 WHEN PD.id IS NOT NULL THEN
@@ -211,13 +560,21 @@ export const getPODetailsById = async (po_id, user_id) => {
               ) AS logged_in_user,
               TU.name AS initiated_by_name,
               CASE WHEN trx.current_approver_id = $2 THEN TRUE ELSE FALSE END AS is_approver,
-              
-              JSON_BUILD_OBJECT(
-                  'id', TPV.id,
-                  'name', TPV.name,
-                  'product_id', TPV.product_id
+              COALESCE(
+                (
+                  SELECT JSON_AGG(
+                      JSON_BUILD_OBJECT(
+                          'id', TPV.id,
+                          'name', TPV.name,
+                          'product_id', TPV.product_id
+                      )
+                  )
+                  FROM tbl_rfq_products TRP
+                  JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
+                  WHERE TRP.id = ANY(po.rfq_product_id)
+                ),
+                '[]'::json
               ) AS product_details,
-              
               CASE
                 WHEN trx.id IS NOT NULL THEN json_build_object(
                   'id', trx.id,
@@ -306,23 +663,54 @@ export const getPODetailsById = async (po_id, user_id) => {
                 WHERE M.po_id = po.id
               ),
               '[]'::json
-            ) AS tasks
+            ) AS tasks,
+            (
+                SELECT array_agg(
+                    json_build_object(
+                      'id',            TQ.id,
+                      'quote_id', TQuotes.id,
+                      'vendor_name', TUser.name,
+                      'unit_price', TQ.unit_price,
+                      'package_price', TQ.package_price,
+                      'freight_price',      TQ.freight_price,
+                      'tax',        TQ.tax,
+                      'freight_mode', TQ.freight_mode,
+                      'package_mode', TQ.package_mode,
+                      'tax_mode', TQ.tax_mode,
+                      'comment',   TQ.comment,
+                      'delivery_period', TQ.delivery_period
+                    )
+                )
+
+                FROM tbl_quote_items TQ
+                JOIN tbl_quotes TQuotes ON TQ.quote_id = TQuotes.id
+                JOIN tbl_users TUser ON TUser.id = TQuotes.created_by
+                JOIN tbl_rfq_products TRP ON TRP.id = ANY(po.rfq_product_id)
+                WHERE PO.rfq_id   = TQ.rfq_id
+                  AND TQ.product_variant_id = TRP.product_variant_id
+                  AND TQ.variant = TRP.variant
+            ) AS quotations
 
        FROM tbl_rfq_purchase_order po
        LEFT JOIN tbl_approval_hierarchy_transactions trx
          ON trx.hierarchy_type = 'po'
          AND trx.target_entity_id = po.id
        LEFT JOIN tbl_projects PD ON PD.id = po.project_id
-
        LEFT JOIN tbl_users trx_user ON trx_user.id = trx.current_approver_id
-       JOIN tbl_rfq_products TRP ON TRP.id = po.rfq_product_id
-       JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
        JOIN tbl_users TU ON TU.id = po.initiated_by
        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2
        WHERE po.id = $1`,
       [po_id, user_id]
     );
+
+    const fileName = `po-${result.po_number}.pdf`;
+    const fullPath = `/app/storage/invoices/${fileName}`
+
+    result = {
+      ...result,
+      poPdfUrl: fullPath
+    }
 
     return result;
   } catch (error) {
