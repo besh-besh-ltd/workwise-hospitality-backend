@@ -3220,6 +3220,7 @@ LIMIT 1;`;
           ) AS "product_details",
           ARRAY(
             SELECT json_build_object(
+              'quote_item_id', TQI.id,
               'quote_id', TQI.quote_id,
               'unit_price', TQI.unit_price,
               'package_price', TQI.package_price,

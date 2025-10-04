@@ -84,7 +84,7 @@ app.get('/debug-sentry', async function mainHandler(req, res) {
   }
 });
 
-app.use(express.static(path.join(__dirname, '/app/uploads')));
+app.use(express.static(__dirname));
 util(app);
 
 rescheduleAllMilestoneReminders();

@@ -1,4 +1,5 @@
 import db from "../config/dbConn.js";
+import seoController from "../controllers/seo/seoController.js";
 import { AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../util/constants.js";
 import generalModel, { markPOStatusChange } from "./generalModel.js";
 
@@ -13,6 +14,149 @@ const getNextPONumber = async () => {
     }
   });
 };
+
+const getItemTotalWOFreight = (item) => {
+  const quantity = parseFloat(item.quantity) || 0;
+    const unitPrice = parseFloat(item.unit_price) || 0;
+    const freightPrice = parseFloat(item.freight_price) || 0;
+    const packagePrice = parseFloat(item.package_price) || 0;
+    const tax = parseFloat(item.tax) || 0;
+    
+    // Base amount (unit_price * quantity)
+    const baseAmount = unitPrice * quantity;
+
+    let freightAmount = 0;
+    if (item.freight_mode === 'percentage') {
+      freightAmount = (freightPrice / 100) * baseAmount;
+    } else {
+      freightAmount = freightPrice; // flat amount
+    }
+    
+    // Calculate package amount based on mode
+    let packageAmount = 0;
+    if (item.package_mode === 'percentage') {
+      packageAmount = (packagePrice / 100) * baseAmount;
+    } else {
+      packageAmount = packagePrice; // flat amount
+    }
+    
+    // Calculate subtotal before tax for this item
+    const itemSubtotal = baseAmount + freightAmount + packageAmount;
+    
+    // Calculate tax amount based on mode
+    let taxAmount = 0;
+    if (item.tax_mode === 'percentage') {
+      taxAmount = (tax / 100) * itemSubtotal;
+    } else {
+      taxAmount = tax; // flat amount
+    }
+    
+    return (itemSubtotal + taxAmount) - freightAmount;
+}
+
+const getSingleItemTaxAmount = (item) => {
+  const quantity = parseFloat(item.quantity) || 0;
+    const unitPrice = parseFloat(item.unit_price) || 0;
+    const freightPrice = parseFloat(item.freight_price) || 0;
+    const packagePrice = parseFloat(item.package_price) || 0;
+    const tax = parseFloat(item.tax) || 0;
+    
+    // Base amount (unit_price * quantity)
+    const baseAmount = unitPrice * quantity;
+    
+    // Calculate freight amount based on mode
+    let freightAmount = 0;
+    if (item.freight_mode === 'percentage') {
+      freightAmount = (freightPrice / 100) * baseAmount;
+    } else {
+      freightAmount = freightPrice; // flat amount
+    }
+    
+    // Calculate package amount based on mode
+    let packageAmount = 0;
+    if (item.package_mode === 'percentage') {
+      packageAmount = (packagePrice / 100) * baseAmount;
+    } else {
+      packageAmount = packagePrice; // flat amount
+    }
+    
+    // Calculate subtotal before tax for this item
+    const itemSubtotal = baseAmount + freightAmount + packageAmount;
+    
+    // Calculate tax amount based on mode
+    let taxAmount = 0;
+    if (item.tax_mode === 'percentage') {
+      taxAmount = (tax / 100) * itemSubtotal;
+    } else {
+      taxAmount = tax; // flat amount
+    }
+    
+    return taxAmount;
+}
+
+function calculatePricing(items) {
+  let subtotal = 0;
+  let totalPrice = 0;
+  let totalFreight = 0;
+  
+  // Calculate subtotal first (unit_price * quantity for all items)
+  items.forEach(item => {
+    const quantity = parseFloat(item.quantity) || 0;
+    const unitPrice = parseFloat(item.unit_price) || 0;
+    subtotal += unitPrice * quantity;
+  });
+  
+  // Calculate total price with freight, package, and tax
+  items.forEach(item => {
+    const quantity = parseFloat(item.quantity) || 0;
+    const unitPrice = parseFloat(item.unit_price) || 0;
+    const freightPrice = parseFloat(item.freight_price) || 0;
+    const packagePrice = parseFloat(item.package_price) || 0;
+    const tax = parseFloat(item.tax) || 0;
+    
+    // Base amount (unit_price * quantity)
+    const baseAmount = unitPrice * quantity;
+    
+    // Calculate freight amount based on mode
+    let freightAmount = 0;
+    if (item.freight_mode === 'percentage') {
+      freightAmount = (freightPrice / 100) * baseAmount;
+    } else {
+      freightAmount = freightPrice; // flat amount
+    }
+
+    totalFreight += freightAmount;
+    
+    // Calculate package amount based on mode
+    let packageAmount = 0;
+    if (item.package_mode === 'percentage') {
+      packageAmount = (packagePrice / 100) * baseAmount;
+    } else {
+      packageAmount = packagePrice; // flat amount
+    }
+    
+    // Calculate subtotal before tax for this item
+    const itemSubtotal = baseAmount + freightAmount + packageAmount;
+    
+    // Calculate tax amount based on mode
+    let taxAmount = 0;
+    if (item.tax_mode === 'percentage') {
+      taxAmount = (tax / 100) * itemSubtotal;
+    } else {
+      taxAmount = tax; // flat amount
+    }
+    
+    // Add to total price
+    totalPrice += itemSubtotal + taxAmount;
+  });
+  
+  return {
+    subtotal: parseFloat(subtotal.toFixed(2)),
+    totalPrice: parseFloat(totalPrice.toFixed(2)),
+    taxAmount: parseFloat((totalPrice - subtotal).toFixed(2)),
+    totalFreight: parseFloat(totalFreight.toFixed(2)),
+  };
+}
 
 export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, t) => {
     try {
@@ -45,14 +189,16 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_val
           `UPDATE tbl_rfq_purchase_order 
             SET
               rfq_product_id = array_append(rfq_product_id, $1),
-              total_value = total_value + $2,
-              quantity = quantity + $3,
-              unit_price = unit_price + $4
+              quote_id = array_append(quote_id, $2),
+              total_value = total_value + $3,
+              quantity = quantity + $4,
+              unit_price = unit_price + $5
 
-            WHERE id = $5
+            WHERE id = $6
             RETURNING id`,
           [
             rfq_product_id,
+            quote_id,
             total_value,
             quantity,
             unit_price,
@@ -72,7 +218,7 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_val
           [
             rfq_id,
             project_id,
-            quote_id,
+            [quote_id],
             poNumber,
             total_value,
             [rfq_product_id],
@@ -99,8 +245,30 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
   try {
     return await db.tx(async t => {
       const purchaseOrder = await t.oneOrNone(
-        `SELECT * FROM tbl_rfq_purchase_order
-        WHERE id = $1`,
+        `SELECT 
+          PO.*, 
+          TC.company_name,
+          JSON_BUILD_OBJECT(
+            'id', SUP.id,
+            'name', SUP.name,
+            'email', SUP.email,
+            'phone', SUP.mobile,
+            'address', SUP.address
+          ) AS supplier,
+          JSON_BUILD_OBJECT(
+            'id', FIN.id,
+            'name', FIN.name,
+            'email', FIN.email,
+            'phone', FIN.mobile,
+            'address', FIN.address
+          ) AS company
+
+          FROM tbl_rfq_purchase_order PO
+          JOIN tbl_users SUP ON SUP.id = PO.finalized_vendor_id
+          JOIN tbl_users FIN ON FIN.id = PO.initiated_by
+          JOIN tbl_company TC ON TC.id = PO.company_id 
+
+        WHERE PO.id = $1`,
         [po_id]
       );
   
@@ -137,13 +305,94 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
       // 4. If no further approval required → mark PO as approved
       if (!approvalResult.approval_required) {
         await markPOStatusChange(purchaseOrder.id, t, false, initiator);
+      } else {
+        await t.oneOrNone(
+          `UPDATE tbl_rfq_purchase_order
+          SET status = 'pending_approval'
+          WHERE id = $1`,
+          [po_id]
+        );
       }
+
+      const items = await getPOItemDetails(purchaseOrder)
+
+      const pdfSaveResult = await seoController.poPDF({
+        ...purchaseOrder,
+        ...items
+      });
+
+      console.log("PDF SAVE RESULT:", pdfSaveResult);
   
       return {
         po_id: purchaseOrder.id,
         approval_required: approvalResult.approval_required,
-        current_approver_id: approvalResult.current_approver_id ?? null
+        current_approver_id: approvalResult.current_approver_id ?? null,
+        poPdf: pdfSaveResult
       };
+    })
+  } catch (error) {
+    throw error;
+  }
+};
+
+export const getPOItemDetails = async (purchase_order) => {
+  try {
+    const { rfq_product_id, quote_id } = purchase_order;
+
+    return await db.tx(async t => {
+      const q = `
+        SELECT 
+          qi.unit_price,
+          qi.package_price,
+          qi.tax,
+          qi.freight_price,
+          qi.total_price,
+          qi.comment,
+          qi.delivery_period,
+          qi.freight_mode,
+          qi.package_mode,
+          qi.tax_mode,
+          pv.name as product_name,
+          qi.quantity
+
+        FROM tbl_quote_items qi
+        INNER JOIN tbl_product_variant pv ON qi.product_variant_id = pv.id
+        WHERE qi.id = ANY($1)
+        ORDER BY qi.id;
+      `;
+      let items = await t.any(q, [quote_id])
+
+      items = items.map(i => ({
+        ...i,
+        taxAmount: getSingleItemTaxAmount(i),
+        total_price: getItemTotalWOFreight(i)
+      }))
+
+      let prices = calculatePricing(items);
+      prices.taxAmount = items.reduce((prev, cur) => prev + cur.taxAmount, 0);
+
+      if(prices.totalFreight && prices.totalFreight > 0) {
+        const freightItem = {
+          unit_price: prices.totalFreight,
+          package_price: 0,
+          tax: 0,
+          freight_price: 0,
+          total_price: prices.totalFreight,
+          comment: '',
+          delivery_period: '',
+          freight_mode: '',
+          package_mode: '',
+          tax_mode: '',
+          product_name: 'Overall Freight Price',
+          quantity: 'N/A',
+        }
+        items = [...items, freightItem]
+      }
+
+      return {
+        items,
+        ...prices
+      }
     })
   } catch (error) {
     throw error;
@@ -247,9 +496,20 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
          ORDER BY po.created_at DESC
          LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`
 
-      const data = await t.any(dataQuery,
+      let data = await t.any(dataQuery,
         [...values, limit, offset]
       );
+  
+      
+      data = data.map(po => {
+        const fileName = `po-${po.po_number}.pdf`;
+        const fullPath = `/app/storage/invoices/${fileName}`
+        
+        return {
+          ...po,
+          poPdfUrl: `${process.env.APP_BASE_PATH}${fullPath}`
+        }
+      })
 
       const count = await t.one(
         `SELECT COUNT(*) AS total
@@ -282,7 +542,7 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
 
 export const getPODetailsById = async (po_id, user_id) => {
   try {
-    const result = await db.oneOrNone(
+    let result = await db.oneOrNone(
       `SELECT po.*,
               CASE
                 WHEN PD.id IS NOT NULL THEN
@@ -443,6 +703,14 @@ export const getPODetailsById = async (po_id, user_id) => {
        WHERE po.id = $1`,
       [po_id, user_id]
     );
+
+    const fileName = `po-${result.po_number}.pdf`;
+    const fullPath = `/app/storage/invoices/${fileName}`
+
+    result = {
+      ...result,
+      poPdfUrl: fullPath
+    }
 
     return result;
   } catch (error) {

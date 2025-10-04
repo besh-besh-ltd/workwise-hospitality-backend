@@ -14,7 +14,7 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
     if (user) user = user[0];
     else reject('User not found!');
 
-    let product = await db.oneOrNone(
+    let product = await db.any(
       `SELECT P.id, P.name FROM tbl_rfq_products trp JOIN tbl_product_variant P ON P.id = trp.product_variant_id WHERE trp.id = ANY($1)`,
       [purchaseOrder.rfq_product_id]
     );
@@ -77,10 +77,11 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
 
 export const sendPONotificationToVendor = async (purchaseOrder, user) => {
     try {
+        console.log("PO TEST -> PURCHASE ORDER EMAIL TRIGGERED!")
         let company = await userModel.getCompanyDetail(user.id);
         if(company) company = company[0];
 
-        const product = await db.one(
+        const product = await db.any(
             `SELECT P.id, P.name FROM tbl_rfq_products TRP JOIN tbl_product_variant P ON TRP.product_variant_id = P.id WHERE TRP.id = ANY($1)`,
             [purchaseOrder.rfq_product_id]
         )
@@ -91,10 +92,14 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
 
         const headerContent = `<h2>Hello ${vendor.organization_name || vendor.name || "Vendor"},</h2>`;
 
+        const fileName = `po-${purchaseOrder.po_number}.pdf`;
+
         const containerContent = ` 
             <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
             <p>
                 We're excited to inform you that a <strong>Purchase Order</strong> has been created for your quote.
+                <br>
+                Please refer to the attachment in this email for the formal PO document.
             </p>
 
             <h4>Purchase Order Details</h4>
@@ -115,11 +120,14 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
                 Please ensure your team is aligned and prepared to fulfill the order as per the specified terms.
             </p>
 
+            <a href='${process.env.APP_BASE_PATH}/app/storage/invoices/${fileName}'>Click here to view PO Document</a>
+
             <p style="text-align:center; margin-top: 30px;">
                 Thank you for your continued partnership.<br/>
                 <strong>— Team Workwise</strong>
             </p>
-            </div>`;
+            </div>
+            `;
 
         // Generate final email layout
         const dynamicHTML = generateEmailTemplate(
@@ -131,18 +139,31 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
 
         let mailRecipients = {
             from: `${company.company_name} <hello@letsworkwise.com>`,
-            subject: `Purchase Order Confirmed — PO #${purchaseOrder.po_number} for ${product.name}`, // Subject line
-            html: dynamicHTML
+            to: vendor.email,
+            subject: `Purchase Order Confirmed — PO #${purchaseOrder.po_number}`, // Subject line
+            html: dynamicHTML,
+            // attachments: [
+            //     {
+            //         filename: `PO_${purchaseOrder.po_number}.pdf`,
+            //         path: `/app/storage/invoices/${fileName}`,
+            //         contentType: 'application/pdf'
+            //     }
+            // ]
         };
+        
+        console.log("PO TEST -> VENDOR:", vendor);
+        console.log("PO TEST -> MAIL RECIPIENTS:", mailRecipients);
 
-        if (spocList && spocList.length > 0) {
-            mailRecipients.to = spocList.map(spoc => spoc.email);
-            mailRecipients.cc =  vendor.email;
-        } else {
-            mailRecipients.to =  vendor.email;
-        }
+        // if (spocList && spocList.length > 0) {
+        //     mailRecipients.to = spocList.map(spoc => spoc.email);
+        //     mailRecipients.cc =  vendor.email;
+        // } else {
+        //     mailRecipients.to =  vendor.email;
+        // }
 
         sendMail(mailRecipients);
+
+        console.log("PO TEST -> EMAIL HAS BEEN SENT!")
     } catch (error) {
         console.error(error);
         throw error;

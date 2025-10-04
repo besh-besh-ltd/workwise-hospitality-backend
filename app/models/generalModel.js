@@ -749,8 +749,11 @@ export const markPOStatusChange = async (po_id, t, reject = false, user) => {
       [po_id, reject ? PO_STATUSES.REJECTED : PO_STATUSES.APPROVED]
     );
 
+    console.log("PO TEST -> PO STATUS IS BEING CHANGED!")
+
     // ⏳ Trigger email notifications to vendors and all the team members (Not yet)!
     if(!reject) {
+      console.log("PO TEST -> IS NOT REJECTED, sending mail for approval")
       await sendPONotificationToVendor(purchaseOrder, user);
     }
 
