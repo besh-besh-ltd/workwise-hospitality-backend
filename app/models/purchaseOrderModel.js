@@ -320,8 +320,6 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
         ...purchaseOrder,
         ...items
       });
-
-      console.log("PDF SAVE RESULT:", pdfSaveResult);
   
       return {
         po_id: purchaseOrder.id,
@@ -709,7 +707,7 @@ export const getPODetailsById = async (po_id, user_id) => {
 
     result = {
       ...result,
-      poPdfUrl: fullPath
+      poPdfUrl: `${process.env.APP_BASE_PATH}${fullPath}`
     }
 
     return result;
