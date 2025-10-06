@@ -6298,7 +6298,7 @@ const rfqController = {
   },
 
   finalize: async (req, res, next) => {
-    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, variant } =
+    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, quote_item_id, variant } =
       req.body;
 
     try {
@@ -6438,7 +6438,7 @@ const rfqController = {
           await userModel.mapBuyerToVendor(req.user.id, vendor_id);
           
           // Pre-initiate PO as if this throws error after this, it will trigger mail without ever finalizing anyone!
-          const result = await draftPO(req.body, req.user, t);
+          const result = await draftPO({...req.body, quote_id: quote_item_id}, req.user, t);
           
           await sendWinningNotificaion(
             vendorNonLoginRfqAccessToken,
