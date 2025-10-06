@@ -483,7 +483,7 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
                     WHERE PM.po_id   = PO.id
                       AND NOT PM.is_done
                       AND PM.due_date > NOW()
-                ) AS upcoming_milestones,
+                ) AS upcoming_milestones
          FROM tbl_rfq_purchase_order po
          LEFT JOIN tbl_projects PRJ ON PRJ.id = PO.project_id
          LEFT JOIN tbl_approval_hierarchy_transactions trx
