@@ -438,6 +438,7 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
 
     const [pos, { total }, { approval_level }] = await db.tx(async t => {
       const dataQuery = `SELECT po.*,
+                po.po_pdf_url AS poPdfUrl
                 VENDOR.organization_name AS finalized_vendor_name,
                 PRJ.name AS project_name,
                 TU.name AS initiated_by,
@@ -482,7 +483,7 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
                     WHERE PM.po_id   = PO.id
                       AND NOT PM.is_done
                       AND PM.due_date > NOW()
-                ) AS upcoming_milestones
+                ) AS upcoming_milestones,
          FROM tbl_rfq_purchase_order po
          LEFT JOIN tbl_projects PRJ ON PRJ.id = PO.project_id
          LEFT JOIN tbl_approval_hierarchy_transactions trx
@@ -497,17 +498,6 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
       let data = await t.any(dataQuery,
         [...values, limit, offset]
       );
-  
-      
-      data = data.map(po => {
-        const fileName = `po-${po.po_number}.pdf`;
-        const fullPath = `/app/storage/invoices/${fileName}`
-        
-        return {
-          ...po,
-          poPdfUrl: `${process.env.APP_BASE_PATH}${fullPath}`
-        }
-      })
 
       const count = await t.one(
         `SELECT COUNT(*) AS total
@@ -542,6 +532,7 @@ export const getPODetailsById = async (po_id, user_id) => {
   try {
     let result = await db.oneOrNone(
       `SELECT po.*,
+              po.po_pdf_url AS poPdfUrl
               CASE
                 WHEN PD.id IS NOT NULL THEN
                   JSON_BUILD_OBJECT(
@@ -701,14 +692,6 @@ export const getPODetailsById = async (po_id, user_id) => {
        WHERE po.id = $1`,
       [po_id, user_id]
     );
-
-    const fileName = `po-${result.po_number}.pdf`;
-    const fullPath = `/app/storage/invoices/${fileName}`
-
-    result = {
-      ...result,
-      poPdfUrl: `${process.env.APP_BASE_PATH}${fullPath}`
-    }
 
     return result;
   } catch (error) {
