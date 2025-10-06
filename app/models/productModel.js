@@ -16,132 +16,6 @@ const productModel = {
         });
     });
   },
-  // Efficient bulk mapping: insert mappings, makes and approvals in minimum statements
-  bulkInsertVariantVendorMappings: async (items, userId) => {
-    // items: [{ variant_id, vendor_id, approved_by: number[] | null, make_list: string[] | null }]
-    return new Promise(async (resolve, reject) => {
-      try {
-        if (!Array.isArray(items) || items.length === 0) {
-          return resolve({ inserted: 0, skipped: 0, makes: 0, approvals: 0 });
-        }
-        const payload = JSON.stringify(items);
-        const sql = `
-          WITH input_raw AS (
-            SELECT
-              (it->>'variant_id')::bigint AS variant_id,
-              (it->>'vendor_id')::bigint AS vendor_id,
-              COALESCE(it->'make_list', '[]'::jsonb) AS make_list,
-              COALESCE(it->'approved_by', '[]'::jsonb) AS approved_by
-            FROM jsonb_array_elements($1::jsonb) it
-            WHERE (it ? 'variant_id') AND (it ? 'vendor_id')
-          ),
-          input_grouped AS (
-            SELECT
-              variant_id,
-              vendor_id,
-              -- flatten and distinct all makes per (variant_id, vendor_id)
-              COALESCE(
-                jsonb_agg(DISTINCT ml.m) FILTER (WHERE ml.m IS NOT NULL),
-                '[]'::jsonb
-              ) AS make_list,
-              -- distinct approved_by ids per (variant_id, vendor_id)
-              COALESCE(
-                jsonb_agg(DISTINCT ab.approver) FILTER (WHERE ab.approver IS NOT NULL),
-                '[]'::jsonb
-              ) AS approved_by
-            FROM input_raw ir
-            LEFT JOIN LATERAL (
-              SELECT jsonb_array_elements_text(ir.make_list)::text AS m
-            ) ml ON true
-            LEFT JOIN LATERAL (
-              SELECT to_jsonb((jsonb_array_elements_text(ir.approved_by))::bigint) AS approver
-            ) ab ON true
-            GROUP BY variant_id, vendor_id
-          ),
-          missing AS (
-            SELECT ig.*
-            FROM input_grouped ig
-            LEFT JOIN tbl_product_variant_vendor_mapping m
-              ON m.product_variant_id = ig.variant_id AND m.vendor_id = ig.vendor_id
-            WHERE m.id IS NULL
-          ),
-          ins AS (
-            INSERT INTO tbl_product_variant_vendor_mapping
-              (product_variant_id, vendor_id, created_at, updated_at, status, is_approved, created_by, updated_by)
-            SELECT variant_id, vendor_id, NOW(), NOW(), true, false, $2, $2
-            FROM missing
-            RETURNING id, product_variant_id, vendor_id
-          ),
-          all_mappings AS (
-            SELECT id, product_variant_id, vendor_id FROM ins
-            UNION ALL
-            SELECT m.id, m.product_variant_id, m.vendor_id
-            FROM tbl_product_variant_vendor_mapping m
-            JOIN input_grouped ig
-              ON m.product_variant_id = ig.variant_id AND m.vendor_id = ig.vendor_id
-          ),
-          makes AS (
-            SELECT
-              am.id AS map_id,
-              trim(elem, ' "') AS make_name
-            FROM input_grouped ig
-            JOIN all_mappings am
-              ON am.product_variant_id = ig.variant_id AND am.vendor_id = ig.vendor_id
-            CROSS JOIN LATERAL jsonb_array_elements_text(ig.make_list) AS elem
-            WHERE NULLIF(trim(elem, ' '), '') IS NOT NULL
-          ),
-          ins_makes AS (
-            INSERT INTO tbl_product_variant_vendor_make (variant_vendor_map_id, make_name)
-            SELECT map_id, make_name FROM makes
-            RETURNING 1
-          ),
-          -- Build desired approvals and remove ones that already exist
-          approvals_desired AS (
-            SELECT DISTINCT
-              am.id AS map_id,
-              pv.product_id AS product_id,
-              (jsonb_array_elements_text(ig.approved_by))::bigint AS approver_id
-            FROM input_grouped ig
-            JOIN all_mappings am
-              ON am.product_variant_id = ig.variant_id AND am.vendor_id = ig.vendor_id
-            JOIN tbl_product_variant pv ON pv.id = am.product_variant_id
-            WHERE jsonb_array_length(ig.approved_by) > 0
-          ),
-          approvals_existing AS (
-            SELECT variant_vendor_mapping_id AS map_id, vendor_approve_id AS approver_id
-            FROM tbl_vendorapprove_product_mapping
-            WHERE variant_vendor_mapping_id IN (SELECT id FROM all_mappings)
-          ),
-          approvals_missing AS (
-            SELECT ad.map_id, ad.product_id, ad.approver_id
-            FROM approvals_desired ad
-            LEFT JOIN approvals_existing ae
-              ON ae.map_id = ad.map_id AND ae.approver_id = ad.approver_id
-            WHERE ae.map_id IS NULL
-          ),
-          ins_approvals AS (
-            INSERT INTO tbl_vendorapprove_product_mapping (product_id, variant_vendor_mapping_id, vendor_approve_id)
-            SELECT product_id, map_id, approver_id FROM approvals_missing
-            RETURNING 1
-          ),
-          counts AS (
-            SELECT
-              (SELECT COUNT(*) FROM ins)::int AS inserted,
-              (SELECT COUNT(*) FROM input_grouped)::int - (SELECT COUNT(*) FROM missing)::int AS skipped,
-              (SELECT COUNT(*) FROM ins_makes)::int AS makes,
-              (SELECT COUNT(*) FROM ins_approvals)::int AS approvals
-          )
-          SELECT inserted, skipped, makes, approvals FROM counts;
-        `;
-
-        const result = await db.one(sql, [payload, userId]);
-        resolve({ inserted: result.inserted, skipped: result.skipped, makes: result.makes, approvals: result.approvals });
-      } catch (error) {
-        console.error('bulkInsertVariantVendorMappings failed:', error);
-        reject(error);
-      }
-    });
-  },
   parentNameExists: async (name, parent_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -1525,8 +1399,7 @@ const productModel = {
           addedBy,
           dateFrom,
           dateTo,
-          is_approve,
-          productType } = filters;
+          is_approve, } = filters;
 
         page = parseInt(page) || 1;
         limit = parseInt(limit) || 10;
@@ -1601,13 +1474,6 @@ const productModel = {
            conditions.push(`p.is_approve = $${paramIndex}`);
            params.push(approvalValue);
            paramIndex++;
-        }
-
-        // Handle product type filter (e.g., package/single)
-        if (productType && String(productType).trim() !== '') {
-          conditions.push(`LOWER(COALESCE(p.product_type::text, '')) = LOWER($${paramIndex})`);
-          params.push(String(productType).trim());
-          paramIndex++;
         }
 
         const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -2784,7 +2650,7 @@ WHERE tbl_product.name = $1`,
                   COUNT(TR.id)::INT AS rfq_count,
                   ROW_NUMBER() OVER (PARTITION BY TP.name ORDER BY COUNT(TR.id) DESC) AS rn
               FROM tbl_rfq TR
-              JOIN tbl_rfq_items TRP
+              JOIN tbl_rfq_products TRP
                   ON TRP.rfq_id = TR.id
               JOIN tbl_product_variant PV ON PV.id = TRP.product_variant_id
             JOIN tbl_product TP ON TP.id = PV.product_id
@@ -3740,12 +3606,7 @@ getProductTechSpecByID: async (productId) => {
             rr.reject_reason,
             TC.name AS created_by,
             TU.name AS updated_by,
-            (
-              SELECT COALESCE(string_agg(va.vendor_approve, ', '), '')
-              FROM tbl_vendorapprove_product_mapping vpm
-              LEFT JOIN tbl_vendor_approve va ON va.id = vpm.vendor_approve_id
-              WHERE vpm.variant_vendor_mapping_id = m.id
-            ) AS approved_by,
+            TA.name AS approved_by,
             p.id AS product_id,
             p.name AS product_name,
             p.created_by AS product_created_by,
@@ -3754,11 +3615,6 @@ getProductTechSpecByID: async (productId) => {
             u.email AS vendor_email,
             COALESCE(c.company_name, u.organization_name, u.name) AS vendor_organization,
             COALESCE(c.company_name, u.organization_name, u.name, 'Unknown Vendor') AS vendor_display_name,
-            (
-              SELECT COALESCE(json_agg(t.make_name) FILTER (WHERE t.make_name IS NOT NULL), '[]'::json)
-              FROM tbl_product_variant_vendor_make t
-              WHERE t.variant_vendor_map_id = m.id
-            ) AS make_list,
             ${searchTerm ? `
               similarity(v.name, '${searchTerm}') AS v_similarity_score,
               similarity(p.name, '${searchTerm}') AS p_similarity_score,
@@ -4496,280 +4352,7 @@ WHERE m.id = $1;
         reject(error);
       });
   });
-},
-
-  // Package-related functions
-  createPackageItems: async (productId, items) => {
-    return new Promise(function (resolve, reject) {
-      if (!Array.isArray(items) || items.length === 0) {
-        resolve([]);
-        return;
-      }
-
-      const values = items.map((item, index) => `($${index * 2 + 1}, $${index * 2 + 2})`).join(',');
-      const params = items.flatMap(item => [productId, item.name]);
-      
-      const query = `
-        INSERT INTO tbl_product_package_item (parent_id, name)
-        VALUES ${values}
-        RETURNING *
-      `;
-
-      db.any(query, params)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-
-  createPackageVendorMapping: async (productId, vendors, userId = null) => {
-    return new Promise(function (resolve, reject) {
-      if (!Array.isArray(vendors) || vendors.length === 0) {
-        resolve([]);
-        return;
-      }
-
-      const values = vendors.map((vendor, index) => `($${index * 6 + 1}, $${index * 6 + 2}, 0, 0, $${index * 6 + 3}, $${index * 6 + 4}, NOW(), NOW())`).join(',');
-      const params = vendors.flatMap(vendor => [productId, vendor, userId, userId]);
-      
-      const query = `
-        INSERT INTO tbl_product_package_vendor_mapping (
-          package_product_id, vendor_id, status, is_approved, created_by, updated_by, created_at, updated_at
-        ) VALUES ${values}
-        RETURNING *
-      `;
-
-      db.any(query, params)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-
-  getPackageItems: async (productId) => {
-    return new Promise(function (resolve, reject) {
-      const query = `
-        SELECT id, parent_id AS product_id, name AS item_name, created_at
-        FROM tbl_product_package_item
-        WHERE parent_id = $1
-        ORDER BY id
-      `;
-
-      db.any(query, [productId])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-
-  getPackageVendorMappings: async (productId) => {
-    return new Promise(function (resolve, reject) {
-      const query = `
-        SELECT pvm.id, pvm.package_product_id AS product_id, pvm.vendor_id, pvm.status, 
-               pvm.is_approved, pvm.approved_by, pvm.approved_at, pvm.created_at,
-               COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name,
-               approver.name AS approved_by_name
-        FROM tbl_product_package_vendor_mapping pvm
-        LEFT JOIN tbl_users tu ON tu.id = pvm.vendor_id
-        LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-        LEFT JOIN tbl_users approver ON approver.id = pvm.approved_by
-        WHERE pvm.package_product_id = $1
-        ORDER BY pvm.id
-      `;
-
-      db.any(query, [productId])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-
-  updatePackageItems: async (productId, items) => {
-    return new Promise(function (resolve, reject) {
-      db.tx(async t => {
-        // Delete existing items
-        await t.none('DELETE FROM tbl_product_package_item WHERE parent_id = $1', [productId]);
-        
-        // Insert new items if provided
-        if (Array.isArray(items) && items.length > 0) {
-          const values = items.map((item, index) => `($${index * 2 + 1}, $${index * 2 + 2})`).join(',');
-          const params = items.flatMap(item => [productId, item.name]);
-          
-          const query = `
-            INSERT INTO tbl_product_package_item (parent_id, name)
-            VALUES ${values}
-            RETURNING *
-          `;
-          
-          return await t.any(query, params);
-        }
-        return [];
-      })
-      .then(function (data) {
-        resolve(data);
-      })
-      .catch(function (err) {
-        let error = new Error(err);
-        reject(error);
-      });
-    });
-  },
-
-  updatePackageVendorMappings: async (productId, vendors) => {
-    return new Promise(function (resolve, reject) {
-      db.tx(async t => {
-        // Delete existing mappings
-        await t.none('DELETE FROM tbl_product_package_vendor_mapping WHERE package_product_id = $1', [productId]);
-        
-        // Insert new mappings if provided
-        if (Array.isArray(vendors) && vendors.length > 0) {
-          const values = vendors.map((vendor, index) => `($${index * 2 + 1}, $${index * 2 + 2})`).join(',');
-          const params = vendors.flatMap(vendor => [productId, vendor]);
-          
-          const query = `
-            INSERT INTO tbl_product_package_vendor_mapping (package_product_id, vendor_id)
-            VALUES ${values}
-            RETURNING *
-          `;
-          
-          return await t.any(query, params);
-        }
-        return [];
-      })
-      .then(function (data) {
-        resolve(data);
-      })
-      .catch(function (err) {
-        let error = new Error(err);
-        reject(error);
-      });
-    });
-  },
-
-  updatePackageVendorMappingStatus: async (mappingId, isApproved, userId) => {
-    return new Promise(function (resolve, reject) {
-      let query, params;
-      
-      // Convert boolean to smallint (0 or 1)
-      const approvedValue = isApproved ? 1 : 0;
-      const status = isApproved ? 1 : 0; // 1 for active, 0 for inactive
-      
-      if (isApproved) {
-        query = `
-          UPDATE tbl_product_package_vendor_mapping 
-          SET is_approved = $1, 
-              approved_by = $2, 
-              approved_at = NOW(),
-              status = $3,
-              updated_by = $4, 
-              updated_at = NOW()
-          WHERE id = $5
-          RETURNING *
-        `;
-        params = [approvedValue, userId, status, userId, mappingId];
-      } else {
-        query = `
-          UPDATE tbl_product_package_vendor_mapping 
-          SET is_approved = $1, 
-              approved_by = NULL, 
-              approved_at = NULL,
-              status = $2,
-              updated_by = $3, 
-              updated_at = NOW()
-          WHERE id = $4
-          RETURNING *
-        `;
-        params = [approvedValue, status, userId, mappingId];
-      }
-      
-      db.oneOrNone(query, params)
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-
-  deletePackageItems: async (productId) => {
-    return new Promise(function (resolve, reject) {
-      const query = 'DELETE FROM tbl_product_package_item WHERE parent_id = $1';
-      
-      db.none(query, [productId])
-        .then(function () {
-          resolve(true);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-
-  deletePackageVendorMappings: async (productId) => {
-    return new Promise(function (resolve, reject) {
-      const query = 'DELETE FROM tbl_product_package_vendor_mapping WHERE package_product_id = $1';
-      
-      db.none(query, [productId])
-        .then(function () {
-          resolve(true);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
-
-  getProductWithPackageDetails: async (productId) => {
-    return new Promise(function (resolve, reject) {
-      const query = `
-        SELECT p.*, 
-               CASE WHEN p.product_type = 'package' THEN
-                 (SELECT json_agg(json_build_object('id', ppi.id, 'item_name', ppi.name))
-                  FROM tbl_product_package_item ppi 
-                  WHERE ppi.parent_id = p.id)
-               ELSE NULL END AS package_items,
-               CASE WHEN p.product_type = 'package' THEN
-                 (SELECT json_agg(json_build_object('id', pvm.id, 'vendor_id', pvm.vendor_id, 'vendor_name', 
-                   COALESCE(tc.company_name, tu.organization_name, tu.name)))
-                  FROM tbl_product_package_vendor_mapping pvm
-                  LEFT JOIN tbl_users tu ON tu.id = pvm.vendor_id
-                  LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-                  WHERE pvm.package_product_id = p.id)
-               ELSE NULL END AS package_vendors
-        FROM tbl_product p
-        WHERE p.id = $1
-      `;
-
-      db.oneOrNone(query, [productId])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  }
+}
 };
 
 export default productModel;

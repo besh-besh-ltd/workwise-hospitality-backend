@@ -234,13 +234,6 @@ productRoutes.post(
   productController.mapVariantWithVendor
 );
 
-// Bulk variant-vendor mapping
-productRoutes.post(
-  '/bulk-map-variant-with-vendor',
-  passportSignIn,
-  productController.bulkMapVariantWithVendor
-);
-
 productRoutes.get(
   '/variant-mappings',
   passportSignIn,
