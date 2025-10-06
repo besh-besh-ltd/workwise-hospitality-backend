@@ -595,7 +595,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       };
     }
 
-    const totalValue = meta?.total_value ?? 0;
+    const totalValue = Number(meta?.total_value ?? 0);
     const bypassCap = initiatorHierarchy.bypass_cap;
 
     // Find next approver (above the initiator)
