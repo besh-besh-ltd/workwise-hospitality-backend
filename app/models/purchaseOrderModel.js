@@ -438,7 +438,7 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
 
     const [pos, { total }, { approval_level }] = await db.tx(async t => {
       const dataQuery = `SELECT po.*,
-                po.po_pdf_url AS poPdfUrl
+                po.po_pdf_url AS poPdfUrl,
                 VENDOR.organization_name AS finalized_vendor_name,
                 PRJ.name AS project_name,
                 TU.name AS initiated_by,
@@ -532,7 +532,7 @@ export const getPODetailsById = async (po_id, user_id) => {
   try {
     let result = await db.oneOrNone(
       `SELECT po.*,
-              po.po_pdf_url AS poPdfUrl
+              po.po_pdf_url AS poPdfUrl,
               CASE
                 WHEN PD.id IS NOT NULL THEN
                   JSON_BUILD_OBJECT(
