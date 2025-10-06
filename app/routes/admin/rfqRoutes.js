@@ -14,6 +14,13 @@ rfqRoutes.post(
   validateBody(rfqSchemas.getAllRfqsForAdminValidation),
   rfqController.getAllRfqs
 );
+
+rfqRoutes.post(
+  '/client-rfq-list',
+  passportSignIn,
+  // validateBody(rfqSchemas.getAllRfqsForAdminValidation),
+  rfqController.getAllClientsrfqsForAdmin
+);
 rfqRoutes.post(
   '/update-status',
   passportSignIn,

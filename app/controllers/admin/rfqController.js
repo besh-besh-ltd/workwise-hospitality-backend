@@ -58,6 +58,32 @@ const rfqController = {
         .end();
     }
   },
+
+ getAllClientsrfqsForAdmin: async (req, res) => {
+  try {
+    console.log("Request Query Parameters:", req.query); // Debugging line
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const search = req.query.search || '';
+    
+    const result = await rfqModel.getAllClientsrfqsForAdmin(page, limit, search);
+
+    console.log("Client RFQ List Result:", result); // Debugging line
+    
+    res.status(200).json({
+      status: 1,
+      message: "Client RFQ list fetched successfully",
+      data: result.data,
+      pagination: result.pagination
+    });
+  } catch (error) {
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    });
+  }
+},
   
   createOrUpdateAdminRfqService: async (req, res) => {
     try {
