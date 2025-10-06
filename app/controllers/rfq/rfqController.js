@@ -9059,6 +9059,7 @@ sendFollowUpEmails: async (req, res) => {
     });
 
   } catch (error) {
+    console.log(" SEND_FOLLOWUP_EMAILS  --------------------------------------------------   ", error)
     logError(error);
     return res.status(400).json({
       status: 3,
