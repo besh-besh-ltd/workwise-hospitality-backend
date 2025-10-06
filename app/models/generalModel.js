@@ -693,7 +693,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         [company_id, hierarchy_type, currentLevel?.approval_level ?? 999]
       );
 
-      const totalValue = trx?.meta?.total_value ?? 0;
+      const totalValue = Number(trx?.meta?.total_value ?? 0);
       const bypassCap = currentLevel.bypass_cap;
 
       if ((totalValue <= bypassCap) || !nextApprover) {
