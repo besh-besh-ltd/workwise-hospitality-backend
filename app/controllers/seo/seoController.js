@@ -426,6 +426,7 @@ const seoController = {
     console.error('createPoPDF error:', err);
     return { ok: false, error: err.message || 'Failed to create PDF' };
   }
+}
   ,
  vendorSitemap : async (req, res, next) => {
   try {
