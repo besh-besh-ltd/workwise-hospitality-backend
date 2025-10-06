@@ -311,6 +311,8 @@ export const rfqSchemas = {
     product_variant_id: Joi.number().required(),
     vendor_id: Joi.number().required(),
     quote_id: Joi.number().required(),
+    quote_item_id: Joi.number().required(),
+    existing_po_id: Joi.number().optional(),
     variant: Joi.number().required(),
 
     // PO Related Validations

@@ -188,10 +188,19 @@ RfqRoutes.get(
 RfqRoutes.get(
   '/get-lpr-lqr',
    passportSignIn,
-   acl([2, 8, 10]),
+   acl([2,3, 8, 10]),
    validateDbBody.user_id_profileexists,
    rfqController.getLprLqrByVariantId
 )
+
+RfqRoutes.get(
+  '/get-quote-history',
+  passportSignIn,
+  acl([3]),
+  validateDbBody.user_id_profileexists,
+  rfqController.getQuoteHistoryForvendor
+);
+
 RfqRoutes.get(
   '/close-rfq/:id',
   passportSignIn,
@@ -224,6 +233,13 @@ RfqRoutes.post(
   validateDbBody.rfq_access_check,
   rfqController.sendSelectiveReminder
 );
+
+RfqRoutes.get(
+  '/get-existing-po',
+  passportSignIn,
+  rfqController.getExistingPO
+);
+
 RfqRoutes.post(
   '/finalize',
   passportSignIn,
@@ -278,6 +294,12 @@ RfqRoutes.get(
 
 RfqRoutes.post('/rfq-list', passportSignIn, rfqController.rfqList);
 
+
+RfqRoutes.get('/get-vendor-quote-status/:rfq_id',
+   passportSignIn,
+   acl([2,3]),
+   rfqController.getVendorQuoteStatus);
+
 // mukul 07-06-2025 ,  not in use, cross check and remove even if this is wokrong move this to another roue folder as this file belongs to rfq only
 RfqRoutes.get('/save-state-cities', rfqController.saveStateCities);
 
@@ -314,7 +336,12 @@ RfqRoutes.post('/magic-webhook',
 RfqRoutes.post('/estimate-cost',
   noLogin.customer_auth,
   rfqController.estimateCost,
-)
+);
+RfqRoutes.post('/send-follow-up-emails',
+  passportSignIn,
+  acl([2,3]),
+  rfqController.sendFollowUpEmails,
+);
 
 RfqRoutes.get('/get-cost-estimation/:persistent_id',
   passportSignIn,

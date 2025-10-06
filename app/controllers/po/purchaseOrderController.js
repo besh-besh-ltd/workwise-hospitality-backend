@@ -2,7 +2,7 @@ import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, initiatePurchaseOrder, updateMilestone, updateTask } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder } from "../../models/purchaseOrderModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
 import { sendApprovalNotification } from "./purchaseOrderEmails.js";
 
@@ -47,16 +47,16 @@ export const getPODetails = async (req, res) => {
     }
 };
 
-export const initiatePO = async (poInfo, user, txn) => {
+export const draftPO = async (poInfo, user, txn) => {
   try {
-    const { rfq_id, project_id, total_value, product_info, quote_id } = poInfo;
+    const { rfq_id, project_id, total_value, product_info, quote_id, existing_po_id } = poInfo;
     const { id: initiated_by, company_id } = user;
 
     if (!rfq_id || !product_info || !product_info.rfq_product_id) {
       throw new Error('Missing required PO fields.');
     }
 
-    const result = await initiatePurchaseOrder(
+    const result = await draftPurchaseOrder(
       rfq_id,
       project_id,
       quote_id,
@@ -65,6 +65,7 @@ export const initiatePO = async (poInfo, user, txn) => {
       initiated_by,
       company_id,
       user,
+      existing_po_id,
       txn
     );
 
@@ -72,6 +73,36 @@ export const initiatePO = async (poInfo, user, txn) => {
   } catch (error) {
     console.error(error);
     throw error;
+  }
+};
+
+export const initiatePO = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+    const initiator = req.user;
+  
+    const result = await initiatePurchaseOrder(po_id, initiator);
+    if(result.approval_required) {
+      const purchaseOrder = await db.oneOrNone(
+        `SELECT * FROM tbl_rfq_purchase_order
+        WHERE id = $1`,
+        [result.po_id]
+      );
+  
+      await sendApprovalNotification(purchaseOrder, result.current_approver_id);
+    }
+  
+    return res.json({
+      status: 1,
+      message: "Purchase order has been initiated"
+    })
+  } catch (error) {
+    logError(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || 'An error occurred while approving the PO.',
+      error
+    });
   }
 };
 

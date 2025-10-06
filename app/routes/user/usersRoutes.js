@@ -182,6 +182,36 @@ UsersRoutes.post(
 );
 
 
+UsersRoutes.post
+(
+  '/enhance-vendor-profile',
+  passportSignIn,
+  acl([1,3]),
+  schema_posts.upload_vendor_document,
+  UsersController.enhance_vendor_profile
+  // validateBody(schemas.enhance_vendor_profile),
+  // UsersController.enhance_vendor_profile
+);
+
+UsersRoutes.get
+(
+  '/get-vendor-profile-documents',
+  passportSignIn,
+  acl([3]),
+  UsersController.get_vendor_profile_documents
+);
+
+UsersRoutes.get(
+  '/get-vendor-profile-reviews',
+  passportSignIn,
+  UsersController.get_vendor_profile_reviews
+)
+
+UsersRoutes.post(
+  '/publish-profile-reviews',
+  passportSignIn,
+  UsersController.publish_profile_reviews
+)
 UsersRoutes.get(
   '/vendor-profile/:vendor_id',
   noLogin.customer_auth,

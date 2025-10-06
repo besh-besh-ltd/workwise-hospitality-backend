@@ -595,7 +595,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       };
     }
 
-    const totalValue = meta?.total_value ?? 0;
+    const totalValue = Number(meta?.total_value ?? 0);
     const bypassCap = initiatorHierarchy.bypass_cap;
 
     // Find next approver (above the initiator)
@@ -693,7 +693,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         [company_id, hierarchy_type, currentLevel?.approval_level ?? 999]
       );
 
-      const totalValue = trx?.meta?.total_value ?? 0;
+      const totalValue = Number(trx?.meta?.total_value ?? 0);
       const bypassCap = currentLevel.bypass_cap;
 
       if ((totalValue <= bypassCap) || !nextApprover) {
@@ -749,8 +749,11 @@ export const markPOStatusChange = async (po_id, t, reject = false, user) => {
       [po_id, reject ? PO_STATUSES.REJECTED : PO_STATUSES.APPROVED]
     );
 
+    console.log("PO TEST -> PO STATUS IS BEING CHANGED!")
+
     // ⏳ Trigger email notifications to vendors and all the team members (Not yet)!
     if(!reject) {
+      console.log("PO TEST -> IS NOT REJECTED, sending mail for approval")
       await sendPONotificationToVendor(purchaseOrder, user);
     }
 
