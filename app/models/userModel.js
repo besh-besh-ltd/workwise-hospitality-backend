@@ -1008,23 +1008,34 @@ user_book_demo: async (mobile) => {
            END AS profile_image_url`;
 
       // Additional fields if current_user is not null
-      if (current_user !== null) {
-        baseQuery += `,
-             tbl_users.mobile,
-             tbl_users.email,
-             ARRAY(
-                 SELECT json_build_object(
-                     'reviewed_by', tbl_vendor_reviews.reviewed_by,
-                     'review_date', tbl_vendor_reviews.review_date,
-                     'rating', tbl_vendor_reviews.rating,
-                     'description', tbl_vendor_reviews.description,
-                     'buyer', BU.name,
-                     'buyer_email', BU.email
-                 )
-                 FROM tbl_vendor_reviews
-                 LEFT JOIN tbl_users BU ON BU.id = tbl_vendor_reviews.reviewed_by
-                 WHERE tbl_vendor_reviews.reviewed_to = tbl_users.id
-             ) AS "reviews"`;
+     if (current_user !== null) {
+    baseQuery += `,
+        tbl_users.mobile,
+        tbl_users.email,
+        ARRAY(
+            SELECT json_build_object(
+                'reviewed_by', vr.reviewed_by,
+                'review_date', vr.review_date,
+                'rating', vr.rating,
+                'description', vr.description,
+                'buyer', BU.name,
+                'buyer_email', BU.email
+            )
+            FROM tbl_vendor_reviews vr
+            LEFT JOIN tbl_users BU ON BU.id = vr.reviewed_by
+            WHERE vr.reviewed_to = tbl_users.id
+              AND vr.is_published = 1
+        ) AS reviews,
+
+        (
+    SELECT json_agg(tvp)
+    FROM tbl_vendor_profile tvp
+    WHERE tvp.vendor_id = tbl_users.id and tvp.is_approved = true
+) AS vendor_info
+
+    `;
+
+
       }
 
       // Completing the query with the FROM clause
@@ -3072,8 +3083,171 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
         });
     });
   },
+insertAssets: async (vendorId, files, text_content, payment_terms , file_type) => {
+  const query = `
+    INSERT INTO tbl_vendor_profile
+    (vendor_id, file_name, file_url, file_type, text_content, payment_terms, is_approved, approved_by)
+    VALUES ($1, $2, $3, $4, $5, $6, FALSE, NULL)
+    RETURNING id
+  `;
 
-  uploadFiless: async (files, user_id, doc_type) => {
+  let insertedRows = [];
+
+  // Case 1: Files + optional text/payment_terms
+  if (files && files.length > 0) {
+    for (const f of files) {
+      const values = [
+        vendorId,
+        f.originalname || null,
+        f.location || null,
+        file_type || "general",
+        text_content || null,
+        payment_terms || null
+      ];
+
+      const result = await db.query(query, values);
+      if (result.length > 0) {
+        insertedRows.push(result[0]);
+      }
+    }
+  }
+
+  // Case 2: Only text/payment_terms, no file
+  if ((!files || files.length === 0) && (text_content || payment_terms)) {
+    const values = [
+      vendorId,
+      null, // file_name
+      null, // file_url
+      file_type || "general",
+      text_content || null,
+      payment_terms || null
+    ];
+
+    const result = await db.query(query, values);
+    if (result.length > 0) {
+      insertedRows.push(result[0]);
+    }
+  }
+
+  return insertedRows;
+},
+
+
+
+approveAsset: async (record_id,is_approved, approver_id) => {
+  const query = `
+    UPDATE tbl_vendor_profile
+    SET is_approved = $3,
+        approved_by = $1
+    WHERE id = $2
+    RETURNING id
+  `;
+  const values = [approver_id, record_id , is_approved];
+
+  const result = await db.query(query, values);
+  return result;
+},
+
+getAllVendorAssets: async ({ limit, offset }) => {
+  return new Promise((resolve, reject) => {
+    const countQuery = `
+      SELECT COUNT(*)::int AS total
+      FROM tbl_vendor_profile vp
+      JOIN tbl_users u ON vp.vendor_id = u.id;
+    `;
+
+    const dataQuery = `
+      SELECT 
+        vp.*,
+        u.name AS vendor_name,
+        u.email AS vendor_email
+      FROM tbl_vendor_profile vp
+      JOIN tbl_users u ON vp.vendor_id = u.id
+      ORDER BY vp.id DESC
+      LIMIT $1 OFFSET $2;
+    `;
+
+    // Run count first
+    db.query(countQuery)
+      .then((countResult) => {
+        const total = countResult[0]?.total || 0;
+
+        db.query(dataQuery, [limit, offset])
+          .then((dataResult) => {
+            resolve({
+              data: dataResult || [],
+              total
+            });
+          })
+          .catch((err) => reject(err));
+      })
+      .catch((err) => reject(err));
+  });
+},
+
+
+
+getVendorReviews: async (vendor_id) => {
+  try {
+    const query = `
+      SELECT 
+        vr.id AS review_id,
+        vr.rating,
+        vr.description,
+        vr.review_date,
+        u.id AS user_id,
+        u.name AS user_name,
+        u.email
+      FROM tbl_vendor_reviews vr
+      INNER JOIN tbl_users u
+        ON vr.reviewed_by = u.id
+      WHERE vr.reviewed_to = $1
+      ORDER BY vr.review_date DESC
+    `;
+
+    const results = await db.any(query, [vendor_id]); // ✅ pg-promise style
+    return results;
+  } catch (error) {
+    console.error("Error fetching vendor reviews:", error);
+    throw error;
+  }
+},
+
+publishProfileReviews: async (reviewObj) => {
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+
+    // 1. First, set all reviews for that vendor to 0
+    const resetQuery = `
+      UPDATE tbl_vendor_reviews
+      SET is_published = 0
+      WHERE reviewed_to = $1
+    `;
+    await db.query(resetQuery, [reviewObj.user_id]);
+
+    // 2. Then, set selected ones to 1
+    const updateQuery = `
+      UPDATE tbl_vendor_reviews
+      SET is_published = 1
+      WHERE reviewed_to = $1 AND id = ANY($2::int[])
+      RETURNING *;
+    `;
+    const values = [reviewObj.user_id, reviewObj.review_ids];
+    const result = await db.query(updateQuery, values);
+
+    await db.query("COMMIT");
+    return result || [];
+  } catch (error) {
+    await db.query("ROLLBACK");
+    console.error("Error publishing vendor reviews:", error);
+    throw error;
+  }
+},
+
+ 
+
+ uploadFiless: async (files, user_id, doc_type) => {
     let dataArray = [];
     console.log('files-->', files);
     // return false;
@@ -3099,7 +3273,6 @@ LEFT JOIN Courses ON Universities.id = Courses.university_id
       });
     }
 
-    console.log('dataArray-->', dataArray);
     const keys = [
       'user_id',
       'file_name',
