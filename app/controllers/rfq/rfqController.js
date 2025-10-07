@@ -6613,10 +6613,14 @@ const rfqController = {
 
 
     // record product search
-     const searchedData = [
-       { product_slug: productSlug, user_id: null }
-     ];
-     const result1 = await generalModel.insertMany('product_search_record', searchedData);
+    try {
+      const searchedData = [
+        { product_slug: productSlug, user_id: null }
+      ];
+      await generalModel.insertMany('product_search_record', searchedData);
+    } catch (error) {
+      console.log('Product search record table not available:', error.message);
+    }
 
       res.status(200).json({
         status: 1,

@@ -471,7 +471,36 @@ const seoController = {
       res.status(400).json({ status: 3, message: 'Error generating sitemap' }).end();
     }
   }
+},
+vendorSitemapIndex: async (req, res, next) => {
+  try {
+    const { totalUrls } = await seoModel.getVendorSitemapTotal();
+    const limit = 50000;
+    const totalPages = Math.ceil(totalUrls / limit);
+    const baseUrl = process.env.FRONTEND_URL || "https://letsworkwise.com";
+
+    res.set("Content-Type", "application/xml");
+
+    let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+    xml += '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
+
+    for (let i = 1; i <= totalPages; i++) {
+      xml += `  <sitemap>\n`;
+      xml += `    <loc>${baseUrl}/vendors/${i}.xml</loc>\n`;
+      xml += `  </sitemap>\n`;
+    }
+
+    xml += "</sitemapindex>";
+
+    res.send(xml);
+  } catch (error) {
+    console.error("Error generating sitemap index:", error);
+    if (!res.headersSent) {
+      res.status(500).json({ status: 3, message: "Error generating sitemap index" });
+    }
+  }
 }
+
 };
 
 
