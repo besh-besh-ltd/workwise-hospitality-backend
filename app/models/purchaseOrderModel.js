@@ -1,7 +1,7 @@
 import db from "../config/dbConn.js";
 import seoController from "../controllers/seo/seoController.js";
 import { AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../util/constants.js";
-import generalModel, { markPOStatusChange } from "./generalModel.js";
+import generalModel, { markPOStatusChange, uploadToS3 } from "./generalModel.js";
 
 const getNextPONumber = async () => {
   return new Promise(async function (resolve, reject) {
@@ -320,6 +320,14 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
         ...purchaseOrder,
         ...items
       });
+
+      const s3Url = await uploadToS3(pdfSaveResult.absolutePath, `po-${purchaseOrder.po_number}.pdf`)
+      await t.any(
+        `UPDATE tbl_rfq_purchase_order
+        SET po_pdf_url = $1
+        WHERE id = $2`,
+        [s3Url.url ?? `${process.env.APP_BASE_PATH}${pdfSaveResult.file}`, purchaseOrder.id]
+      );
   
       return {
         po_id: purchaseOrder.id,
@@ -438,7 +446,6 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
 
     const [pos, { total }, { approval_level }] = await db.tx(async t => {
       const dataQuery = `SELECT po.*,
-                po.po_pdf_url AS poPdfUrl,
                 VENDOR.organization_name AS finalized_vendor_name,
                 PRJ.name AS project_name,
                 TU.name AS initiated_by,
@@ -499,6 +506,11 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
         [...values, limit, offset]
       );
 
+      data = data.map(d => ({
+        ...d,
+        poPdfUrl: d.po_pdf_url
+      }))
+
       const count = await t.one(
         `SELECT COUNT(*) AS total
          FROM tbl_rfq_purchase_order po
@@ -532,7 +544,6 @@ export const getPODetailsById = async (po_id, user_id) => {
   try {
     let result = await db.oneOrNone(
       `SELECT po.*,
-              po.po_pdf_url AS poPdfUrl,
               CASE
                 WHEN PD.id IS NOT NULL THEN
                   JSON_BUILD_OBJECT(
@@ -693,7 +704,7 @@ export const getPODetailsById = async (po_id, user_id) => {
       [po_id, user_id]
     );
 
-    return result;
+    return { ...result, poPdfUrl: result.po_pdf_url };
   } catch (error) {
     console.error('Error in getPODetails:', error);
     throw error;
