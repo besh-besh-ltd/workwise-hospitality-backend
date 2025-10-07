@@ -248,6 +248,9 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
         `SELECT 
           PO.*, 
           TC.company_name,
+          TC.cin,
+          TC.website,
+          FIN.mobile,
           JSON_BUILD_OBJECT(
             'id', SUP.id,
             'name', SUP.name,

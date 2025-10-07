@@ -88,6 +88,8 @@ export const initiatePO = async (req, res) => {
         WHERE id = $1`,
         [result.po_id]
       );
+
+      console.log("PURCHASE ORDER:", purchaseOrder);
   
       await sendApprovalNotification(purchaseOrder, result.current_approver_id);
     }
