@@ -250,6 +250,7 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
           TC.company_name,
           TC.cin,
           TC.website,
+          TC.location,
           FIN.mobile,
           JSON_BUILD_OBJECT(
             'id', SUP.id,

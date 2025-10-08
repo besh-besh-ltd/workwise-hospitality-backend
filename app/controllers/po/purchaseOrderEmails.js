@@ -6,7 +6,6 @@ import userModel from "../../models/userModel.js";
 import vendorModel from "../../models/vendorModel.js";
 
 export const sendApprovalNotification = async (purchaseOrder, userId) => {
-    console.log("PURCHASE ORDER FROM INSIDE SEND APPROVAL NOTI:", purchaseOrder);
   return new Promise(async (resolve, reject) => {
     const quantity = purchaseOrder?.quantity || 'N/A';
     const totalValue = purchaseOrder?.total_value || 'N/A';
