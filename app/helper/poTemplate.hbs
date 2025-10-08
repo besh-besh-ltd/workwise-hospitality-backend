@@ -236,15 +236,16 @@
       {{/if}}
       
       <div class="company-info">
-        <div class="company-name">Lakshya Powertech Limited</div>
-        <div class="company-cin">Corporate Identity Number: L74900GJ2012PLC071218</div>
-        <div class="company-subtitle">(formerly known as Lakshya Powertech Private Limited)</div>
+        <div class="company-name">{{company_name}}</div>
+        <div class="company-cin">Corporate Identity Number: {{cin}}</div>
+        {{!-- <div class="company-subtitle">(formerly known as Lakshya Powertech Private Limited)</div> --}}
       </div>
       
       <div class="contact-info">
-        <div class="address">A-620 & 621, SIDDHI VINAYAK<br>TOWERS, MAKARIA, S G<br>HIGHWAY, AHMEDABAD<br>GUJARAT- 380051</div>
-        <div class="phone">+91 79 48007211</div>
-        <div class="website">www.lakshyapowertech.com</div>
+        {{!-- <div class="address">A-620 & 621, SIDDHI VINAYAK<br>TOWERS, MAKARIA, S G<br>HIGHWAY, AHMEDABAD<br>GUJARAT- 380051</div> --}}
+        <div class="address">{{location}}</div>
+        <div class="phone">{{mobile}}</div>
+        <div class="website">{{website}}</div>
       </div>
     </div>
     
