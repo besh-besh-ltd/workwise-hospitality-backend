@@ -7,8 +7,8 @@ import vendorModel from "../../models/vendorModel.js";
 
 export const sendApprovalNotification = async (purchaseOrder, userId) => {
   return new Promise(async (resolve, reject) => {
-    const quantity = purchaseOrder.quantity || 'N/A';
-    const totalValue = purchaseOrder.total_value || 'N/A';
+    const quantity = purchaseOrder?.quantity || 'N/A';
+    const totalValue = purchaseOrder?.total_value || 'N/A';
 
     let user = await userModel.getUserById(userId);
     if (user) user = user[0];
@@ -34,12 +34,12 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
 
             <h4>Purchase Order Details</h4>
             <ul>
-            <li><strong>Product Name:</strong> ${product.name}</li>
+            <li><strong>Product(s) Name:</strong> ${product.map(p => p?.name).filter(Boolean).join(", ")}</li>
             <li><strong>Quantity:</strong> ${quantity}</li>
             <li><strong>Total Value:</strong> ₹${totalValue}.00</li>
             <li><strong>Finalized Vendor:</strong> ${finalized.name}</li>
             <li><strong>Created At:</strong> ${
-                new Date(purchaseOrder.created_at).toLocaleString()
+                purchaseOrder.created_at
             }</li>
             </ul>
 
@@ -105,7 +105,7 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
             <h4>Purchase Order Details</h4>
             <ul>
                 <li><strong>PO Number:</strong> ${purchaseOrder.po_number}</li>
-                <li><strong>Product Name:</strong> ${product.name}</li>
+                <li><strong>Product(s) Name:</strong> ${product.map(p => p.name).join(", ")}</li>
                 <li><strong>Quantity:</strong> ${purchaseOrder.quantity}</li>
                 <li><strong>Total Value:</strong> ₹${purchaseOrder.total_value}.00</li>
                 <li><strong>Created At:</strong> ${new Date(purchaseOrder.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</li>
@@ -120,7 +120,7 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
                 Please ensure your team is aligned and prepared to fulfill the order as per the specified terms.
             </p>
 
-            <a href='${process.env.APP_BASE_PATH}/app/storage/invoices/${fileName}'>Click here to view PO Document</a>
+            <a href='${purchaseOrder.po_pdf_url}'>Click here to view PO Document</a>
 
             <p style="text-align:center; margin-top: 30px;">
                 Thank you for your continued partnership.<br/>
