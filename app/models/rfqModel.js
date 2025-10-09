@@ -5569,47 +5569,77 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     });
   },
 
- getAllClientsrfqsForAdmin: async (page = 1, limit = 10, search = '') => {
+getAllClientsrfqsForAdmin: async (page = 1, limit = 10, search = '', dateFilter = 'all', startDate = '', endDate = '', companyIds = []) => {
   const offset = (page - 1) * limit;
-  
-  // Base query with search condition
+
+  // Date filter logic
+  let dateCondition = '';
+  let queryParams = [];
+
+  if (dateFilter === '3days') {
+    dateCondition = `AND tr.timestamp >= NOW() - INTERVAL '3 days'`;
+  } else if (dateFilter === '7days') {
+    dateCondition = `AND tr.timestamp >= NOW() - INTERVAL '7 days'`;
+  } else if (dateFilter === 'custom' && startDate && endDate) {
+    queryParams.push(startDate, endDate);
+    dateCondition = `AND tr.timestamp BETWEEN $${queryParams.length - 1} AND $${queryParams.length}`;
+  }
+
+  // Company filter logic
+  let companyCondition = '';
+  if (Array.isArray(companyIds) && companyIds.length > 0) {
+    const placeholders = companyIds.map((_, i) => `$${queryParams.length + i + 1}`).join(', ');
+    companyCondition = `AND tc.id IN (${placeholders})`;
+    queryParams = [...queryParams, ...companyIds];
+  }
+
+  // Search condition
+  let searchCondition = '';
+  if (search) {
+    queryParams.push(`%${search}%`);
+    searchCondition = `AND (tc.company_name ILIKE $${queryParams.length} OR tr.rfq_no ILIKE $${queryParams.length})`;
+  }
+
+  // Base query
   const baseQuery = `
     WITH vendors AS (
-        SELECT tr.id AS rfq_id, COUNT(DISTINCT trpv.user_id) AS total_vendors
-        FROM tbl_rfq tr
-        LEFT JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = tr.id
-        GROUP BY tr.id
+      SELECT tr.id AS rfq_id, tr.status AS rfq_status, tr.rfq_type, COUNT(DISTINCT trpv.user_id) AS total_vendors
+      FROM tbl_rfq tr
+      LEFT JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = tr.id
+      GROUP BY tr.id
     ),
     quotes AS (
-        SELECT 
-            rfq_id,
-            COUNT(DISTINCT CASE WHEN is_regret = 0 THEN created_by END) AS quotes_received,
-            COUNT(DISTINCT CASE WHEN is_regret = 1 THEN created_by END) AS quote_regrets,
-            COUNT(DISTINCT created_by) AS total_quotes
-        FROM tbl_quotes
-        GROUP BY rfq_id
+      SELECT 
+        rfq_id,
+        COUNT(DISTINCT CASE WHEN is_regret = 0 THEN created_by END) AS quotes_received,
+        COUNT(DISTINCT CASE WHEN is_regret = 1 THEN created_by END) AS quote_regrets,
+        COUNT(DISTINCT created_by) AS total_quotes
+      FROM tbl_quotes
+      GROUP BY rfq_id
     ),
     products AS (
-        SELECT rfq_id, COUNT(DISTINCT id) AS products_added
-        FROM tbl_rfq_products
-        GROUP BY rfq_id
+      SELECT rfq_id, COUNT(DISTINCT id) AS products_added
+      FROM tbl_rfq_products
+      GROUP BY rfq_id
     ),
     finalizations AS (
-        SELECT rfq_id, COUNT(DISTINCT product_variant_id) AS finalization_count
-        FROM tbl_quote_finalization
-        GROUP BY rfq_id
+      SELECT rfq_id, COUNT(DISTINCT product_variant_id) AS finalization_count
+      FROM tbl_quote_finalization
+      GROUP BY rfq_id
     )
     SELECT 
-        tr.id,
-        tc.company_name,
-        tr.rfq_no,
-        tr.timestamp,
-        v.total_vendors,
-        q.quotes_received,
-        q.quote_regrets,
-        (v.total_vendors - COALESCE(q.total_quotes, 0)) AS vendors_not_responded,
-        p.products_added,
-        f.finalization_count
+      tr.id,
+      tc.company_name,
+      tr.rfq_no,
+      tr.timestamp,
+      tr.status AS rfq_status,
+      tr.rfq_type,
+      v.total_vendors,
+      q.quotes_received,
+      q.quote_regrets,
+      (v.total_vendors - COALESCE(q.total_quotes, 0)) AS vendors_not_responded,
+      p.products_added,
+      f.finalization_count
     FROM tbl_rfq tr
     JOIN tbl_users tu ON tu.id = tr.created_by
     JOIN tbl_company tc ON tc.id = tu.company_id
@@ -5618,47 +5648,35 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     LEFT JOIN products p ON p.rfq_id = tr.id
     LEFT JOIN finalizations f ON f.rfq_id = tr.id
     WHERE 1=1
-  `;
-
-  // Add search condition if provided
-  let searchCondition = '';
-  let queryParams = [];
-  
-  if (search) {
-    searchCondition = ` AND (tc.company_name ILIKE $1 OR tr.rfq_no ILIKE $1)`;
-    queryParams.push(`%${search}%`);
-  }
-
-  // Main data query
-  const dataQuery = `
-    ${baseQuery}
+    ${dateCondition}
+    ${companyCondition}
     ${searchCondition}
     ORDER BY tr.timestamp DESC
     LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}
   `;
 
-  // Count query for pagination
   const countQuery = `
-    SELECT COUNT(*) as total_count
+    SELECT COUNT(*) AS total_count
     FROM tbl_rfq tr
     JOIN tbl_users tu ON tu.id = tr.created_by
     JOIN tbl_company tc ON tc.id = tu.company_id
     WHERE 1=1
+    ${dateCondition}
+    ${companyCondition}
     ${searchCondition}
   `;
 
   try {
-    // Execute both queries in parallel
     const [data, countResult] = await Promise.all([
-      db.any(dataQuery, [...queryParams, limit, offset]),
-      db.one(countQuery, search ? queryParams : [])
+      db.any(baseQuery, [...queryParams, limit, offset]),
+      db.one(countQuery, queryParams)
     ]);
 
     const totalCount = parseInt(countResult.total_count);
     const totalPages = Math.ceil(totalCount / limit);
 
     return {
-      data: data,
+      data,
       pagination: {
         current_page: page,
         total_pages: totalPages,
@@ -5673,6 +5691,23 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
   }
 },
 
+getAllCompaniesListForAdmin : async () => {
+  return new Promise((resolve, reject) => {
+    const query = `
+    select DISTINCT tc.id, tc.company_name
+    from tbl_company tc join tbl_users tu on tu.company_id = tc.id
+    where tu.user_type = 2`;
+    db.any
+    (query)
+      .then(function (data) {   
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+  });
+},
 
   getTotalRfqCountForAdmin: async (rfqStatus, adminServiceStatus) => {
     return new Promise((resolve, reject) => {

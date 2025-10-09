@@ -21,6 +21,14 @@ rfqRoutes.post(
   // validateBody(rfqSchemas.getAllRfqsForAdminValidation),
   rfqController.getAllClientsrfqsForAdmin
 );
+
+rfqRoutes.get(
+  '/companies-list',
+  passportSignIn,
+
+  rfqController.getAllCompaniesListForAdmin
+
+)
 rfqRoutes.post(
   '/update-status',
   passportSignIn,

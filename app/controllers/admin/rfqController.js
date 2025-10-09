@@ -59,17 +59,19 @@ const rfqController = {
     }
   },
 
- getAllClientsrfqsForAdmin: async (req, res) => {
+getAllClientsrfqsForAdmin: async (req, res) => {
   try {
-    console.log("Request Query Parameters:", req.query); // Debugging line
+    console.log("Request Query Parameters:", req.query);
+    console.log("Request Body Parameters:", req.body);
+
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const search = req.query.search || '';
-    
-    const result = await rfqModel.getAllClientsrfqsForAdmin(page, limit, search);
 
-    console.log("Client RFQ List Result:", result); // Debugging line
-    
+    const { dateFilter = 'all', startDate = '', endDate = '', companyIds = [] } = req.body;
+
+    const result = await rfqModel.getAllClientsrfqsForAdmin(page, limit, search, dateFilter, startDate, endDate, companyIds);
+
     res.status(200).json({
       status: 1,
       message: "Client RFQ list fetched successfully",
@@ -77,6 +79,25 @@ const rfqController = {
       pagination: result.pagination
     });
   } catch (error) {
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    });
+  }
+},
+
+getAllCompaniesListForAdmin : async (req, res) => {
+  try {
+    const result = await rfqModel.getAllCompaniesListForAdmin();
+
+    res.status(200).json({
+      status: 1,
+      message: "Companies list fetched successfully",
+      data: result
+    }); 
+  } catch (error) {
+    
     logError(error);
     res.status(400).json({
       status: 3,
