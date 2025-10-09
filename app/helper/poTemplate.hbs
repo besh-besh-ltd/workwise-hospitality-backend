@@ -237,7 +237,9 @@
       
       <div class="company-info">
         <div class="company-name">{{company_name}}</div>
-        <div class="company-cin">Corporate Identity Number: {{cin}}</div>
+        {{#if cin}}
+          <div class="company-cin">Corporate Identity Number: {{cin}}</div>
+        {{/if}}
         {{!-- <div class="company-subtitle">(formerly known as Lakshya Powertech Private Limited)</div> --}}
       </div>
       
@@ -268,7 +270,8 @@
             <div class="flex-section">
               <div>
                 <div style="margin-bottom: 4px;"><strong>Bill To:</strong></div>
-                {{billTo}}
+                {{company_name}}
+                {{location}}
               </div>
               <div>
                 <div style="margin-bottom: 4px;"><strong>Ship To:</strong></div>
@@ -371,7 +374,7 @@
     
     <!-- SIGNATURE -->
     <div class="signature-section">
-      For, LAKSHYA POWERTECH LIMITED<br>
+      For, {{company_name}}<br>
       <div class="signature-line">Authorized Signatory</div>
     </div>
 
@@ -382,7 +385,7 @@
         </div>
     
     <!-- FOOTER -->
-    <div class="footer">
+    {{!-- <div class="footer">
       Subject to JHARKHAND Jurisdiction
       <div class="certifications">
         <div class="cert-badge">
@@ -400,7 +403,7 @@
           <div style="background: #333; color: white; padding: 2px 4px; font-size: 7px;">UKAS</div>
         </div>
       </div>
-    </div>
+    </div> --}}
   </div>
 </body>
 </html>
