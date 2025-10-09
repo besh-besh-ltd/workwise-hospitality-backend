@@ -34,12 +34,12 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
 
             <h4>Purchase Order Details</h4>
             <ul>
-            <li><strong>Product Name:</strong> ${product.name}</li>
+            <li><strong>Product(s) Name:</strong> ${product.map(p => p?.name).filter(Boolean).join(", ")}</li>
             <li><strong>Quantity:</strong> ${quantity}</li>
             <li><strong>Total Value:</strong> ₹${totalValue}.00</li>
             <li><strong>Finalized Vendor:</strong> ${finalized.name}</li>
             <li><strong>Created At:</strong> ${
-                new Date(purchaseOrder.created_at).toLocaleString()
+                purchaseOrder.created_at
             }</li>
             </ul>
 
