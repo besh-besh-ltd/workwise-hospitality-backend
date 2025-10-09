@@ -59,53 +59,82 @@ const rfqController = {
     }
   },
 
-getAllClientsrfqsForAdmin: async (req, res) => {
-  try {
-    console.log("Request Query Parameters:", req.query);
-    console.log("Request Body Parameters:", req.body);
+  getAllClientsrfqsForAdmin: async (req, res) => {
+    try {
+      console.log('Request Query Parameters:', req.query);
+      console.log('Request Body Parameters:', req.body);
 
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const search = req.query.search || '';
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 10;
+      const search = req.query.search || '';
 
-    const { dateFilter = 'all', startDate = '', endDate = '', companyIds = [] } = req.body;
+      const {
+        dateFilter = 'all',
+        startDate = '',
+        endDate = '',
+        companyIds = []
+      } = req.body;
 
-    const result = await rfqModel.getAllClientsrfqsForAdmin(page, limit, search, dateFilter, startDate, endDate, companyIds);
+      const result = await rfqModel.getAllClientsrfqsForAdmin(
+        page,
+        limit,
+        search,
+        dateFilter,
+        startDate,
+        endDate,
+        companyIds
+      );
 
-    res.status(200).json({
-      status: 1,
-      message: "Client RFQ list fetched successfully",
-      data: result.data,
-      pagination: result.pagination
-    });
-  } catch (error) {
-    logError(error);
-    res.status(400).json({
-      status: 3,
-      message: Config.errorText.value
-    });
-  }
-},
+      res.status(200).json({
+        status: 1,
+        message: 'Client RFQ list fetched successfully',
+        data: result.data,
+        pagination: result.pagination
+      });
+    } catch (error) {
+      logError(error);
+      res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
+    }
+  },
 
-getAllCompaniesListForAdmin : async (req, res) => {
-  try {
-    const result = await rfqModel.getAllCompaniesListForAdmin();
+  getVendorInfoPageForAdmin: async (req, res) => {
+    try {
+      const result = await rfqModel.getVendorInfoPageForAdmin();
+      res.status(200).json({
+        status: 1,
+        message: 'Vendor info page data fetched successfully',
+        data: result
+      });
+    } catch (error) {
+      logError(error);
+      res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
+    }
+  },
 
-    res.status(200).json({
-      status: 1,
-      message: "Companies list fetched successfully",
-      data: result
-    }); 
-  } catch (error) {
-    
-    logError(error);
-    res.status(400).json({
-      status: 3,
-      message: Config.errorText.value
-    });
-  }
-},
-  
+  getAllCompaniesListForAdmin: async (req, res) => {
+    try {
+      const result = await rfqModel.getAllCompaniesListForAdmin();
+
+      res.status(200).json({
+        status: 1,
+        message: 'Companies list fetched successfully',
+        data: result
+      });
+    } catch (error) {
+      logError(error);
+      res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
+    }
+  },
+
   createOrUpdateAdminRfqService: async (req, res) => {
     try {
       const { rfq_id, status, comment } = req.body;
@@ -118,7 +147,12 @@ getAllCompaniesListForAdmin : async (req, res) => {
         });
       }
 
-      const result = await rfqModel.createOrUpdateAdminRfqService(rfq_id, subadmin_id, status, comment);
+      const result = await rfqModel.createOrUpdateAdminRfqService(
+        rfq_id,
+        subadmin_id,
+        status,
+        comment
+      );
 
       res.status(200).json({
         status: 1,
@@ -145,7 +179,7 @@ getAllCompaniesListForAdmin : async (req, res) => {
           .status(404)
           .json({
             status: 3,
-            message: 'RFQ not found',
+            message: 'RFQ not found'
           })
           .end();
       }
@@ -155,7 +189,7 @@ getAllCompaniesListForAdmin : async (req, res) => {
         .json({
           status: 1,
           message: 'RFQ details fetched successfully',
-          data: rfqDetails,
+          data: rfqDetails
         })
         .end();
     } catch (error) {
@@ -164,11 +198,11 @@ getAllCompaniesListForAdmin : async (req, res) => {
         .status(400)
         .json({
           status: 3,
-          message: Config.errorText.value, 
+          message: Config.errorText.value
         })
         .end();
     }
-  },
+  }
 };
 
 export default rfqController;

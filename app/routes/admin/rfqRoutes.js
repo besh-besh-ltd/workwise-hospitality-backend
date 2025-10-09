@@ -23,6 +23,12 @@ rfqRoutes.post(
 );
 
 rfqRoutes.get(
+  '/vendor-info-page',
+  passportSignIn,
+  rfqController.getVendorInfoPageForAdmin
+);
+
+rfqRoutes.get(
   '/companies-list',
   passportSignIn,
 
