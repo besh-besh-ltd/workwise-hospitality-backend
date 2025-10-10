@@ -487,7 +487,7 @@ vendorSitemapIndex: async (req, res, next) => {
 
     for (let i = 1; i <= totalPages; i++) {
       xml += `  <sitemap>\n`;
-      xml += `    <loc>${baseUrl}/vendors/${i}.xml</loc>\n`;
+      xml += `    <loc>${baseUrl}/vendors/sitemap/${i}.xml</loc>\n`;
       xml += `  </sitemap>\n`;
     }
 
