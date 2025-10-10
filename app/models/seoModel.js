@@ -95,6 +95,12 @@ const seoModel = {
         if (!products.length) break; // no more products
 
         for (const p of products) {
+          // Normalize product slug to avoid stray spaces around hyphens in URLs
+          const productSlug = (p.slug || '')
+            .toLowerCase()
+            .trim()
+            .replace(/\s+/g, '-')
+            .replace(/-+/g, '-');
           // For each product, determine available states and cities where at least one vendor exists
           const [availableCountries, availableStates, availableCities] = await Promise.all([
             db.any(
@@ -144,7 +150,7 @@ const seoModel = {
               continue;
             }
             const countrySlug = (k.country_name || '').toLowerCase().replace(/\s+/g, '');
-            yield `<url>\n  <loc>${baseUrl}/vendor/${p.slug}-${countrySlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
+            yield `<url>\n  <loc>${baseUrl}/vendor/${productSlug}-${countrySlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
             yielded++;
             if (yielded >= limit) return;
           }
@@ -157,7 +163,7 @@ const seoModel = {
               continue;
             }
             const stateSlug = (s.state_name || '').toLowerCase().replace(/\s+/g, '');
-            yield `<url>\n  <loc>${baseUrl}/vendor/${p.slug}-${stateSlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
+            yield `<url>\n  <loc>${baseUrl}/vendor/${productSlug}-${stateSlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
             yielded++;
             if (yielded >= limit) return;
           }
@@ -171,7 +177,7 @@ const seoModel = {
             }
             const citySlug = (c.city_name || '').toLowerCase().replace(/\s+/g, '');
             const stateSlug = (c.state_name || '').toLowerCase().replace(/\s+/g, '');
-            yield `<url>\n  <loc>${baseUrl}/vendor/${p.slug}-${citySlug}-${stateSlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
+            yield `<url>\n  <loc>${baseUrl}/vendor/${productSlug}-${citySlug}-${stateSlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
             yielded++;
             if (yielded >= limit) return;
           }
