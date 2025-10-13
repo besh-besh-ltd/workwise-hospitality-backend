@@ -5690,107 +5690,107 @@ getAllClientsrfqsForAdmin: async (page = 1, limit = 10, search = '', dateFilter 
     throw new Error(err);
   }
 },
-getVendorInfoPageForAdmin: async () => {
-  return new Promise((resolve, reject) => {
-    const query = `
-      SELECT 
-        u.id AS vendor_id,
-        u.name AS vendor_name,
-        CONCAT(u.email, ' / ', u.mobile) AS vendor_contact,
+// getVendorInfoPageForAdmin: async () => {
+//   return new Promise((resolve, reject) => {
+//     const query = `
+//       SELECT 
+//         u.id AS vendor_id,
+//         u.name AS vendor_name,
+//         CONCAT(u.email, ' / ', u.mobile) AS vendor_contact,
         
-        -- Total product count
-        COUNT(DISTINCT pvm.id) AS total_products,
+//         -- Total product count
+//         COUNT(DISTINCT pvm.id) AS total_products,
         
-        -- PSU Approved (list of approvals)
-        va.psu_approved,
+//         -- PSU Approved (list of approvals)
+//         va.psu_approved,
         
-        -- Product Make
-        pvvm.product_makes,
+//         -- Product Make
+//         pvvm.product_makes,
         
-        -- Total Inquiry Received (unique RFQs)
-        rpv_stats.inquiry_count AS total_inquiry_received,
+//         -- Total Inquiry Received (unique RFQs)
+//         rpv_stats.inquiry_count AS total_inquiry_received,
         
-        -- Total Quote Sent
-        q_stats.quote_count AS total_quote_sent,
+//         -- Total Quote Sent
+//         q_stats.quote_count AS total_quote_sent,
         
-        -- Response Rate
-        CASE 
-          WHEN rpv_stats.inquiry_count = 0 THEN '0%'
-          ELSE ROUND((q_stats.quote_count::decimal / NULLIF(rpv_stats.inquiry_count, 0)) * 100, 2) || '%'
-        END AS response_rate,
+//         -- Response Rate
+//         CASE 
+//           WHEN rpv_stats.inquiry_count = 0 THEN '0%'
+//           ELSE ROUND((q_stats.quote_count::decimal / NULLIF(rpv_stats.inquiry_count, 0)) * 100, 2) || '%'
+//         END AS response_rate,
         
-        -- Joining Date
-        TO_CHAR(u.created_at, 'DD/MM/YYYY') AS joining_date,
+//         -- Joining Date
+//         TO_CHAR(u.created_at, 'DD/MM/YYYY') AS joining_date,
         
-        -- Status
-        u.status,
+//         -- Status
+//         u.status,
         
-        -- Vendor Profile
-        'View' AS vendor_profile
+//         -- Vendor Profile
+//         'View' AS vendor_profile
 
-      FROM tbl_users u
+//       FROM tbl_users u
 
-      -- Pre-aggregate vendor approvals
-      LEFT JOIN (
-          SELECT 
-              vaum.user_id,
-              STRING_AGG(DISTINCT va.vendor_approve, ', ') AS psu_approved
-          FROM tbl_vendorapprove_user_mapping vaum
-          INNER JOIN tbl_vendor_approve va ON va.id = vaum.vendor_approve_id
-          GROUP BY vaum.user_id
-      ) va ON va.user_id = u.id
+//       -- Pre-aggregate vendor approvals
+//       LEFT JOIN (
+//           SELECT 
+//               vaum.user_id,
+//               STRING_AGG(DISTINCT va.vendor_approve, ', ') AS psu_approved
+//           FROM tbl_vendorapprove_user_mapping vaum
+//           INNER JOIN tbl_vendor_approve va ON va.id = vaum.vendor_approve_id
+//           GROUP BY vaum.user_id
+//       ) va ON va.user_id = u.id
 
-      -- Pre-aggregate product makes
-      LEFT JOIN (
-          SELECT 
-              pvm.vendor_id,
-              STRING_AGG(DISTINCT pvvm2.make_name, ', ') AS product_makes
-          FROM tbl_product_variant_vendor_mapping pvm
-          INNER JOIN tbl_product_variant_vendor_make pvvm2 
-              ON pvvm2.variant_vendor_map_id = pvm.id
-          GROUP BY pvm.vendor_id
-      ) pvvm ON pvvm.vendor_id = u.id
+//       -- Pre-aggregate product makes
+//       LEFT JOIN (
+//           SELECT 
+//               pvm.vendor_id,
+//               STRING_AGG(DISTINCT pvvm2.make_name, ', ') AS product_makes
+//           FROM tbl_product_variant_vendor_mapping pvm
+//           INNER JOIN tbl_product_variant_vendor_make pvvm2 
+//               ON pvvm2.variant_vendor_map_id = pvm.id
+//           GROUP BY pvm.vendor_id
+//       ) pvvm ON pvvm.vendor_id = u.id
 
-      -- Pre-aggregate RFQ statistics
-      LEFT JOIN (
-          SELECT 
-              user_id,
-              COUNT(DISTINCT rfq_id) AS inquiry_count
-          FROM tbl_rfq_product_vendors
-          GROUP BY user_id
-      ) rpv_stats ON rpv_stats.user_id = u.id
+//       -- Pre-aggregate RFQ statistics
+//       LEFT JOIN (
+//           SELECT 
+//               user_id,
+//               COUNT(DISTINCT rfq_id) AS inquiry_count
+//           FROM tbl_rfq_product_vendors
+//           GROUP BY user_id
+//       ) rpv_stats ON rpv_stats.user_id = u.id
 
-      -- Pre-aggregate quote statistics
-      LEFT JOIN (
-          SELECT 
-              created_by,
-              COUNT(DISTINCT id) AS quote_count
-          FROM tbl_quotes
-          GROUP BY created_by
-      ) q_stats ON q_stats.created_by = u.id
+//       -- Pre-aggregate quote statistics
+//       LEFT JOIN (
+//           SELECT 
+//               created_by,
+//               COUNT(DISTINCT id) AS quote_count
+//           FROM tbl_quotes
+//           GROUP BY created_by
+//       ) q_stats ON q_stats.created_by = u.id
 
-      -- For total product count
-      LEFT JOIN tbl_product_variant_vendor_mapping pvm 
-        ON pvm.vendor_id = u.id
+//       -- For total product count
+//       LEFT JOIN tbl_product_variant_vendor_mapping pvm 
+//         ON pvm.vendor_id = u.id
 
-      WHERE u.user_type = 3 
+//       WHERE u.user_type = 3 
 
-      GROUP BY 
-        u.id, u.name, u.email, u.mobile, u.created_at, u.status,
-        va.psu_approved, pvvm.product_makes, 
-        rpv_stats.inquiry_count, q_stats.quote_count
-      ORDER BY u.id;
-    `;
+//       GROUP BY 
+//         u.id, u.name, u.email, u.mobile, u.created_at, u.status,
+//         va.psu_approved, pvvm.product_makes, 
+//         rpv_stats.inquiry_count, q_stats.quote_count
+//       ORDER BY u.id;
+//     `;
 
-    db.any(query)
-      .then((data) => {
-        resolve(data);
-      })
-      .catch((err) => {
-        reject(new Error(err));
-      });
-  });
-},
+//     db.any(query)
+//       .then((data) => {
+//         resolve(data);
+//       })
+//       .catch((err) => {
+//         reject(new Error(err));
+//       });
+//   });
+// },
 
 
 
