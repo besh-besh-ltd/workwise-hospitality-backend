@@ -5569,6 +5569,249 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     });
   },
 
+getAllClientsrfqsForAdmin: async (page = 1, limit = 10, search = '', dateFilter = 'all', startDate = '', endDate = '', companyIds = []) => {
+  const offset = (page - 1) * limit;
+
+  // Date filter logic
+  let dateCondition = '';
+  let queryParams = [];
+
+  if (dateFilter === '3days') {
+    dateCondition = `AND tr.timestamp >= NOW() - INTERVAL '3 days'`;
+  } else if (dateFilter === '7days') {
+    dateCondition = `AND tr.timestamp >= NOW() - INTERVAL '7 days'`;
+  } else if (dateFilter === 'custom' && startDate && endDate) {
+    queryParams.push(startDate, endDate);
+    dateCondition = `AND tr.timestamp BETWEEN $${queryParams.length - 1} AND $${queryParams.length}`;
+  }
+
+  // Company filter logic
+  let companyCondition = '';
+  if (Array.isArray(companyIds) && companyIds.length > 0) {
+    const placeholders = companyIds.map((_, i) => `$${queryParams.length + i + 1}`).join(', ');
+    companyCondition = `AND tc.id IN (${placeholders})`;
+    queryParams = [...queryParams, ...companyIds];
+  }
+
+  // Search condition
+  let searchCondition = '';
+  if (search) {
+    queryParams.push(`%${search}%`);
+    searchCondition = `AND (tc.company_name ILIKE $${queryParams.length} OR tr.rfq_no ILIKE $${queryParams.length})`;
+  }
+
+  // Base query
+  const baseQuery = `
+    WITH vendors AS (
+      SELECT tr.id AS rfq_id, tr.status AS rfq_status, tr.rfq_type, COUNT(DISTINCT trpv.user_id) AS total_vendors
+      FROM tbl_rfq tr
+      LEFT JOIN tbl_rfq_product_vendors trpv ON trpv.rfq_id = tr.id
+      GROUP BY tr.id
+    ),
+    quotes AS (
+      SELECT 
+        rfq_id,
+        COUNT(DISTINCT CASE WHEN is_regret = 0 THEN created_by END) AS quotes_received,
+        COUNT(DISTINCT CASE WHEN is_regret = 1 THEN created_by END) AS quote_regrets,
+        COUNT(DISTINCT created_by) AS total_quotes
+      FROM tbl_quotes
+      GROUP BY rfq_id
+    ),
+    products AS (
+      SELECT rfq_id, COUNT(DISTINCT id) AS products_added
+      FROM tbl_rfq_products
+      GROUP BY rfq_id
+    ),
+    finalizations AS (
+      SELECT rfq_id, COUNT(DISTINCT product_variant_id) AS finalization_count
+      FROM tbl_quote_finalization
+      GROUP BY rfq_id
+    )
+    SELECT 
+      tr.id as rfq_id,
+      tc.company_name,
+      tr.rfq_no,
+      tr.timestamp,
+      tr.status AS rfq_status,
+      tr.rfq_type,
+      v.total_vendors,
+      q.quotes_received,
+      q.quote_regrets,
+      (v.total_vendors - COALESCE(q.total_quotes, 0)) AS vendors_not_responded,
+      p.products_added,
+      f.finalization_count
+    FROM tbl_rfq tr
+    JOIN tbl_users tu ON tu.id = tr.created_by
+    JOIN tbl_company tc ON tc.id = tu.company_id
+    LEFT JOIN vendors v ON v.rfq_id = tr.id
+    LEFT JOIN quotes q ON q.rfq_id = tr.id
+    LEFT JOIN products p ON p.rfq_id = tr.id
+    LEFT JOIN finalizations f ON f.rfq_id = tr.id
+    WHERE 1=1
+    ${dateCondition}
+    ${companyCondition}
+    ${searchCondition}
+    ORDER BY tr.timestamp DESC
+    LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}
+  `;
+
+  const countQuery = `
+    SELECT COUNT(*) AS total_count
+    FROM tbl_rfq tr
+    JOIN tbl_users tu ON tu.id = tr.created_by
+    JOIN tbl_company tc ON tc.id = tu.company_id
+    WHERE 1=1
+    ${dateCondition}
+    ${companyCondition}
+    ${searchCondition}
+  `;
+
+  try {
+    const [data, countResult] = await Promise.all([
+      db.any(baseQuery, [...queryParams, limit, offset]),
+      db.one(countQuery, queryParams)
+    ]);
+
+    const totalCount = parseInt(countResult.total_count);
+    const totalPages = Math.ceil(totalCount / limit);
+
+    return {
+      data,
+      pagination: {
+        current_page: page,
+        total_pages: totalPages,
+        total_items: totalCount,
+        items_per_page: limit,
+        has_next: page < totalPages,
+        has_prev: page > 1
+      }
+    };
+  } catch (err) {
+    throw new Error(err);
+  }
+},
+// getVendorInfoPageForAdmin: async () => {
+//   return new Promise((resolve, reject) => {
+//     const query = `
+//       SELECT 
+//         u.id AS vendor_id,
+//         u.name AS vendor_name,
+//         CONCAT(u.email, ' / ', u.mobile) AS vendor_contact,
+        
+//         -- Total product count
+//         COUNT(DISTINCT pvm.id) AS total_products,
+        
+//         -- PSU Approved (list of approvals)
+//         va.psu_approved,
+        
+//         -- Product Make
+//         pvvm.product_makes,
+        
+//         -- Total Inquiry Received (unique RFQs)
+//         rpv_stats.inquiry_count AS total_inquiry_received,
+        
+//         -- Total Quote Sent
+//         q_stats.quote_count AS total_quote_sent,
+        
+//         -- Response Rate
+//         CASE 
+//           WHEN rpv_stats.inquiry_count = 0 THEN '0%'
+//           ELSE ROUND((q_stats.quote_count::decimal / NULLIF(rpv_stats.inquiry_count, 0)) * 100, 2) || '%'
+//         END AS response_rate,
+        
+//         -- Joining Date
+//         TO_CHAR(u.created_at, 'DD/MM/YYYY') AS joining_date,
+        
+//         -- Status
+//         u.status,
+        
+//         -- Vendor Profile
+//         'View' AS vendor_profile
+
+//       FROM tbl_users u
+
+//       -- Pre-aggregate vendor approvals
+//       LEFT JOIN (
+//           SELECT 
+//               vaum.user_id,
+//               STRING_AGG(DISTINCT va.vendor_approve, ', ') AS psu_approved
+//           FROM tbl_vendorapprove_user_mapping vaum
+//           INNER JOIN tbl_vendor_approve va ON va.id = vaum.vendor_approve_id
+//           GROUP BY vaum.user_id
+//       ) va ON va.user_id = u.id
+
+//       -- Pre-aggregate product makes
+//       LEFT JOIN (
+//           SELECT 
+//               pvm.vendor_id,
+//               STRING_AGG(DISTINCT pvvm2.make_name, ', ') AS product_makes
+//           FROM tbl_product_variant_vendor_mapping pvm
+//           INNER JOIN tbl_product_variant_vendor_make pvvm2 
+//               ON pvvm2.variant_vendor_map_id = pvm.id
+//           GROUP BY pvm.vendor_id
+//       ) pvvm ON pvvm.vendor_id = u.id
+
+//       -- Pre-aggregate RFQ statistics
+//       LEFT JOIN (
+//           SELECT 
+//               user_id,
+//               COUNT(DISTINCT rfq_id) AS inquiry_count
+//           FROM tbl_rfq_product_vendors
+//           GROUP BY user_id
+//       ) rpv_stats ON rpv_stats.user_id = u.id
+
+//       -- Pre-aggregate quote statistics
+//       LEFT JOIN (
+//           SELECT 
+//               created_by,
+//               COUNT(DISTINCT id) AS quote_count
+//           FROM tbl_quotes
+//           GROUP BY created_by
+//       ) q_stats ON q_stats.created_by = u.id
+
+//       -- For total product count
+//       LEFT JOIN tbl_product_variant_vendor_mapping pvm 
+//         ON pvm.vendor_id = u.id
+
+//       WHERE u.user_type = 3 
+
+//       GROUP BY 
+//         u.id, u.name, u.email, u.mobile, u.created_at, u.status,
+//         va.psu_approved, pvvm.product_makes, 
+//         rpv_stats.inquiry_count, q_stats.quote_count
+//       ORDER BY u.id;
+//     `;
+
+//     db.any(query)
+//       .then((data) => {
+//         resolve(data);
+//       })
+//       .catch((err) => {
+//         reject(new Error(err));
+//       });
+//   });
+// },
+
+
+
+getAllCompaniesListForAdmin : async () => {
+  return new Promise((resolve, reject) => {
+    const query = `
+    select DISTINCT tc.id, tc.company_name
+    from tbl_company tc join tbl_users tu on tu.company_id = tc.id
+    where tu.user_type = 2`;
+    db.any
+    (query)
+      .then(function (data) {   
+        resolve(data);
+      })
+      .catch(function (err) {
+        let error = new Error(err);
+        reject(error);
+      });
+  });
+},
+
   getTotalRfqCountForAdmin: async (rfqStatus, adminServiceStatus) => {
     return new Promise((resolve, reject) => {
       let dynamicQuery = '';
