@@ -22,11 +22,11 @@ rfqRoutes.post(
   rfqController.getAllClientsrfqsForAdmin
 );
 
-rfqRoutes.get(
-  '/vendor-info-page',
-  passportSignIn,
-  rfqController.getVendorInfoPageForAdmin
-);
+// rfqRoutes.get(
+//   '/vendor-info-page',
+//   passportSignIn,
+//   rfqController.getVendorInfoPageForAdmin
+// );
 
 rfqRoutes.get(
   '/companies-list',
