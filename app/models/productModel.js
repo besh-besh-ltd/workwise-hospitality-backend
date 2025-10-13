@@ -1279,6 +1279,70 @@ const productModel = {
         });
     });
   },
+
+getNestedCategoryList: async (parentId, slug) => {
+  try {
+    let query;
+    let params;
+
+    if (slug && slug.trim() !== '') {
+      // Step 1: Get the category by slug
+      const findSlugQuery = `
+        SELECT id 
+        FROM tbl_category 
+        WHERE slug = $1
+        LIMIT 1
+      `;
+      const slugResult = await db.oneOrNone(findSlugQuery, [slug]);
+
+      if (!slugResult) {
+        // No such slug found
+        return [];
+      }
+
+      // Step 2: Use that category's id as parent_id
+      const categoryId = slugResult.id;
+      query = `
+        SELECT id, title, parent_id, slug
+        FROM tbl_category
+        WHERE parent_id = $1
+      `;
+      params = [categoryId];
+    } 
+    else if (parentId !== undefined && parentId !== null && parentId !== '') {
+      query = `
+        SELECT id, title, parent_id, slug
+        FROM tbl_category
+        WHERE parent_id = $1
+      `;
+      params = [parentId];
+    } 
+    else {
+      throw new Error('Either parent_id or slug must be provided.');
+    }
+
+    const result = await db.any(query, params);
+    return result;
+  } catch (error) {
+    throw error;
+  }
+},
+
+getRandomProductsForCarausel : async () =>{
+ return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT id, name , slug , sku  FROM tbl_product_variant WHERE is_deleted = 0 AND is_approve = 1 ORDER BY RANDOM() LIMIT 6`
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    }); 
+  },
+
   getProductList: async (
     limit,
     offset,
