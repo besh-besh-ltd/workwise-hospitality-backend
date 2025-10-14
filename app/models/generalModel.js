@@ -2,6 +2,10 @@ import db from '../config/dbConn.js';
 import { sendApprovalNotification, sendPONotificationToVendor } from '../controllers/po/purchaseOrderEmails.js';
 import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
 
+import { PutObjectCommand } from "@aws-sdk/client-s3";
+import s3Client from "../config/s3config.js";
+import fs from "fs";
+
 const generalModel = {
   // 25-05-2025 Mukul jatav
   // insertMany: used to insert multiple records into a table, Prevents SQL injection for values using positional placeholders, Suitable for low-to-medium data volume, problem is still we useing use input table_name good we create alist of while list tables for such models
@@ -595,7 +599,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       };
     }
 
-    const totalValue = meta?.total_value ?? 0;
+    const totalValue = Number(meta?.total_value ?? 0);
     const bypassCap = initiatorHierarchy.bypass_cap;
 
     // Find next approver (above the initiator)
@@ -693,7 +697,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         [company_id, hierarchy_type, currentLevel?.approval_level ?? 999]
       );
 
-      const totalValue = trx?.meta?.total_value ?? 0;
+      const totalValue = Number(trx?.meta?.total_value ?? 0);
       const bypassCap = currentLevel.bypass_cap;
 
       if ((totalValue <= bypassCap) || !nextApprover) {
@@ -749,8 +753,11 @@ export const markPOStatusChange = async (po_id, t, reject = false, user) => {
       [po_id, reject ? PO_STATUSES.REJECTED : PO_STATUSES.APPROVED]
     );
 
+    console.log("PO TEST -> PO STATUS IS BEING CHANGED!")
+
     // ⏳ Trigger email notifications to vendors and all the team members (Not yet)!
     if(!reject) {
+      console.log("PO TEST -> IS NOT REJECTED, sending mail for approval")
       await sendPONotificationToVendor(purchaseOrder, user);
     }
 
@@ -758,6 +765,49 @@ export const markPOStatusChange = async (po_id, t, reject = false, user) => {
   } catch (error) {
     console.error('Failed to mark PO status chnged:', error);
     throw error;
+  }
+};
+
+export const uploadToS3 = async (filePath, fileName) => {
+  try {
+    console.log(':file_folder: Starting upload process...');
+    // Check file exists
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+    console.log(':white_check_mark: File found, reading file...');
+    const fileBuffer = fs.readFileSync(filePath);
+    const uploadParams = {
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key: `purchase-order/${fileName}`,
+      Body: fileBuffer,
+      ContentType: "application/pdf",
+    };
+    console.log(':rocket: Uploading to S3...');
+    console.log('Bucket:', process.env.AWS_S3_BUCKET);
+    console.log('Key:', `purchase-order/${fileName}`);
+    const command = new PutObjectCommand(uploadParams);
+    const response = await s3Client.send(command);
+    console.log(":white_check_mark: Upload success. ETag:", response.ETag);
+    const url = `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/purchase-order/${fileName}`;
+    return {
+      ok: true,
+      url: url,
+      etag: response.ETag
+    };
+  } catch (err) {
+    console.error(":x: Upload error details:");
+    console.error("Error name:", err.name);
+    console.error("Error message:", err.message);
+    console.error("Error code:", err.code);
+    if (err.$metadata) {
+      console.error("Request ID:", err.$metadata.requestId);
+      console.error("HTTP Status:", err.$metadata.httpStatusCode);
+    }
+    return {
+      ok: false,
+      error: err.message
+    };
   }
 };
 

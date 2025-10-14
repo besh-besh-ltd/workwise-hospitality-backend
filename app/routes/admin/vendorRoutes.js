@@ -117,6 +117,18 @@ vendorRoutes.put(
 );
 
 vendorRoutes.get(
+  '/get-vendor-profile-documents',
+  passportSignIn,
+  vendorController.getVendorProfileDocuments
+);
+
+vendorRoutes.put(
+  '/approve-vendor-profile-documents',
+  passportSignIn,
+  vendorController.approveVendorProfileDocuments
+)
+
+vendorRoutes.get(
   '/reject-reason-dropdown-list',
   passportSignIn,
   vendorController.rejectReasonDropdownList

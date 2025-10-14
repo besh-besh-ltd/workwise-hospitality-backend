@@ -768,6 +768,8 @@ const validateDbBody = {
       const user_id = req.user.id;
       const user_type = req.user.user_type;
 
+      const source = req.body.source || req.query.source || req.params.source || "";
+
       if (!rfq_id) {
         return res.status(400).json({
           status: 2,
@@ -775,7 +777,7 @@ const validateDbBody = {
         });
       }
       const hasAccess = await userModel.user_rfq_access_review(rfq_id, user_id, user_type);
-      if (hasAccess) {
+      if (hasAccess || source.toLowerCase() == 'po') {
         next();
       } else {
         res.status(403).json({

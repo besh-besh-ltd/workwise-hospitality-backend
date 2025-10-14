@@ -14,6 +14,27 @@ rfqRoutes.post(
   validateBody(rfqSchemas.getAllRfqsForAdminValidation),
   rfqController.getAllRfqs
 );
+
+rfqRoutes.post(
+  '/client-rfq-list',
+  passportSignIn,
+  // validateBody(rfqSchemas.getAllRfqsForAdminValidation),
+  rfqController.getAllClientsrfqsForAdmin
+);
+
+// rfqRoutes.get(
+//   '/vendor-info-page',
+//   passportSignIn,
+//   rfqController.getVendorInfoPageForAdmin
+// );
+
+rfqRoutes.get(
+  '/companies-list',
+  passportSignIn,
+
+  rfqController.getAllCompaniesListForAdmin
+
+)
 rfqRoutes.post(
   '/update-status',
   passportSignIn,

@@ -30,6 +30,7 @@ admin.use('/subscription', subscriptionRoutes);
 admin.use('/coupon', couponRoutes);
 admin.use('/roles', rolesRoutes);
 admin.use('/rfq', rfqRoutes);
+
 // admin.use('/user', userRoutes);
 
 export default admin;
