@@ -1282,11 +1282,10 @@ const productModel = {
 
 getNestedCategoryList: async (parentId, slug) => {
   try {
-    let query;
-    let params;
+    let categoryId = null;
 
-    if (slug && slug.trim() !== '') {
-      // Step 1: Get the category by slug
+    // STEP 1: Determine categoryId (from slug or parentId)
+    if (slug && slug.trim() !== '' && slug !== 'undefined' && slug !== 'null') {
       const findSlugQuery = `
         SELECT id 
         FROM tbl_category 
@@ -1294,35 +1293,59 @@ getNestedCategoryList: async (parentId, slug) => {
         LIMIT 1
       `;
       const slugResult = await db.oneOrNone(findSlugQuery, [slug]);
-
-      if (!slugResult) {
-        // No such slug found
-        return [];
-      }
-
-      // Step 2: Use that category's id as parent_id
-      const categoryId = slugResult.id;
-      query = `
-        SELECT id, title, parent_id, slug
-        FROM tbl_category
-        WHERE parent_id = $1
-      `;
-      params = [categoryId];
-    } 
-    else if (parentId !== undefined && parentId !== null && parentId !== '') {
-      query = `
-        SELECT id, title, parent_id, slug
-        FROM tbl_category
-        WHERE parent_id = $1
-      `;
-      params = [parentId];
-    } 
-    else {
+      if (!slugResult) return [];
+      categoryId = slugResult.id;
+    } else if (parentId !== undefined && parentId !== null && parentId !== '') {
+      categoryId = parentId;
+    } else {
       throw new Error('Either parent_id or slug must be provided.');
     }
 
-    const result = await db.any(query, params);
-    return result;
+    // STEP 2: Fetch subcategories that have at least one product
+    const subCategoryQuery = `
+      SELECT c.id, c.title, c.parent_id, c.slug
+      FROM tbl_category c
+      WHERE c.parent_id = $1
+      AND EXISTS (
+        SELECT 1
+        FROM tbl_product_categories pc
+        WHERE pc.category_id = c.id
+      )
+    `;
+    const subCategories = await db.any(subCategoryQuery, [categoryId]);
+
+    if (subCategories.length > 0) {
+      // ✅ Return only subcategories that have products
+      return { type: "category", data: subCategories };
+    }
+
+    // STEP 3: If no valid subcategories, fetch products for this category
+    const productQuery = `
+      SELECT p.id , p.name , p.sku, p.slug
+      FROM tbl_product_categories pc
+      JOIN tbl_product p ON p.id = pc.product_id
+      WHERE pc.category_id = $1
+    `;
+    const products = await db.any(productQuery, [categoryId]);
+
+    if (products.length > 0) {
+      return { type: "product", data: products };
+    }
+
+    // STEP 4: If no products, fetch variants for product_id
+    const variantQuery = `
+      SELECT v.name , v.id, v.product_id , v.sku, v.slug
+      FROM tbl_product_variant v
+      WHERE v.product_id = $1 and v.is_approve = 1
+    `;
+    const variants = await db.any(variantQuery, [categoryId]);
+
+    if (variants.length > 0) {
+      return { type: "variant", data: variants };
+    }
+
+    // STEP 5: Nothing found
+    return { type: "none", data: [] };
   } catch (error) {
     throw error;
   }
