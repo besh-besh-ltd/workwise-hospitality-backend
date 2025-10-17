@@ -124,7 +124,14 @@ ProductsRoutes.get(
   acl([2, 3, 8]),
   ProductsController.approvedProductList
 );
-
+ProductsRoutes.get(
+  '/nested-category-list',
+  ProductsController.nestedCategoryList
+);
+ProductsRoutes.get(
+  '/random-products-for-carausel',
+  ProductsController.randomProductsForCarausel
+);
 
 //  delete this api ASAP, after review route again
 ProductsRoutes.get(
