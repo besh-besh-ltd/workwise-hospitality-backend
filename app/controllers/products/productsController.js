@@ -1178,6 +1178,52 @@ const ProductsController = {
         .end();
     }
   },
+
+nestedCategoryList: async (req, res, next) => {
+  try {
+    const { parent_id, slug } = req.query;
+
+    console.log("parent_id:", parent_id, "slug:", slug);
+
+    const categoryList = await productModel.getNestedCategoryList(parent_id, slug);
+
+    res.status(200).json({
+      status: 1,
+      type: categoryList.type, // category | product | variant
+      data: categoryList.data,
+    });
+  } catch (error) {
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value,
+      error: error.message,
+    });
+  }
+},
+
+
+randomProductsForCarausel : async (req, res, next) => {
+  try {
+    
+
+    let products = await productModel.getRandomProductsForCarausel();
+    
+    res.status(200).json({
+
+      status: 1,
+      data: products
+    }).end();
+
+  } catch (error) {
+    logError(error);
+    res.status(400).json({
+      status: 3,
+      message: Config.errorText.value,
+    }).end();
+  }
+},
+
   // not in use delete this ASAP, after reviewing all the code
   searchProductsByCategory: async (req, res, next) => {
     try {
