@@ -500,7 +500,79 @@ vendorSitemapIndex: async (req, res, next) => {
       res.status(500).json({ status: 3, message: "Error generating sitemap index" });
     }
   }
+},
+categorySitemap : async (req, res, next) => {
+  try {
+    const { page = 1, limit = 50000 } = req.query;
+    const pageNumber = parseInt(page, 10);
+    const limitNumber = parseInt(limit, 10);
+
+    if (isNaN(pageNumber) || pageNumber < 1 || isNaN(limitNumber) || limitNumber < 1) {
+      return res.status(400).json({ status: 3, message: 'Invalid page or limit' });
+    }
+
+    const offset = (pageNumber - 1) * limitNumber;
+
+    // Setup streaming response
+    const stream = new Readable({ read() {} });
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    stream.pipe(res);
+
+    // XML header
+    stream.push('<?xml version="1.0" encoding="UTF-8"?>\n');
+    stream.push('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n');
+
+    // Stream URLs from generator
+    for await (const url of seoModel.getCategoryAndVariantUrls(limitNumber, offset)) {
+      stream.push(url);
+    }
+
+    // Close XML
+    stream.push('</urlset>\n');
+    stream.push(null);
+
+  } catch (error) {
+    console.error('Error generating category sitemap:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ status: 3, message: 'Error generating category sitemap' });
+    }
+  }
+},
+categorySitemapIndex: async (req, res, next) => {
+  try {
+    const { totalUrls } = await seoModel.getCategorySitemapTotal();
+
+    console.log("Total Category URLs:", totalUrls);
+    const limit = 50000;
+    const totalPages = Math.ceil(totalUrls / limit);
+    const baseUrl = process.env.FRONTEND_URL || "https://letsworkwise.com";
+
+    res.set("Content-Type", "application/xml");
+
+    let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+    xml += '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
+
+    for (let i = 1; i <= totalPages; i++) {
+      xml += `  <sitemap>\n`;
+      xml += `    <loc>${baseUrl}/category/sitemap/${i}.xml</loc>\n`;
+      xml += `  </sitemap>\n`;
+    }
+
+    xml += "</sitemapindex>";
+
+    res.send(xml);
+  } catch (error) {
+    console.error("Error generating category sitemap index:", error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        status: 3,
+        message: "Error generating category sitemap index",
+      });
+    }
+  }
 }
+
 
 };
 
