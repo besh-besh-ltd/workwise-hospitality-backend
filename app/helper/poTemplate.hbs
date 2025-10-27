@@ -231,8 +231,8 @@
   <div class="document">
     <!-- HEADER -->
     <div class="header">
-      {{#if company.logoBase64}}
-        <img class="logo" src="data:image/png;base64,{{company.logoBase64}}" alt="Lakshya Logo" />
+      {{#if company.logoUrl}}
+        <img class="logo" src="{{company.logoUrl}}" alt="Company Logo" />
       {{/if}}
       
       <div class="company-info">
