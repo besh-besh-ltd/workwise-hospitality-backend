@@ -251,6 +251,7 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
           TC.cin,
           TC.website,
           TC.location,
+          TC.logo,
           FIN.mobile,
           JSON_BUILD_OBJECT(
             'id', SUP.id,
@@ -260,11 +261,12 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
             'address', SUP.address
           ) AS supplier,
           JSON_BUILD_OBJECT(
-            'id', FIN.id,
-            'name', FIN.name,
+            'id', TC.id,
+            'name', TC.company_name,
             'email', FIN.email,
             'phone', FIN.mobile,
-            'address', FIN.address
+            'address', FIN.address,
+            'logoUrl', TC.logo
           ) AS company
 
           FROM tbl_rfq_purchase_order PO
