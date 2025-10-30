@@ -249,6 +249,7 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
           PO.*, 
           TC.company_name,
           TC.cin,
+          TC.gstin,
           TC.website,
           TC.location,
           TC.logo,
@@ -267,7 +268,16 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
             'phone', FIN.mobile,
             'address', FIN.address,
             'logoUrl', TC.logo
-          ) AS company
+          ) AS company,
+          (
+            SELECT CONCAT(
+              MIN(CAST(TQI.delivery_period AS INTEGER)), ' - ', MAX(CAST(TQI.delivery_period AS INTEGER))
+            )
+            FROM tbl_quote_items TQI
+            WHERE 
+              TQI.id = ANY(PO.quote_id)
+              AND TQI.delivery_period <> ''
+          ) AS deliveryTerms
 
           FROM tbl_rfq_purchase_order PO
           JOIN tbl_users SUP ON SUP.id = PO.finalized_vendor_id

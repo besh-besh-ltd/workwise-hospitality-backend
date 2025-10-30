@@ -272,6 +272,7 @@
                 <div style="margin-bottom: 4px;"><strong>Bill To:</strong></div>
                 {{company_name}}
                 {{location}}
+                {{gstin}}
               </div>
               <div>
                 <div style="margin-bottom: 4px;"><strong>Ship To:</strong></div>
@@ -290,8 +291,8 @@
             <tr><td class="label">Quotation Date</td><td class="colon">:</td><td class="value">{{quotationDate}}</td></tr>
             {{!-- <tr><td class="label">Other Ref.</td><td class="colon">:</td><td class="value">{{otherRef}}</td></tr> --}}
             <tr><td class="label">Buyer Name</td><td class="colon">:</td><td class="value">{{company_name}}</td></tr>
-            {{!-- <tr><td class="label">Buyer Contact No</td><td class="colon">:</td><td class="value">{{buyerContact}}</td></tr> --}}
-            {{!-- <tr><td class="label">Buyer's Email</td><td class="colon">:</td><td class="value">{{buyerEmail}}</td></tr> --}}
+            <tr><td class="label">Buyer Contact No</td><td class="colon">:</td><td class="value">{{company.phone}}</td></tr>
+            <tr><td class="label">Buyer's Email</td><td class="colon">:</td><td class="value">{{company.email}}</td></tr>
           </table>
         </td>
       </tr>
@@ -367,7 +368,13 @@
       <tr>
         <td style="width: 35%;">
           <div>Terms & Conditions</div>
-          <strong>Payment :</strong> {{paymentTerms}}
+          {{#if paymentTerms}}
+            <strong>Payment :</strong> {{paymentTerms}}
+          {{/if}}
+
+          {{#if deliveryterms}}
+            <strong>Delivery Terms :</strong> {{deliveryterms}}
+          {{/if}}
         </td>
       </tr>
     </table>
@@ -379,8 +386,8 @@
     </div>
 
     <div class="bottom-table">
-          <div>Notes / Remarks :</div>
-          <div style="margin-top: 4px;">{{notes}}</div>
+          {{!-- <div>Notes / Remarks :</div>
+          <div style="margin-top: 4px;">{{notes}}</div> --}}
           <div style="font-size: 10px; margin-top: 6px;">{{terms}}</div>
         </div>
     
