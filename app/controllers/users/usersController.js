@@ -33,7 +33,7 @@ import rfqModel from '../../models/rfqModel.js';
 import vendorModel from '../../models/vendorModel.js';
 import productModel from '../../models/productModel.js';
 import vendorapproveModel from '../../models/vendorapproveModel.js';
-import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
+import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISensy.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { pgp } from '../../config/dbConn.js';
 
@@ -189,7 +189,7 @@ const UsersController = {
 
       // send whatsapp message to user
       const payload = { name:" ", phone:mobile }
-      const sendWhatsapp =  await whatsappNotificationFluxChat.contactUsFormWhatsAppMessage(payload);
+      const sendWhatsapp =  await whatsappNotificationAISensy.contactUsFormWhatsAppMessage(payload);
 
       //  send email to Admin 
       const emailHeader = ` <h5> Book A Call </h5> `
@@ -3713,7 +3713,7 @@ publish_profile_reviews: async (req, res, next) => {
           password:password
 
         }
-        await whatsappNotificationFluxChat.buyerAddedVendorNotificationToVendor(payload)
+        await whatsappNotificationAISensy.buyerAddedVendorNotificationToVendor(payload)
 
         vendorId = user_id;
 

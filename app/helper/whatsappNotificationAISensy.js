@@ -24,7 +24,7 @@ const formatPhoneNumber = (input) => {
 }
 
 //  contact us form submited 
-const whatsappNotificationFluxChat = {
+const whatsappNotificationAISensy = {
 
   // Function to send a notification when a buyer creates an RFQ
 buyerCreatesRFQNotification: async (payload) => {
@@ -53,7 +53,6 @@ buyerCreatesRFQNotification: async (payload) => {
   
   const headers = {
     'Content-Type': 'application/json',
-    // Authorization: flux_chat_bearer_token // Replace with your actual API key for the messaging service
   };
 
   // Make the POST request to the messaging API
@@ -252,10 +251,8 @@ sendQuoteSubmissionNotification: async (payload) =>{
     //   }
     // }
   
-    // 3) Set your request headers (include your Flux API key)
     const headers = {
       'Content-Type': 'application/json',
-      // Authorization: flux_chat_bearer_token // Replace with your Flux API key
     };
   
     console.log(data)
@@ -300,7 +297,6 @@ sendQuoteSubmissionNotification: async (payload) =>{
       }
     };
   
-    // 3) Set your request headers (include your Flux API key)
     const headers = {
       'Content-Type': 'application/json',
     };
@@ -363,10 +359,9 @@ sendQuoteSubmissionNotification: async (payload) =>{
       }
     };
   
-    // 3) Set your request headers (include your Flux API key)
     const headers = {
       'Content-Type': 'application/json',
-      Authorization: flux_chat_bearer_token // Replace with your Flux API key
+      Authorization: flux_chat_bearer_token
     };
   
     console.log(data)
@@ -388,4 +383,4 @@ sendQuoteSubmissionNotification: async (payload) =>{
 
 
 
-export default whatsappNotificationFluxChat;
+export default whatsappNotificationAISensy;

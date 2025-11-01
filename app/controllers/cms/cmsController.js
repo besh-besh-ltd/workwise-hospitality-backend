@@ -22,7 +22,7 @@ import fs from 'fs';
 import { v4 } from 'uuid';
 import admin from 'firebase-admin';
 //import serviceAccount from '../../config/privateKey.json' assert { type: 'json' };
-import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
+import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISensy.js';
 
 const CmsController = {
   homeBanner: async (req, res, next) => {
@@ -128,7 +128,7 @@ const CmsController = {
       // console.log('Test controller-->', contactObj);
 
       const payload = { name:name, phone:phone }
-      await whatsappNotificationFluxChat.contactUsFormWhatsAppMessage(payload);
+      await whatsappNotificationAISensy.contactUsFormWhatsAppMessage(payload);
 
       let dynamic_html = fs
         .readFileSync(`${Config.template_path}/admin_contact_template.txt`)
