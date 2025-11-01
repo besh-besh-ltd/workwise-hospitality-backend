@@ -48,6 +48,7 @@
     }
     
     .contact-info { 
+      max-width: 250px;
       text-align: right; 
       font-size: 10px; 
       line-height: 1.3; 
@@ -272,7 +273,10 @@
                 <div style="margin-bottom: 4px;"><strong>Bill To:</strong></div>
                 {{company_name}}
                 {{location}}
-                {{gstin}}
+                {{#if gstin}}
+                  <br>
+                  GSTIN: {{gstin}}
+                {{/if}}
               </div>
               <div>
                 <div style="margin-bottom: 4px;"><strong>Ship To:</strong></div>
