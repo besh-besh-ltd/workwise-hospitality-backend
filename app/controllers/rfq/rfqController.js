@@ -17,7 +17,7 @@ import xlsx from 'xlsx';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import vendorModel from '../../models/vendorModel.js';
 import projectModel from '../../models/projectModel.js';
-import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
+import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISensy.js';
 import { generateEmailTemplate, getRfqEmailContent, RFQ_EMAIL_TYPE } from '../../helper/notificationEmailLayout.js';
 import fs from 'fs';
 import productModel from '../../models/productModel.js';
@@ -763,7 +763,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
               hasTechEvaluation: techEval.length > 0 ? 'Some products require technical evaluation' : ''
             };
             
-            await whatsappNotificationFluxChat.vendorReceivesRFQNotification(payloadForWhatsApp);
+            await whatsappNotificationAISensy.vendorReceivesRFQNotification(payloadForWhatsApp);
           }
         })
       );
@@ -781,7 +781,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
         hasTechEvaluation: techEval.length > 0 ? 'Some products require technical evaluation' : ''
       };
 
-      await whatsappNotificationFluxChat.vendorReceivesRFQNotification(payloadForWhatsApp);
+      await whatsappNotificationAISensy.vendorReceivesRFQNotification(payloadForWhatsApp);
 
       // Send notification if applicable
       if (user_details[0].endpoint) {
@@ -1131,7 +1131,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
         name:vendorName
       }
     
-      await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+      await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
     }
     })
   
@@ -1143,7 +1143,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
       message:message,
       name:vendorName
     }  
-    await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+    await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
   
   
 
@@ -1224,7 +1224,7 @@ const formattedProducts = countedProducts.length > 0
     buyerName:buyerDetails[0]?.name
   }
 
-  await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(payload);
+  await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(payload);
 
 };
 
@@ -1295,7 +1295,7 @@ const sendQuoteNotificationToVendor = async (req) => {
       name:organization_name || name
     }
   
-    await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+    await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
   }
   })
 
@@ -1307,7 +1307,7 @@ const sendQuoteNotificationToVendor = async (req) => {
     message:message,
     name:organization_name || name
   }  
-  await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+  await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
 
 };
 
@@ -1468,7 +1468,7 @@ const containerContent = `
           name: vendorName
         };
     
-        await whatsappNotificationFluxChat.sendQuoteReminderNotificationToVendor(whatsappPayloadSPOC);
+        await whatsappNotificationAISensy.sendQuoteReminderNotificationToVendor(whatsappPayloadSPOC);
       }
     });
     
@@ -1481,7 +1481,7 @@ const containerContent = `
       name:vendorName
     }
 
-    await whatsappNotificationFluxChat.sendQuoteReminderNotificationToVendor(whatsappPayloadForVendor)
+    await whatsappNotificationAISensy.sendQuoteReminderNotificationToVendor(whatsappPayloadForVendor)
 
     const notificationData = {
       type: 'RFQ Pending',
@@ -2837,7 +2837,7 @@ const rfqController = {
         rfq_no: responseUpdate[0]?.rfq_no
       };
 
-      whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload);
+      whatsappNotificationAISensy.buyerCreatesRFQNotification(buyerMsgPayload);
 
       return res
         .status(200)
@@ -5698,7 +5698,7 @@ const rfqController = {
               buyerName: buyerDetails[0]?.name
             };
 
-            await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(
+            await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(
               payload
             );
 
