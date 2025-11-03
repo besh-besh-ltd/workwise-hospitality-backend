@@ -3713,7 +3713,7 @@ publish_profile_reviews: async (req, res, next) => {
           password:password
 
         }
-        await whatsappNotificationAISensy.buyerAddedVendorNotificationToVendor(payload)
+        // await whatsappNotificationAISensy.buyerAddedVendorNotificationToVendor(payload)
 
         vendorId = user_id;
 
