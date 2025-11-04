@@ -265,55 +265,55 @@ const whatsappNotificationAISensy = {
       });
   },
 
-  sendNewQuoteNotificationToBuyer: async (payload) => {
-    try {
-      // Construct the data payload
-      const data = {
-        apiKey: aisensy_bearer_token,
-        campaignName: 'BuyerNewQuoteReceived',
-        destination: formatPhoneNumber(payload.mobile),
-        userName: 'letsworkwise',
-        templateParams: [
-          payload.rfqNumber,
-          payload?.buyerName,
-          payload?.vendorName,
-          payload?.projectName,
-          payload.rfqNumber,
-          `dashboard/buyer/quote-compare?rfq=${payload.rfqID}`
-        ],
-        source: 'new-landing-page form',
-        media: {},
-        buttons: [],
-        carouselCards: [],
-        location: {},
-        attributes: {},
-        paramsFallbackValue: {
-          FirstName: 'user'
-        }
-      };
+  // sendNewQuoteNotificationToBuyer: async (payload) => {
+  //   try {
+  //     // Construct the data payload
+  //     const data = {
+  //       apiKey: aisensy_bearer_token,
+  //       campaignName: 'BuyerNewQuoteReceived',
+  //       destination: formatPhoneNumber(payload.mobile),
+  //       userName: 'letsworkwise',
+  //       templateParams: [
+  //         payload.rfqNumber,
+  //         payload?.buyerName,
+  //         payload?.vendorName,
+  //         payload?.projectName,
+  //         payload.rfqNumber,
+  //         `dashboard/buyer/quote-compare?rfq=${payload.rfqID}`
+  //       ],
+  //       source: 'new-landing-page form',
+  //       media: {},
+  //       buttons: [],
+  //       carouselCards: [],
+  //       location: {},
+  //       attributes: {},
+  //       paramsFallbackValue: {
+  //         FirstName: 'user'
+  //       }
+  //     };
 
-      const headers = {
-        'Content-Type': 'application/json'
-      };
+  //     const headers = {
+  //       'Content-Type': 'application/json'
+  //     };
 
-      // 4) Make the POST request
-      await axios
-        .post(aisensy_api, data, { headers: headers })
-        .then((response) => {
-          console.log('New Quote Notification Sent:', response.data);
-        })
-        .catch((error) => {
-          console.error(
-            'Failed to send new quote notification:',
-            error.response ? error.response.data : error.message
-          );
-        });
-    } catch (error) {
-      console.error(error)
-      logError(error);
-      return false;
-    }
-  }
+  //     // 4) Make the POST request
+  //     await axios
+  //       .post(aisensy_api, data, { headers: headers })
+  //       .then((response) => {
+  //         console.log('New Quote Notification Sent:', response.data);
+  //       })
+  //       .catch((error) => {
+  //         console.error(
+  //           'Failed to send new quote notification:',
+  //           error.response ? error.response.data : error.message
+  //         );
+  //       });
+  //   } catch (error) {
+  //     console.error(error)
+  //     logError(error);
+  //     return false;
+  //   }
+  // }
 
   /* 
     COMMENTED UNTIL THE TEMPLATE GETS VERIFIED BY AISENSY
