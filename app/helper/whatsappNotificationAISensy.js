@@ -1,6 +1,6 @@
 
 import axios from 'axios'; // Import axios for making HTTP requests
-import { logError } from './common';
+import { logError } from './common.js';
 
 const aisensy_api = process.env.AISENSY_API
 const aisensy_bearer_token =  process.env.AISENSY_API_KEY
