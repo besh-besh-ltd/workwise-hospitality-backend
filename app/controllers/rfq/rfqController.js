@@ -1224,7 +1224,7 @@ const formattedProducts = countedProducts.length > 0
     buyerName:buyerDetails[0]?.name
   }
 
-  await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(payload);
+  // await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(payload);
 
 };
 
@@ -5698,9 +5698,9 @@ const rfqController = {
               buyerName: buyerDetails[0]?.name
             };
 
-            await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(
-              payload
-            );
+            // await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(
+            //   payload
+            // );
 
             return res
               .status(200)
