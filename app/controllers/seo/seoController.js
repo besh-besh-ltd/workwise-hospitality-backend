@@ -416,6 +416,7 @@ const seoController = {
     // --- Render HTML ---
     const html = template(data);
 
+
     // --- Ensure output folder exists ---
     const storageDir = path.join(process.cwd(), 'app', 'storage', 'invoices');
     if (!fs.existsSync(storageDir)) fs.mkdirSync(storageDir, { recursive: true });

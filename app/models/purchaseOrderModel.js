@@ -378,7 +378,16 @@ export const getPOItemDetails = async (purchase_order) => {
           qi.package_mode,
           qi.tax_mode,
           pv.name as product_name,
-          qi.quantity
+          qi.quantity,
+          (
+            SELECT s.value
+            FROM tbl_rfq_products_specs s
+            WHERE s.rfq_id = qi.rfq_id
+            AND s.product_variant_id = qi.product_variant_id
+            AND s.variant = qi.variant
+            AND s.title = 'Unit'
+            LIMIT 1
+          ) as unit
 
         FROM tbl_quote_items qi
         INNER JOIN tbl_product_variant pv ON qi.product_variant_id = pv.id
