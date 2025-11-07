@@ -259,7 +259,9 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
             'name', SUP.name,
             'email', SUP.email,
             'phone', SUP.mobile,
-            'address', SUP.address
+            'address', SUP.address,
+            'gstin', TCSUP.gstin,
+            'cin', TCSUP.cin
           ) AS supplier,
           JSON_BUILD_OBJECT(
             'id', TC.id,
@@ -282,6 +284,7 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
           FROM tbl_rfq_purchase_order PO
           JOIN tbl_users SUP ON SUP.id = PO.finalized_vendor_id
           JOIN tbl_users FIN ON FIN.id = PO.initiated_by
+          JOIN tbl_company TCSUP ON TCSUP.id = SUP.company_id
           JOIN tbl_company TC ON TC.id = PO.company_id 
 
         WHERE PO.id = $1`,

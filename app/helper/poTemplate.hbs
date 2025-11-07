@@ -267,6 +267,12 @@
               {{supplier.address}}<br>
               Phone No: {{supplier.phone}}<br>
               Email: {{supplier.email}}<br>
+              {{#if supplier.gstin}}
+                GSTIN: {{supplier.gstin}}<br>
+              {{/if}}
+              {{#if supplier.cin}}
+                CIN: {{supplier.cin}}
+              {{/if}}
             </div>
             <div class="flex-section">
               <div>
