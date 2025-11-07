@@ -201,7 +201,7 @@ UsersRoutes.post(
 
 UsersRoutes.get(
   '/get-vendor-payment-terms',
-  passportSignIn,
+  noLogin.customer_auth,
  UsersController.get_payment_terms
 )
 
