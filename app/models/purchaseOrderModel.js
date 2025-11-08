@@ -260,7 +260,7 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
             'email', SUP.email,
             'phone', SUP.mobile,
             'address', SUP.address,
-            'gstin', TCSUP.gstin,
+            'gstin', COALESCE(TQ.gstin, TCSUP.gstin),
             'cin', TCSUP.cin
           ) AS supplier,
           JSON_BUILD_OBJECT(
@@ -282,6 +282,7 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
           ) AS deliveryTerms
 
           FROM tbl_rfq_purchase_order PO
+          LEFT JOIN tbl_quotes TQ ON TQ.rfq_id = PO.rfq_id AND TQ.created_by = PO.finalized_vendor_id
           JOIN tbl_users SUP ON SUP.id = PO.finalized_vendor_id
           JOIN tbl_users FIN ON FIN.id = PO.initiated_by
           JOIN tbl_company TCSUP ON TCSUP.id = SUP.company_id
