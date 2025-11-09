@@ -982,8 +982,12 @@ user_book_demo: async (mobile) => {
                   SELECT json_build_object(
                     'product_name', V.name,
                     'product_id', V.id,
-                    'product_make', PVVM.make_name,  -- ✅ Added here
-                    'approved_by', (
+                  'product_make', (
+                    SELECT ARRAY_AGG(DISTINCT PVVM.make_name)
+                    FROM tbl_product_variant_vendor_make PVVM
+                    WHERE PVVM.variant_vendor_map_id = M.id
+                  ),
+                  'approved_by', (
                       SELECT ARRAY(
                         SELECT DISTINCT ON (VA.id)
                           json_build_object(
@@ -1000,10 +1004,6 @@ user_book_demo: async (mobile) => {
                   )
                   FROM tbl_product_variant_vendor_mapping M
                   JOIN tbl_product_variant V ON V.id = M.product_variant_id
-
-                  -- ✅ NEW JOIN
-                  LEFT JOIN tbl_product_variant_vendor_make PVVM
-                    ON PVVM.variant_vendor_map_id = M.id
 
                   WHERE M.vendor_id = tbl_users.id
                 ) AS "product_list",
