@@ -282,15 +282,17 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         });
     });
   },
-  doesHierarchyExist: async (type, companyId) => {
+  doesHierarchyExist: async (type, companyId, firstUser) => {
     try {
       const raw = await db.any(`
         SELECT id
         FROM tbl_approval_hierarchy
         WHERE company_id = $1
-        AND hierarchy_type = $2
-        ORDER BY hierarchy_type, approval_level ASC
-      `, [companyId, type]);
+          AND hierarchy_type = $2
+          AND approval_level = 1
+          AND user_id = $3
+        ORDER BY hierarchy_type, approval_level
+      `, [companyId, type, firstUser.user_id]);
 
       return raw && raw.length > 0;
     } catch (error) {
