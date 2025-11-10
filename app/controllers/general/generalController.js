@@ -163,14 +163,15 @@ const generalController = {
   },
   updateHierarchy: async (req, res) => {
     try {
-      const { type, approvers, removableApprovers } = req.body;
+      const { hierarchy_id, type, approvers, removableApprovers } = req.body;
       const { company_id } = req.user;
 
       const updated = await generalModel.updateHierarchy(
         type,
         approvers,
         removableApprovers,
-        company_id
+        company_id,
+        hierarchy_id
       );
 
       if (updated) return res.status(200).end();

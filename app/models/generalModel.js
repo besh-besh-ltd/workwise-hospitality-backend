@@ -469,13 +469,13 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       throw error;
     }
   },
-  updateHierarchy: async (type, approvers, removableApprovers = [], companyId) => {
+  updateHierarchy: async (type, approvers, removableApprovers = [], companyId, hierarchyId) => {
     try {
       const updatePromises = approvers.map(async (approver) => {
         const exists = await db.oneOrNone(
           `SELECT id FROM tbl_approval_hierarchy
-          WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3`,
-          [companyId, approver.user_id, type]
+          WHERE id = $1 AND company_id = $2 AND user_id = $3 AND hierarchy_type = $4`,
+          [hierarchyId, companyId, approver.user_id, type]
         );
 
         if (exists) {
