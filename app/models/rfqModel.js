@@ -1437,6 +1437,13 @@ WHERE NOT EXISTS (
               'name', TV.name,
               'product_name', T_P.name,
               'variant', RFQ_P.variant,
+              'vendor_count', (
+              SELECT COUNT(*)
+              FROM tbl_rfq_product_vendors trpv
+              WHERE trpv.rfq_id = RFQ_P.rfq_id
+              AND trpv.product_variant_id = RFQ_P.product_variant_id
+              AND trpv.variant = RFQ_P.variant
+              ),
               'spec', (
                   SELECT json_agg(json_build_object(
                       'title', RFQ_P_SPEC.title,
@@ -1491,6 +1498,7 @@ WHERE NOT EXISTS (
       throw error;
     }
   },
+
 
   getDraftProductVendors: async (draftId, rfqProductId, buyerId, filters) => {
     try {
