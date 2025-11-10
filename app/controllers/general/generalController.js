@@ -130,7 +130,7 @@ const generalController = {
       const { company_id } = req.user;
 
       const doesExist = await generalModel.doesHierarchyExist(type, company_id, approvers[0]);
-      if (doesExist && doesExist.length > 0) {
+      if (doesExist) {
         return res.status(400).json({
           status: 2,
           message: `A Hierarchy already exist for type \`${type}\` with given initial user!`
