@@ -298,7 +298,7 @@
             <tr><td class="label">PO No</td><td class="colon">:</td><td class="value">{{po_number}}</td></tr>
             <tr><td class="label">PO Date</td><td class="colon">:</td><td class="value">{{created_at}}</td></tr>
             {{!-- <tr><td class="label">Quotation Ref.</td><td class="colon">:</td><td class="value">{{quotationRef}}</td></tr> --}}
-            <tr><td class="label">Quotation Date</td><td class="colon">:</td><td class="value">{{quotationDate}}</td></tr>
+            <tr><td class="label">Quotation Date</td><td class="colon">:</td><td class="value">{{timestamp}}</td></tr>
             {{!-- <tr><td class="label">Other Ref.</td><td class="colon">:</td><td class="value">{{otherRef}}</td></tr> --}}
             <tr><td class="label">Buyer Name</td><td class="colon">:</td><td class="value">{{company_name}}</td></tr>
             <tr><td class="label">Buyer Contact No</td><td class="colon">:</td><td class="value">{{company.phone}}</td></tr>
@@ -334,7 +334,10 @@
         {{#each items}}
         <tr>
           <td>{{inc @index}}</td>
-          <td class="item-description">{{product_name}}</td>
+          <td class="item-description">
+            {{product_name}} 
+            {{#if hsn_code}}<br><strong>HSN CODE: {{hsn_code}}</strong>{{/if}}
+          </td>
           <td>{{quantity}}</td>
           <td>{{unit}}</td>
           <td>{{formatCurrency unit_price}}</td>

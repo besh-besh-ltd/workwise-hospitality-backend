@@ -409,6 +409,15 @@ const seoController = {
       const year = createdInDate.getFullYear();
       data.created_at = `${day}/${month}/${year}`;
     }
+
+    if (data.timestamp) {
+      const createdInDate = new Date(data.timestamp);
+      // Pad single digits with zero for day and month
+      const day = String(createdInDate.getDate()).padStart(2, '0');
+      const month = String(createdInDate.getMonth() + 1).padStart(2, '0'); // Months are zero-based
+      const year = createdInDate.getFullYear();
+      data.timestamp = `${day}/${month}/${year}`;
+    }
     
     console.log("PO DATA:")
     console.dir(data, { depth: null })

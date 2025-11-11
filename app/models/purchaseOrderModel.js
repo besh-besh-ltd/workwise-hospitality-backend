@@ -249,11 +249,11 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
           PO.*, 
           TC.company_name,
           TC.cin,
-          TC.gstin,
           TC.website,
           TC.location,
           TC.logo,
           FIN.mobile,
+          TQ.timestamp
           JSON_BUILD_OBJECT(
             'id', SUP.id,
             'name', SUP.name,
@@ -380,6 +380,7 @@ export const getPOItemDetails = async (purchase_order) => {
           qi.tax_mode,
           pv.name as product_name,
           qi.quantity,
+          TPOHM.hsn_code,
           (
             SELECT s.value
             FROM tbl_rfq_products_specs s
@@ -391,11 +392,13 @@ export const getPOItemDetails = async (purchase_order) => {
           ) as unit
 
         FROM tbl_quote_items qi
+        JOIN tbl_rfq_products TRP ON TRP.rfq_id = qi.rfq_id AND TRP.product_variant_id = qi.product_variant_id AND TRP.variant = qi.variant
+        JOIN tbl_purchase_order_hsn_mapping TPOHM ON TPOHM.po_id = $2 AND TPOHM.rfq_item_id = TRP.id
         INNER JOIN tbl_product_variant pv ON qi.product_variant_id = pv.id
         WHERE qi.id = ANY($1)
         ORDER BY qi.id;
       `;
-      let items = await t.any(q, [quote_id])
+      let items = await t.any(q, [quote_id, purchase_order.id])
 
       items = items.map(i => ({
         ...i,
@@ -595,7 +598,8 @@ export const getPODetailsById = async (po_id, user_id) => {
                       JSON_BUILD_OBJECT(
                           'id', TPV.id,
                           'name', TPV.name,
-                          'product_id', TPV.product_id
+                          'product_id', TPV.product_id,
+                          'rfq_item_id', TRP.id
                       )
                   )
                   FROM tbl_rfq_products TRP
@@ -604,6 +608,21 @@ export const getPODetailsById = async (po_id, user_id) => {
                 ),
                 '[]'::json
               ) AS product_details,
+              COALESCE(
+              (
+                SELECT JSON_AGG(
+                    JSON_BUILD_OBJECT(
+                        'id', TPOHM.id,
+                        'rfq_item_id', TPOHM.rfq_item_id,
+                        'hsn_code', TPOHM.hsn_code,
+                        'mapped_by', TPOHM.mapped_by
+                    )
+                )
+                FROM tbl_purchase_order_hsn_mapping TPOHM
+                WHERE TPOHM.po_id = po.id
+              ),
+              '[]'::json
+            ) AS hsn_codes,
               CASE
                 WHEN trx.id IS NOT NULL THEN json_build_object(
                   'id', trx.id,
@@ -886,4 +905,55 @@ export const deleteTask = async (id, user) => {
   );
 
   return result;
+};
+
+export const updateGSTForPO = async (id, newGST) => {
+  const result = await db.one(
+    `UPDATE tbl_rfq_purchase_order
+      SET gstin = $1
+      WHERE id = $2
+      RETURNING *`,
+      [newGST, id]
+  )
+
+  return result;
+};
+
+export const updateHSNCode = async (po_id, hsn_codes, mapped_by) => {
+  if(Array.isArray(hsn_codes) && hsn_codes.length > 0) {
+    const totalResult = [];
+    
+    for(let hsn_code of hsn_codes) {
+      const alreadyExist = await db.oneOrNone(
+        `SELECT id FROM tbl_purchase_order_hsn_mapping
+         WHERE rfq_item_id = $1
+         AND po_id = $2`,
+        [hsn_code.rfq_item_id, po_id]
+      );
+      if (alreadyExist) {
+        const result = await db.one(
+          `UPDATE tbl_purchase_order_hsn_mapping
+           SET hsn_code = $1
+           WHERE id = $2
+           RETURNING *`,
+          [hsn_code.code, alreadyExist.id]
+        );
+    
+        totalResult.push(result);
+      } else {
+        const result = await db.one(
+          `INSERT INTO tbl_purchase_order_hsn_mapping 
+           (rfq_item_id, hsn_code, po_id, mapped_by)
+           VALUES ($1, $2, $3, $4) RETURNING *`,
+          [hsn_code.rfq_item_id, hsn_code.code, po_id, mapped_by]
+        );
+    
+        totalResult.push(result);
+      }
+    }
+
+    return totalResult;
+  } else {
+    return null;
+  }
 };
