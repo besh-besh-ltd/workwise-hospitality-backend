@@ -48,6 +48,7 @@
     }
     
     .contact-info { 
+      max-width: 250px;
       text-align: right; 
       font-size: 10px; 
       line-height: 1.3; 
@@ -210,13 +211,13 @@
       margin: 8px; 
       padding-top: 8px; 
       border-top: 2px solid #000; 
-      font-size: 9px; 
+      font-size: 12px; 
     }
     .certifications { 
       display: flex; 
-      justify-content: center; 
+      justify-content: flex-end; 
       gap: 20px; 
-      margin-top: 6px; 
+      margin-top: 12px; 
     }
     .cert-badge { 
       display: flex; 
@@ -266,12 +267,22 @@
               {{supplier.address}}<br>
               Phone No: {{supplier.phone}}<br>
               Email: {{supplier.email}}<br>
+              {{#if supplier.gstin}}
+                GSTIN: {{supplier.gstin}}<br>
+              {{/if}}
+              {{#if supplier.cin}}
+                CIN: {{supplier.cin}}
+              {{/if}}
             </div>
             <div class="flex-section">
               <div>
                 <div style="margin-bottom: 4px;"><strong>Bill To:</strong></div>
                 {{company_name}}
                 {{location}}
+                {{#if gstin}}
+                  <br>
+                  GSTIN: {{gstin}}
+                {{/if}}
               </div>
               <div>
                 <div style="margin-bottom: 4px;"><strong>Ship To:</strong></div>
@@ -290,8 +301,8 @@
             <tr><td class="label">Quotation Date</td><td class="colon">:</td><td class="value">{{quotationDate}}</td></tr>
             {{!-- <tr><td class="label">Other Ref.</td><td class="colon">:</td><td class="value">{{otherRef}}</td></tr> --}}
             <tr><td class="label">Buyer Name</td><td class="colon">:</td><td class="value">{{company_name}}</td></tr>
-            {{!-- <tr><td class="label">Buyer Contact No</td><td class="colon">:</td><td class="value">{{buyerContact}}</td></tr> --}}
-            {{!-- <tr><td class="label">Buyer's Email</td><td class="colon">:</td><td class="value">{{buyerEmail}}</td></tr> --}}
+            <tr><td class="label">Buyer Contact No</td><td class="colon">:</td><td class="value">{{company.phone}}</td></tr>
+            <tr><td class="label">Buyer's Email</td><td class="colon">:</td><td class="value">{{company.email}}</td></tr>
           </table>
         </td>
       </tr>
@@ -367,7 +378,13 @@
       <tr>
         <td style="width: 35%;">
           <div>Terms & Conditions</div>
-          <strong>Payment :</strong> {{paymentTerms}}
+          {{#if paymentTerms}}
+            <strong>Payment :</strong> {{paymentTerms}}
+          {{/if}}
+
+          {{#if deliveryterms}}
+            <strong>Delivery Terms :</strong> {{deliveryterms}}
+          {{/if}}
         </td>
       </tr>
     </table>
@@ -379,31 +396,18 @@
     </div>
 
     <div class="bottom-table">
-          <div>Notes / Remarks :</div>
-          <div style="margin-top: 4px;">{{notes}}</div>
+          {{!-- <div>Notes / Remarks :</div>
+          <div style="margin-top: 4px;">{{notes}}</div> --}}
           <div style="font-size: 10px; margin-top: 6px;">{{terms}}</div>
         </div>
     
     <!-- FOOTER -->
-    {{!-- <div class="footer">
-      Subject to JHARKHAND Jurisdiction
+    <div class="footer">
+      Subject to <strong>JHARKHAND</strong> Jurisdiction
       <div class="certifications">
-        <div class="cert-badge">
-          <div style="background: red; color: white; padding: 2px 4px; font-size: 7px;">ISO 9001</div>
-          <span>BUREAU VERITAS<br>Certification</span>
-        </div>
-        <div class="cert-badge">
-          <div style="background: #333; color: white; padding: 2px 4px; font-size: 7px;">UKAS</div>
-        </div>
-        <div class="cert-badge">
-          <div style="background: red; color: white; padding: 2px 4px; font-size: 7px;">BS OHSAS 18001</div>
-          <span>BUREAU VERITAS<br>Certification</span>
-        </div>
-        <div class="cert-badge">
-          <div style="background: #333; color: white; padding: 2px 4px; font-size: 7px;">UKAS</div>
-        </div>
+        <img style="max-height: 90px;" src="https://workwise-static-s3.s3.ap-south-1.amazonaws.com/iso-logo/ISO-logo.png" alt="ISO Logo">
       </div>
-    </div> --}}
+    </div>
   </div>
 </body>
 </html>

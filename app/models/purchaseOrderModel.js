@@ -249,6 +249,7 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
           PO.*, 
           TC.company_name,
           TC.cin,
+          TC.gstin,
           TC.website,
           TC.location,
           TC.logo,
@@ -258,7 +259,9 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
             'name', SUP.name,
             'email', SUP.email,
             'phone', SUP.mobile,
-            'address', SUP.address
+            'address', SUP.address,
+            'gstin', COALESCE(TQ.gstin, TCSUP.gstin),
+            'cin', TCSUP.cin
           ) AS supplier,
           JSON_BUILD_OBJECT(
             'id', TC.id,
@@ -267,11 +270,22 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
             'phone', FIN.mobile,
             'address', FIN.address,
             'logoUrl', TC.logo
-          ) AS company
+          ) AS company,
+          (
+            SELECT CONCAT(
+              MIN(CAST(TQI.delivery_period AS INTEGER)), ' - ', MAX(CAST(TQI.delivery_period AS INTEGER))
+            )
+            FROM tbl_quote_items TQI
+            WHERE 
+              TQI.id = ANY(PO.quote_id)
+              AND TQI.delivery_period <> ''
+          ) AS deliveryTerms
 
           FROM tbl_rfq_purchase_order PO
+          LEFT JOIN tbl_quotes TQ ON TQ.rfq_id = PO.rfq_id AND TQ.created_by = PO.finalized_vendor_id
           JOIN tbl_users SUP ON SUP.id = PO.finalized_vendor_id
           JOIN tbl_users FIN ON FIN.id = PO.initiated_by
+          JOIN tbl_company TCSUP ON TCSUP.id = SUP.company_id
           JOIN tbl_company TC ON TC.id = PO.company_id 
 
         WHERE PO.id = $1`,
@@ -365,7 +379,16 @@ export const getPOItemDetails = async (purchase_order) => {
           qi.package_mode,
           qi.tax_mode,
           pv.name as product_name,
-          qi.quantity
+          qi.quantity,
+          (
+            SELECT s.value
+            FROM tbl_rfq_products_specs s
+            WHERE s.rfq_id = qi.rfq_id
+            AND s.product_variant_id = qi.product_variant_id
+            AND s.variant = qi.variant
+            AND s.title = 'Unit'
+            LIMIT 1
+          ) as unit
 
         FROM tbl_quote_items qi
         INNER JOIN tbl_product_variant pv ON qi.product_variant_id = pv.id
