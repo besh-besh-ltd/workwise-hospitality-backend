@@ -400,12 +400,31 @@ const seoController = {
     if(data.company.logoUrl) {
       data.company.logoUrlBase64 = await getBase64FromUrl(data.company.logoUrl)
     }
+
+    if (data.created_at) {
+      const createdInDate = new Date(data.created_at);
+      // Pad single digits with zero for day and month
+      const day = String(createdInDate.getDate()).padStart(2, '0');
+      const month = String(createdInDate.getMonth() + 1).padStart(2, '0'); // Months are zero-based
+      const year = createdInDate.getFullYear();
+      data.created_at = `${day}/${month}/${year}`;
+    }
+
+    if (data.timestamp) {
+      const createdInDate = new Date(data.timestamp);
+      // Pad single digits with zero for day and month
+      const day = String(createdInDate.getDate()).padStart(2, '0');
+      const month = String(createdInDate.getMonth() + 1).padStart(2, '0'); // Months are zero-based
+      const year = createdInDate.getFullYear();
+      data.timestamp = `${day}/${month}/${year}`;
+    }
     
     console.log("PO DATA:")
     console.dir(data, { depth: null })
 
     // --- Render HTML ---
     const html = template(data);
+
 
     // --- Ensure output folder exists ---
     const storageDir = path.join(process.cwd(), 'app', 'storage', 'invoices');

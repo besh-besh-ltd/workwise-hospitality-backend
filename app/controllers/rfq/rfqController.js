@@ -5150,7 +5150,8 @@ const rfqController = {
       global_payment_term_list,
       term_and_condition_files,
       is_regret,
-      regret_reason
+      regret_reason,
+      vendorGSTIN
     } = req.body;
 
     const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
@@ -5385,7 +5386,8 @@ const rfqController = {
             is_regret: req.body.is_regret ? req.body.is_regret : 0,
             global_payment_term: globalPaymentTerms,
             global_comment: globalComment,
-            regret_reason
+            regret_reason,
+            gstin: vendorGSTIN
           };
 
           // check quote is already exists or not
@@ -9465,7 +9467,8 @@ sendFollowUpEmails: async (req, res) => {
       globalPaymentTerms,
       globalComment,
       global_payment_term_list,
-      term_and_condition_files
+      term_and_condition_files,
+      vendorGSTIN
     } = req.body;
 
     // Determine the user ID to check based on the verification status
@@ -9634,7 +9637,8 @@ sendFollowUpEmails: async (req, res) => {
       // update global comment and payment term
       if (
         globalPaymentTerms !== quoteExists[0].global_payment_term ||
-        globalComment !== quoteExists[0].global_comment
+        globalComment !== quoteExists[0].global_comment || 
+        vendorGSTIN !== quoteExists[0].gstin
       ) {
         const tbl_quotes_data = {
           rfq_id: quoteExists[0].rfq_id,
@@ -9645,7 +9649,8 @@ sendFollowUpEmails: async (req, res) => {
           timestamp: new Date().toISOString(),
           is_regret: 0,
           global_payment_term: globalPaymentTerms,
-          global_comment: globalComment
+          global_comment: globalComment,
+          gstin: vendorGSTIN
         };
         await rfqModel.update('tbl_quotes', tbl_quotes_data, quoteId);
 

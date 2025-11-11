@@ -2,7 +2,7 @@ import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode } from "../../models/purchaseOrderModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
 import { sendApprovalNotification } from "./purchaseOrderEmails.js";
 
@@ -173,6 +173,49 @@ export const approvePO = async (req, res) => {
           data: result
         });
     })
+  } catch (error) {
+    logError(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || 'An error occurred while approving the PO.',
+      error
+    });
+  }
+};
+
+export const updateGST = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+    const { value } = req.body;
+
+    const updatedData = await updateGSTForPO(po_id, value);
+    return res.json({
+      status: 1,
+      message: 'Updated GST for given PO.',
+      data: updatedData
+    })
+  } catch (error) {
+    logError(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || 'An error occurred while approving the PO.',
+      error
+    });
+  }
+};
+
+export const updateHSNForProduct = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+    const { hsn_codes } = req.body;
+    const { id } = req.user;
+
+    const updatedData = await updateHSNCode(po_id, hsn_codes, id);
+    return res.json({
+      status: 1,
+      message: 'Updated HSN for given product.',
+      data: updatedData
+    });
   } catch (error) {
     logError(error);
     return res.status(500).json({

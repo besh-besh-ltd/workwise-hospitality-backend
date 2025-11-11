@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, updateMilestoneController, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
+import { approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, updateGST, updateHSNForProduct, updateMilestoneController, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
 import passport from '../../middleware/passport.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
@@ -10,6 +10,8 @@ PORoutes.get('/:po_id', passportSignIn, getPODetails);
 PORoutes.get('/rfq/:rfq_id', passportSignIn, getPOByRFQ);
 PORoutes.get('/initiate/:po_id', passportSignIn, initiatePO);
 PORoutes.post('/approve/:po_id', passportSignIn, approvePO);
+PORoutes.post('/updateGST/:po_id', passportSignIn, updateGST);
+PORoutes.post('/updateHSN/:po_id', passportSignIn, updateHSNForProduct);
 
 // Milestone Routes
 PORoutes.get('/:po_id/milestones', passportSignIn, getMilestonesController);
