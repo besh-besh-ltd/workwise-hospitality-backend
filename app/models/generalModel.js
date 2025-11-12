@@ -456,10 +456,18 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
   },
   createHierarchy: async (type, approvers, companyId) => {
     try {
+      const lastHierarchy = await db.oneOrNone(
+        `SELECT hierarchy_id 
+        FROM tbl_approval_hierarchy WHERE company_id = $1
+        ORDER BY hierarchy_id DESC
+        LIMIT 1`
+      );
+
       let baseData = {
         hierarchy_type: type,
         company_id: companyId,
         created_at: new Date(),
+        hierarchy_id: lastHierarchy?.hierarchy_id ? lastHierarchy.hierarchy_id + 1 : 1
       };
       const insertableData = approvers.map(approver => ({...baseData, ...approver}));
 
@@ -578,7 +586,9 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
     // 1. Initiator's hierarchy
     const initiatorHierarchy = await t.oneOrNone(
       `SELECT * FROM tbl_approval_hierarchy
-      WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND is_active = true`,
+      WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND is_active = true
+      ORDER BY created_at DESC
+      LIMIT 1`,
       [companyId, initiatedBy, type]
     );
 
@@ -608,19 +618,19 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
     const nextApprover = await t.oneOrNone(
       `SELECT user_id FROM tbl_approval_hierarchy
       WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
-        AND approval_level > $3
+        AND approval_level > $3 AND hierarchy_id = $4
       ORDER BY approval_level
       LIMIT 1`,
-      [companyId, type, initiatorHierarchy.approval_level]
+      [companyId, type, initiatorHierarchy.approval_level, initiatorHierarchy.hierarchy_id]
     );
 
     // 2. Auto-approve case: bypass cap OR if there exist no higher approver
     if ((totalValue <= bypassCap) || !nextApprover) {
       const transaction = await t.one(
         `INSERT INTO tbl_approval_hierarchy_transactions 
-        (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
-        VALUES ($1, $2, $3, $4, NULL, $4, $5, $6) RETURNING *`,
-        [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
+        (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status, hierarchy_id)
+        VALUES ($1, $2, $3, $4, NULL, $4, $5, $6, $7) RETURNING *`,
+        [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED, initiatorHierarchy.hierarchy_id]
       );
       await t.none(
         `INSERT INTO tbl_approval_hierarchy_history
@@ -637,9 +647,9 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
     // 4. Start approval chain
     await t.none(
       `INSERT INTO tbl_approval_hierarchy_transactions
-      (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, meta, status)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [type, entityId, companyId, initiatedBy, nextApprover.user_id, meta, APPROVAL_DECISIONS.PENDING]
+      (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, meta, status, hierarchy_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [type, entityId, companyId, initiatedBy, nextApprover.user_id, meta, APPROVAL_DECISIONS.PENDING, initiatorHierarchy.hierarchy_id]
     );
 
     return {
@@ -686,17 +696,17 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       // Find next approver
       const currentLevel = await t.oneOrNone(
         `SELECT approval_level, bypass_cap FROM tbl_approval_hierarchy
-        WHERE company_id = $1 AND hierarchy_type = $2 AND user_id = $3`,
-        [company_id, hierarchy_type, approvedBy]
+        WHERE company_id = $1 AND hierarchy_type = $2 AND user_id = $3 AND hierarchy_id = $4`,
+        [company_id, hierarchy_type, approvedBy, trx.hierarchy_id]
       );
 
       const nextApprover = await t.oneOrNone(
         `SELECT user_id FROM tbl_approval_hierarchy
         WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
-          AND approval_level > $3
+          AND approval_level > $3 AND hierarchy_id = $4
         ORDER BY approval_level
         LIMIT 1`,
-        [company_id, hierarchy_type, currentLevel?.approval_level ?? 999]
+        [company_id, hierarchy_type, currentLevel?.approval_level ?? 999, trx.hierarchy_id]
       );
 
       const totalValue = Number(trx?.meta?.total_value ?? 0);
