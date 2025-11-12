@@ -1835,7 +1835,8 @@ WHERE NOT EXISTS (
         'is_regret', TQ.is_regret,
         'regret_reason', TQ.regret_reason,
         'global_payment_term', TQ.global_payment_term,
-        'global_comment', TQ.global_comment
+        'global_comment', TQ.global_comment,
+        'gstin', TQ.gstin
       )
       FROM tbl_quotes TQ
       WHERE TQ.rfq_id = RFQ.id
