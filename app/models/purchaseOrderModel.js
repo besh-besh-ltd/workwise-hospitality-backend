@@ -343,7 +343,7 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
       });
 
       const s3Url = await uploadToS3(pdfSaveResult.absolutePath, `po-${purchaseOrder.po_number}.pdf`)
-      await fs.promises.unlink(pdfSaveResult.absolutePath);
+      // await fs.promises.unlink(pdfSaveResult.absolutePath);
 
       await t.any(
         `UPDATE tbl_rfq_purchase_order
