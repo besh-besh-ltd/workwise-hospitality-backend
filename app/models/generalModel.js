@@ -536,6 +536,28 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       throw error;
     }
   },
+  mapHierarchyToProject: async (hierarchy_id, project_id, company_id, mapped_by) => {
+    return db.tx(async t => {
+      const exists = await t.oneOrNone(
+        `SELECT id FROM tbl_hierarchy_project_mapping
+        WHERE company_id = $1 AND hierarchy_id = $2 AND project_id = $3`,
+        [company_id, hierarchy_id, project_id]
+      )
+
+      if(exists) throw new Error("The mapping between project and hierarchy already exists!")
+
+      const result = await t.one(
+        `INSERT INTO tbl_hierarchy_project_mapping
+        (company_id, hierarchy_id, project_id, mapped_by)
+        VALUES ($1, $2, $3, $4)
+        
+        RETURNING *`,
+        [company_id, hierarchy_id, project_id, mapped_by]
+      )
+
+      return result;
+    })
+  },
   initiateApproval: async (
     type, // 'po'
     entityId,
@@ -584,14 +606,72 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
     }
 
     // 1. Initiator's hierarchy
-    const initiatorHierarchy = await t.oneOrNone(
-      `SELECT * FROM tbl_approval_hierarchy
-      WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND is_active = true
-      ORDER BY created_at DESC
-      LIMIT 1`,
-      [companyId, initiatedBy, type]
-    );
+    let initiatorHierarchy = null;
 
+    const projectId = (meta && meta.project_id) ? meta.project_id : null;
+
+    if (projectId) {
+      // 1) Get hierarchy ids mapped to this company + project
+      const mappedRows = await t.any(
+        `SELECT hierarchy_id
+        FROM tbl_hierarchy_project_mapping
+        WHERE company_id = $1 AND project_id = $2`,
+        [companyId, projectId]
+      );
+
+      const mappedHierarchyIds = mappedRows && mappedRows.length
+        ? [...new Set(mappedRows.map(r => r.hierarchy_id).filter(Boolean))]
+        : [];
+
+      if (mappedHierarchyIds.length) {
+        // There are mappings - restrict to these hierarchy ids
+        initiatorHierarchy = await t.oneOrNone(
+          `SELECT *
+          FROM tbl_approval_hierarchy
+          WHERE company_id = $1
+            AND user_id = $2
+            AND hierarchy_type = $3
+            AND is_active = true
+            AND hierarchy_id = ANY($4)
+          ORDER BY created_at DESC
+          LIMIT 1`,
+          [companyId, initiatedBy, type, mappedHierarchyIds]
+        );
+
+        // If mappings exist but user is not present in any mapped hierarchy -> throw error
+        if (!initiatorHierarchy) {
+          throw new Error('User is not part of the selected project approval hierarchy');
+        }
+      } else {
+        // No mappings found for this project — fall back to company-wide behavior
+        initiatorHierarchy = await t.oneOrNone(
+          `SELECT *
+          FROM tbl_approval_hierarchy
+          WHERE company_id = $1
+            AND user_id = $2
+            AND hierarchy_type = $3
+            AND is_active = true
+          ORDER BY created_at DESC
+          LIMIT 1`,
+          [companyId, initiatedBy, type]
+        );
+      }
+    } else {
+      // No project specified — original behavior
+      initiatorHierarchy = await t.oneOrNone(
+        `SELECT *
+        FROM tbl_approval_hierarchy
+        WHERE company_id = $1
+          AND user_id = $2
+          AND hierarchy_type = $3
+          AND is_active = true
+        ORDER BY created_at DESC
+        LIMIT 1`,
+        [companyId, initiatedBy, type]
+      );
+    }
+
+    // If there's no hierarchy at all (company has no hierarchies) -> auto-approve (your existing flow)
     if (!initiatorHierarchy) {
       const transaction = await t.one(
         `INSERT INTO tbl_approval_hierarchy_transactions 

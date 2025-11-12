@@ -188,6 +188,33 @@ const generalController = {
         error
       }).end();
     }
+  },
+  mapHierarchyToProject: async (req, res) => {
+    try {
+      const { hierarchy_id, project_id } = req.body;
+      const { id, company_id } = req.user;
+
+      const updated = await generalModel.mapHierarchyToProject(
+        hierarchy_id,
+        project_id,
+        company_id,
+        id
+      );
+
+      if (updated) return res.status(200).end();
+
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while mapping hierarchy to project'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message ?? Config.errorText.value,
+        error
+      }).end();
+    }
   }
 };
 export default generalController;

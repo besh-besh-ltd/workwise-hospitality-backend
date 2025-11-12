@@ -21,4 +21,8 @@ export const hierarchySchema = {
         approvers: Joi.array().items(approversType).required(),
         removableApprovers: Joi.array().items(Joi.number()).optional()
     }),
+    mapHierarchyToProject: Joi.object({
+        hierarchy_id: Joi.number().required(),
+        project_id: Joi.number().required(),
+    }),
 }
