@@ -2,6 +2,7 @@ import db from "../config/dbConn.js";
 import seoController from "../controllers/seo/seoController.js";
 import { AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../util/constants.js";
 import generalModel, { markPOStatusChange, uploadToS3 } from "./generalModel.js";
+import fs from 'fs';
 
 const getNextPONumber = async () => {
   return new Promise(async function (resolve, reject) {
@@ -342,6 +343,8 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
       });
 
       const s3Url = await uploadToS3(pdfSaveResult.absolutePath, `po-${purchaseOrder.po_number}.pdf`)
+      await fs.promises.unlink(pdfSaveResult.absolutePath);
+
       await t.any(
         `UPDATE tbl_rfq_purchase_order
         SET po_pdf_url = $1
