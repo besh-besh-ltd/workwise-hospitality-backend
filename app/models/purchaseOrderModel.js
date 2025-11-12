@@ -253,7 +253,7 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
           TC.location,
           TC.logo,
           FIN.mobile,
-          TQ.timestamp
+          TQ.timestamp,
           JSON_BUILD_OBJECT(
             'id', SUP.id,
             'name', SUP.name,
