@@ -2229,6 +2229,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       updated_by: user_id
   };
 
+  const errorObj = { vendorNotPresent: [] };
 
   if (project_id && project_id !== -1) {
       rfqData.project_id = project_id;
@@ -2616,9 +2617,14 @@ const saveRfqDraft = async (user_id, reqBody) => {
             deletingCondition['-user_ids'].length <= 0 &&
             (updatableVendors[rfqProductId]?.addable ?? []).length <= 0
           ) {
-            throw new Error(
-              'Some products contain No Vendors, Please delete the products with no vendors!'
-            );
+
+          // Push product ID into errorObj.vendorNotPresent
+            errorObj.vendorNotPresent.push({
+              rfqProductId,
+              product_variant_id: product.product_variant_id,
+              variant: product.variant,
+            });          
+            continue;
           }
 
           await rfqModel.delete(
@@ -2673,6 +2679,17 @@ const saveRfqDraft = async (user_id, reqBody) => {
             );
           }
         }
+
+        // ✅ After loop: Throw combined error
+        if (errorObj.vendorNotPresent.length > 0) {
+         throw new Error(
+           JSON.stringify({
+             message: "Some products have no vendors. Please remove product oradd vendors for these products.",
+             details: errorObj.vendorNotPresent,
+           })
+         );
+         }
+
       }
     }
 
@@ -2802,7 +2819,7 @@ const rfqController = {
             .end();
         }
       }
-      await saveRfqDraft(user_id, req.body);
+     const saveRfqDataResult =  await saveRfqDraft(user_id, req.body);
 
       const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id, selectedSheets);
 
@@ -2848,15 +2865,20 @@ const rfqController = {
         })
         .end();
     } catch (error) {
-      logError(error);
-      return res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
+     logError(error);
+   
+     let parsedError = {};
+       parsedError = JSON.parse(error?.message);
+   
+     return res
+       .status(400)
+       .json({
+         status: 2,
+         message: parsedError?.message || 'An error occurred while creating RFQ',
+         details: parsedError?.details || [],
+       })
+       .end();
+      }
   },
 
   update: async (req, res, next) => {
@@ -3804,11 +3826,16 @@ const rfqController = {
       });
     } catch (error) {
       logError(error);
+       
+     let parsedError = {};
+       parsedError = JSON.parse(error?.message);
+
       res.status(500).json({
         status: 3,
         message: 'An error occurred while saving the draft',
         errors: {
-          rfq: error.message ?? 'An error occurred while saving the draft'
+          rfq:error?.message || 'An error occurred while saving the draft',
+          details: parsedError?.details || [],
         }
       });
     }

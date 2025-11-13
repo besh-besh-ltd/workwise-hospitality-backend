@@ -418,9 +418,6 @@ const seoController = {
       const year = createdInDate.getFullYear();
       data.timestamp = `${day}/${month}/${year}`;
     }
-    
-    console.log("PO DATA:")
-    console.dir(data, { depth: null })
 
     // --- Render HTML ---
     const html = template(data);
