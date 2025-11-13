@@ -240,6 +240,13 @@ productRoutes.get(
   productController.getVariantMappings
 );
 
+// Bulk variant-vendor mapping
+productRoutes.post(
+  '/bulk-map-variant-with-vendor',
+  passportSignIn,
+  productController.bulkMapVariantWithVendor
+);
+
 
 // get variant + vendor mapping by id, including variant and products basic details
 productRoutes.get(
