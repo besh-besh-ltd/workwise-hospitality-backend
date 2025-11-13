@@ -2690,28 +2690,6 @@ const productController = {
       });
     }
   },
-  // Bulk map multiple variant-vendor pairs efficiently
-  bulkMapVariantWithVendor: async (req, res) => {
-    try {
-      const { mappings } = req.body || {};
-      if (!Array.isArray(mappings) || mappings.length === 0) {
-        return res.status(400).json({ status: 3, message: 'mappings must be a non-empty array' });
-      }
-
-      // Normalize payload: variant_id, vendor_id, approved_by[], make_list[]
-      const normalized = mappings.map(m => ({
-        variant_id: m.variant_id || m.product_variant_id,
-        vendor_id: m.vendor_id,
-        approved_by: Array.isArray(m.approved_by) ? m.approved_by : [],
-        make_list: Array.isArray(m.make_list) ? m.make_list : []
-      }));
-
-      const result = await productModel.bulkInsertVariantVendorMappings(normalized, req.user.id);
-      return res.status(200).json({ status: 1, message: 'Bulk mapping processed', ...result });
-    } catch (error) {
-      return res.status(500).json({ status: 3, message: Config?.errorText?.value || 'Bulk mapping failed', error: error.message });
-    }
-  },
   createProductVariant: async (variantObj) => {
     return new Promise(function (resolve, reject) {
       // Construct the dynamic SQL query

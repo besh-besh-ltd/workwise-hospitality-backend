@@ -33,8 +33,9 @@ import rfqModel from '../../models/rfqModel.js';
 import vendorModel from '../../models/vendorModel.js';
 import productModel from '../../models/productModel.js';
 import vendorapproveModel from '../../models/vendorapproveModel.js';
-import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
+import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISensy.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
+import { pgp } from '../../config/dbConn.js';
 
 
 const generatePassword = (password) => {
@@ -188,7 +189,7 @@ const UsersController = {
 
       // send whatsapp message to user
       const payload = { name:" ", phone:mobile }
-      const sendWhatsapp =  await whatsappNotificationFluxChat.contactUsFormWhatsAppMessage(payload);
+      const sendWhatsapp =  await whatsappNotificationAISensy.contactUsFormWhatsAppMessage(payload);
 
       //  send email to Admin 
       const emailHeader = ` <h5> Book A Call </h5> `
@@ -1986,6 +1987,90 @@ enhance_vendor_profile: async (req, res, next) => {
   }
 },
 
+upload_payment_terms :  async (req, res, next) => {
+  try {
+    const { terms } = req.body;
+    const user_id = req.user?.id || null;
+
+    // ✅ Validation
+    if (!Array.isArray(terms) || terms.length === 0) {
+      return res.status(400).json({
+        status: 0,
+        message: "Invalid or empty payment terms data",
+      });
+    }
+    //First delete the existing payment terms
+    await rfqModel.delete('tbl_vendor_payment_terms', { created_by: user_id });
+    // 🧩 Prepare data for DB insert
+    const dataArray = terms.map((t) => ({
+      value: t.value || 0,
+      type: t.type || null,
+      days: t.days || null,
+      created_by: user_id,
+      timestamp: currentDateTime(),
+      comment: t.comment || null,
+    }));
+
+    // 🗝️ Define column keys (must match your table `tbl_payment_terms`)
+    const keys = new pgp.helpers.ColumnSet(
+      ["value", "type", "days", "created_by", "timestamp", "comment"],
+      { table: "tbl_payment_terms" }
+    );
+
+    // 🧠 Use model helper
+    const insertedRows = await rfqModel.insertArray(dataArray, keys, "tbl_vendor_payment_terms");
+
+    return res.status(200).json({
+      status: 1,
+      message: "Payment terms added successfully",
+      data: insertedRows,
+    });
+
+  } catch (error) {
+    console.error("Error in upload_payment_terms:", error);
+    next(error);
+  }
+},
+
+get_payment_terms: async (req, res, next) => {
+  try {
+    const { vendor_id, type } = req.query;
+
+    // 🧠 Determine whose payment terms to fetch
+    let user_id;
+
+    if (type === "buyer" && vendor_id) {
+      // Buyer is requesting vendor's terms → use vendor_id from query
+      user_id = vendor_id;
+    } else if (type === "vendor") {
+      // Vendor is requesting their own terms → use logged-in user ID
+      user_id = req.user?.id;
+    }
+
+    // 🚨 If no valid user_id found
+    if (!user_id) {
+      return res.status(400).json({
+        status: 0,
+        message:
+          "Missing vendor ID or unauthorized request. Please provide vendor_id when type is 'buyer'.",
+      });
+    }
+
+    // ✅ Fetch payment terms from DB
+    const terms = await rfqModel.findAll("tbl_vendor_payment_terms", {
+      created_by: user_id,
+    });
+
+    return res.status(200).json({
+      status: 1,
+      data: terms || [],
+    });
+  } catch (error) {
+    console.error("Error in get_payment_terms:", error);
+    next(error);
+  }
+},
+
 get_vendor_profile_documents  : async (req, res, next) => {
   try {
     let user_id = req.user.id;
@@ -3628,7 +3713,7 @@ publish_profile_reviews: async (req, res, next) => {
           password:password
 
         }
-        await whatsappNotificationFluxChat.buyerAddedVendorNotificationToVendor(payload)
+        // await whatsappNotificationAISensy.buyerAddedVendorNotificationToVendor(payload)
 
         vendorId = user_id;
 

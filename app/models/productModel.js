@@ -16,88 +16,6 @@ const productModel = {
         });
     });
   },
-  // Efficient bulk mapping: insert mappings, makes and approvals in minimum statements
-  bulkInsertVariantVendorMappings: async (items, userId) => {
-    // items: [{ variant_id, vendor_id, approved_by: number[] | null, make_list: string[] | null }]
-    return new Promise(async (resolve, reject) => {
-      try {
-        if (!Array.isArray(items) || items.length === 0) {
-          return resolve({ inserted: 0, skipped: 0, makes: 0, approvals: 0 });
-        }
-
-        // 1) De-duplicate input combos and skip ones already existing in DB
-        const unique = [];
-        const seen = new Set();
-        for (const it of items) {
-          if (!it?.variant_id || !it?.vendor_id) continue;
-          const key = `${it.variant_id}::${it.vendor_id}`;
-          if (!seen.has(key)) { seen.add(key); unique.push(it); }
-        }
-
-        if (unique.length === 0) return resolve({ inserted: 0, skipped: items.length, makes: 0, approvals: 0 });
-
-        // Fetch existing mappings in one go
-        const existRows = await db.any(
-          `SELECT product_variant_id, vendor_id, id FROM tbl_product_variant_vendor_mapping
-           WHERE (product_variant_id, vendor_id) IN ($1:csv)`,
-          [unique.map(u => `(${u.variant_id},${u.vendor_id})`)]
-        ).catch(() => []);
-        const existSet = new Set(existRows.map(r => `${r.product_variant_id}::${r.vendor_id}`));
-
-        const toInsert = unique.filter(u => !existSet.has(`${u.variant_id}::${u.vendor_id}`));
-        const skipped = unique.length - toInsert.length;
-
-        if (toInsert.length === 0) {
-          return resolve({ inserted: 0, skipped, makes: 0, approvals: 0 });
-        }
-
-        // 2) Insert mappings in a single INSERT ... VALUES ... RETURNING id, product_variant_id
-        const mappingValues = [];
-        const placeholders = toInsert.map((u, idx) => {
-          mappingValues.push(u.variant_id, u.vendor_id, true, false, userId, userId); // status=true, is_approved=false
-          const base = idx * 6;
-          return `($${base+1}, $${base+2}, NOW(), NOW(), $${base+3}, $${base+4}, $${base+5}, $${base+6})`;
-        }).join(', ');
-
-        const insertQuery = `
-          INSERT INTO tbl_product_variant_vendor_mapping
-            (product_variant_id, vendor_id, created_at, updated_at, status, is_approved, created_by, updated_by)
-          VALUES ${placeholders}
-          RETURNING id, product_variant_id
-        `;
-
-        const newMappings = await db.any(insertQuery, mappingValues);
-
-        // Map variant_id -> mapping_id for follow-up inserts
-        const variantToMapping = new Map(newMappings.map(r => [String(r.product_variant_id), r.id]));
-
-        // 3) Build bulk rows for makes and approvals
-        const makeRows = [];
-        for (const u of toInsert) {
-          const mapId = variantToMapping.get(String(u.variant_id));
-          if (!mapId) continue;
-          if (Array.isArray(u.make_list) && u.make_list.length > 0) {
-            for (const m of u.make_list) {
-              if (m && String(m).trim()) {
-                makeRows.push({ variant_vendor_map_id: mapId, make_name: String(m).trim() });
-              }
-            }
-          }
-        }
-
-        // 4) Bulk insert makes and approvals using generalModel.insertMany if rows exist
-        let insertedMakes = 0;
-        if (makeRows.length > 0) {
-          const res = await generalModel.insertMany('tbl_product_variant_vendor_make', makeRows).catch(() => []);
-          insertedMakes = Array.isArray(res) ? res.length : 0;
-        }
-        resolve({ inserted: newMappings.length, skipped, makes: insertedMakes });
-      } catch (error) {
-        console.error('bulkInsertVariantVendorMappings failed:', error);
-        reject(error);
-      }
-    });
-  },
   parentNameExists: async (name, parent_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -1361,6 +1279,93 @@ const productModel = {
         });
     });
   },
+
+getNestedCategoryList: async (parentId, slug) => {
+  try {
+    let categoryId = null;
+
+    // STEP 1: Determine categoryId (from slug or parentId)
+    if (slug && slug.trim() !== '' && slug !== 'undefined' && slug !== 'null') {
+      const findSlugQuery = `
+        SELECT id 
+        FROM tbl_category 
+        WHERE slug = $1
+        LIMIT 1
+      `;
+      const slugResult = await db.oneOrNone(findSlugQuery, [slug]);
+      if (!slugResult) return [];
+      categoryId = slugResult.id;
+    } else if (parentId !== undefined && parentId !== null && parentId !== '') {
+      categoryId = parentId;
+    } else {
+      throw new Error('Either parent_id or slug must be provided.');
+    }
+
+    // STEP 2: Fetch subcategories that have at least one product
+    const subCategoryQuery = `
+      SELECT c.id, c.title, c.parent_id, c.slug
+      FROM tbl_category c
+      WHERE c.parent_id = $1
+      AND EXISTS (
+        SELECT 1
+        FROM tbl_product_categories pc
+        WHERE pc.category_id = c.id
+      )
+    `;
+    const subCategories = await db.any(subCategoryQuery, [categoryId]);
+
+    if (subCategories.length > 0) {
+      // ✅ Return only subcategories that have products
+      return { type: "category", data: subCategories };
+    }
+
+    // STEP 3: If no valid subcategories, fetch products for this category
+    const productQuery = `
+      SELECT p.id , p.name , p.sku, p.slug
+      FROM tbl_product_categories pc
+      JOIN tbl_product p ON p.id = pc.product_id
+      WHERE pc.category_id = $1
+    `;
+    const products = await db.any(productQuery, [categoryId]);
+
+    if (products.length > 0) {
+      return { type: "product", data: products };
+    }
+
+    // STEP 4: If no products, fetch variants for product_id
+    const variantQuery = `
+      SELECT v.name , v.id, v.product_id , v.sku, v.slug
+      FROM tbl_product_variant v
+      WHERE v.product_id = $1 and v.is_approve = 1
+    `;
+    const variants = await db.any(variantQuery, [categoryId]);
+
+    if (variants.length > 0) {
+      return { type: "variant", data: variants };
+    }
+
+    // STEP 5: Nothing found
+    return { type: "none", data: [] };
+  } catch (error) {
+    throw error;
+  }
+},
+
+getRandomProductsForCarausel : async () =>{
+ return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT id, name , slug , sku  FROM tbl_product_variant WHERE is_deleted = 0 AND is_approve = 1 ORDER BY RANDOM() LIMIT 6`
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    }); 
+  },
+
   getProductList: async (
     limit,
     offset,
@@ -3697,11 +3702,6 @@ getProductTechSpecByID: async (productId) => {
             u.email AS vendor_email,
             COALESCE(c.company_name, u.organization_name, u.name) AS vendor_organization,
             COALESCE(c.company_name, u.organization_name, u.name, 'Unknown Vendor') AS vendor_display_name,
-            (
-              SELECT COALESCE(json_agg(t.make_name) FILTER (WHERE t.make_name IS NOT NULL), '[]'::json)
-              FROM tbl_product_variant_vendor_make t
-              WHERE t.variant_vendor_map_id = m.id
-            ) AS make_list,
             ${searchTerm ? `
               similarity(v.name, '${searchTerm}') AS v_similarity_score,
               similarity(p.name, '${searchTerm}') AS p_similarity_score,

@@ -192,6 +192,18 @@ UsersRoutes.post
   // validateBody(schemas.enhance_vendor_profile),
   // UsersController.enhance_vendor_profile
 );
+UsersRoutes.post(
+  '/upload-payment-terms',
+  passportSignIn,
+  acl([1,3]),
+  UsersController.upload_payment_terms
+)
+
+UsersRoutes.get(
+  '/get-vendor-payment-terms',
+  noLogin.customer_auth,
+ UsersController.get_payment_terms
+)
 
 UsersRoutes.get
 (

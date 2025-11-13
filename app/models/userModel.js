@@ -978,29 +978,36 @@ user_book_demo: async (mobile) => {
                FROM tbl_files
                WHERE tbl_files.user_id = tbl_users.id
        ) AS "brochure",
-       ARRAY(
-               SELECT json_build_object(
-                              'product_name', V.name,
-                              'product_id', V.id,
-                              'approved_by', (
-                                  SELECT ARRAY(
-                                                 SELECT DISTINCT ON (VA.id)
-                                                     json_build_object(
-                                                             'vendor_approve_id', VA.id,
-                                                             'vendor_name', VA.vendor_approve,
-                                                             'approved_at', VM.created_at
-                                                     )
-                                                 FROM tbl_vendorapprove_product_mapping VM
-                                                          LEFT JOIN tbl_vendor_approve VA ON VA.id = VM.vendor_approve_id
-                                                 WHERE VM.variant_vendor_mapping_id = M.id
-                                                 ORDER BY VA.id, VM.created_at DESC
-                                         )
-                              )
+                      ARRAY(
+                  SELECT json_build_object(
+                    'product_name', V.name,
+                    'product_id', V.id,
+                  'product_make', (
+                    SELECT ARRAY_AGG(DISTINCT PVVM.make_name)
+                    FROM tbl_product_variant_vendor_make PVVM
+                    WHERE PVVM.variant_vendor_map_id = M.id
+                  ),
+                  'approved_by', (
+                      SELECT ARRAY(
+                        SELECT DISTINCT ON (VA.id)
+                          json_build_object(
+                            'vendor_approve_id', VA.id,
+                            'vendor_name', VA.vendor_approve,
+                            'approved_at', VM.created_at
+                          )
+                        FROM tbl_vendorapprove_product_mapping VM
+                        LEFT JOIN tbl_vendor_approve VA ON VA.id = VM.vendor_approve_id
+                        WHERE VM.variant_vendor_mapping_id = M.id
+                        ORDER BY VA.id, VM.created_at DESC
                       )
-               FROM tbl_product_variant_vendor_mapping M
-                        JOIN tbl_product_variant V ON V.id = M.product_variant_id
-               WHERE M.vendor_id = tbl_users.id
-       ) AS "product_list",
+                    )
+                  )
+                  FROM tbl_product_variant_vendor_mapping M
+                  JOIN tbl_product_variant V ON V.id = M.product_variant_id
+
+                  WHERE M.vendor_id = tbl_users.id
+                ) AS "product_list",
+
        CASE
            WHEN tbl_company.logo IS NULL THEN
                NULL

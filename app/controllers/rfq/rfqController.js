@@ -17,7 +17,7 @@ import xlsx from 'xlsx';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import vendorModel from '../../models/vendorModel.js';
 import projectModel from '../../models/projectModel.js';
-import whatsappNotificationFluxChat from '../../helper/whatsappNotificationFluxChat.js';
+import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISensy.js';
 import { generateEmailTemplate, getRfqEmailContent, RFQ_EMAIL_TYPE } from '../../helper/notificationEmailLayout.js';
 import fs from 'fs';
 import productModel from '../../models/productModel.js';
@@ -763,7 +763,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
               hasTechEvaluation: techEval.length > 0 ? 'Some products require technical evaluation' : ''
             };
             
-            await whatsappNotificationFluxChat.vendorReceivesRFQNotification(payloadForWhatsApp);
+            await whatsappNotificationAISensy.vendorReceivesRFQNotification(payloadForWhatsApp);
           }
         })
       );
@@ -781,7 +781,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
         hasTechEvaluation: techEval.length > 0 ? 'Some products require technical evaluation' : ''
       };
 
-      await whatsappNotificationFluxChat.vendorReceivesRFQNotification(payloadForWhatsApp);
+      await whatsappNotificationAISensy.vendorReceivesRFQNotification(payloadForWhatsApp);
 
       // Send notification if applicable
       if (user_details[0].endpoint) {
@@ -1131,7 +1131,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
         name:vendorName
       }
     
-      await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+      await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
     }
     })
   
@@ -1143,7 +1143,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
       message:message,
       name:vendorName
     }  
-    await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+    await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
   
   
 
@@ -1224,7 +1224,7 @@ const formattedProducts = countedProducts.length > 0
     buyerName:buyerDetails[0]?.name
   }
 
-  await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(payload);
+  // await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(payload);
 
 };
 
@@ -1295,7 +1295,7 @@ const sendQuoteNotificationToVendor = async (req) => {
       name:organization_name || name
     }
   
-    await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+    await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
   }
   })
 
@@ -1307,7 +1307,7 @@ const sendQuoteNotificationToVendor = async (req) => {
     message:message,
     name:organization_name || name
   }  
-  await whatsappNotificationFluxChat.sendQuoteSubmissionNotification(whatsappPayload)
+  await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
 
 };
 
@@ -1468,7 +1468,7 @@ const containerContent = `
           name: vendorName
         };
     
-        await whatsappNotificationFluxChat.sendQuoteReminderNotificationToVendor(whatsappPayloadSPOC);
+        await whatsappNotificationAISensy.sendQuoteReminderNotificationToVendor(whatsappPayloadSPOC);
       }
     });
     
@@ -1481,7 +1481,7 @@ const containerContent = `
       name:vendorName
     }
 
-    await whatsappNotificationFluxChat.sendQuoteReminderNotificationToVendor(whatsappPayloadForVendor)
+    await whatsappNotificationAISensy.sendQuoteReminderNotificationToVendor(whatsappPayloadForVendor)
 
     const notificationData = {
       type: 'RFQ Pending',
@@ -2229,6 +2229,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       updated_by: user_id
   };
 
+  const errorObj = { vendorNotPresent: [] };
 
   if (project_id && project_id !== -1) {
       rfqData.project_id = project_id;
@@ -2616,9 +2617,14 @@ const saveRfqDraft = async (user_id, reqBody) => {
             deletingCondition['-user_ids'].length <= 0 &&
             (updatableVendors[rfqProductId]?.addable ?? []).length <= 0
           ) {
-            throw new Error(
-              'Some products contain No Vendors, Please delete the products with no vendors!'
-            );
+
+          // Push product ID into errorObj.vendorNotPresent
+            errorObj.vendorNotPresent.push({
+              rfqProductId,
+              product_variant_id: product.product_variant_id,
+              variant: product.variant,
+            });          
+            continue;
           }
 
           await rfqModel.delete(
@@ -2673,6 +2679,17 @@ const saveRfqDraft = async (user_id, reqBody) => {
             );
           }
         }
+
+        // ✅ After loop: Throw combined error
+        if (errorObj.vendorNotPresent.length > 0) {
+         throw new Error(
+           JSON.stringify({
+             message: "Some products have no vendors. Please remove product oradd vendors for these products.",
+             details: errorObj.vendorNotPresent,
+           })
+         );
+         }
+
       }
     }
 
@@ -2802,7 +2819,7 @@ const rfqController = {
             .end();
         }
       }
-      await saveRfqDraft(user_id, req.body);
+     const saveRfqDataResult =  await saveRfqDraft(user_id, req.body);
 
       const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id, selectedSheets);
 
@@ -2837,7 +2854,7 @@ const rfqController = {
         rfq_no: responseUpdate[0]?.rfq_no
       };
 
-      whatsappNotificationFluxChat.buyerCreatesRFQNotification(buyerMsgPayload);
+      whatsappNotificationAISensy.buyerCreatesRFQNotification(buyerMsgPayload);
 
       return res
         .status(200)
@@ -2848,15 +2865,20 @@ const rfqController = {
         })
         .end();
     } catch (error) {
-      logError(error);
-      return res
-        .status(400)
-        .json({
-          status: 3,
-          message: Config.errorText.value
-        })
-        .end();
-    }
+     logError(error);
+   
+     let parsedError = {};
+       parsedError = JSON.parse(error?.message);
+   
+     return res
+       .status(400)
+       .json({
+         status: 2,
+         message: parsedError?.message || 'An error occurred while creating RFQ',
+         details: parsedError?.details || [],
+       })
+       .end();
+      }
   },
 
   update: async (req, res, next) => {
@@ -3804,11 +3826,16 @@ const rfqController = {
       });
     } catch (error) {
       logError(error);
+       
+     let parsedError = {};
+       parsedError = JSON.parse(error?.message);
+
       res.status(500).json({
         status: 3,
         message: 'An error occurred while saving the draft',
         errors: {
-          rfq: error.message ?? 'An error occurred while saving the draft'
+          rfq:error?.message || 'An error occurred while saving the draft',
+          details: parsedError?.details || [],
         }
       });
     }
@@ -5150,7 +5177,8 @@ const rfqController = {
       global_payment_term_list,
       term_and_condition_files,
       is_regret,
-      regret_reason
+      regret_reason,
+      vendorGSTIN
     } = req.body;
 
     const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
@@ -5385,7 +5413,8 @@ const rfqController = {
             is_regret: req.body.is_regret ? req.body.is_regret : 0,
             global_payment_term: globalPaymentTerms,
             global_comment: globalComment,
-            regret_reason
+            regret_reason,
+            gstin: vendorGSTIN
           };
 
           // check quote is already exists or not
@@ -5698,9 +5727,9 @@ const rfqController = {
               buyerName: buyerDetails[0]?.name
             };
 
-            await whatsappNotificationFluxChat.sendNewQuoteNotificationToBuyer(
-              payload
-            );
+            // await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(
+            //   payload
+            // );
 
             return res
               .status(200)
@@ -9063,6 +9092,7 @@ sendFollowUpEmails: async (req, res) => {
     });
 
   } catch (error) {
+    console.log(" SEND_FOLLOWUP_EMAILS  --------------------------------------------------   ", error)
     logError(error);
     return res.status(400).json({
       status: 3,
@@ -9464,7 +9494,8 @@ sendFollowUpEmails: async (req, res) => {
       globalPaymentTerms,
       globalComment,
       global_payment_term_list,
-      term_and_condition_files
+      term_and_condition_files,
+      vendorGSTIN
     } = req.body;
 
     // Determine the user ID to check based on the verification status
@@ -9633,7 +9664,8 @@ sendFollowUpEmails: async (req, res) => {
       // update global comment and payment term
       if (
         globalPaymentTerms !== quoteExists[0].global_payment_term ||
-        globalComment !== quoteExists[0].global_comment
+        globalComment !== quoteExists[0].global_comment || 
+        vendorGSTIN !== quoteExists[0].gstin
       ) {
         const tbl_quotes_data = {
           rfq_id: quoteExists[0].rfq_id,
@@ -9644,7 +9676,8 @@ sendFollowUpEmails: async (req, res) => {
           timestamp: new Date().toISOString(),
           is_regret: 0,
           global_payment_term: globalPaymentTerms,
-          global_comment: globalComment
+          global_comment: globalComment,
+          gstin: vendorGSTIN
         };
         await rfqModel.update('tbl_quotes', tbl_quotes_data, quoteId);
 

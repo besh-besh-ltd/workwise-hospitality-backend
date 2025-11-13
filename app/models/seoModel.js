@@ -45,147 +45,124 @@ const seoModel = {
     // for the specific location filters (state/city). We prefetch India states/cities
     // and, per product variant, compute the set of available state_ids and city_ids
     // from active, approved vendors.
-    vendorSitemapUrls: async function* (limit = 50000, offset = 0) {
-      const baseUrl = process.env.FRONTEND_URL || 'https://letsworkwise.com';
+   vendorSitemapUrls: async function* (limit = 50000, offset = 0) {
+  const baseUrl = process.env.FRONTEND_URL || 'https://letsworkwise.com';
 
-      // Fetch countries, states and cities once
-      const [countries, states, cities] = await Promise.all([
-        db.any(`
-          SELECT id, country_name
-          FROM tbl_location_country
-          ORDER BY country_name ASC
-        `),
-        db.any(`
-          SELECT id, state_name 
-          FROM tbl_location_states 
-          WHERE country_id = 1
-          ORDER BY state_name ASC
-        `),
-        db.any(`
-          SELECT tlc.id, tlc.city_name, tlc.state_id, tls.state_name
-          FROM tbl_location_cities tlc
-          JOIN tbl_location_states tls ON tlc.state_id = tls.id
-          WHERE tls.country_id = 1
-          ORDER BY tlc.city_name ASC
-        `)
-      ]);
+  // Fetch all locations once
+  const [countries, states, cities] = await Promise.all([
+    db.any(`SELECT id, country_name FROM tbl_location_country ORDER BY country_name ASC`),
+    db.any(`SELECT id, state_name FROM tbl_location_states WHERE country_id = 1 ORDER BY state_name ASC`),
+    db.any(`
+      SELECT tlc.id, tlc.city_name, tlc.state_id, tls.state_name
+      FROM tbl_location_cities tlc
+      JOIN tbl_location_states tls ON tlc.state_id = tls.id
+      WHERE tls.country_id = 1
+      ORDER BY tlc.city_name ASC
+    `)
+  ]);
 
-      // Iterate products in batches and produce filtered URLs with global offset/limit handling
-      const productBatchSize = 200; // moderate batch to control memory and DB load
-      let productOffset = 0;
-      let yielded = 0;
-      let skipped = 0;
+  // Fetch all product-vendor-location mappings in one query
+  const mappings = await db.any(`
+    SELECT pv.id AS product_id, pv.slug, u.country AS country_id, u.state AS state_id, u.city AS city_id
+    FROM tbl_product_variant pv
+    JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id
+    JOIN tbl_users u ON u.id = pvvm.vendor_id
+    WHERE pv.slug IS NOT NULL
+      AND pvvm.status = TRUE
+      AND pvvm.is_approved = TRUE
+      AND u.is_deleted = 0
+      AND u.status = 1
+    ORDER BY pv.slug
+    LIMIT $1 OFFSET $2
+  `, [limit, offset]);
 
-      while (yielded < limit) {
-        const products = await db.any(
-          `SELECT pv.id, pv.slug
-           FROM tbl_product_variant pv
-           WHERE pv.slug IS NOT NULL
-             AND EXISTS (
-               SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm
-               WHERE pvvm.product_variant_id = pv.id
-                 AND pvvm.status = TRUE
-                 AND pvvm.is_approved = TRUE
-             )
-           ORDER BY pv.slug
-           LIMIT $1 OFFSET $2`,
-          [productBatchSize, productOffset]
-        );
+  // Group mappings by product
+  const productMap = new Map();
+  for (const row of mappings) {
+    const slug = row.slug.toLowerCase().trim().replace(/\s+/g, '-').replace(/-+/g, '-');
+    if (!productMap.has(slug)) productMap.set(slug, { countries: new Set(), states: new Set(), cities: new Set() });
+    const entry = productMap.get(slug);
+    if (row.country_id) entry.countries.add(row.country_id);
+    if (row.state_id) entry.states.add(row.state_id);
+    if (row.city_id) entry.cities.add(row.city_id);
+  }
 
-        if (!products.length) break; // no more products
+  // Yield sitemap URLs
+  for (const [slug, locs] of productMap) {
+    for (const c of countries) {
+      if (!locs.countries.has(c.id)) continue;
+      yield `<url><loc>${baseUrl}/vendor/${slug}-${c.country_name.toLowerCase().replace(/\s+/g,'')}</loc><changefreq>weekly</changefreq><priority>0.5</priority></url>\n`;
+    }
+    for (const s of states) {
+      if (!locs.states.has(s.id)) continue;
+      yield `<url><loc>${baseUrl}/vendor/${slug}-${s.state_name.toLowerCase().replace(/\s+/g,'')}</loc><changefreq>weekly</changefreq><priority>0.5</priority></url>\n`;
+    }
+    for (const c of cities) {
+      if (!locs.cities.has(c.id)) continue;
+      yield `<url><loc>${baseUrl}/vendor/${slug}-${c.city_name.toLowerCase().replace(/\s+/g,'')}-${c.state_name.toLowerCase().replace(/\s+/g,'')}</loc><changefreq>weekly</changefreq><priority>0.5</priority></url>\n`;
+    }
+  }
+},
 
-        for (const p of products) {
-          // Normalize product slug to avoid stray spaces around hyphens in URLs
-          const productSlug = (p.slug || '')
-            .toLowerCase()
-            .trim()
-            .replace(/\s+/g, '-')
-            .replace(/-+/g, '-');
-          // For each product, determine available states and cities where at least one vendor exists
-          const [availableCountries, availableStates, availableCities] = await Promise.all([
-            db.any(
-              `SELECT DISTINCT u.country::int AS country_id
-               FROM tbl_product_variant_vendor_mapping pvvm
-               JOIN tbl_users u ON u.id = pvvm.vendor_id
-               WHERE pvvm.product_variant_id = $1
-                 AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
-                 AND u.is_deleted = 0 AND u.status = 1
-                 AND u.country IS NOT NULL
-              `,
-              [p.id]
-            ),
-            db.any(
-              `SELECT DISTINCT u.state AS state_id
-               FROM tbl_product_variant_vendor_mapping pvvm
-               JOIN tbl_users u ON u.id = pvvm.vendor_id
-               WHERE pvvm.product_variant_id = $1
-                 AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
-                 AND u.is_deleted = 0 AND u.status = 1
-                 AND u.state IS NOT NULL
-              `,
-              [p.id]
-            ),
-            db.any(
-              `SELECT DISTINCT u.city AS city_id
-               FROM tbl_product_variant_vendor_mapping pvvm
-               JOIN tbl_users u ON u.id = pvvm.vendor_id
-               WHERE pvvm.product_variant_id = $1
-                 AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
-                 AND u.is_deleted = 0 AND u.status = 1
-                 AND u.city IS NOT NULL
-              `,
-              [p.id]
-            )
-          ]);
+getCategoryAndVariantUrls: async function* (limit = 50000, offset = 0) {
+  const baseUrl = process.env.FRONTEND_URL || 'https://letsworkwise.com';
 
-          const availableCountryIds = new Set(availableCountries.map(s => s.country_id));
-          const availableStateIds = new Set(availableStates.map(s => s.state_id));
-          const availableCityIds = new Set(availableCities.map(c => c.city_id));
+  let yielded = 0;
 
-          // Emit country URLs that have at least one vendor
-          for (const k of countries) {
-            if (!availableCountryIds.has(k.id)) continue;
-            if (skipped < offset) {
-              skipped++;
-              continue;
-            }
-            const countrySlug = (k.country_name || '').toLowerCase().replace(/\s+/g, '');
-            yield `<url>\n  <loc>${baseUrl}/vendor/${productSlug}-${countrySlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
-            yielded++;
-            if (yielded >= limit) return;
-          }
+  // Define escapeXml inside the generator
+  const escapeXml = (str) => {
+    if (!str) return '';
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  };
 
-          // Emit state URLs that have at least one vendor
-          for (const s of states) {
-            if (!availableStateIds.has(s.id)) continue;
-            if (skipped < offset) {
-              skipped++;
-              continue;
-            }
-            const stateSlug = (s.state_name || '').toLowerCase().replace(/\s+/g, '');
-            yield `<url>\n  <loc>${baseUrl}/vendor/${productSlug}-${stateSlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
-            yielded++;
-            if (yielded >= limit) return;
-          }
+  // -------------------------------
+  // 1️⃣ Categories
+  // -------------------------------
+  const categories = await db.any(`
+    SELECT DISTINCT c.id, c.title, c.slug
+    FROM tbl_category c
+    LEFT JOIN tbl_product_categories pc ON pc.category_id = c.id
+    LEFT JOIN tbl_product p ON p.id = pc.product_id
+    LEFT JOIN tbl_product_variant v ON v.product_id = p.id AND v.is_approve = 1
+    WHERE c.slug IS NOT NULL
+      AND (p.id IS NOT NULL OR v.id IS NOT NULL)
+    ORDER BY c.id
+    LIMIT $1 OFFSET $2
+  `, [limit, offset]);
 
-          // Emit city URLs that have at least one vendor
-          for (const c of cities) {
-            if (!availableCityIds.has(c.id)) continue;
-            if (skipped < offset) {
-              skipped++;
-              continue;
-            }
-            const citySlug = (c.city_name || '').toLowerCase().replace(/\s+/g, '');
-            const stateSlug = (c.state_name || '').toLowerCase().replace(/\s+/g, '');
-            yield `<url>\n  <loc>${baseUrl}/vendor/${productSlug}-${citySlug}-${stateSlug}</loc>\n  <changefreq>weekly</changefreq>\n  <priority>0.5</priority>\n</url>\n`;
-            yielded++;
-            if (yielded >= limit) return;
-          }
-        }
+  for (const cat of categories) {
+    const slugRaw = (cat.slug || cat.title).toLowerCase().trim().replace(/\s+/g, '-');
+    const slug = escapeXml(slugRaw);
+    yield `<url>\n  <loc>${baseUrl}/vendor/${slug}-category${cat.id}</loc>\n  <priority>1.0</priority>\n</url>\n`;
+    yielded++;
+    if (yielded >= limit) return;
+  }
 
-        productOffset += products.length;
-      }
-    },
+  // -------------------------------
+  // 2️⃣ Product variants
+  // -------------------------------
+  const variants = await db.any(`
+    SELECT v.id, v.slug
+    FROM tbl_product_variant v
+    WHERE v.is_approve = 1
+      AND v.slug IS NOT NULL
+    ORDER BY v.id
+    LIMIT $1 OFFSET $2
+  `, [limit - yielded, 0]);
+
+  for (const variant of variants) {
+    const slugRaw = variant.slug.toLowerCase().trim().replace(/\s+/g, '-');
+    const slug = escapeXml(slugRaw);
+    yield `<url>\n  <loc>${baseUrl}/vendor/${slug}</loc>\n  <priority>0.8</priority>\n</url>\n`;
+    yielded++;
+    if (yielded >= limit) return;
+  }
+},
 getVendorSitemapTotal: async () => {
   // Count only product-location combinations that actually have at least one vendor
   const [{ eligible_countries_count }] = await db.any(`
@@ -247,7 +224,32 @@ getVendorSitemapTotal: async () => {
   return {
     totalUrls
   };
+},
+getCategorySitemapTotal: async () => {
+  // Count total categories with at least one product or variant
+  const [{ total_categories }] = await db.any(`
+    SELECT COUNT(DISTINCT c.id) AS total_categories
+    FROM tbl_category c
+    LEFT JOIN tbl_product_categories pc ON pc.category_id = c.id
+    LEFT JOIN tbl_product p ON p.id = pc.product_id
+    LEFT JOIN tbl_product_variant v ON v.product_id = p.id AND v.is_approve = 1
+    WHERE c.slug IS NOT NULL
+      AND (p.id IS NOT NULL OR v.id IS NOT NULL)
+  `);
+
+  // Count total approved variants
+  const [{ total_variants }] = await db.any(`
+    SELECT COUNT(DISTINCT v.id) AS total_variants
+    FROM tbl_product_variant v
+    WHERE v.is_approve = 1
+      AND v.slug IS NOT NULL
+  `);
+
+  const totalUrls = parseInt(total_categories) + parseInt(total_variants);
+
+  return { totalUrls };
 }
+
 
 
 }
