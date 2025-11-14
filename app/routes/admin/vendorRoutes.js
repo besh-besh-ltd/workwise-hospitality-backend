@@ -141,6 +141,12 @@ vendorRoutes.get(
 );
 
 vendorRoutes.get(
+  '/buyer-company-dropdown',
+  passportSignIn,
+  vendorController.buyerCompanyDropdown
+);
+
+vendorRoutes.get(
   '/spoc-list',
   passportSignIn,
   vendorController.spocList
