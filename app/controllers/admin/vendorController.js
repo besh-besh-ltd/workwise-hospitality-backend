@@ -23,6 +23,62 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
+const normalizeVendorAccessType = (value, fallback = null) => {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  const normalized = value.toString().toLowerCase();
+  if (normalized === 'private') {
+    return 'private';
+  }
+  if (normalized === 'public') {
+    return 'public';
+  }
+  return fallback;
+};
+
+const extractBuyerCompanyIds = (input) => {
+  if (input === undefined) {
+    return { provided: false, ids: [] };
+  }
+
+  if (input === null || input === '') {
+    return { provided: true, ids: [] };
+  }
+
+  let ids = [];
+
+  if (Array.isArray(input)) {
+    ids = input
+      .map((item) => parseInt(item, 10))
+      .filter((item) => !Number.isNaN(item));
+  } else if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input);
+      if (Array.isArray(parsed)) {
+        ids = parsed
+          .map((item) => parseInt(item, 10))
+          .filter((item) => !Number.isNaN(item));
+      } else if (!Number.isNaN(parseInt(parsed, 10))) {
+        ids = [parseInt(parsed, 10)];
+      }
+    } catch (error) {
+      ids = input
+        .split(',')
+        .map((item) => parseInt(item.trim(), 10))
+        .filter((item) => !Number.isNaN(item));
+    }
+  } else {
+    const parsedId = parseInt(input, 10);
+    if (!Number.isNaN(parsedId)) {
+      ids = [parsedId];
+    }
+  }
+
+  ids = [...new Set(ids)];
+  return { provided: true, ids };
+};
+
 const vendorController = {
   vendorList: async (req, res, next) => {
     try {
@@ -114,9 +170,31 @@ const vendorController = {
         total_employees,
         about_vendor_company,
         subscription,
-        spocs
+        spocs,
+        vendor_access_type: vendorAccessTypeRaw,
+        buyer_company_ids: buyerCompanyIdsRaw
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
+
+      const vendorAccessType = normalizeVendorAccessType(
+        vendorAccessTypeRaw,
+        'public'
+      );
+      const { ids: buyerCompanyIds } = extractBuyerCompanyIds(
+        buyerCompanyIdsRaw
+      );
+
+      if (vendorAccessType === 'private' && buyerCompanyIds.length === 0) {
+        return res
+          .status(400)
+          .json({
+            status: 2,
+            errors: {
+              buyer_company_ids: 'Please select at least one buyer company'
+            }
+          })
+          .end();
+      }
       
       let cleanedMobile = mobile || null;
       if (cleanedMobile) {
@@ -165,7 +243,7 @@ const vendorController = {
         turnover: turn_over || null,
         no_of_employess: total_employees || null,
         website: website || null,
-        is_private:0
+        is_private: vendorAccessType === 'private' ? 1 : 0
       };
 
 
@@ -229,6 +307,16 @@ if (Array.isArray(spocs) && spocs.length > 0) {
 
       addDefaultNotifications(vendorId);
 
+      if (vendorAccessType === 'private') {
+        await vendorModel.replaceVendorCompanyMappings(
+          vendorId,
+          buyerCompanyIds,
+          createdBy
+        );
+      } else {
+        await vendorModel.replaceVendorCompanyMappings(vendorId, [], createdBy);
+      }
+
       if (vendorId) {        
 
       const emailHeader = ` <h2>Dear ${name} </h2>`
@@ -279,6 +367,50 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     try {
       let vendorId = req.params.id;
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
+      const companyDetails = await userModel.getCompanyDetail(vendorId);
+      const existingIsPrivate =
+        companyDetails &&
+        companyDetails[0] &&
+        (companyDetails[0].is_private === 1 ||
+          companyDetails[0].is_private === '1')
+          ? 1
+          : 0;
+      const resolvedIsPrivate =
+        targetAccessType !== null
+          ? targetAccessType === 'private'
+            ? 1
+            : 0
+          : existingIsPrivate;
+      const finalAccessType = resolvedIsPrivate === 1 ? 'private' : 'public';
+
+      let existingMappedCompanyIds = [];
+      if (finalAccessType === 'private' && !buyerCompanyIdsProvided) {
+        const existingMappings = await vendorModel.getVendorCompanyMappings(
+          vendorId
+        );
+        existingMappedCompanyIds = existingMappings
+          .map((item) => parseInt(item.company_id, 10))
+          .filter((item) => !Number.isNaN(item));
+      }
+
+      let companyIdsToMap = buyerCompanyIdsProvided
+        ? buyerCompanyIds
+        : existingMappedCompanyIds;
+      companyIdsToMap = companyIdsToMap
+        .map((item) => parseInt(item, 10))
+        .filter((item) => !Number.isNaN(item));
+
+      if (finalAccessType === 'private' && companyIdsToMap.length === 0) {
+        return res
+          .status(400)
+          .json({
+            status: 2,
+            errors: {
+              buyer_company_ids: 'Please select at least one buyer company'
+            }
+          })
+          .end();
+      }
       const spocDetails = await vendorModel.getSpocDetails(vendorId);
       res
         .status(200)
@@ -307,10 +439,18 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       let companyDetails = await userModel.getCompanyDetail(vendorId);
       let files = await vendorModel.getFiles(vendorId);
       let spocDetails = await vendorModel.getSpocDetails(vendorId, false); // Show all SPOCs regardless of status
+      let mappedCompanies = await vendorModel.getVendorCompanyMappings(vendorId);
       resObj.spocDetails = spocDetails;
       resObj.vendorDetails = vendorDetails[0];
       resObj.companyDetails = companyDetails[0];
       resObj.files = files || [];
+      resObj.mappedCompanies = mappedCompanies || [];
+      const companyIsPrivate =
+        companyDetails &&
+        companyDetails[0] &&
+        (companyDetails[0].is_private === 1 ||
+          companyDetails[0].is_private === '1');
+      resObj.vendorAccessType = companyIsPrivate ? 'private' : 'public';
       res
         .status(200)
         .json({
@@ -401,8 +541,18 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         total_employees,
         about_vendor_company,
         subscription,
+        vendor_access_type: vendorAccessTypeRaw,
+        buyer_company_ids: buyerCompanyIdsRaw
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
+      const targetAccessType = normalizeVendorAccessType(
+        vendorAccessTypeRaw,
+        null
+      );
+      const {
+        provided: buyerCompanyIdsProvided,
+        ids: buyerCompanyIds
+      } = extractBuyerCompanyIds(buyerCompanyIdsRaw);
       // let fileName = req?.file?.filename;
       // let originalFilename = req?.file?.originalname;
 
@@ -445,10 +595,10 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         turnover: turn_over || null,
         no_of_employess: total_employees || null,
         website: website || null,
-        is_private:0
+        is_private: resolvedIsPrivate
       };
 
-      const result = await userModel.update_companyDetails(vendorObj,companyObj);
+      const result = await userModel.update_companyDetails(vendorObj, companyObj);
 
       if (subscription) {
         const condition = `user_id = ${parseInt(
@@ -501,7 +651,15 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         }
       }
 
-      // await productModel.updateVendorDetail(vendorObj, vendorId);
+      if (resolvedIsPrivate === 1) {
+        await vendorModel.replaceVendorCompanyMappings(
+          vendorId,
+          companyIdsToMap,
+          updatedBy
+        );
+      } else {
+        await vendorModel.replaceVendorCompanyMappings(vendorId, [], updatedBy);
+      }
 
       // let companyDetails = await userModel.getCompanyDetail(vendorId);
 
@@ -770,6 +928,30 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     });
   }
  },
+  buyerCompanyDropdown: async (req, res, next) => {
+    try {
+      const search = req.query?.search || null;
+      const limitParam = parseInt(req.query?.limit, 10);
+      const limit = Number.isNaN(limitParam) ? 100 : Math.min(Math.max(limitParam, 1), 500);
+      const dropdown = await vendorModel.getBuyerCompanyDropdown(search, limit);
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: dropdown
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   vendorDropdownList: async (req, res, next) => {
     const search = req.query.search;
     try {

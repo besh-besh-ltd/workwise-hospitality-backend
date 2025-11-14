@@ -897,6 +897,94 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     });
   },
 
+  getBuyerCompanyDropdown: async (search = null, limit = 100) => {
+    return new Promise(function (resolve, reject) {
+      const params = [];
+      let searchClause = '';
+
+      if (search) {
+        params.push(`%${search.trim().toLowerCase()}%`);
+        searchClause = `AND (LOWER(c.company_name) LIKE $${params.length} OR LOWER(u.email) LIKE $${params.length} OR LOWER(u.name) LIKE $${params.length})`;
+      }
+
+      const query = `
+        SELECT DISTINCT ON (c.id)
+          c.id AS company_id,
+          c.company_name,
+          u.id AS buyer_user_id,
+          u.name AS buyer_name,
+          u.email AS buyer_email,
+          u.mobile AS buyer_mobile
+        FROM tbl_users u
+        INNER JOIN tbl_company c ON u.company_id = c.id
+        WHERE u.is_deleted = 0
+          AND u.user_type IN (2, 8)
+          AND c.id IS NOT NULL
+          ${searchClause}
+        ORDER BY c.id, u.created_at DESC
+        LIMIT ${limit};
+      `;
+
+      db.any(query, params)
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  getVendorCompanyMappings: async (vendorId) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT 
+            bvm.company_id,
+            c.company_name
+         FROM tbl_buyer_private_vendors_mapping bvm
+         LEFT JOIN tbl_company c ON bvm.company_id = c.id
+         WHERE bvm.vendor_id = $1
+         ORDER BY c.company_name ASC`,
+        [vendorId]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  replaceVendorCompanyMappings: async (vendorId, companyIds = [], createdBy) => {
+    return db.tx(async (t) => {
+      await t.none(
+        `DELETE FROM tbl_buyer_private_vendors_mapping WHERE vendor_id = $1`,
+        [vendorId]
+      );
+
+      if (!companyIds || companyIds.length === 0) {
+        return true;
+      }
+
+      const insertQuery = `
+        INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id, created_date, updated_date)
+        VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      `;
+
+      for (const companyId of companyIds) {
+        const companyIdInt = parseInt(companyId, 10);
+        if (!Number.isNaN(companyIdInt)) {
+          await t.none(insertQuery, [createdBy || null, vendorId, companyIdInt]);
+        }
+      }
+
+      return true;
+    });
+  },
+
   findReasonByText: async (reasonText) => {
     return new Promise(function (resolve, reject) {
       db.any(
