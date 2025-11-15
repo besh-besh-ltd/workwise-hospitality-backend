@@ -191,11 +191,12 @@ const generalController = {
   },
   mapHierarchyToProject: async (req, res) => {
     try {
-      const { hierarchy_id, project_id } = req.body;
+      const { hierarchy_id, hierarchy_type, project_id } = req.body;
       const { id, company_id } = req.user;
 
       const updated = await generalModel.mapHierarchyToProject(
         hierarchy_id,
+        hierarchy_type,
         project_id,
         company_id,
         id

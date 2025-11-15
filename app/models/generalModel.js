@@ -418,6 +418,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       const raw = await db.any(`
         SELECT
           TAH.hierarchy_type,
+          TAH.hierarchy_id,
           TAH.company_id,
           user_id AS id,
           U.name,
@@ -425,26 +426,45 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
           TAH.approval_level AS level,
           TAH.bypass_cap,
           TAH.is_active AS active,
+          COALESCE(
+            (
+              SELECT JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                      'id', THPM.id,
+                      'project_id', THPM.project_id,
+                      'hierarchy_id', THPM.hierarchy_id,
+                      'hierarchy_type', THPM.hierarchy_type
+                  )
+              )
+              FROM tbl_hierarchy_project_mapping THPM
+              WHERE THPM.hierarchy_id = TAH.hierarchy_id AND THPM.hierarchy_type = TAH.hierarchy_type
+            ),
+            '[]'::json
+          ) AS mapped_project_ids,
           TAH.created_at
         FROM tbl_approval_hierarchy TAH
         JOIN tbl_users U ON TAH.user_id = U.id
         WHERE TAH.company_id = $1
         ${type ? ' AND hierarchy_type = $2' : ''}
-        ORDER BY hierarchy_type, approval_level ASC
+        ORDER BY hierarchy_id, approval_level
       `, [companyId, type]);
 
       const grouped = raw.reduce((acc, row) => {
-        const { hierarchy_type, company_id, ...rest } = row;
+        const { hierarchy_type, company_id, hierarchy_id, mapped_project_ids, ...rest } = row;
 
-        if (!acc[hierarchy_type]) {
-          acc[hierarchy_type] = {
+        const accKey = `${hierarchy_type}_${hierarchy_id}`
+
+        if (!acc[accKey]) {
+          acc[accKey] = {
             hierarchy_type,
             company_id,
+            hierarchy_id,
+            mapped_project_ids,
             approvers: [],
           };
         }
 
-        acc[hierarchy_type].approvers.push(rest);
+        acc[accKey].approvers.push(rest);
 
         return acc;
       }, {});
@@ -460,14 +480,15 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         `SELECT hierarchy_id 
         FROM tbl_approval_hierarchy WHERE company_id = $1
         ORDER BY hierarchy_id DESC
-        LIMIT 1`
+        LIMIT 1`,
+        [companyId]
       );
 
       let baseData = {
         hierarchy_type: type,
         company_id: companyId,
         created_at: new Date(),
-        hierarchy_id: lastHierarchy?.hierarchy_id ? lastHierarchy.hierarchy_id + 1 : 1
+        hierarchy_id: lastHierarchy?.hierarchy_id ? parseInt(lastHierarchy.hierarchy_id) + 1 : 1
       };
       const insertableData = approvers.map(approver => ({...baseData, ...approver}));
 
@@ -482,7 +503,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       const updatePromises = approvers.map(async (approver) => {
         const exists = await db.oneOrNone(
           `SELECT id FROM tbl_approval_hierarchy
-          WHERE id = $1 AND company_id = $2 AND user_id = $3 AND hierarchy_type = $4`,
+          WHERE hierarchy_id = $1 AND company_id = $2 AND user_id = $3 AND hierarchy_type = $4`,
           [hierarchyId, companyId, approver.user_id, type]
         );
 
@@ -536,24 +557,30 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       throw error;
     }
   },
-  mapHierarchyToProject: async (hierarchy_id, project_id, company_id, mapped_by) => {
+  mapHierarchyToProject: async (hierarchy_id, hierarchy_type, project_id, company_id, mapped_by) => {
     return db.tx(async t => {
-      const exists = await t.oneOrNone(
-        `SELECT id FROM tbl_hierarchy_project_mapping
-        WHERE company_id = $1 AND hierarchy_id = $2 AND project_id = $3`,
-        [company_id, hierarchy_id, project_id]
-      )
+      let result = [];
 
-      if(exists) throw new Error("The mapping between project and hierarchy already exists!")
-
-      const result = await t.one(
-        `INSERT INTO tbl_hierarchy_project_mapping
-        (company_id, hierarchy_id, project_id, mapped_by)
-        VALUES ($1, $2, $3, $4)
-        
-        RETURNING *`,
-        [company_id, hierarchy_id, project_id, mapped_by]
-      )
+      if(project_id && Array.isArray(project_id)) {
+        await t.none(
+          `DELETE FROM tbl_hierarchy_project_mapping
+          WHERE company_id = $1 AND hierarchy_id = $2 AND hierarchy_type = $3`,
+          [company_id, hierarchy_id, hierarchy_type]
+        )
+        for(let project of project_id) {
+    
+          const r = await t.one(
+            `INSERT INTO tbl_hierarchy_project_mapping
+            (company_id, hierarchy_id, hierarchy_type, project_id, mapped_by)
+            VALUES ($1, $2, $3, $4, $5)
+            
+            RETURNING *`,
+            [company_id, hierarchy_id, hierarchy_type, project, mapped_by]
+          )
+    
+          result.push(r);
+        }
+      }
 
       return result;
     })
@@ -615,12 +642,12 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       const mappedRows = await t.any(
         `SELECT hierarchy_id
         FROM tbl_hierarchy_project_mapping
-        WHERE company_id = $1 AND project_id = $2`,
-        [companyId, projectId]
+        WHERE company_id = $1 AND project_id = $2 AND hierarchy_type = $3`,
+        [companyId, projectId, type]
       );
 
       const mappedHierarchyIds = mappedRows && mappedRows.length
-        ? [...new Set(mappedRows.map(r => r.hierarchy_id).filter(Boolean))]
+        ? [...new Set(mappedRows.map(r => parseInt(r.hierarchy_id)).filter(Boolean))]
         : [];
 
       if (mappedHierarchyIds.length) {

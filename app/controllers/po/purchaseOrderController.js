@@ -97,8 +97,8 @@ export const initiatePO = async (req, res) => {
       message: "Purchase order has been initiated"
     })
   } catch (error) {
-    logError(error);
-    return res.status(500).json({
+    // logError(error);
+    return res.status(400).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
       error
