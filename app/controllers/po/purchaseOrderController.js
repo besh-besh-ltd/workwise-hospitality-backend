@@ -3,6 +3,7 @@ import { logError } from "../../helper/common.js";
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange } from "../../models/generalModel.js";
 import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode } from "../../models/purchaseOrderModel.js";
+import rfqModel from "../../models/rfqModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
 import { sendApprovalNotification } from "./purchaseOrderEmails.js";
 
@@ -150,14 +151,19 @@ export const approvePO = async (req, res) => {
           t,
         });
     
+        const purchaseOrder = await t.oneOrNone(`
+          SELECT * FROM tbl_rfq_purchase_order trpo 
+            JOIN tbl_approval_hierarchy_transactions taht ON taht.id = $1 
+          WHERE trpo.id = taht.target_entity_id`,
+        [trx.id])
+
         if (result && (!result.approval_required || result.is_rejected)) {
           await markPOStatusChange(po_id, t, result.is_rejected, req.user);
+
+          if(result.is_rejected) {
+            await handlePORejection(purchaseOrder, userId, t);
+          }
         } else if (result && (!result.is_rejected && result.approval_required)) {
-          const purchaseOrder = await t.oneOrNone(`
-            SELECT * FROM tbl_rfq_purchase_order trpo 
-              JOIN tbl_approval_hierarchy_transactions taht ON taht.id = $1 
-            WHERE trpo.id = taht.target_entity_id`,
-          [trx.id])
 
           await sendApprovalNotification(purchaseOrder, result.current_approver_id);
         }
@@ -180,6 +186,49 @@ export const approvePO = async (req, res) => {
       message: error.message || 'An error occurred while approving the PO.',
       error
     });
+  }
+};
+
+export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
+  try {
+    if(!purchaseOrder) throw new Error("Purchase order is required to handle Reject Case")
+    if(!t) throw new Error("Transaction is required for PO Rejection Case handling")
+
+    for (let product of purchaseOrder.rfq_product_id) {
+      const alreadyExists = await t.one(`
+        SELECT TQF.* FROM tbl_quote_finalization TQF
+        JOIN tbl_rfq_products TRP ON TRP.id = $2
+        WHERE TQF.rfq_id = $1
+        AND TQF.product_variant_id = TRP.product_variant_id AND TQF.variant = TRP.variant 
+        LIMIT 1
+      `, [purchaseOrder.rfq_id, product])
+
+      const history_data = {
+        rfq_id: alreadyExists.rfq_id,
+        rfq_no: alreadyExists.rfq_no,
+        product_variant_id: alreadyExists.product_variant_id,
+        vendor_id: alreadyExists.vendor_id,
+        quote_id: alreadyExists.quote_id,
+        created_by: alreadyExists.created_by,
+        timestamp: alreadyExists.timestamp,
+        variant: alreadyExists.variant,
+        changed_by: rejectedBy
+      };
+  
+      await rfqModel.insert(
+        'tbl_quote_finalization_history',
+        history_data,
+        t
+      );
+
+      await t.one(`
+        DELETE FROM tbl_quote_finalization
+        WHERE id = $1 RETURNING *
+      `, [alreadyExists.id]);
+    }
+  } catch (error) {
+    logError(error);
+    return false;
   }
 };
 
