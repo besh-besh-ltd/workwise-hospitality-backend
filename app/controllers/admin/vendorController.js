@@ -547,10 +547,40 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         provided: buyerCompanyIdsProvided,
         ids: buyerCompanyIds
       } = extractBuyerCompanyIds(buyerCompanyIdsRaw);
-      // let fileName = req?.file?.filename;
-      // let originalFilename = req?.file?.originalname;
 
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
+      let companyDetails = await userModel.getCompanyDetail(vendorId);
+      
+      const existingIsPrivate =
+        companyDetails &&
+        companyDetails[0] &&
+        (companyDetails[0].is_private === 1 ||
+          companyDetails[0].is_private === '1')
+          ? 1
+          : 0;
+      const resolvedIsPrivate =
+        targetAccessType === 'private'
+          ? 1
+          : targetAccessType === 'public'
+            ? 0
+            : existingIsPrivate;
+
+      let existingMappedCompanyIds = [];
+      if (!buyerCompanyIdsProvided) {
+        const existingMappings = await vendorModel.getVendorCompanyMappings(
+          vendorId
+        );
+        existingMappedCompanyIds = existingMappings
+          .map((item) => parseInt(item.company_id, 10))
+          .filter((item) => !Number.isNaN(item));
+      }
+
+      let companyIdsToMap = buyerCompanyIdsProvided
+        ? buyerCompanyIds
+        : existingMappedCompanyIds;
+      companyIdsToMap = companyIdsToMap
+        .map((item) => parseInt(item, 10))
+        .filter((item) => !Number.isNaN(item));
       // let vendorObj = {
       //   name: name || vendorDetails[0].name,
       //   email: email || vendorDetails[0].email,
@@ -645,15 +675,11 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         }
       }
 
-      if (companyIdsToMap && companyIdsToMap.length > 0) {
-        await vendorModel.replaceVendorCompanyMappings(
-          vendorId,
-          companyIdsToMap,
-          updatedBy
-        );
-      } else {
-        await vendorModel.replaceVendorCompanyMappings(vendorId, [], updatedBy);
-      }
+      await vendorModel.replaceVendorCompanyMappings(
+        vendorId,
+        companyIdsToMap,
+        updatedBy
+      );
 
       // let companyDetails = await userModel.getCompanyDetail(vendorId);
 
