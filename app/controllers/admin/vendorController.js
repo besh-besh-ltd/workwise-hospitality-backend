@@ -183,18 +183,6 @@ const vendorController = {
       const { ids: buyerCompanyIds } = extractBuyerCompanyIds(
         buyerCompanyIdsRaw
       );
-
-      if (vendorAccessType === 'private' && buyerCompanyIds.length === 0) {
-        return res
-          .status(400)
-          .json({
-            status: 2,
-            errors: {
-              buyer_company_ids: 'Please select at least one buyer company'
-            }
-          })
-          .end();
-      }
       
       let cleanedMobile = mobile || null;
       if (cleanedMobile) {
@@ -307,7 +295,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
 
       addDefaultNotifications(vendorId);
 
-      if (vendorAccessType === 'private') {
+      if (buyerCompanyIds && buyerCompanyIds.length > 0) {
         await vendorModel.replaceVendorCompanyMappings(
           vendorId,
           buyerCompanyIds,
@@ -317,32 +305,80 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         await vendorModel.replaceVendorCompanyMappings(vendorId, [], createdBy);
       }
 
-      if (vendorId) {        
+      if (vendorId) {
+        const companyMappings = await vendorModel.getVendorCompanyMappings(vendorId);
+        const hasCompanyMappings = companyMappings && companyMappings.length > 0;
 
-      const emailHeader = ` <h2>Dear ${name} </h2>`
+        if (hasCompanyMappings) {
+          const companyNames = companyMappings
+            .map(m => m.company_name)
+            .filter(Boolean)
+            .join(', ');
           
-      const emailContent = `
-           <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
-             <p>Thank you for registering with us! Your login credentials are as follows:</p>
-                <ul style="list-style-type: none; padding: 0;">
-                 <li><strong>Email:</strong> ${email}</li>
-                 <li><strong>Password:</strong> ${password}</li>
-             </ul>
-             <p>Your account is currently under review. We will notify you as soon as it is approved.</p>
-             <p>Meanwhile, please save this email securely as it contains your login credentials.</p>
-             <p>We appreciate your patience and look forward to having you on board!</p>
-           </div>
-            `
-           const dunamicHtmlTemplate = generateEmailTemplate(emailHeader, emailContent)
+          const vendorName = name || organization_name || 'Vendor';
+          const spocList = await vendorModel.getSpocDetails(vendorId);
 
-          let mailRecipients = {
-            from: Config.webmasterMail,
-            subject: `Work Wise | Registration`,
-            html: dunamicHtmlTemplate,
-            to: email
-        };
+          const headerContent = `<h2>Hello ${vendorName},</h2>`;
 
-        sendMail(mailRecipients);
+          const containerContent = `
+            <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+              <p>
+                We are pleased to inform you that <strong>${companyNames}</strong> has added you as a preferred vendor on the Workwise platform.
+                Going forward, <strong>${companyNames}</strong> will manage their procurement activities through Workwise.
+              </p>
+              <p>
+                To ensure you receive all enquiries promptly, Login to your account.
+                Your login credentials are provided below:
+              </p>
+              <p><strong>Email:</strong> ${email || '[Vendor Email]'}</p>
+              <p><strong>Password:</strong> ${password || '[Temporary Password]'}</p>
+              <p>
+                We recommend changing your password after your first login for security reasons.
+              </p>
+              <a href="https://letsworkwise.com"
+                style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+                 Login
+              </a>    
+              <p style="margin-top:20px; text-align:center;">
+                We look forward to supporting your business growth.
+              </p>
+            </div>`;
+
+          const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+          sendMail({
+            from: `${companyNames} ${Config.masterEmail}`,
+            to: spocList?.length ? spocList.map(spoc => spoc.email) : email,
+            cc: spocList?.length ? email : '',
+            subject: `${companyNames} Added You on Workwise`,
+            html: dynamicHTML
+          });
+        } else {
+          const emailHeader = ` <h2>Dear ${name} </h2>`
+              
+          const emailContent = `
+               <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+                 <p>Thank you for registering with us! Your login credentials are as follows:</p>
+                    <ul style="list-style-type: none; padding: 0;">
+                     <li><strong>Email:</strong> ${email}</li>
+                     <li><strong>Password:</strong> ${password}</li>
+                 </ul>
+                 <p>Your account is currently under review. We will notify you as soon as it is approved.</p>
+                 <p>Meanwhile, please save this email securely as it contains your login credentials.</p>
+                 <p>We appreciate your patience and look forward to having you on board!</p>
+               </div>
+                `
+               const dunamicHtmlTemplate = generateEmailTemplate(emailHeader, emailContent)
+
+              let mailRecipients = {
+                from: Config.webmasterMail,
+                subject: `Work Wise | Registration`,
+                html: dunamicHtmlTemplate,
+                to: email
+            };
+
+            sendMail(mailRecipients);
+        }
 
         res
           .status(200)
@@ -399,18 +435,6 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       companyIdsToMap = companyIdsToMap
         .map((item) => parseInt(item, 10))
         .filter((item) => !Number.isNaN(item));
-
-      if (finalAccessType === 'private' && companyIdsToMap.length === 0) {
-        return res
-          .status(400)
-          .json({
-            status: 2,
-            errors: {
-              buyer_company_ids: 'Please select at least one buyer company'
-            }
-          })
-          .end();
-      }
       const spocDetails = await vendorModel.getSpocDetails(vendorId);
       res
         .status(200)
@@ -651,7 +675,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         }
       }
 
-      if (resolvedIsPrivate === 1) {
+      if (companyIdsToMap && companyIdsToMap.length > 0) {
         await vendorModel.replaceVendorCompanyMappings(
           vendorId,
           companyIdsToMap,
