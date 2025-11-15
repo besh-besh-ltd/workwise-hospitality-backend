@@ -1006,6 +1006,8 @@ user_book_demo: async (mobile) => {
                   JOIN tbl_product_variant V ON V.id = M.product_variant_id
 
                   WHERE M.vendor_id = tbl_users.id
+                  AND M.is_approved = TRUE
+                  AND M.status = TRUE
                 ) AS "product_list",
 
        CASE

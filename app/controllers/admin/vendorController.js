@@ -404,43 +404,13 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       let vendorId = req.params.id;
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
       const companyDetails = await userModel.getCompanyDetail(vendorId);
-      const existingIsPrivate =
-        companyDetails &&
-        companyDetails[0] &&
-        (companyDetails[0].is_private === 1 ||
-          companyDetails[0].is_private === '1')
-          ? 1
-          : 0;
-      const resolvedIsPrivate =
-        targetAccessType !== null
-          ? targetAccessType === 'private'
-            ? 1
-            : 0
-          : existingIsPrivate;
-      const finalAccessType = resolvedIsPrivate === 1 ? 'private' : 'public';
-
-      let existingMappedCompanyIds = [];
-      if (finalAccessType === 'private' && !buyerCompanyIdsProvided) {
-        const existingMappings = await vendorModel.getVendorCompanyMappings(
-          vendorId
-        );
-        existingMappedCompanyIds = existingMappings
-          .map((item) => parseInt(item.company_id, 10))
-          .filter((item) => !Number.isNaN(item));
-      }
-
-      let companyIdsToMap = buyerCompanyIdsProvided
-        ? buyerCompanyIds
-        : existingMappedCompanyIds;
-      companyIdsToMap = companyIdsToMap
-        .map((item) => parseInt(item, 10))
-        .filter((item) => !Number.isNaN(item));
       const spocDetails = await vendorModel.getSpocDetails(vendorId);
       res
         .status(200)
         .json({
           status: 1,
           data: vendorDetails,
+          companyDetails: companyDetails || [],
           spocDetails: spocDetails || []
         })
         .end();

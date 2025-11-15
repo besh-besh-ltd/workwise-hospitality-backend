@@ -1660,7 +1660,7 @@ getRandomProductsForCarausel : async () =>{
 
         // Handle vendor filter
         if (vendorId && vendorId !== '') {
-          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm JOIN tbl_product_variant PV on PV.id = pvvm.product_variant_id WHERE PV.product_id = p.id AND pvvm.vendor_id = $${paramIndex})`);
+          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm JOIN tbl_product_variant PV on PV.id = pvvm.product_variant_id WHERE PV.product_id = p.id AND pvvm.vendor_id = $${paramIndex} AND pvvm.status = TRUE AND pvvm.is_approved = TRUE)`);
           params.push(vendorId);
           paramIndex++;
         }
@@ -3819,7 +3819,7 @@ getProductTechSpecByID: async (productId) => {
             rr.reject_reason,
             TC.name AS created_by,
             TU.name AS updated_by,
-            TA.name AS mapping_approved_by,
+            TA.name AS approved_by,
             COALESCE(
               array_to_string(
                 ARRAY(
@@ -3831,7 +3831,7 @@ getProductTechSpecByID: async (productId) => {
                 ', '
               ),
               ''
-            ) AS approved_by,
+            ) AS vendor_approved_by_companies,
             (
               SELECT COALESCE(
                 ARRAY_AGG(DISTINCT va.vendor_approve),
@@ -4149,6 +4149,41 @@ WHERE m.id = $1;
     });
   },
   
+  // Delete variant-vendor mapping
+  deleteVariantVendorMapping: async (mappingId) => {
+    return new Promise(function (resolve, reject) {
+      db.tx(async (t) => {
+        // Delete related makes
+        await t.none(
+          'DELETE FROM tbl_product_variant_vendor_make WHERE variant_vendor_map_id = $1',
+          [mappingId]
+        );
+        
+        // Delete related approvals
+        await t.none(
+          'DELETE FROM tbl_vendorapprove_product_mapping WHERE variant_vendor_mapping_id = $1',
+          [mappingId]
+        );
+        
+        // Delete the mapping itself
+        const result = await t.one(
+          'DELETE FROM tbl_product_variant_vendor_mapping WHERE id = $1 RETURNING id',
+          [mappingId]
+        );
+        
+        return result;
+      })
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error deleting variant-vendor mapping:", err);
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
   // Changes by Agnij May 02, 2025 [Added function to update variant approval status]
   updateProductVariantApproval: async (variantId, isApproved, rejectReasonId = null) => {
     return new Promise(function (resolve, reject) {
@@ -4413,7 +4448,7 @@ WHERE m.id = $1;
 
         // Handle vendor filter
         if (vendor_id && vendor_id !== '') {
-          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm WHERE pvvm.product_variant_id = pv.id AND pvvm.vendor_id = $${paramIndex})`);
+          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm WHERE pvvm.product_variant_id = pv.id AND pvvm.vendor_id = $${paramIndex} AND pvvm.status = TRUE AND pvvm.is_approved = TRUE)`);
           params.push(vendor_id);
           paramIndex++;
         }
