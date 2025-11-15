@@ -396,7 +396,7 @@ export const getPOItemDetails = async (purchase_order) => {
 
         FROM tbl_quote_items qi
         JOIN tbl_rfq_products TRP ON TRP.rfq_id = qi.rfq_id AND TRP.product_variant_id = qi.product_variant_id AND TRP.variant = qi.variant
-        JOIN tbl_purchase_order_hsn_mapping TPOHM ON TPOHM.po_id = $2 AND TPOHM.rfq_item_id = TRP.id
+        LEFT JOIN tbl_purchase_order_hsn_mapping TPOHM ON TPOHM.po_id = $2 AND TPOHM.rfq_item_id = TRP.id
         INNER JOIN tbl_product_variant pv ON qi.product_variant_id = pv.id
         WHERE qi.id = ANY($1)
         ORDER BY qi.id;
