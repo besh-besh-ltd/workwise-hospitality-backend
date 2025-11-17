@@ -426,6 +426,13 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
           TAH.approval_level AS level,
           TAH.bypass_cap,
           TAH.is_active AS active,
+          EXISTS (
+              SELECT 1
+              FROM tbl_hierarchy_default_mapping THDM
+              WHERE THDM.company_id = $1
+              AND THDM.hierarchy_type = TAH.hierarchy_type
+              AND THDM.hierarchy_id = TAH.hierarchy_id
+          ) AS is_default,
           COALESCE(
             (
               SELECT JSON_AGG(
@@ -450,7 +457,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       `, [companyId, type]);
 
       const grouped = raw.reduce((acc, row) => {
-        const { hierarchy_type, company_id, hierarchy_id, mapped_project_ids, ...rest } = row;
+        const { hierarchy_type, company_id, hierarchy_id, mapped_project_ids, is_default, ...rest } = row;
 
         const accKey = `${hierarchy_type}_${hierarchy_id}`
 
@@ -460,6 +467,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
             company_id,
             hierarchy_id,
             mapped_project_ids,
+            is_default,
             approvers: [],
           };
         }
@@ -583,6 +591,35 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       }
 
       return result;
+    })
+  },
+  setDefaultHierarchy: async (hierarchy_id, hierarchy_type, company_id, mapped_by) => {
+    return db.tx(async t => {
+      const exists = await t.oneOrNone(
+        `SELECT id FROM tbl_hierarchy_default_mapping
+          WHERE hierarchy_type = $1 AND company_id = $2
+          LIMIT 1`,
+          [hierarchy_type, company_id]
+      );
+
+      if(exists) {
+        await t.none(
+          `UPDATE tbl_hierarchy_default_mapping
+            SET hierarchy_id = $2,
+            created_by = $3
+            WHERE id = $1`,
+            [exists.id, hierarchy_id, mapped_by]
+        )
+      } else {
+        await t.none(
+          `INSERT INTO tbl_hierarchy_default_mapping
+            (hierarchy_id, company_id, hierarchy_type, created_by)
+            VALUES ($1, $2, $3, $4)`,
+            [hierarchy_id, company_id, hierarchy_type, mapped_by]
+        )
+      }
+
+      return true;
     })
   },
   initiateApproval: async (

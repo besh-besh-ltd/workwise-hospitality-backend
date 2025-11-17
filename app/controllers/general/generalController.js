@@ -216,6 +216,33 @@ const generalController = {
         error
       }).end();
     }
+  },
+  setDefaultHierarchy: async (req, res) => {
+    try {
+      const { hierarchy_id, hierarchy_type } = req.body;
+      const { id, company_id } = req.user;
+
+      const updated = await generalModel.setDefaultHierarchy(
+        hierarchy_id,
+        hierarchy_type,
+        company_id,
+        id
+      );
+
+      if (updated) return res.status(200).end();
+
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while setting hierarchy as default'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message ?? Config.errorText.value,
+        error
+      }).end();
+    }
   }
 };
 export default generalController;

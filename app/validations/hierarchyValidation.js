@@ -27,4 +27,8 @@ export const hierarchySchema = {
         hierarchy_type: Joi.string().allow(...Object.keys(AVAILABLE_HIERARCHY_TYPES)).required(),
         project_id: Joi.array().items(Joi.number()).required(),
     }),
+    setDefaultHierarchy: Joi.object({
+        hierarchy_id: Joi.string().required(),
+        hierarchy_type: Joi.string().allow(...Object.keys(AVAILABLE_HIERARCHY_TYPES)).required(),
+    })
 }
