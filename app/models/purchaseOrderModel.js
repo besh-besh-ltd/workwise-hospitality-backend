@@ -553,13 +553,13 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
         values
       );
 
-      const approverLevel = await t.oneOrNone(
-        `SELECT approval_level FROM tbl_approval_hierarchy TAH
-         WHERE user_id = $1 AND hierarchy_type = 'po'`,
-         [user_id]
-      )
+      // const approverLevel = await t.oneOrNone(
+      //   `SELECT approval_level FROM tbl_approval_hierarchy TAH
+      //    WHERE user_id = $1 AND hierarchy_type = 'po'`,
+      //    [user_id]
+      // )
 
-      return [data, count, approverLevel || -1];
+      return [data, count, 999];
     });
 
     return {

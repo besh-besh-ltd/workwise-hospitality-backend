@@ -290,9 +290,9 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         WHERE company_id = $1
           AND hierarchy_type = $2
           AND approval_level = 1
-          AND user_id = $3
+          AND (user_id = $3 OR $3 IS NULL)
         ORDER BY hierarchy_type, approval_level
-      `, [companyId, type, firstUser.user_id]);
+      `, [companyId, type, firstUser?.user_id]);
 
       return raw && raw.length > 0;
     } catch (error) {
@@ -482,7 +482,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       throw error;
     }
   },
-  createHierarchy: async (type, approvers, companyId) => {
+  createHierarchy: async (type, approvers, companyId, createdBy) => {
     try {
       const lastHierarchy = await db.oneOrNone(
         `SELECT hierarchy_id 
@@ -492,15 +492,28 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         [companyId]
       );
 
+      const hierarchyExist = await generalModel.doesHierarchyExist(type, companyId)
+
+      const nextHierarchyId = lastHierarchy?.hierarchy_id ? parseInt(lastHierarchy.hierarchy_id) + 1 : 1
+
       let baseData = {
         hierarchy_type: type,
         company_id: companyId,
         created_at: new Date(),
-        hierarchy_id: lastHierarchy?.hierarchy_id ? parseInt(lastHierarchy.hierarchy_id) + 1 : 1
+        hierarchy_id: nextHierarchyId
       };
       const insertableData = approvers.map(approver => ({...baseData, ...approver}));
 
       await generalModel.insertMany('tbl_approval_hierarchy', insertableData);
+
+      if(!hierarchyExist) {
+        await db.none(
+          `INSERT INTO tbl_hierarchy_default_mapping
+          (hierarchy_id, hierarchy_type, company_id, created_by)
+          VALUES($1, $2, $3, $4)`,
+          [nextHierarchyId, type, companyId, createdBy]
+        )
+      }
       return true;
     } catch (error) {
       throw error;
@@ -622,6 +635,19 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       return true;
     })
   },
+  getHierarchyTypes: async () => {
+    return await db.any(
+      `SELECT
+        enumlabel AS value,
+        INITCAP(REPLACE(enumlabel, '_', ' ')) AS label
+        
+      FROM pg_enum
+      JOIN pg_type ON pg_type.oid = pg_enum.enumtypid
+      WHERE pg_type.typname = 'hierarchy_type'
+      ORDER BY pg_enum.enumsortorder;
+      `
+    );
+  },
   initiateApproval: async (
     type, // 'po'
     entityId,
@@ -690,14 +716,19 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       if (mappedHierarchyIds.length) {
         // There are mappings - restrict to these hierarchy ids
         initiatorHierarchy = await t.oneOrNone(
-          `SELECT *
-          FROM tbl_approval_hierarchy
-          WHERE company_id = $1
-            AND user_id = $2
-            AND hierarchy_type = $3
+          `SELECT TAH.*,
+          CASE WHEN THDM.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_default
+          FROM tbl_approval_hierarchy TAH
+          LEFT JOIN tbl_hierarchy_default_mapping THDM ON TAH.hierarchy_id = THDM.hierarchy_id 
+            AND THDM.hierarchy_type = $3 
+            AND THDM.company_id = $1
+          
+          WHERE TAH.company_id = $1
+            AND TAH.user_id = $2
+            AND TAH.hierarchy_type = $3
             AND is_active = true
-            AND hierarchy_id = ANY($4)
-          ORDER BY created_at DESC
+            AND TAH.hierarchy_id = ANY($4)
+          ORDER BY is_default DESC, created_at DESC
           LIMIT 1`,
           [companyId, initiatedBy, type, mappedHierarchyIds]
         );
@@ -709,13 +740,18 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       } else {
         // No mappings found for this project — fall back to company-wide behavior
         initiatorHierarchy = await t.oneOrNone(
-          `SELECT *
-          FROM tbl_approval_hierarchy
-          WHERE company_id = $1
-            AND user_id = $2
-            AND hierarchy_type = $3
-            AND is_active = true
-          ORDER BY created_at DESC
+          `SELECT TAH.*,
+          CASE WHEN THDM.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_default
+          FROM tbl_approval_hierarchy TAH
+          LEFT JOIN tbl_hierarchy_default_mapping THDM ON TAH.hierarchy_id = THDM.hierarchy_id 
+            AND THDM.hierarchy_type = $3 
+            AND THDM.company_id = $1
+
+          WHERE TAH.company_id = $1
+            AND TAH.user_id = $2
+            AND TAH.hierarchy_type = $3
+            AND TAH.is_active = true
+          ORDER BY is_default DESC, TAH.created_at DESC
           LIMIT 1`,
           [companyId, initiatedBy, type]
         );
@@ -723,13 +759,18 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
     } else {
       // No project specified — original behavior
       initiatorHierarchy = await t.oneOrNone(
-        `SELECT *
-        FROM tbl_approval_hierarchy
-        WHERE company_id = $1
-          AND user_id = $2
-          AND hierarchy_type = $3
-          AND is_active = true
-        ORDER BY created_at DESC
+        `SELECT TAH.*,
+        CASE WHEN THDM.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_default
+        FROM tbl_approval_hierarchy TAH
+        LEFT JOIN tbl_hierarchy_default_mapping THDM ON TAH.hierarchy_id = THDM.hierarchy_id 
+          AND THDM.hierarchy_type = $3 
+          AND THDM.company_id = $1
+
+        WHERE TAH.company_id = $1
+          AND TAH.user_id = $2
+          AND TAH.hierarchy_type = $3
+          AND TAH.is_active = true
+        ORDER BY is_default DESC, TAH.created_at DESC
         LIMIT 1`,
         [companyId, initiatedBy, type]
       );

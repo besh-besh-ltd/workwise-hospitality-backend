@@ -64,4 +64,10 @@ GeneralRoutes.post(
   generalController.setDefaultHierarchy
 );
 
+GeneralRoutes.get(
+  '/hierarchyTypes',
+  passportSignIn,
+  generalController.getHierarchyTypes
+);
+
 export default GeneralRoutes;
