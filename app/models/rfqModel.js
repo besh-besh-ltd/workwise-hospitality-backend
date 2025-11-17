@@ -6052,6 +6052,113 @@ ORDER BY m.created_at;
     });
   },
 
+  /**
+   * Optimized conversation summary fetcher for buyer-vendor queries
+   * Collapses the previous per-user Promise.all loop into a single SQL roundtrip
+   * to keep latency predictable even with thousands of vendors.
+   *
+   * @param {*} rfq_id
+   * @param {*} viewer_id
+   * @param {*} viewer_type
+   * @param {*} user_name optional search string
+   */
+  getQueryParticipantsSummary: async (
+    rfq_id,
+    viewer_id,
+    viewer_type,
+    user_name = ''
+  ) => {
+    const buyerTypes = [2, 8, 9, 10];
+    const params = [rfq_id, viewer_id];
+    let searchParamIndex = null;
+
+    if (user_name) {
+      params.push(user_name);
+      searchParamIndex = params.length;
+    }
+
+    const searchFilter = user_name
+      ? `
+        AND (
+          to_tsvector('english', TU.name) @@ plainto_tsquery('english', $${searchParamIndex}) OR
+          (char_length($${searchParamIndex}) = 1 AND similarity(TU.name, $${searchParamIndex}) > 0) OR
+          (char_length($${searchParamIndex}) > 1 AND similarity(TU.name, $${searchParamIndex}) > 0.1)
+        )
+      `
+      : '';
+
+    const candidateQuery = buyerTypes.includes(viewer_type)
+      ? `
+        SELECT DISTINCT
+          TRPV.user_id AS user_id,
+          TU.name AS user_name,
+          COALESCE(TC.company_name, '') AS company_name
+        FROM tbl_rfq_product_vendors TRPV
+        JOIN tbl_users TU ON TU.id = TRPV.user_id
+        LEFT JOIN tbl_company TC ON TC.id = TU.company_id
+        WHERE TRPV.rfq_id = $1
+        ${searchFilter}
+      `
+      : `
+        SELECT
+          TU.id AS user_id,
+          TU.name AS user_name,
+          COALESCE(TC.company_name, '') AS company_name
+        FROM tbl_rfq TR
+        JOIN tbl_users TU ON TU.id = TR.created_by
+        LEFT JOIN tbl_company TC ON TC.id = TU.company_id
+        WHERE TR.id = $1
+        ${searchFilter}
+      `;
+
+    const query = `
+      WITH candidates AS (
+        ${candidateQuery}
+      ),
+      latest_messages AS (
+        SELECT
+          CASE WHEN m.sender_id = $2 THEN m.receiver_id ELSE m.sender_id END AS other_user_id,
+          m.message_text,
+          m.created_at,
+          ROW_NUMBER() OVER (
+            PARTITION BY CASE WHEN m.sender_id = $2 THEN m.receiver_id ELSE m.sender_id END
+            ORDER BY m.created_at DESC
+          ) AS rn
+        FROM tbl_query_messages m
+        WHERE m.rfq_id = $1
+          AND (m.sender_id = $2 OR m.receiver_id = $2)
+      ),
+      unseen_counts AS (
+        SELECT sender_id AS other_user_id, COUNT(*) AS unseen_count
+        FROM tbl_query_messages
+        WHERE rfq_id = $1
+          AND receiver_id = $2
+          AND is_seen = false
+        GROUP BY sender_id
+      )
+      SELECT
+        c.user_id,
+        c.user_name,
+        c.company_name,
+        COALESCE(u.unseen_count, 0) AS unseen_count,
+        COALESCE(l.message_text, '') AS last_message,
+        l.created_at AS last_message_timestamp
+      FROM candidates c
+      LEFT JOIN unseen_counts u ON u.other_user_id = c.user_id
+      LEFT JOIN latest_messages l ON l.other_user_id = c.user_id AND l.rn = 1
+      ORDER BY
+        CASE WHEN l.created_at IS NULL THEN 1 ELSE 0 END,
+        l.created_at DESC NULLS LAST,
+        c.user_name ASC;
+    `;
+
+    return new Promise((resolve, reject) => {
+      db.query(query, params)
+        .then((result) => resolve(result))
+        .catch((error) => reject(new Error(error)));
+    });
+  },
+
   // Changes by Agnij 2025-05-14 [Add bulk clause insertion]
   addManyClauses: async (rfq_id, rfq_product_id, clauses) => {
     return new Promise(async (resolve, reject) => {

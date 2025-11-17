@@ -10038,6 +10038,44 @@ sendFollowUpEmails: async (req, res) => {
     const sender_type = req.user.user_type;
 
     try {
+      const normalizeReceiverIds = (raw) => {
+        if (!raw) return [];
+
+        let parsed = raw;
+        if (typeof raw === 'string') {
+          try {
+            parsed = JSON.parse(raw);
+          } catch (error) {
+            parsed = raw.split(',').map((id) => id.trim());
+          }
+        }
+
+        if (!Array.isArray(parsed)) {
+          parsed = [parsed];
+        }
+
+        const ids = parsed
+          .map((entry) => {
+            if (typeof entry === 'object' && entry !== null) {
+              return entry.id || entry.user_id || entry.receiver_id;
+            }
+            const parsedId = parseInt(entry, 10);
+            return Number.isNaN(parsedId) ? null : parsedId;
+          })
+          .filter((id) => Number.isInteger(id));
+
+        return Array.from(new Set(ids));
+      };
+
+      const receiverIdList = normalizeReceiverIds(receiver_ids);
+
+      if (!receiverIdList.length) {
+        return res.status(400).json({
+          status: 0,
+          message: 'No valid vendors selected for broadcast.'
+        });
+      }
+
       // Get RFQ and sender details (unchanged)
       const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
       if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
@@ -10046,49 +10084,70 @@ sendFollowUpEmails: async (req, res) => {
       const sender_details = await userModel.user_profile_detail(sender_id);
       const senderDetails = sender_details[0];
 
-      // Prepare messages for bulk insert
-      const messagesData = receiver_ids.map((receiver) => ({
-        rfq_id,
-        sender_id,
-        receiver_id: receiver.id,
-        sender_type,
-        message_text,
-        created_at: new Date()
-      }));
+      const determineBatchSize = (count) => (count <= 2000 ? 1000 : 500);
 
-      // Bulk insert messages
-      const insertedMessages = await rfqModel.insertArray(
-        messagesData,
-        [
-          'rfq_id',
-          'sender_id',
-          'receiver_id',
-          'sender_type',
-          'message_text',
-          'created_at'
-        ],
-        'tbl_query_messages'
-      );
+      const MESSAGE_BATCH_SIZE = determineBatchSize(receiverIdList.length);
+      const insertedMessageIds = [];
+      const messageKeys = [
+        'rfq_id',
+        'sender_id',
+        'receiver_id',
+        'sender_type',
+        'message_text',
+        'created_at'
+      ];
 
-      // Handle file attachments if present
-      if (files && files.length > 0) {
-        const filesData = [];
+      for (let i = 0; i < receiverIdList.length; i += MESSAGE_BATCH_SIZE) {
+        const chunk = receiverIdList.slice(i, i + MESSAGE_BATCH_SIZE);
+        const insertedChunk = await db.tx(async (t) => {
+          const timestamp = new Date();
+          const messagePayload = chunk.map((receiverId) => ({
+            rfq_id,
+            sender_id,
+            receiver_id: receiverId,
+            sender_type,
+            message_text,
+            created_at: timestamp
+          }));
 
-        insertedMessages.forEach((message) => {
-          files.forEach((file) => {
-            filesData.push({
-              message_id: message.id,
-              file_name: file.originalname,
-              file_url: file.location
-            });
-          });
+          const insertedMessages = await rfqModel.insertArray(
+            messagePayload,
+            messageKeys,
+            'tbl_query_messages',
+            t
+          );
+
+          if (files && files.length > 0 && insertedMessages.length > 0) {
+            const filePayload = [];
+            for (const message of insertedMessages) {
+              files.forEach((file) => {
+                filePayload.push({
+                  message_id: message.id,
+                  file_name: file.originalname,
+                  file_url: file.location
+                });
+              });
+            }
+
+            await rfqModel.insertArray(
+              filePayload,
+              ['message_id', 'file_name', 'file_url'],
+              'tbl_query_message_files',
+              t
+            );
+          }
+
+          return insertedMessages;
         });
 
-        await rfqModel.insertArray(
-          filesData,
-          ['message_id', 'file_name', 'file_url'],
-          'tbl_query_message_files'
-        );
+        insertedMessageIds.push(...insertedChunk.map((msg) => msg.id));
+      }
+
+      if (!insertedMessageIds.length) {
+        return res.status(500).json({
+          status: 0,
+          message: 'Failed to broadcast messages.'
+        });
       }
 
       // Get all receiver details in one query
@@ -10270,53 +10329,19 @@ sendFollowUpEmails: async (req, res) => {
     const user_type = req.user.user_type;
 
     try {
-      let users;
-
-      if ([2, 8, 9, 10].includes(user_type)) {
-        const vendorResult = await rfqModel.getVendorsForRfq(rfq_id, user_name);
-        users = vendorResult.map((row) => row.user_id);
-      } else if (user_type === 3) {
-        const buyerResult = await rfqModel.getBuyerForRfq(rfq_id);
-        users = buyerResult.length ? [buyerResult[0].user_id] : [];
-      } else {
+      if (![2, 3, 8, 9, 10].includes(user_type)) {
         return res.status(400).json({
           success: false,
           message: 'Invalid user type'
         });
       }
 
-      const summaries = await Promise.all(
-        users.map(async (other_user_id) => {
-          const summaryResult = await rfqModel.getQueryMessageSummary(
-            rfq_id,
-            user_id,
-            other_user_id
-          );
-          return {
-            user_id: other_user_id,
-            user_name: summaryResult[0]?.user_name || '',
-            company_name: summaryResult[0]?.company_name || '',
-            unseen_count: summaryResult[0]?.unseen_count || 0,
-            last_message: summaryResult[0]?.last_message || '',
-            last_message_timestamp:
-              summaryResult[0]?.last_message_timestamp || null
-          };
-        })
+      const summaries = await rfqModel.getQueryParticipantsSummary(
+        rfq_id,
+        user_id,
+        user_type,
+        user_name
       );
-
-      summaries.sort((a, b) => {
-        if (
-          a.last_message_timestamp === null &&
-          b.last_message_timestamp === null
-        )
-          return 0;
-        if (a.last_message_timestamp === null) return 1;
-        if (b.last_message_timestamp === null) return -1;
-        return (
-          new Date(b.last_message_timestamp) -
-          new Date(a.last_message_timestamp)
-        );
-      });
 
       res
         .status(200)
