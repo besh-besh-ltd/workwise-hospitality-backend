@@ -23,6 +23,62 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
+const normalizeVendorAccessType = (value, fallback = null) => {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  const normalized = value.toString().toLowerCase();
+  if (normalized === 'private') {
+    return 'private';
+  }
+  if (normalized === 'public') {
+    return 'public';
+  }
+  return fallback;
+};
+
+const extractBuyerCompanyIds = (input) => {
+  if (input === undefined) {
+    return { provided: false, ids: [] };
+  }
+
+  if (input === null || input === '') {
+    return { provided: true, ids: [] };
+  }
+
+  let ids = [];
+
+  if (Array.isArray(input)) {
+    ids = input
+      .map((item) => parseInt(item, 10))
+      .filter((item) => !Number.isNaN(item));
+  } else if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input);
+      if (Array.isArray(parsed)) {
+        ids = parsed
+          .map((item) => parseInt(item, 10))
+          .filter((item) => !Number.isNaN(item));
+      } else if (!Number.isNaN(parseInt(parsed, 10))) {
+        ids = [parseInt(parsed, 10)];
+      }
+    } catch (error) {
+      ids = input
+        .split(',')
+        .map((item) => parseInt(item.trim(), 10))
+        .filter((item) => !Number.isNaN(item));
+    }
+  } else {
+    const parsedId = parseInt(input, 10);
+    if (!Number.isNaN(parsedId)) {
+      ids = [parsedId];
+    }
+  }
+
+  ids = [...new Set(ids)];
+  return { provided: true, ids };
+};
+
 const vendorController = {
   vendorList: async (req, res, next) => {
     try {
@@ -114,9 +170,19 @@ const vendorController = {
         total_employees,
         about_vendor_company,
         subscription,
-        spocs
+        spocs,
+        vendor_access_type: vendorAccessTypeRaw,
+        buyer_company_ids: buyerCompanyIdsRaw
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
+
+      const vendorAccessType = normalizeVendorAccessType(
+        vendorAccessTypeRaw,
+        'public'
+      );
+      const { ids: buyerCompanyIds } = extractBuyerCompanyIds(
+        buyerCompanyIdsRaw
+      );
       
       let cleanedMobile = mobile || null;
       if (cleanedMobile) {
@@ -165,7 +231,7 @@ const vendorController = {
         turnover: turn_over || null,
         no_of_employess: total_employees || null,
         website: website || null,
-        is_private:0
+        is_private: vendorAccessType === 'private' ? 1 : 0
       };
 
 
@@ -229,32 +295,90 @@ if (Array.isArray(spocs) && spocs.length > 0) {
 
       addDefaultNotifications(vendorId);
 
-      if (vendorId) {        
+      if (buyerCompanyIds && buyerCompanyIds.length > 0) {
+        await vendorModel.replaceVendorCompanyMappings(
+          vendorId,
+          buyerCompanyIds,
+          createdBy
+        );
+      } else {
+        await vendorModel.replaceVendorCompanyMappings(vendorId, [], createdBy);
+      }
 
-      const emailHeader = ` <h2>Dear ${name} </h2>`
+      if (vendorId) {
+        const companyMappings = await vendorModel.getVendorCompanyMappings(vendorId);
+        const hasCompanyMappings = companyMappings && companyMappings.length > 0;
+
+        if (hasCompanyMappings) {
+          const companyNames = companyMappings
+            .map(m => m.company_name)
+            .filter(Boolean)
+            .join(', ');
           
-      const emailContent = `
-           <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
-             <p>Thank you for registering with us! Your login credentials are as follows:</p>
-                <ul style="list-style-type: none; padding: 0;">
-                 <li><strong>Email:</strong> ${email}</li>
-                 <li><strong>Password:</strong> ${password}</li>
-             </ul>
-             <p>Your account is currently under review. We will notify you as soon as it is approved.</p>
-             <p>Meanwhile, please save this email securely as it contains your login credentials.</p>
-             <p>We appreciate your patience and look forward to having you on board!</p>
-           </div>
-            `
-           const dunamicHtmlTemplate = generateEmailTemplate(emailHeader, emailContent)
+          const vendorName = name || organization_name || 'Vendor';
+          const spocList = await vendorModel.getSpocDetails(vendorId);
 
-          let mailRecipients = {
-            from: Config.webmasterMail,
-            subject: `Work Wise | Registration`,
-            html: dunamicHtmlTemplate,
-            to: email
-        };
+          const headerContent = `<h2>Hello ${vendorName},</h2>`;
 
-        sendMail(mailRecipients);
+          const containerContent = `
+            <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+              <p>
+                We are pleased to inform you that <strong>${companyNames}</strong> has added you as a preferred vendor on the Workwise platform.
+                Going forward, <strong>${companyNames}</strong> will manage their procurement activities through Workwise.
+              </p>
+              <p>
+                To ensure you receive all enquiries promptly, Login to your account.
+                Your login credentials are provided below:
+              </p>
+              <p><strong>Email:</strong> ${email || '[Vendor Email]'}</p>
+              <p><strong>Password:</strong> ${password || '[Temporary Password]'}</p>
+              <p>
+                We recommend changing your password after your first login for security reasons.
+              </p>
+              <a href="https://letsworkwise.com"
+                style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+                 Login
+              </a>    
+              <p style="margin-top:20px; text-align:center;">
+                We look forward to supporting your business growth.
+              </p>
+            </div>`;
+
+          const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+          sendMail({
+            from: `${companyNames} ${Config.masterEmail}`,
+            to: spocList?.length ? spocList.map(spoc => spoc.email) : email,
+            cc: spocList?.length ? email : '',
+            subject: `${companyNames} Added You on Workwise`,
+            html: dynamicHTML
+          });
+        } else {
+          const emailHeader = ` <h2>Dear ${name} </h2>`
+              
+          const emailContent = `
+               <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+                 <p>Thank you for registering with us! Your login credentials are as follows:</p>
+                    <ul style="list-style-type: none; padding: 0;">
+                     <li><strong>Email:</strong> ${email}</li>
+                     <li><strong>Password:</strong> ${password}</li>
+                 </ul>
+                 <p>Your account is currently under review. We will notify you as soon as it is approved.</p>
+                 <p>Meanwhile, please save this email securely as it contains your login credentials.</p>
+                 <p>We appreciate your patience and look forward to having you on board!</p>
+               </div>
+                `
+               const dunamicHtmlTemplate = generateEmailTemplate(emailHeader, emailContent)
+
+              let mailRecipients = {
+                from: Config.webmasterMail,
+                subject: `Work Wise | Registration`,
+                html: dunamicHtmlTemplate,
+                to: email
+            };
+
+            sendMail(mailRecipients);
+        }
 
         res
           .status(200)
@@ -279,12 +403,14 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     try {
       let vendorId = req.params.id;
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
+      const companyDetails = await userModel.getCompanyDetail(vendorId);
       const spocDetails = await vendorModel.getSpocDetails(vendorId);
       res
         .status(200)
         .json({
           status: 1,
           data: vendorDetails,
+          companyDetails: companyDetails || [],
           spocDetails: spocDetails || []
         })
         .end();
@@ -307,10 +433,18 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       let companyDetails = await userModel.getCompanyDetail(vendorId);
       let files = await vendorModel.getFiles(vendorId);
       let spocDetails = await vendorModel.getSpocDetails(vendorId, false); // Show all SPOCs regardless of status
+      let mappedCompanies = await vendorModel.getVendorCompanyMappings(vendorId);
       resObj.spocDetails = spocDetails;
       resObj.vendorDetails = vendorDetails[0];
       resObj.companyDetails = companyDetails[0];
       resObj.files = files || [];
+      resObj.mappedCompanies = mappedCompanies || [];
+      const companyIsPrivate =
+        companyDetails &&
+        companyDetails[0] &&
+        (companyDetails[0].is_private === 1 ||
+          companyDetails[0].is_private === '1');
+      resObj.vendorAccessType = companyIsPrivate ? 'private' : 'public';
       res
         .status(200)
         .json({
@@ -401,12 +535,52 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         total_employees,
         about_vendor_company,
         subscription,
+        vendor_access_type: vendorAccessTypeRaw,
+        buyer_company_ids: buyerCompanyIdsRaw
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
-      // let fileName = req?.file?.filename;
-      // let originalFilename = req?.file?.originalname;
+      const targetAccessType = normalizeVendorAccessType(
+        vendorAccessTypeRaw,
+        null
+      );
+      const {
+        provided: buyerCompanyIdsProvided,
+        ids: buyerCompanyIds
+      } = extractBuyerCompanyIds(buyerCompanyIdsRaw);
 
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
+      let companyDetails = await userModel.getCompanyDetail(vendorId);
+      
+      const existingIsPrivate =
+        companyDetails &&
+        companyDetails[0] &&
+        (companyDetails[0].is_private === 1 ||
+          companyDetails[0].is_private === '1')
+          ? 1
+          : 0;
+      const resolvedIsPrivate =
+        targetAccessType === 'private'
+          ? 1
+          : targetAccessType === 'public'
+            ? 0
+            : existingIsPrivate;
+
+      let existingMappedCompanyIds = [];
+      if (!buyerCompanyIdsProvided) {
+        const existingMappings = await vendorModel.getVendorCompanyMappings(
+          vendorId
+        );
+        existingMappedCompanyIds = existingMappings
+          .map((item) => parseInt(item.company_id, 10))
+          .filter((item) => !Number.isNaN(item));
+      }
+
+      let companyIdsToMap = buyerCompanyIdsProvided
+        ? buyerCompanyIds
+        : existingMappedCompanyIds;
+      companyIdsToMap = companyIdsToMap
+        .map((item) => parseInt(item, 10))
+        .filter((item) => !Number.isNaN(item));
       // let vendorObj = {
       //   name: name || vendorDetails[0].name,
       //   email: email || vendorDetails[0].email,
@@ -445,10 +619,10 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         turnover: turn_over || null,
         no_of_employess: total_employees || null,
         website: website || null,
-        is_private:0
+        is_private: resolvedIsPrivate
       };
 
-      const result = await userModel.update_companyDetails(vendorObj,companyObj);
+      const result = await userModel.update_companyDetails(vendorObj, companyObj);
 
       if (subscription) {
         const condition = `user_id = ${parseInt(
@@ -501,7 +675,11 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         }
       }
 
-      // await productModel.updateVendorDetail(vendorObj, vendorId);
+      await vendorModel.replaceVendorCompanyMappings(
+        vendorId,
+        companyIdsToMap,
+        updatedBy
+      );
 
       // let companyDetails = await userModel.getCompanyDetail(vendorId);
 
@@ -770,6 +948,30 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     });
   }
  },
+  buyerCompanyDropdown: async (req, res, next) => {
+    try {
+      const search = req.query?.search || null;
+      const limitParam = parseInt(req.query?.limit, 10);
+      const limit = Number.isNaN(limitParam) ? 100 : Math.min(Math.max(limitParam, 1), 500);
+      const dropdown = await vendorModel.getBuyerCompanyDropdown(search, limit);
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: dropdown
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   vendorDropdownList: async (req, res, next) => {
     const search = req.query.search;
     try {

@@ -127,20 +127,21 @@ const generalController = {
   createHierarchy: async (req, res) => {
     try {
       const { type, approvers } = req.body;
-      const { company_id } = req.user;
+      const { id, company_id } = req.user;
 
-      const doesExist = await generalModel.doesHierarchyExist(type, company_id, approvers[0]);
-      if (doesExist) {
-        return res.status(400).json({
-          status: 2,
-          message: `A Hierarchy already exist for type \`${type}\` with given initial user!`
-        });
-      }
+      // const doesExist = await generalModel.doesHierarchyExist(type, company_id, approvers[0]);
+      // if (doesExist) {
+      //   return res.status(400).json({
+      //     status: 2,
+      //     message: `A Hierarchy already exist for type \`${type}\` with given initial user!`
+      //   });
+      // }
 
       const createdHierarchy = await generalModel.createHierarchy(
         type,
         approvers,
-        company_id
+        company_id,
+        id
       );
       if (createdHierarchy) return res.status(201).end();
 
@@ -215,6 +216,50 @@ const generalController = {
         message: error.message ?? Config.errorText.value,
         error
       }).end();
+    }
+  },
+  setDefaultHierarchy: async (req, res) => {
+    try {
+      const { hierarchy_id, hierarchy_type } = req.body;
+      const { id, company_id } = req.user;
+
+      const updated = await generalModel.setDefaultHierarchy(
+        hierarchy_id,
+        hierarchy_type,
+        company_id,
+        id
+      );
+
+      if (updated) return res.status(200).end();
+
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while setting hierarchy as default'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message ?? Config.errorText.value,
+        error
+      }).end();
+    }
+  },
+  getHierarchyTypes: async (req, res) => {
+    try {
+      const result = await generalModel.getHierarchyTypes();
+      return res.json({
+        status: 1,
+        data: result,
+      })
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message ?? Config.errorText.value,
+        error
+      }).end();
+      
     }
   }
 };

@@ -56,5 +56,18 @@ GeneralRoutes.post(
   validateBody(hierarchySchema.mapHierarchyToProject),
   generalController.mapHierarchyToProject
 );
+GeneralRoutes.post(
+  '/setDefaultHierarchy',
+  passportSignIn,
+  acl([7]),
+  validateBody(hierarchySchema.setDefaultHierarchy),
+  generalController.setDefaultHierarchy
+);
+
+GeneralRoutes.get(
+  '/hierarchyTypes',
+  passportSignIn,
+  generalController.getHierarchyTypes
+);
 
 export default GeneralRoutes;
