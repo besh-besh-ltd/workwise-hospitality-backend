@@ -167,7 +167,22 @@ const schemas = {
     ptr_track: Joi.string().optional().allow(null).allow(''),
     certifications: Joi.string().optional().allow(null).allow(''),
     brochure: Joi.string().optional().allow(null).allow(''),
-    subscription: Joi.string().optional().allow(null).allow('')
+    subscription: Joi.string().optional().allow(null).allow(''),
+    vendor_access_type: Joi.string()
+      .optional()
+      .valid('public', 'private')
+      .allow(null, ''),
+    buyer_company_ids: Joi.alternatives()
+      .try(
+        Joi.array().items(
+          Joi.number()
+            .integer()
+            .messages({ 'number.base': 'Buyer company id must be a number' })
+        ),
+        Joi.string().allow(null, '')
+      )
+      .optional()
+      .allow(null, '')
   }),
   id: Joi.object().keys({
     id: Joi.string()

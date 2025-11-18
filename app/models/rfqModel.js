@@ -1741,7 +1741,7 @@ WHERE NOT EXISTS (
           JOIN tbl_users tu ON trpv.user_id = tu.id
           LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
               ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
-          JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id
+          JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
           JOIN tbl_company tc ON tu.company_id = tc.id
 
           ${dynamicJoin}
@@ -2244,6 +2244,7 @@ LIMIT 1;`;
             : ``
         }
           WHERE pvt.status = 1 AND pvt.is_deleted = 0 AND pvt.is_review = 0 AND pvt.is_approve = 1
+         AND pvm.status = TRUE AND pvm.is_approved = TRUE
          AND tu.is_deleted = 0 AND tu.status = 1 AND pvt.name = '${search_key}' AND tc.is_private = 0
         ${
           state != ''
@@ -2313,7 +2314,9 @@ LIMIT 1;`;
       `
           : ``
       }
-        WHERE pvt.status = 1 AND pvt.is_deleted = 0 AND pvt.is_review = 0 AND pvt.is_approve = 1  AND tu.is_deleted = 0 AND tu.status = 1 AND pvt.name = '${search_key}' AND tc.is_private = 0
+        WHERE pvt.status = 1 AND pvt.is_deleted = 0 AND pvt.is_review = 0 AND pvt.is_approve = 1
+        AND pvm.status = TRUE AND pvm.is_approved = TRUE
+        AND tu.is_deleted = 0 AND tu.status = 1 AND pvt.name = '${search_key}' AND tc.is_private = 0
       ${
         state != ''
           ? `AND tu.state::int IN (${state.map((s) => s.id).join(',')})`
@@ -4107,7 +4110,8 @@ WHERE row_num_by_name_category = 1
             : ``
         }
 
-        WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
+        WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 
+          AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
           AND tu.is_deleted = 0 AND tu.status = 1 
           AND pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER('${search_key}'))
           AND tu.email IS NOT NULL
@@ -8095,7 +8099,8 @@ ORDER BY m.created_at;
     JOIN 
       tbl_product_variant pv ON pvvm.product_variant_id = pv.id
     WHERE 
-      pvvm.status = 1
+      pvvm.status = TRUE
+      AND pvvm.is_approved = TRUE
       AND u.status = 1
       AND u.is_deleted = 0
       AND ${variant_id ? 'pvvm.product_variant_id = $1' : 'pv.product_id = $1'}
