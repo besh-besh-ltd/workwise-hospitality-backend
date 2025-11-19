@@ -41,7 +41,7 @@ user_book_demo: async (mobile) => {
           const companyFields = [
             "company_name", "profile", "nature_of_business", "type_of_business",
             "turnover", "no_of_employess", "import_export_code", "gstin", "cin", "logo",
-            "established_year", "website", "location", "is_private"
+            "established_year", "website", "location", "is_private", "is_hospitality"
           ];
 
           const companyValues = companyFields.map(field => company_data?.[field] ?? null);

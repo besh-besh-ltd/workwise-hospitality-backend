@@ -2,15 +2,15 @@ import db from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 
 const buyerModel = {
-  getBuyerList: async (limit, offset, organization, verified, name, user_type) => {
+  getBuyerList: async (limit, offset, organization, verified, name, user_type, is_hospitality = null) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (name) {
-        dynamicQuery += `AND name  ILIKE '%${name}%'`;
+        dynamicQuery += `AND u.name  ILIKE '%${name}%'`;
       }
 
       if (organization) {
-        dynamicQuery += `AND organization_name  ILIKE '%${organization}%'`;
+        dynamicQuery += `AND u.organization_name  ILIKE '%${organization}%'`;
       }
       if (verified == 't') {
         dynamicQuery += `AND status = 1 `;
@@ -19,11 +19,17 @@ const buyerModel = {
       }
       
       if (user_type) {
-        dynamicQuery += `AND user_type = ${user_type} `;
+        dynamicQuery += `AND u.user_type = ${user_type} `;
+      }
+
+      if (is_hospitality === 0 || is_hospitality === 1) {
+        dynamicQuery += `AND COALESCE(tc.is_hospitality, 0) = ${is_hospitality} `;
       }
       
       db.any(
-        `SELECT u.*, tc.company_name as company_name
+        `SELECT u.*, 
+          tc.company_name as company_name,
+          COALESCE(tc.is_hospitality, 0) AS company_is_hospitality
         FROM tbl_users u
         LEFT JOIN tbl_company tc ON u.company_id = tc.id
         WHERE (u.user_type = 2 OR u.user_type = 7 OR u.user_type = 8 OR u.user_type = 9 OR u.user_type = 10) 
@@ -40,14 +46,14 @@ const buyerModel = {
         });
     });
   },
-  getBuyerListCount: async (organization, verified, name, user_type) => {
+  getBuyerListCount: async (organization, verified, name, user_type, is_hospitality = null) => {
     return new Promise(function (resolve, reject) {
       let dynamicQuery = '';
       if (name) {
-        dynamicQuery += `AND name  ILIKE '%${name}%'`;
+        dynamicQuery += `AND u.name  ILIKE '%${name}%'`;
       }
       if (organization) {
-        dynamicQuery += `AND organization_name  ILIKE '%${organization}%'`;
+        dynamicQuery += `AND u.organization_name  ILIKE '%${organization}%'`;
       }
       if (verified == 't') {
         dynamicQuery += `AND status = 1 `;
@@ -56,14 +62,19 @@ const buyerModel = {
       }
       
       if (user_type) {
-        dynamicQuery += `AND user_type = ${user_type} `;
+        dynamicQuery += `AND u.user_type = ${user_type} `;
+      }
+
+      if (is_hospitality === 0 || is_hospitality === 1) {
+        dynamicQuery += `AND COALESCE(tc.is_hospitality, 0) = ${is_hospitality} `;
       }
       
       db.one(
-        `SELECT count(id) 
-        FROM tbl_users 
+        `SELECT count(u.id) 
+        FROM tbl_users u
+        LEFT JOIN tbl_company tc ON u.company_id = tc.id
         WHERE is_deleted = 0 
-        AND (user_type = 2 OR user_type = 7 OR user_type = 8 OR user_type = 9 OR user_type = 10) ${dynamicQuery}`
+        AND (u.user_type = 2 OR u.user_type = 7 OR u.user_type = 8 OR u.user_type = 9 OR u.user_type = 10) ${dynamicQuery}`
       )
         .then(function (data) {
           resolve(data);
@@ -92,6 +103,7 @@ const buyerModel = {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT tbl_users.*,tbl_company.profile,tbl_company.nature_of_business,tbl_company.company_name,
+        COALESCE(tbl_company.is_hospitality, 0) AS company_is_hospitality,
         NULL AS profile_image  FROM tbl_users left join tbl_company ON tbl_users.company_id = tbl_company.id  WHERE tbl_users.is_deleted = 0 AND (tbl_users.user_type = 2 OR tbl_users.user_type = 7 OR tbl_users.user_type = 8 OR tbl_users.user_type = 9 OR tbl_users.user_type = 10) AND tbl_users.id = $1`,
         [buyerId]
       )
@@ -184,6 +196,23 @@ const buyerModel = {
         .then(function (data) {
           resolve(data);
         })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  updateBuyerHospitalityFlag: async (buyerId, isHospitality) => {
+    return new Promise(function (resolve, reject) {
+      db.none(
+        `UPDATE tbl_company AS c
+         SET is_hospitality = $1
+         FROM tbl_users AS u
+         WHERE u.id = $2
+           AND c.id = u.company_id`,
+        [isHospitality, buyerId]
+      )
+        .then(() => resolve(true))
         .catch(function (err) {
           let error = new Error(err);
           reject(error);

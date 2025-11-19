@@ -16,6 +16,7 @@ const buyerController = {
   buyerList: async (req, res, next) => {
     try {
       let page, limit, offset, organization, verified, name, user_type;
+      let is_hospitality = null;
       if (req.query.page && req.query.page > 0) {
         page = req.query.page;
         limit = req.query.limit || Config.globalAdminLimit;
@@ -37,19 +38,32 @@ const buyerController = {
         user_type = req.query.user_type;
       }
 
+      if (
+        req.query.is_hospitality !== undefined &&
+        req.query.is_hospitality !== null &&
+        req.query.is_hospitality !== ''
+      ) {
+        const parsedHospitality = parseInt(req.query.is_hospitality);
+        if (!isNaN(parsedHospitality) && (parsedHospitality === 0 || parsedHospitality === 1)) {
+          is_hospitality = parsedHospitality;
+        }
+      }
+
       let buyerList = await buyerModel.getBuyerList(
         limit,
         offset,
         organization,
         verified,
         name,
-        user_type
+        user_type,
+        is_hospitality
       );
       let buyerCount = await buyerModel.getBuyerListCount(
         organization,
         verified,
         name,
-        user_type
+        user_type,
+        is_hospitality
       );
       res
         .status(200)
@@ -222,6 +236,7 @@ const buyerController = {
         organization_name,
         address,
         subscription,
+        is_hospitality
       } = req.body;
 
       const email = req.body.email?.toLowerCase() || '';
@@ -240,6 +255,16 @@ const buyerController = {
       };
       
       await buyerModel.updateBuyer(buyerId, buyerObj);
+
+      let resolvedHospitality = null;
+      if (is_hospitality !== undefined && is_hospitality !== null && is_hospitality !== '') {
+        resolvedHospitality =
+          parseInt(is_hospitality, 10) === 1 ? 1 : 0;
+      }
+
+      if (resolvedHospitality !== null) {
+        await buyerModel.updateBuyerHospitalityFlag(buyerId, resolvedHospitality);
+      }
 
       if (subscription) {
         const condition = `user_id = ${parseInt(

@@ -174,6 +174,7 @@ const schemas = {
     skype: Joi.string().optional().allow('', null),
     image: Joi.string().optional().allow('', null),
     subscription: Joi.string().optional().allow('', null),
+    is_hospitality: Joi.number().valid(0, 1).optional(),
     /* status: Joi.string()
       .required()
       .regex(/^[0|1]$/, 'numeric values only') */
@@ -224,6 +225,7 @@ const schema_posts = {
             max_procurement: Joi.number().min(0).required(),
             max_engineering: Joi.number().min(0).required(),
             max_finance: Joi.number().min(0).required(),
+            is_hospitality: Joi.number().valid(0, 1).optional().default(0)
           });
 
           const result = addBuyerSchema.validate(req.body, { abortEarly: false });
@@ -237,6 +239,10 @@ const schema_posts = {
             let return_err = { status: 2, errors: err_msg };
             return res.status(400).json(return_err);
           } else {
+            req.body = {
+              ...req.body,
+              ...result.value
+            };
             next();
           }
         }
