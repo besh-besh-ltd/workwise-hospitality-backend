@@ -482,6 +482,131 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       throw error;
     }
   },
+  getUserHierarchies: async (type, companyId, userId, projectId, currentUserOnly) => {
+    try {
+      // Initialize an array for query parameters
+      const params = [companyId];
+      let paramIndex = 2; // Start index for dynamic parameters
+
+      // Build the WHERE clause dynamically
+      let whereClauses = ['TAH.company_id = $1'];
+
+      // 1. Filter by hierarchy_type
+      if (type) {
+        whereClauses.push(`TAH.hierarchy_type = $${paramIndex++}`);
+        params.push(type);
+      }
+
+      // 2. Filter by currentUserOnly (requires joining TAH to itself or using a subquery)
+      let currentUserOnlyJoin = '';
+      if (currentUserOnly) {
+        // Use a subquery/EXISTS to check if the current user is part of the hierarchy
+        whereClauses.push(`EXISTS (
+            SELECT 1
+            FROM tbl_approval_hierarchy TAH2
+            WHERE TAH2.hierarchy_id = TAH.hierarchy_id
+              AND TAH2.hierarchy_type = TAH.hierarchy_type
+              AND TAH2.company_id = $1
+              AND TAH2.user_id = $${paramIndex++}
+          )`);
+        params.push(userId);
+      }
+      
+      // Determine the parameter index for the current user's ID in the main SELECT (used for is_current_user)
+      const userIdParamIndex = paramIndex++; 
+      params.push(userId); // Add userId to parameters for the CASE statement
+
+      const whereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+      const raw = await db.any(
+        `
+        SELECT
+          TAH.hierarchy_type,
+          TAH.hierarchy_id,
+          TAH.company_id,
+          TAH.user_id AS id,
+          CASE WHEN TAH.user_id = $${userIdParamIndex} THEN TRUE ELSE FALSE END AS is_current_user,
+          U.name,
+          U.email,
+          TAH.approval_level AS level,
+          TAH.bypass_cap,
+          TAH.is_active AS active,
+          -- New is_default logic: Check project mapping first, then global default
+          CASE
+            WHEN $${paramIndex} IS NOT NULL AND THPM_main.project_id IS NOT NULL THEN TRUE
+            WHEN $${paramIndex} IS NULL AND EXISTS (
+                SELECT 1
+                FROM tbl_hierarchy_default_mapping THDM
+                WHERE THDM.company_id = $1
+                AND THDM.hierarchy_type = TAH.hierarchy_type
+                AND THDM.hierarchy_id = TAH.hierarchy_id
+            ) THEN TRUE
+            ELSE FALSE
+          END AS is_default,
+          COALESCE(
+            (
+              SELECT JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                      'id', THPM.id,
+                      'project_id', THPM.project_id,
+                      'hierarchy_id', THPM.hierarchy_id,
+                      'hierarchy_type', THPM.hierarchy_type
+                  )
+              )
+              FROM tbl_hierarchy_project_mapping THPM
+              WHERE THPM.hierarchy_id = TAH.hierarchy_id AND THPM.hierarchy_type = TAH.hierarchy_type
+            ),
+            '[]'::json
+          ) AS mapped_project_ids,
+          TAH.created_at
+        FROM tbl_approval_hierarchy TAH
+        JOIN tbl_users U ON TAH.user_id = U.id
+        -- Main join for project-specific default check
+        LEFT JOIN tbl_hierarchy_project_mapping THPM_main 
+          ON THPM_main.hierarchy_id = TAH.hierarchy_id
+          AND THPM_main.hierarchy_type = TAH.hierarchy_type
+          AND THPM_main.company_id = $1
+          AND THPM_main.project_id = $${paramIndex}
+        ${whereClause}
+        ORDER BY hierarchy_id, approval_level
+        `,
+        [...params, projectId] // Append projectId to the end for the main JOIN/CASE statement
+      );
+      
+      // Since projectId is used in the main SELECT and JOIN, we append it to the params array last
+      // and update paramIndex to point to its position.
+      const projectIdParamIndex = paramIndex; 
+      params.push(projectId);
+
+
+      const grouped = raw.reduce((acc, row) => {
+        const { hierarchy_type, company_id, hierarchy_id, mapped_project_ids, is_default, ...rest } = row;
+
+        // Use a consistent key for grouping
+        const accKey = `${hierarchy_type}_${hierarchy_id}`;
+
+        if (!acc[accKey]) {
+          acc[accKey] = {
+            hierarchy_type,
+            company_id,
+            hierarchy_id,
+            // mapped_project_ids is duplicated on every row, so we can pick it up once.
+            mapped_project_ids, 
+            is_default,
+            approvers: [],
+          };
+        }
+
+        acc[accKey].approvers.push(rest);
+
+        return acc;
+      }, {});
+
+      return Object.values(grouped);
+    } catch (error) {
+      throw error;
+    }
+  },
   createHierarchy: async (type, approvers, companyId, createdBy) => {
     try {
       const lastHierarchy = await db.oneOrNone(
@@ -653,6 +778,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
     entityId,
     companyId,
     initiatedBy,
+    selected_hierarchy,
     meta = {},
     errors = {},
     t
@@ -699,46 +825,94 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
     let initiatorHierarchy = null;
 
     const projectId = (meta && meta.project_id) ? meta.project_id : null;
+    const doesCompanyHaveHierarchy = await t.oneOrNone(
+      `SELECT id
+      FROM tbl_approval_hierarchy
+      WHERE company_id = $1
+      LIMIT 1`,
+      [companyId]
+    )
 
-    if (projectId) {
-      // 1) Get hierarchy ids mapped to this company + project
-      const mappedRows = await t.any(
-        `SELECT hierarchy_id
-        FROM tbl_hierarchy_project_mapping
-        WHERE company_id = $1 AND project_id = $2 AND hierarchy_type = $3`,
-        [companyId, projectId, type]
+    if(selected_hierarchy) {
+      initiatorHierarchy = await t.oneOrNone(
+        `SELECT TAH.*
+        FROM tbl_approval_hierarchy TAH
+        
+        WHERE TAH.company_id = $1
+          AND TAH.user_id = $2
+          AND TAH.hierarchy_type = $3
+          AND TAH.hierarchy_id = $4
+        LIMIT 1`,
+        [companyId, initiatedBy, type, selected_hierarchy]
       );
 
-      const mappedHierarchyIds = mappedRows && mappedRows.length
-        ? [...new Set(mappedRows.map(r => parseInt(r.hierarchy_id)).filter(Boolean))]
-        : [];
-
-      if (mappedHierarchyIds.length) {
-        // There are mappings - restrict to these hierarchy ids
-        initiatorHierarchy = await t.oneOrNone(
-          `SELECT TAH.*,
-          CASE WHEN THDM.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_default
-          FROM tbl_approval_hierarchy TAH
-          LEFT JOIN tbl_hierarchy_default_mapping THDM ON TAH.hierarchy_id = THDM.hierarchy_id 
-            AND THDM.hierarchy_type = $3 
-            AND THDM.company_id = $1
-          
-          WHERE TAH.company_id = $1
-            AND TAH.user_id = $2
-            AND TAH.hierarchy_type = $3
-            AND is_active = true
-            AND TAH.hierarchy_id = ANY($4)
-          ORDER BY is_default DESC, created_at DESC
-          LIMIT 1`,
-          [companyId, initiatedBy, type, mappedHierarchyIds]
+      if (!initiatorHierarchy) {
+        throw new Error('User is not part of the PO selected approval hierarchy');
+      }
+    } else {
+      if (projectId) {
+        // 1) Get hierarchy ids mapped to this company + project
+        const mappedRows = await t.any(
+          `SELECT hierarchy_id
+          FROM tbl_hierarchy_project_mapping
+          WHERE company_id = $1 AND project_id = $2 AND hierarchy_type = $3`,
+          [companyId, projectId, type]
         );
-
-        // If mappings exist but user is not present in any mapped hierarchy -> throw error
-        if (!initiatorHierarchy) {
-          throw new Error('User is not part of the selected project approval hierarchy');
+  
+        const mappedHierarchyIds = mappedRows && mappedRows.length
+          ? [...new Set(mappedRows.map(r => parseInt(r.hierarchy_id)).filter(Boolean))]
+          : [];
+  
+        if (mappedHierarchyIds.length) {
+          // There are mappings - restrict to these hierarchy ids
+          initiatorHierarchy = await t.oneOrNone(
+            `SELECT TAH.*,
+            CASE WHEN THDM.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_default
+            FROM tbl_approval_hierarchy TAH
+            LEFT JOIN tbl_hierarchy_default_mapping THDM ON TAH.hierarchy_id = THDM.hierarchy_id 
+              AND THDM.hierarchy_type = $3 
+              AND THDM.company_id = $1
+            
+            WHERE TAH.company_id = $1
+              AND TAH.user_id = $2
+              AND TAH.hierarchy_type = $3
+              AND is_active = true
+              AND TAH.hierarchy_id = ANY($4)
+            ORDER BY created_at DESC
+            LIMIT 1`,
+            [companyId, initiatedBy, type, mappedHierarchyIds]
+          );
+  
+          // If mappings exist but user is not present in any mapped hierarchy -> throw error
+          if (!initiatorHierarchy) {
+            throw new Error('User is not part of the selected project approval hierarchy');
+          }
+        } else {
+          // No mappings found for this project — fall back to company-wide behavior
+          initiatorHierarchy = await t.oneOrNone(
+            `SELECT TAH.*,
+            CASE WHEN THDM.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_default
+            FROM tbl_approval_hierarchy TAH
+            LEFT JOIN tbl_hierarchy_default_mapping THDM ON TAH.hierarchy_id = THDM.hierarchy_id 
+              AND THDM.hierarchy_type = $3 
+              AND THDM.company_id = $1
+  
+            WHERE TAH.company_id = $1
+              AND TAH.user_id = $2
+              AND TAH.hierarchy_type = $3
+              AND TAH.is_active = true
+              AND is_default
+            ORDER BY TAH.created_at DESC
+            LIMIT 1`,
+            [companyId, initiatedBy, type]
+          );
+  
+          if (!initiatorHierarchy) {
+            throw new Error('User is not part of the company\'s default approval hierarchy');
+          }
         }
-      } else {
-        // No mappings found for this project — fall back to company-wide behavior
+      } else if(!projectId && doesCompanyHaveHierarchy) {
+        // No project specified — original behavior
         initiatorHierarchy = await t.oneOrNone(
           `SELECT TAH.*,
           CASE WHEN THDM.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_default
@@ -746,7 +920,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
           LEFT JOIN tbl_hierarchy_default_mapping THDM ON TAH.hierarchy_id = THDM.hierarchy_id 
             AND THDM.hierarchy_type = $3 
             AND THDM.company_id = $1
-
+  
           WHERE TAH.company_id = $1
             AND TAH.user_id = $2
             AND TAH.hierarchy_type = $3
@@ -755,25 +929,11 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
           LIMIT 1`,
           [companyId, initiatedBy, type]
         );
+  
+        if (!initiatorHierarchy) {
+          throw new Error('User is not part of the company\'s approval hierarchy');
+        }
       }
-    } else {
-      // No project specified — original behavior
-      initiatorHierarchy = await t.oneOrNone(
-        `SELECT TAH.*,
-        CASE WHEN THDM.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_default
-        FROM tbl_approval_hierarchy TAH
-        LEFT JOIN tbl_hierarchy_default_mapping THDM ON TAH.hierarchy_id = THDM.hierarchy_id 
-          AND THDM.hierarchy_type = $3 
-          AND THDM.company_id = $1
-
-        WHERE TAH.company_id = $1
-          AND TAH.user_id = $2
-          AND TAH.hierarchy_type = $3
-          AND TAH.is_active = true
-        ORDER BY is_default DESC, TAH.created_at DESC
-        LIMIT 1`,
-        [companyId, initiatedBy, type]
-      );
     }
 
     // If there's no hierarchy at all (company has no hierarchies) -> auto-approve (your existing flow)

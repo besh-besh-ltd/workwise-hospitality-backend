@@ -159,7 +159,7 @@ function calculatePricing(items) {
   };
 }
 
-export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, t) => {
+export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, selected_hierarchy, t) => {
     try {
       const { rfq_product_id, quantity, unit_price, finalized_vendor_id } =
         product_info;
@@ -193,7 +193,8 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_val
               quote_id = array_append(quote_id, $2),
               total_value = total_value + $3,
               quantity = quantity + $4,
-              unit_price = unit_price + $5
+              unit_price = unit_price + $5,
+              selected_hierarchy = $7
 
             WHERE id = $6
             RETURNING id`,
@@ -203,7 +204,8 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_val
             total_value,
             quantity,
             unit_price,
-            existing_po_id
+            existing_po_id,
+            selected_hierarchy
           ]
         );
       } else {
@@ -212,9 +214,9 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_val
         po = await t.one(
           `INSERT INTO tbl_rfq_purchase_order (
             rfq_id, project_id, quote_id, po_number, total_value, rfq_product_id, quantity,
-            unit_price, finalized_vendor_id, initiated_by, status
+            unit_price, finalized_vendor_id, initiated_by, status, selected_hierarchy
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
           RETURNING id`,
           [
             rfq_id,
@@ -227,7 +229,8 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_val
             unit_price,
             finalized_vendor_id,
             initiated_by,
-            PO_STATUSES.DRAFT
+            PO_STATUSES.DRAFT,
+            selected_hierarchy
           ]
         );
       }
@@ -316,6 +319,7 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
         purchaseOrder.id,
         initiator.company_id,
         initiator.id,
+        purchaseOrder.selected_hierarchy,
         meta,
         {
           exist: `You cannot change the finalized vendor because an approved Purchase Order already exists for them.`

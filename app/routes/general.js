@@ -70,4 +70,10 @@ GeneralRoutes.get(
   generalController.getHierarchyTypes
 );
 
+GeneralRoutes.get(
+  '/getUserHierarchies',
+  passportSignIn,
+  generalController.getUserHierarchies
+);
+
 export default GeneralRoutes;
