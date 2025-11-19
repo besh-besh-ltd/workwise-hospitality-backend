@@ -3702,6 +3702,7 @@ publishProfileReviews: async (reviewObj) => {
             vp.row_num,
             vp.buyer_email,
             vp.vendor_email,
+            vp.vendor_id,
             COALESCE(buyer.name, 'Unknown') AS buyer_name,
             COALESCE(vendor.name, 'Unknown') AS vendor_name,
             COALESCE(buyer.email, vp.buyer_email) AS buyer_email_display,
