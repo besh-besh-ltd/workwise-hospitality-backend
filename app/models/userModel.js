@@ -3657,7 +3657,7 @@ publishProfileReviews: async (reviewObj) => {
             SELECT id AS buyer_id, email AS buyer_email, company_id
             FROM tbl_users 
             WHERE email = ANY($4) 
-            AND user_type IN (2, 8) 
+            AND user_type IN (2, 7, 8, 9, 10) 
             AND is_deleted = 0
           ),
           vendors AS (
@@ -3702,6 +3702,7 @@ publishProfileReviews: async (reviewObj) => {
             vp.row_num,
             vp.buyer_email,
             vp.vendor_email,
+            vp.vendor_id,
             COALESCE(buyer.name, 'Unknown') AS buyer_name,
             COALESCE(vendor.name, 'Unknown') AS vendor_name,
             COALESCE(buyer.email, vp.buyer_email) AS buyer_email_display,

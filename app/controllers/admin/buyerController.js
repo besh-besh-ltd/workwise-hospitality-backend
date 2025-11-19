@@ -2,13 +2,15 @@ import buyerModel from '../../models/buyerModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import subscriptionModel from '../../models/subscriptionModel.js';
 import Config from '../../config/app.config.js';
-import { logError } from '../../helper/common.js';
+import { logError, sendMail } from '../../helper/common.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
 import userModel from '../../models/userModel.js';
+import vendorModel from '../../models/vendorModel.js';
 import xlsx from 'xlsx';
 import fs from 'fs';
 import moment from 'moment';
+import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -504,6 +506,80 @@ const buyerController = {
       // Get the admin's user ID who is performing the bulk mapping
       const adminUserId = req.user.id;
       const result = await userModel.bulkMapBuyersToVendors(emailPairs, adminUserId);
+
+      // Send emails to vendors who were successfully mapped
+      if (result.mappedEntries && result.mappedEntries.length > 0) {
+        // Group mappings by vendor_id to send one email per vendor
+        const vendorMap = new Map();
+        result.mappedEntries.forEach(entry => {
+          if (entry.vendor_id) {
+            if (!vendorMap.has(entry.vendor_id)) {
+              vendorMap.set(entry.vendor_id, {
+                vendor_id: entry.vendor_id,
+                vendor_email: entry.vendor_email_display,
+                vendor_name: entry.vendor_name
+              });
+            }
+          }
+        });
+
+        // Send email to each unique vendor
+        for (const [vendorId, vendorInfo] of vendorMap) {
+          try {
+            const companyMappings = await vendorModel.getVendorCompanyMappings(vendorId);
+            const hasCompanyMappings = companyMappings && companyMappings.length > 0;
+
+            if (hasCompanyMappings) {
+              const companyNames = companyMappings
+                .map(m => m.company_name)
+                .filter(Boolean)
+                .join(', ');
+              
+              const vendorName = vendorInfo.vendor_name || 'Vendor';
+              const vendorEmail = vendorInfo.vendor_email;
+              const spocList = await vendorModel.getSpocDetails(vendorId);
+
+              const headerContent = `<h2>Hello ${vendorName},</h2>`;
+
+              const containerContent = `
+                <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+                  <p>
+                    We are pleased to inform you that <strong>${companyNames}</strong> has added you as a preferred vendor on the Workwise platform.
+                    Going forward, <strong>${companyNames}</strong> will manage their procurement activities through Workwise.
+                  </p>
+                  <p>
+                    To ensure you receive all enquiries promptly, Login to your account.
+                    Your login credentials are provided below:
+                  </p>
+                  <p><strong>Email:</strong> ${vendorEmail || '[Vendor Email]'}</p>
+                  <p>
+                    We recommend changing your password after your first login for security reasons.
+                  </p>
+                  <a href="https://letsworkwise.com"
+                    style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+                     Login
+                  </a>    
+                  <p style="margin-top:20px; text-align:center;">
+                    We look forward to supporting your business growth.
+                  </p>
+                </div>`;
+
+              const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
+
+              sendMail({
+                from: `${companyNames} ${Config.masterEmail}`,
+                to: spocList?.length ? spocList.map(spoc => spoc.email) : vendorEmail,
+                cc: spocList?.length ? vendorEmail : '',
+                subject: `${companyNames} Added You on Workwise`,
+                html: dynamicHTML
+              });
+            }
+          } catch (emailError) {
+            // Log email error but don't fail the entire bulk mapping operation
+            logError(emailError);
+          }
+        }
+      }
 
       res.status(200).json({
         status: 1,
