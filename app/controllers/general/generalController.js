@@ -103,14 +103,26 @@ const generalController = {
       const { type } = req.query;
       const { company_id } = req.user;
 
-      if (type && !AVAILABLE_HIERARCHY_TYPES[type]) {
-        return res.status(400).json({
-          status: 2,
-          message: `Provided hierarchy type \`${type}\` is not supported!`
-        });
-      }
-
       const hierarchies = await generalModel.getHierarchies(type, company_id);
+      return res.json({
+        status: 1,
+        data: hierarchies
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message ?? Config.errorText.value,
+        error
+      });
+    }
+  },
+  getUserHierarchies: async (req, res) => {
+    try {
+      const { type, project_id, currentUserOnly = false } = req.query;
+      const { id, company_id } = req.user;
+
+      const hierarchies = await generalModel.getUserHierarchies(type, company_id, id, project_id, currentUserOnly);
       return res.json({
         status: 1,
         data: hierarchies
@@ -259,8 +271,8 @@ const generalController = {
         message: error.message ?? Config.errorText.value,
         error
       }).end();
-      
     }
   }
 };
+
 export default generalController;

@@ -50,7 +50,7 @@ export const getPODetails = async (req, res) => {
 
 export const draftPO = async (poInfo, user, txn) => {
   try {
-    const { rfq_id, project_id, total_value, product_info, quote_id, existing_po_id } = poInfo;
+    const { rfq_id, project_id, total_value, product_info, quote_id, existing_po_id, selected_hierarchy } = poInfo;
     const { id: initiated_by, company_id } = user;
 
     if (!rfq_id || !product_info || !product_info.rfq_product_id) {
@@ -67,6 +67,7 @@ export const draftPO = async (poInfo, user, txn) => {
       company_id,
       user,
       existing_po_id,
+      selected_hierarchy,
       txn
     );
 
