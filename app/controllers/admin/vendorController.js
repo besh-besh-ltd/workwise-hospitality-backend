@@ -101,6 +101,7 @@ const vendorController = {
       dateFrom = req.query.date_from || null;
       dateTo = req.query.date_to || null;
       created_by = req.query.created_by || null;
+      const is_hospitality = req.query.is_hospitality !== undefined ? parseInt(req.query.is_hospitality) : null;
 
       let vendorList = await vendorModel.getVendorList(
         limit,
@@ -112,7 +113,8 @@ const vendorController = {
         status,
         dateFrom,
         dateTo,
-        created_by
+        created_by,
+        is_hospitality
       );
 
       let vendorCount = await vendorModel.getVendorListCount(
@@ -123,7 +125,8 @@ const vendorController = {
         status,
         dateFrom,
         dateTo,
-        created_by
+        created_by,
+        is_hospitality
       );
 
       res
@@ -172,7 +175,8 @@ const vendorController = {
         subscription,
         spocs,
         vendor_access_type: vendorAccessTypeRaw,
-        buyer_company_ids: buyerCompanyIdsRaw
+        buyer_company_ids: buyerCompanyIdsRaw,
+        is_hospitality
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
 
@@ -231,7 +235,8 @@ const vendorController = {
         turnover: turn_over || null,
         no_of_employess: total_employees || null,
         website: website || null,
-        is_private: vendorAccessType === 'private' ? 1 : 0
+        is_private: vendorAccessType === 'private' ? 1 : 0,
+        is_hospitality: is_hospitality === 1 || is_hospitality === '1' || is_hospitality === true || is_hospitality === 'true' ? 1 : 0
       };
 
 
@@ -474,7 +479,13 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         companyDetails[0] &&
         (companyDetails[0].is_private === 1 ||
           companyDetails[0].is_private === '1');
+      const companyIsHospitality =
+        companyDetails &&
+        companyDetails[0] &&
+        (companyDetails[0].is_hospitality === 1 ||
+          companyDetails[0].is_hospitality === '1');
       resObj.vendorAccessType = companyIsPrivate ? 'private' : 'public';
+      resObj.isHospitality = companyIsHospitality ? 1 : 0;
       res
         .status(200)
         .json({
@@ -566,7 +577,8 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         about_vendor_company,
         subscription,
         vendor_access_type: vendorAccessTypeRaw,
-        buyer_company_ids: buyerCompanyIdsRaw
+        buyer_company_ids: buyerCompanyIdsRaw,
+        is_hospitality
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
       const targetAccessType = normalizeVendorAccessType(
@@ -577,10 +589,52 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         provided: buyerCompanyIdsProvided,
         ids: buyerCompanyIds
       } = extractBuyerCompanyIds(buyerCompanyIdsRaw);
-      // let fileName = req?.file?.filename;
-      // let originalFilename = req?.file?.originalname;
 
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
+      let companyDetails = await userModel.getCompanyDetail(vendorId);
+      
+      const existingIsPrivate =
+        companyDetails &&
+        companyDetails[0] &&
+        (companyDetails[0].is_private === 1 ||
+          companyDetails[0].is_private === '1')
+          ? 1
+          : 0;
+      const resolvedIsPrivate =
+        targetAccessType === 'private'
+          ? 1
+          : targetAccessType === 'public'
+            ? 0
+            : existingIsPrivate;
+
+      const existingIsHospitality =
+        companyDetails &&
+        companyDetails[0] &&
+        (companyDetails[0].is_hospitality === 1 ||
+          companyDetails[0].is_hospitality === '1')
+          ? 1
+          : 0;
+      const resolvedIsHospitality =
+        is_hospitality !== undefined && is_hospitality !== null && is_hospitality !== ''
+          ? (is_hospitality === 1 || is_hospitality === '1' || is_hospitality === true || is_hospitality === 'true' ? 1 : 0)
+          : existingIsHospitality;
+
+      let existingMappedCompanyIds = [];
+      if (!buyerCompanyIdsProvided) {
+        const existingMappings = await vendorModel.getVendorCompanyMappings(
+          vendorId
+        );
+        existingMappedCompanyIds = existingMappings
+          .map((item) => parseInt(item.company_id, 10))
+          .filter((item) => !Number.isNaN(item));
+      }
+
+      let companyIdsToMap = buyerCompanyIdsProvided
+        ? buyerCompanyIds
+        : existingMappedCompanyIds;
+      companyIdsToMap = companyIdsToMap
+        .map((item) => parseInt(item, 10))
+        .filter((item) => !Number.isNaN(item));
       // let vendorObj = {
       //   name: name || vendorDetails[0].name,
       //   email: email || vendorDetails[0].email,
@@ -619,7 +673,8 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         turnover: turn_over || null,
         no_of_employess: total_employees || null,
         website: website || null,
-        is_private: resolvedIsPrivate
+        is_private: resolvedIsPrivate,
+        is_hospitality: resolvedIsHospitality
       };
 
       const result = await userModel.update_companyDetails(vendorObj, companyObj);

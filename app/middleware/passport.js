@@ -74,16 +74,27 @@ passport.use(
           }
           // console.log('Case 22', isMatch);
           const isMatchAdminApprove = user_dtls.status;
+          const isHospitalityVendor =
+            user_dtls.is_hospitality === 1 ||
+            user_dtls.is_hospitality === '1';
+          const sanitizedUser = { ...user_dtls };
+          delete sanitizedUser.password;
           if (!isMatch) {
             return done(null, { id: 0, err_msg: 'Password not matched' });
           } else {
             if (isMatchAdminApprove != '1') {
+              if (isHospitalityVendor) {
+                return done(null, {
+                  ...sanitizedUser,
+                  login_status: 'hospitality_pending'
+                });
+              }
               return done(null, {
                 id: 0,
                 err_msg: 'User not approved by admin'
               });
             } else {
-              return done(null, user_dtls);
+              return done(null, sanitizedUser);
             }
           }
         } else {

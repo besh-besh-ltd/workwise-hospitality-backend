@@ -276,7 +276,14 @@ user_book_demo: async (mobile) => {
   getUserAuthEmail: async (email) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `select * from tbl_users where email = $1 AND user_type != '1' AND is_deleted = '0'`,
+        `SELECT 
+            tbl_users.*, 
+            COALESCE(tbl_company.is_hospitality, 0) AS is_hospitality
+          FROM tbl_users 
+          LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
+          WHERE tbl_users.email = $1 
+            AND tbl_users.user_type != '1' 
+            AND tbl_users.is_deleted = '0'`,
         [email]
       )
         .then(function (data) {
@@ -838,6 +845,7 @@ user_book_demo: async (mobile) => {
                   tbl_company.logo,
                   tbl_company.website,
                   tbl_company.established_year,
+                  COALESCE(tbl_company.is_hospitality, 0) AS is_hospitality,
                   tbl_location_states.state_name, 
                   tbl_location_cities.city_name  
               FROM tbl_users 
@@ -857,6 +865,7 @@ user_book_demo: async (mobile) => {
                   tbl_company.turnover,
                   tbl_company.no_of_employess,
                   tbl_company.import_export_code,
+                  COALESCE(tbl_company.is_hospitality, 0) AS is_hospitality,
                   tbl_company.location,
                   admin_user.mobile AS company_mobile,
                   tbl_company.gstin,

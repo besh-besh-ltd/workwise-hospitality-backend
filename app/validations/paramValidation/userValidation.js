@@ -509,6 +509,11 @@ const schemas = {
     sub_id: Joi.number().required(),
     coupon_code: Joi.string().trim().optional().allow(null, '')
   }),
+  hospitality_subscription_payment: Joi.object().keys({
+    user_key: Joi.string().required(),
+    sub_id: Joi.number().required(),
+    coupon_code: Joi.string().trim().optional().allow(null, '')
+  }),
   coupon_check: Joi.object().keys({
     coupon_code: Joi.string().trim().required(),
     sub_id: Joi.number().required()

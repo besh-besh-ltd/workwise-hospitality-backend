@@ -4109,7 +4109,13 @@ WHERE row_num_by_name_category = 1
 
         WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
           AND tu.is_deleted = 0 AND tu.status = 1 
-          AND pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER('${search_key}'))
+          ${
+            category_id && category_id != ''
+              ? `AND p.id IN (SELECT product_id FROM tbl_product_categories WHERE category_id = ${category_id})`
+              : search_key && search_key != ''
+              ? `AND pv.id IN (SELECT id FROM tbl_product_variant _pv WHERE LOWER(_pv.name) = LOWER('${search_key}'))`
+              : ``
+          }
           AND tu.email IS NOT NULL
 
           ${

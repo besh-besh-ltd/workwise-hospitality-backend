@@ -182,6 +182,13 @@ const schemas = {
         Joi.string().allow(null, '')
       )
       .optional()
+      .allow(null, ''),
+    is_hospitality: Joi.alternatives()
+      .try(
+        Joi.number().valid(0, 1),
+        Joi.string().valid('0', '1', 'true', 'false')
+      )
+      .optional()
       .allow(null, '')
   }),
   id: Joi.object().keys({

@@ -233,7 +233,7 @@ const UsersController = {
     try {
        const { name, email, mobile, organization_name, user_type, password, address, country, whatsapp, 
         state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
-       import_export_code,established_year,website, is_private, status} = req.body;
+       import_export_code,established_year,website, is_private, status, is_hospitality} = req.body;
 
        const current_user = req.user || null
 
@@ -270,6 +270,9 @@ const UsersController = {
         website: website || null,
         location: address || null,
         is_private: is_private || 0,
+        is_hospitality: is_hospitality !== undefined && is_hospitality !== null
+          ? (parseInt(is_hospitality) === 1 ? 1 : 0)
+          : 0,
        };
 
       //  Register company, this model register detail in both tables tbl_user and tbl_company
@@ -883,6 +886,25 @@ get_company_users: async (req, res, next) => {
       let err_msg = 'Invalid email or password or OTP not verified';
       if (req.user.err_msg && req.user.err_msg != '') {
         err_msg = req.user.err_msg;
+      }
+      const isHospitalityPending =
+        req.user && req.user.login_status === 'hospitality_pending';
+      if (isHospitalityPending) {
+        const hospitalityUser = {
+          user_key: cryptr.encrypt(req.user.id),
+          name: req.user.name,
+          email: req.user.email,
+          mobile: req.user.mobile,
+          organization_name: req.user.organization_name
+        };
+        return res
+          .status(200)
+          .json({
+            status: 5,
+            message: 'Hospitality payment required',
+            hospitality_user: hospitalityUser
+          })
+          .end();
       }
       const { fcm_id } = req.body;
       if (req.user && req.user.id > 0 && req.query?.conform) {
@@ -2498,6 +2520,176 @@ publish_profile_reviews: async (req, res, next) => {
         .end();
     }
   },
+  hospitalitySubscriptionPayment: async (req, res, next) => {
+    try {
+      const { user_key, sub_id, coupon_code } = req.body;
+      if (!user_key || !sub_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Missing required data'
+        });
+      }
+
+      let decryptedUserId;
+      try {
+        decryptedUserId = parseInt(cryptr.decrypt(user_key), 10);
+      } catch (error) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Invalid user token'
+        });
+      }
+
+      const userRecords = await userModel.getUserById(decryptedUserId);
+      if (!userRecords || userRecords.length === 0) {
+        return res.status(400).json({
+          status: 2,
+          message: 'User not found'
+        });
+      }
+      const userRecord = userRecords[0];
+      if (userRecord.user_type !== 3) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Only vendors can purchase hospitality subscriptions'
+        });
+      }
+      if (userRecord.status === 1) {
+        return res.status(400).json({
+          status: 2,
+          message: 'User already approved'
+        });
+      }
+
+      const companyDetails = await userModel.getCompanyDetail(decryptedUserId);
+      const isHospitalityVendor =
+        companyDetails &&
+        companyDetails[0] &&
+        (companyDetails[0].is_hospitality === 1 ||
+          companyDetails[0].is_hospitality === '1');
+      if (!isHospitalityVendor) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Hospitality subscription not applicable'
+        });
+      }
+
+      let subscriptionDetails =
+        await subscriptionModel.subscriptionIdExist(sub_id, userRecord.user_type);
+      let offer = [];
+      let checkOffers = await subscriptionModel.subscriptionOfferExist(sub_id);
+      if (checkOffers.length > 0) {
+        let today = dateFormat(new Date(), 'yyyy-mm-dd');
+        offer = await subscriptionModel.getOfferDetails(
+          checkOffers[0].offer_id,
+          today
+        );
+      }
+
+      const startDate = Moment();
+      const billingCycleMonths = subscriptionDetails[0].duration;
+      const endDate = startDate
+        .clone()
+        .add(billingCycleMonths, 'months')
+        .subtract(1, 'day');
+      const renewDate = startDate.clone().add(billingCycleMonths, 'months');
+
+      let UserSubscriptionObj = {
+        user_id: decryptedUserId,
+        plan_id: sub_id,
+        status: 4,
+        start_date: startDate.format('YYYY-MM-DD'),
+        end_date: endDate.format('YYYY-MM-DD'),
+        renew_date: renewDate.format('YYYY-MM-DD')
+      };
+
+      let createUserSubscription =
+        await subscriptionModel.createUserSubscription(UserSubscriptionObj);
+
+      let newSubscriptionPrice = subscriptionDetails[0].price;
+      let offerDiscountedPrice = 0;
+      if (offer.length > 0 && offer[0].is_percentage) {
+        offerDiscountedPrice = newSubscriptionPrice * (offer[0].price / 100);
+        newSubscriptionPrice = Math.round(
+          newSubscriptionPrice - offerDiscountedPrice
+        );
+      } else if (offer.length > 0 && !offer[0].is_percentage) {
+        offerDiscountedPrice = offer[0].price;
+        newSubscriptionPrice = Math.round(
+          newSubscriptionPrice - offerDiscountedPrice
+        );
+      }
+
+      let couponDiscountedPrice = 0;
+      if (coupon_code) {
+        let today = dateFormat(new Date(), 'yyyy-mm-dd');
+        let couponDetails = await couponModel.checkCouponCodeExists(
+          coupon_code,
+          today,
+          userRecord.user_type
+        );
+        if (couponDetails.length > 0 && couponDetails[0].is_percentage) {
+          couponDiscountedPrice =
+            newSubscriptionPrice * couponDetails[0].discount_amount;
+          newSubscriptionPrice = Math.round(
+            newSubscriptionPrice - couponDiscountedPrice
+          );
+        } else if (
+          couponDetails.length > 0 &&
+          !couponDetails[0].is_percentage
+        ) {
+          couponDiscountedPrice = couponDetails[0].discount_amount;
+          newSubscriptionPrice = Math.round(
+            newSubscriptionPrice - couponDiscountedPrice
+          );
+        }
+      }
+
+      let digit = convertSixDigit(createUserSubscription.id);
+      const razorpay = new Razorpay({
+        key_id: Config.razorpay.razorpay_key,
+        key_secret: Config.razorpay.razorpay_secret
+      });
+      const options = {
+        amount: newSubscriptionPrice * 100,
+        currency: 'INR',
+        receipt: `PAY${digit}`,
+        payment_capture: 1
+      };
+      let response = await razorpay.orders.create(options);
+
+      let subscriptionPaymentObj = {
+        user_id: decryptedUserId,
+        user_subscriptions_id: createUserSubscription.id,
+        status: 0,
+        amount: newSubscriptionPrice,
+        before_payment_response: response,
+        order_id: response.id,
+        receipt: `PAY${digit}`,
+        subscription_charge: subscriptionDetails[0].price,
+        offer_price: offerDiscountedPrice,
+        coupon_price: couponDiscountedPrice
+      };
+      await subscriptionModel.createSubscriptionPayment(subscriptionPaymentObj);
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: response.id
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   test_razorpay_webhook: async (req, res) => {
     try {
       let subscriptionPaymentObj = {
@@ -2557,6 +2749,26 @@ publish_profile_reviews: async (req, res, next) => {
             userSubscription[0].plan_id,
             paymentUpdate[0].user_id
           );
+
+          // 3-way check: If hospitality vendor and payment successful, approve vendor
+          const userId = paymentUpdate[0].user_id;
+          const userDetails = await userModel.userinfo(userId);
+          if (userDetails && userDetails.length > 0) {
+            const user = userDetails[0];
+            // Check if user is vendor (user_type = 3) and status is 0 (unapproved)
+            if (user.user_type === 3 && user.status === 0) {
+              // Check if company is hospitality
+              const companyDetails = await userModel.getCompanyDetail(userId);
+              if (companyDetails && companyDetails.length > 0) {
+                const company = companyDetails[0];
+                if (company.is_hospitality === 1 || company.is_hospitality === '1') {
+                  // Approve the hospitality vendor
+                  await userModel.updateUserAccount(userId, { status: 1 });
+                }
+              }
+            }
+          }
+
           res
             .status(200)
             .json({
@@ -2637,7 +2849,25 @@ publish_profile_reviews: async (req, res, next) => {
             paymentUpdate[0].user_id
           );
 
-          let userDetails = await userModel.userinfo(paymentUpdate[0].user_id);
+          // 3-way check: If hospitality vendor and payment successful, approve vendor
+          const userId = paymentUpdate[0].user_id;
+          const userDetails = await userModel.userinfo(userId);
+          
+          if (userDetails && userDetails.length > 0) {
+            const user = userDetails[0];
+            // Check if user is vendor (user_type = 3) and status is 0 (unapproved)
+            if (user.user_type === 3 && user.status === 0) {
+              // Check if company is hospitality
+              const companyDetails = await userModel.getCompanyDetail(userId);
+              if (companyDetails && companyDetails.length > 0) {
+                const company = companyDetails[0];
+                if (company.is_hospitality === 1 || company.is_hospitality === '1') {
+                  // Approve the hospitality vendor
+                  await userModel.updateUserAccount(userId, { status: 1 });
+                }
+              }
+            }
+          }
           let planDetails = await subscriptionModel.getSubscriptionDetails(
             userSubscription[0].plan_id
           );

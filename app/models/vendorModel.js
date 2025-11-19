@@ -10,7 +10,7 @@ const vendorModel = {
     return str.replace(/'/g, "''");
   },
 
-  getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by) => {
+  getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by, is_hospitality = null) => {
     return new Promise(function (resolve, reject) {
       // Escape input strings to prevent SQL injection and syntax errors
       const escapedName = name ? vendorModel._escapeSqlString(name) : null;
@@ -56,6 +56,9 @@ const vendorModel = {
       if (created_by) {
         dynamicQuery += `AND tbl_users.created_by = ${created_by}`;
       }
+      if (is_hospitality !== null && is_hospitality !== undefined) {
+        dynamicQuery += `AND tbl_company.is_hospitality = ${is_hospitality}`;
+      }
 
       let orderByClause = 'ORDER BY tbl_users.created_at DESC';
       if (name || organization) {
@@ -97,6 +100,7 @@ const vendorModel = {
           tbl_users.email,
           tbl_users.mobile,
           COALESCE(tbl_company.company_name, tbl_users.organization_name) AS organization_name,
+          COALESCE(tbl_company.is_hospitality, 0) AS is_hospitality,
           tbl_users.status,
           tbl_users.created_at,
           tbl_users.updated_at,
@@ -146,7 +150,7 @@ const vendorModel = {
     });
   },
  
-getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo, created_by) => {
+getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo, created_by, is_hospitality = null) => {
   return new Promise(function (resolve, reject) {
     // Escape input strings
     const escapedName = name ? vendorModel._escapeSqlString(name) : null;
@@ -191,6 +195,9 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     }
     if (created_by) {
       dynamicQuery += `AND tbl_users.created_by = ${created_by}`;
+    }
+    if (is_hospitality !== null && is_hospitality !== undefined) {
+      dynamicQuery += `AND tbl_company.is_hospitality = ${is_hospitality}`;
     }
 
     const query = `
