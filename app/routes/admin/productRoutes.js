@@ -262,6 +262,12 @@ productRoutes.put(
   productController.approveMapping
 );
 
+// Delete/unmap variant-vendor mapping
+productRoutes.delete(
+  '/variant-mappings/:id',
+  passportSignIn,
+  productController.deleteVariantVendorMapping
+);
 
 /**  used to make changes in variant and vendor mapping
  *  currently we only update, vendor approve by list and prodict make after mapping vendor and variant
