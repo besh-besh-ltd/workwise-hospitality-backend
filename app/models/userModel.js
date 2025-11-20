@@ -1015,6 +1015,8 @@ user_book_demo: async (mobile) => {
                   JOIN tbl_product_variant V ON V.id = M.product_variant_id
 
                   WHERE M.vendor_id = tbl_users.id
+                  AND M.is_approved = TRUE
+                  AND M.status = TRUE
                 ) AS "product_list",
 
        CASE
@@ -3648,20 +3650,23 @@ publishProfileReviews: async (reviewObj) => {
       }
 
       try {
-        const buyerEmails = [...new Set(emailPairs.map(item => item.buyerEmail))];
-        const vendorEmails = [...new Set(emailPairs.map(item => item.vendorEmail))];
+        const buyerEmailList = emailPairs.map(item => item.buyerEmail);
+        const vendorEmailList = emailPairs.map(item => item.vendorEmail);
+        const rowNumbers = emailPairs.map(item => item.row);
+        const buyerEmails = [...new Set(buyerEmailList)];
+        const vendorEmails = [...new Set(vendorEmailList)];
         
         const query = `
           WITH email_pairs AS (
-            SELECT unnest($1::text[]) AS buyer_email, 
-                   unnest($2::text[]) AS vendor_email,
-                   unnest($3::int[]) AS row_num
+            SELECT *
+            FROM unnest($1::text[], $2::text[], $3::int[]) 
+            AS ep(buyer_email, vendor_email, row_num)
           ),
           buyers AS (
             SELECT id AS buyer_id, email AS buyer_email, company_id
             FROM tbl_users 
             WHERE email = ANY($4) 
-            AND user_type IN (2, 8) 
+            AND user_type IN (2, 7, 8, 9, 10) 
             AND is_deleted = 0
           ),
           vendors AS (
@@ -3692,7 +3697,7 @@ publishProfileReviews: async (reviewObj) => {
           ),
           new_mappings AS (
             INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id, created_date, updated_date)
-            SELECT ${adminUserId}, vp.vendor_id, vp.company_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            SELECT $6, vp.vendor_id, vp.company_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             FROM valid_pairs vp
             WHERE vp.buyer_id IS NOT NULL 
             AND vp.vendor_id IS NOT NULL
@@ -3706,6 +3711,7 @@ publishProfileReviews: async (reviewObj) => {
             vp.row_num,
             vp.buyer_email,
             vp.vendor_email,
+            vp.vendor_id,
             COALESCE(buyer.name, 'Unknown') AS buyer_name,
             COALESCE(vendor.name, 'Unknown') AS vendor_name,
             COALESCE(buyer.email, vp.buyer_email) AS buyer_email_display,
@@ -3729,11 +3735,12 @@ publishProfileReviews: async (reviewObj) => {
         `;
         
         const result = await db.any(query, [
+          buyerEmailList,
+          vendorEmailList,
+          rowNumbers,
           buyerEmails,
           vendorEmails,
-          emailPairs.map((_, index) => index + 1),
-          buyerEmails,
-          vendorEmails
+          adminUserId
         ]);
 
         const successfulMappings = result.filter(r => r.is_success).length;

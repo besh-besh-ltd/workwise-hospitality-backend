@@ -321,7 +321,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
   getVendorDetails: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT tbl_users.*,tbl_company.profile,tbl_company.nature_of_business,tbl_company.no_of_employess,tbl_company.gstin,tbl_company.import_export_code,
+        `SELECT tbl_users.*,tbl_company.company_name,tbl_company.profile,tbl_company.nature_of_business,tbl_company.type_of_business,tbl_company.no_of_employess,tbl_company.gstin,tbl_company.import_export_code,tbl_company.cin,tbl_company.website,tbl_company.turnover,tbl_company.established_year,tbl_company.logo,
        ARRAY
           (SELECT json_build_object('ptr',tbl_files.new_file_name,'ptr_url', CASE
           WHEN tbl_files.new_file_name IS NULL THEN
