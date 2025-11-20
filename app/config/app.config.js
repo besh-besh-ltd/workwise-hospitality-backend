@@ -42,6 +42,9 @@ const globalAdminLimit = process.env.LIMIT || 20;
 const sgst = process.env.SGST || 0.0015;
 const cgst = process.env.CGST || 0.0015;
 const app_version = process.env.APP_VERSION || 1.0;
+const recaptchaSecret = process.env.RECAPTCHA_SECRET_KEY || "";
+const recaptchaMinScore =
+  Number(process.env.RECAPTCHA_MIN_SCORE || 0.5) || 0.5;
 
 // Sentry configuration
 const sentryDsn = process.env.SENTRY_DSN || "";
@@ -331,6 +334,10 @@ const config = {
     razorpay_key: process.env.RAZORPAY_KEY,
     razorpay_secret: process.env.RAZORPAY_SECRET,
     razorpay_signature: process.env.RAZORPAY_SIGNATURE,
+  },
+  recaptcha: {
+    secretKey: recaptchaSecret,
+    minScore: recaptchaMinScore,
   },
   sentry: {
     dsn: sentryDsn,
