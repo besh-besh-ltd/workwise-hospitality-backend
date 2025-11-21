@@ -10,12 +10,15 @@ const vendorModel = {
     return str.replace(/'/g, "''");
   },
 
-  getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by) => {
-    return new Promise(function (resolve, reject) {
+ getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by, source, subscription_plan, isPrivate) => {    
+  return new Promise(function (resolve, reject) {
       // Escape input strings to prevent SQL injection and syntax errors
       const escapedName = name ? vendorModel._escapeSqlString(name) : null;
       const escapedOrganization = organization ? vendorModel._escapeSqlString(organization) : null;
       const escapedEmail = email ? vendorModel._escapeSqlString(email) : null;
+      const escapedSource = source ? vendorModel._escapeSqlString(source) : null;
+      const escapedPlan = subscription_plan ? vendorModel._escapeSqlString(subscription_plan) : null;
+      const escapedIsPrivate = isPrivate ? vendorModel._escapeSqlString(isPrivate) : null;
       
       let dynamicQuery = '';
       if (name) {
@@ -37,24 +40,35 @@ const vendorModel = {
           )`;
       }
       if (verified == 't') {
-        dynamicQuery += `AND tbl_users.status = 1 `;
+        dynamicQuery += ` AND tbl_users.status = 1`;
       } else if (verified == 'f') {
-        dynamicQuery += `AND tbl_users.status = 0 `;
+        dynamicQuery += ` AND tbl_users.status = 0`;
       }
       if (email) {
-        dynamicQuery += `AND tbl_users.email ILIKE '%${escapedEmail}%'`;
+        dynamicQuery += ` AND tbl_users.email ILIKE '%${escapedEmail}%'`;
       }
       if (status !== undefined && status !== null) {
-        dynamicQuery += `AND tbl_users.status = ${status}`;
+        dynamicQuery += ` AND tbl_users.status = '${status}'`;
       }
       if (dateFrom) {
-        dynamicQuery += `AND tbl_users.created_at >= '${dateFrom}'`;
+        dynamicQuery += ` AND tbl_users.created_at >= '${dateFrom}'`;
       }
       if (dateTo) {
-        dynamicQuery += `AND tbl_users.created_at <= '${dateTo} 23:59:59'`;
+        dynamicQuery += ` AND tbl_users.created_at <= '${dateTo} 23:59:59'`;
       }
       if (created_by) {
-        dynamicQuery += `AND tbl_users.created_by = ${created_by}`;
+        dynamicQuery += ` AND tbl_users.created_by = '${created_by}'`;
+      }
+      if(source === 'unknown' || source === 'null'){
+        dynamicQuery += ` AND tbl_company.source IS NULL`;
+      } else if(source){
+        dynamicQuery += ` AND tbl_company.source = '${escapedSource}'`;
+      }
+      if(subscription_plan){
+        dynamicQuery += ` AND tbl_company.subscription_plan = '${escapedPlan}'`;
+      }
+      if(isPrivate){
+        dynamicQuery += ` AND tbl_company.is_private = '${escapedIsPrivate}'`;
       }
 
       let orderByClause = 'ORDER BY tbl_users.created_at DESC';
@@ -100,6 +114,9 @@ const vendorModel = {
           tbl_users.status,
           tbl_users.created_at,
           tbl_users.updated_at,
+          tbl_company.source,
+          tbl_users.subscription_plan_id,
+          tbl_company.is_private,
           creator.name AS created_by_name,
           updater.name AS updated_by_name,
           trr.reject_reason,
@@ -128,7 +145,7 @@ const vendorModel = {
         LEFT JOIN tbl_reject_reason trr ON tbl_users.reject_reason_id = trr.id
         LEFT JOIN tbl_users creator ON tbl_users.created_by = creator.id
         LEFT JOIN tbl_users updater ON tbl_users.updated_by = updater.id
-        WHERE tbl_users.is_deleted = 0 AND tbl_users.user_type = 3 ${dynamicQuery}
+        WHERE tbl_users.is_deleted = '0' AND tbl_users.user_type = '3' ${dynamicQuery}
         ${orderByClause}
         LIMIT $1 OFFSET $2`
 
@@ -146,12 +163,15 @@ const vendorModel = {
     });
   },
  
-getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo, created_by) => {
-  return new Promise(function (resolve, reject) {
+getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo, created_by, source, subscription_plan, is_private) => {
+    return new Promise(function (resolve, reject) {
     // Escape input strings
     const escapedName = name ? vendorModel._escapeSqlString(name) : null;
     const escapedOrganization = organization ? vendorModel._escapeSqlString(organization) : null;
     const escapedEmail = email ? vendorModel._escapeSqlString(email) : null;
+    const escapedSource = source ? vendorModel._escapeSqlString(source) : null;
+    const escapedPlan = subscription_plan ? vendorModel._escapeSqlString(subscription_plan) : null;
+    const escapedIsPrivate = is_private ? vendorModel._escapeSqlString(is_private) : null;
     
     let dynamicQuery = 'AND tbl_users.user_type = 3 ';
     if (name) {
@@ -173,24 +193,35 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         )`;
     }
     if (verified == 't') {
-      dynamicQuery += `AND tbl_users.status = 1 `;
+      dynamicQuery += ` AND tbl_users.status = 1`;
     } else if (verified == 'f') {
-      dynamicQuery += `AND tbl_users.status = 0 `;
+      dynamicQuery += ` AND tbl_users.status = 0`;
     }
     if (email) {
-      dynamicQuery += `AND tbl_users.email ILIKE '%${escapedEmail}%'`;
+      dynamicQuery += ` AND tbl_users.email ILIKE '%${escapedEmail}%'`;
     }
     if (status !== undefined && status !== null) {
-      dynamicQuery += `AND tbl_users.status = ${status}`;
+      dynamicQuery += ` AND tbl_users.status = '${status}'`;
     }
     if (dateFrom) {
-      dynamicQuery += `AND tbl_users.created_at >= '${dateFrom}'`;
+      dynamicQuery += ` AND tbl_users.created_at >= '${dateFrom}'`;
     }
     if (dateTo) {
-      dynamicQuery += `AND tbl_users.created_at <= '${dateTo} 23:59:59'`;
+      dynamicQuery += ` AND tbl_users.created_at <= '${dateTo} 23:59:59'`;
     }
     if (created_by) {
-      dynamicQuery += `AND tbl_users.created_by = ${created_by}`;
+      dynamicQuery += ` AND tbl_users.created_by = '${created_by}'`;
+    }
+    if(source === 'unknown' || source === 'null'){
+        dynamicQuery += ` AND tbl_company.source IS NULL`;
+      } else if(source){
+        dynamicQuery += ` AND tbl_company.source = '${escapedSource}'`;
+      }
+    if(subscription_plan){
+        dynamicQuery += ` AND tbl_company.subscription_plan = '${escapedPlan}'`;
+    }
+    if(is_private){
+        dynamicQuery += ` AND tbl_company.is_private = '${escapedIsPrivate}'`;
     }
 
     const query = `
