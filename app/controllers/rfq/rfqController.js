@@ -6759,6 +6759,99 @@ const rfqController = {
     }
   },
 
+  bulkSearchVendorsByCategory: async (req, res, next) => {
+    try {
+      const {
+        category_id,
+        approved_by_id = [],
+        state = [],
+        city = [],
+        country = [],
+        turnOver = null,
+        vendorType = [],
+        prevWorkedWith = null,
+        vendor_name = '',
+        myVendorType = null,
+        productMakes = [],
+        page = 1,
+        limit = 20
+      } = req.body;
+
+      if (!category_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'category_id is required'
+        });
+      }
+
+      const user_id = req.is_verified ? req.user?.id : null;
+      const hasSubscription = req.is_verified && req.user?.subscription_plan_id;
+
+      const result = await rfqModel.bulkSearchVendorsByCategory(
+        category_id,
+        approved_by_id,
+        state,
+        city,
+        country,
+        turnOver,
+        vendorType,
+        prevWorkedWith,
+        vendor_name,
+        myVendorType,
+        productMakes,
+        page,
+        limit,
+        user_id
+      );
+
+      if (!req.is_verified) {
+        return res.status(200).json({
+          status: 1,
+          data: result.data.slice(0, 2),
+          total: result.total,
+          page: result.page,
+          limit: result.limit,
+          totalPages: result.totalPages,
+          logged_In: false,
+          subscription: false
+        });
+      }
+
+      if (!hasSubscription) {
+        return res.status(200).json({
+          status: 1,
+          data: result.data.slice(0, 1),
+          total: result.total,
+          page: result.page,
+          limit: result.limit,
+          totalPages: result.totalPages,
+          logged_In: true,
+          subscription: false
+        });
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: result.data,
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        totalPages: result.totalPages,
+        logged_In: true,
+        subscription: true
+      });
+
+    } catch (error) {
+      console.error('Error in bulkSearchVendorsByCategory:', error);
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'An error occurred while searching for vendors',
+        error: error.message
+      });
+    }
+  },
+
   /**
    * 
    * @last_changes - mukul 28-08-2025 without login senf 2 vendors details
