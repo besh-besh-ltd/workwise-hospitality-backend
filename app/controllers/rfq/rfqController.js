@@ -621,7 +621,7 @@ const sendFollowUpEmailsService = async (payload) => {
 const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auction, location) => {
   try {
     // Validate email addresses
-    let organization_name = user?.organization_name || user?.name;
+    let organization_name = user?.company_name || user?.organization_name || user?.name;
     const buyerUserId = user?.id || null;
     const buyerEmail = user?.email || "";
 
@@ -729,7 +729,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
 
       const dynamicHTML = generateEmailTemplate(headerContent, containerContent, buyerUserId);
 
-      const org_name = user_details[0].organization_name || user_details[0].name || "";
+      const org_name = user_details[0].company_name || user_details[0].organization_name || user_details[0].name || "";
       let mailRecipients = {
         from: `${organization_name} ${Config.masterEmail}`,
         subject: `New RFQ Opportunity from ${organization_name}`,
@@ -1083,14 +1083,14 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
   const spocList = await vendorModel.getSpocDetails(user.id)
 
   // Extract vendor details from user object
-  const vendorName = user.organization_name || user?.name;
+  const vendorName = user.company_name || user.organization_name || user?.name;
 
   // Email content
   const headerContent = `<h2>Hello ${vendorName || ''},</h2>`;
 
   const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
       <p style="padding-bottom: 3px;">
-                   Your updated quotation for #${rfq_no} has been successfully shared with ${buyerDetails[0]?.organization_name || buyerDetails[0]?.name || 'the buyer'}. This update keeps you competitive and responsive to buyer requirements.      </p>
+                   Your updated quotation for #${rfq_no} has been successfully shared with ${buyerDetails[0]?.company_name || buyerDetails[0]?.organization_name || buyerDetails[0]?.name || 'the buyer'}. This update keeps you competitive and responsive to buyer requirements.      </p>
                    </p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0]?.token || ""}"
@@ -1158,7 +1158,7 @@ const sendRevisedQuotationEmailToBuyer = async (buyerDetails, quoteItemChanges, 
   
 
   // Extract vendor details from user object
-  const vendorName = user.organization_name || user?.name;
+  const vendorName = user.company_name || user.organization_name || user?.name;
 
 // Group product names and count occurrences (variants)
 const productCountMap = quoteItemChanges
@@ -1181,7 +1181,7 @@ const formattedProducts = countedProducts.length > 0
   
 
   // Email content
-  const headerContent = `<h2>Hello ${buyerDetails[0]?.organization_name || ''},</h2>`;
+  const headerContent = `<h2>Hello ${buyerDetails[0]?.company_name || buyerDetails[0]?.organization_name || ''},</h2>`;
 
   const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
       <p style="padding-bottom: 3px;">
@@ -1225,7 +1225,7 @@ const formattedProducts = countedProducts.length > 0
     rfqID:rfq_id,
     projectName:"-",
     vendorName:vendorName,
-    buyerName:buyerDetails[0]?.name
+    buyerName:buyerDetails[0]?.company_name || buyerDetails[0]?.organization_name || buyerDetails[0]?.name
   }
 
   // await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(payload);
@@ -1236,11 +1236,14 @@ const formattedProducts = countedProducts.length > 0
 const sendQuoteNotificationToVendor = async (req) => {
   // send mail to vendors
   const {rfq_id, rfq_no} = req.body
-  const { name, email, id, organization_name, mobile } = req.user;
+  const { name, email, id, organization_name, company_name, mobile } = req.user;
   const token = await rfqModel.getVendorRfqToken(id, rfq_id);
   const BuyerDetails = await rfqModel.getRFQCreatedBy(rfq_id) 
   
-  const headerContent = `<h2>Hello ${organization_name || name},</h2>`;
+  const vendorCompanyName = company_name || organization_name || name;
+  const buyerCompanyName = BuyerDetails[0]?.company_name || BuyerDetails[0]?.organization_name || '';
+  
+  const headerContent = `<h2>Hello ${vendorCompanyName},</h2>`;
 
   const containerContent = ` 
   <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
@@ -1249,7 +1252,7 @@ const sendQuoteNotificationToVendor = async (req) => {
         ? 'Your regret concern has been sent to the buyer.'
         : `<div>
             <p>Thank you for submitting your quotation for <strong>#${rfq_no}</strong>. 
-               We've shared it with <strong>${BuyerDetails[0]?.organization_name || ''}</strong>, who will review it and get back to you soon.</p>
+               We've shared it with <strong>${buyerCompanyName}</strong>, who will review it and get back to you soon.</p>
               <p><strong>Next Steps:</strong> Keep an eye out for any buyer queries or updates, 
                and be ready to discuss terms to secure the order.</p>
 
@@ -1289,6 +1292,7 @@ const sendQuoteNotificationToVendor = async (req) => {
 
   // send message to spoc
   // here we have to implement await Promise.allSettled(promises); for better perfomance
+  const vendorCompanyNameForWhatsApp = user.company_name || user.organization_name || user.name;
   spocList.map(async (spoc) => {
     if (spoc.mobile) {
     const whatsappPayload ={
@@ -1296,7 +1300,7 @@ const sendQuoteNotificationToVendor = async (req) => {
       token:token[0].token,
       rfq_id:rfq_id,
       message:message,
-      name:organization_name || name
+      name:vendorCompanyNameForWhatsApp
     }
   
     await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
@@ -1309,14 +1313,15 @@ const sendQuoteNotificationToVendor = async (req) => {
     token:token[0].token,
     rfq_id:rfq_id,
     message:message,
-    name:organization_name || name
+    name:vendorCompanyName
   }  
   await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
 
 };
 
 const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
-  const { name, email, organization_name } = buyerInfo;
+  const { name, email, organization_name, company_name } = buyerInfo;
+  const buyerCompanyName = company_name || organization_name || name;
 
   // Define email content based on user role
   const headerContent = `<div>
@@ -1382,7 +1387,7 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
     const spocList = vendor.spocs;
 
     let mailRecipients = {
-      from: `${organization_name ?? name} ${Config.masterEmail}`,
+      from: `${buyerCompanyName} ${Config.masterEmail}`,
       subject: `RFQ Marked as Closed for #${rfqItem.rfq_no}`,
       html: dynamicHTMLVendor
     };
@@ -1402,6 +1407,7 @@ const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) =>
   if (!vendor.token) return;
 
   const vendorName =
+    vendor.company_name ||
     vendor.organization_name ||
     vendor.vendor_name ||
     vendor.name ||
@@ -1580,7 +1586,7 @@ const hydrateReminderTokens = async (vendors, rfq_id) => {
 
 
 const sendQuoteNotificationEmail = async (req) => {
-  let { name,  organization_name } = req.user;
+  let { name,  organization_name, company_name } = req.user;
   let { rfq_id, rfq_no, products } = req.body;
 
     let u = await rfqModel.getRFQCreatedBy(rfq_id);
@@ -1603,8 +1609,10 @@ const sendQuoteNotificationEmail = async (req) => {
         productEntries += ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>`;
       }
 
+      const vendorCompanyName = company_name || organization_name || name;
+
       // Email header content
-      const headerContent = `<h2>Hello ${buyer.organization_name || ''},</h2>`;
+      const headerContent = `<h2>Hello ${buyer.company_name || buyer.organization_name || ''},</h2>`;
 
       // Email body content
       const containerContent = `
@@ -1612,7 +1620,7 @@ const sendQuoteNotificationEmail = async (req) => {
         <p>
           You've received a new quotation! Check out the details below:
         </p>
-        <p><strong>Vendor:</strong> ${organization_name || name}</p>
+        <p><strong>Vendor:</strong> ${vendorCompanyName}</p>
         <p><strong>Products:</strong> ${productEntries || '-'}</p>
 
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
@@ -1630,7 +1638,7 @@ const sendQuoteNotificationEmail = async (req) => {
 
       // Preparing the email details
       let mailRecipients = {
-        from: `${organization_name || name} ${Config.masterEmail}`, // sender address
+        from: `${vendorCompanyName} ${Config.masterEmail}`, // sender address
         //  organization_name : Config.webmasterMail,
         // to: buyer.email,
         subject: `New Quotation Received for Your RFQ ${rfq_no}`,
@@ -5801,8 +5809,8 @@ const rfqController = {
               rfqNumber: rfq_no,
               rfqID: rfq_id,
               projectName: projectDetails[0]?.name || '-',
-              vendorName: req?.user?.name,
-              buyerName: buyerDetails[0]?.name
+              vendorName: req?.user?.company_name || req?.user?.organization_name || req?.user?.name,
+              buyerName: buyerDetails[0]?.company_name || buyerDetails[0]?.organization_name || buyerDetails[0]?.name
             };
 
             // await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(
@@ -9974,10 +9982,11 @@ sendFollowUpEmails: async (req, res) => {
         const receiverDetails = receiver_details[0];
         const spocList = await vendorModel.getSpocDetails(receiver_id);
 
+        const receiverCompanyName = receiverDetails?.company_name || receiverDetails?.organization_name || receiverDetails?.name;
+        const senderCompanyName = senderDetails?.company_name || senderDetails?.organization_name || senderDetails?.name;
+        
         const headerContent = ` <div>
-           <h2>Hello ${
-             receiverDetails?.organization_name || receiverDetails?.name
-           } </h2>
+           <h2>Hello ${receiverCompanyName} </h2>
            </div>`;
 
         const containerContent = `
@@ -9985,11 +9994,8 @@ sendFollowUpEmails: async (req, res) => {
                 <div style="font-size:16px;">
                   ${
                     sender_type == 2
-                      ? `${
-                          senderDetails?.organization_name ||
-                          senderDetails?.name
-                        } has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`
-                      : `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}`
+                      ? `${senderCompanyName} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`
+                      : `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderCompanyName}`
                   }
                 </div>
                               
@@ -10027,7 +10033,7 @@ sendFollowUpEmails: async (req, res) => {
             : `Buyer Query for #${rfqNumber} – Your Response Needed`;
 
         const mailRecipients = {
-          from: `${senderDetails?.organization_name || senderDetails?.name} ${
+          from: `${senderCompanyName} ${
             Config.masterEmail
           }`,
           subject: emailSubject,
@@ -10046,11 +10052,11 @@ sendFollowUpEmails: async (req, res) => {
         const notificationData = {
           type: 'New Message',
           title: 'New RFQ Message Received',
-          message: `You have received a new message from ${senderDetails.name}.`,
+          message: `You have received a new message from ${senderCompanyName}.`,
           additional_data: { user_type: receiverDetails.user_type }
         };
         const payload = {
-          title: `Hello ${receiverDetails.name}`,
+          title: `Hello ${receiverCompanyName}`,
           body: 'You have a new message regarding an RFQ.'
         };
         const ss = JSON.parse(receiverDetails.endpoint);
