@@ -292,8 +292,10 @@ export const getMilestonesController = async (req, res) => {
 
 export const createMilestoneController = async (req, res) => {
   try {
-    const milestone = await createMilestone(req.body, req.user);
-    if(milestone) await scheduleMilestoneReminder(milestone);
+    let milestone = await createMilestone(req.body, req.user);
+    if(milestone) {
+      await scheduleMilestoneReminder(milestone)
+    };
 
     return res.status(201).json({ success: true, data: milestone });
   } catch (error) {

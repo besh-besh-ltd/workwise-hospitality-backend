@@ -4,6 +4,7 @@ import { sendMail } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 
 export const sendReminderMail = async (milestone, userList) => {
+  console.log("SENDING MILESTONE MAIL");
   return new Promise(async (resolve, reject) => {
     try {
       const {
@@ -14,7 +15,7 @@ export const sendReminderMail = async (milestone, userList) => {
         rfq_id,
       } = milestone;
 
-      const headerContent = `<h2>📌 Upcoming Payment Milestone Reminder</h2>`;
+      const headerContent = `<h2>Upcoming Payment Milestone Reminder</h2>`;
 
       const containerContent = `
       <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
@@ -35,7 +36,7 @@ export const sendReminderMail = async (milestone, userList) => {
           Please ensure the necessary actions are taken on or before the due date.
         </p>
 
-        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/payment-milestones?rfq_id=${rfq_id}&po_id=${po_id}" 
+        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po_id=${po_id}" 
            style="background-color: #3B82F6; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; display: inline-block; font-weight: 600; margin: 20px auto;">
           View Milestone in Dashboard
         </a>
@@ -50,14 +51,18 @@ export const sendReminderMail = async (milestone, userList) => {
 
       let recipients = {
         from: config.webmasterMail,
-        subject: `⏰ Reminder: Milestone "${milestone_name}" is due soon`,
+        subject: `Reminder: Milestone "${milestone_name}" is due soon`,
         html: htmlContent
       };
 
-      const emails = userList?.map(async u => {
-        const user = await userModel.getUserById(u);
-        return user.email;
-      }).filter(Boolean);
+      const emails = []
+
+      for (let user of userList) {
+        let u = await userModel.getUserById(user);
+        u = u?.[0];
+
+        if(u && u.email) emails.push(u.email);
+      }
       
       if (emails && emails.length > 0) {
         recipients.to = emails;

@@ -494,12 +494,15 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
                   SELECT JSON_AGG(
                       JSON_BUILD_OBJECT(
                           'id', TPV.id,
-                          'name', TPV.name
+                          'name', TPV.name,
+                          'quantity', TPOP.quantity,
+                          'unit', TPOP.unit
                       )
                   )
-                  FROM tbl_rfq_products TRP
+                  FROM tbl_purchase_order_product TPOP
+                  JOIN tbl_rfq_products TRP ON TPOP.rfq_product_id = TRP.id
                   JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
-                  WHERE TRP.id = ANY(po.rfq_product_id)
+                  WHERE TPOP.purchase_order_id = po.id
                 ),
                 '[]'::json
               ) AS product_details,
@@ -599,19 +602,25 @@ export const getPODetailsById = async (po_id, user_id) => {
               ) AS logged_in_user,
               TU.name AS initiated_by_name,
               CASE WHEN trx.current_approver_id = $2 THEN TRUE ELSE FALSE END AS is_approver,
-              COALESCE(
+               COALESCE(
                 (
                   SELECT JSON_AGG(
                       JSON_BUILD_OBJECT(
                           'id', TPV.id,
                           'name', TPV.name,
                           'product_id', TPV.product_id,
-                          'rfq_item_id', TRP.id
+                          'rfq_item_id', TRP.id,
+                          'quantity', TPOP.quantity,
+                          'unit', TPOP.unit,
+                          'unit_price', TPOP.unit_price,
+                          'charges_meta', TPOP.charges_meta,
+                          'total_price', TPOP.total_price
                       )
                   )
-                  FROM tbl_rfq_products TRP
+                  FROM tbl_purchase_order_product TPOP
+                  JOIN tbl_rfq_products TRP ON TPOP.rfq_product_id = TRP.id
                   JOIN tbl_product_variant TPV ON TRP.product_variant_id = TPV.id
-                  WHERE TRP.id = ANY(po.rfq_product_id)
+                  WHERE TPOP.purchase_order_id = po.id
                 ),
                 '[]'::json
               ) AS product_details,

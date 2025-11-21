@@ -15,7 +15,7 @@ export const scheduleMilestoneReminder = async (milestone) => {
 
   const job = cron.schedule(cronExpression, async () => {
     await sendReminderMail(milestone, reminder_users);
-    await db.none(`UPDATE tbl_payment_milestone SET is_reminded = true status = 'achieved' WHERE id = $1`, [id]);
+    await db.none(`UPDATE tbl_payment_milestone SET is_reminded = true, status = 'achieved' WHERE id = $1`, [id]);
     job.stop();
     cronRegistry.delete(id);
   });
