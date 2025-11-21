@@ -3680,7 +3680,7 @@ publish_profile_reviews: async (req, res, next) => {
           is_private: 1
         }];
         const buyer = await userModel.getUserById(buyerId);
-        const buyerName = buyer[0].name;
+        const buyerName = buyer[0]?.company_name || buyer[0]?.organization_name || buyer[0]?.name;
         let orgChar = userDetails[0].vendor_name.match(/[a-zA-Z]/g)?.join('').toLowerCase();
         let capitalizeFourOrganizationLetter = `${orgChar.charAt(0).toUpperCase()}${orgChar.substring(1, 4)}`;
         let password = `${capitalizeFourOrganizationLetter}@${userDetails[0].mobile.substring(
