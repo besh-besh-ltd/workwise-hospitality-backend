@@ -6955,6 +6955,18 @@ const rfqController = {
             productMakes
           );
 
+          // ---- Return 404 if nothing found ----
+         if (!vendorResult || vendorResult.length === 0) {
+           return res.status(404).json({
+             status: 0,
+             data: [],
+             total: 0,
+             message: 'No vendor found matching the criteria',
+             logged_In: true,
+             subscription: !!user.subscription_plan_id
+           });
+         }
+
           let items_to_show = 1;
           let total_items = vendorResult.length;
           let rest_items = 0;
@@ -11353,6 +11365,14 @@ getClauses: async (req, res) => {
       if (!variantVendorResults || variantVendorResults.length === 0) {
         return res.status(200).json([]).end();
       }
+
+          // If empty → return 404
+       if (!variantVendorResults || variantVendorResults.length === 0) {
+         return res.status(404).json({
+           status: 2,
+           message: "No vendors found for this variant."
+         });
+       }
 
       res.status(200).json(variantVendorResults).end();
     } catch (error) {
