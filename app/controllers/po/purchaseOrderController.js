@@ -2,7 +2,7 @@ import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
 import { sendApprovalNotification } from "./purchaseOrderEmails.js";
@@ -46,6 +46,28 @@ export const getPODetails = async (req, res) => {
             error
         });
     }
+};
+
+export const updatePO = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+    const { changes } = req.body;
+
+    const updated = await handleUpdatePO(po_id, changes, req.user);
+
+    return res.json({
+      status: 1,
+      message: "PO has been updated!",
+      updated,
+    });
+  } catch (error) {
+      logError(error);
+      return res.status(500).json({
+          status: 0,
+          message: error.message || 'An error occurred while approving the PO.',
+          error
+      });
+  }
 };
 
 export const draftPO = async (poInfo, user, txn) => {

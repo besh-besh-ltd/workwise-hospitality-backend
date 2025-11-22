@@ -1,4 +1,5 @@
 import db from "../config/dbConn.js";
+import { sendApprovalNotification } from "../controllers/po/purchaseOrderEmails.js";
 import seoController from "../controllers/seo/seoController.js";
 import { AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../util/constants.js";
 import generalModel, { markPOStatusChange, uploadToS3 } from "./generalModel.js";
@@ -245,9 +246,11 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_val
     }
 };
 
-export const initiatePurchaseOrder = async (po_id, initiator) => {
+export const initiatePurchaseOrder = async (po_id, initiator, transaction) => {
   try {
     return await db.tx(async t => {
+      t = transaction ?? t;
+      
       const purchaseOrder = await t.oneOrNone(
         `SELECT 
           PO.*, 
@@ -339,14 +342,14 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
         );
       }
 
-      const items = await getPOItemDetails(purchaseOrder)
+      const items = await getPOItemDetails(purchaseOrder, t)
 
       const pdfSaveResult = await seoController.poPDF({
         ...purchaseOrder,
         ...items
       });
 
-      const s3Url = await uploadToS3(pdfSaveResult.absolutePath, `po-${purchaseOrder.po_number}.pdf`)
+      const s3Url = await uploadToS3(pdfSaveResult.absolutePath, `po-${purchaseOrder.po_number}-${Date.now().toString()}.pdf`)
       // await fs.promises.unlink(pdfSaveResult.absolutePath);
 
       await t.any(
@@ -368,77 +371,71 @@ export const initiatePurchaseOrder = async (po_id, initiator) => {
   }
 };
 
-export const getPOItemDetails = async (purchase_order) => {
+export const getPOItemDetails = async (purchase_order, t) => {
   try {
-    const { rfq_product_id, quote_id } = purchase_order;
+    const q = `
+      SELECT 
+        pop.unit_price,
+        -- charges_meta JSONB breakdown
+        (pop.charges_meta->>'package_price')::numeric    AS package_price,
+        (pop.charges_meta->>'tax')::numeric              AS tax,
+        (pop.charges_meta->>'freight_price')::numeric    AS freight_price,
+        pop.total_price,
+        qi.comment,
+        qi.delivery_period,
+        pop.charges_meta->>'freight_mode'  AS freight_mode,
+        pop.charges_meta->>'package_mode'  AS package_mode,
+        pop.charges_meta->>'tax_mode'      AS tax_mode,
+        pv.name                            AS product_name,
+        pop.quantity,
+        pop.unit,
+        TPOHM.hsn_code
+      FROM tbl_purchase_order_product pop
+      JOIN tbl_rfq_products TRP
+        ON TRP.id = pop.rfq_product_id
+      LEFT JOIN tbl_purchase_order_hsn_mapping TPOHM
+        ON TPOHM.po_id = pop.purchase_order_id
+      AND TPOHM.rfq_item_id = TRP.id
+      JOIN tbl_product_variant pv
+        ON TRP.product_variant_id = pv.id
+      LEFT JOIN tbl_quote_items qi
+        ON qi.id = pop.quote_id
+      WHERE pop.purchase_order_id = $1
+      ORDER BY pop.id;
+    `;
+    let items = await t.any(q, [purchase_order.id])
 
-    return await db.tx(async t => {
-      const q = `
-        SELECT 
-          qi.unit_price,
-          qi.package_price,
-          qi.tax,
-          qi.freight_price,
-          qi.total_price,
-          qi.comment,
-          qi.delivery_period,
-          qi.freight_mode,
-          qi.package_mode,
-          qi.tax_mode,
-          pv.name as product_name,
-          qi.quantity,
-          TPOHM.hsn_code,
-          (
-            SELECT s.value
-            FROM tbl_rfq_products_specs s
-            WHERE s.rfq_id = qi.rfq_id
-            AND s.product_variant_id = qi.product_variant_id
-            AND s.variant = qi.variant
-            AND s.title = 'Unit'
-            LIMIT 1
-          ) as unit
+    items = items.map(i => ({
+      ...i,
+      taxAmount: getSingleItemTaxAmount(i),
+      total_price: getItemTotalWOFreight(i)
+    }))
 
-        FROM tbl_quote_items qi
-        JOIN tbl_rfq_products TRP ON TRP.rfq_id = qi.rfq_id AND TRP.product_variant_id = qi.product_variant_id AND TRP.variant = qi.variant
-        LEFT JOIN tbl_purchase_order_hsn_mapping TPOHM ON TPOHM.po_id = $2 AND TPOHM.rfq_item_id = TRP.id
-        INNER JOIN tbl_product_variant pv ON qi.product_variant_id = pv.id
-        WHERE qi.id = ANY($1)
-        ORDER BY qi.id;
-      `;
-      let items = await t.any(q, [quote_id, purchase_order.id])
+    let prices = calculatePricing(items);
+    prices.taxAmount = items.reduce((prev, cur) => prev + cur.taxAmount, 0);
 
-      items = items.map(i => ({
-        ...i,
-        taxAmount: getSingleItemTaxAmount(i),
-        total_price: getItemTotalWOFreight(i)
-      }))
-
-      let prices = calculatePricing(items);
-      prices.taxAmount = items.reduce((prev, cur) => prev + cur.taxAmount, 0);
-
-      if(prices.totalFreight && prices.totalFreight > 0) {
-        const freightItem = {
-          unit_price: prices.totalFreight,
-          package_price: 0,
-          tax: 0,
-          freight_price: 0,
-          total_price: prices.totalFreight,
-          comment: '',
-          delivery_period: '',
-          freight_mode: '',
-          package_mode: '',
-          tax_mode: '',
-          product_name: 'Overall Freight Price',
-          quantity: 'N/A',
-        }
-        items = [...items, freightItem]
+    if(prices.totalFreight && prices.totalFreight > 0) {
+      const freightItem = {
+        unit_price: prices.totalFreight,
+        package_price: 0,
+        tax: 0,
+        freight_price: 0,
+        total_price: prices.totalFreight,
+        comment: '',
+        delivery_period: '',
+        freight_mode: '',
+        package_mode: '',
+        tax_mode: '',
+        product_name: 'Overall Freight Price',
+        quantity: 'N/A',
       }
+      items = [...items, freightItem]
+    }
 
-      return {
-        items,
-        ...prices
-      }
-    })
+    return {
+      items,
+      ...prices
+    }
   } catch (error) {
     throw error;
   }
@@ -773,6 +770,222 @@ export const getPODetailsById = async (po_id, user_id) => {
     console.error('Error in getPODetails:', error);
     throw error;
   }
+};
+
+export const handleUpdatePO = async (po_id, changes, current_user) => {
+  if (!po_id || !Array.isArray(changes) || changes.length <= 0) {
+    throw new Error("PO Id and Changes are required to update the PO!");
+  }
+
+  const poId = Number(po_id);
+
+  return db.tx(async (t) => {
+    // --- Buckets for updates ---
+    const poUpdates = {}; // root-level PO column => latest value
+    const productUpdates = {}; // rfq_item_id => { remove: bool, fields: {}, charges: {} }
+    const hsnUpdates = {}; // rfq_item_id => hsn_code string
+
+    for (const change of changes) {
+      const { path, newValue } = change || {};
+      if (!path) continue;
+
+      // 1) PRODUCT changes: product[<rfq_item_id>].field / product[<rfq_item_id>].charges_meta.key
+      if (path.startsWith("product[")) {
+        const match = path.match(/^product\[(\d+)\]\.(.+)$/);
+        if (!match) continue;
+
+        const rfqItemId = Number(match[1]); // this maps to rfq_product_id in tbl_purchase_order_product
+        const rest = match[2];
+
+        if (!productUpdates[rfqItemId]) {
+          productUpdates[rfqItemId] = {
+            remove: false,
+            fields: {},
+            charges: {},
+          };
+        }
+
+        // Special case: removal flag
+        if (rest === "removed") {
+          productUpdates[rfqItemId].remove = !!newValue;
+          continue;
+        }
+
+        // charges_meta.<key>
+        if (rest.startsWith("charges_meta.")) {
+          const key = rest.split(".")[1]; // e.g. "tax", "freight_price"
+          if (!key) continue;
+          productUpdates[rfqItemId].charges[key] = newValue;
+          continue;
+        }
+
+        // Any other field is treated as a direct column on tbl_purchase_order_product
+        // e.g. quantity, unit, unit_price, total_price, future columns
+        const colName = rest;
+        if (!/^[a-zA-Z0-9_]+$/.test(colName)) {
+          // Avoid SQL injection via column name, even though path is from our own frontend
+          continue;
+        }
+        productUpdates[rfqItemId].fields[colName] = newValue;
+        continue;
+      }
+
+      // 2) HSN changes: hsn_codes[<rfq_item_id>].code
+      if (path.startsWith("hsn_codes[")) {
+        const match = path.match(/^hsn_codes\[(\d+)\]\.code$/);
+        if (!match) continue;
+
+        const rfqItemId = Number(match[1]);
+        hsnUpdates[rfqItemId] = newValue || ""; // empty means delete mapping
+        continue;
+      }
+
+      // 3) Everything else is treated as a root-level PO column (tbl_rfq_purchase_order)
+      //    e.g. "po_number", "terms_and_conditions", "gstin", or any future column.
+      const col = path;
+      if (!/^[a-zA-Z0-9_]+$/.test(col)) {
+        continue;
+      }
+      poUpdates[col] = newValue;
+    }
+
+    // --- 1) Apply PO root-level updates (tbl_rfq_purchase_order) ---
+    if (Object.keys(poUpdates).length > 0) {
+      const cols = Object.keys(poUpdates);
+      const setFragments = [];
+      const values = [poId];
+
+      cols.forEach((col, idx) => {
+        // quote column name to avoid conflicts with reserved words
+        setFragments.push(`"${col}" = $${idx + 2}`);
+        values.push(poUpdates[col]);
+      });
+
+      const poUpdateQuery = `
+        UPDATE tbl_rfq_purchase_order
+        SET ${setFragments.join(", ")}
+        WHERE id = $1
+      `;
+
+      await t.none(poUpdateQuery, values);
+    }
+
+    // --- 2) Apply product-level updates (tbl_purchase_order_product) ---
+    // We expect one row per (purchase_order_id, rfq_product_id)
+    for (const [rfqItemIdStr, info] of Object.entries(productUpdates)) {
+      const rfqItemId = Number(rfqItemIdStr);
+      const { remove, fields, charges } = info;
+
+      if (remove) {
+        // Delete product row from PO
+        await t.none(
+          `
+            DELETE FROM tbl_purchase_order_product
+            WHERE purchase_order_id = $1 AND rfq_product_id = $2
+          `,
+          [poId, rfqItemId]
+        );
+        continue;
+      }
+
+      const setFragments = [];
+      const values = [poId, rfqItemId];
+      let paramIndex = 3;
+
+      // Direct column updates (quantity, unit, unit_price, total_price, future columns)
+      for (const [colName, val] of Object.entries(fields)) {
+        if (!/^[a-zA-Z0-9_]+$/.test(colName)) continue;
+        setFragments.push(`"${colName}" = $${paramIndex++}`);
+        values.push(val);
+      }
+
+      // charges_meta merge
+      if (Object.keys(charges).length > 0) {
+        setFragments.push(
+          `charges_meta = COALESCE(charges_meta, '{}'::jsonb) || $${paramIndex}::jsonb`
+        );
+        values.push(JSON.stringify(charges));
+        paramIndex++;
+      }
+
+      if (setFragments.length === 0) {
+        // nothing to update for this product
+        continue;
+      }
+
+      const productUpdateQuery = `
+        UPDATE tbl_purchase_order_product
+        SET ${setFragments.join(", ")}
+        WHERE purchase_order_id = $1
+          AND rfq_product_id = $2
+      `;
+
+      await t.none(productUpdateQuery, values);
+    }
+
+    // --- 3) Apply HSN updates (tbl_purchase_order_hsn_mapping) ---
+    for (const [rfqItemIdStr, hsnCode] of Object.entries(hsnUpdates)) {
+      const rfqItemId = Number(rfqItemIdStr);
+
+      if (!hsnCode) {
+        // Empty string => delete mapping
+        await t.none(
+          `
+            DELETE FROM tbl_purchase_order_hsn_mapping
+            WHERE po_id = $1 AND rfq_item_id = $2
+          `,
+          [poId, rfqItemId]
+        );
+        continue;
+      }
+
+      // Try update first
+      const updateResult = await t.result(
+        `
+          UPDATE tbl_purchase_order_hsn_mapping
+          SET hsn_code = $1
+          WHERE po_id = $2 AND rfq_item_id = $3
+        `,
+        [hsnCode, poId, rfqItemId]
+      );
+
+      if (updateResult.rowCount === 0) {
+        // No existing row -> insert new mapping
+        await t.none(
+          `
+            INSERT INTO tbl_purchase_order_hsn_mapping (rfq_item_id, hsn_code, po_id)
+            VALUES ($1, $2, $3)
+          `,
+          [rfqItemId, hsnCode, poId]
+        );
+      }
+    }
+
+    const txn = await t.one(
+      `SELECT * FROM tbl_approval_hierarchy_transactions WHERE hierarchy_type = 'po' AND target_entity_id = $1`,
+      [po_id]
+    )
+
+    await t.none(
+      `INSERT INTO tbl_approval_hierarchy_history 
+      (approval_transaction_id, approved_by, action, meta)
+      VALUES ($1, $2, $3, $4)`,
+      [txn.id, current_user.id, 'edited', { ...poUpdates, ...productUpdates, ...hsnUpdates }]
+    )
+
+    const result = await initiatePurchaseOrder(po_id, current_user, t);
+    if(result.approval_required) {
+      const purchaseOrder = await t.oneOrNone(
+        `SELECT * FROM tbl_rfq_purchase_order
+        WHERE id = $1`,
+        [result.po_id]
+      );
+  
+      await sendApprovalNotification(purchaseOrder, result.current_approver_id);
+    }
+
+    return { success: true };
+  });
 };
 
 export const getMilestonesByPOId = async (company_id, po_id, includeDeleted = false) => {

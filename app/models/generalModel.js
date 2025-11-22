@@ -791,12 +791,12 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         AND company_id = $2
         AND status IN ('pending', 'approved')
         AND meta ->> 'rfq_id' = $3
-        AND meta ->> 'rfq_product_id' = $4`,
+        AND meta ->> 'po_id' = $4`,
       [
         type,
         companyId,
         String(meta.rfq_id),           // meta.rfq_id must be passed as string
-        String(meta.rfq_product_id)    // meta.rfq_product_id must be passed as string
+        String(entityId)
       ]
     );
 
@@ -805,19 +805,25 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         throw new Error(errors.exist ?? 'An already approved request exists for this entity.');
       } else {
         // cancel old pending transaction and any ongoing PO for current rfqProductId
-        await t.none(
-          `UPDATE tbl_approval_hierarchy_transactions
-          SET status = 'cancelled', final_decision_by = $3, current_approver_id = NULL, updated_at = NOW()
-          WHERE id = $1`,
-          [existingTrx.id, APPROVAL_DECISIONS.CANCELLED, initiatedBy]
-        );
+        // await t.none(
+        //   `UPDATE tbl_approval_hierarchy_transactions
+        //   SET status = 'cancelled', final_decision_by = $3, current_approver_id = NULL, updated_at = NOW()
+        //   WHERE id = $1`,
+        //   [existingTrx.id, APPROVAL_DECISIONS.CANCELLED, initiatedBy]
+        // );
 
-        await t.none(
-          `INSERT INTO tbl_approval_hierarchy_history
-          (approval_transaction_id, approved_by, action, created_at)
-          VALUES ($1, $2, $3, NOW())`,
-          [existingTrx.id, initiatedBy, APPROVAL_DECISIONS.CANCELLED]
-        );
+        // await t.none(
+        //   `INSERT INTO tbl_approval_hierarchy_history
+        //   (approval_transaction_id, approved_by, action, created_at)
+        //   VALUES ($1, $2, $3, NOW())`,
+        //   [existingTrx.id, initiatedBy, APPROVAL_DECISIONS.CANCELLED]
+        // );
+
+        // FOR NEW: Delete old transactions for ongoing PO approval hierarchy
+        // await t.none(
+        //   `DELETE FROM tbl_approval_hierarchy_transactions WHERE id = $1`,
+        //   [existingTrx.id]
+        // )
       }
     }
 
@@ -901,7 +907,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
               AND TAH.user_id = $2
               AND TAH.hierarchy_type = $3
               AND TAH.is_active = true
-              AND is_default
+              AND THDM.id IS NOT NULL
             ORDER BY TAH.created_at DESC
             LIMIT 1`,
             [companyId, initiatedBy, type]
@@ -925,7 +931,8 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
             AND TAH.user_id = $2
             AND TAH.hierarchy_type = $3
             AND TAH.is_active = true
-          ORDER BY is_default DESC, TAH.created_at DESC
+            AND THDM.id IS NOT NULL
+          ORDER BY TAH.created_at DESC
           LIMIT 1`,
           [companyId, initiatedBy, type]
         );
@@ -938,12 +945,23 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
 
     // If there's no hierarchy at all (company has no hierarchies) -> auto-approve (your existing flow)
     if (!initiatorHierarchy) {
-      const transaction = await t.one(
-        `INSERT INTO tbl_approval_hierarchy_transactions 
-        (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
-        VALUES ($1, $2, $3, $4, NULL, $4, $5, $6) RETURNING *`,
-        [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
-      );
+      let transaction = null;
+
+      if(existingTrx) {
+        transaction = await t.one(
+          `UPDATE tbl_approval_hierarchy_transactions 
+          SET current_approver_id = NULL, final_decision_by = $1, status = $2
+          WHERE id = $3 RETURNING *`,
+          [initiatedBy, APPROVAL_DECISIONS.APPROVED, existingTrx.id]
+        );
+      } else {
+        transaction = await t.one(
+          `INSERT INTO tbl_approval_hierarchy_transactions 
+          (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
+          VALUES ($1, $2, $3, $4, NULL, $4, $5, $6) RETURNING *`,
+          [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
+        );
+      }
       await t.none(
         `INSERT INTO tbl_approval_hierarchy_history
         (approval_transaction_id, approved_by, action, created_at)
@@ -971,12 +989,22 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
 
     // 2. Auto-approve case: bypass cap OR if there exist no higher approver
     if ((totalValue <= bypassCap) || !nextApprover) {
-      const transaction = await t.one(
-        `INSERT INTO tbl_approval_hierarchy_transactions 
-        (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status, hierarchy_id)
-        VALUES ($1, $2, $3, $4, NULL, $4, $5, $6, $7) RETURNING *`,
-        [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED, initiatorHierarchy.hierarchy_id]
-      );
+      let transaction = null;
+      if(existingTrx) {
+        transaction = await t.one(
+          `UPDATE tbl_approval_hierarchy_transactions 
+          SET current_approver_id = NULL, final_decision_by = $1, status = $2, hierarchy_id = $3
+          WHERE id = $4 RETURNING *`,
+          [initiatedBy, APPROVAL_DECISIONS.APPROVED, initiatorHierarchy.hierarchy_id, existingTrx.id]
+        );
+      } else {
+        transaction = await t.one(
+          `INSERT INTO tbl_approval_hierarchy_transactions 
+          (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status, hierarchy_id)
+          VALUES ($1, $2, $3, $4, NULL, $4, $5, $6, $7) RETURNING *`,
+          [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED, initiatorHierarchy.hierarchy_id]
+        );
+      }
       await t.none(
         `INSERT INTO tbl_approval_hierarchy_history
         (approval_transaction_id, approved_by, action, created_at)
@@ -990,12 +1018,21 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
     }
 
     // 4. Start approval chain
-    await t.none(
-      `INSERT INTO tbl_approval_hierarchy_transactions
-      (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, meta, status, hierarchy_id)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [type, entityId, companyId, initiatedBy, nextApprover.user_id, meta, APPROVAL_DECISIONS.PENDING, initiatorHierarchy.hierarchy_id]
-    );
+    if(existingTrx) {
+      await t.one(
+        `UPDATE tbl_approval_hierarchy_transactions 
+        SET current_approver_id = $1, final_decision_by = NULL, status = $2, hierarchy_id = $3
+        WHERE id = $4 RETURNING *`,
+        [nextApprover.user_id, APPROVAL_DECISIONS.PENDING, initiatorHierarchy.hierarchy_id, existingTrx.id]
+      );
+    } else {
+      await t.none(
+        `INSERT INTO tbl_approval_hierarchy_transactions
+        (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, meta, status, hierarchy_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [type, entityId, companyId, initiatedBy, nextApprover.user_id, meta, APPROVAL_DECISIONS.PENDING, initiatorHierarchy.hierarchy_id]
+      );
+    }
 
     return {
       approval_required: true,
@@ -1110,11 +1147,8 @@ export const markPOStatusChange = async (po_id, t, reject = false, user) => {
       [po_id, reject ? PO_STATUSES.REJECTED : PO_STATUSES.APPROVED]
     );
 
-    console.log("PO TEST -> PO STATUS IS BEING CHANGED!")
-
     // ⏳ Trigger email notifications to vendors and all the team members (Not yet)!
     if(!reject) {
-      console.log("PO TEST -> IS NOT REJECTED, sending mail for approval")
       await sendPONotificationToVendor(purchaseOrder, user);
     }
 
