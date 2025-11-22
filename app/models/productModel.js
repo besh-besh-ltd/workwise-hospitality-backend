@@ -1406,76 +1406,147 @@ const productModel = {
     });
   },
 
-getNestedCategoryList: async (parentId, slug) => {
+getNestedCategoryList: async (parentId, slug, vendorRequired = false) => {
   try {
     let categoryId = null;
 
-    // STEP 1: Determine categoryId (from slug or parentId)
+    // ---------------------------------------
+    // STEP 1: Resolve categoryId from slug
+    // ---------------------------------------
     if (slug && slug.trim() !== '' && slug !== 'undefined' && slug !== 'null') {
-      const findSlugQuery = `
-        SELECT id 
-        FROM tbl_category 
-        WHERE slug = $1
-        LIMIT 1
-      `;
-      const slugResult = await db.oneOrNone(findSlugQuery, [slug]);
-      if (!slugResult) return [];
-      categoryId = slugResult.id;
+      const row = await db.oneOrNone(
+        `SELECT id FROM tbl_category WHERE slug = $1 LIMIT 1`,
+        [slug]
+      );
+      if (!row) return { type: "none", data: [] };
+      categoryId = row.id;
     } else if (parentId !== undefined && parentId !== null && parentId !== '') {
       categoryId = parentId;
     } else {
-      throw new Error('Either parent_id or slug must be provided.');
+      throw new Error("Either parent_id or slug must be provided.");
     }
 
-    // STEP 2: Fetch subcategories that have at least one product
-    const subCategoryQuery = `
-      SELECT c.id, c.title, c.parent_id, c.slug
-      FROM tbl_category c
-      WHERE c.parent_id = $1
-      AND EXISTS (
-        SELECT 1
-        FROM tbl_product_categories pc
-        WHERE pc.category_id = c.id
-      )
-    `;
-    const subCategories = await db.any(subCategoryQuery, [categoryId]);
+    // PARAMS
+    const params = [categoryId];
+
+    // ---------------------------------------
+    // STEP 2: SUBCATEGORIES
+    // ---------------------------------------
+    let subCategories = await db.any(
+      `
+      SELECT id, title, parent_id, slug
+      FROM tbl_category
+      WHERE parent_id = $1
+      `,
+      params
+    );
+
+    // If vendorRequired → filter subcategories where *ANY* variant has vendors
+    if (vendorRequired && subCategories.length > 0) {
+      const filtered = await db.any(
+        `
+        SELECT c.id, c.title, c.parent_id, c.slug
+        FROM tbl_category c
+        WHERE c.parent_id = $1
+        AND EXISTS (
+          SELECT 1
+          FROM tbl_product_categories pc
+          JOIN tbl_product_variant v ON v.product_id = pc.product_id
+          JOIN tbl_product_variant_vendor_mapping vm 
+                ON vm.product_variant_id = v.id
+          WHERE pc.category_id = c.id
+            AND v.is_approve = 1
+            AND vm.is_approved = true
+        )
+        `,
+        params
+      );
+
+      subCategories = filtered;
+    }
 
     if (subCategories.length > 0) {
-      // ✅ Return only subcategories that have products
       return { type: "category", data: subCategories };
     }
 
-    // STEP 3: If no valid subcategories, fetch products for this category
-    const productQuery = `
-      SELECT p.id , p.name , p.sku, p.slug
+    // ---------------------------------------
+    // STEP 3: PRODUCTS under this category
+    // ---------------------------------------
+    let products = await db.any(
+      `
+      SELECT p.id, p.name, p.sku, p.slug
       FROM tbl_product_categories pc
       JOIN tbl_product p ON p.id = pc.product_id
       WHERE pc.category_id = $1
-    `;
-    const products = await db.any(productQuery, [categoryId]);
+      `,
+      params
+    );
+
+    // vendorRequired → filter products having vendor-approved variants
+    if (vendorRequired && products.length > 0) {
+      products = await db.any(
+        `
+        SELECT DISTINCT p.id, p.name, p.sku, p.slug
+        FROM tbl_product_categories pc
+        JOIN tbl_product p ON p.id = pc.product_id
+        JOIN tbl_product_variant v ON v.product_id = p.id
+        JOIN tbl_product_variant_vendor_mapping vm 
+              ON vm.product_variant_id = v.id
+        WHERE pc.category_id = $1
+          AND v.is_approve = 1
+          AND vm.is_approved = true
+        `,
+        params
+      );
+    }
 
     if (products.length > 0) {
       return { type: "product", data: products };
     }
 
-    // STEP 4: If no products, fetch variants for product_id
-    const variantQuery = `
-      SELECT v.name , v.id, v.product_id , v.sku, v.slug
-      FROM tbl_product_variant v
-      WHERE v.product_id = $1 and v.is_approve = 1
-    `;
-    const variants = await db.any(variantQuery, [categoryId]);
+    // ---------------------------------------
+    // STEP 4: VARIANTS for this PRODUCT
+    // ---------------------------------------
+    let variants = await db.any(
+      `
+      SELECT id, name, sku, slug, product_id
+      FROM tbl_product_variant
+      WHERE product_id = $1
+        AND is_approve = 1
+      `,
+      params
+    );
+
+    // vendorRequired → filter variants with vendor mapping
+    if (vendorRequired && variants.length > 0) {
+      variants = await db.any(
+        `
+        SELECT DISTINCT v.id, v.name, v.slug, v.sku, v.product_id
+        FROM tbl_product_variant v
+        JOIN tbl_product_variant_vendor_mapping vm
+              ON vm.product_variant_id = v.id
+        WHERE v.product_id = $1
+          AND v.is_approve = 1
+          AND vm.is_approved = true
+        `,
+        params
+      );
+    }
 
     if (variants.length > 0) {
       return { type: "variant", data: variants };
     }
 
+    // ---------------------------------------
     // STEP 5: Nothing found
+    // ---------------------------------------
     return { type: "none", data: [] };
-  } catch (error) {
-    throw error;
+
+  } catch (err) {
+    throw err;
   }
-},
+}
+,
 
 getRandomProductsForCarausel : async () =>{
  return new Promise(function (resolve, reject) {
