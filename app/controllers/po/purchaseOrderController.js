@@ -105,7 +105,9 @@ export const initiatePO = async (req, res) => {
     const { po_id } = req.params;
     const initiator = req.user;
   
-    const result = await initiatePurchaseOrder(po_id, initiator);
+    const result = await db.tx(async t => {
+      return await initiatePurchaseOrder(po_id, initiator, t);
+    })
     if(result.approval_required) {
       const purchaseOrder = await db.oneOrNone(
         `SELECT * FROM tbl_rfq_purchase_order
