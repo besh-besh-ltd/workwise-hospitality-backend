@@ -276,6 +276,12 @@ RfqRoutes.post(
   rfqController.searchVendor
 );
 
+RfqRoutes.post(
+  '/bulk-search-vendors-by-category',
+  noLogin.customer_auth,
+  rfqController.bulkSearchVendorsByCategory
+);
+
 
 // mukul 07-06-2025 ,  not in use but functional 
 RfqRoutes.post(
