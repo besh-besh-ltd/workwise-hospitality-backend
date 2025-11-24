@@ -8,6 +8,14 @@ import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqControll
 import { PO_STATUSES } from '../util/constants.js';
 
 
+const generateReminderTokenValue = () => {
+  const timestamp = Date.now().toString();
+  const randomSegment = Math.floor(Math.random() * 1_000_000)
+    .toString()
+    .padStart(6, '0');
+  return parseInt((timestamp + randomSegment).slice(0, 16), 10);
+};
+
 const rfqModel = {
   insert: async (table_name, data, db_con = db) => {
     const keys = Object.keys(data);
@@ -2214,6 +2222,204 @@ LIMIT 1;`;
    *
    * @last_changes - mukul 28-08-2025 without login senf 2 vendors details
    */
+  bulkSearchVendorsByCategory: async (
+    category_id,
+    approved_by_id = [],
+    state = [],
+    city = [],
+    country = [],
+    turnOver = null,
+    vendorType = [],
+    prevWorkedWith = null,
+    vendor_name = '',
+    myVendorType = null,
+    productMakes = [],
+    page = 1,
+    limit = 20,
+    user_id = null
+  ) => {
+    const offset = (page - 1) * limit;
+    
+    const turnoverCondition = turnOver && (turnOver.from > 0 || turnOver.to > 0)
+      ? `AND tc.turnover IS NOT NULL AND TRIM(tc.turnover) != '' AND (
+          ${turnOver.from > 0 && turnOver.to > 0
+            ? `NULLIF(TRIM(tc.turnover), '')::bigint BETWEEN ${turnOver.from} AND ${turnOver.to}`
+            : turnOver.from > 0
+            ? `NULLIF(TRIM(tc.turnover), '')::bigint >= ${turnOver.from}`
+            : `NULLIF(TRIM(tc.turnover), '')::bigint <= ${turnOver.to}`
+          }
+        )`
+      : '';
+
+    const myVendorCondition = myVendorType && user_id
+      ? myVendorType.value === 'is_private'
+        ? `AND EXISTS (
+            SELECT 1 FROM tbl_buyer_private_vendors bpv
+            WHERE bpv.vendor_id = tu.id AND bpv.buyer_id = ${user_id}
+          )`
+        : myVendorType.value === 'is_public'
+        ? `AND NOT EXISTS (
+            SELECT 1 FROM tbl_buyer_private_vendors bpv
+            WHERE bpv.vendor_id = tu.id AND bpv.buyer_id = ${user_id}
+          )`
+        : ''
+      : '';
+
+    const prevWorkedCondition = prevWorkedWith && user_id
+      ? prevWorkedWith === 'prev_finalized'
+        ? `AND EXISTS (
+            SELECT 1 FROM tbl_rfq_finalize_vendor rfv
+            JOIN tbl_rfq r ON r.id = rfv.rfq_id
+            WHERE rfv.vendor_id = tu.id AND r.user_id = ${user_id}
+          )`
+        : prevWorkedWith === 'rfq_sent'
+        ? `AND EXISTS (
+            SELECT 1 FROM tbl_rfq_product_vendors rpv
+            JOIN tbl_rfq r ON r.id = rpv.rfq_id
+            WHERE rpv.vendor_id = tu.id AND r.user_id = ${user_id}
+          )`
+        : ''
+      : '';
+
+    const vendorNameCondition = vendor_name
+      ? `AND (
+          LOWER(tu.name) LIKE LOWER('%${vendor_name.replace(/'/g, "''")}%')
+          OR LOWER(COALESCE(tc.company_name, tu.organization_name)) LIKE LOWER('%${vendor_name.replace(/'/g, "''")}%')
+        )`
+      : '';
+
+    const makeCondition = productMakes && productMakes.length > 0
+      ? `AND EXISTS (
+          SELECT 1 FROM tbl_product_variant_vendor_make pvvm
+          WHERE pvvm.variant_vendor_map_id = pvm.id
+          AND pvvm.make_id IN (${productMakes.map(m => m.id).join(',')})
+        )`
+      : '';
+
+    const countQuery = `
+      WITH vendor_data AS (
+        SELECT DISTINCT tu.id
+        FROM tbl_product_variant pvt
+        JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
+        JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
+        LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+        ${approved_by_id.length > 0 ? `
+          JOIN tbl_vendorapprove_product_mapping vum ON vum.variant_vendor_mapping_id = pvm.id
+        ` : ''}
+        WHERE pvt.status = 1 
+          AND pvt.is_deleted = 0 
+          AND pvt.is_review = 0 
+          AND pvt.is_approve = 1
+          AND pvm.status = TRUE 
+          AND pvm.is_approved = TRUE
+          AND tu.is_deleted = 0 
+          AND tu.status = 1
+          AND (tc.is_private = 0 OR tc.is_private IS NULL)
+          AND pvt.product_id IN (
+            SELECT product_id FROM tbl_product_categories WHERE category_id = ${category_id}
+          )
+          ${state.length > 0 ? `AND tu.state::int IN (${state.map(s => s.id).join(',')})` : ''}
+          ${city.length > 0 ? `AND tu.city::int IN (${city.map(c => c.id).join(',')})` : ''}
+          ${country.length > 0 ? `AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(',')})` : ''}
+          ${turnoverCondition}
+          ${vendorType.length > 0 ? `
+            AND EXISTS (
+              SELECT 1 FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
+              WHERE TRIM(nb) IN (${vendorType.map(vt => `'${vt.value.toLowerCase().trim()}'`).join(', ')})
+            )
+          ` : ''}
+          ${approved_by_id.length > 0 ? `
+            AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(',')})
+          ` : ''}
+          ${myVendorCondition}
+          ${prevWorkedCondition}
+          ${vendorNameCondition}
+          ${makeCondition}
+      )
+      SELECT COUNT(*) AS total FROM vendor_data;
+    `;
+
+    const dataQuery = `
+      WITH vendor_data AS (
+        SELECT DISTINCT 
+          tu.id,
+          tu.name as vendor_name,
+          tu.email,
+          tu.mobile,
+          COALESCE(tc.company_name, tu.organization_name, tu.name) as organization_name,
+          tu.address,
+          tc.profile as about,
+          tc.website,
+          tc.company_name as original_company_name,
+          lc.id as city_id,
+          lc.city_name,
+          ls.id as state_id,
+          ls.state_name,
+          tc.turnover,
+          tc.nature_of_business
+        FROM tbl_product_variant pvt
+        JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
+        JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
+        LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+        LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
+        LEFT JOIN tbl_location_states ls ON tu.state = ls.id
+        ${approved_by_id.length > 0 ? `
+          JOIN tbl_vendorapprove_product_mapping vum ON vum.variant_vendor_mapping_id = pvm.id
+        ` : ''}
+        WHERE pvt.status = 1 
+          AND pvt.is_deleted = 0 
+          AND pvt.is_review = 0 
+          AND pvt.is_approve = 1
+          AND pvm.status = TRUE 
+          AND pvm.is_approved = TRUE
+          AND tu.is_deleted = 0 
+          AND tu.status = 1
+          AND (tc.is_private = 0 OR tc.is_private IS NULL)
+          AND pvt.product_id IN (
+            SELECT product_id FROM tbl_product_categories WHERE category_id = ${category_id}
+          )
+          ${state.length > 0 ? `AND tu.state::int IN (${state.map(s => s.id).join(',')})` : ''}
+          ${city.length > 0 ? `AND tu.city::int IN (${city.map(c => c.id).join(',')})` : ''}
+          ${country.length > 0 ? `AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(',')})` : ''}
+          ${turnoverCondition}
+          ${vendorType.length > 0 ? `
+            AND EXISTS (
+              SELECT 1 FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
+              WHERE TRIM(nb) IN (${vendorType.map(vt => `'${vt.value.toLowerCase().trim()}'`).join(', ')})
+            )
+          ` : ''}
+          ${approved_by_id.length > 0 ? `
+            AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(',')})
+          ` : ''}
+          ${myVendorCondition}
+          ${prevWorkedCondition}
+          ${vendorNameCondition}
+          ${makeCondition}
+      )
+      SELECT * FROM vendor_data 
+      ORDER BY vendor_name ASC
+      LIMIT ${limit} OFFSET ${offset};
+    `;
+
+    try {
+      const [countResult, dataResult] = await Promise.all([
+        db.query(countQuery),
+        db.query(dataQuery)
+      ]);
+
+      return {
+        total: parseInt(countResult[0]?.total || 0),
+        data: dataResult || [],
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(parseInt(countResult[0]?.total || 0) / parseInt(limit))
+      };
+    } catch (err) {
+      console.error('Error in bulkSearchVendorsByCategory:', err);
+      throw err;
+    }
+  },
+
   searchVendorWithoutLogin: async (
     search_key,
     category_id,
@@ -6062,6 +6268,113 @@ ORDER BY m.created_at;
     });
   },
 
+  /**
+   * Optimized conversation summary fetcher for buyer-vendor queries
+   * Collapses the previous per-user Promise.all loop into a single SQL roundtrip
+   * to keep latency predictable even with thousands of vendors.
+   *
+   * @param {*} rfq_id
+   * @param {*} viewer_id
+   * @param {*} viewer_type
+   * @param {*} user_name optional search string
+   */
+  getQueryParticipantsSummary: async (
+    rfq_id,
+    viewer_id,
+    viewer_type,
+    user_name = ''
+  ) => {
+    const buyerTypes = [2, 8, 9, 10];
+    const params = [rfq_id, viewer_id];
+    let searchParamIndex = null;
+
+    if (user_name) {
+      params.push(user_name);
+      searchParamIndex = params.length;
+    }
+
+    const searchFilter = user_name
+      ? `
+        AND (
+          to_tsvector('english', TU.name) @@ plainto_tsquery('english', $${searchParamIndex}) OR
+          (char_length($${searchParamIndex}) = 1 AND similarity(TU.name, $${searchParamIndex}) > 0) OR
+          (char_length($${searchParamIndex}) > 1 AND similarity(TU.name, $${searchParamIndex}) > 0.1)
+        )
+      `
+      : '';
+
+    const candidateQuery = buyerTypes.includes(viewer_type)
+      ? `
+        SELECT DISTINCT
+          TRPV.user_id AS user_id,
+          TU.name AS user_name,
+          COALESCE(TC.company_name, '') AS company_name
+        FROM tbl_rfq_product_vendors TRPV
+        JOIN tbl_users TU ON TU.id = TRPV.user_id
+        LEFT JOIN tbl_company TC ON TC.id = TU.company_id
+        WHERE TRPV.rfq_id = $1
+        ${searchFilter}
+      `
+      : `
+        SELECT
+          TU.id AS user_id,
+          TU.name AS user_name,
+          COALESCE(TC.company_name, '') AS company_name
+        FROM tbl_rfq TR
+        JOIN tbl_users TU ON TU.id = TR.created_by
+        LEFT JOIN tbl_company TC ON TC.id = TU.company_id
+        WHERE TR.id = $1
+        ${searchFilter}
+      `;
+
+    const query = `
+      WITH candidates AS (
+        ${candidateQuery}
+      ),
+      latest_messages AS (
+        SELECT
+          CASE WHEN m.sender_id = $2 THEN m.receiver_id ELSE m.sender_id END AS other_user_id,
+          m.message_text,
+          m.created_at,
+          ROW_NUMBER() OVER (
+            PARTITION BY CASE WHEN m.sender_id = $2 THEN m.receiver_id ELSE m.sender_id END
+            ORDER BY m.created_at DESC
+          ) AS rn
+        FROM tbl_query_messages m
+        WHERE m.rfq_id = $1
+          AND (m.sender_id = $2 OR m.receiver_id = $2)
+      ),
+      unseen_counts AS (
+        SELECT sender_id AS other_user_id, COUNT(*) AS unseen_count
+        FROM tbl_query_messages
+        WHERE rfq_id = $1
+          AND receiver_id = $2
+          AND is_seen = false
+        GROUP BY sender_id
+      )
+      SELECT
+        c.user_id,
+        c.user_name,
+        c.company_name,
+        COALESCE(u.unseen_count, 0) AS unseen_count,
+        COALESCE(l.message_text, '') AS last_message,
+        l.created_at AS last_message_timestamp
+      FROM candidates c
+      LEFT JOIN unseen_counts u ON u.other_user_id = c.user_id
+      LEFT JOIN latest_messages l ON l.other_user_id = c.user_id AND l.rn = 1
+      ORDER BY
+        CASE WHEN l.created_at IS NULL THEN 1 ELSE 0 END,
+        l.created_at DESC NULLS LAST,
+        c.user_name ASC;
+    `;
+
+    return new Promise((resolve, reject) => {
+      db.query(query, params)
+        .then((result) => resolve(result))
+        .catch((error) => reject(new Error(error)));
+    });
+  },
+
   // Changes by Agnij 2025-05-14 [Add bulk clause insertion]
   addManyClauses: async (rfq_id, rfq_product_id, clauses) => {
     return new Promise(async (resolve, reject) => {
@@ -8437,7 +8750,71 @@ ORDER BY tq.timestamp DESC;
     });
   },
 
-  getVendorsForReminder: async (rfq_id) => {
+  getVendorsForReminder: async (
+    rfq_id,
+    vendorIds = [],
+    options = {}
+  ) => {
+    const { includeContactDetails = false } = options;
+    const params = [rfq_id];
+
+    let vendorFilterClause = '';
+    if (Array.isArray(vendorIds) && vendorIds.length) {
+      params.push(vendorIds);
+      vendorFilterClause = `AND vendor_list.user_id = ANY($${params.length}::int[])`;
+    }
+
+    const spocCte = includeContactDetails
+      ? `,
+    spoc_data AS (
+      SELECT 
+        user_id,
+        jsonb_agg(
+          jsonb_build_object(
+            'name', s.name,
+            'email', s.email,
+            'mobile', s.mobile
+          )
+        ) FILTER (WHERE s.id IS NOT NULL) AS spoc_list
+      FROM tbl_users_spoc s
+      WHERE s.is_deleted IS NULL OR s.is_deleted = 0
+      GROUP BY user_id
+    ),
+    token_data AS (
+      SELECT vendor_id, token
+      FROM tbl_vendor_rfq_tokens_non_login
+      WHERE rfq_no = $1
+    )`
+      : '';
+
+    const contactSelect = includeContactDetails
+      ? `
+      u.email,
+      u.mobile,
+      u.organization_name,
+      u.endpoint,
+      u.user_type,
+      COALESCE(sd.spoc_list, '[]'::jsonb) AS spocs,
+      td.token as reminder_token,`
+      : `
+      NULL::text as email,
+      NULL::text as mobile,
+      NULL::text as organization_name,
+      NULL::text as endpoint,
+      NULL::int as user_type,
+      '[]'::jsonb AS spocs,
+      NULL::bigint as reminder_token,`;
+
+    const contactJoins = includeContactDetails
+      ? `
+    LEFT JOIN spoc_data sd ON sd.user_id = vendor_list.user_id
+    LEFT JOIN token_data td ON td.vendor_id = vendor_list.user_id`
+      : '';
+
+    const contactGroupBy = includeContactDetails
+      ? ', u.email, u.mobile, u.organization_name, u.endpoint, u.user_type, sd.spoc_list, td.token'
+      : '';
+
     const query = `
     WITH rfq_data AS (
       SELECT 
@@ -8477,7 +8854,7 @@ ORDER BY tq.timestamp DESC;
       SELECT DISTINCT created_by as user_id
       FROM tbl_quotes 
       WHERE rfq_id = $1 AND is_regret = 1
-    )
+    )${spocCte}
     SELECT 
       rd.id as rfq_id,
       rd.company_name,
@@ -8488,7 +8865,7 @@ ORDER BY tq.timestamp DESC;
       rd.bid_end_date as rfq_deadline,
       u.id as user_id,
       COALESCE(u.organization_name, u.name) as vendor_name,
-      u.email,
+      ${contactSelect}
       json_agg(
         json_build_object(
           'product_id', vp.product_variant_id,
@@ -8510,17 +8887,19 @@ ORDER BY tq.timestamp DESC;
           AND qp.variant = vp.variant
       )
     LEFT JOIN regret_vendors rv ON rv.user_id = vendor_list.user_id
+    ${contactJoins}
     WHERE rv.user_id IS NULL
       AND u.status = 1
       AND u.is_deleted = 0
+      ${vendorFilterClause}
     GROUP BY rd.id, rd.company_name, rd.rfq_no, rd.status, 
-             rd.timestamp, rd.bid_end_date, u.id, u.organization_name, u.name, u.email
+             rd.timestamp, rd.bid_end_date, u.id, u.organization_name, u.name${contactGroupBy}
     HAVING count(vp.product_variant_id) > 0
     ORDER BY vendor_name;
   `;
 
     try {
-      const result = await db.query(query, [rfq_id]);
+      const result = await db.query(query, params);
 
       if (result.length === 0) {
         return { rfq_details: null, vendors: [] };
@@ -8539,7 +8918,13 @@ ORDER BY tq.timestamp DESC;
       const vendors = result.map((row) => ({
         user_id: row.user_id,
         vendor_name: row.vendor_name,
-        email: row.email,
+        email: row.email || null,
+        mobile: row.mobile || null,
+        organization_name: row.organization_name || null,
+        endpoint: row.endpoint || null,
+        user_type: row.user_type || null,
+        spocs: row.spocs || [],
+        token: row.reminder_token || null,
         remainingProducts: row.remaining_products || []
       }));
 
@@ -8547,6 +8932,65 @@ ORDER BY tq.timestamp DESC;
     } catch (error) {
       throw error;
     }
+  },
+
+  ensureVendorTokens: async (rfq_id, vendorIds = []) => {
+    if (!Array.isArray(vendorIds) || !vendorIds.length) return [];
+
+    const uniqueVendorIds = Array.from(new Set(vendorIds));
+
+    const existingTokens = await db.query(
+      `SELECT vendor_id, token 
+       FROM tbl_vendor_rfq_tokens_non_login 
+       WHERE rfq_no = $1 AND vendor_id = ANY($2::int[])`,
+      [rfq_id, uniqueVendorIds]
+    );
+
+    const tokensMap = new Map(
+      existingTokens.map((row) => [row.vendor_id, row.token])
+    );
+
+    const missingVendorIds = uniqueVendorIds.filter(
+      (id) => !tokensMap.has(id)
+    );
+
+    if (missingVendorIds.length) {
+      const tokenRecords = missingVendorIds.map((vendor_id) => ({
+        token: generateReminderTokenValue(),
+        vendor_id,
+        rfq_no: rfq_id
+      }));
+
+      const insertQuery =
+        pgp.helpers.insert(
+          tokenRecords,
+          ['token', 'vendor_id', 'rfq_no'],
+          'tbl_vendor_rfq_tokens_non_login'
+        ) +
+        ' ON CONFLICT (vendor_id, rfq_no) DO NOTHING RETURNING vendor_id, token';
+
+      const insertedRows = await db.any(insertQuery);
+      insertedRows.forEach((row) => tokensMap.set(row.vendor_id, row.token));
+
+      const stillMissing = missingVendorIds.filter(
+        (id) => !tokensMap.has(id)
+      );
+
+      if (stillMissing.length) {
+        const fallbackRows = await db.query(
+          `SELECT vendor_id, token 
+           FROM tbl_vendor_rfq_tokens_non_login 
+           WHERE rfq_no = $1 AND vendor_id = ANY($2::int[])`,
+          [rfq_id, stillMissing]
+        );
+        fallbackRows.forEach((row) => tokensMap.set(row.vendor_id, row.token));
+      }
+    }
+
+    return Array.from(tokensMap.entries()).map(([vendor_id, token]) => ({
+      vendor_id,
+      token
+    }));
   },
   // New optimized method for sidebar data
   getRfqs: async (
