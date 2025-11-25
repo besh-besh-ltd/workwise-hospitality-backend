@@ -324,6 +324,66 @@ const hospitalityModel = {
          )`,
       [userId, companyId, mappingType, hotelId]
     );
+  },
+
+  getUserContexts: async (userId) => {
+    return db.any(
+      `SELECT 
+        hum.id,
+        hum.user_id,
+        hum.mapping_type,
+        hum.hospitality_company_id,
+        hc.name AS company_name,
+        hum.hospitality_hotel_id,
+        hh.name AS hotel_name,
+        hum.auto_map_projects,
+        hum.created_at
+       FROM tbl_hospitality_user_mappings hum
+       JOIN tbl_hospitality_companies hc
+         ON hc.id = hum.hospitality_company_id
+        AND hc.is_deleted = 0
+       LEFT JOIN tbl_hospitality_company_hotels hh
+         ON hh.id = hum.hospitality_hotel_id
+        AND hh.is_deleted = 0
+       WHERE hum.user_id = $1`,
+      [userId]
+    );
+  },
+
+  userHasContext: async (userId, companyId, hotelId = null) => {
+    const params = [userId, companyId];
+    let condition = '';
+    if (hotelId) {
+      params.push(hotelId);
+      condition = `AND hum.hospitality_hotel_id = $3 AND hum.mapping_type = 1`;
+    } else {
+      condition = `AND hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL`;
+    }
+
+    const row = await db.oneOrNone(
+      `SELECT 1
+       FROM tbl_hospitality_user_mappings hum
+       WHERE hum.user_id = $1
+         AND hum.hospitality_company_id = $2
+         ${condition}`,
+      params
+    );
+
+    if (!row && hotelId) {
+      // allow company level access to cover hotels
+      const companyLevelAccess = await db.oneOrNone(
+        `SELECT 1
+         FROM tbl_hospitality_user_mappings hum
+         WHERE hum.user_id = $1
+           AND hum.hospitality_company_id = $2
+           AND hum.mapping_type = 0
+           AND hum.hospitality_hotel_id IS NULL`,
+        [userId, companyId]
+      );
+      return Boolean(companyLevelAccess);
+    }
+
+    return Boolean(row);
   }
 };
 

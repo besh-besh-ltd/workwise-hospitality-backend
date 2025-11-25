@@ -90,6 +90,12 @@ HospitalityRoutes.get(
 );
 
 HospitalityRoutes.get(
+  '/my-contexts',
+  passportSignIn,
+  hospitalityController.getMyContexts
+);
+
+HospitalityRoutes.get(
   '/company/:company_id/user-mappings',
   passportSignIn,
   acl([7]),

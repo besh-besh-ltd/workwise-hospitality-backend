@@ -1,4 +1,5 @@
 import userModel from '../models/userModel.js';
+import hospitalityModel from '../models/hospitalityModel.js';
 import Config from '../config/app.config.js';
 import { logError } from '../helper/common.js';
 
@@ -63,8 +64,68 @@ const checkHospitality = (requireHospitality = false) => {
  */
 const requireHospitality = checkHospitality(true);
 
+const attachHospitalityContext = () => {
+  return async (req, res, next) => {
+    try {
+      if (!req.user || !req.user.id) {
+        return next();
+      }
+
+      const rawCompanyId =
+        req.headers['x-hospitality-company'] ||
+        req.headers['x-hospitality-company-id'];
+      const rawHotelId =
+        req.headers['x-hospitality-hotel'] ||
+        req.headers['x-hospitality-hotel-id'];
+
+      if (!rawCompanyId) {
+        req.hospitalityContext = null;
+        return next();
+      }
+
+      const companyId = parseInt(rawCompanyId, 10);
+      const hotelId =
+        rawHotelId !== undefined && rawHotelId !== null && rawHotelId !== ''
+          ? parseInt(rawHotelId, 10)
+          : null;
+
+      if (Number.isNaN(companyId) || (hotelId !== null && Number.isNaN(hotelId))) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Invalid hospitality context',
+        });
+      }
+
+      const hasAccess = await hospitalityModel.userHasContext(
+        req.user.id,
+        companyId,
+        hotelId
+      );
+      if (!hasAccess) {
+        return res.status(403).json({
+          status: 2,
+          message: 'Hospitality context not permitted',
+        });
+      }
+
+      req.hospitalityContext = {
+        companyId,
+        hotelId,
+      };
+      return next();
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value,
+      });
+    }
+  };
+};
+
 export default {
   checkHospitality,
-  requireHospitality
+  requireHospitality,
+  attachHospitalityContext,
 };
 

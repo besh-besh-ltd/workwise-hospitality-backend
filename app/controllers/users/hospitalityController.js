@@ -551,6 +551,19 @@ const HospitalityController = {
       logError(error);
       return formatErrorResponse(res, error);
     }
+  },
+
+  getMyContexts: async (req, res) => {
+    try {
+      const contexts = await hospitalityModel.getUserContexts(req.user.id);
+      return res.status(200).json({
+        status: 1,
+        data: contexts
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
   }
 };
 
