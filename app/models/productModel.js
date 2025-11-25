@@ -1472,70 +1472,124 @@ getNestedCategoryList: async (parentId, slug, vendorRequired = false) => {
     // ---------------------------------------
     // STEP 3: PRODUCTS under this category
     // ---------------------------------------
-    let products = await db.any(
-      `
-      SELECT p.id, p.name, p.sku, p.slug
-      FROM tbl_product_categories pc
-      JOIN tbl_product p ON p.id = pc.product_id
-      WHERE pc.category_id = $1
-      `,
-      params
-    );
+    // let products = await db.any(
+    //   `
+    //   SELECT p.id, p.name, p.sku, p.slug
+    //   FROM tbl_product_categories pc
+    //   JOIN tbl_product p ON p.id = pc.product_id
+    //   WHERE pc.category_id = $1
+    //   `,
+    //   params
+    // );
 
-    // vendorRequired → filter products having vendor-approved variants
-    if (vendorRequired && products.length > 0) {
-      products = await db.any(
-        `
-        SELECT DISTINCT p.id, p.name, p.sku, p.slug
-        FROM tbl_product_categories pc
-        JOIN tbl_product p ON p.id = pc.product_id
-        JOIN tbl_product_variant v ON v.product_id = p.id
-        JOIN tbl_product_variant_vendor_mapping vm 
-              ON vm.product_variant_id = v.id
-        WHERE pc.category_id = $1
-          AND v.is_approve = 1
-          AND vm.is_approved = true
-        `,
-        params
-      );
-    }
+    // // vendorRequired → filter products having vendor-approved variants
+    // if (vendorRequired && products.length > 0) {
+    //   products = await db.any(
+    //     `
+    //     SELECT DISTINCT p.id, p.name, p.sku, p.slug
+    //     FROM tbl_product_categories pc
+    //     JOIN tbl_product p ON p.id = pc.product_id
+    //     JOIN tbl_product_variant v ON v.product_id = p.id
+    //     JOIN tbl_product_variant_vendor_mapping vm 
+    //           ON vm.product_variant_id = v.id
+    //     WHERE pc.category_id = $1
+    //       AND v.is_approve = 1
+    //       AND vm.is_approved = true
+    //     `,
+    //     params
+    //   );
+    // }
 
-    if (products.length > 0) {
-      return { type: "product", data: products };
-    }
+    // if (products.length > 0) {
+    //   return { type: "product", data: products };
+    // }
 
     // ---------------------------------------
     // STEP 4: VARIANTS for this PRODUCT
     // ---------------------------------------
-    let variants = await db.any(
-      `
-      SELECT id, name, sku, slug, product_id
-      FROM tbl_product_variant
-      WHERE product_id = $1
-        AND is_approve = 1
-      `,
-      params
-    );
+    // let variants = await db.any(
+    //   `
+    //   SELECT id, name, sku, slug, product_id
+    //   FROM tbl_product_variant
+    //   WHERE product_id = $1
+    //     AND is_approve = 1
+    //   `,
+    //   params
+    // );
 
-    // vendorRequired → filter variants with vendor mapping
-    if (vendorRequired && variants.length > 0) {
-      variants = await db.any(
-        `
-        SELECT DISTINCT v.id, v.name, v.slug, v.sku, v.product_id
-        FROM tbl_product_variant v
-        JOIN tbl_product_variant_vendor_mapping vm
-              ON vm.product_variant_id = v.id
-        WHERE v.product_id = $1
-          AND v.is_approve = 1
-          AND vm.is_approved = true
-        `,
-        params
-      );
-    }
+    // // vendorRequired → filter variants with vendor mapping
+    // if (vendorRequired && variants.length > 0) {
+    //   variants = await db.any(
+    //     `
+    //     SELECT DISTINCT v.id, v.name, v.slug, v.sku, v.product_id
+    //     FROM tbl_product_variant v
+    //     JOIN tbl_product_variant_vendor_mapping vm
+    //           ON vm.product_variant_id = v.id
+    //     WHERE v.product_id = $1
+    //       AND v.is_approve = 1
+    //       AND vm.is_approved = true
+    //     `,
+    //     params
+    //   );
+    // }
 
-    if (variants.length > 0) {
-      return { type: "variant", data: variants };
-    }
+    // if (variants.length > 0) {
+    //   return { type: "variant", data: variants };
+    // }
+
+    // ---------------------------------------
+// STEP 4: VARIANTS for this CATEGORY (all products)
+// ---------------------------------------
+
+// 1. Find all product IDs under this category
+const productIds = await db.any(
+  `
+    SELECT DISTINCT p.id
+    FROM tbl_product_categories pc
+    JOIN tbl_product p ON p.id = pc.product_id
+    WHERE pc.category_id = $1
+  `,
+  params
+);
+
+// If no products exist → no variants exist
+if (!productIds || productIds.length === 0) {
+  return { type: "none", data: [] };
+}
+
+const ids = productIds.map(p => p.id);
+
+// 2. Fetch ALL variants for ALL those products
+let variants = await db.any(
+  `
+    SELECT v.id, v.name, v.sku, v.slug, v.product_id
+    FROM tbl_product_variant v
+    WHERE v.product_id IN ($1:csv)
+      AND v.is_approve = 1
+  `,
+  [ids]
+);
+
+// 3. If vendorRequired → filter variants with approved vendors
+if (vendorRequired && variants.length > 0) {
+  variants = await db.any(
+    `
+      SELECT DISTINCT v.id, v.name, v.slug, v.sku, v.product_id
+      FROM tbl_product_variant v
+      JOIN tbl_product_variant_vendor_mapping vm
+            ON vm.product_variant_id = v.id
+      WHERE v.product_id IN ($1:csv)
+        AND v.is_approve = 1
+        AND vm.is_approved = true
+    `,
+    [ids]
+  );
+}
+
+if (variants.length > 0) {
+  return { type: "variant", data: variants };
+}
+
 
     // ---------------------------------------
     // STEP 5: Nothing found
