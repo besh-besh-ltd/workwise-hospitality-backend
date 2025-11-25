@@ -198,6 +198,132 @@ const hospitalityModel = {
          AND u.company_id = $2`,
       [projectIds, companyId]
     );
+  },
+
+  getUserMappingsForCompany: async (
+    companyId,
+    mappingType = null,
+    hotelId = null
+  ) => {
+    const params = [companyId];
+    let idx = 2;
+    let whereClause = '';
+
+    if (mappingType !== null && (mappingType === 0 || mappingType === 1)) {
+      whereClause += ` AND hum.mapping_type = $${idx}`;
+      params.push(mappingType);
+      idx += 1;
+    }
+
+    if (mappingType === 1 && hotelId) {
+      whereClause += ` AND hum.hospitality_hotel_id = $${idx}`;
+      params.push(hotelId);
+      idx += 1;
+    }
+
+    return db.any(
+      `SELECT 
+        hum.*,
+        u.name,
+        u.email,
+        u.mobile,
+        COALESCE(hh.name, '') AS hotel_name
+       FROM tbl_hospitality_user_mappings hum
+       JOIN tbl_users u ON u.id = hum.user_id
+       LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = hum.hospitality_hotel_id
+       WHERE hum.hospitality_company_id = $1
+         ${whereClause}
+       ORDER BY hum.created_at DESC`,
+      params
+    );
+  },
+
+  getMappedUserIds: async (companyId, mappingType, hotelId = null) => {
+    return db.any(
+      `SELECT DISTINCT user_id
+       FROM tbl_hospitality_user_mappings
+       WHERE hospitality_company_id = $1
+         AND mapping_type = $2
+         AND (
+              (mapping_type = 0 AND hospitality_hotel_id IS NULL)
+              OR (mapping_type = 1 AND hospitality_hotel_id = $3)
+         )`,
+      [companyId, mappingType, hotelId]
+    );
+  },
+
+  getMappedProjectIds: async (companyId, mappingType, hotelId = null) => {
+    return db.any(
+      `SELECT DISTINCT project_id
+       FROM tbl_hospitality_project_mappings
+       WHERE hospitality_company_id = $1
+         AND mapping_type = $2
+         AND (
+              (mapping_type = 0 AND hospitality_hotel_id IS NULL)
+              OR (mapping_type = 1 AND hospitality_hotel_id = $3)
+         )`,
+      [companyId, mappingType, hotelId]
+    );
+  },
+
+  getProjectMappings: async (projectId) => {
+    return db.any(
+      `SELECT 
+        hpm.*,
+        hc.name AS company_name,
+        hh.name AS hotel_name
+       FROM tbl_hospitality_project_mappings hpm
+       JOIN tbl_hospitality_companies hc ON hc.id = hpm.hospitality_company_id
+       LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = hpm.hospitality_hotel_id
+       WHERE hpm.project_id = $1
+         AND hc.is_deleted = 0
+         AND (hh.id IS NULL OR hh.is_deleted = 0)`,
+      [projectId]
+    );
+  },
+
+  getUserMappings: async (userId) => {
+    return db.any(
+      `SELECT 
+        hum.*,
+        hc.name AS company_name,
+        hh.name AS hotel_name
+       FROM tbl_hospitality_user_mappings hum
+       JOIN tbl_hospitality_companies hc ON hc.id = hum.hospitality_company_id
+       LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = hum.hospitality_hotel_id
+       WHERE hum.user_id = $1
+         AND hc.is_deleted = 0
+         AND (hh.id IS NULL OR hh.is_deleted = 0)`,
+      [userId]
+    );
+  },
+
+  deleteProjectMappings: async (projectId, companyId, mappingType, hotelId = null) => {
+    return db.result(
+      `DELETE FROM tbl_hospitality_project_mappings
+       WHERE project_id = $1
+         AND hospitality_company_id = $2
+         AND mapping_type = $3
+         AND (
+              (mapping_type = 0 AND hospitality_hotel_id IS NULL)
+              OR (mapping_type = 1 AND hospitality_hotel_id = $4)
+         )`,
+      [projectId, companyId, mappingType, hotelId]
+    );
+  },
+
+  deleteUserMappings: async (userId, companyId, mappingType, hotelId = null) => {
+    return db.result(
+      `DELETE FROM tbl_hospitality_user_mappings
+       WHERE user_id = $1
+         AND hospitality_company_id = $2
+         AND mapping_type = $3
+         AND (
+              (mapping_type = 0 AND hospitality_hotel_id IS NULL)
+              OR (mapping_type = 1 AND hospitality_hotel_id = $4)
+         )`,
+      [userId, companyId, mappingType, hotelId]
+    );
   }
 };
 

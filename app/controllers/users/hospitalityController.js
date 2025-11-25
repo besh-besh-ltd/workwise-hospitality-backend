@@ -229,7 +229,7 @@ const HospitalityController = {
                   return projectModel.addTeamMember({
                     project_id: mapping.project_id,
                     user_id: userId,
-                    role: 'member',
+                    role: 2,
                     created_by: req.user.id
                   });
                 }
@@ -327,7 +327,7 @@ const HospitalityController = {
                   return projectModel.addTeamMember({
                     project_id: mapping.project_id,
                     user_id: user.user_id,
-                    role: 'member',
+                    role: 2,
                     created_by: req.user.id
                   });
                 }
@@ -340,6 +340,212 @@ const HospitalityController = {
       return res.status(200).json({
         status: 1,
         message: 'Projects mapped successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  getMappedUserIds: async (req, res) => {
+    try {
+      const company = req.companyDetails;
+      const hospitalityCompanyId = parseInt(req.params.company_id, 10);
+      const mappingType = parseInt(req.query.mapping_type, 10);
+      const hotelId = req.query.hotel_id ? parseInt(req.query.hotel_id, 10) : null;
+
+      const record = await hospitalityModel.getCompanyById(hospitalityCompanyId);
+      if (!record || record.buyer_company_id !== company.id) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Hospitality company not found'
+        });
+      }
+
+      const mappedUsers = await hospitalityModel.getMappedUserIds(
+        hospitalityCompanyId,
+        mappingType,
+        hotelId
+      );
+
+      return res.status(200).json({
+        status: 1,
+        data: mappedUsers.map(u => u.user_id)
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  getMappedProjectIds: async (req, res) => {
+    try {
+      const company = req.companyDetails;
+      const hospitalityCompanyId = parseInt(req.params.company_id, 10);
+      const mappingType = parseInt(req.query.mapping_type, 10);
+      const hotelId = req.query.hotel_id ? parseInt(req.query.hotel_id, 10) : null;
+
+      const record = await hospitalityModel.getCompanyById(hospitalityCompanyId);
+      if (!record || record.buyer_company_id !== company.id) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Hospitality company not found'
+        });
+      }
+
+      const mappedProjects = await hospitalityModel.getMappedProjectIds(
+        hospitalityCompanyId,
+        mappingType,
+        hotelId
+      );
+
+      return res.status(200).json({
+        status: 1,
+        data: mappedProjects.map(p => p.project_id)
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  getProjectMappings: async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.project_id, 10);
+      const mappings = await hospitalityModel.getProjectMappings(projectId);
+
+      return res.status(200).json({
+        status: 1,
+        data: mappings
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  getUserMappings: async (req, res) => {
+    try {
+      const userId = parseInt(req.params.user_id, 10);
+      const mappings = await hospitalityModel.getUserMappings(userId);
+
+      return res.status(200).json({
+        status: 1,
+        data: mappings
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  deleteProjectMapping: async (req, res) => {
+    try {
+      const company = req.companyDetails;
+      const projectId = parseInt(req.params.project_id, 10);
+      const companyId = parseInt(req.body.company_id, 10);
+      const mappingType = parseInt(req.body.mapping_type, 10);
+      const hotelId = req.body.hotel_id ? parseInt(req.body.hotel_id, 10) : null;
+
+      const record = await hospitalityModel.getCompanyById(companyId);
+      if (!record || record.buyer_company_id !== company.id) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Hospitality company not found'
+        });
+      }
+
+      await hospitalityModel.deleteProjectMappings(projectId, companyId, mappingType, hotelId);
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Project mapping deleted successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  deleteUserMapping: async (req, res) => {
+    try {
+      const company = req.companyDetails;
+      const userId = parseInt(req.params.user_id, 10);
+      const companyId = parseInt(req.body.company_id, 10);
+      const mappingType = parseInt(req.body.mapping_type, 10);
+      const hotelId = req.body.hotel_id ? parseInt(req.body.hotel_id, 10) : null;
+
+      const record = await hospitalityModel.getCompanyById(companyId);
+      if (!record || record.buyer_company_id !== company.id) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Hospitality company not found'
+        });
+      }
+
+      await hospitalityModel.deleteUserMappings(userId, companyId, mappingType, hotelId);
+
+      return res.status(200).json({
+        status: 1,
+        message: 'User mapping deleted successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  listCompanyUserMappings: async (req, res) => {
+    try {
+      const company = req.companyDetails;
+      const hospitalityCompanyId = parseInt(req.params.company_id, 10);
+      const mappingTypeParam = req.query.mapping_type;
+      let mappingType = null;
+      if (mappingTypeParam !== undefined) {
+        mappingType = parseInt(mappingTypeParam, 10);
+        if (![0, 1].includes(mappingType)) {
+          return res.status(400).json({
+            status: 2,
+            message: 'Invalid mapping_type value'
+          });
+        }
+      }
+      let hotelId = null;
+      if (mappingType === 1) {
+        const hotelParam = req.query.hotel_id;
+        if (!hotelParam) {
+          return res.status(400).json({
+            status: 2,
+            message: 'hotel_id is required for hotel level mappings'
+          });
+        }
+        hotelId = parseInt(hotelParam, 10);
+        const hotelRecord = await hospitalityModel.getHotelById(hotelId);
+        if (!hotelRecord || hotelRecord.hospitality_company_id !== hospitalityCompanyId) {
+          return res.status(404).json({
+            status: 2,
+            message: 'Hotel not found in selected company'
+          });
+        }
+      }
+
+      const record = await hospitalityModel.getCompanyById(hospitalityCompanyId);
+      if (!record || record.buyer_company_id !== company.id) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Hospitality company not found'
+        });
+      }
+
+      const mappings = await hospitalityModel.getUserMappingsForCompany(
+        hospitalityCompanyId,
+        mappingType,
+        mappingType === 1 ? hotelId : null
+      );
+
+      return res.status(200).json({
+        status: 1,
+        data: mappings
       });
     } catch (error) {
       logError(error);

@@ -79,6 +79,15 @@ const schemas = {
     sub_id: Joi.number().required(),
     coupon_code: Joi.string().trim().optional().allow(null, ''),
   }),
+  deleteMapping: Joi.object().keys({
+    company_id: Joi.number().integer().required(),
+    mapping_type: Joi.number().valid(0, 1).required(),
+    hotel_id: Joi.when('mapping_type', {
+      is: 1,
+      then: Joi.number().required(),
+      otherwise: Joi.any().optional().allow(null),
+    }),
+  }),
 };
 
 export { validateBody, validateParam, schemas };

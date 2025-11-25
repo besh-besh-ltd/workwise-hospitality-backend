@@ -80,6 +80,67 @@ HospitalityRoutes.post(
   hospitalityController.mapProjects
 );
 
+HospitalityRoutes.get(
+  '/company/:company_id/mapped-user-ids',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  validateParam(schemas.companyIdParam),
+  hospitalityController.getMappedUserIds
+);
+
+HospitalityRoutes.get(
+  '/company/:company_id/user-mappings',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  validateParam(schemas.companyIdParam),
+  hospitalityController.listCompanyUserMappings
+);
+
+HospitalityRoutes.get(
+  '/company/:company_id/mapped-project-ids',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  validateParam(schemas.companyIdParam),
+  hospitalityController.getMappedProjectIds
+);
+
+HospitalityRoutes.get(
+  '/project/:project_id/mappings',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.checkHospitality(false),
+  hospitalityController.getProjectMappings
+);
+
+HospitalityRoutes.get(
+  '/user/:user_id/mappings',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.checkHospitality(false),
+  hospitalityController.getUserMappings
+);
+
+HospitalityRoutes.delete(
+  '/project/:project_id/mapping',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  validateBody(schemas.deleteMapping),
+  hospitalityController.deleteProjectMapping
+);
+
+HospitalityRoutes.delete(
+  '/user/:user_id/mapping',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  validateBody(schemas.deleteMapping),
+  hospitalityController.deleteUserMapping
+);
+
 HospitalityRoutes.post(
   '/subscription-payment',
   validateBody(schemas.hospitalitySubscriptionPayment),
