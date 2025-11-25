@@ -2975,14 +2975,16 @@ const productController = {
         });
       }
       
-      // Prepare the variant update object
+      // Prepare the mapping update object
       const variantObj = {
-        is_approved: status == "1",
+        is_approved: status === 1,
         updated_by: req.user.id,
         updated_at: new Date(),
         approved_by: req.user.id,
         approved_at: new Date(),
       };
+      
+      // Note: reject_reason_id is not stored on the mapping table, only on the variant table
 
       
       // Update the variant instead of the mapping
@@ -3051,6 +3053,44 @@ const productController = {
       return res.status(500).json({
         status: 3,
         message: Config?.errorText?.value || 'Something went wrong while updating approval',
+        error: error.message
+      });
+    }
+  },
+  deleteVariantVendorMapping: async (req, res) => {
+    try {
+      const mappingId = req.params.id;
+      
+      if (!mappingId) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Mapping ID is required'
+        });
+      }
+      
+      // Check if mapping exists
+      const mappingDetails = await productModel.getVariantVendorMappingById(mappingId);
+      
+      if (!mappingDetails) {
+        return res.status(404).json({
+          status: 3,
+          message: 'Mapping not found'
+        });
+      }
+      
+      // Delete the mapping
+      await productModel.deleteVariantVendorMapping(mappingId);
+      
+      return res.status(200).json({
+        status: 1,
+        message: 'Mapping deleted successfully'
+      });
+    } catch (error) {
+      console.error("Exception in deleteVariantVendorMapping:", error);
+      logError(error);
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong while deleting mapping',
         error: error.message
       });
     }
