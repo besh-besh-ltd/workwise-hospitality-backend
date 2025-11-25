@@ -237,11 +237,7 @@ UsersRoutes.post(
   validateDbBody.subscription_and_coupon_id_exists,
   UsersController.subscriptionDetails
 );
-UsersRoutes.post(
-  '/hospitality-subscription-payment',
-  validateBody(schemas.hospitality_subscription_payment),
-  UsersController.hospitalitySubscriptionPayment
-);
+
 UsersRoutes.post(
   '/subscription-payment',
   passportSignIn,
