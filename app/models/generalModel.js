@@ -534,7 +534,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
           -- New is_default logic: Check project mapping first, then global default
           CASE
             WHEN $${paramIndex} IS NOT NULL AND THPM_main.project_id IS NOT NULL THEN TRUE
-            WHEN $${paramIndex} IS NULL AND EXISTS (
+            WHEN EXISTS (
                 SELECT 1
                 FROM tbl_hierarchy_default_mapping THDM
                 WHERE THDM.company_id = $1

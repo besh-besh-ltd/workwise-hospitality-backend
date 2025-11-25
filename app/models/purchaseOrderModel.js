@@ -160,24 +160,25 @@ function calculatePricing(items) {
   };
 }
 
-export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, selected_hierarchy, t) => {
+export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, total_value, product_info, initiated_by, company_id, user, existing_po_id, selected_hierarchy, t) => {
     try {
-      const { rfq_product_id, quantity, unit_price, finalized_vendor_id } =
+      const { rfq_product_id, quantity, unit, unit_price, charges_meta, finalized_vendor_id } =
         product_info;
 
       // 1. Check if a pending PO already exists for this RFQ Product
       const existing = await t.oneOrNone(
-        `SELECT id FROM tbl_rfq_purchase_order
-      WHERE rfq_id = $1 AND $2 = ANY(rfq_product_id) AND status = $3`,
+        `SELECT TRPO.id FROM tbl_rfq_purchase_order TRPO
+        LEFT JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = TRPO.id AND TPOP.rfq_product_id = $2
+      WHERE rfq_id = $1 AND TPOP.id IS NOT NULL AND status = $3`,
         [rfq_id, rfq_product_id, PO_STATUSES.PENDING_APPROVAL]
       );
 
       if (existing) {
         await t.none(
           `UPDATE tbl_rfq_purchase_order
-          SET status = $3, updated_at = NOW()
-          WHERE rfq_id = $1 AND $2 = ANY(rfq_product_id)`,
-          [rfq_id, rfq_product_id, PO_STATUSES.CANCELLED]
+          SET status = $2, updated_at = NOW()
+          WHERE id = $1`,
+          [existing.id, PO_STATUSES.CANCELLED]
         );
       }
 
@@ -190,39 +191,44 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_val
         po = await t.one(
           `UPDATE tbl_rfq_purchase_order 
             SET
-              rfq_product_id = array_append(rfq_product_id, $1),
-              quote_id = array_append(quote_id, $2),
-              total_value = total_value + $3,
-              quantity = quantity + $4,
-              unit_price = unit_price + $5,
-              selected_hierarchy = $7
+              selected_hierarchy = $1
 
-            WHERE id = $6
+            WHERE id = $2
             RETURNING id`,
           [
-            rfq_product_id,
-            quote_id,
-            total_value,
-            quantity,
-            unit_price,
-            existing_po_id,
-            selected_hierarchy
+            selected_hierarchy,
+            existing_po_id
           ]
         );
+
+        await t.none(
+          `INSERT INTO tbl_purchase_order_product
+          (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, charges_meta, total_price)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [existing_po_id, rfq_product_id, quote_item_id, quantity, unit, charges_meta, total_value]
+        )
       } else {
         // 2. Insert new PO record
         const poNumber = await getNextPONumber();
+        const concated_terms = await db.one(
+          `SELECT STRING_AGG(t.term_content, ', ' ORDER BY t.id) AS terms_text
+            FROM tbl_rfq_terms_map tm
+            JOIN tbl_rfq_terms t ON t.id = tm.terms_id
+            WHERE tm.rfq_id = $1;
+          `,
+          [rfq_id]
+        )
         po = await t.one(
           `INSERT INTO tbl_rfq_purchase_order (
             rfq_id, project_id, quote_id, po_number, total_value, rfq_product_id, quantity,
-            unit_price, finalized_vendor_id, initiated_by, status, selected_hierarchy
+            unit_price, finalized_vendor_id, initiated_by, status, selected_hierarchy, terms_and_conditions
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
           RETURNING id`,
           [
             rfq_id,
             project_id,
-            [quote_id],
+            [quote_item_id],
             poNumber,
             total_value,
             [rfq_product_id],
@@ -231,9 +237,17 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_val
             finalized_vendor_id,
             initiated_by,
             PO_STATUSES.DRAFT,
-            selected_hierarchy
+            selected_hierarchy,
+            concated_terms.terms_text
           ]
         );
+
+        await t.none(
+          `INSERT INTO tbl_purchase_order_product
+          (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, charges_meta, total_price)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [po.id, rfq_product_id, quote_item_id, quantity, unit, unit_price, charges_meta, total_value]
+        )
       }
 
       return {
@@ -258,6 +272,7 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
         TC.logo,
         FIN.mobile,
         TQ.timestamp,
+        RFQ.location AS delivery_location,
         JSON_BUILD_OBJECT(
           'id', SUP.id,
           'name', SUP.name,
@@ -286,6 +301,7 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
         ) AS deliveryTerms
 
         FROM tbl_rfq_purchase_order PO
+        JOIN tbl_rfq RFQ ON RFQ.id = PO.rfq_id
         LEFT JOIN tbl_quotes TQ ON TQ.rfq_id = PO.rfq_id AND TQ.created_by = PO.finalized_vendor_id
         JOIN tbl_users SUP ON SUP.id = PO.finalized_vendor_id
         JOIN tbl_users FIN ON FIN.id = PO.initiated_by
