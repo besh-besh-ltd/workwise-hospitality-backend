@@ -5713,7 +5713,9 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
     offset,
     rfqStatus,
     adminServiceStatus,
-    sort
+    sort,
+    rfq_no,
+    company
   ) => {
     return new Promise((resolve, reject) => {
       let dynamicQuery = '';
@@ -5722,6 +5724,15 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         dynamicQuery += ` AND (ARS.status IS NULL OR ARS.status = '${adminServiceStatus}')`;
       } else if (adminServiceStatus) {
         dynamicQuery += ` AND ARS.status = '${adminServiceStatus}'`;
+      }
+
+      if (rfq_no) {
+        dynamicQuery += ` AND RFQ.rfq_no = ${Number(rfq_no)}`;
+      }
+
+      if (company && Array.isArray(company) && company.length > 0) {
+        const companyList = company.map(Number).join(","); 
+        dynamicQuery += ` AND U.company_id IN (${companyList})`;
       }
 
       const query = `
@@ -5767,6 +5778,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         FROM tbl_rfq RFQ
         LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
         LEFT JOIN tbl_admin_rfq_service ARS ON RFQ.id = ARS.rfq_id
+        LEFT JOIN tbl_users U ON RFQ.created_by = U.id
         WHERE
           RFQ.is_published = 1 AND
           (($1 IS NULL) OR RFQ.status = $1)
@@ -5779,6 +5791,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
 
       db.any(query, values)
         .then(function (data) {
+          console.log('Data:', data);
           resolve(data);
         })
         .catch(function (err) {
@@ -5787,6 +5800,7 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         });
     });
   },
+
 
 getAllClientsrfqsForAdmin: async (page = 1, limit = 10, search = '', dateFilter = 'all', startDate = '', endDate = '', companyIds = []) => {
   const offset = (page - 1) * limit;
