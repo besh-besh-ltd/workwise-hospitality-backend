@@ -65,7 +65,7 @@ const vendorModel = {
         dynamicQuery += ` AND tbl_company.source = '${escapedSource}'`;
       }
       if(subscription_plan){
-        dynamicQuery += ` AND tbl_company.subscription_plan = '${escapedPlan}'`;
+        dynamicQuery += ` AND tbl_users.subscription_plan_id = '${escapedPlan}'`;
       }
       if(isPrivate){
         dynamicQuery += ` AND tbl_company.is_private = '${escapedIsPrivate}'`;
@@ -218,7 +218,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         dynamicQuery += ` AND tbl_company.source = '${escapedSource}'`;
       }
     if(subscription_plan){
-        dynamicQuery += ` AND tbl_company.subscription_plan = '${escapedPlan}'`;
+        dynamicQuery += ` AND tbl_users.subscription_plan_id = '${escapedPlan}'`;
     }
     if(is_private){
         dynamicQuery += ` AND tbl_company.is_private = '${escapedIsPrivate}'`;
