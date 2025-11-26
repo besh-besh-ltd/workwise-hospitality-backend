@@ -380,7 +380,7 @@ export const rfqSchemas = {
       let upload = multer({
         storage: store_query_message_upload_file,
         limits: {
-          fileSize: 8000000 // 8MB
+           fileSize: 100 * 1024 * 1024 // 100 MB in bytes
         }
       }).array('files', 10);
       upload(req, res, async function (err) {
