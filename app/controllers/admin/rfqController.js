@@ -44,7 +44,8 @@ const rfqController = {
       );
       const count = await rfqModel.getTotalRfqCountForAdmin(
         rfq_status,
-        admin_service_status
+        admin_service_status,
+        company
       );
 
       res

@@ -5719,20 +5719,31 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
   ) => {
     return new Promise((resolve, reject) => {
       let dynamicQuery = '';
+      const values = [rfqStatus, adminServiceStatus, sort, limit, offset];
+      let paramIndex = 6;
 
-      if (adminServiceStatus == 'Pending') {
-        dynamicQuery += ` AND (ARS.status IS NULL OR ARS.status = '${adminServiceStatus}')`;
+      // Admin service status
+      if (adminServiceStatus === 'Pending') {
+        dynamicQuery += ` AND (ARS.status IS NULL OR ARS.status = 'Pending')`;
       } else if (adminServiceStatus) {
-        dynamicQuery += ` AND ARS.status = '${adminServiceStatus}'`;
+        dynamicQuery += ` AND ARS.status = $${paramIndex}`;
+        values.push(adminServiceStatus);
+        paramIndex++;
       }
 
+      // RFQ number
       if (rfq_no) {
-        dynamicQuery += ` AND RFQ.rfq_no = ${Number(rfq_no)}`;
+        dynamicQuery += ` AND RFQ.rfq_no = $${paramIndex}`;
+        values.push(Number(rfq_no));
+        paramIndex++;
       }
 
+      // COMPANY FILTER — SAFE & PARAMETERIZED
       if (company && Array.isArray(company) && company.length > 0) {
-        const companyList = company.map(Number).join(","); 
-        dynamicQuery += ` AND U.company_id IN (${companyList})`;
+        const placeholders = company.map((_, i) => `$${paramIndex + i}`).join(',');
+        dynamicQuery += ` AND U.company_id IN (${placeholders})`;
+        company.forEach(id => values.push(Number(id)));
+        paramIndex += company.length;
       }
 
       const query = `
@@ -5780,24 +5791,16 @@ WHERE created_by = $1 AND status = $2  AND tbl_rfq.is_published = 1`,
         LEFT JOIN tbl_admin_rfq_service ARS ON RFQ.id = ARS.rfq_id
         LEFT JOIN tbl_users U ON RFQ.created_by = U.id
         WHERE
-          RFQ.is_published = 1 AND
-          (($1 IS NULL) OR RFQ.status = $1)
+          RFQ.is_published = 1
+          AND ($1::text IS NULL OR RFQ.status = $1)
           ${dynamicQuery}
-        ORDER BY RFQ.timestamp ${sort}
+        ORDER BY RFQ.timestamp ${sort === 'DESC' ? 'DESC' : 'ASC'}
         LIMIT $4 OFFSET $5
-    `;
-
-      const values = [rfqStatus, adminServiceStatus, sort, limit, offset];
+      `;
 
       db.any(query, values)
-        .then(function (data) {
-          console.log('Data:', data);
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
+        .then(data => resolve(data))
+        .catch(err => reject(err));
     });
   },
 
@@ -6045,35 +6048,45 @@ getAllCompaniesListForAdmin : async () => {
   });
 },
 
-  getTotalRfqCountForAdmin: async (rfqStatus, adminServiceStatus) => {
+  getTotalRfqCountForAdmin: async (rfqStatus, adminServiceStatus, company = []) => {
     return new Promise((resolve, reject) => {
       let dynamicQuery = '';
+      const values = [rfqStatus];  // $1
+      let paramCount = 2;
 
-      if (adminServiceStatus == 'Pending') {
-        dynamicQuery += ` AND (ARS.status IS NULL OR ARS.status = '${adminServiceStatus}')`;
+      // Handle admin_service_status
+      if (adminServiceStatus === 'Pending') {
+        dynamicQuery += ` AND (ARS.status IS NULL OR ARS.status = 'Pending')`;
       } else if (adminServiceStatus) {
-        dynamicQuery += ` AND ARS.status = '${adminServiceStatus}'`;
+        dynamicQuery += ` AND ARS.status = $${paramCount}`;
+        values.push(adminServiceStatus);
+        paramCount++;
+      }
+
+      // Handle company filter - THIS IS WHAT WAS MISSING AND BROKEN BEFORE
+      if (company && Array.isArray(company) && company.length > 0) {
+        const placeholders = company.map((_, i) => `$${paramCount + i}`).join(', ');
+        dynamicQuery += ` AND U.company_id IN (${placeholders})`;
+        company.forEach(id => values.push(Number(id)));
+        paramCount += company.length;
       }
 
       const query = `
         SELECT COUNT(*) AS total
         FROM tbl_rfq RFQ
         LEFT JOIN tbl_admin_rfq_service ARS ON RFQ.id = ARS.rfq_id
-        WHERE
-          RFQ.is_published = 1 AND
-          ($1 IS NULL OR RFQ.status = $1)
+        LEFT JOIN tbl_users U ON RFQ.created_by = U.id
+        WHERE RFQ.is_published = 1
+          AND ($1 IS NULL OR RFQ.status = $1)
           ${dynamicQuery}
       `;
 
-      const values = [rfqStatus];
-
       db.one(query, values)
-        .then(function (data) {
-          resolve(data);
+        .then(data => {
+          resolve({ total: Number(data.total) }); // match your old format: { total: 123 }
         })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
+        .catch(err => {
+          reject(new Error(err));
         });
     });
   },
