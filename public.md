@@ -46,8 +46,6 @@ GET /api/v1/public/products?search_key=flns
   "count": 1,
   "data": [
     {
-      "variant_id": 6068,
-      "variant_name": "FLANGES",
       "product_id": 6068,
       "product_name": "FLANGES",
       "description": null,
