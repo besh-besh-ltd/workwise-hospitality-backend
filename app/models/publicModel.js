@@ -12,10 +12,10 @@ export const handleGetProducts = async (search_key) => {
     const products = await t.any(
       `
       SELECT DISTINCT
-        pv.id AS variant_id,
-        pv.name AS variant_name,
-        p.id AS product_id,
-        p.name AS product_name,
+        pv.id AS product_id,
+        pv.name AS product_name,
+        -- p.id AS product_id,
+        -- p.name AS product_name,
         p.description,
         pv.slug AS slug,
         c.title AS category_name,
