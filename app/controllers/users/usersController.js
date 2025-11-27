@@ -351,6 +351,7 @@ const UsersController = {
   update_company_detail: async (req, res, next) => {
   try {
     const { company_id } = req.user;
+    console.log("company_id", company_id);
     const user_id = req.user.id
     const reqData = req.body;
 
@@ -369,11 +370,14 @@ const UsersController = {
 
     //  this data stpred in tbl_user but belongs to company, we are storing it here because one comapny may have mulriple location and tehy always has one spoc for each location, ( if this is not work we move this to the tbl_ocmpany )
     const reqLocationData = {
-      state: reqData?.state,
-      city: reqData?.city,
-      country: reqData?.country,
+      state_id: reqData?.state,
+      city_id: reqData?.city,
+      country_id: reqData?.country,
       address: reqData?.street_address?.trim(),
+      company_id: company_id,
       postal_code:reqData?.postal_code,
+      created_by : req.user.id,
+      created_at: new Date(), // this value  depends on server date and time
       updated_at: new Date(), // this value  depends on server date and time
     }
 
@@ -383,10 +387,10 @@ const UsersController = {
       `id = ${company_id}`
     );
 
-    await rfqModel.updateWhere(
-      "tbl_users",
+    await rfqModel.updateWhere(       
+      "tbl_company_location",
       reqLocationData,
-      `id = ${user_id}`
+      `company_id = ${company_id}`
     );
 
     return res.status(200).json({
