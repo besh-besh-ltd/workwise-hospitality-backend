@@ -43,6 +43,10 @@ const formatPersistentErrors = (errors) => {
   }
 }
 
+const REMINDER_SEND_YIELD_THRESHOLD = 20;
+const yieldReminderEventLoop = () =>
+  new Promise((resolve) => setImmediate(resolve));
+
 const VENDORS_FILTER_KEYS = [
   'vendor_approved_by',
   'state',
@@ -617,7 +621,7 @@ const sendFollowUpEmailsService = async (payload) => {
 const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auction, location) => {
   try {
     // Validate email addresses
-    let organization_name = user?.organization_name || user?.name;
+    let organization_name = user?.company_name || user?.organization_name || user?.name;
     const buyerUserId = user?.id || null;
     const buyerEmail = user?.email || "";
 
@@ -725,7 +729,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
 
       const dynamicHTML = generateEmailTemplate(headerContent, containerContent, buyerUserId);
 
-      const org_name = user_details[0].organization_name || user_details[0].name || "";
+      const org_name = user_details[0].company_name || user_details[0].organization_name || user_details[0].name || "";
       let mailRecipients = {
         from: `${organization_name} ${Config.masterEmail}`,
         subject: `New RFQ Opportunity from ${organization_name}`,
@@ -1079,14 +1083,14 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
   const spocList = await vendorModel.getSpocDetails(user.id)
 
   // Extract vendor details from user object
-  const vendorName = user.organization_name || user?.name;
+  const vendorName = user.company_name || user.organization_name || user?.name;
 
   // Email content
   const headerContent = `<h2>Hello ${vendorName || ''},</h2>`;
 
   const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
       <p style="padding-bottom: 3px;">
-                   Your updated quotation for #${rfq_no} has been successfully shared with ${buyerDetails[0]?.organization_name || buyerDetails[0]?.name || 'the buyer'}. This update keeps you competitive and responsive to buyer requirements.      </p>
+                   Your updated quotation for #${rfq_no} has been successfully shared with ${buyerDetails[0]?.company_name || buyerDetails[0]?.organization_name || buyerDetails[0]?.name || 'the buyer'}. This update keeps you competitive and responsive to buyer requirements.      </p>
                    </p>
 
       <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0]?.token || ""}"
@@ -1154,7 +1158,7 @@ const sendRevisedQuotationEmailToBuyer = async (buyerDetails, quoteItemChanges, 
   
 
   // Extract vendor details from user object
-  const vendorName = user.organization_name || user?.name;
+  const vendorName = user.company_name || user.organization_name || user?.name;
 
 // Group product names and count occurrences (variants)
 const productCountMap = quoteItemChanges
@@ -1177,7 +1181,7 @@ const formattedProducts = countedProducts.length > 0
   
 
   // Email content
-  const headerContent = `<h2>Hello ${buyerDetails[0]?.organization_name || ''},</h2>`;
+  const headerContent = `<h2>Hello ${buyerDetails[0]?.company_name || buyerDetails[0]?.organization_name || ''},</h2>`;
 
   const containerContent = `<div style="font-size: 15px; font-family: 'Roboto', sans-serif;">
       <p style="padding-bottom: 3px;">
@@ -1221,7 +1225,7 @@ const formattedProducts = countedProducts.length > 0
     rfqID:rfq_id,
     projectName:"-",
     vendorName:vendorName,
-    buyerName:buyerDetails[0]?.name
+    buyerName:buyerDetails[0]?.company_name || buyerDetails[0]?.organization_name || buyerDetails[0]?.name
   }
 
   // await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(payload);
@@ -1232,11 +1236,15 @@ const formattedProducts = countedProducts.length > 0
 const sendQuoteNotificationToVendor = async (req) => {
   // send mail to vendors
   const {rfq_id, rfq_no} = req.body
-  const { name, email, id, organization_name, mobile } = req.user;
+  const { name, email, id, organization_name, company_name, mobile } = req.user;
+  const user = req.user
   const token = await rfqModel.getVendorRfqToken(id, rfq_id);
   const BuyerDetails = await rfqModel.getRFQCreatedBy(rfq_id) 
   
-  const headerContent = `<h2>Hello ${organization_name || name},</h2>`;
+  const vendorCompanyName = company_name || organization_name || name;
+  const buyerCompanyName = BuyerDetails[0]?.company_name || BuyerDetails[0]?.organization_name || '';
+  
+  const headerContent = `<h2>Hello ${vendorCompanyName},</h2>`;
 
   const containerContent = ` 
   <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
@@ -1245,7 +1253,7 @@ const sendQuoteNotificationToVendor = async (req) => {
         ? 'Your regret concern has been sent to the buyer.'
         : `<div>
             <p>Thank you for submitting your quotation for <strong>#${rfq_no}</strong>. 
-               We've shared it with <strong>${BuyerDetails[0]?.organization_name || ''}</strong>, who will review it and get back to you soon.</p>
+               We've shared it with <strong>${buyerCompanyName}</strong>, who will review it and get back to you soon.</p>
               <p><strong>Next Steps:</strong> Keep an eye out for any buyer queries or updates, 
                and be ready to discuss terms to secure the order.</p>
 
@@ -1285,6 +1293,7 @@ const sendQuoteNotificationToVendor = async (req) => {
 
   // send message to spoc
   // here we have to implement await Promise.allSettled(promises); for better perfomance
+  const vendorCompanyNameForWhatsApp = user.company_name || user.organization_name || user.name;
   spocList.map(async (spoc) => {
     if (spoc.mobile) {
     const whatsappPayload ={
@@ -1292,7 +1301,7 @@ const sendQuoteNotificationToVendor = async (req) => {
       token:token[0].token,
       rfq_id:rfq_id,
       message:message,
-      name:organization_name || name
+      name:vendorCompanyNameForWhatsApp
     }
   
     await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
@@ -1305,14 +1314,15 @@ const sendQuoteNotificationToVendor = async (req) => {
     token:token[0].token,
     rfq_id:rfq_id,
     message:message,
-    name:organization_name || name
+    name:vendorCompanyName
   }  
   await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
 
 };
 
 const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
-  const { name, email, organization_name } = buyerInfo;
+  const { name, email, organization_name, company_name } = buyerInfo;
+  const buyerCompanyName = company_name || organization_name || name;
 
   // Define email content based on user role
   const headerContent = `<div>
@@ -1378,7 +1388,7 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
     const spocList = vendor.spocs;
 
     let mailRecipients = {
-      from: `${organization_name ?? name} ${Config.masterEmail}`,
+      from: `${buyerCompanyName} ${Config.masterEmail}`,
       subject: `RFQ Marked as Closed for #${rfqItem.rfq_no}`,
       html: dynamicHTMLVendor
     };
@@ -1393,41 +1403,55 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
   }
 };
 
-const sendReminderRFQMAIL = async (vendoritem, remainingProducts, org_name,rfq_id, rfqBasicDetails) => {
-  let user_details = await userModel.user_profile_detail(vendoritem.user_id);
-  const token = await rfqModel.getVendorRfqToken(vendoritem.user_id, rfq_id);
-  const vendorName =  user_details[0].organization_name || user_details[0].name
-  if (user_details.length > 0) {
+const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) => {
+  if (!vendor?.user_id || !(vendor.remainingProducts || []).length) return;
+  if (!vendor.token) return;
 
-    const headerContent = `<h2>Hello ${vendorName},</h2>`;
+  const vendorName =
+    vendor.company_name ||
+    vendor.organization_name ||
+    vendor.vendor_name ||
+    vendor.name ||
+    'there';
 
-const containerContent = ` 
-       <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
-         <p>
-           This is a friendly reminder from <strong>${org_name}</strong> regarding the RFQ quotation. Ensure your quote is submitted on time to secure this opportunity.
-         </p>
-         <p>
-           Please submit quote for the following product variant(s):
-         </p>
-         <p>
-           ${remainingProducts.map(product => (
-            `<strong>${product.name}</strong><br>`
-           ))}
-         </p>
-       
-         <p> <strong> Deadline: </strong> ${rfqBasicDetails?.bid_end_date || 'N/A'} </p>
-       
-         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}"
-            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-           Submit Your Quote Now
-         </a>
-       
-         <p style="margin-top:20px; font-weight:bold; text-align:center">   Don't miss out on this opportunity!
-         </p>
-       </div>`;
+  const remainingProductsArray = Array.isArray(vendor.remainingProducts)
+    ? vendor.remainingProducts
+    : [];
 
-  // console.log(containerContent)
-  
+  const remainingProductsHtml = remainingProductsArray
+    .map(
+      (product) =>
+        `<strong>${product?.name || 'Product'}</strong>${
+          product?.variant ? ` - ${product.variant}` : ''
+        }<br>`
+    )
+    .join('');
+
+  const headerContent = `<h2>Hello ${vendorName},</h2>`;
+
+  const containerContent = ` 
+      <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+        <p>
+          This is a friendly reminder from <strong>${org_name}</strong> regarding the RFQ quotation. Ensure your quote is submitted on time to secure this opportunity.
+        </p>
+        <p>
+          Please submit quote for the following product variant(s):
+        </p>
+        <p>
+          ${remainingProductsHtml}
+        </p>
+      
+        <p> <strong> Deadline: </strong> ${rfqBasicDetails?.bid_end_date || 'N/A'} </p>
+      
+        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${vendor.token}"
+           style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
+          Submit Your Quote Now
+        </a>
+      
+        <p style="margin-top:20px; font-weight:bold; text-align:center">   Don't miss out on this opportunity!
+        </p>
+      </div>`;
+
   // Resolve theming user id: prefer RFQ.created_by; fallback to explicit DB fetch
   let themingUserId = rfqBasicDetails?.created_by;
   if (!themingUserId) {
@@ -1437,72 +1461,133 @@ const containerContent = `
     } catch (e) {}
   }
 
-  const dynamicHTML = generateEmailTemplate(headerContent, containerContent, themingUserId)
+  const dynamicHTML = generateEmailTemplate(
+    headerContent,
+    containerContent,
+    themingUserId
+  );
 
-    const spocList = await vendorModel.getSpocDetails(user_details[0]?.id)
+  const spocList = Array.isArray(vendor.spocs) ? vendor.spocs : [];
 
-    
-    let mailRecipients = {
-      from:  `${org_name} ${Config.masterEmail}`,
-      subject: `Work Wise | Reminder for Quotation | Action Required`, // Subject line
-      html: dynamicHTML
-    };
-    if (spocList && spocList.length > 0) {
-      mailRecipients.to = spocList.map(spoc => spoc.email);
-      // mailRecipients.cc = [user_details[0].email, rfqBasicDetails.response_email];
-      mailRecipients.cc = [user_details[0].email];
-    } else {
-      mailRecipients.to = user_details[0].email;
-      // mailRecipients.cc = rfqBasicDetails.response_email
-    }
-    sendMail(mailRecipients);
+  const recipientEmails = spocList
+    .map((spoc) => spoc?.email)
+    .filter((email) => typeof email === 'string' && email.includes('@'));
 
-    spocList.map( async (spoc) =>{
-      if (spoc.mobile) {  // Check if the mobile number is not null or undefined
-        const whatsappPayloadSPOC = {
-          mobile: spoc.mobile,
-          token: token[0].token,
-          rfq_id: rfq_id,
-          rfq_no: rfqBasicDetails?.rfq_no,
-          buyerName: org_name,
-          name: vendorName
-        };
-    
-        await whatsappNotificationAISensy.sendQuoteReminderNotificationToVendor(whatsappPayloadSPOC);
-      }
-    });
-    
-    const whatsappPayloadForVendor= {
-      mobile:user_details[0].mobile,
-      token:token[0].token,
-      rfq_id: rfq_id,
-      rfq_no:rfqBasicDetails?.rfq_no,
-      buyerName:org_name,
-      name:vendorName
-    }
-
-    await whatsappNotificationAISensy.sendQuoteReminderNotificationToVendor(whatsappPayloadForVendor)
-
-    const notificationData = {
-      type: 'RFQ Pending',
-      title: `RFQ Pending`,
-      message: `RFQ Response Pending`,
-      additional_data: {
-        user_type: user_details[0].user_type
-      }
-    };
-    const payload = {
-      title: `Hello ${user_details[0].name}`,
-      body: `RFQ Response Pending `
-    };
-    const ss = JSON.parse(user_details[0].endpoint);
-    sendNotification(user_details[0].id, '', notificationData, payload, ss);
+  if (
+    !recipientEmails.length &&
+    typeof vendor.email === 'string' &&
+    vendor.email.includes('@')
+  ) {
+    recipientEmails.push(vendor.email);
   }
+
+  if (!recipientEmails.length) return;
+
+  const mailRecipients = {
+    from: `${org_name} ${Config.masterEmail}`,
+    subject: `Work Wise | Reminder for Quotation | Action Required`,
+    html: dynamicHTML,
+    to: recipientEmails
+  };
+
+  if (spocList.length && vendor.email && vendor.email.includes('@')) {
+    mailRecipients.cc = [vendor.email];
+  }
+
+  sendMail(mailRecipients);
+
+  const whatsappTargets = new Set();
+  spocList.forEach((spoc) => {
+    if (spoc?.mobile) whatsappTargets.add(spoc.mobile);
+  });
+  if (vendor.mobile) whatsappTargets.add(vendor.mobile);
+
+  for (const mobile of whatsappTargets) {
+    const whatsappPayload = {
+      mobile,
+      token: vendor.token,
+      rfq_id,
+      rfq_no: rfqBasicDetails?.rfq_no,
+      buyerName: org_name,
+      name: vendorName
+    };
+    await whatsappNotificationAISensy.sendQuoteReminderNotificationToVendor(
+      whatsappPayload
+    );
+  }
+
+  const notificationData = {
+    type: 'RFQ Pending',
+    title: `RFQ Pending`,
+    message: `RFQ Response Pending`,
+    additional_data: {
+      user_type: vendor.user_type
+    }
+  };
+  const payload = {
+    title: `Hello ${vendor.vendor_name || vendor.name || vendorName}`,
+    body: `RFQ Response Pending `
+  };
+
+  if (vendor.endpoint) {
+    try {
+      const parsedEndpoint =
+        typeof vendor.endpoint === 'string'
+          ? JSON.parse(vendor.endpoint)
+          : vendor.endpoint;
+      if (parsedEndpoint) {
+        sendNotification(vendor.user_id, '', notificationData, payload, parsedEndpoint);
+      }
+    } catch (error) {
+      console.warn('Failed to parse vendor endpoint for notifications');
+    }
+  }
+};
+
+const dispatchReminderSequence = async (
+  vendors,
+  org_name,
+  rfq_id,
+  rfqBasicDetails
+) => {
+  let processed = 0;
+  for (const vendor of vendors) {
+    try {
+      await sendReminderRFQMAIL(vendor, org_name, rfq_id, rfqBasicDetails);
+    } catch (error) {
+      logError(error);
+    }
+    processed += 1;
+    if (processed % REMINDER_SEND_YIELD_THRESHOLD === 0) {
+      await yieldReminderEventLoop();
+    }
+  }
+};
+
+const hydrateReminderTokens = async (vendors, rfq_id) => {
+  const missingVendorIds = vendors
+    .filter((vendor) => !vendor.token)
+    .map((vendor) => vendor.user_id);
+
+  if (!missingVendorIds.length) return;
+
+  const tokenRows = await rfqModel.ensureVendorTokens(rfq_id, missingVendorIds);
+  if (!tokenRows?.length) return;
+
+  const tokenMap = new Map(
+    tokenRows.map((row) => [row.vendor_id, row.token])
+  );
+
+  vendors.forEach((vendor) => {
+    if (!vendor.token && tokenMap.has(vendor.user_id)) {
+      vendor.token = tokenMap.get(vendor.user_id);
+    }
+  });
 };
 
 
 const sendQuoteNotificationEmail = async (req) => {
-  let { name,  organization_name } = req.user;
+  let { name,  organization_name, company_name } = req.user;
   let { rfq_id, rfq_no, products } = req.body;
 
     let u = await rfqModel.getRFQCreatedBy(rfq_id);
@@ -1525,8 +1610,10 @@ const sendQuoteNotificationEmail = async (req) => {
         productEntries += ` <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}" style="color: #059669; text-decoration: none;">view more</a>`;
       }
 
+      const vendorCompanyName = company_name || organization_name || name;
+
       // Email header content
-      const headerContent = `<h2>Hello ${buyer.organization_name || ''},</h2>`;
+      const headerContent = `<h2>Hello ${buyer.company_name || buyer.organization_name || ''},</h2>`;
 
       // Email body content
       const containerContent = `
@@ -1534,7 +1621,7 @@ const sendQuoteNotificationEmail = async (req) => {
         <p>
           You've received a new quotation! Check out the details below:
         </p>
-        <p><strong>Vendor:</strong> ${organization_name || name}</p>
+        <p><strong>Vendor:</strong> ${vendorCompanyName}</p>
         <p><strong>Products:</strong> ${productEntries || '-'}</p>
 
         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfq_id}"
@@ -1552,7 +1639,7 @@ const sendQuoteNotificationEmail = async (req) => {
 
       // Preparing the email details
       let mailRecipients = {
-        from: `${organization_name || name} ${Config.masterEmail}`, // sender address
+        from: `${vendorCompanyName} ${Config.masterEmail}`, // sender address
         //  organization_name : Config.webmasterMail,
         // to: buyer.email,
         subject: `New Quotation Received for Your RFQ ${rfq_no}`,
@@ -5723,8 +5810,8 @@ const rfqController = {
               rfqNumber: rfq_no,
               rfqID: rfq_id,
               projectName: projectDetails[0]?.name || '-',
-              vendorName: req?.user?.name,
-              buyerName: buyerDetails[0]?.name
+              vendorName: req?.user?.company_name || req?.user?.organization_name || req?.user?.name,
+              buyerName: buyerDetails[0]?.company_name || buyerDetails[0]?.organization_name || buyerDetails[0]?.name
             };
 
             // await whatsappNotificationAISensy.sendNewQuoteNotificationToBuyer(
@@ -6060,89 +6147,55 @@ const rfqController = {
           .end();
       }
 
-      let vendors = await rfqModel.gerRFQVendors(rfq_id);
-      // const quote_vendor = await rfqModel.quoteVendor(rfq_id);
+      const reminderData = await rfqModel.getVendorsForReminder(
+        rfq_id,
+        [],
+        { includeContactDetails: true }
+      );
 
-      //  buyer org name, the company name he used in create rfq field
-      let org_name = rfqBasicDetails?.company_name || '';
-
-      // const createdByIds = new Set(quote_vendor.map((item) => item.created_by));
-
-      const unmatchedVendors = (
-        await Promise.all(
-          vendors.map(async (vendor) => {
-            let q = `rfq_id = ${rfq_id} AND created_by = ${vendor.user_id} AND is_regret = 1`;
-            const isRegret = await rfqModel.checkIfExists('tbl_quotes', q);
-
-            if (isRegret && isRegret.length > 0) return null;
-
-            const vendorProducts = await rfqModel.getVendorProductsCount(
-              rfq_id,
-              vendor.user_id
-            );
-            const vendorProductsQuoted = await rfqModel.getVendorProductsQuoted(
-              rfq_id,
-              vendor.user_id
-            );
-
-            const requiredCount = vendorProducts.length;
-            const quotedCount = vendorProductsQuoted.length;
-
-            const isUnmatched = requiredCount !== quotedCount;
-
-            return isUnmatched
-              ? {
-                  vendor,
-                  remainingProducts: vendorProducts.filter(
-                    (product) =>
-                      !vendorProductsQuoted.some(
-                        (_product) => _product.product_id == product.product_id
-                      )
-                  )
-                }
-              : null;
+      if (!reminderData.rfq_details) {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: 'RFQ not found, or is no longer available!'
           })
-        )
-      ).filter(Boolean);
+          .end();
+      }
 
-      vendors = unmatchedVendors;
+      const vendors = reminderData.vendors || [];
 
-      Promise.all(
-        vendors.map((item) =>
-          sendReminderRFQMAIL(
-            item.vendor,
-            item.remainingProducts,
-            org_name,
-            rfq_id,
-            rfqBasicDetails
-          )
-        )
-      )
-        .then(async () => {
-          try {
-            await rfqModel.insertRFQActivity(rfq_id, id);
-          } catch (error) {
-            throw new Error(error);
-          } finally {
-            res
-              .status(200)
-              .json({
-                status: 1,
-                message: 'Reminder has been sent successfully!'
-              })
-              .end();
-          }
+      if (!vendors.length) {
+        return res
+          .status(400)
+          .json({
+            status: 1,
+            message: 'All vendors have already submitted their quotes!'
+          })
+          .end();
+      }
+
+      await hydrateReminderTokens(vendors, rfq_id);
+
+      const org_name =
+        rfqBasicDetails?.company_name || organization_name || name || '';
+
+      await dispatchReminderSequence(
+        vendors,
+        org_name,
+        rfq_id,
+        rfqBasicDetails
+      );
+
+      await rfqModel.insertRFQActivity(rfq_id, id);
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          message: 'Reminder has been sent successfully!'
         })
-        .catch((error) => {
-          logError(error);
-          res
-            .status(400)
-            .json({
-              status: 3,
-              message: Config.errorText.value
-            })
-            .end();
-        });
+        .end();
     } catch (error) {
       logError(error);
       res
@@ -6162,7 +6215,9 @@ const rfqController = {
     let rfq_id = req.params.id;
 
     try {
-      const result = await rfqModel.getVendorsForReminder(rfq_id);
+      const result = await rfqModel.getVendorsForReminder(rfq_id, [], {
+        includeContactDetails: false
+      });
 
       if (!result.rfq_details) {
         return res
@@ -6184,11 +6239,18 @@ const rfqController = {
           .end();
       }
 
+      const sanitizedVendors = (result.vendors || []).map((vendor) => ({
+        user_id: vendor.user_id,
+        vendor_name: vendor.vendor_name,
+        email: vendor.email,
+        remainingProducts: vendor.remainingProducts || []
+      }));
+
       return res
         .status(200)
         .json({
           status: 1,
-          data: result.vendors
+          data: sanitizedVendors
         })
         .end();
     } catch (error) {
@@ -6226,7 +6288,11 @@ const rfqController = {
           .end();
       }
 
-      const result = await rfqModel.getVendorsForReminder(rfq_id);
+      const result = await rfqModel.getVendorsForReminder(
+        rfq_id,
+        vendor_ids,
+        { includeContactDetails: true }
+      );
 
       if (!result.rfq_details) {
         return res
@@ -6248,9 +6314,7 @@ const rfqController = {
           .end();
       }
 
-      const selectedVendors = result.vendors.filter((vendor) =>
-        vendor_ids.includes(vendor.user_id)
-      );
+      const selectedVendors = result.vendors || [];
 
       if (selectedVendors.length === 0) {
         return res
@@ -6262,38 +6326,27 @@ const rfqController = {
           .end();
       }
 
-      const org_name = result.rfq_details.company_name || '';
+      await hydrateReminderTokens(selectedVendors, rfq_id);
 
-      try {
-        for (const vendor of selectedVendors) {
-          await sendReminderRFQMAIL(
-            { user_id: vendor.user_id },
-            vendor.remainingProducts,
-            org_name,
-            rfq_id,
-            result.rfq_details
-          );
-        }
+      const org_name =
+        result.rfq_details.company_name || req.user.organization_name || '';
 
-        await rfqModel.insertRFQActivity(rfq_id, id);
+      await dispatchReminderSequence(
+        selectedVendors,
+        org_name,
+        rfq_id,
+        result.rfq_details
+      );
 
-        res
-          .status(200)
-          .json({
-            status: 1,
-            message: 'Reminder has been sent successfully to selected vendors!'
-          })
-          .end();
-      } catch (error) {
-        logError(error);
-        res
-          .status(400)
-          .json({
-            status: 3,
-            message: Config.errorText.value
-          })
-          .end();
-      }
+      await rfqModel.insertRFQActivity(rfq_id, id);
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          message: 'Reminder has been sent successfully to selected vendors!'
+        })
+        .end();
     } catch (error) {
       logError(error);
       return res
@@ -6707,6 +6760,99 @@ const rfqController = {
     }
   },
 
+  bulkSearchVendorsByCategory: async (req, res, next) => {
+    try {
+      const {
+        category_id,
+        approved_by_id = [],
+        state = [],
+        city = [],
+        country = [],
+        turnOver = null,
+        vendorType = [],
+        prevWorkedWith = null,
+        vendor_name = '',
+        myVendorType = null,
+        productMakes = [],
+        page = 1,
+        limit = 20
+      } = req.body;
+
+      if (!category_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'category_id is required'
+        });
+      }
+
+      const user_id = req.is_verified ? req.user?.id : null;
+      const hasSubscription = req.is_verified && req.user?.subscription_plan_id;
+
+      const result = await rfqModel.bulkSearchVendorsByCategory(
+        category_id,
+        approved_by_id,
+        state,
+        city,
+        country,
+        turnOver,
+        vendorType,
+        prevWorkedWith,
+        vendor_name,
+        myVendorType,
+        productMakes,
+        page,
+        limit,
+        user_id
+      );
+
+      if (!req.is_verified) {
+        return res.status(200).json({
+          status: 1,
+          data: result.data.slice(0, 2),
+          total: result.total,
+          page: result.page,
+          limit: result.limit,
+          totalPages: result.totalPages,
+          logged_In: false,
+          subscription: false
+        });
+      }
+
+      if (!hasSubscription) {
+        return res.status(200).json({
+          status: 1,
+          data: result.data.slice(0, 1),
+          total: result.total,
+          page: result.page,
+          limit: result.limit,
+          totalPages: result.totalPages,
+          logged_In: true,
+          subscription: false
+        });
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: result.data,
+        total: result.total,
+        page: result.page,
+        limit: result.limit,
+        totalPages: result.totalPages,
+        logged_In: true,
+        subscription: true
+      });
+
+    } catch (error) {
+      console.error('Error in bulkSearchVendorsByCategory:', error);
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'An error occurred while searching for vendors',
+        error: error.message
+      });
+    }
+  },
+
   /**
    * 
    * @last_changes - mukul 28-08-2025 without login senf 2 vendors details
@@ -6809,6 +6955,18 @@ const rfqController = {
             '', // responseKeys : function accepting this - need to recheck it's use and remove it if not required
             productMakes
           );
+
+          // ---- Return 404 if nothing found ----
+         if (!vendorResult || vendorResult.length === 0) {
+           return res.status(404).json({
+             status: 0,
+             data: [],
+             total: 0,
+             message: 'No vendor found matching the criteria',
+             logged_In: true,
+             subscription: !!user.subscription_plan_id
+           });
+         }
 
           let items_to_show = 1;
           let total_items = vendorResult.length;
@@ -9930,10 +10088,11 @@ sendFollowUpEmails: async (req, res) => {
         const receiverDetails = receiver_details[0];
         const spocList = await vendorModel.getSpocDetails(receiver_id);
 
+        const receiverCompanyName = receiverDetails?.company_name || receiverDetails?.organization_name || receiverDetails?.name;
+        const senderCompanyName = senderDetails?.company_name || senderDetails?.organization_name || senderDetails?.name;
+        
         const headerContent = ` <div>
-           <h2>Hello ${
-             receiverDetails?.organization_name || receiverDetails?.name
-           } </h2>
+           <h2>Hello ${receiverCompanyName} </h2>
            </div>`;
 
         const containerContent = `
@@ -9941,11 +10100,8 @@ sendFollowUpEmails: async (req, res) => {
                 <div style="font-size:16px;">
                   ${
                     sender_type == 2
-                      ? `${
-                          senderDetails?.organization_name ||
-                          senderDetails?.name
-                        } has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`
-                      : `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderDetails.name}`
+                      ? `${senderCompanyName} has a question about your submitted quotation for #${rfqNumber}. Quick responses help build trust and increase your chances of closing the order.`
+                      : `One of your vendors has a question regarding your RFQ #${rfqNumber}. Here's the vendor details: <br> <strong>Vendor: </strong> ${senderCompanyName}`
                   }
                 </div>
                               
@@ -9983,7 +10139,7 @@ sendFollowUpEmails: async (req, res) => {
             : `Buyer Query for #${rfqNumber} – Your Response Needed`;
 
         const mailRecipients = {
-          from: `${senderDetails?.organization_name || senderDetails?.name} ${
+          from: `${senderCompanyName} ${
             Config.masterEmail
           }`,
           subject: emailSubject,
@@ -10002,11 +10158,11 @@ sendFollowUpEmails: async (req, res) => {
         const notificationData = {
           type: 'New Message',
           title: 'New RFQ Message Received',
-          message: `You have received a new message from ${senderDetails.name}.`,
+          message: `You have received a new message from ${senderCompanyName}.`,
           additional_data: { user_type: receiverDetails.user_type }
         };
         const payload = {
-          title: `Hello ${receiverDetails.name}`,
+          title: `Hello ${receiverCompanyName}`,
           body: 'You have a new message regarding an RFQ.'
         };
         const ss = JSON.parse(receiverDetails.endpoint);
@@ -10038,6 +10194,44 @@ sendFollowUpEmails: async (req, res) => {
     const sender_type = req.user.user_type;
 
     try {
+      const normalizeReceiverIds = (raw) => {
+        if (!raw) return [];
+
+        let parsed = raw;
+        if (typeof raw === 'string') {
+          try {
+            parsed = JSON.parse(raw);
+          } catch (error) {
+            parsed = raw.split(',').map((id) => id.trim());
+          }
+        }
+
+        if (!Array.isArray(parsed)) {
+          parsed = [parsed];
+        }
+
+        const ids = parsed
+          .map((entry) => {
+            if (typeof entry === 'object' && entry !== null) {
+              return entry.id || entry.user_id || entry.receiver_id;
+            }
+            const parsedId = parseInt(entry, 10);
+            return Number.isNaN(parsedId) ? null : parsedId;
+          })
+          .filter((id) => Number.isInteger(id));
+
+        return Array.from(new Set(ids));
+      };
+
+      const receiverIdList = normalizeReceiverIds(receiver_ids);
+
+      if (!receiverIdList.length) {
+        return res.status(400).json({
+          status: 0,
+          message: 'No valid vendors selected for broadcast.'
+        });
+      }
+
       // Get RFQ and sender details (unchanged)
       const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
       if (!rfqDetails) throw new Error(`RFQ with ID ${rfq_id} not found`);
@@ -10046,49 +10240,70 @@ sendFollowUpEmails: async (req, res) => {
       const sender_details = await userModel.user_profile_detail(sender_id);
       const senderDetails = sender_details[0];
 
-      // Prepare messages for bulk insert
-      const messagesData = receiver_ids.map((receiver) => ({
-        rfq_id,
-        sender_id,
-        receiver_id: receiver.id,
-        sender_type,
-        message_text,
-        created_at: new Date()
-      }));
+      const determineBatchSize = (count) => (count <= 2000 ? 1000 : 500);
 
-      // Bulk insert messages
-      const insertedMessages = await rfqModel.insertArray(
-        messagesData,
-        [
-          'rfq_id',
-          'sender_id',
-          'receiver_id',
-          'sender_type',
-          'message_text',
-          'created_at'
-        ],
-        'tbl_query_messages'
-      );
+      const MESSAGE_BATCH_SIZE = determineBatchSize(receiverIdList.length);
+      const insertedMessageIds = [];
+      const messageKeys = [
+        'rfq_id',
+        'sender_id',
+        'receiver_id',
+        'sender_type',
+        'message_text',
+        'created_at'
+      ];
 
-      // Handle file attachments if present
-      if (files && files.length > 0) {
-        const filesData = [];
+      for (let i = 0; i < receiverIdList.length; i += MESSAGE_BATCH_SIZE) {
+        const chunk = receiverIdList.slice(i, i + MESSAGE_BATCH_SIZE);
+        const insertedChunk = await db.tx(async (t) => {
+          const timestamp = new Date();
+          const messagePayload = chunk.map((receiverId) => ({
+            rfq_id,
+            sender_id,
+            receiver_id: receiverId,
+            sender_type,
+            message_text,
+            created_at: timestamp
+          }));
 
-        insertedMessages.forEach((message) => {
-          files.forEach((file) => {
-            filesData.push({
-              message_id: message.id,
-              file_name: file.originalname,
-              file_url: file.location
-            });
-          });
+          const insertedMessages = await rfqModel.insertArray(
+            messagePayload,
+            messageKeys,
+            'tbl_query_messages',
+            t
+          );
+
+          if (files && files.length > 0 && insertedMessages.length > 0) {
+            const filePayload = [];
+            for (const message of insertedMessages) {
+              files.forEach((file) => {
+                filePayload.push({
+                  message_id: message.id,
+                  file_name: file.originalname,
+                  file_url: file.location
+                });
+              });
+            }
+
+            await rfqModel.insertArray(
+              filePayload,
+              ['message_id', 'file_name', 'file_url'],
+              'tbl_query_message_files',
+              t
+            );
+          }
+
+          return insertedMessages;
         });
 
-        await rfqModel.insertArray(
-          filesData,
-          ['message_id', 'file_name', 'file_url'],
-          'tbl_query_message_files'
-        );
+        insertedMessageIds.push(...insertedChunk.map((msg) => msg.id));
+      }
+
+      if (!insertedMessageIds.length) {
+        return res.status(500).json({
+          status: 0,
+          message: 'Failed to broadcast messages.'
+        });
       }
 
       // Get all receiver details in one query
@@ -10270,53 +10485,19 @@ sendFollowUpEmails: async (req, res) => {
     const user_type = req.user.user_type;
 
     try {
-      let users;
-
-      if ([2, 8, 9, 10].includes(user_type)) {
-        const vendorResult = await rfqModel.getVendorsForRfq(rfq_id, user_name);
-        users = vendorResult.map((row) => row.user_id);
-      } else if (user_type === 3) {
-        const buyerResult = await rfqModel.getBuyerForRfq(rfq_id);
-        users = buyerResult.length ? [buyerResult[0].user_id] : [];
-      } else {
+      if (![2, 3, 8, 9, 10].includes(user_type)) {
         return res.status(400).json({
           success: false,
           message: 'Invalid user type'
         });
       }
 
-      const summaries = await Promise.all(
-        users.map(async (other_user_id) => {
-          const summaryResult = await rfqModel.getQueryMessageSummary(
-            rfq_id,
-            user_id,
-            other_user_id
-          );
-          return {
-            user_id: other_user_id,
-            user_name: summaryResult[0]?.user_name || '',
-            company_name: summaryResult[0]?.company_name || '',
-            unseen_count: summaryResult[0]?.unseen_count || 0,
-            last_message: summaryResult[0]?.last_message || '',
-            last_message_timestamp:
-              summaryResult[0]?.last_message_timestamp || null
-          };
-        })
+      const summaries = await rfqModel.getQueryParticipantsSummary(
+        rfq_id,
+        user_id,
+        user_type,
+        user_name
       );
-
-      summaries.sort((a, b) => {
-        if (
-          a.last_message_timestamp === null &&
-          b.last_message_timestamp === null
-        )
-          return 0;
-        if (a.last_message_timestamp === null) return 1;
-        if (b.last_message_timestamp === null) return -1;
-        return (
-          new Date(b.last_message_timestamp) -
-          new Date(a.last_message_timestamp)
-        );
-      });
 
       res
         .status(200)
@@ -11185,6 +11366,14 @@ getClauses: async (req, res) => {
       if (!variantVendorResults || variantVendorResults.length === 0) {
         return res.status(200).json([]).end();
       }
+
+          // If empty → return 404
+       if (!variantVendorResults || variantVendorResults.length === 0) {
+         return res.status(404).json({
+           status: 2,
+           message: "No vendors found for this variant."
+         });
+       }
 
       res.status(200).json(variantVendorResults).end();
     } catch (error) {

@@ -419,10 +419,11 @@ create_buyer_company_users: async (req, res, next) => {
       company_id: companyID
     };
 
-    // Fetch company limits and current active user count concurrently
-    const [companyLimits, activeUsers] = await Promise.all([
+    // Fetch company limits, current active user count, and company details concurrently
+    const [companyLimits, activeUsers, companyDetails] = await Promise.all([
       rfqModel.checkIfExists("tbl_company_buyer_account_limit", `company_id = ${companyID}`),
-      rfqModel.checkIfExists("tbl_users", `company_id = ${companyID} AND user_type = ${user_type} AND is_deleted = 0`)
+      rfqModel.checkIfExists("tbl_users", `company_id = ${companyID} AND user_type = ${user_type} AND is_deleted = 0`),
+      rfqModel.checkIfExists("tbl_company", `id = ${companyID}`)
     ]);
 
     if (!companyLimits.length) {
@@ -517,11 +518,17 @@ create_buyer_company_users: async (req, res, next) => {
     };
     const accountTypeLabel = accountTypeMap[user_type] || "User";
 
+    // Get company name
+    const companyName = companyDetails && companyDetails[0] && companyDetails[0].company_name 
+      ? companyDetails[0].company_name 
+      : null;
+
     // Compose and send email
     const emailHeader = `<h2>Hello ${name},</h2>`;
     const emailContent = `
       <div style="font-size:16px; font-family:'Roboto',sans-serif;">
-        <p>Welcome to WorkWise, your account has been successfully registered.</p>
+        <p>Welcome to WorkWise${companyName ? ` - ${companyName}` : ''}, your account has been successfully registered.</p>
+        ${companyName ? `<p><strong>Company:</strong> ${companyName}</p>` : ''}
         <p><strong>Login Details:</strong></p>
         <ul>
           <li><strong>Email:</strong> ${email}</li>
@@ -3673,7 +3680,7 @@ publish_profile_reviews: async (req, res, next) => {
           is_private: 1
         }];
         const buyer = await userModel.getUserById(buyerId);
-        const buyerName = buyer[0].name;
+        const buyerName = buyer[0]?.company_name || buyer[0]?.organization_name || buyer[0]?.name;
         let orgChar = userDetails[0].vendor_name.match(/[a-zA-Z]/g)?.join('').toLowerCase();
         let capitalizeFourOrganizationLetter = `${orgChar.charAt(0).toUpperCase()}${orgChar.substring(1, 4)}`;
         let password = `${capitalizeFourOrganizationLetter}@${userDetails[0].mobile.substring(

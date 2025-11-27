@@ -24,6 +24,9 @@ import admin from 'firebase-admin';
 //import serviceAccount from '../../config/privateKey.json' assert { type: 'json' };
 import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISensy.js';
 
+const CONTACT_US_RECAPTCHA_ACTION = 'contact_us_form';
+const RECAPTCHA_VERIFY_URL = 'https://www.google.com/recaptcha/api/siteverify';
+
 const CmsController = {
   homeBanner: async (req, res, next) => {
     try {
@@ -113,8 +116,45 @@ const CmsController = {
   },
   contact_us: async (req, res, next) => {
     try {
-      const { name, phone, subject, comment, submitted_from } = req.body;
+      const { name, phone, subject, comment, submitted_from, recaptchaToken } = req.body;
       const email = req.body.email?.toLowerCase() || '';
+
+      if (!recaptchaToken || !Config.recaptcha?.secretKey) {
+        return res
+          .status(400)
+          .json({
+            status: false,
+            message: 'Captcha verification failed'
+          })
+          .end();
+      }
+
+      const recaptchaResponse = await axios.post(
+        RECAPTCHA_VERIFY_URL,
+        null,
+        {
+          params: {
+            secret: Config.recaptcha.secretKey,
+            response: recaptchaToken
+          }
+        }
+      );
+
+      const recaptchaScore = Number(recaptchaResponse?.data?.score || 0);
+      const isRecaptchaInvalid =
+        !recaptchaResponse?.data?.success ||
+        recaptchaResponse?.data?.action !== CONTACT_US_RECAPTCHA_ACTION ||
+        recaptchaScore < (Config.recaptcha?.minScore || 0.5);
+
+      if (isRecaptchaInvalid) {
+        return res
+          .status(400)
+          .json({
+            status: false,
+            message: 'Captcha verification failed'
+          })
+          .end();
+      }
 
       let contactObj = {
         name,

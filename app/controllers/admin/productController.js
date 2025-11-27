@@ -2707,6 +2707,28 @@ const productController = {
         });
     });
   },
+  // Bulk map multiple variant-vendor pairs efficiently
+  bulkMapVariantWithVendor: async (req, res) => {
+    try {
+      const { mappings } = req.body || {};
+      if (!Array.isArray(mappings) || mappings.length === 0) {
+        return res.status(400).json({ status: 3, message: 'mappings must be a non-empty array' });
+      }
+
+      // Normalize payload: variant_id, vendor_id, approved_by[], make_list[]
+      const normalized = mappings.map(m => ({
+        variant_id: m.variant_id || m.product_variant_id,
+        vendor_id: m.vendor_id,
+        approved_by: Array.isArray(m.approved_by) ? m.approved_by : [],
+        make_list: Array.isArray(m.make_list) ? m.make_list : []
+      }));
+
+      const result = await productModel.bulkInsertVariantVendorMappings(normalized, req.user.id);
+      return res.status(200).json({ status: 1, message: 'Bulk mapping processed', ...result });
+    } catch (error) {
+      return res.status(500).json({ status: 3, message: Config?.errorText?.value || 'Bulk mapping failed', error: error.message });
+    }
+  },
   // Changes by Agnij April 30, 2025 [Added endpoint to search all product variants]
   searchVariants: async (req, res) => {
     try {
@@ -2953,14 +2975,16 @@ const productController = {
         });
       }
       
-      // Prepare the variant update object
+      // Prepare the mapping update object
       const variantObj = {
-        is_approved: status == "1",
+        is_approved: status === 1,
         updated_by: req.user.id,
         updated_at: new Date(),
         approved_by: req.user.id,
         approved_at: new Date(),
       };
+      
+      // Note: reject_reason_id is not stored on the mapping table, only on the variant table
 
       
       // Update the variant instead of the mapping
@@ -3029,6 +3053,44 @@ const productController = {
       return res.status(500).json({
         status: 3,
         message: Config?.errorText?.value || 'Something went wrong while updating approval',
+        error: error.message
+      });
+    }
+  },
+  deleteVariantVendorMapping: async (req, res) => {
+    try {
+      const mappingId = req.params.id;
+      
+      if (!mappingId) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Mapping ID is required'
+        });
+      }
+      
+      // Check if mapping exists
+      const mappingDetails = await productModel.getVariantVendorMappingById(mappingId);
+      
+      if (!mappingDetails) {
+        return res.status(404).json({
+          status: 3,
+          message: 'Mapping not found'
+        });
+      }
+      
+      // Delete the mapping
+      await productModel.deleteVariantVendorMapping(mappingId);
+      
+      return res.status(200).json({
+        status: 1,
+        message: 'Mapping deleted successfully'
+      });
+    } catch (error) {
+      console.error("Exception in deleteVariantVendorMapping:", error);
+      logError(error);
+      return res.status(500).json({
+        status: 3,
+        message: Config?.errorText?.value || 'Something went wrong while deleting mapping',
         error: error.message
       });
     }

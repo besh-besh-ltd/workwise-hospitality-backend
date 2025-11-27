@@ -170,6 +170,132 @@ const productModel = {
         });
     });
   },
+  // Efficient bulk mapping: insert mappings, makes and approvals in minimum statements
+  bulkInsertVariantVendorMappings: async (items, userId) => {
+    // items: [{ variant_id, vendor_id, approved_by: number[] | null, make_list: string[] | null }]
+    return new Promise(async (resolve, reject) => {
+      try {
+        if (!Array.isArray(items) || items.length === 0) {
+          return resolve({ inserted: 0, skipped: 0, makes: 0, approvals: 0 });
+        }
+        const payload = JSON.stringify(items);
+        const sql = `
+          WITH input_raw AS (
+            SELECT
+              (it->>'variant_id')::bigint AS variant_id,
+              (it->>'vendor_id')::bigint AS vendor_id,
+              COALESCE(it->'make_list', '[]'::jsonb) AS make_list,
+              COALESCE(it->'approved_by', '[]'::jsonb) AS approved_by
+            FROM jsonb_array_elements($1::jsonb) it
+            WHERE (it ? 'variant_id') AND (it ? 'vendor_id')
+          ),
+          input_grouped AS (
+            SELECT
+              variant_id,
+              vendor_id,
+              -- flatten and distinct all makes per (variant_id, vendor_id)
+              COALESCE(
+                jsonb_agg(DISTINCT ml.m) FILTER (WHERE ml.m IS NOT NULL),
+                '[]'::jsonb
+              ) AS make_list,
+              -- distinct approved_by ids per (variant_id, vendor_id)
+              COALESCE(
+                jsonb_agg(DISTINCT ab.approver) FILTER (WHERE ab.approver IS NOT NULL),
+                '[]'::jsonb
+              ) AS approved_by
+            FROM input_raw ir
+            LEFT JOIN LATERAL (
+              SELECT jsonb_array_elements_text(ir.make_list)::text AS m
+            ) ml ON true
+            LEFT JOIN LATERAL (
+              SELECT to_jsonb((jsonb_array_elements_text(ir.approved_by))::bigint) AS approver
+            ) ab ON true
+            GROUP BY variant_id, vendor_id
+          ),
+          missing AS (
+            SELECT ig.*
+            FROM input_grouped ig
+            LEFT JOIN tbl_product_variant_vendor_mapping m
+              ON m.product_variant_id = ig.variant_id AND m.vendor_id = ig.vendor_id
+            WHERE m.id IS NULL
+          ),
+          ins AS (
+            INSERT INTO tbl_product_variant_vendor_mapping
+              (product_variant_id, vendor_id, created_at, updated_at, status, is_approved, created_by, updated_by)
+            SELECT variant_id, vendor_id, NOW(), NOW(), true, false, $2, $2
+            FROM missing
+            RETURNING id, product_variant_id, vendor_id
+          ),
+          all_mappings AS (
+            SELECT id, product_variant_id, vendor_id FROM ins
+            UNION ALL
+            SELECT m.id, m.product_variant_id, m.vendor_id
+            FROM tbl_product_variant_vendor_mapping m
+            JOIN input_grouped ig
+              ON m.product_variant_id = ig.variant_id AND m.vendor_id = ig.vendor_id
+          ),
+          makes AS (
+            SELECT
+              am.id AS map_id,
+              trim(elem, ' "') AS make_name
+            FROM input_grouped ig
+            JOIN all_mappings am
+              ON am.product_variant_id = ig.variant_id AND am.vendor_id = ig.vendor_id
+            CROSS JOIN LATERAL jsonb_array_elements_text(ig.make_list) AS elem
+            WHERE NULLIF(trim(elem, ' '), '') IS NOT NULL
+          ),
+          ins_makes AS (
+            INSERT INTO tbl_product_variant_vendor_make (variant_vendor_map_id, make_name)
+            SELECT map_id, make_name FROM makes
+            RETURNING 1
+          ),
+          -- Build desired approvals and remove ones that already exist
+          approvals_desired AS (
+            SELECT DISTINCT
+              am.id AS map_id,
+              pv.product_id AS product_id,
+              (jsonb_array_elements_text(ig.approved_by))::bigint AS approver_id
+            FROM input_grouped ig
+            JOIN all_mappings am
+              ON am.product_variant_id = ig.variant_id AND am.vendor_id = ig.vendor_id
+            JOIN tbl_product_variant pv ON pv.id = am.product_variant_id
+            WHERE jsonb_array_length(ig.approved_by) > 0
+          ),
+          approvals_existing AS (
+            SELECT variant_vendor_mapping_id AS map_id, vendor_approve_id AS approver_id
+            FROM tbl_vendorapprove_product_mapping
+            WHERE variant_vendor_mapping_id IN (SELECT id FROM all_mappings)
+          ),
+          approvals_missing AS (
+            SELECT ad.map_id, ad.product_id, ad.approver_id
+            FROM approvals_desired ad
+            LEFT JOIN approvals_existing ae
+              ON ae.map_id = ad.map_id AND ae.approver_id = ad.approver_id
+            WHERE ae.map_id IS NULL
+          ),
+          ins_approvals AS (
+            INSERT INTO tbl_vendorapprove_product_mapping (product_id, variant_vendor_mapping_id, vendor_approve_id)
+            SELECT product_id, map_id, approver_id FROM approvals_missing
+            RETURNING 1
+          ),
+          counts AS (
+            SELECT
+              (SELECT COUNT(*) FROM ins)::int AS inserted,
+              (SELECT COUNT(*) FROM input_grouped)::int - (SELECT COUNT(*) FROM missing)::int AS skipped,
+              (SELECT COUNT(*) FROM ins_makes)::int AS makes,
+              (SELECT COUNT(*) FROM ins_approvals)::int AS approvals
+          )
+          SELECT inserted, skipped, makes, approvals FROM counts;
+        `;
+
+        const result = await db.one(sql, [payload, userId]);
+        resolve({ inserted: result.inserted, skipped: result.skipped, makes: result.makes, approvals: result.approvals });
+      } catch (error) {
+        console.error('bulkInsertVariantVendorMappings failed:', error);
+        reject(error);
+      }
+    });
+  },
   getSubCategory: async (parent_id = null, slug = null) => {
     return new Promise(async (resolve, reject) => {
       try {
@@ -1280,76 +1406,201 @@ const productModel = {
     });
   },
 
-getNestedCategoryList: async (parentId, slug) => {
+getNestedCategoryList: async (parentId, slug, vendorRequired = false) => {
   try {
     let categoryId = null;
 
-    // STEP 1: Determine categoryId (from slug or parentId)
+    // ---------------------------------------
+    // STEP 1: Resolve categoryId from slug
+    // ---------------------------------------
     if (slug && slug.trim() !== '' && slug !== 'undefined' && slug !== 'null') {
-      const findSlugQuery = `
-        SELECT id 
-        FROM tbl_category 
-        WHERE slug = $1
-        LIMIT 1
-      `;
-      const slugResult = await db.oneOrNone(findSlugQuery, [slug]);
-      if (!slugResult) return [];
-      categoryId = slugResult.id;
+      const row = await db.oneOrNone(
+        `SELECT id FROM tbl_category WHERE slug = $1 LIMIT 1`,
+        [slug]
+      );
+      if (!row) return { type: "none", data: [] };
+      categoryId = row.id;
     } else if (parentId !== undefined && parentId !== null && parentId !== '') {
       categoryId = parentId;
     } else {
-      throw new Error('Either parent_id or slug must be provided.');
+      throw new Error("Either parent_id or slug must be provided.");
     }
 
-    // STEP 2: Fetch subcategories that have at least one product
-    const subCategoryQuery = `
-      SELECT c.id, c.title, c.parent_id, c.slug
-      FROM tbl_category c
-      WHERE c.parent_id = $1
-      AND EXISTS (
-        SELECT 1
-        FROM tbl_product_categories pc
-        WHERE pc.category_id = c.id
-      )
-    `;
-    const subCategories = await db.any(subCategoryQuery, [categoryId]);
+    // PARAMS
+    const params = [categoryId];
+
+    // ---------------------------------------
+    // STEP 2: SUBCATEGORIES
+    // ---------------------------------------
+    let subCategories = await db.any(
+      `
+      SELECT id, title, parent_id, slug
+      FROM tbl_category
+      WHERE parent_id = $1
+      `,
+      params
+    );
+
+    // If vendorRequired → filter subcategories where *ANY* variant has vendors
+    if (vendorRequired && subCategories.length > 0) {
+      const filtered = await db.any(
+        `
+        SELECT c.id, c.title, c.parent_id, c.slug
+        FROM tbl_category c
+        WHERE c.parent_id = $1
+        AND EXISTS (
+          SELECT 1
+          FROM tbl_product_categories pc
+          JOIN tbl_product_variant v ON v.product_id = pc.product_id
+          JOIN tbl_product_variant_vendor_mapping vm 
+                ON vm.product_variant_id = v.id
+          WHERE pc.category_id = c.id
+            AND v.is_approve = 1
+            AND vm.is_approved = true
+        )
+        `,
+        params
+      );
+
+      subCategories = filtered;
+    }
 
     if (subCategories.length > 0) {
-      // ✅ Return only subcategories that have products
       return { type: "category", data: subCategories };
     }
 
-    // STEP 3: If no valid subcategories, fetch products for this category
-    const productQuery = `
-      SELECT p.id , p.name , p.sku, p.slug
-      FROM tbl_product_categories pc
-      JOIN tbl_product p ON p.id = pc.product_id
-      WHERE pc.category_id = $1
-    `;
-    const products = await db.any(productQuery, [categoryId]);
+    // ---------------------------------------
+    // STEP 3: PRODUCTS under this category
+    // ---------------------------------------
+    // let products = await db.any(
+    //   `
+    //   SELECT p.id, p.name, p.sku, p.slug
+    //   FROM tbl_product_categories pc
+    //   JOIN tbl_product p ON p.id = pc.product_id
+    //   WHERE pc.category_id = $1
+    //   `,
+    //   params
+    // );
 
-    if (products.length > 0) {
-      return { type: "product", data: products };
-    }
+    // // vendorRequired → filter products having vendor-approved variants
+    // if (vendorRequired && products.length > 0) {
+    //   products = await db.any(
+    //     `
+    //     SELECT DISTINCT p.id, p.name, p.sku, p.slug
+    //     FROM tbl_product_categories pc
+    //     JOIN tbl_product p ON p.id = pc.product_id
+    //     JOIN tbl_product_variant v ON v.product_id = p.id
+    //     JOIN tbl_product_variant_vendor_mapping vm 
+    //           ON vm.product_variant_id = v.id
+    //     WHERE pc.category_id = $1
+    //       AND v.is_approve = 1
+    //       AND vm.is_approved = true
+    //     `,
+    //     params
+    //   );
+    // }
 
-    // STEP 4: If no products, fetch variants for product_id
-    const variantQuery = `
-      SELECT v.name , v.id, v.product_id , v.sku, v.slug
+    // if (products.length > 0) {
+    //   return { type: "product", data: products };
+    // }
+
+    // ---------------------------------------
+    // STEP 4: VARIANTS for this PRODUCT
+    // ---------------------------------------
+    // let variants = await db.any(
+    //   `
+    //   SELECT id, name, sku, slug, product_id
+    //   FROM tbl_product_variant
+    //   WHERE product_id = $1
+    //     AND is_approve = 1
+    //   `,
+    //   params
+    // );
+
+    // // vendorRequired → filter variants with vendor mapping
+    // if (vendorRequired && variants.length > 0) {
+    //   variants = await db.any(
+    //     `
+    //     SELECT DISTINCT v.id, v.name, v.slug, v.sku, v.product_id
+    //     FROM tbl_product_variant v
+    //     JOIN tbl_product_variant_vendor_mapping vm
+    //           ON vm.product_variant_id = v.id
+    //     WHERE v.product_id = $1
+    //       AND v.is_approve = 1
+    //       AND vm.is_approved = true
+    //     `,
+    //     params
+    //   );
+    // }
+
+    // if (variants.length > 0) {
+    //   return { type: "variant", data: variants };
+    // }
+
+    // ---------------------------------------
+// STEP 4: VARIANTS for this CATEGORY (all products)
+// ---------------------------------------
+
+// 1. Find all product IDs under this category
+const productIds = await db.any(
+  `
+    SELECT DISTINCT p.id
+    FROM tbl_product_categories pc
+    JOIN tbl_product p ON p.id = pc.product_id
+    WHERE pc.category_id = $1
+  `,
+  params
+);
+
+// If no products exist → no variants exist
+if (!productIds || productIds.length === 0) {
+  return { type: "none", data: [] };
+}
+
+const ids = productIds.map(p => p.id);
+
+// 2. Fetch ALL variants for ALL those products
+let variants = await db.any(
+  `
+    SELECT v.id, v.name, v.sku, v.slug, v.product_id
+    FROM tbl_product_variant v
+    WHERE v.product_id IN ($1:csv)
+      AND v.is_approve = 1
+  `,
+  [ids]
+);
+
+// 3. If vendorRequired → filter variants with approved vendors
+if (vendorRequired && variants.length > 0) {
+  variants = await db.any(
+    `
+      SELECT DISTINCT v.id, v.name, v.slug, v.sku, v.product_id
       FROM tbl_product_variant v
-      WHERE v.product_id = $1 and v.is_approve = 1
-    `;
-    const variants = await db.any(variantQuery, [categoryId]);
+      JOIN tbl_product_variant_vendor_mapping vm
+            ON vm.product_variant_id = v.id
+      WHERE v.product_id IN ($1:csv)
+        AND v.is_approve = 1
+        AND vm.is_approved = true
+    `,
+    [ids]
+  );
+}
 
-    if (variants.length > 0) {
-      return { type: "variant", data: variants };
-    }
+if (variants.length > 0) {
+  return { type: "variant", data: variants };
+}
 
+
+    // ---------------------------------------
     // STEP 5: Nothing found
+    // ---------------------------------------
     return { type: "none", data: [] };
-  } catch (error) {
-    throw error;
+
+  } catch (err) {
+    throw err;
   }
-},
+}
+,
 
 getRandomProductsForCarausel : async () =>{
  return new Promise(function (resolve, reject) {
@@ -1534,7 +1785,7 @@ getRandomProductsForCarausel : async () =>{
 
         // Handle vendor filter
         if (vendorId && vendorId !== '') {
-          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm JOIN tbl_product_variant PV on PV.id = pvvm.product_variant_id WHERE PV.product_id = p.id AND pvvm.vendor_id = $${paramIndex})`);
+          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm JOIN tbl_product_variant PV on PV.id = pvvm.product_variant_id WHERE PV.product_id = p.id AND pvvm.vendor_id = $${paramIndex} AND pvvm.status = TRUE AND pvvm.is_approved = TRUE)`);
           params.push(vendorId);
           paramIndex++;
         }
@@ -3694,6 +3945,55 @@ getProductTechSpecByID: async (productId) => {
             TC.name AS created_by,
             TU.name AS updated_by,
             TA.name AS approved_by,
+            COALESCE(
+              array_to_string(
+                ARRAY(
+                  SELECT DISTINCT va.vendor_approve
+                  FROM tbl_vendorapprove_product_mapping vpm
+                  LEFT JOIN tbl_vendor_approve va ON va.id = vpm.vendor_approve_id
+                  WHERE vpm.variant_vendor_mapping_id = m.id
+                ),
+                ', '
+              ),
+              ''
+            ) AS vendor_approved_by_companies,
+            (
+              SELECT COALESCE(
+                ARRAY_AGG(DISTINCT va.vendor_approve),
+                ARRAY[]::text[]
+              )
+              FROM tbl_vendorapprove_product_mapping vpm
+              LEFT JOIN tbl_vendor_approve va ON va.id = vpm.vendor_approve_id
+              WHERE vpm.variant_vendor_mapping_id = m.id
+            ) AS approved_by_names,
+            (
+              SELECT COALESCE(
+                ARRAY_AGG(DISTINCT vpm.vendor_approve_id),
+                ARRAY[]::bigint[]
+              )
+              FROM tbl_vendorapprove_product_mapping vpm
+              WHERE vpm.variant_vendor_mapping_id = m.id
+            ) AS approved_ids,
+            (
+              SELECT COALESCE(
+                json_agg(DISTINCT jsonb_build_object(
+                  'id', vpm.vendor_approve_id,
+                  'name', va.vendor_approve
+                )),
+                '[]'::json
+              )
+              FROM tbl_vendorapprove_product_mapping vpm
+              LEFT JOIN tbl_vendor_approve va ON va.id = vpm.vendor_approve_id
+              WHERE vpm.variant_vendor_mapping_id = m.id
+            ) AS approved_by_details,
+            (
+              SELECT COALESCE(
+                ARRAY_AGG(pvvm.make_name),
+                ARRAY[]::text[]
+              )
+              FROM tbl_product_variant_vendor_make pvvm
+              WHERE pvvm.variant_vendor_map_id = m.id
+            ) AS make_list,
             p.id AS product_id,
             p.name AS product_name,
             p.created_by AS product_created_by,
@@ -3974,6 +4274,41 @@ WHERE m.id = $1;
     });
   },
   
+  // Delete variant-vendor mapping
+  deleteVariantVendorMapping: async (mappingId) => {
+    return new Promise(function (resolve, reject) {
+      db.tx(async (t) => {
+        // Delete related makes
+        await t.none(
+          'DELETE FROM tbl_product_variant_vendor_make WHERE variant_vendor_map_id = $1',
+          [mappingId]
+        );
+        
+        // Delete related approvals
+        await t.none(
+          'DELETE FROM tbl_vendorapprove_product_mapping WHERE variant_vendor_mapping_id = $1',
+          [mappingId]
+        );
+        
+        // Delete the mapping itself
+        const result = await t.one(
+          'DELETE FROM tbl_product_variant_vendor_mapping WHERE id = $1 RETURNING id',
+          [mappingId]
+        );
+        
+        return result;
+      })
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          console.error("Error deleting variant-vendor mapping:", err);
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
   // Changes by Agnij May 02, 2025 [Added function to update variant approval status]
   updateProductVariantApproval: async (variantId, isApproved, rejectReasonId = null) => {
     return new Promise(function (resolve, reject) {
@@ -4238,7 +4573,7 @@ WHERE m.id = $1;
 
         // Handle vendor filter
         if (vendor_id && vendor_id !== '') {
-          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm WHERE pvvm.product_variant_id = pv.id AND pvvm.vendor_id = $${paramIndex})`);
+          conditions.push(`EXISTS (SELECT 1 FROM tbl_product_variant_vendor_mapping pvvm WHERE pvvm.product_variant_id = pv.id AND pvvm.vendor_id = $${paramIndex} AND pvvm.status = TRUE AND pvvm.is_approved = TRUE)`);
           params.push(vendor_id);
           paramIndex++;
         }
