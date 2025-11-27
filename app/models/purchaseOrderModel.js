@@ -1,7 +1,10 @@
 import db from "../config/dbConn.js";
 import { sendApprovalNotification } from "../controllers/po/purchaseOrderEmails.js";
 import seoController from "../controllers/seo/seoController.js";
-import { AVAILABLE_HIERARCHY_TYPES, PO_STATUSES } from "../util/constants.js";
+import { generateSignature } from "../helper/common.js";
+import { scheduleGRNReminders } from "../helper/cronManager.js";
+import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
+import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
 import generalModel, { markPOStatusChange, uploadToS3 } from "./generalModel.js";
 import fs from 'fs';
 
@@ -221,9 +224,9 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
         po = await t.one(
           `INSERT INTO tbl_rfq_purchase_order (
             rfq_id, project_id, quote_id, po_number, total_value, rfq_product_id, quantity,
-            unit_price, finalized_vendor_id, initiated_by, status, selected_hierarchy, terms_and_conditions
+            unit_price, finalized_vendor_id, initiated_by, status, selected_hierarchy, terms_and_conditions, company_id
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
           RETURNING id`,
           [
             rfq_id,
@@ -238,7 +241,8 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
             initiated_by,
             PO_STATUSES.DRAFT,
             selected_hierarchy,
-            concated_terms.terms_text
+            concated_terms.terms_text,
+            company_id
           ]
         );
 
@@ -453,7 +457,7 @@ export const getPOItemDetails = async (purchase_order, t) => {
   }
 };
 
-export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filters = {}) => {
+export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit = 10, filters = {}) => {
   try {
     const offset = (page - 1) * limit;
 
@@ -488,6 +492,16 @@ export const getPOByRFQId = async (rfq_id, user_id, page = 1, limit = 10, filter
     if (filters.dateTo) {
       conditions.push(`po.created_at <= $${paramIndex++}`);
       values.push(filters.dateTo);
+    }
+
+    if(user_type == 3) {
+      // Only PO that are for our vendor
+      conditions.push(`po.finalized_vendor_id = $${paramIndex++}`);
+      values.push(user_id);
+
+      // Only PO that are either approved or in the latter stage
+      conditions.push(`po.status <> ALL($${paramIndex++}::po_status[])`);
+      values.push(INVALID_PO_STATUSES_FOR_VENDOR);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -640,8 +654,9 @@ export const getPODetailsById = async (po_id, user_id) => {
                   'user_type', LOGGED_IN_USER.user_type
               ) AS logged_in_user,
               TU.name AS initiated_by_name,
+              TU.email AS initiated_by_email,
               CASE WHEN trx.current_approver_id = $2 THEN TRUE ELSE FALSE END AS is_approver,
-               COALESCE(
+              COALESCE(
                 (
                   SELECT JSON_AGG(
                       JSON_BUILD_OBJECT(
@@ -663,6 +678,22 @@ export const getPODetailsById = async (po_id, user_id) => {
                 ),
                 '[]'::json
               ) AS product_details,
+              COALESCE(
+                (
+                  SELECT JSON_AGG(
+                      JSON_BUILD_OBJECT(
+                          'id', TPOD.id,
+                          'document_type', TPOD.document_type,
+                          'document_url', TPOD.document_url,
+                          'uploaded_by', TPOD.uploaded_by,
+                          'created_at', TPOD.created_at
+                      )
+                  )
+                  FROM tbl_purchase_order_document TPOD
+                  WHERE TPOD.purchase_order_id = po.id
+                ),
+                '[]'::json
+              ) AS documents,
               COALESCE(
               (
                 SELECT JSON_AGG(
@@ -1233,4 +1264,194 @@ export const updateHSNCode = async (po_id, hsn_codes, mapped_by) => {
   } else {
     return null;
   }
+};
+
+export const handleRaiseInvoice = async (po_id, invoice_url, vendor_id) => {
+  return await db.tx(async t => {
+    const po = await t.oneOrNone(
+      `SELECT * FROM tbl_rfq_purchase_order
+      WHERE id = $1`,
+      [po_id]
+    );
+
+    if(!po) throw new Error('PO does not exist with given id')
+    else if (po && po.finalized_vendor_id != vendor_id) throw new Error('PO does not belong to you!')
+
+    const existing = await t.oneOrNone(
+      `SELECT id FROM tbl_purchase_order_document WHERE purchase_order_id = $1 AND document_type = 'invoice'`,
+      [po_id]
+    );
+
+    if(existing) {
+      throw new Error("Invoice is already raised for this PO!")
+    }
+
+    const result = await t.one(
+      `INSERT INTO tbl_purchase_order_document
+      (purchase_order_id, document_type, document_url, uploaded_by)
+      VALUES($1, 'invoice', $2, $3)
+      
+      RETURNING *`,
+      [po_id, invoice_url, vendor_id]
+    );
+
+    await t.none(
+      `UPDATE tbl_rfq_purchase_order
+      SET status = 'invoice_raised'
+      WHERE id = $1`,
+      [po_id]
+    );
+
+    const formattedPOData = await t.one(
+      `SELECT PO.*,
+      TC.company_name AS finalized_vendor_name,
+      TU.email AS finalized_vendor_email
+
+      FROM tbl_rfq_purchase_order PO
+      JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
+      JOIN tbl_company TC ON TU.company_id = TC.id
+
+      WHERE PO.id = $1`,
+      [po_id]
+    );
+
+    const reminderUsers = await t.one(
+      `SELECT ARRAY_AGG(user_id) AS users_list
+      FROM tbl_approval_hierarchy
+      WHERE company_id = $1
+      AND hierarchy_type = 'po'
+      AND hierarchy_id = $2`,
+      [po.company_id, po.selected_hierarchy]
+    );
+
+    await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers);
+
+    return result;
+  })
+};
+
+export const handleMarkDispatched = async (po_id, vendor_id) => {
+  return await db.tx(async t => {
+    const po = await t.oneOrNone(
+      `SELECT * FROM tbl_rfq_purchase_order
+      WHERE id = $1`,
+      [po_id]
+    );
+
+    if(!po) throw new Error('PO does not exist with given id')
+    else if (po && po.finalized_vendor_id != vendor_id) throw new Error('PO does not belong to you!')
+
+    await t.none(
+      `UPDATE tbl_rfq_purchase_order
+      SET status = 'dispatched'
+      WHERE id = $1`,
+      [po_id]
+    );
+
+    const formattedPOData = await t.one(
+      `SELECT PO.*,
+      TU.name AS finalized_vendor_name,
+      TU.email AS finalized_vendor_email,
+      TAHH.created_at AS po_approved_on,
+      QI.delivery_period
+
+      FROM tbl_rfq_purchase_order PO
+      JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
+      JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
+      JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND target_entity_id = PO.id
+      JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
+      JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
+      JOIN tbl_company TC ON TU.company_id = TC.id
+
+      WHERE PO.id = $1`,
+      [po_id]
+    );
+
+    const reminderUsers = await t.one(
+      `SELECT ARRAY_AGG(user_id) AS users_list
+      FROM tbl_approval_hierarchy
+      WHERE company_id = $1
+      AND hierarchy_type = 'po'
+      AND hierarchy_id = $2`,
+      [po.company_id, po.selected_hierarchy]
+    );
+    
+    await scheduleGRNReminders(formattedPOData, reminderUsers.users_list);
+    await sendDispatchedEmail(formattedPOData, reminderUsers.users_list);
+
+    return true;
+  })
+};
+
+export const handleAddSiteRepresentative = async (po_id, company_id, added_by, name, email, phone) => {
+  return await db.tx(async t => {
+    const existing = await t.oneOrNone(
+      `SELECT id FROM tbl_token_login_data
+      WHERE token_type = 'GRN'
+      AND entity_id = $1`
+    );
+    let result = null;
+
+    const secret = process.env.WEBHOOK_SECRET;
+    const expires = Math.floor(Date.now() / 1000) + 12 * 60 * 60;
+    const message = `${name}_${email}_${phone}_${expires}`;
+
+    const token = generateSignature(message, secret);
+
+    if(existing) {
+      result = await t.one(
+        `UPDATE tbl_token_login_data
+        SET name = $1,
+        email = $2,
+        phone = $3,
+        added_by = $4
+        token = $5
+        
+        WHERE id = $6
+        RETURNING *`,
+        [name, email, phone, added_by, token, existing.id]
+      );
+    } else {
+      result = await t.one(
+        `INSERT INTO tbl_token_login_data
+        (token_type, entity_id, name, email, phone, added_by, token)
+        VALUES ('GRN', $1, $2, $3, $4, $5, $6)
+        
+        RETURNING *`,
+        [po_id, name, email, phone, added_by, token]
+      );
+    }
+
+    const formattedPOData = await t.one(
+      `SELECT PO.*,
+      TU.name AS finalized_vendor_name,
+      TU.email AS finalized_vendor_email,
+      TAHH.created_at AS po_approved_on,
+      QI.delivery_period
+
+      FROM tbl_rfq_purchase_order PO
+      JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
+      JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
+      JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND target_entity_id = PO.id
+      JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
+      JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
+      JOIN tbl_company TC ON TU.company_id = TC.id
+
+      WHERE PO.id = $1`,
+      [po_id]
+    );
+
+    const reminderUsers = await t.one(
+      `SELECT ARRAY_AGG(user_id) AS users_list
+      FROM tbl_approval_hierarchy
+      WHERE company_id = $1
+      AND hierarchy_type = 'po'
+      AND hierarchy_id = $2`,
+      [po.company_id, po.selected_hierarchy]
+    );
+
+    await sendGRNRepresentativeEmail(formattedPOData, reminderUsers, token);
+
+    return result;
+  })
 };

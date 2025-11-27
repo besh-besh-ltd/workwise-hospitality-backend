@@ -789,7 +789,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       FROM tbl_approval_hierarchy_transactions
       WHERE hierarchy_type = $1
         AND company_id = $2
-        AND status IN ('pending', 'approved')
+        AND status IN ('pending', 'approved', 'rejected')
         AND meta ->> 'rfq_id' = $3
         AND meta ->> 'po_id' = $4`,
       [

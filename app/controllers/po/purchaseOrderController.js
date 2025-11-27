@@ -2,7 +2,7 @@ import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
 import { sendApprovalNotification } from "./purchaseOrderEmails.js";
@@ -11,9 +11,9 @@ export const getPOByRFQ = async (req, res) => {
     try {
         const { rfq_id } = req.params;
         const { page = 1, limit = 10, ...filters } = req.query;
-        const { id } = req.user;
+        const { id, user_type } = req.user;
 
-        const result = await getPOByRFQId(rfq_id, id, page, limit, filters);
+        const result = await getPOByRFQId(rfq_id, id, user_type, page, limit, filters);
 
         return res.json(result);
 
@@ -291,7 +291,66 @@ export const updateHSNForProduct = async (req, res) => {
       data: updatedData
     });
   } catch (error) {
-    logError(error);
+    console.error(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || 'An error occurred while approving the PO.',
+      error
+    });
+  }
+};
+
+export const raiseInvoice = async (req, res) => {
+  try {
+    const { po_id, invoice_url } = req.body;
+    const { id } = req.user;
+
+    const result = await handleRaiseInvoice(po_id, invoice_url, id);
+    return res.json({
+      status: 1,
+      message: 'Invoice has been raised for this PO.',
+      data: result
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || 'An error occurred while approving the PO.',
+      error
+    });
+  }
+};
+
+export const markDispatched = async (req, res) => {
+  try {
+    const { po_id } = req.body;
+    const { id } = req.user;
+
+    const result = await handleMarkDispatched(po_id, id);
+    return res.json({
+      status: 1,
+      message: 'Marked as Dispatched for this PO.',
+      data: result
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || 'An error occurred while approving the PO.',
+      error
+    });
+  }
+};
+
+export const addSiteRepresentative = async (req, res) => {
+  try {
+    const { po_id, name, email, phone } = req.body;
+    const { id, company_id } = req.user;
+
+    const result = await handleAddSiteRepresentative(po_id, company_id, id, name, email, phone);
+
+  } catch (error) {
+    console.error(error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',

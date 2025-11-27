@@ -27,6 +27,8 @@ export const PO_STATUSES = {
   REJECTED: 'rejected'
 }
 
+export const INVALID_PO_STATUSES_FOR_VENDOR = ['draft', 'pending_approval', 'cancelled', 'rejected']
+
 // For Now Hard Coded Tender Summaries
 export const summaries = [
   {

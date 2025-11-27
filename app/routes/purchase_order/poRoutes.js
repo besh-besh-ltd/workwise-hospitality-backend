@@ -1,6 +1,7 @@
 import { Router } from "express";
-import { approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
+import { addSiteRepresentative, approvePO, createMilestoneController, createTaskController, deleteMilestoneController, deleteTaskController, getMilestonesController, getPOByRFQ, getPODetails, getTasksController, initiatePO, markDispatched, raiseInvoice, updateGST, updateHSNForProduct, updateMilestoneController, updatePO, updateTaskController } from "../../controllers/po/purchaseOrderController.js";
 import passport from '../../middleware/passport.js';
+import { acl, noAcl } from "../../helper/common.js";
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -13,6 +14,9 @@ PORoutes.get('/initiate/:po_id', passportSignIn, initiatePO);
 PORoutes.post('/approve/:po_id', passportSignIn, approvePO);
 PORoutes.post('/updateGST/:po_id', passportSignIn, updateGST);
 PORoutes.post('/updateHSN/:po_id', passportSignIn, updateHSNForProduct);
+PORoutes.post('/raiseInvoice', passportSignIn, acl([3]), raiseInvoice);
+PORoutes.post('/markDispatched', passportSignIn, acl([3]), markDispatched);
+PORoutes.post('/addSiteRepresentative', passportSignIn, noAcl([2]), addSiteRepresentative);
 
 // Milestone Routes
 PORoutes.get('/:po_id/milestones', passportSignIn, getMilestonesController);

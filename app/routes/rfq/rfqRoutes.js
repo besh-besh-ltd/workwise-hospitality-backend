@@ -549,7 +549,7 @@ RfqRoutes.post('/get-tech-evaluation-rfqs',
 RfqRoutes.get('/get-rfqs',
   passportSignIn,
   validateDbBody.user_id_profileexists,
-  acl([2, 8, 9, 10]),
+  acl([2, 3, 8, 9, 10]),
   validateGetRfqsQuery,
   rfqController.getRfqs
 )

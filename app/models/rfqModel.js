@@ -8989,6 +8989,7 @@ ORDER BY tq.timestamp DESC;
   // New optimized method for sidebar data
   getRfqs: async (
     user_id,
+    user_type,
     tech_eval,
     po,
     limit,
@@ -9009,8 +9010,13 @@ ORDER BY tq.timestamp DESC;
       }
 
       if (po) {
-        dynamicJoins +=
-          'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
+        if(user_type == 3) {
+          dynamicJoins += 
+           `JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id AND TRPO.finalized_vendor_id = ${user_id}`
+        } else {
+          dynamicJoins +=
+            'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
+        }
       }
 
       let q = `
@@ -9047,7 +9053,11 @@ ORDER BY tq.timestamp DESC;
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
       ${dynamicJoins}
-      WHERE (RFQ.created_by = ${user_id} OR EXISTS (
+      WHERE (${
+        user_type == 3
+          ? `EXISTS (SELECT 1 FROM tbl_rfq_product_vendors WHERE rfq_id = RFQ.id AND user_id = ${user_id})`
+          : `RFQ.created_by = ${user_id}`
+      } OR EXISTS (
         ${
           po
             ? `
