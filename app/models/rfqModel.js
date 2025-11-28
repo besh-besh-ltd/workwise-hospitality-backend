@@ -4202,10 +4202,28 @@ WHERE row_num_by_name_category = 1
           tc.website,
           tc.turnover,
           tc.nature_of_business,
+
+          ARRAY(
+            SELECT json_build_object(
+              'address', tcl2.address,
+              'postal_code', tcl2.postal_code,
+              'city_id', tcl2.city_id,
+              'city_name', lc.city_name,
+              'state_id', tcl2.state_id,
+              'state_name', ls.state_name,
+              'country_id', tcl2.country_id,
+              'country_name', lco.country_name
+            )
+            FROM tbl_company_location tcl2
+            LEFT JOIN tbl_location_cities lc ON lc.id = tcl2.city_id
+            LEFT JOIN tbl_location_states ls ON ls.id = tcl2.state_id
+            LEFT JOIN tbl_location_country lco ON lco.id = tcl2.country_id
+            WHERE tcl2.company_id = tc.id
+          ) AS location,
           CASE
           WHEN tc.logo IS NULL THEN NULL
-          ELSE tc.logo
-          END AS image_url,
+           ELSE tc.logo
+           END AS image_url,
           CASE
             WHEN bvm.vendor_id IS NOT NULL THEN 1
             ELSE 0
