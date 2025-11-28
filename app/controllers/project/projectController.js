@@ -4,6 +4,7 @@ import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
 import rfqModel from "../../models/rfqModel.js";
 import db from "../../config/dbConn.js";
 import userModel from "../../models/userModel.js";
+import hospitalityModel from "../../models/hospitalityModel.js";
 
 const projectController = {
   create: async (req, res, next) => {
@@ -372,6 +373,21 @@ const projectController = {
       } else {
         // users can only access their own projects or projects they are a member of
         projects = await projectModel.getAllProjects(user_id);
+      }
+
+      // Apply hospitality scope filter when context is present
+      if (req.hospitalityContext) {
+        const { companyId, hotelId } = req.hospitalityContext;
+        const mappedProjects = await hospitalityModel.getProjectIdsForContext(
+          companyId,
+          hotelId || null
+        );
+        const allowedIds = new Set(
+          mappedProjects.map((row) => Number(row.project_id))
+        );
+        projects = projects.filter((project) =>
+          allowedIds.has(Number(project.id))
+        );
       }
 
       // IMPORTANT: Ensure the response format is consistent

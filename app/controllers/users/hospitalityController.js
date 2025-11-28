@@ -455,7 +455,26 @@ const HospitalityController = {
         });
       }
 
-      await hospitalityModel.deleteProjectMappings(projectId, companyId, mappingType, hotelId);
+      await hospitalityModel.deleteProjectMappings(
+        projectId,
+        companyId,
+        mappingType,
+        hotelId
+      );
+
+      // Remove team members that were added via this hospitality context
+      const contextUsers = await hospitalityModel.getMappedUserIds(
+        companyId,
+        mappingType,
+        hotelId
+      );
+      if (contextUsers && contextUsers.length) {
+        await Promise.all(
+          contextUsers.map((row) =>
+            projectModel.removeTeamMember(projectId, row.user_id)
+          )
+        );
+      }
 
       return res.status(200).json({
         status: 1,

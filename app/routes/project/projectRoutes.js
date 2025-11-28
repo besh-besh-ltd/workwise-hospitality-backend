@@ -1,5 +1,6 @@
 import {Router} from 'express';
 import projectController from '../../controllers/project/projectController.js';
+import hospitalityMiddleware from '../../middleware/hospitality.js';
 import { validateBody,validateParam } from '../../validations/paramValidation/userValidation.js';
 import { validateDbBody } from '../../validations/dbValidation/projectDbValidation.js';
 import passport from '../../middleware/passport.js';
@@ -64,7 +65,7 @@ projectRoutes.get('/available-budget/:project_id',
 projectRoutes.get(
     '/',
     passportSignIn,
-    // acl([2, 7]),
+    hospitalityMiddleware.attachHospitalityContext(),
     projectController.getAllProjects
 )
 

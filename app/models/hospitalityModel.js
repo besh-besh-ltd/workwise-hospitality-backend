@@ -266,6 +266,28 @@ const hospitalityModel = {
     );
   },
 
+  getProjectIdsForContext: async (companyId, hotelId = null) => {
+    if (!companyId) {
+      return [];
+    }
+    if (hotelId) {
+      return db.any(
+        `SELECT DISTINCT project_id
+         FROM tbl_hospitality_project_mappings
+         WHERE hospitality_company_id = $1
+           AND mapping_type = 1
+           AND hospitality_hotel_id = $2`,
+        [companyId, hotelId]
+      );
+    }
+    return db.any(
+      `SELECT DISTINCT project_id
+       FROM tbl_hospitality_project_mappings
+       WHERE hospitality_company_id = $1`,
+      [companyId]
+    );
+  },
+
   getProjectMappings: async (projectId) => {
     return db.any(
       `SELECT 
