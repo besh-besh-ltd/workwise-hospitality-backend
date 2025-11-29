@@ -72,7 +72,7 @@ const vendorModel = {
       }
       if (is_hospitality !== null && is_hospitality !== undefined) {
         dynamicQuery += `AND tbl_company.is_hospitality = ${is_hospitality}`;
-
+      }
 
       let orderByClause = 'ORDER BY tbl_users.created_at DESC';
       if (name || organization) {
