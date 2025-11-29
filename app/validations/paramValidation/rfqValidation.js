@@ -329,10 +329,12 @@ export const rfqSchemas = {
     page: Joi.number().integer().optional(),
     limit: Joi.number().integer().optional(),
     offset: Joi.number().integer().optional(),
-    rfq_status: Joi.string().valid('1', '2').allow(null).optional(),
+    rfq_status: Joi.string().valid('1', '2').allow(null, '').optional(),
+    rfq_no: Joi.string().allow(null, '').optional(),
+    company: Joi.array().items(Joi.number()).optional(),
     admin_service_status: Joi.string()
       .valid('Pending', 'Working', 'Complete')
-      .allow(null)
+      .allow(null, '')
       .optional(),
     sort: Joi.string().valid('ASC', 'DESC').optional()
   }),
@@ -380,7 +382,7 @@ export const rfqSchemas = {
       let upload = multer({
         storage: store_query_message_upload_file,
         limits: {
-          fileSize: 8000000 // 8MB
+           fileSize: 100 * 1024 * 1024 // 100 MB in bytes
         }
       }).array('files', 10);
       upload(req, res, async function (err) {

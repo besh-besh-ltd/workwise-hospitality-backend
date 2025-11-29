@@ -39,7 +39,7 @@ user_book_demo: async (mobile) => {
           // Step 1: Insert Company
           // ------------------------------
           const companyFields = [
-            "company_name", "profile", "nature_of_business", "type_of_business",
+            "company_name", "source", "profile", "nature_of_business", "type_of_business",
             "turnover", "no_of_employess", "import_export_code", "gstin", "cin", "logo",
             "established_year", "website", "location", "is_private", "is_hospitality"
           ];
@@ -62,7 +62,7 @@ user_book_demo: async (mobile) => {
           const userFields = [
             "name", "email", "mobile", "created_by", "updated_by",
             "status", "user_type", "password", "address", "country",
-            "whatsapp", "state", "city", "postal_code"
+            "whatsapp", "state", "city", "postal_code", "subscription_plan_id"
           ];
           const userValues = userFields.map(f => user_data?.[f] ?? null);
           userFields.push("company_id");

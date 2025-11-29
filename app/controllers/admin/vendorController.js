@@ -82,7 +82,7 @@ const extractBuyerCompanyIds = (input) => {
 const vendorController = {
   vendorList: async (req, res, next) => {
     try {
-      let page, limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by;
+      let page, limit, offset, organization, verified, name, email, status, source, subscription_plan, is_private, dateFrom, dateTo, created_by;
       if (req.query.page && req.query.page > 0) {
         page = req.query.page;
         limit = req.query.limit || Config.globalAdminLimit;
@@ -102,6 +102,9 @@ const vendorController = {
       dateTo = req.query.date_to || null;
       created_by = req.query.created_by || null;
       const is_hospitality = req.query.is_hospitality !== undefined ? parseInt(req.query.is_hospitality) : null;
+      source = req?.query?.source || null;
+      subscription_plan = req?.query?.subscription_plan ?? null;
+      is_private = req?.query?.is_private || null;
 
       let vendorList = await vendorModel.getVendorList(
         limit,
@@ -114,7 +117,10 @@ const vendorController = {
         dateFrom,
         dateTo,
         created_by,
-        is_hospitality
+        is_hospitality,
+        source,
+        subscription_plan,
+        is_private
       );
 
       let vendorCount = await vendorModel.getVendorListCount(
@@ -126,7 +132,10 @@ const vendorController = {
         dateFrom,
         dateTo,
         created_by,
-        is_hospitality
+        is_hospitality,
+        source,
+        subscription_plan,
+        is_private
       );
 
       res
@@ -173,6 +182,7 @@ const vendorController = {
         total_employees,
         about_vendor_company,
         subscription,
+        subscription_plan,
         spocs,
         vendor_access_type: vendorAccessTypeRaw,
         buyer_company_ids: buyerCompanyIdsRaw,
@@ -225,6 +235,8 @@ const vendorController = {
 
       let companyObj = {
         profile: about_vendor_company || null,
+        source : "admin",
+        subscription_plan : subscription_plan || "Free",
         logo: req.files.logo?.[0]?.location || null,
         company_name: organization_name || null,
         nature_of_business: nature_business || null,
@@ -546,6 +558,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         total_employees,
         about_vendor_company,
         subscription,
+        subscription_plan,
         vendor_access_type: vendorAccessTypeRaw,
         buyer_company_ids: buyerCompanyIdsRaw,
         is_hospitality
@@ -629,6 +642,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         mobile : mobile || null,
         postal_code: postal_code || null ,
         organization_name: organization_name || null,
+        subscription_plan_id : subscription_plan || null,
         updated_by : updatedBy || null
       }
       let companyObj = {

@@ -168,6 +168,7 @@ const schemas = {
     certifications: Joi.string().optional().allow(null).allow(''),
     brochure: Joi.string().optional().allow(null).allow(''),
     subscription: Joi.string().optional().allow(null).allow(''),
+    subscription_plan : Joi.number().optional().allow(null).allow(''),
     vendor_access_type: Joi.string()
       .optional()
       .valid('public', 'private')
