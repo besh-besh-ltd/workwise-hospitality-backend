@@ -3,7 +3,7 @@ import userModel from "../../models/userModel.js";
 import { sendMail } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
 
-export const sendGRNEmail = async (purchase_order, userList, day = 0) => {
+export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0) => {
   return new Promise(async (resolve, reject) => {
     try {
       const {
@@ -60,7 +60,7 @@ export const sendGRNEmail = async (purchase_order, userList, day = 0) => {
       } else {
         // Fallback / generic
         subjectSuffix = "GRN reminder";
-        reminderTagLine = `This is a reminder related to Goods Receipt (GRN) for PO #${po_number}.`;
+        reminderTagLine = `This is a reminder related to Goods Received Note (GRN) for PO #${po_number}.`;
         sequenceNote = `
           If the shipment has been delivered, please update the PO status to <strong>GRN</strong> in Workwise.
         `;
@@ -68,7 +68,7 @@ export const sendGRNEmail = async (purchase_order, userList, day = 0) => {
 
       const vendorName = finalized_vendor_name || "N/A";
 
-      const headerContent = `<h2>Goods Receipt (GRN) Reminder</h2>`;
+      const headerContent = `<h2>Goods Received Note (GRN) Reminder</h2>`;
 
       const containerContent = `
       <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
@@ -92,7 +92,7 @@ export const sendGRNEmail = async (purchase_order, userList, day = 0) => {
         </p>
 
         <div style="text-align:center; margin-top:24px;">
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po_id=${po_id}" 
+          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
             style="background-color: #3B82F6; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; display: inline-block; font-weight: 600;">
             View PO in Dashboard
           </a>
@@ -121,6 +121,9 @@ export const sendGRNEmail = async (purchase_order, userList, day = 0) => {
         if (u && u.email) emails.push(u.email);
       }
 
+      if(grnRepData && grnRepData.email)
+        emails.push(grnRepData.email);
+
       if (emails && emails.length > 0) {
         recipients.to = emails;
       } else {
@@ -137,7 +140,7 @@ export const sendGRNEmail = async (purchase_order, userList, day = 0) => {
   });
 };
 
-export const sendInvoiceEmail = async (purchase_order, invoice_url, userList) => {
+export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = []) => {
   return new Promise(async (resolve, reject) => {
     try {
       const {
@@ -182,7 +185,7 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList) =>
                   </a>`
               : ""
           }
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po_id=${po_id}" 
+          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
              style="background-color:#3B82F6; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
             View PO in Dashboard
           </a>
@@ -199,6 +202,94 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList) =>
       let recipients = {
         from: config.webmasterMail,
         subject: `Invoice raised by ${vendorName} for PO #${po_number}`,
+        html: htmlContent,
+      };
+
+      const emails = [];
+
+      for (let user of userList) {
+        let u = await userModel.getUserById(user);
+        u = u?.[0];
+        if (u && u.email) emails.push(u.email);
+      }
+
+      if (emails && emails.length > 0) {
+        recipients.to = emails;
+      } else {
+        // fallback, no emails to send
+        return resolve(false);
+      }
+
+      sendMail(recipients);
+      return resolve(true);
+    } catch (err) {
+      console.error("Error sending invoice email:", err);
+      return reject(err);
+    }
+  });
+};
+export const sendGRNUpdationEmail = async (purchase_order, grn_document_url, userList) => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const {
+        id: po_id,
+        rfq_id,
+        po_number,
+        finalized_vendor_name,
+        finalized_vendor_email,
+      } = purchase_order || {};
+
+      const vendorName = finalized_vendor_name || "Vendor";
+
+      const headerContent = `<h2>GRN Marked for Purchase Order</h2>`;
+
+      const containerContent = `
+      <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+        <p>
+          This is to inform you that <strong>GRN ( Goods Received Note )</strong> has raised and uploaded 
+          against the Purchase Order <strong>#${po_number}</strong>.
+        </p>
+
+        <h4>PO Details</h4>
+        <ul>
+          <li><strong>PO Number:</strong> ${po_number}</li>
+          <li><strong>PO ID:</strong> ${po_id}</li>
+          <li><strong>RFQ ID:</strong> ${rfq_id ?? "N/A"}</li>
+          <li><strong>Vendor Email:</strong> ${finalized_vendor_email || "N/A"}</li>
+        </ul>
+
+        <p style="margin-top:16px;">
+          This email is for your information and records that the GRN has been marked 
+          for this Purchase Order. Please review the document and process it as per your internal
+          workflow.
+        </p>
+
+        <div style="text-align:center; margin-top:24px;">
+          ${
+            grn_document_url
+              ? `<a href="${grn_document_url}" 
+                    style="background-color:#10B981; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600; margin-right:12px;">
+                    View GRN Document
+                  </a>`
+              : ""
+          }
+          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
+             style="background-color:#3B82F6; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
+            View PO in Dashboard
+          </a>
+        </div>
+
+        <p style="text-align:center; margin-top: 30px;">
+          Thank you for keeping your Purchase Orders and invoices up to date.<br/>
+          <strong>— Workwise Team</strong>
+        </p>
+      </div>`;
+
+      const htmlContent = generateEmailTemplate(headerContent, containerContent);
+
+      let recipients = {
+        from: config.webmasterMail,
+        subject: `GRN marked for PO #${po_number}`,
         html: htmlContent,
       };
 
@@ -280,7 +371,7 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
         <p style="margin-top:16px;">
           <strong>Action Recommended:</strong> If you have not yet assigned a site representative 
           (or store in-charge) for this delivery, please do so now. A designated site person will help ensure 
-          that the Goods Receipt Note (GRN) is posted smoothly once the material reaches the site.
+          that the Goods Received Note (GRN) is posted smoothly once the material reaches the site.
         </p>
 
         <p style="margin-top:10px;">
@@ -298,7 +389,7 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
         </p>
 
         <div style="text-align:center; margin-top:24px;">
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po_id=${po_id}" 
+          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
              style="background-color:#3B82F6; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
             View PO in Dashboard
           </a>
@@ -343,7 +434,7 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
   });
 };
 
-export const sendGRNRepresentativeEmail = async (purchase_order, userList, token) => {
+export const sendGRNRepresentativeEmail = async (purchase_order, siteRepEmail, token) => {
   return new Promise(async (resolve, reject) => {
     try {
       const {
@@ -374,14 +465,19 @@ export const sendGRNRepresentativeEmail = async (purchase_order, userList, token
         }
       }
 
-      const headerContent = `<h2>GRN Login Credentials for Purchase Order</h2>`;
+      const headerContent = `<h2>GRN Login Steps for Purchase Order</h2>`;
 
       const containerContent = `
         <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
             <p>
                 You have been assigned as the site representative for 
-                Purchase Order <strong>#${po_number}</strong>. The goods for this PO have been
-                dispatched by <strong>${vendorName}</strong> and will be delivered to your site.
+                Purchase Order <strong>#${po_number}</strong>. ${purchase_order.status == 'dispatched' ? (
+                    `The goods for this PO have been
+                    dispatched by <strong>${vendorName}</strong> and will be delivered to your site.`
+                ) : (
+                    `The goods for this PO will soon be
+                    dispatched by <strong>${vendorName}</strong> and will be delivered to your site.`
+                )}
             </p>
 
             <h4>PO Details</h4>
@@ -397,7 +493,7 @@ export const sendGRNRepresentativeEmail = async (purchase_order, userList, token
             <p style="margin-top:16px;">
                 <strong>Your responsibility:</strong> Once the material reaches the site, 
                 please check the quantity and condition of the goods and update the 
-                <strong>Goods Receipt Note (GRN)</strong> for this PO.
+                <strong>Goods Received Note (GRN)</strong> for this PO.
             </p>
 
             <p style="margin-top:10px;">
@@ -407,7 +503,7 @@ export const sendGRNRepresentativeEmail = async (purchase_order, userList, token
 
             <div style="text-align:center; margin-top:24px;">
                 <a
-                    href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order/grn?rfq=2043&po=89&token=${token}"
+                    href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order/grn?rfq=${purchase_order.rfq_id}&po=${purchase_order.id}&token=${token}"
                     style="background-color:#10B981; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600; margin-bottom:12px;"
                 >
                     Open GRN Page
@@ -429,18 +525,20 @@ export const sendGRNRepresentativeEmail = async (purchase_order, userList, token
 
       let recipients = {
         from: config.webmasterMail,
-        subject: `Dispatch Update: PO #${po_number} marked as Dispatched`,
+        subject: `GRN Login Info for PO #${po_number}`,
         html: htmlContent,
       };
 
       const emails = [];
 
-      for (let user of userList) {
-        let u = await userModel.getUserById(user);
-        u = u?.[0];
+    //   for (let user of userList) {
+    //     let u = await userModel.getUserById(user);
+    //     u = u?.[0];
 
-        if (u && u.email) emails.push(u.email);
-      }
+    //     if (u && u.email) emails.push(u.email);
+    //   }
+
+      emails.push(siteRepEmail)
 
       if (emails && emails.length > 0) {
         recipients.to = emails;

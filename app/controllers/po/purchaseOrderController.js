@@ -2,7 +2,7 @@ import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
 import { sendApprovalNotification } from "./purchaseOrderEmails.js";
@@ -321,6 +321,27 @@ export const raiseInvoice = async (req, res) => {
   }
 };
 
+export const markGRN = async (req, res) => {
+  try {
+    const { po_id, grn_document_url, remarks } = req.body;
+    const { id } = req.user;
+
+    const result = await handleMarkGRN(po_id, grn_document_url, id, remarks);
+    return res.json({
+      status: 1,
+      message: 'GRN has been marked for this PO.',
+      data: result
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || 'An error occurred while approving the PO.',
+      error
+    });
+  }
+};
+
 export const markDispatched = async (req, res) => {
   try {
     const { po_id } = req.body;
@@ -347,8 +368,12 @@ export const addSiteRepresentative = async (req, res) => {
     const { po_id, name, email, phone } = req.body;
     const { id, company_id } = req.user;
 
-    const result = await handleAddSiteRepresentative(po_id, company_id, id, name, email, phone);
-
+    const result = await handleAddSiteRepresentative(po_id, id, name, email, phone);
+    return res.json({
+      status: 1,
+      message: 'Site Rep has been added for this PO',
+      data: result
+    });
   } catch (error) {
     console.error(error);
     return res.status(500).json({

@@ -3,7 +3,7 @@ import { sendApprovalNotification } from "../controllers/po/purchaseOrderEmails.
 import seoController from "../controllers/seo/seoController.js";
 import { generateSignature } from "../helper/common.js";
 import { scheduleGRNReminders } from "../helper/cronManager.js";
-import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
+import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
 import generalModel, { markPOStatusChange, uploadToS3 } from "./generalModel.js";
 import fs from 'fs';
@@ -694,6 +694,20 @@ export const getPODetailsById = async (po_id, user_id) => {
                 ),
                 '[]'::json
               ) AS documents,
+              (
+                SELECT JSON_BUILD_OBJECT(
+                  'id', TTLD.id,
+                  'name', TTLD.name,
+                  'email', TTLD.email,
+                  'phone', TTLD.phone,
+                  'created_at', TTLD.created_at
+                )
+                FROM tbl_token_login_data TTLD
+                WHERE TTLD.token_type = 'GRN'
+                AND entity_id = po.id
+
+                LIMIT 1
+              ) AS site_rep,
               COALESCE(
               (
                 SELECT JSON_AGG(
@@ -731,7 +745,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                         'remarks', H.remarks,
                         'created_at', H.created_at,
                         'approved_by', H.approved_by,
-                        'approved_by_name', U.name
+                        'approved_by_name', COALESCE(U.name, 'Site Representative')
                       )
                       ORDER BY H.created_at,
                       CASE
@@ -741,7 +755,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                       END
                   )
                   FROM tbl_approval_hierarchy_history H
-                  JOIN tbl_users U ON U.id = H.approved_by
+                  LEFT JOIN tbl_users U ON U.id = H.approved_by
                   WHERE H.approval_transaction_id = trx.id
                 ),
                 '[]'::json
@@ -804,32 +818,8 @@ export const getPODetailsById = async (po_id, user_id) => {
               ),
               '[]'::json
             ) AS tasks,
-            (
-                SELECT array_agg(
-                    json_build_object(
-                      'id',            TQ.id,
-                      'quote_id', TQuotes.id,
-                      'vendor_name', TUser.name,
-                      'unit_price', TQ.unit_price,
-                      'package_price', TQ.package_price,
-                      'freight_price',      TQ.freight_price,
-                      'tax',        TQ.tax,
-                      'freight_mode', TQ.freight_mode,
-                      'package_mode', TQ.package_mode,
-                      'tax_mode', TQ.tax_mode,
-                      'comment',   TQ.comment,
-                      'delivery_period', TQ.delivery_period
-                    )
-                )
-
-                FROM tbl_quote_items TQ
-                JOIN tbl_quotes TQuotes ON TQ.quote_id = TQuotes.id
-                JOIN tbl_users TUser ON TUser.id = TQuotes.created_by
-                JOIN tbl_rfq_products TRP ON TRP.id = ANY(po.rfq_product_id)
-                WHERE PO.rfq_id   = TQ.rfq_id
-                  AND TQ.product_variant_id = TRP.product_variant_id
-                  AND TQ.variant = TRP.variant
-            ) AS quotations
+            TAHH.created_at AS po_approved_on,
+            QI.delivery_period
 
        FROM tbl_rfq_purchase_order po
        LEFT JOIN tbl_approval_hierarchy_transactions trx
@@ -840,6 +830,9 @@ export const getPODetailsById = async (po_id, user_id) => {
        JOIN tbl_users TU ON TU.id = po.initiated_by
        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2
+       JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = po.id
+       JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
+       JOIN tbl_approval_hierarchy_history TAHH ON trx.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
        WHERE po.id = $1`,
       [po_id, user_id]
     );
@@ -1324,11 +1317,108 @@ export const handleRaiseInvoice = async (po_id, invoice_url, vendor_id) => {
       [po.company_id, po.selected_hierarchy]
     );
 
-    await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers);
+    console.log("REMINDER USERS:", reminderUsers);
+
+    const txn = await t.one(
+      `SELECT id FROM tbl_approval_hierarchy_transactions
+      WHERE hierarchy_type = 'po'
+      AND target_entity_id = $1`,
+      [po_id]
+    );
+
+    await t.none(
+      `INSERT INTO tbl_approval_hierarchy_history 
+      (approval_transaction_id, approved_by, action)
+      VALUES ($1, $2, $3)`,
+      [txn.id, vendor_id, 'invoice']
+    )
+
+    await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers.users_list);
 
     return result;
   })
 };
+
+export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks) => {
+  return await db.tx(async t => {
+    const po = await t.oneOrNone(
+      `SELECT * FROM tbl_rfq_purchase_order
+      WHERE id = $1`,
+      [po_id]
+    );
+
+    if(!po) throw new Error('PO does not exist with given id')
+
+    const existing = await t.oneOrNone(
+      `SELECT id FROM tbl_purchase_order_document WHERE purchase_order_id = $1 AND document_type = 'grn'`,
+      [po_id]
+    );
+
+    if(existing) {
+      throw new Error("GRN is already marked for this PO!")
+    }
+
+    let result = null;
+
+    if(grn_document_url) 
+      result = await t.one(
+        `INSERT INTO tbl_purchase_order_document
+        (purchase_order_id, document_type, document_url, uploaded_by)
+        VALUES($1, 'grn', $2, $3)
+        
+        RETURNING *`,
+        [po_id, grn_document_url, user_id]
+      );
+
+    await t.none(
+      `UPDATE tbl_rfq_purchase_order
+      SET status = 'GRN'
+      WHERE id = $1`,
+      [po_id]
+    );
+
+    const formattedPOData = await t.one(
+      `SELECT PO.*,
+      TC.company_name AS finalized_vendor_name,
+      TU.email AS finalized_vendor_email
+
+      FROM tbl_rfq_purchase_order PO
+      JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
+      JOIN tbl_company TC ON TU.company_id = TC.id
+
+      WHERE PO.id = $1`,
+      [po_id]
+    );
+
+    const reminderUsers = await t.one(
+      `SELECT ARRAY_AGG(user_id) AS users_list
+      FROM tbl_approval_hierarchy
+      WHERE company_id = $1
+      AND hierarchy_type = 'po'
+      AND hierarchy_id = $2`,
+      [po.company_id, po.selected_hierarchy]
+    );
+
+    const txn = await t.one(
+      `SELECT id FROM tbl_approval_hierarchy_transactions
+      WHERE hierarchy_type = 'po'
+      AND target_entity_id = $1`,
+      [po_id]
+    );
+
+    await t.none(
+      `INSERT INTO tbl_approval_hierarchy_history 
+      (approval_transaction_id, approved_by, action, remarks)
+      VALUES ($1, $2, $3, $4)`,
+      [txn.id, user_id, 'grn', remarks]
+    );
+
+    await sendGRNUpdationEmail(formattedPOData, grn_document_url, reminderUsers.users_list);
+
+    return result;
+  });
+};
+
 
 export const handleMarkDispatched = async (po_id, vendor_id) => {
   return await db.tx(async t => {
@@ -1375,20 +1465,29 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
       AND hierarchy_id = $2`,
       [po.company_id, po.selected_hierarchy]
     );
+
+    const grnRepData = await t.oneOrNone(
+      `SELECT id, name, email, phone
+      FROM tbl_token_login_data
+      WHERE token_type = 'GRN'
+      AND entity_id = $1`,
+      [po_id]
+    );
     
-    await scheduleGRNReminders(formattedPOData, reminderUsers.users_list);
+    await scheduleGRNReminders(formattedPOData, reminderUsers.users_list, grnRepData);
     await sendDispatchedEmail(formattedPOData, reminderUsers.users_list);
 
     return true;
   })
 };
 
-export const handleAddSiteRepresentative = async (po_id, company_id, added_by, name, email, phone) => {
+export const handleAddSiteRepresentative = async (po_id, added_by, name, email, phone) => {
   return await db.tx(async t => {
     const existing = await t.oneOrNone(
       `SELECT id FROM tbl_token_login_data
       WHERE token_type = 'GRN'
-      AND entity_id = $1`
+      AND entity_id = $1`,
+      [po_id]
     );
     let result = null;
 
@@ -1441,16 +1540,7 @@ export const handleAddSiteRepresentative = async (po_id, company_id, added_by, n
       [po_id]
     );
 
-    const reminderUsers = await t.one(
-      `SELECT ARRAY_AGG(user_id) AS users_list
-      FROM tbl_approval_hierarchy
-      WHERE company_id = $1
-      AND hierarchy_type = 'po'
-      AND hierarchy_id = $2`,
-      [po.company_id, po.selected_hierarchy]
-    );
-
-    await sendGRNRepresentativeEmail(formattedPOData, reminderUsers, token);
+    await sendGRNRepresentativeEmail(formattedPOData, email, token);
 
     return result;
   })

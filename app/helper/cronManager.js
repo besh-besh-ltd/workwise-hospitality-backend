@@ -131,7 +131,7 @@ export const rescheduleAllMilestoneReminders = async () => {
 //   return true;
 // };
 
-export const scheduleGRNReminders = async (purchase_order, reminder_users = [], testMode = false) => {
+export const scheduleGRNReminders = async (purchase_order, reminder_users = [], grn_rep_data, testMode = false) => {
   const { id: poId, delivery_period, po_approved_on } = purchase_order || {};
   console.log("SCHEDULING GRN REMINDERS")
 
@@ -211,8 +211,7 @@ export const scheduleGRNReminders = async (purchase_order, reminder_users = [], 
 
         // Trigger the email for this reminder
         // offset: -3, 0, or 3 to indicate which reminder this is
-        console.log("SENDING GRN EMAIL FOR OFFSET:", offset);
-        await sendGRNEmail(po, reminder_users, offset);
+        await sendGRNEmail(po, reminder_users, grn_rep_data, offset);
 
         // Schedule the next reminder if any
         scheduleReminderAtIndex(index + 1);
