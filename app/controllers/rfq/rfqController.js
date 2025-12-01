@@ -1237,6 +1237,7 @@ const sendQuoteNotificationToVendor = async (req) => {
   // send mail to vendors
   const {rfq_id, rfq_no} = req.body
   const { name, email, id, organization_name, company_name, mobile } = req.user;
+  const user = req.user
   const token = await rfqModel.getVendorRfqToken(id, rfq_id);
   const BuyerDetails = await rfqModel.getRFQCreatedBy(rfq_id) 
   

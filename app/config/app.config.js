@@ -321,6 +321,7 @@ const config = {
   admin_email: [
     'mukul@letsworkwise.com',
     'siddharth@letsworkwise.com',
+    'parth@letsworkwise.com'
     // 'sourav.maity@indusnet.co.in',
     // 'abhisek.pal@indusnet.co.in',
     // 'ranit.majumder@indusnet.co.in',

@@ -1181,11 +1181,11 @@ const ProductsController = {
 
 nestedCategoryList: async (req, res, next) => {
   try {
-    const { parent_id, slug } = req.query;
+    const { parent_id, slug, vendorRequired=true } = req.query;
 
     console.log("parent_id:", parent_id, "slug:", slug);
 
-    const categoryList = await productModel.getNestedCategoryList(parent_id, slug);
+    const categoryList = await productModel.getNestedCategoryList(parent_id, slug, vendorRequired);
 
     res.status(200).json({
       status: 1,
@@ -1193,6 +1193,7 @@ nestedCategoryList: async (req, res, next) => {
       data: categoryList.data,
     });
   } catch (error) {
+    console.log(" nested Categiory List =>", error)
     logError(error);
     res.status(400).json({
       status: 3,
