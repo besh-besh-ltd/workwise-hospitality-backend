@@ -111,3 +111,17 @@ export const handleGetVendors = async (product_id) => {
     return vendors;
   });
 };
+
+export const handleGetAllHotels = async () => {
+  return await db.any(
+    `SELECT 
+      id,
+      name,
+      city,
+      keys,
+      hospitality_company_id
+     FROM tbl_hospitality_company_hotels
+     WHERE is_deleted = 0
+     ORDER BY name ASC`
+  );
+};

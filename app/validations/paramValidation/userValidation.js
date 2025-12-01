@@ -299,6 +299,15 @@ const schemas = {
     established_year: Joi.number().optional().allow(null).allow(''),
     website: Joi.string().optional().allow(null).allow(''),
     is_private: Joi.number().optional().allow(null),
+    is_hospitality: Joi.number().valid(0, 1).optional().allow(null),
+    hotels: Joi.array()
+      .items(Joi.number().integer().positive())
+      .optional()
+      .allow(null),
+    categories: Joi.array()
+      .items(Joi.number().integer().positive())
+      .optional()
+      .allow(null),
     // Additional fields for buyer registration
     max_top_management: Joi.number().optional().allow(null),
     max_procurement: Joi.number().optional().allow(null),

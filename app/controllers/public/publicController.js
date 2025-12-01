@@ -1,4 +1,4 @@
-import { handleGetProducts, handleGetVendors } from "../../models/publicModel.js";
+import { handleGetProducts, handleGetVendors, handleGetAllHotels } from "../../models/publicModel.js";
 
 export const getProducts = async (req, res) => {
     try {
@@ -34,6 +34,24 @@ export const getVendors = async (req, res) => {
         return res.status(500).json({
             status: 0,
             message: error.message || 'An error occurred while approving the PO.',
+            error
+        });
+    }
+};
+
+export const getAllHotels = async (req, res) => {
+    try {
+        const result = await handleGetAllHotels();
+
+        return res.json({
+            status: 1,
+            data: result,
+        })
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({
+            status: 0,
+            message: error.message || 'An error occurred while fetching hotels.',
             error
         });
     }

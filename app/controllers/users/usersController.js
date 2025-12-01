@@ -36,8 +36,7 @@ import vendorapproveModel from '../../models/vendorapproveModel.js';
 import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISensy.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { pgp } from '../../config/dbConn.js';
-
-
+import hospitalityModel from '../../models/hospitalityModel.js';
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -231,34 +230,62 @@ const UsersController = {
 
   company_registration: async (req, res, next) => {
     try {
-       const { name, email, mobile, organization_name, user_type, password, address, country, source, subscription_plan, whatsapp, 
-        state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
-       import_export_code,established_year,website, is_private, status, is_hospitality} = req.body;
+      const {
+        name,
+        email,
+        mobile,
+        organization_name,
+        user_type,
+        password,
+        address,
+        country,
+        source,
+        subscription_plan,
+        whatsapp,
+        state,
+        city,
+        postal_code,
+        gstin,
+        cin,
+        profile,
+        nature_of_business,
+        type_of_business,
+        turnover,
+        no_of_employess,
+        import_export_code,
+        established_year,
+        website,
+        is_private,
+        status,
+        is_hospitality,
+        hotels,
+        categories
+      } = req.body;
 
-       const current_user = req.user || null
+      const current_user = req.user || null;
 
       const user_data = {
         name: name || null,
         email: email?.toLowerCase() || null,
         mobile: mobile || null,
         user_type: user_type || null,
-        status: status !== undefined ? status : (user_type == 7 ? 1 : 0),
-        password: generatePassword(password), 
+        status: status !== undefined ? status : user_type == 7 ? 1 : 0,
+        password: generatePassword(password),
         address: address || null,
-        created_by:current_user?.id || null,
-        updated_by:current_user?.id || null,
+        created_by: current_user?.id || null,
+        updated_by: current_user?.id || null,
         country: country || null,
         whatsapp: whatsapp || null,
         token: null,
         state: state || null,
         city: city || null,
         postal_code: postal_code || null,
-        subscription_plan_id : subscription_plan ?? null
+        subscription_plan_id: subscription_plan ?? null
       };
 
       const company_data = {
         company_name: organization_name || null,
-        source : source || null,
+        source: source || null,
         profile: profile || null,
         nature_of_business: nature_of_business || null,
         type_of_business: type_of_business || null,
@@ -267,37 +294,83 @@ const UsersController = {
         import_export_code: import_export_code || null,
         gstin: gstin || null,
         cin: cin || null,
-        logo:  req.file?.location || null, 
+        logo: req.file?.location || null,
         established_year: established_year || null,
         website: website || null,
         location: address || null,
         is_private: is_private || 0,
-        is_hospitality: is_hospitality !== undefined && is_hospitality !== null
-          ? (parseInt(is_hospitality) === 1 ? 1 : 0)
-          : 0,
-       };
+        is_hospitality:
+          is_hospitality !== undefined && is_hospitality !== null
+            ? parseInt(is_hospitality, 10) === 1
+              ? 1
+              : 0
+            : 0
+      };
 
       //  Register company, this model register detail in both tables tbl_user and tbl_company
-       const {company_id} = await userModel.company_registration(user_data, company_data)         
+      const { company_id, user_id } = await userModel.company_registration(
+        user_data,
+        company_data
+      );
+
       // user_type 7 is for buyer company registration, 3 is for vendor registration
-        if (user_type == 7 && company_id) {
-           await  continueBuyerCompanyRegistration(req.body, company_id)
-        }
-       else if (user_type == 3 && company_id) {
-           await  continueVendorCompanyRegistration(req.body, company_id)
-        }
+      if (user_type == 7 && company_id) {
+        await continueBuyerCompanyRegistration(req.body, company_id);
+      } else if (user_type == 3 && company_id) {
+        await continueVendorCompanyRegistration(req.body, company_id);
 
-        res
-          .status(200)
-          .json({
-            status: 1,
-            message: `Registered ${ user_type == 3? "Vendor" : "Buyer" } successfully`,
-            company_id: company_id,
-          })
-          .end();
+        // For hospitality vendors, persist vendor-hotel-category mappings
+        const isHospitalityVendor =
+          is_hospitality === 1 ||
+          is_hospitality === '1' ||
+          is_hospitality === true ||
+          is_hospitality === 'true';
 
+        if (
+          isHospitalityVendor &&
+          user_id &&
+          Array.isArray(hotels) &&
+          hotels.length &&
+          Array.isArray(categories) &&
+          categories.length
+        ) {
+          const mappingRows = [];
+          for (const rawHotelId of hotels) {
+            const hotelId = parseInt(rawHotelId, 10);
+            if (!hotelId) continue;
+            for (const rawCategoryId of categories) {
+              const categoryId = parseInt(rawCategoryId, 10);
+              if (!categoryId) continue;
+              mappingRows.push({
+                vendor_id: user_id,
+                hospitality_hotel_id: hotelId,
+                category_id: categoryId
+              });
+            }
+          }
+
+          if (mappingRows.length) {
+            try {
+              await hospitalityModel.insertVendorHotelCategoryMappings(
+                mappingRows
+              );
+            } catch (mappingError) {
+              logError(mappingError);
+            }
+          }
+        }
+      }
+
+      res
+        .status(200)
+        .json({
+          status: 1,
+          message: `Registered ${user_type == 3 ? 'Vendor' : 'Buyer'} successfully`,
+          company_id: company_id
+        })
+        .end();
     } catch (err) {
-       logError(err);
+      logError(err);
       res
         .status(400)
         .json({

@@ -147,6 +147,25 @@ const hospitalityModel = {
     return db.any(query);
   },
 
+  insertVendorHotelCategoryMappings: async (rows) => {
+    if (!rows?.length) {
+      return [];
+    }
+
+    const columnSet = new pgp.helpers.ColumnSet(
+      ['vendor_id', 'hospitality_hotel_id', 'category_id'],
+      { table: 'tbl_vendor_hotel_category_mappings' }
+    );
+
+    const query =
+      pgp.helpers.insert(rows, columnSet) +
+      ` ON CONFLICT (vendor_id, hospitality_hotel_id, category_id)
+        DO NOTHING
+        RETURNING *`;
+
+    return db.any(query);
+  },
+
   getProjectMappingsForContext: async (companyId, mappingType, hotelId = null) => {
     return db.any(
       `SELECT project_id
