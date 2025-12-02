@@ -387,6 +387,38 @@ const hospitalityModel = {
     return db.any(query);
   },
 
+  getPendingSubscriptionsForVendor: async (vendorId) => {
+    return db.any(
+      `SELECT 
+        vhcs.*,
+        vp.razorpay_order_id,
+        vp.amount,
+        vp.payment_status,
+        vp.id AS payment_id
+       FROM tbl_vendor_hotel_category_subscription vhcs
+       JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
+       WHERE vhcs.vendor_id = $1
+         AND vp.payment_status IN ('created', 'pending')
+         AND vhcs.status = 'active'
+       ORDER BY vp.created_at DESC, vhcs.id DESC`,
+      [vendorId]
+    );
+  },
+
+  updatePendingSubscriptionsPaymentId: async (vendorId, newPaymentId) => {
+    return db.none(
+      `UPDATE tbl_vendor_hotel_category_subscription
+       SET payment_id = $1
+       WHERE vendor_id = $2
+         AND payment_id IN (
+           SELECT id FROM tbl_vendor_payments
+           WHERE vendor_id = $2
+             AND payment_status IN ('created', 'pending')
+         )`,
+      [newPaymentId, vendorId]
+    );
+  },
+
   deleteProjectMappings: async (projectId, companyId, mappingType, hotelId = null) => {
     return db.result(
       `DELETE FROM tbl_hospitality_project_mappings

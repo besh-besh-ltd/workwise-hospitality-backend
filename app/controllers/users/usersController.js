@@ -35,7 +35,7 @@ import productModel from '../../models/productModel.js';
 import vendorapproveModel from '../../models/vendorapproveModel.js';
 import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISensy.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
-import { pgp } from '../../config/dbConn.js';
+import db, { pgp } from '../../config/dbConn.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
@@ -931,12 +931,45 @@ get_company_users: async (req, res, next) => {
       const isHospitalityPending =
         req.user && req.user.login_status === 'hospitality_pending';
       if (isHospitalityPending) {
+        // Fetch pending subscriptions for this vendor
+        const pendingSubscriptions = await hospitalityModel.getPendingSubscriptionsForVendor(req.user.id);
+        
+        // Extract categories and hotels from pending subscriptions
+        const categories = [];
+        const hotels = [];
+        const categoryNames = [];
+        const hotelNames = [];
+        
+        if (pendingSubscriptions && pendingSubscriptions.length > 0) {
+          for (const sub of pendingSubscriptions) {
+            if (sub.item_type === 'category') {
+              categories.push(sub.item_id);
+              // Fetch category name
+              const catDetails = await productModel.parentIdExists(sub.item_id);
+              if (catDetails && catDetails.length > 0) {
+                categoryNames.push(catDetails[0].title || catDetails[0].name);
+              }
+            } else if (sub.item_type === 'hotel') {
+              hotels.push(sub.item_id);
+              // Fetch hotel name
+              const hotelDetails = await hospitalityModel.getHotelById(sub.item_id);
+              if (hotelDetails) {
+                hotelNames.push(hotelDetails.name);
+              }
+            }
+          }
+        }
+        
         const hospitalityUser = {
           user_key: cryptr.encrypt(req.user.id),
           name: req.user.name,
           email: req.user.email,
           mobile: req.user.mobile,
-          organization_name: req.user.organization_name
+          organization_name: req.user.organization_name,
+          categories: categories,
+          hotels: hotels,
+          categoryNames: categoryNames,
+          hotelNames: hotelNames
         };
         return res
           .status(200)
@@ -2627,8 +2660,23 @@ publish_profile_reviews: async (req, res, next) => {
           : fyEndThisYear.clone();
       const fyEndDateStr = fyEnd.format('YYYY-MM-DD');
 
-      const categoryIds = Array.isArray(categories) ? categories : [];
-      const hotelIds = Array.isArray(hotels) ? hotels : [];
+      // Check for existing pending subscriptions
+      const existingPendingSubs = await hospitalityModel.getPendingSubscriptionsForVendor(decryptedUserId);
+      
+      // If we have existing pending subscriptions but no categories/hotels in request, use existing ones
+      let categoryIds = Array.isArray(categories) ? categories : [];
+      let hotelIds = Array.isArray(hotels) ? hotels : [];
+      
+      if (existingPendingSubs && existingPendingSubs.length > 0 && (!categoryIds.length && !hotelIds.length)) {
+        // Extract from existing subscriptions
+        for (const sub of existingPendingSubs) {
+          if (sub.item_type === 'category' && !categoryIds.includes(sub.item_id)) {
+            categoryIds.push(sub.item_id);
+          } else if (sub.item_type === 'hotel' && !hotelIds.includes(sub.item_id)) {
+            hotelIds.push(sub.item_id);
+          }
+        }
+      }
 
       let totalAmount = 0;
       const subscriptionRows = [];
@@ -2699,15 +2747,25 @@ publish_profile_reviews: async (req, res, next) => {
         payment_status: 'created'
       });
 
-      // Insert subscriptions for each selected item, linked to this payment
-      const subscriptionsWithPayment = subscriptionRows.map((row) => ({
-        ...row,
-        payment_id: vendorPayment.id,
-        status: 'active'
-      }));
-      await hospitalityModel.createVendorHotelCategorySubscription(
-        subscriptionsWithPayment
-      );
+      // If we have existing pending subscriptions, update them to link to new payment
+      // Otherwise, create new subscriptions
+      if (existingPendingSubs && existingPendingSubs.length > 0) {
+        // Update existing subscriptions to link to new payment_id
+        await hospitalityModel.updatePendingSubscriptionsPaymentId(
+          decryptedUserId,
+          vendorPayment.id
+        );
+      } else {
+        // Insert new subscriptions for each selected item, linked to this payment
+        const subscriptionsWithPayment = subscriptionRows.map((row) => ({
+          ...row,
+          payment_id: vendorPayment.id,
+          status: 'active'
+        }));
+        await hospitalityModel.createVendorHotelCategorySubscription(
+          subscriptionsWithPayment
+        );
+      }
 
       res
         .status(200)
