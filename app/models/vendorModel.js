@@ -918,7 +918,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         FROM tbl_users u
         INNER JOIN tbl_company c ON u.company_id = c.id
         WHERE u.is_deleted = 0
-          AND u.user_type IN (2, 8)
+          AND u.user_type IN (7)
           AND c.id IS NOT NULL
           ${searchClause}
         ORDER BY c.id, u.created_at DESC
