@@ -68,8 +68,8 @@ const hospitalityModel = {
   createHotel: async (hotelObj) => {
     return db.one(
       `INSERT INTO tbl_hospitality_company_hotels
-        (hospitality_company_id, name, city, keys, status, created_by, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $6)
+        (hospitality_company_id, name, city, keys, status, created_by, updated_by, fee_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $6, $7)
        RETURNING *`,
       [
         hotelObj.hospitality_company_id,
@@ -77,7 +77,8 @@ const hospitalityModel = {
         hotelObj.city,
         hotelObj.keys,
         hotelObj.status,
-        hotelObj.created_by
+        hotelObj.created_by,
+        hotelObj.fee_amount
       ]
     );
   },
@@ -147,25 +148,6 @@ const hospitalityModel = {
     return db.any(query);
   },
 
-  insertVendorHotelCategoryMappings: async (rows) => {
-    if (!rows?.length) {
-      return [];
-    }
-
-    const columnSet = new pgp.helpers.ColumnSet(
-      ['vendor_id', 'hospitality_hotel_id', 'category_id'],
-      { table: 'tbl_vendor_hotel_category_mappings' }
-    );
-
-    const query =
-      pgp.helpers.insert(rows, columnSet) +
-      ` ON CONFLICT (vendor_id, hospitality_hotel_id, category_id)
-        DO NOTHING
-        RETURNING *`;
-
-    return db.any(query);
-  },
-
   getProjectMappingsForContext: async (companyId, mappingType, hotelId = null) => {
     return db.any(
       `SELECT project_id
@@ -216,6 +198,20 @@ const hospitalityModel = {
        WHERE p.id IN ($1:csv)
          AND u.company_id = $2`,
       [projectIds, companyId]
+    );
+  },
+
+  // Get active category subscriptions for a vendor
+  getActiveVendorCategoryIds: async (vendorId) => {
+    return db.any(
+      `SELECT item_id AS category_id
+       FROM tbl_vendor_hotel_category_subscription
+       WHERE vendor_id = $1
+         AND item_type = 'category'
+         AND status = 'active'
+         AND start_date <= CURRENT_DATE
+         AND end_date >= CURRENT_DATE`,
+      [vendorId]
     );
   },
 
@@ -337,6 +333,58 @@ const hospitalityModel = {
          AND (hh.id IS NULL OR hh.is_deleted = 0)`,
       [userId]
     );
+  },
+  getHotelsByIds: async (ids = []) => {
+    if (!ids || !ids.length) {
+      return [];
+    }
+    return db.any(
+      `SELECT id, fee_amount
+       FROM tbl_hospitality_company_hotels
+       WHERE id IN ($1:csv) AND is_deleted = 0`,
+      [ids]
+    );
+  },
+  createVendorPayment: async (paymentObj) => {
+    return db.one(
+      `INSERT INTO tbl_vendor_payments
+         (vendor_id, razorpay_order_id, razorpay_payment_id, razorpay_signature, amount, currency, payment_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [
+        paymentObj.vendor_id,
+        paymentObj.razorpay_order_id,
+        paymentObj.razorpay_payment_id,
+        paymentObj.razorpay_signature,
+        paymentObj.amount,
+        paymentObj.currency,
+        paymentObj.payment_status
+      ]
+    );
+  },
+  createVendorHotelCategorySubscription: async (rows) => {
+    if (!rows?.length) {
+      return [];
+    }
+    const columnSet = new pgp.helpers.ColumnSet(
+      [
+        'vendor_id',
+        'item_type',
+        'item_id',
+        'fee_amount',
+        'start_date',
+        'end_date',
+        'status',
+        'payment_id'
+      ],
+      { table: 'tbl_vendor_hotel_category_subscription' }
+    );
+    const query =
+      pgp.helpers.insert(rows, columnSet) +
+      ` ON CONFLICT (vendor_id, item_type, item_id, end_date)
+        DO UPDATE SET fee_amount = EXCLUDED.fee_amount
+        RETURNING *`;
+    return db.any(query);
   },
 
   deleteProjectMappings: async (projectId, companyId, mappingType, hotelId = null) => {

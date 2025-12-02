@@ -115,13 +115,16 @@ export const handleGetVendors = async (product_id) => {
 export const handleGetAllHotels = async () => {
   return await db.any(
     `SELECT 
-      id,
-      name,
-      city,
-      keys,
-      hospitality_company_id
-     FROM tbl_hospitality_company_hotels
-     WHERE is_deleted = 0
-     ORDER BY name ASC`
+      hh.id,
+      hh.name,
+      hh.city,
+      hh.keys,
+      hh.hospitality_company_id,
+      hc.name AS company_name
+     FROM tbl_hospitality_company_hotels hh
+     LEFT JOIN tbl_hospitality_companies hc
+       ON hc.id = hh.hospitality_company_id
+     WHERE hh.is_deleted = 0
+     ORDER BY hh.name ASC`
   );
 };

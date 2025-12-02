@@ -316,49 +316,8 @@ const UsersController = {
       // user_type 7 is for buyer company registration, 3 is for vendor registration
       if (user_type == 7 && company_id) {
         await continueBuyerCompanyRegistration(req.body, company_id);
-      } else if (user_type == 3 && company_id) {
+        } else if (user_type == 3 && company_id) {
         await continueVendorCompanyRegistration(req.body, company_id);
-
-        // For hospitality vendors, persist vendor-hotel-category mappings
-        const isHospitalityVendor =
-          is_hospitality === 1 ||
-          is_hospitality === '1' ||
-          is_hospitality === true ||
-          is_hospitality === 'true';
-
-        if (
-          isHospitalityVendor &&
-          user_id &&
-          Array.isArray(hotels) &&
-          hotels.length &&
-          Array.isArray(categories) &&
-          categories.length
-        ) {
-          const mappingRows = [];
-          for (const rawHotelId of hotels) {
-            const hotelId = parseInt(rawHotelId, 10);
-            if (!hotelId) continue;
-            for (const rawCategoryId of categories) {
-              const categoryId = parseInt(rawCategoryId, 10);
-              if (!categoryId) continue;
-              mappingRows.push({
-                vendor_id: user_id,
-                hospitality_hotel_id: hotelId,
-                category_id: categoryId
-              });
-            }
-          }
-
-          if (mappingRows.length) {
-            try {
-              await hospitalityModel.insertVendorHotelCategoryMappings(
-                mappingRows
-              );
-            } catch (mappingError) {
-              logError(mappingError);
-            }
-          }
-        }
       }
 
       res
@@ -1067,6 +1026,7 @@ get_company_users: async (req, res, next) => {
               token,
               user_detail,
               oldDevice: oldDevice,
+              user_key: cryptr.encrypt(req.user.id),
               message: 'Login success'
             })
             .end();
@@ -2604,11 +2564,12 @@ publish_profile_reviews: async (req, res, next) => {
   },
   hospitalitySubscriptionPayment: async (req, res, next) => {
     try {
-      const { user_key, sub_id, coupon_code } = req.body;
-      if (!user_key || !sub_id) {
+      const { user_key, categories, hotels } = req.body;
+
+      if (!user_key) {
         return res.status(400).json({
           status: 2,
-          message: 'Missing required data'
+          message: 'Missing required user key'
         });
       }
 
@@ -2656,103 +2617,97 @@ publish_profile_reviews: async (req, res, next) => {
         });
       }
 
-      let subscriptionDetails =
-        await subscriptionModel.subscriptionIdExist(sub_id, userRecord.user_type);
-      let offer = [];
-      let checkOffers = await subscriptionModel.subscriptionOfferExist(sub_id);
-      if (checkOffers.length > 0) {
-        let today = dateFormat(new Date(), 'yyyy-mm-dd');
-        offer = await subscriptionModel.getOfferDetails(
-          checkOffers[0].offer_id,
-          today
-        );
-      }
-
+      // Financial year end: always 31 March of the ongoing FY
       const startDate = Moment();
-      const billingCycleMonths = subscriptionDetails[0].duration;
-      const endDate = startDate
-        .clone()
-        .add(billingCycleMonths, 'months')
-        .subtract(1, 'day');
-      const renewDate = startDate.clone().add(billingCycleMonths, 'months');
+      const currentYear = startDate.year();
+      const fyEndThisYear = Moment(`${currentYear}-03-31`, 'YYYY-MM-DD');
+      const fyEnd =
+        startDate.isAfter(fyEndThisYear) || startDate.isSame(fyEndThisYear, 'day')
+          ? fyEndThisYear.clone().add(1, 'year')
+          : fyEndThisYear.clone();
+      const fyEndDateStr = fyEnd.format('YYYY-MM-DD');
 
-      let UserSubscriptionObj = {
-        user_id: decryptedUserId,
-        plan_id: sub_id,
-        status: 4,
-        start_date: startDate.format('YYYY-MM-DD'),
-        end_date: endDate.format('YYYY-MM-DD'),
-        renew_date: renewDate.format('YYYY-MM-DD')
-      };
+      const categoryIds = Array.isArray(categories) ? categories : [];
+      const hotelIds = Array.isArray(hotels) ? hotels : [];
 
-      let createUserSubscription =
-        await subscriptionModel.createUserSubscription(UserSubscriptionObj);
+      let totalAmount = 0;
+      const subscriptionRows = [];
 
-      let newSubscriptionPrice = subscriptionDetails[0].price;
-      let offerDiscountedPrice = 0;
-      if (offer.length > 0 && offer[0].is_percentage) {
-        offerDiscountedPrice = newSubscriptionPrice * (offer[0].price / 100);
-        newSubscriptionPrice = Math.round(
-          newSubscriptionPrice - offerDiscountedPrice
-        );
-      } else if (offer.length > 0 && !offer[0].is_percentage) {
-        offerDiscountedPrice = offer[0].price;
-        newSubscriptionPrice = Math.round(
-          newSubscriptionPrice - offerDiscountedPrice
-        );
-      }
-
-      let couponDiscountedPrice = 0;
-      if (coupon_code) {
-        let today = dateFormat(new Date(), 'yyyy-mm-dd');
-        let couponDetails = await couponModel.checkCouponCodeExists(
-          coupon_code,
-          today,
-          userRecord.user_type
-        );
-        if (couponDetails.length > 0 && couponDetails[0].is_percentage) {
-          couponDiscountedPrice =
-            newSubscriptionPrice * couponDetails[0].discount_amount;
-          newSubscriptionPrice = Math.round(
-            newSubscriptionPrice - couponDiscountedPrice
-          );
-        } else if (
-          couponDetails.length > 0 &&
-          !couponDetails[0].is_percentage
-        ) {
-          couponDiscountedPrice = couponDetails[0].discount_amount;
-          newSubscriptionPrice = Math.round(
-            newSubscriptionPrice - couponDiscountedPrice
-          );
+      if (categoryIds.length) {
+        const dbCategories = await productModel.getCategoriesByIds(categoryIds);
+        for (const row of dbCategories) {
+          const fee = row.fee_amount || 500;
+          totalAmount += fee;
+          subscriptionRows.push({
+            vendor_id: decryptedUserId,
+            item_type: 'category',
+            item_id: row.id,
+            fee_amount: fee,
+            start_date: startDate.format('YYYY-MM-DD'),
+            end_date: fyEndDateStr,
+            status: 'active'
+          });
         }
       }
 
-      let digit = convertSixDigit(createUserSubscription.id);
+      if (hotelIds.length) {
+        const dbHotels = await hospitalityModel.getHotelsByIds(hotelIds);
+        for (const row of dbHotels) {
+          const fee = row.fee_amount || 500;
+          totalAmount += fee;
+          subscriptionRows.push({
+            vendor_id: decryptedUserId,
+            item_type: 'hotel',
+            item_id: row.id,
+            fee_amount: fee,
+            start_date: startDate.format('YYYY-MM-DD'),
+            end_date: fyEndDateStr,
+            status: 'active'
+          });
+        }
+      }
+
+      if (!subscriptionRows.length || totalAmount <= 0) {
+        return res.status(400).json({
+          status: 2,
+          message: 'No valid hospitality items selected for subscription'
+        });
+      }
+
+      // Create Razorpay order for computed amount
+      let digit = convertSixDigit(decryptedUserId);
       const razorpay = new Razorpay({
         key_id: Config.razorpay.razorpay_key,
         key_secret: Config.razorpay.razorpay_secret
       });
       const options = {
-        amount: newSubscriptionPrice * 100,
+        amount: totalAmount * 100,
         currency: 'INR',
         receipt: `PAY${digit}`,
         payment_capture: 1
       };
       let response = await razorpay.orders.create(options);
 
-      let subscriptionPaymentObj = {
-        user_id: decryptedUserId,
-        user_subscriptions_id: createUserSubscription.id,
-        status: 0,
-        amount: newSubscriptionPrice,
-        before_payment_response: response,
-        order_id: response.id,
-        receipt: `PAY${digit}`,
-        subscription_charge: subscriptionDetails[0].price,
-        offer_price: offerDiscountedPrice,
-        coupon_price: couponDiscountedPrice
-      };
-      await subscriptionModel.createSubscriptionPayment(subscriptionPaymentObj);
+      // Record vendor payment before actual payment happens
+      const vendorPayment = await hospitalityModel.createVendorPayment({
+        vendor_id: decryptedUserId,
+        razorpay_order_id: response.id,
+        razorpay_payment_id: null,
+        razorpay_signature: null,
+        amount: totalAmount,
+        currency: 'INR',
+        payment_status: 'created'
+      });
+
+      // Insert subscriptions for each selected item, linked to this payment
+      const subscriptionsWithPayment = subscriptionRows.map((row) => ({
+        ...row,
+        payment_id: vendorPayment.id,
+        status: 'active'
+      }));
+      await hospitalityModel.createVendorHotelCategorySubscription(
+        subscriptionsWithPayment
+      );
 
       res
         .status(200)
@@ -3295,7 +3250,17 @@ publish_profile_reviews: async (req, res, next) => {
         offset
       );
       if (notificationList && notificationList.length > 0) {
-        res
+          // Mark vendor payment as successful as well
+          await db.none(
+            `UPDATE tbl_vendor_payments
+             SET payment_status = 'success',
+                 razorpay_payment_id = $1,
+                 razorpay_signature = $2
+             WHERE razorpay_order_id = $3`,
+            [paymentEntity.id, receivedSignature, paymentEntity.order_id]
+          );
+
+          res
           .status(200)
           .json({
             status: 1,

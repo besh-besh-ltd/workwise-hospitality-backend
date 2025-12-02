@@ -30,6 +30,7 @@ import {
   validateBodyController
 } from '../../validations/paramValidation/userValidation.js';
 import generalModel from '../../models/generalModel.js';
+import hospitalityModel from '../../models/hospitalityModel.js';
 async function getAllData(products) {
   const promises = products.map(async (item) => {
     try {
@@ -580,8 +581,51 @@ const ProductsController = {
         master_id
       } = req.body;
 
-      const productResult = await productModel.getProductByVariant(master_id)
-      let productId = productResult?.[0]?.id
+      const productResult = await productModel.getProductByVariant(master_id);
+      let productId = productResult?.[0]?.id;
+
+      // If we couldn't resolve the product, abort early
+      if (!productId) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Invalid product variant.'
+        }).end();
+      }
+
+      // Restrict hospitality vendors to their subscribed categories
+      const isHospitalityVendor =
+        req.user?.is_hospitality === 1 ||
+        req.user?.is_hospitality === '1';
+
+      if (isHospitalityVendor) {
+        // Fetch product categories
+        const productCategories = await productModel.getProductCategories(
+          productId
+        );
+        const productCategoryIds = productCategories.map(
+          (row) => row.category_id
+        );
+
+        // Fetch vendor's active category subscriptions
+        const subscriptions =
+          await hospitalityModel.getActiveVendorCategoryIds(vendorId);
+        const allowedCategoryIds = new Set(
+          subscriptions.map((row) => row.category_id)
+        );
+
+        // If there is at least one category on the product that is not subscribed, block the operation
+        const hasUnsubscribedCategory = productCategoryIds.some(
+          (catId) => !allowedCategoryIds.has(catId)
+        );
+
+        if (productCategoryIds.length > 0 && hasUnsubscribedCategory) {
+          return res.status(403).json({
+            status: 3,
+            message:
+              'You are not subscribed for this category. Please update your hospitality subscription to add products under this category.'
+          }).end();
+        }
+      }
 
       if (approved_id) {
         if (typeof approved_id === 'string') {

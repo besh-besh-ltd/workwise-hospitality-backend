@@ -132,7 +132,10 @@ const HospitalityController = {
         city: req.body.city?.trim() || null,
         keys: req.body.keys ? parseInt(req.body.keys, 10) : 0,
         status: req.body.status?.trim() || 'Active',
-        created_by: req.user.id
+        created_by: req.user.id,
+        fee_amount: req.body.fee_amount
+          ? parseInt(req.body.fee_amount, 10)
+          : 500
       };
 
       const created = await hospitalityModel.createHotel(payload);

@@ -170,6 +170,17 @@ const productModel = {
         });
     });
   },
+  getCategoriesByIds: async (ids = []) => {
+    if (!ids || !ids.length) {
+      return [];
+    }
+    return db.any(
+      `SELECT id, fee_amount
+       FROM tbl_category
+       WHERE id IN ($1:csv) AND is_deleted != '1'`,
+      [ids]
+    );
+  },
   // Efficient bulk mapping: insert mappings, makes and approvals in minimum statements
   bulkInsertVariantVendorMappings: async (items, userId) => {
     // items: [{ variant_id, vendor_id, approved_by: number[] | null, make_list: string[] | null }]

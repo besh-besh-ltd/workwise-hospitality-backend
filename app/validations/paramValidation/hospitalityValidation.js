@@ -76,8 +76,14 @@ const schemas = {
   }),
   hospitalitySubscriptionPayment: Joi.object().keys({
     user_key: Joi.string().required(),
-    sub_id: Joi.number().required(),
-    coupon_code: Joi.string().trim().optional().allow(null, ''),
+    categories: Joi.array()
+      .items(Joi.number().integer().positive())
+      .min(1)
+      .required(),
+    hotels: Joi.array()
+      .items(Joi.number().integer().positive())
+      .optional()
+      .allow(null),
   }),
   deleteMapping: Joi.object().keys({
     company_id: Joi.number().integer().required(),
