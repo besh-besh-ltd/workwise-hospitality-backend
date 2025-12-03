@@ -5890,6 +5890,7 @@ getAllClientsrfqsForAdmin: async (page = 1, limit = 10, search = '', dateFilter 
     LEFT JOIN products p ON p.rfq_id = tr.id
     LEFT JOIN finalizations f ON f.rfq_id = tr.id
     WHERE 1=1
+     AND tr.is_published IN (1, 2) 
     ${dateCondition}
     ${companyCondition}
     ${searchCondition}
@@ -5903,6 +5904,7 @@ getAllClientsrfqsForAdmin: async (page = 1, limit = 10, search = '', dateFilter 
     JOIN tbl_users tu ON tu.id = tr.created_by
     JOIN tbl_company tc ON tc.id = tu.company_id
     WHERE 1=1
+     AND tr.is_published IN (1, 2)
     ${dateCondition}
     ${companyCondition}
     ${searchCondition}

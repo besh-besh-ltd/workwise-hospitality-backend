@@ -3688,50 +3688,70 @@ publishProfileReviews: async (reviewObj) => {
             LEFT JOIN buyers b ON ep.buyer_email = b.buyer_email
             LEFT JOIN vendors v ON ep.vendor_email = v.vendor_email
           ),
-          existing_mappings AS (
-            SELECT vp.buyer_id, vp.vendor_id
+          ranked_pairs AS (
+            SELECT vp.*, 
+                   ROW_NUMBER() OVER (
+                     PARTITION BY vp.company_id, vp.vendor_id 
+                     ORDER BY vp.row_num
+                   ) AS company_vendor_rank
             FROM valid_pairs vp
+            WHERE vp.company_id IS NOT NULL AND vp.vendor_id IS NOT NULL
+          ),
+          enhanced_pairs AS (
+            SELECT vp.*,
+                   COALESCE(rp.company_vendor_rank, 0) AS company_vendor_rank
+            FROM valid_pairs vp
+            LEFT JOIN ranked_pairs rp ON vp.row_num = rp.row_num
+          ),
+          existing_mappings AS (
+            SELECT DISTINCT rp.company_id, rp.vendor_id
+            FROM ranked_pairs rp
             INNER JOIN tbl_buyer_private_vendors_mapping bpvm 
-            ON vp.company_id = bpvm.company_id AND vp.vendor_id = bpvm.vendor_id
-            WHERE vp.buyer_id IS NOT NULL AND vp.vendor_id IS NOT NULL
+              ON rp.company_id = bpvm.company_id AND rp.vendor_id = bpvm.vendor_id
+          ),
+          insert_candidates AS (
+            SELECT rp.*
+            FROM ranked_pairs rp
+            WHERE rp.company_vendor_rank = 1
           ),
           new_mappings AS (
             INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id, created_date, updated_date)
-            SELECT $6, vp.vendor_id, vp.company_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-            FROM valid_pairs vp
-            WHERE vp.buyer_id IS NOT NULL 
-            AND vp.vendor_id IS NOT NULL
-            AND NOT EXISTS (
+            SELECT $6, ic.vendor_id, ic.company_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            FROM insert_candidates ic
+            WHERE NOT EXISTS (
               SELECT 1 FROM tbl_buyer_private_vendors_mapping bpvm 
-              WHERE bpvm.company_id = vp.company_id AND bpvm.vendor_id = vp.vendor_id
+              WHERE bpvm.company_id = ic.company_id AND bpvm.vendor_id = ic.vendor_id
             )
-            RETURNING created_by, vendor_id
+            RETURNING vendor_id, company_id
           )
           SELECT 
-            vp.row_num,
-            vp.buyer_email,
-            vp.vendor_email,
-            vp.vendor_id,
+            ep.row_num,
+            ep.buyer_email,
+            ep.vendor_email,
+            ep.vendor_id,
             COALESCE(buyer.name, 'Unknown') AS buyer_name,
             COALESCE(vendor.name, 'Unknown') AS vendor_name,
-            COALESCE(buyer.email, vp.buyer_email) AS buyer_email_display,
-            COALESCE(vendor.email, vp.vendor_email) AS vendor_email_display,
+            COALESCE(buyer.email, ep.buyer_email) AS buyer_email_display,
+            COALESCE(vendor.email, ep.vendor_email) AS vendor_email_display,
             CASE 
-              WHEN vp.error_reason IS NOT NULL THEN vp.error_reason
-              WHEN em.buyer_id IS NOT NULL THEN 'Already mapped to company'
-              WHEN nm.created_by IS NOT NULL THEN 'Mapped successfully'
+              WHEN ep.error_reason IS NOT NULL THEN ep.error_reason
+              WHEN ep.company_vendor_rank > 1 THEN 'Already mapped to company'
+              WHEN em.company_id IS NOT NULL THEN 'Already mapped to company'
+              WHEN nm.vendor_id IS NOT NULL AND ep.company_vendor_rank = 1 THEN 'Mapped successfully'
               ELSE 'Unknown error'
             END AS status,
             CASE 
-              WHEN vp.error_reason IS NOT NULL OR em.buyer_id IS NOT NULL THEN false
+              WHEN ep.error_reason IS NOT NULL THEN false
+              WHEN ep.company_vendor_rank > 1 THEN false
+              WHEN em.company_id IS NOT NULL THEN false
               ELSE true
             END AS is_success
-          FROM valid_pairs vp
-          LEFT JOIN existing_mappings em ON vp.buyer_id = em.buyer_id AND vp.vendor_id = em.vendor_id
-          LEFT JOIN new_mappings nm ON vp.vendor_id = nm.vendor_id
-          LEFT JOIN tbl_users buyer ON buyer.id = vp.buyer_id
-          LEFT JOIN tbl_users vendor ON vendor.id = vp.vendor_id
-          ORDER BY vp.row_num
+          FROM enhanced_pairs ep
+          LEFT JOIN existing_mappings em ON ep.company_id = em.company_id AND ep.vendor_id = em.vendor_id
+          LEFT JOIN new_mappings nm ON ep.company_id = nm.company_id AND ep.vendor_id = nm.vendor_id
+          LEFT JOIN tbl_users buyer ON buyer.id = ep.buyer_id
+          LEFT JOIN tbl_users vendor ON vendor.id = ep.vendor_id
+          ORDER BY ep.row_num
         `;
         
         const result = await db.any(query, [
