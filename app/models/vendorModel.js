@@ -62,7 +62,7 @@ const vendorModel = {
       if(source === 'unknown' || source === 'null'){
         dynamicQuery += ` AND tbl_company.source IS NULL`;
       } else if(source){
-        dynamicQuery += ` AND tbl_company.source = '${escapedSource}'`;
+        dynamicQuery += ` AND tbl_company.source ILIKE '${escapedSource}'`;
       }
       if(subscription_plan){
         dynamicQuery += ` AND tbl_users.subscription_plan_id = '${escapedPlan}'`;
