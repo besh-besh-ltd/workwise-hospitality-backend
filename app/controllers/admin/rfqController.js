@@ -15,7 +15,7 @@ const rfqController = {
         offset = 0;
       }
 
-      let { rfq_status, admin_service_status, sort } = req.body;
+      let { rfq_status, admin_service_status, sort, rfq_no, company} = req.body;
 
       if (!rfq_status) {
         rfq_status = null;
@@ -26,17 +26,26 @@ const rfqController = {
       if (!sort) {
         sort = 'DESC';
       }
+      if(!rfq_no){
+        rfq_no = null;
+      }
+      if(!company){
+        company = [];
+      }
 
       const listRfq = await rfqModel.getAllRfqsForAdmin(
         limit,
         offset,
         rfq_status,
         admin_service_status,
-        sort
+        sort,
+        rfq_no,
+        company
       );
       const count = await rfqModel.getTotalRfqCountForAdmin(
         rfq_status,
-        admin_service_status
+        admin_service_status,
+        company
       );
 
       res

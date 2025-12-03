@@ -231,7 +231,7 @@ const UsersController = {
 
   company_registration: async (req, res, next) => {
     try {
-       const { name, email, mobile, organization_name, user_type, password, address, country, whatsapp, 
+       const { name, email, mobile, organization_name, user_type, password, address, country, source, subscription_plan, whatsapp, 
         state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
        import_export_code,established_year,website, is_private, status} = req.body;
 
@@ -252,11 +252,13 @@ const UsersController = {
         token: null,
         state: state || null,
         city: city || null,
-        postal_code: postal_code || null
+        postal_code: postal_code || null,
+        subscription_plan_id : subscription_plan ?? null
       };
 
       const company_data = {
         company_name: organization_name || null,
+        source : source || null,
         profile: profile || null,
         nature_of_business: nature_of_business || null,
         type_of_business: type_of_business || null,
