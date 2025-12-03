@@ -102,6 +102,16 @@ UsersRoutes.post(
   UsersController.refresh_token
 );
 UsersRoutes.post(
+  '/registration-otp-send',
+  validateBody(schemas.registration_otp_send),
+  UsersController.sendRegistrationOTP
+);
+UsersRoutes.post(
+  '/registration-otp-verify',
+  validateBody(schemas.registration_otp_verify),
+  UsersController.verifyRegistrationOTP
+);
+UsersRoutes.post(
   '/forgot-password-otp-send',
   validateDbBody.user_email_exists,
   UsersController.forgot_passw_otp_send

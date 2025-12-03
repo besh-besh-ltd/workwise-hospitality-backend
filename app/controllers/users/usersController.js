@@ -1179,6 +1179,138 @@ get_company_users: async (req, res, next) => {
     }
   },
 
+  sendRegistrationOTP: async (req, res, next) => {
+    try {
+      const email = req.body.email?.toLowerCase() || '';
+      if (!email) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Email is required'
+        }).end();
+      }
+
+      // Check if email already exists
+      const existingUser = await userModel.getUserAuthEmail(email);
+      if (existingUser && existingUser.length > 0) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Email already registered'
+        }).end();
+      }
+
+      // Generate OTP
+      const otp = generateOTPRandomNo();
+      const timestamp = Date.now();
+      
+      // Encrypt OTP + email + timestamp into a token (stateless approach)
+      const tokenData = JSON.stringify({
+        email: email,
+        otp: otp,
+        timestamp: timestamp
+      });
+      const encryptedToken = cryptr.encrypt(tokenData);
+
+      // Send OTP email
+      const emailHeader = `<h2>Email Verification</h2>`;
+      const emailContent = `
+        <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+          <p>Your OTP for email verification is: <strong>${otp}</strong></p>
+          <p>This OTP is valid for 10 minutes.</p>
+          <p style="font-size: 14px; color: #777;"><em>If you didn't request this, please ignore this email.</em></p>
+        </div>`;
+      const dynamicHtml = generateEmailTemplate(emailHeader, emailContent);
+
+      const mailRecipients = {
+        from: Config.webmasterMail,
+        to: email,
+        subject: 'Workwise - Email Verification OTP',
+        html: dynamicHtml
+      };
+
+      // Send email using existing helper (fire-and-forget) and log for debugging
+      console.log('[OTP] Triggering registration OTP email', {
+        to: email,
+        otp,
+      });
+
+      try {
+        sendMail(mailRecipients);
+      } catch (emailError) {
+        console.error('[OTP] Failed to trigger OTP email for:', email, emailError);
+        logError(emailError);
+      }
+
+      res.status(200).json({
+        status: 1,
+        message: 'OTP sent successfully',
+        token: encryptedToken
+      }).end();
+    } catch (err) {
+      logError(err);
+      res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      }).end();
+    }
+  },
+
+  verifyRegistrationOTP: async (req, res, next) => {
+    try {
+      const { otp, token } = req.body;
+      
+      if (!otp || !token) {
+        return res.status(400).json({
+          status: 2,
+          message: 'OTP and token are required'
+        }).end();
+      }
+
+      // Decrypt token
+      let tokenData;
+      try {
+        const decrypted = cryptr.decrypt(token);
+        tokenData = JSON.parse(decrypted);
+      } catch (error) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Invalid or expired token'
+        }).end();
+      }
+
+      // Check if OTP matches
+      if (tokenData.otp !== otp) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Invalid OTP'
+        }).end();
+      }
+
+      // Check if token is expired (10 minutes)
+      const now = Date.now();
+      const tokenAge = now - tokenData.timestamp;
+      const tenMinutes = 10 * 60 * 1000;
+      
+      if (tokenAge > tenMinutes) {
+        return res.status(400).json({
+          status: 2,
+          message: 'OTP expired. Please request a new one.'
+        }).end();
+      }
+
+      res.status(200).json({
+        status: 1,
+        message: 'Email verified successfully',
+        email: tokenData.email
+      }).end();
+    } catch (err) {
+      logError(err);
+      res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      }).end();
+    }
+  },
+
   forgot_passw_otp_send: async (req, res, next) => {
     try {
       const now = currentDateTime();

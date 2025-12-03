@@ -354,6 +354,13 @@ const schemas = {
     login_type: Joi.string().required(),
     access_token: Joi.string().required()
   }),
+  registration_otp_send: Joi.object().keys({
+    email: Joi.string().required().email().max(100)
+  }),
+  registration_otp_verify: Joi.object().keys({
+    otp: Joi.string().required().length(6).regex(/^[0-9]+$/),
+    token: Joi.string().required()
+  }),
   otp_user: Joi.object().keys({
     otp: Joi.string().required(),
     password: Joi.string().min(3).max(15).required().label('Password'),
