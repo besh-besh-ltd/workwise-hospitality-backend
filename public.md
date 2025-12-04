@@ -194,3 +194,312 @@ fetch("/api/v1/public/vendors?product_id=6068")
 4. Hit **Send**
 5. View formatted JSON response
 
+
+
+
+# **3. Manage Public Users**
+
+These APIs allow you to register and retrieve public users who interact with the Workwise platform.
+
+## **3.1 Add a Public User**
+
+Register a new public user who has shown interest in Workwise products or vendors.
+
+### **Endpoint**
+
+```
+POST /api/v1/public/add-public-users
+```
+
+### **Request Body**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `username` | string | Yes | Name of the public user |
+| `email` | string | Yes | Email address of the user |
+| `mobile` | string | Yes | Mobile/contact number |
+| `company_name` | string | Yes | Company/organization name |
+| `platform` | string | Yes | Platform where the user came from (e.g., "website", "mobile_app") |
+| `element` | string | Yes | Element/feature the user interacted with |
+
+---
+
+### **Example Request**
+
+```json
+POST /api/v1/public/add-public-users
+Content-Type: application/json
+
+{
+  "username": "John Doe",
+  "email": "john.doe@example.com",
+  "mobile": "+1-555-0123",
+  "company_name": "TechCorp Inc.",
+  "platform": "website",
+  "element": "product_search"
+}
+```
+
+---
+
+### **Success Response (200)**
+
+```json
+{
+  "status": 1,
+  "message": "Public user added successfully"
+}
+```
+
+---
+
+### **Error Response (500)**
+
+```json
+{
+  "status": 0,
+  "message": "An error occurred while adding public user",
+  "error": "Detailed error message"
+}
+```
+
+---
+
+## **3.2 Get Public Users**
+
+Retrieve a paginated list of registered public users with optional date filtering.
+
+### **Endpoint**
+
+```
+GET /api/v1/public/get-public-users
+```
+
+### **Query Parameters**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `page` | integer | No | Page number (default: 1) |
+| `limit` | integer | No | Items per page (default: 10) |
+| `start_date` | string (ISO date) | No | Start date for filtering records (e.g., "2024-01-01") |
+| `end_date` | string (ISO date) | No | End date for filtering records (e.g., "2024-12-31") |
+| `search` | string | No | Search term to filter by username, email, or company name |
+
+---
+
+### **Example Request**
+
+```
+GET /api/v1/public/get-public-users?page=1&limit=20&start_date=2024-01-01&end_date=2024-12-31
+```
+
+---
+
+### **Success Response (200)**
+
+```json
+{
+  "status": 1,
+  "message": "Public users fetched successfully",
+  "data": {
+    "data": [
+      {
+        "id": 1,
+        "username": "John Doe",
+        "email": "john.doe@example.com",
+        "mobile": "+1-555-0123",
+        "company_name": "TechCorp Inc.",
+        "platform": "website",
+        "element": "product_search",
+        "created_at": "2024-03-15T10:30:00.000Z"
+      }
+    ],
+    "pagination": {
+      "current_page": 1,
+      "items_per_page": 20,
+      "total_items": 150,
+      "total_pages": 8,
+      "has_next": true,
+      "has_prev": false
+    }
+  }
+}
+```
+
+---
+
+### **Error Responses**
+
+#### **Invalid Pagination (400)**
+
+```json
+{
+  "status": 0,
+  "message": "Invalid page number"
+}
+```
+
+#### **Invalid Date Format (400)**
+
+```json
+{
+  "status": 0,
+  "message": "Invalid date format provided"
+}
+```
+
+#### **Server Error (500)**
+
+```json
+{
+  "status": 0,
+  "message": "An error occurred while fetching public users",
+  "error": "Detailed error message"
+}
+```
+
+---
+
+## **Response Fields Explained**
+
+### **User Object**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | integer | Unique identifier for the public user |
+| `username` | string | Name of the public user |
+| `email` | string | Email address |
+| `mobile` | string | Contact number |
+| `company_name` | string | Company/organization name |
+| `platform` | string | Source platform |
+| `element` | string | Element/feature interacted with |
+| `created_at` | string (ISO) | Timestamp when the user was registered |
+
+### **Pagination Object**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `current_page` | integer | Current page number |
+| `items_per_page` | integer | Number of items per page |
+| `total_items` | integer | Total number of items available |
+| `total_pages` | integer | Total number of pages |
+| `has_next` | boolean | Whether a next page exists |
+| `has_prev` | boolean | Whether a previous page exists |
+
+---
+
+# **How to Call These APIs**
+
+### **Using cURL**
+
+#### **Add Public User**
+
+```bash
+curl -X POST "https://yourdomain.com/api/v1/public/add-public-users" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "John Doe",
+    "email": "john.doe@example.com",
+    "mobile": "+1-555-0123",
+    "company_name": "TechCorp Inc.",
+    "platform": "website",
+    "element": "product_search"
+  }'
+```
+
+#### **Get Public Users**
+
+```bash
+curl "https://yourdomain.com/api/v1/public/get-public-users?page=1&limit=20&start_date=2024-01-01&end_date=2024-12-31"
+```
+
+---
+
+### **Using JavaScript (Fetch)**
+
+```javascript
+// Add Public User
+fetch("/api/v1/public/add-public-users", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    username: "John Doe",
+    email: "john.doe@example.com",
+    mobile: "+1-555-0123",
+    company_name: "TechCorp Inc.",
+    platform: "website",
+    element: "product_search"
+  })
+})
+.then(res => res.json())
+.then(console.log);
+
+// Get Public Users
+fetch("/api/v1/public/get-public-users?page=1&limit=20&start_date=2024-01-01")
+  .then(res => res.json())
+  .then(console.log);
+```
+
+---
+
+### **Using Python (requests)**
+
+```python
+import requests
+
+# Add Public User
+response = requests.post(
+    "https://yourdomain.com/api/v1/public/add-public-users",
+    json={
+        "username": "John Doe",
+        "email": "john.doe@example.com",
+        "mobile": "+1-555-0123",
+        "company_name": "TechCorp Inc.",
+        "platform": "website",
+        "element": "product_search"
+    }
+)
+print(response.json())
+
+# Get Public Users
+response = requests.get(
+    "https://yourdomain.com/api/v1/public/get-public-users",
+    params={
+        "page": 1,
+        "limit": 20,
+        "start_date": "2024-01-01",
+        "end_date": "2024-12-31"
+    }
+)
+print(response.json())
+```
+
+---
+
+### **Using Postman**
+
+#### **For POST (Add Public User):**
+1. Open Postman → New Request
+2. Set method → **POST**
+3. URL: `https://yourdomain.com/api/v1/public/add-public-users`
+4. Go to **Body** tab → Select **raw** → Choose **JSON**
+5. Paste the JSON payload
+6. Hit **Send**
+
+#### **For GET (Get Public Users):**
+1. Open Postman → New Request
+2. Set method → **GET**
+3. URL: `https://yourdomain.com/api/v1/public/get-public-users`
+4. Go to **Params** tab → Add query parameters
+5. Hit **Send**
+
+---
+
+## **Notes**
+
+1. **Authentication**: These endpoints are public and do not require authentication.
+2. **Rate Limiting**: Be mindful of request rates to avoid being throttled.
+3. **Data Privacy**: Ensure you have proper consent before storing user data.
+4. **Validation**: All fields in the POST request are required. Missing fields will result in an error.
+5. **Date Format**: Use ISO 8601 format (`YYYY-MM-DD`) for date parameters.
+6. **Search**: The search parameter performs case-insensitive search across username, email, and company_name fields.
