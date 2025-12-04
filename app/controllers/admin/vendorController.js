@@ -581,9 +581,8 @@ if (Array.isArray(spocs) && spocs.length > 0) {
   },
   deleteVendorLocation: async (req, res, next) => {
     try {
-      const location_id = req.params.location_id;
+      const location_id = req.params.id;
       const deleted = await rfqModel.delete('tbl_company_location', { id: Number(location_id) });
-console.log("Deleted rows:", deleted);
       return res.status(200).json({
         status: 1,
         message: 'Location deleted successfully'
