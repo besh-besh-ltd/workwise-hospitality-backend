@@ -740,13 +740,13 @@ console.log("Deleted rows:", deleted);
         mobile : mobile || null,
         postal_code: postal_code || null ,
         organization_name: organization_name || null,
+        subscription_plan_id : subscription_plan || null,
         updated_by : updatedBy || null
       }
       let companyObj = {
         profile: about_vendor_company || null,
         logo: req.files.logo?.[0]?.location || null,
         company_name: organization_name || null,
-        subscription_plan : subscription_plan || null,
         nature_of_business: nature_business || [],
         established_year: estd_year || null,
         gstin: gstin || null,
