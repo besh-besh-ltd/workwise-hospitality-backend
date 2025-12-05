@@ -128,3 +128,131 @@ export const handleGetAllHotels = async () => {
      ORDER BY hh.name ASC`
   );
 };
+
+export const handleAddPublicUsers = async (userData) => {
+  const {
+    username,
+    email,
+    mobile,
+    company_name,
+    platform,
+    element
+  } = userData;
+
+  return db.tx(async (t) => {
+    const query = `
+      INSERT INTO tbl_public_users (
+        username,
+        email,
+        mobile,
+        created_at,
+        company_name,
+        platform,
+        element
+      )
+      VALUES ($1, $2, $3, NOW(), $4, $5, $6)
+      RETURNING 
+        id,
+        username,
+        email,
+        mobile,
+        company_name,
+        platform,
+        element,
+        created_at;
+    `;
+
+    const values = [
+      username,
+      email,
+      mobile,
+      company_name,
+      platform,
+      element
+    ];
+
+    const newUser = await t.one(query, values);
+    return newUser;
+  });
+};
+
+
+export const fetchPublicUsers = async ({
+  page = 1,
+  limit = 10,
+  startDate = null,
+  endDate = null,
+  search = ""
+}) => {
+
+  const offset = (page - 1) * limit;
+  let whereClauses = ["1=1"];
+  const params = [];
+
+  // Date filter
+  if (startDate && endDate) {
+    params.push(startDate, endDate);
+    whereClauses.push(`created_at BETWEEN $${params.length - 1} AND $${params.length}`);
+  }
+
+  // Optional search (by name, email, company)
+  if (search) {
+    params.push(`%${search}%`);
+    const idx = params.length;
+    whereClauses.push(
+      `(username ILIKE $${idx} OR email ILIKE $${idx} OR company_name ILIKE $${idx})`
+    );
+  }
+
+  // Pagination params
+  params.push(limit, offset);
+
+  const whereSQL = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
+
+  const dataQuery = `
+    SELECT 
+      id,
+      username,
+      email,
+      mobile,
+      company_name,
+      platform,
+      element,
+      created_at
+    FROM tbl_public_users
+    ${whereSQL}
+    ORDER BY created_at DESC
+    LIMIT $${params.length - 1} OFFSET $${params.length};
+  `;
+
+  const countQuery = `
+    SELECT COUNT(*) AS total_items
+    FROM tbl_public_users
+    ${whereSQL};
+  `;
+
+  try {
+    const [data, totalResult] = await Promise.all([
+      db.any(dataQuery, params),
+      db.one(countQuery, params.slice(0, params.length - 2)) // count query uses only filters
+    ]);
+
+    const totalItems = Number(totalResult.total_items);
+    const totalPages = Math.ceil(totalItems / limit);
+
+    return {
+      data,
+      pagination: {
+        current_page: page,
+        items_per_page: limit,
+        total_items: totalItems,
+        total_pages: totalPages,
+        has_next: page < totalPages,
+        has_prev: page > 1
+      }
+    };
+
+  } catch (err) {
+    throw new Error(err.message || err);
+  }
+};

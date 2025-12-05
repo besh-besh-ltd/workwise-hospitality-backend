@@ -270,6 +270,7 @@ RfqRoutes.post(
   rfqController.searchProductByCategory
 );
 
+//Changes By Ayush
 RfqRoutes.post(
   '/search-vendor',
   noLogin.customer_auth,
@@ -616,6 +617,7 @@ RfqRoutes.get(
   rfqController.getDraftById
 );
 
+//chnages by ayush
 RfqRoutes.post('/get-draft-vendors/:draftId',
   passportSignIn,
   acl([2, 8]),

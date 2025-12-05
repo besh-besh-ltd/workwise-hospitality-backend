@@ -379,6 +379,7 @@ const schemas = {
 
   // mukul 09-06-2025, just saprate this from update_profile
   company_profile: Joi.object().keys({
+    company_id: Joi.number().optional(),
     company_name: Joi.string().optional().allow(null).allow(''),
     established_year: Joi.number().optional().allow(null).allow(''),
     about_company : Joi.string().optional().allow(null).allow(''), // in tbl_company this is we have as profile

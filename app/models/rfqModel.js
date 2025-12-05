@@ -1572,23 +1572,23 @@ WHERE NOT EXISTS (
         `;
       }
 
-      if (city) {
-        dynamicJoin += `
-          LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-        `;
-      }
+      // if (city) {
+      //   dynamicJoin += `
+      //     LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
+      //   `;
+      // }
 
-      if (state) {
-        dynamicJoin += `
-          LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-        `;
-      }
+      // if (state) {
+      //   dynamicJoin += `
+      //     LEFT JOIN tbl_location_states ls ON tu.state = ls.id
+      //   `;
+      // }
 
-      if (country) {
-        dynamicJoin += `
-          LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
-        `;
-      }
+      // if (country) {
+      //   dynamicJoin += `
+      //     LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
+      //   `;
+      // }
 
       if (prev_worked_with === 'prev_finalized') {
         dynamicJoin += `
@@ -1610,23 +1610,23 @@ WHERE NOT EXISTS (
 
       // WHERE CLAUSES
       if (city && Array.isArray(city) && city.length > 0) {
-        dynamicWhere += ` AND tu.city::int IN (${city.join(',')})`;
+        dynamicWhere += ` AND tcl.city_id::int IN (${city.join(',')})`;
       } else if (typeof city == 'string' || typeof city == 'number') {
-        dynamicWhere += ` AND tu.city = '${city}'`;
+        dynamicWhere += ` AND tcl.city_id = '${city}'`;
       }
 
       if (state && Array.isArray(state) && state.length > 0) {
-        dynamicWhere += ` AND tu.state::int IN (${state.join(',')})`;
+        dynamicWhere += ` AND tcl.state_id::int IN (${state.join(',')})`;
       } else if (typeof state == 'string' || typeof state == 'number') {
-        dynamicWhere += ` AND tu.state = '${state}'`;
+        dynamicWhere += ` AND tcl.state_id = '${state}'`;
       }
 
       if (country && Array.isArray(country) && country.length > 0) {
-        dynamicWhere += ` AND COALESCE(tu.country, '1')::int IN (${country.join(
+        dynamicWhere += ` AND COALESCE(tcl.country_id, '1')::int IN (${country.join(
           ','
         )})`;
       } else if (typeof country == 'string' || typeof country == 'number') {
-        dynamicWhere += ` AND COALESCE(tu.country, '1') = '${country}'`;
+        dynamicWhere += ` AND COALESCE(tcl.country_id, '1') = '${country}'`;
       }
 
       if (turnoverCondition) {
@@ -1747,6 +1747,7 @@ WHERE NOT EXISTS (
               AND trpv.variant = trp.variant
           JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
           JOIN tbl_users tu ON trpv.user_id = tu.id
+          LEFT JOIN tbl_company_location tcl ON tu.company_id = tcl.company_id
           LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
               ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
           JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
@@ -2435,56 +2436,49 @@ LIMIT 1;`;
     // mukul jatav 28/apr/2024 - product migration changes - added product_variant_vendor_mapping and replaced tbl_product with tbl_product_variant
 
     let countQuery = `
-      WITH vendor_data AS (
-        SELECT DISTINCT tu.id
-        FROM tbl_product_variant pvt
-        JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
-                JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
-        LEFT JOIN tbl_company tc ON tc.id = tu.company_id AND tc.is_private = 0
-        ${
-          approved_by_id != ''
-            ? `
-          JOIN tbl_vendorapprove_product_mapping vum 
-            ON vum.variant_vendor_mapping_id = pvm.id
-        `
-            : ``
-        }
-          WHERE pvt.status = 1 AND pvt.is_deleted = 0 AND pvt.is_review = 0 AND pvt.is_approve = 1
-         AND pvm.status = TRUE AND pvm.is_approved = TRUE
-         AND tu.is_deleted = 0 AND tu.status = 1 AND pvt.name = '${search_key}' AND tc.is_private = 0
-        ${
-          state != ''
-            ? `AND tu.state::int IN (${state.map((s) => s.id).join(',')})`
-            : ``
-        }
-        ${
-          city != ''
-            ? `AND tu.city::int IN (${city.map((c) => c.id).join(',')})`
-            : ``
-        }
-        ${
-          country != ''
-            ? `AND COALESCE(tu.country, '1')::int IN (${country
-                .map((c) => c.id)
-                .join(',')})`
-            : ``
-        }
-        ${
-          category_id != ''
-            ? `AND pvt.product_id IN (SELECT product_id FROM tbl_product_categories WHERE category_id = ${category_id})`
-            : ``
-        }
-        ${
-          approved_by_id != ''
-            ? `
-          AND vum.vendor_approve_id IN (${approved_by_id
-            .map((vui) => vui.id)
-            .join(',')})
-        `
-            : ``
-        }
-      )
-      SELECT COUNT(*) AS total FROM vendor_data;
+   WITH vendor_data AS (
+   SELECT DISTINCT tu.id
+   FROM tbl_product_variant pvt
+   JOIN tbl_product_variant_vendor_mapping pvm 
+        ON pvt.id = pvm.product_variant_id
+   JOIN tbl_users tu 
+        ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
+   LEFT JOIN tbl_company tc 
+        ON tc.id = tu.company_id AND tc.is_private = 0
+   LEFT JOIN tbl_company_location tcl
+        ON tcl.company_id = tc.id
+   ${approved_by_id != '' ? `
+   JOIN tbl_vendorapprove_product_mapping vum 
+        ON vum.variant_vendor_mapping_id = pvm.id` : ``}
+
+   WHERE pvt.status = 1 
+     AND pvt.is_deleted = 0 
+     AND pvt.is_review = 0 
+     AND pvt.is_approve = 1
+     AND pvm.status = TRUE 
+     AND pvm.is_approved = TRUE
+     AND tu.is_deleted = 0 
+     AND tu.status = 1
+     AND pvt.name = '${search_key}'
+     AND tc.is_private = 0
+
+   ${state != '' ? `AND tcl.state_id IN (${state.map(s => s.id).join(',')})` : ``}
+   ${city != '' ? `AND tcl.city_id IN (${city.map(c => c.id).join(',')})` : ``}
+   ${country != '' ? `AND tcl.country_id IN (${country.map(c => c.id).join(',')})` : ``}
+
+   ${category_id != '' ?
+     `AND pvt.product_id IN (
+          SELECT product_id FROM tbl_product_categories 
+          WHERE category_id = ${category_id}
+      )`
+   : ``}
+
+   ${approved_by_id != '' ? `
+     AND vum.vendor_approve_id IN (${approved_by_id.map(v => v.id).join(',')})
+   ` : ``}
+)
+SELECT COUNT(*) AS total FROM vendor_data;
+
     `;
     let turnoverCondition = '';
 
@@ -2501,83 +2495,88 @@ LIMIT 1;`;
       turnoverCondition += ')';
     }
 
-    let dataQuery = `
-    WITH vendor_data AS (
-      SELECT DISTINCT tu.id, tu.name as vendor_name, COALESCE(tc.company_name, tu.organization_name, tu.name) as company_name,
-      tu.address, tc.profile as about, tc.website, tc.company_name as original_company_name, lc.city_name, ls.state_name
+    let dataQuery = `WITH vendor_data AS (
+   SELECT DISTINCT 
+        tu.id,
+        tu.name AS vendor_name,
+        COALESCE(tc.company_name, tu.organization_name, tu.name) AS company_name,
+        tcl.address,
+        tc.profile AS about,
+        tc.website,
+        tc.company_name AS original_company_name,
+        lc.city_name,
+        ls.state_name
 
-      FROM tbl_product_variant pvt
-      JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
-        JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
-      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-      LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-      LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-      ${
-        approved_by_id != ''
-          ? `
-        JOIN tbl_vendorapprove_product_mapping vum 
-          ON vum.variant_vendor_mapping_id = pvm.id
-      `
-          : ``
-      }
-        WHERE pvt.status = 1 AND pvt.is_deleted = 0 AND pvt.is_review = 0 AND pvt.is_approve = 1
-        AND pvm.status = TRUE AND pvm.is_approved = TRUE
-        AND tu.is_deleted = 0 AND tu.status = 1 AND pvt.name = '${search_key}' AND tc.is_private = 0
-      ${
-        state != ''
-          ? `AND tu.state::int IN (${state.map((s) => s.id).join(',')})`
-          : ``
-      }
-      ${
-        city != ''
-          ? `AND tu.city::int IN (${city.map((c) => c.id).join(',')})`
-          : ``
-      }
-      ${
-        country != ''
-          ? `AND COALESCE(tu.country, '1')::int IN (${country
-              .map((c) => c.id)
-              .join(',')})`
-          : ``
-      }
-      ${turnoverCondition}
-      ${
-        category_id != ''
-          ? `AND pvt.product_id IN (SELECT product_id FROM tbl_product_categories WHERE category_id = ${category_id})`
-          : ``
-      }
-      ${
-        vendorType.length > 0
-          ? `
-        AND EXISTS (
-          SELECT 1
-          FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
-          WHERE TRIM(nb) IN (${vendorType
-            .map((vt) => `'${vt.value.toLowerCase().trim()}'`)
-            .join(', ')})
-        )
-      `
-          : ``
-      }
-      ${
-        approved_by_id != ''
-          ? `
-        AND vum.vendor_approve_id IN (${approved_by_id
-          .map((vui) => vui.id)
-          .join(',')})
-      `
-          : ``
-      }
-    )
-    SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 2;
-  `;
+   FROM tbl_product_variant pvt
+   JOIN tbl_product_variant_vendor_mapping pvm 
+        ON pvt.id = pvm.product_variant_id
+   JOIN tbl_users tu 
+        ON tu.id = pvm.vendor_id 
+       AND tu.user_type IN (3,4)
+   LEFT JOIN tbl_company tc 
+        ON tc.id = tu.company_id
+   LEFT JOIN tbl_company_location tcl 
+        ON tcl.company_id = tc.id
+   LEFT JOIN tbl_location_cities lc 
+        ON tcl.city_id = lc.id
+   LEFT JOIN tbl_location_states ls 
+        ON tcl.state_id = ls.id
+
+   ${approved_by_id != '' ? `
+   JOIN tbl_vendorapprove_product_mapping vum 
+        ON vum.variant_vendor_mapping_id = pvm.id` : ``}
+
+   WHERE pvt.status = 1 
+     AND pvt.is_deleted = 0 
+     AND pvt.is_review = 0 
+     AND pvt.is_approve = 1
+     AND pvm.status = TRUE 
+     AND pvm.is_approved = TRUE
+     AND tu.is_deleted = 0 
+     AND tu.status = 1
+     AND pvt.name = '${search_key}'
+     AND tc.is_private = 0
+
+   ${state != '' ? `AND tcl.state_id IN (${state.map(s => s.id).join(',')})` : ``}
+   ${city != '' ? `AND tcl.city_id IN (${city.map(c => c.id).join(',')})` : ``}
+   ${country != '' ? `AND tcl.country_id IN (${country.map(c => c.id).join(',')})` : ``}
+
+   ${turnoverCondition}
+
+   ${category_id != '' ?
+     `AND pvt.product_id IN (
+          SELECT product_id FROM tbl_product_categories 
+          WHERE category_id = ${category_id}
+      )`
+   : ``}
+
+   ${vendorType.length > 0 ? `
+     AND EXISTS (
+        SELECT 1
+        FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
+        WHERE TRIM(nb) IN (${vendorType
+           .map(vt => `'${vt.value.toLowerCase().trim()}'`)
+           .join(', ')})
+     )
+   ` : ``}
+
+   ${approved_by_id != '' ? `
+     AND vum.vendor_approve_id IN (${approved_by_id.map(v => v.id).join(',')})
+   ` : ``}
+)
+SELECT * 
+FROM vendor_data 
+ORDER BY RANDOM() 
+LIMIT 2;
+`;
 
     try {
       const countResult = await db.query(countQuery);
+      console.log('countQueery', countQuery);
       const totalCount = countResult[0].total;
-
+      
       const dataResult = await db.query(dataQuery);
-
+      console.log('dataQuwry', dataQuery);
       return {
         total: totalCount,
         vendor: dataResult.length > 0 ? dataResult : null
@@ -4134,65 +4133,22 @@ WHERE row_num_by_name_category = 1
     let cityIds = [];
     let countryIds = [];
 
-    // Process all location lookups in parallel for better performance
-    const locationPromises = [];
-
     if (state && Array.isArray(state) && state.length > 0) {
-      if (typeof state[0] === 'string') {
-        // If state is array of strings, convert to IDs
-        locationPromises.push(
-          Promise.all(
-            state.map((stateName) => cmsModel.findStateByName(stateName))
-          ).then((results) => {
-            stateIds = results.filter((result) => result !== null);
-          })
-        );
-      } else {
         // If state is array of objects with id property
         stateIds = state.map((s) => s.id);
-      }
     }
 
     if (city && Array.isArray(city) && city.length > 0) {
-      if (typeof city[0] === 'string') {
-        // If city is array of strings, convert to IDs
-        locationPromises.push(
-          Promise.all(
-            city.map((cityName) =>
-              cmsModel.findCityByNameAndState(null, cityName)
-            )
-          ).then((results) => {
-            cityIds = results.filter((result) => result !== null);
-          })
-        );
-      } else {
         // If city is array of objects with id property
         cityIds = city.map((c) => c.id);
-      }
     }
 
     if (country && Array.isArray(country) && country.length > 0) {
-      if (typeof country[0] === 'string') {
-        // If country is array of strings, convert to IDs
-        locationPromises.push(
-          Promise.all(
-            country.map((countryName) =>
-              cmsModel.findCountryByName(countryName)
-            )
-          ).then((results) => {
-            countryIds = results.filter((result) => result !== null);
-          })
-        );
-      } else {
         // If country is array of objects with id property
         countryIds = country.map((c) => c.id);
-      }
     }
 
-    // Wait for all location lookups to complete
-    if (locationPromises.length > 0) {
-      await Promise.all(locationPromises);
-    }
+    console.log("COUNTRY IDS:", countryIds);
 
     // Adding dynamic turnover condition
     let turnoverCondition = '';
@@ -4246,13 +4202,28 @@ WHERE row_num_by_name_category = 1
           tc.website,
           tc.turnover,
           tc.nature_of_business,
-          lc.city_name,
-          ls.state_name,
-          lcn.country_name,
+
+          ARRAY(
+            SELECT json_build_object(
+              'address', tcl2.address,
+              'postal_code', tcl2.postal_code,
+              'city_id', tcl2.city_id,
+              'city_name', lc.city_name,
+              'state_id', tcl2.state_id,
+              'state_name', ls.state_name,
+              'country_id', tcl2.country_id,
+              'country_name', lco.country_name
+            )
+            FROM tbl_company_location tcl2
+            LEFT JOIN tbl_location_cities lc ON lc.id = tcl2.city_id
+            LEFT JOIN tbl_location_states ls ON ls.id = tcl2.state_id
+            LEFT JOIN tbl_location_country lco ON lco.id = tcl2.country_id
+            WHERE tcl2.company_id = tc.id
+          ) AS location,
           CASE
           WHEN tc.logo IS NULL THEN NULL
-          ELSE tc.logo
-          END AS image_url,
+           ELSE tc.logo
+           END AS image_url,
           CASE
             WHEN bvm.vendor_id IS NOT NULL THEN 1
             ELSE 0
@@ -4274,10 +4245,8 @@ WHERE row_num_by_name_category = 1
         JOIN tbl_category c ON pc.category_id = c.id
         JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
         LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+        LEFT JOIN tbl_company_location tcl on tc.id = tcl.company_id
         LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
-        LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-        LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-        LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
         LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
         LEFT JOIN (
           SELECT DISTINCT rpv.user_id
@@ -4342,17 +4311,17 @@ WHERE row_num_by_name_category = 1
 
           ${
             stateIds.length > 0
-              ? `AND tu.state::int IN (${stateIds.join(',')})`
+              ? `AND tcl.state_id::int IN (${stateIds.join(',')})`
               : ``
           }
           ${
             cityIds.length > 0
-              ? `AND tu.city::int IN (${cityIds.join(',')})`
+              ? `AND tcl.city_id::int IN (${cityIds.join(',')})`
               : ``
           }
           ${
             countryIds.length > 0
-              ? `AND COALESCE(tu.country, '1')::int IN (${countryIds.join(
+              ? `AND COALESCE(tcl.country_id, '1')::int IN (${countryIds.join(
                   ','
                 )})`
               : ``

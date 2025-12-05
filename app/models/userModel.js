@@ -943,7 +943,7 @@ user_book_demo: async (mobile) => {
         });
     });
   },
-  vendorinfo: async (user_id, current_user = null) => {
+ vendorinfo: async (user_id, current_user = null) => {
     return new Promise(function (resolve, reject) {
 
       // query changes by Mukul Jatav 30-08-2024, 
@@ -975,9 +975,24 @@ user_book_demo: async (mobile) => {
        tbl_company.import_export_code,
        tbl_company.company_name,
        tbl_company.profile,
-       tbl_company.location,
-       cl.city_name,
-       sl.state_name,
+
+       ARRAY(
+         SELECT json_build_object(
+             'address', TCL.address,
+             'postal_code', TCL.postal_code,
+             'city_id', TCL.city_id,
+             'city_name', LC.city_name,
+             'state_id', TCL.state_id,
+             'state_name', LS.state_name,
+             'country_id', TCL.country_id,
+             'country_name', LCO.country_name
+         )
+         FROM tbl_company_location TCL
+         LEFT JOIN tbl_location_cities LC ON LC.id = TCL.city_id
+         LEFT JOIN tbl_location_states LS ON LS.id = TCL.state_id
+         LEFT JOIN tbl_location_country LCO ON LCO.id = TCL.country_id
+         WHERE TCL.company_id = tbl_company.id
+       ) AS location,
 
        ARRAY(
                SELECT json_build_object(
@@ -1052,16 +1067,12 @@ user_book_demo: async (mobile) => {
 ) AS vendor_info
 
     `;
-
-
       }
 
       // Completing the query with the FROM clause
       baseQuery += `
       FROM tbl_users
       LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
-      LEFT JOIN tbl_location_cities cl ON cl.id = tbl_users.city
-      LEFT JOIN tbl_location_states sl ON sl.id = tbl_users.state     
       WHERE tbl_users.id = $1`;
 
       // Execute the query
@@ -1075,6 +1086,7 @@ user_book_demo: async (mobile) => {
         });
     });
   },
+
 
   update_change_password_status: async (user_id, password) => {
     return new Promise(function (resolve, reject) {
