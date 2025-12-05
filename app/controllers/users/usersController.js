@@ -298,7 +298,8 @@ const UsersController = {
         established_year: established_year || null,
         website: website || null,
         location: address || null,
-        is_private: is_private || 0,
+        // For hospitality vendors, set as private (1), otherwise use provided value or default to 0
+        is_private: (is_hospitality !== undefined && parseInt(is_hospitality, 10) === 1) ? 1 : (is_private || 0),
         is_hospitality:
           is_hospitality !== undefined && is_hospitality !== null
             ? parseInt(is_hospitality, 10) === 1
@@ -318,6 +319,42 @@ const UsersController = {
         await continueBuyerCompanyRegistration(req.body, company_id);
         } else if (user_type == 3 && company_id) {
         await continueVendorCompanyRegistration(req.body, company_id);
+        
+        // For hospitality vendors, map them to buyer companies of selected hotels
+        if (is_hospitality !== undefined && parseInt(is_hospitality, 10) === 1 && hotels && Array.isArray(hotels) && hotels.length > 0) {
+          try {
+            // Get unique buyer company IDs from selected hotels
+            const hotelIds = hotels.filter(id => id && !isNaN(parseInt(id, 10))).map(id => parseInt(id, 10));
+            if (hotelIds.length > 0) {
+              const hotelRecords = await hospitalityModel.getHotelsByIds(hotelIds);
+              const buyerCompanyIds = new Set();
+              
+              for (const hotel of hotelRecords) {
+                // Get hospitality company for this hotel
+                const hospitalityCompany = await hospitalityModel.getCompanyById(hotel.hospitality_company_id);
+                if (hospitalityCompany && hospitalityCompany.buyer_company_id) {
+                  buyerCompanyIds.add(hospitalityCompany.buyer_company_id);
+                }
+              }
+              
+              // Map vendor to each unique buyer company
+              for (const buyerCompanyId of buyerCompanyIds) {
+                // Get a buyer user from this company to use as created_by
+                const buyerUsers = await userModel.getCompanyUsers(buyerCompanyId);
+                const createdBy = buyerUsers && buyerUsers.length > 0 ? buyerUsers[0].id : null;
+                
+                if (createdBy) {
+                  await userModel.mapBuyerToVendor(createdBy, user_id);
+                  console.log(`[HOSPITALITY] Mapped vendor ${user_id} to buyer company ${buyerCompanyId}`);
+                }
+              }
+            }
+          } catch (mappingError) {
+            console.error('[HOSPITALITY] Error mapping vendor to buyer companies:', mappingError);
+            logError(mappingError);
+            // Don't fail registration if mapping fails - vendor is still registered
+          }
+        }
       }
 
       res
@@ -1681,6 +1718,34 @@ update_user_detail: async (req, res, next) => {
         // return false;
         user.vendor_approve = vendor_arr;
         user.spoc = spoc;
+        
+        // Add user_key for hospitality payments
+        user.user_key = cryptr.encrypt(user_id.toString());
+        
+        // Check hospitality subscription status for vendors
+        if (user.user_type === 3 && (user.is_hospitality === 1 || user.is_hospitality === '1')) {
+          const hasValidSubscription = await hospitalityModel.hasValidPaidSubscription(user_id);
+          user.has_valid_hospitality_subscription = hasValidSubscription;
+          
+          // Get pending subscriptions for payment initiation
+          if (!hasValidSubscription) {
+            const pendingSubs = await hospitalityModel.getPendingSubscriptionsForVendor(user_id);
+            if (pendingSubs && pendingSubs.length > 0) {
+              const categories = [];
+              const hotels = [];
+              for (const sub of pendingSubs) {
+                if (sub.item_type === 'category' && !categories.includes(sub.item_id)) {
+                  categories.push(sub.item_id);
+                } else if (sub.item_type === 'hotel' && !hotels.includes(sub.item_id)) {
+                  hotels.push(sub.item_id);
+                }
+              }
+              user.pending_hospitality_categories = categories;
+              user.pending_hospitality_hotels = hotels;
+            }
+          }
+        }
+        
         // console.log('user-->', user);
         // return false;
         res
@@ -3045,6 +3110,137 @@ publish_profile_reviews: async (req, res, next) => {
       if (valid && req.body.event == 'order.paid') {
         let paymentEntity = req.body.payload.payment.entity;
         let orderEntity = req.body.payload.order.entity;
+        
+        // Check if this is a hospitality vendor payment
+        const vendorPayment = await hospitalityModel.getVendorPaymentByOrderId(paymentEntity.order_id);
+        if (vendorPayment && vendorPayment.length > 0) {
+          // Update hospitality vendor payment status
+          await db.none(
+            `UPDATE tbl_vendor_payments 
+             SET razorpay_payment_id = $1, 
+                 razorpay_signature = $2, 
+                 payment_status = 'success'
+             WHERE razorpay_order_id = $3`,
+            [paymentEntity.id, receivedSignature, paymentEntity.order_id]
+          );
+          
+          const payment = vendorPayment[0];
+          const userId = payment.vendor_id;
+          const userDetails = await userModel.userinfo(userId);
+          
+          if (userDetails && userDetails.length > 0) {
+            const user = userDetails[0];
+            if (user.user_type === 3 && user.status === 0) {
+              const companyDetails = await userModel.getCompanyDetail(userId);
+              if (companyDetails && companyDetails.length > 0) {
+                const company = companyDetails[0];
+                if (company.is_hospitality === 1 || company.is_hospitality === '1') {
+                  await userModel.updateUserAccount(userId, { status: 1 });
+                  
+                  // Send confirmation email
+                  try {
+                    const subscriptions = await db.any(
+                      `SELECT vhcs.*, 
+                       CASE 
+                         WHEN vhcs.item_type = 'category' THEN c.title
+                         WHEN vhcs.item_type = 'hotel' THEN h.name
+                       END AS item_name
+                       FROM tbl_vendor_hotel_category_subscription vhcs
+                       LEFT JOIN tbl_category c ON vhcs.item_type = 'category' AND c.id = vhcs.item_id
+                       LEFT JOIN tbl_hospitality_company_hotels h ON vhcs.item_type = 'hotel' AND h.id = vhcs.item_id
+                       WHERE vhcs.payment_id = $1 AND vhcs.vendor_id = $2`,
+                      [payment.id, userId]
+                    );
+                    
+                    const categories = subscriptions.filter(s => s.item_type === 'category').map(s => s.item_name);
+                    const hotels = subscriptions.filter(s => s.item_type === 'hotel').map(s => s.item_name);
+                    const expiryDate = subscriptions.length > 0 ? subscriptions[0].end_date : null;
+                    const expiryDateFormatted = expiryDate 
+                      ? Moment(expiryDate).format('MMMM DD, YYYY')
+                      : 'March 31, ' + (Moment().month() >= 2 ? Moment().year() + 1 : Moment().year());
+                    const totalAmount = subscriptions.reduce((sum, s) => sum + (s.fee_amount || 0), 0);
+                    
+                    const emailHeader = `<h2>Dear ${user.name},</h2>`;
+                    const emailContent = `
+                      <p style="font-size: 16px; line-height: 1.6; color: #333;">
+                        Congratulations! Your hospitality vendor registration has been successfully completed and your payment has been processed.
+                      </p>
+                      
+                      <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                        <h3 style="color: #158993; margin-top: 0;">Registration Details</h3>
+                        
+                        <p style="margin: 10px 0;"><strong>Company Name:</strong> ${company.organization_name || company.name || 'N/A'}</p>
+                        <p style="margin: 10px 0;"><strong>Email:</strong> ${user.email}</p>
+                        <p style="margin: 10px 0;"><strong>Payment Amount:</strong> ₹${totalAmount.toLocaleString('en-IN')}</p>
+                        <p style="margin: 10px 0;"><strong>Payment ID:</strong> ${paymentEntity.id}</p>
+                        <p style="margin: 10px 0;"><strong>Order ID:</strong> ${paymentEntity.order_id}</p>
+                      </div>
+                      
+                      ${categories.length > 0 ? `
+                      <div style="margin: 20px 0;">
+                        <h3 style="color: #158993;">Selected Categories</h3>
+                        <ul style="list-style-type: none; padding-left: 0;">
+                          ${categories.map(cat => `<li style="padding: 5px 0;">• ${cat}</li>`).join('')}
+                        </ul>
+                      </div>
+                      ` : ''}
+                      
+                      ${hotels.length > 0 ? `
+                      <div style="margin: 20px 0;">
+                        <h3 style="color: #158993;">Selected Hotels</h3>
+                        <ul style="list-style-type: none; padding-left: 0;">
+                          ${hotels.map(hotel => `<li style="padding: 5px 0;">• ${hotel}</li>`).join('')}
+                        </ul>
+                      </div>
+                      ` : ''}
+                      
+                      <div style="background-color: #e8f5e9; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #4caf50;">
+                        <p style="margin: 0; font-weight: 600; color: #2e7d32;">
+                          <strong>Subscription Expiry Date:</strong> ${expiryDateFormatted}
+                        </p>
+                        <p style="margin: 10px 0 0 0; font-size: 14px; color: #555;">
+                          Your subscription is valid until ${expiryDateFormatted}. Please ensure timely renewal to continue enjoying our services.
+                        </p>
+                      </div>
+                      
+                      <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
+                        Your account has been approved and you can now start using the Workwise platform. Log in to your dashboard to begin exploring opportunities.
+                      </p>
+                      
+                      <div style="text-align: center; margin: 30px 0;">
+                        <a href="${process.env.FRONT_END_WEBSITE}/dashboard" 
+                           style="background-color: #158993; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
+                          Go to Dashboard
+                        </a>
+                      </div>
+                      
+                      <p style="font-size: 14px; color: #666; margin-top: 30px;">
+                        If you have any questions or need assistance, please contact us at <a href="mailto:hello@letsworkwise.com" style="color: #158993;">hello@letsworkwise.com</a>
+                      </p>
+                    `;
+                    
+                    const dynamicHTML = generateEmailTemplate(emailHeader, emailContent);
+                    
+                    sendMail({
+                      from: Config.webmasterMail,
+                      to: user.email,
+                      subject: 'Workwise - Hospitality Vendor Registration Confirmation',
+                      html: dynamicHTML
+                    });
+                  } catch (emailError) {
+                    console.error('Error sending hospitality vendor confirmation email:', emailError);
+                    logError(emailError);
+                  }
+                }
+              }
+            }
+          }
+          
+          res.status(200).json({ status: 1, message: 'Payment processed successfully' }).end();
+          return;
+        }
+        
+        // Regular subscription payment handling
         let subscriptionPaymentObj = {
           status: 1,
           after_payment_response: requestedBody,
@@ -3076,25 +3272,6 @@ publish_profile_reviews: async (req, res, next) => {
             paymentUpdate[0].user_id
           );
 
-          // 3-way check: If hospitality vendor and payment successful, approve vendor
-          const userId = paymentUpdate[0].user_id;
-          const userDetails = await userModel.userinfo(userId);
-          
-          if (userDetails && userDetails.length > 0) {
-            const user = userDetails[0];
-            // Check if user is vendor (user_type = 3) and status is 0 (unapproved)
-            if (user.user_type === 3 && user.status === 0) {
-              // Check if company is hospitality
-              const companyDetails = await userModel.getCompanyDetail(userId);
-              if (companyDetails && companyDetails.length > 0) {
-                const company = companyDetails[0];
-                if (company.is_hospitality === 1 || company.is_hospitality === '1') {
-                  // Approve the hospitality vendor
-                  await userModel.updateUserAccount(userId, { status: 1 });
-                }
-              }
-            }
-          }
           let planDetails = await subscriptionModel.getSubscriptionDetails(
             userSubscription[0].plan_id
           );

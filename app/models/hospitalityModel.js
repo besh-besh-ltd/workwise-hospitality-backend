@@ -362,6 +362,12 @@ const hospitalityModel = {
       ]
     );
   },
+  getVendorPaymentByOrderId: async (orderId) => {
+    return db.any(
+      `SELECT * FROM tbl_vendor_payments WHERE razorpay_order_id = $1`,
+      [orderId]
+    );
+  },
   createVendorHotelCategorySubscription: async (rows) => {
     if (!rows?.length) {
       return [];
@@ -403,6 +409,21 @@ const hospitalityModel = {
        ORDER BY vp.created_at DESC, vhcs.id DESC`,
       [vendorId]
     );
+  },
+
+  hasValidPaidSubscription: async (vendorId) => {
+    const result = await db.oneOrNone(
+      `SELECT COUNT(*) as count
+       FROM tbl_vendor_hotel_category_subscription vhcs
+       JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
+       WHERE vhcs.vendor_id = $1
+         AND vp.payment_status IN ('paid', 'success')
+         AND vhcs.status = 'active'
+         AND vhcs.start_date <= CURRENT_DATE
+         AND vhcs.end_date >= CURRENT_DATE`,
+      [vendorId]
+    );
+    return result && parseInt(result.count) > 0;
   },
 
   updatePendingSubscriptionsPaymentId: async (vendorId, newPaymentId) => {
