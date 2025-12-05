@@ -82,7 +82,7 @@ const extractBuyerCompanyIds = (input) => {
 const vendorController = {
   vendorList: async (req, res, next) => {
     try {
-      let page, limit, offset, organization, verified, name, email, status, source, subscription_plan, is_private, dateFrom, dateTo, created_by;
+      let page, limit, offset, organization, verified, name, email, status, source, subscription_plan, is_private, dateFrom, dateTo, created_by , mobile;
       if (req.query.page && req.query.page > 0) {
         page = req.query.page;
         limit = req.query.limit || Config.globalAdminLimit;
@@ -104,6 +104,7 @@ const vendorController = {
       source = req?.query?.source || null;
       subscription_plan = req?.query?.subscription_plan ?? null;
       is_private = req?.query?.is_private || null;
+      mobile = req.query.mobile || null;
 
       let vendorList = await vendorModel.getVendorList(
         limit,
@@ -118,7 +119,8 @@ const vendorController = {
         created_by,
         source,
         subscription_plan,
-        is_private
+        is_private,
+        mobile
       );
 
       let vendorCount = await vendorModel.getVendorListCount(
@@ -132,7 +134,8 @@ const vendorController = {
         created_by,
         source,
         subscription_plan,
-        is_private
+        is_private,
+        mobile
       );
 
       res

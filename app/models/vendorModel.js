@@ -10,7 +10,7 @@ const vendorModel = {
     return str.replace(/'/g, "''");
   },
 
- getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by, source, subscription_plan, isPrivate) => {    
+ getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by, source, subscription_plan, isPrivate,mobile) => {    
   return new Promise(function (resolve, reject) {
       // Escape input strings to prevent SQL injection and syntax errors
       const escapedName = name ? vendorModel._escapeSqlString(name) : null;
@@ -19,6 +19,7 @@ const vendorModel = {
       const escapedSource = source ? vendorModel._escapeSqlString(source) : null;
       const escapedPlan = subscription_plan ? vendorModel._escapeSqlString(subscription_plan) : null;
       const escapedIsPrivate = isPrivate ? vendorModel._escapeSqlString(isPrivate) : null;
+      const escapedMobile = mobile ? mobile.replace(/[^0-9]/g, '') : null;
       
       let dynamicQuery = '';
       if (name) {
@@ -50,7 +51,13 @@ const vendorModel = {
       if (status !== undefined && status !== null) {
         dynamicQuery += ` AND tbl_users.status = '${status}'`;
       }
-      if (dateFrom) {
+    if (mobile) {
+      dynamicQuery += `
+    AND regexp_replace(tbl_users.mobile, '[^0-9]', '', 'g')
+    ILIKE '%${escapedMobile}%'
+  `;
+}
+    if (dateFrom) {
         dynamicQuery += ` AND tbl_users.created_at >= '${dateFrom}'`;
       }
       if (dateTo) {
@@ -163,7 +170,7 @@ const vendorModel = {
     });
   },
  
-getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo, created_by, source, subscription_plan, is_private) => {
+getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo, created_by, source, subscription_plan, is_private,mobile) => {
     return new Promise(function (resolve, reject) {
     // Escape input strings
     const escapedName = name ? vendorModel._escapeSqlString(name) : null;
@@ -172,6 +179,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     const escapedSource = source ? vendorModel._escapeSqlString(source) : null;
     const escapedPlan = subscription_plan ? vendorModel._escapeSqlString(subscription_plan) : null;
     const escapedIsPrivate = is_private ? vendorModel._escapeSqlString(is_private) : null;
+    const escapedMobile = mobile ? mobile.replace(/[^0-9]/g, '') : null;
     
     let dynamicQuery = 'AND tbl_users.user_type = 3 ';
     if (name) {
@@ -200,6 +208,9 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     if (email) {
       dynamicQuery += ` AND tbl_users.email ILIKE '%${escapedEmail}%'`;
     }
+    if (mobile) {
+        dynamicQuery += ` AND regexp_replace(tbl_users.mobile, '[^0-9]', '', 'g') ILIKE '%${escapedMobile}%'`;
+      }
     if (status !== undefined && status !== null) {
       dynamicQuery += ` AND tbl_users.status = '${status}'`;
     }
