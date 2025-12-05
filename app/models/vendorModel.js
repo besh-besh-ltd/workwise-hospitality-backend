@@ -427,6 +427,39 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         });
     });
   },
+  getLocationsByCompanyId: async (company_id) => {
+    try {
+      const query = `
+        SELECT 
+          l.id,
+          l.company_id,
+          l.address,
+          l.postal_code,
+          l.country_id,
+          c.country_name,
+          l.state_id,
+          s.state_name,
+          l.city_id,
+          ci.city_name,
+          l.created_at,
+          l.updated_at
+        FROM tbl_company_location l
+        LEFT JOIN tbl_location_country c ON l.country_id = c.id
+        LEFT JOIN tbl_location_states s ON l.state_id = s.id
+        LEFT JOIN tbl_location_cities ci ON l.city_id = ci.id
+        WHERE l.company_id = $1
+        ORDER BY l.id DESC;
+      `;
+
+      const result = await db.any(query, [company_id]);
+      return result;
+
+    } catch (error) {
+      console.error("Error fetching vendor locations with join:", error);
+      throw error;
+    }
+  },
+
   getFiles: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.any('SELECT * FROM tbl_files WHERE user_id = $1', [vendorId])

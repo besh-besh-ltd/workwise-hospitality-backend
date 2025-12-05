@@ -6935,7 +6935,7 @@ const rfqController = {
         });
       }
     } else {
-      // if user is not logged!
+      // if user is  logged!
       let user = req.user;
       if (user && user.user_type != 3) {
         try {

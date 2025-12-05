@@ -47,6 +47,26 @@ vendorRoutes.get(
   validateDbBody.vendor_id_exists,
   vendorController.vendor_edit_details
 );
+vendorRoutes.get(
+ '/get-vendor-locations/:id',
+ passportSignIn,
+ vendorController.getVendorLocations
+)
+vendorRoutes.post(
+  '/add-vendor-location',
+  passportSignIn,
+  vendorController.addVendorLocation
+)
+vendorRoutes.put(
+  '/update-vendor-location/:id',
+  passportSignIn,
+  vendorController.updateVendorLocation
+)
+vendorRoutes.delete(
+  '/delete-vendor-location/:id',
+  passportSignIn,
+  vendorController.deleteVendorLocation
+)
 // vendorRoutes.get(
 //   '/vendor-rfq-list/:id',
 //   passportSignIn,
