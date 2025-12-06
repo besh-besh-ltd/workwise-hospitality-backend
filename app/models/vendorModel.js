@@ -864,7 +864,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
               TU.organization_name,
               TU.email AS email,
               TU.mobile AS mobile,
-              TU.address AS address,
+              TCL.address AS address,
               TUC.company_name,
               COUNT(DISTINCT TR.id)::INT AS rfq_count
           FROM tbl_rfq_product_vendors TRPV
@@ -881,11 +881,13 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
               ON TU.id = TRPV.user_id
           LEFT JOIN tbl_company TUC
               ON TU.company_id = TUC.id 
+          LEFT JOIN tbl_company_location TCL
+              ON TUC.id = TCL.company_id
           WHERE TR.created_by = $1
               AND TU.is_deleted = 0 
               AND TU.status = 1 
           GROUP BY 
-              TRPV.user_id, TU.name, TU.organization_name, TU.email, TU.mobile, TU.address, TUC.company_name
+              TRPV.user_id, TU.name, TU.organization_name, TU.email, TU.mobile, TCL.address, TUC.company_name
           ORDER BY 
               rfq_count DESC
           LIMIT 10;
