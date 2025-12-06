@@ -2145,19 +2145,28 @@ LIMIT 1;`;
             ? `
           ,(
             SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id, 'variant', RFQ_P_V.variant,
-                'user_details', (
+             'user_details', (
                   SELECT json_build_object(
                     'user_id', U.id,
                     'name', U.name,
                     'company_name', C.company_name,
                     'email', U.email,
-                    'address', U.address,
+                    'address', (
+                      SELECT ARRAY_AGG(
+                        json_build_object(
+                          'address', TCL.address
+                        )
+                      )
+                      FROM tbl_company_location TCL
+                      WHERE TCL.company_id = U.company_id
+                    ),
                     'mobile', U.mobile
                   )
                   FROM tbl_users U
                   JOIN tbl_company C ON U.company_id = C.id
                   WHERE RFQ_P_V.user_id = U.id
                 )
+
               ))
             FROM tbl_rfq_product_vendors RFQ_P_V
             JOIN tbl_users U ON RFQ_P_V.user_id = U.id
@@ -2843,7 +2852,7 @@ LIMIT 2;
         U.name,
         U.email,
         U.mobile,
-        U.address,
+        CL.address,
         U.organization_name,
         C.company_name,
         ${
@@ -2860,6 +2869,7 @@ LIMIT 2;
         JOIN tbl_product_variant PV ON PVVM.product_variant_id = PV.id
         JOIN tbl_users U ON PVVM.vendor_id = U.id
         JOIN tbl_company C ON C.id = U.company_id
+        JOIN tbl_company_location CL ON C.id = CL.company_id
         LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.company_id = ${companyId}
   
         WHERE PVVM.product_variant_id = $1
@@ -2898,7 +2908,7 @@ LIMIT 2;
       throw error;
     }
   },
-  getVendorsByRfqProduct: async (rfq_product_id) => {
+ getVendorsByRfqProduct: async (rfq_product_id) => {
     try {
       let q = `
         SELECT 
@@ -2906,9 +2916,21 @@ LIMIT 2;
           U.name,
           U.email,
           U.mobile,
-          U.address,
           C.company_name,
-          COALESCE(RPV.is_rfq_viewed, 0) AS is_rfq_viewed
+          COALESCE(RPV.is_rfq_viewed, 0) AS is_rfq_viewed,
+          (
+            SELECT ARRAY_AGG(
+              json_build_object(
+                'address', CL.address,
+                'country', CL.country_id,
+                'state', CL.state_id,
+                'city', CL.city_id,
+                'postal_code', CL.postal_code
+              )
+            )
+            FROM tbl_company_location CL
+            WHERE CL.company_id = U.company_id
+          ) AS addresses
         FROM tbl_rfq_products RP
         JOIN tbl_rfq_product_vendors RPV ON RP.rfq_id = RPV.rfq_id 
           AND RP.product_variant_id = RPV.product_variant_id 
@@ -2917,6 +2939,7 @@ LIMIT 2;
         JOIN tbl_company C ON U.company_id = C.id
         WHERE RP.id = $1
           AND U.status = 1
+        GROUP BY U.id, U.name, U.email, U.mobile, C.company_name, RPV.is_rfq_viewed
         ORDER BY C.company_name
       `;
 
@@ -2925,6 +2948,7 @@ LIMIT 2;
       throw error;
     }
   },
+
   checkIfExists: async (table_name, parameter, db_con = db) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
 
@@ -2976,7 +3000,7 @@ LIMIT 2;
         });
     });
   },
-  getQuotesByRfqByIdByProduct: async (
+ getQuotesByRfqByIdByProduct: async (
     id,
     user_id,
     company_id,
@@ -3075,7 +3099,7 @@ LIMIT 2;
         'name', TU.name,
         'email', TU.email,
         'mobile', TU.mobile,
-        'address', TCL.address,
+        -- 'address', TCL.address,
 
         -- vendor-specific latest_target_price
         'latest_target_price', (
@@ -3126,7 +3150,7 @@ LIMIT 2;
     FROM tbl_quotes TQ
     JOIN tbl_users TU ON TU.id = TQ.created_by
     LEFT JOIN tbl_company TCC ON TCC.id = TU.company_id
-    LEFT JOIN tbl_company_location TCL ON TCC.id = TCL.company_id
+    -- LEFT JOIN tbl_company_location TCL ON TCC.id = TCL.company_id
     LEFT JOIN tbl_quote_finalization _TQF 
         ON _TQF.rfq_id = $1 
        AND _TQF.vendor_id = TU.id 
@@ -3153,7 +3177,7 @@ LIMIT 2;
                             'name', TU.name,
                             'email', TU.email,
                             'mobile', TU.mobile,
-                            'address', TCL.address,
+                            -- 'address', TCL.address,
                             'organization_name', COALESCE(TCC2.company_name, TU.organization_name, TU.name),
                             'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END),
                             'prev_worked', (SELECT 1
@@ -3166,6 +3190,7 @@ LIMIT 2;
                         ))
                         FROM tbl_users TU
                         LEFT JOIN tbl_company TCC2 ON TCC2.id = TU.company_id
+                        -- LEFT JOIN tbl_company_location TCL ON TCC2.id = TCL.company_id
                         LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant
                         WHERE TU.id = TQ.created_by
                         ${TA_Vendors === 'TA' ? vendorCondition : ''}
@@ -3485,13 +3510,14 @@ LIMIT 2;
                       'company_name', TC.company_name,
                       'email', TUU.email,
                       'mobile', TUU.mobile,
-                      'address', TCL.address,
+                      -- 'address', TCL.address,
                       'organization_name', TUU.organization_name
                     )
                     FROM tbl_users TUU
                     JOIN tbl_company TC ON TUU.company_id = TC.id
-                    JOIN tbl_company_location TCL ON TC.id = TCL.company_id
+                    -- JOIN tbl_company_location TCL ON TC.id = TCL.company_id
                     WHERE TUU.id = TQF.vendor_id
+                    LIMIT 1
                   )
                 )
                 FROM tbl_quote_finalization TQF
@@ -3520,7 +3546,7 @@ LIMIT 2;
                       'name', TU.name,
                       'email', TU.email,
                       'mobile', TU.mobile,
-                      'address', TCL3.address,
+                      -- 'address', TCL3.address,
                       'organization_name', COALESCE(TCC3.company_name, TU.organization_name, TU.name),
                       'prev_worked', (SELECT 1
                                         FROM tbl_rfq_product_vendors rpv
@@ -3532,8 +3558,9 @@ LIMIT 2;
                     )
                     FROM tbl_users TU
                     LEFT JOIN tbl_company TCC3 ON TCC3.id = TU.company_id
-                    LEFT JOIN tbl_company_location TCL3 ON TCC3.id = TCL3.company_id
+                    -- LEFT JOIN tbl_company_location TCL3 ON TCC3.id = TCL3.company_id
                     WHERE TU.id = TQ_INNER.created_by
+                    LIMIT 1
                   )
                 )
                 FROM tbl_quotes TQ_INNER

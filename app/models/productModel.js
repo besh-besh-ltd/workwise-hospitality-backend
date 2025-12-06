@@ -446,7 +446,7 @@ const productModel = {
   getVendorList: async (product_name) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT U.id,U.name as vendor_name,U.email,U.created_by,U.address,U.new_profile_image, C.profile as about, C.website,C.company_name, F.file_path as ptr_file,
+        `SELECT U.id,U.name as vendor_name,U.email,U.created_by,TCL.address,U.new_profile_image, C.profile as about, C.website,C.company_name, F.file_path as ptr_file,
         CASE
         WHEN U.new_profile_image IS NULL THEN
         NULL
@@ -459,6 +459,7 @@ const productModel = {
        
         FROM tbl_users U 
         LEFT JOIN tbl_company C ON C.user_id = U.id
+        LEFT JOIN tbl_company_location tcl ON tcl.company_id = C.id
         LEFT JOIN tbl_files F ON  U.id = F.user_id  AND F.doc_type = 'ptr'
          WHERE U.user_type = '3'  `
       )
@@ -471,6 +472,7 @@ const productModel = {
         });
     });
   },
+
   getCategoryListFront: async () => {
     return new Promise(function (resolve, reject) {
       db.any(
@@ -2339,8 +2341,9 @@ FROM (
   getUserDetail: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT U.name,U.email,U.address,U.new_profile_image,TC.website, TC.profile FROM tbl_users U
+        `SELECT U.name,U.email,TCL.address,U.new_profile_image,TC.website, TC.profile FROM tbl_users U
         LEFT JOIN tbl_company TC ON U.id = TC.user_id
+        LEFT JOIN tbl_company_location TCL ON TC.id = TCL.company_id
         WHERE U.id = $1`,
         [user_id]
       )

@@ -806,7 +806,7 @@ user_book_demo: async (mobile) => {
         });
     });
   },
- userinfo: async (user_id) => {
+  userinfo: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.one(
         'SELECT user_type, company_id FROM tbl_users WHERE id = $1',
@@ -815,13 +815,10 @@ user_book_demo: async (mobile) => {
         .then(function (userBasicInfo) {
           const { user_type, company_id } = userBasicInfo;
           
-          // For company admin (user_type 7) or vendor (user_type 3), show their own company details
-          // For other company users (user_type 2, 8, 9, 10), fetch company details from company admin
           let queryToExecute;
           let queryParams;
           
           if (user_type === 7 || user_type === 3) {
-            // Company admin or vendor - show their own company details
             queryToExecute = `
               SELECT tbl_users.*,
                   tbl_company.company_name,
@@ -837,19 +834,12 @@ user_book_demo: async (mobile) => {
                   tbl_company.cin,
                   tbl_company.logo,
                   tbl_company.website,
-                  tbl_company.established_year,
-                  tbl_location_states.state_name, 
-                  tbl_location_cities.city_name
+                  tbl_company.established_year
               FROM tbl_users 
-              LEFT JOIN tbl_company_location tcl on tcl.company_id = tbl_users.company_id
               LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
-              LEFT JOIN tbl_location_states ON tcl.state_id = tbl_location_states.id
-              LEFT JOIN tbl_location_cities ON tcl.city_id = tbl_location_cities.id
-              LEFT JOIN tbl_location_country ON tcl.country_id = tbl_location_country.id
               WHERE tbl_users.id = $1`;
             queryParams = [user_id];
           } else {
-            // Other company users - fetch company details from company admin (user_type 7)
             queryToExecute = `
               SELECT cu.*,
                   tbl_company.company_name,
@@ -865,35 +855,17 @@ user_book_demo: async (mobile) => {
                   tbl_company.cin,
                   tbl_company.logo,
                   tbl_company.website,
-                  tbl_company.established_year,
-                  admin_states.state_name, 
-                  admin_cities.city_name,
-                  tcl.address,
-                  tcl.postal_code,
-                  tcl.country_id,
-                  tcl.state_id,
-                  tcl.city_id,
-                  admin_countries.country_name
+                  tbl_company.established_year
               FROM (
-                SELECT tbl_users.*,
-                    tbl_location_states.state_name as current_user_state_name, 
-                    tbl_location_cities.city_name as current_user_city_name
+                SELECT tbl_users.*
                 FROM tbl_users 
-                LEFT JOIN tbl_company_location tcl on tcl.company_id = tbl_users.company_id
-                LEFT JOIN tbl_location_states ON tcl.state_id = tbl_location_states.id
-                LEFT JOIN tbl_location_cities ON tcl.city_id = tbl_location_cities.id
                 WHERE tbl_users.id = $1
               ) cu
               LEFT JOIN tbl_users admin_user ON (admin_user.company_id = $2 AND admin_user.user_type = 7)
-              LEFT JOIN tbl_company_location tcl on tcl.company_id = cu.company_id
-              LEFT JOIN tbl_company ON cu.company_id = tbl_company.id
-              LEFT JOIN tbl_location_states admin_states ON tcl.state_id = admin_states.id
-              LEFT JOIN tbl_location_cities admin_cities ON tcl.city_id = admin_cities.id
-              LEFT JOIN tbl_location_country admin_countries ON tcl.country_id = admin_countries.id`;
+              LEFT JOIN tbl_company ON cu.company_id = tbl_company.id`;
             queryParams = [user_id, company_id];
           }
 
-          // Execute the determined query
           db.one(queryToExecute, queryParams)
             .then(function (data) {
               resolve(data);
@@ -910,8 +882,7 @@ user_book_demo: async (mobile) => {
           reject(error);
         });
     });
-  }
-,
+  },
   userFileinfo: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.any('select * from tbl_files  where user_id = $1', [user_id])
@@ -957,7 +928,6 @@ user_book_demo: async (mobile) => {
       SELECT tbl_users.id as user_id,
        tbl_users.name as vendor_name,
        tbl_company.logo as profile_image,
-       tbl_users.address,
        tbl_users.status,
        tbl_users.whatsapp,
        tbl_company.id as company_id,
