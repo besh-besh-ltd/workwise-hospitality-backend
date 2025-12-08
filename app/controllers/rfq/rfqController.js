@@ -4334,6 +4334,9 @@ const rfqController = {
       let isNew = false;
 
       const sheet_id = req.body.sheet_id;
+      const variant_id = req.body.variant_id;
+
+      const globalFilters = req.body.filters;
 
       // Changes by Agnij 2025-06-17 [Improved handling of specific RFQ ID]
       // If rfq_id is provided in request, use that specific ID instead of creating a new draft
@@ -4468,18 +4471,60 @@ const rfqController = {
         }
       }
 
-      // if(product.isUnfoundProduct && product.unfoundName) {
-      //   let validationErrors = sheetData.validation_errors;
-      //   if(validationErrors && Array.isArray(validationErrors) && validationErrors.length > 0) {
-      //     const updatedErrors = validationErrors.filter(error => error.name != product.unfoundName);
 
-      //     const updatedSheetData = {
-      //       validation_errors: JSON.stringify(updatedErrors)
-      //     }
-      //     await rfqModel.update('tbl_rfq_draft_sheets', updatedSheetData, sheet_id);
-      //   }
-      // }
 
+      //Add global filters to sheet data
+      if (!globalFilters || typeof globalFilters !== "object") return;
+      else {
+        const extractors = {
+          country: (v) => v.map((x) => x.id),
+          state: (v) => v.map((x) => x.id),
+          city: (v) => v.map((x) => x.id),
+
+          approved_by_id: (v) => v.map((x) => x.id),
+
+          vendorType: (v) => v.map((x) => x.value),    // store "branch" only
+          productMakes: (v) => v,                      // store string array as-is
+
+          category_id: (v) => v,                       // direct ID
+          search_key: (v) => v,
+          vendor_name: (v) => v,
+          include_variants: (v) => v,
+
+          myVendorType: (v) => v,
+          prevWorkedWith: (v) => v,
+          // store object as JSON
+        };
+
+
+        console.log("checcking the logs here -------------", globalFilters);
+        for (const [key, rawValue] of Object.entries(globalFilters)) {
+          if (rawValue === null || rawValue === "" || rawValue?.length === 0) continue;
+
+          const extractor = extractors[key];
+          if (!extractor) continue; // skip unknown fields
+
+          const extracted = extractor(rawValue);
+
+          console.log(`Extracted filter - ${key}:`, extracted);
+
+          // Handle arrays → multiple inserts
+          const values = Array.isArray(extracted) ? extracted : [extracted];
+
+          for (const val of values) {
+            if (val === null || val === "" || val === undefined) continue;
+
+            const filterData = {
+              variant_id,
+              rfq_id,
+              type: key,
+              value: val,
+              user_id: req.user.id,
+            };
+            await rfqModel.insert("tbl_rfq_filters", filterData);
+          }
+        }
+      }
       res.status(200).json({
         status: 1,
         message: 'RFQ draft created/updated successfully',
@@ -4490,6 +4535,23 @@ const rfqController = {
       });
     } catch (error) {
       logError('Error while creating or updating RFQ with products:', error);
+      res.status(500).json({
+        status: 3,
+        message: 'An error occurred while processing your request'
+      });
+    }
+  },
+  fetchRfqFilters : async (req, res) => {
+    try {
+      const { rfq_id } = req.params;
+      const filters =  await rfqModel.findAll('tbl_rfq_filters', {rfq_id});
+      res.status(200).json({
+        status: 1,
+        message: 'RFQ filters fetched successfully',
+        data: filters
+      });
+    } catch (error) {
+      logError('Error while fetching RFQ filters:', error);
       res.status(500).json({
         status: 3,
         message: 'An error occurred while processing your request'

@@ -52,6 +52,13 @@ RfqRoutes.post(
   rfqController.createOrUpdateRfqDraftWithProductVendors
 );
 
+RfqRoutes.get(
+  '/fetch-rfq-filters/:rfq_id',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.fetchRfqFilters 
+)
+
 RfqRoutes.post(
   '/remove-vendor-from-draft',
   passportSignIn,
