@@ -464,6 +464,7 @@ WHERE NOT EXISTS (
               is_published, 
               status,
               reverse_auction,
+              is_tender,
               created_by, 
               updated_by, 
               bid_end_date,
@@ -487,7 +488,8 @@ WHERE NOT EXISTS (
               $13,
               $14,
               $15,
-              $16
+              $16,
+              $17
             )
             RETURNING id
           `;
@@ -509,6 +511,7 @@ WHERE NOT EXISTS (
             0,
             1,
             0,
+            data.is_tender !== undefined ? data.is_tender : 0,
             createdBy,
             createdBy,
             formattedDate,
@@ -634,10 +637,20 @@ WHERE NOT EXISTS (
             // Use id as user_id if user_id is not available
             const userId = vendor.user_id || vendor.id;
 
+            // Get vendor company name
+            const vendorCompany = await t.oneOrNone(
+              `SELECT c.company_name 
+               FROM tbl_users u
+               LEFT JOIN tbl_company c ON u.company_id = c.id
+               WHERE u.id = $1`,
+              [userId]
+            );
+            const vendorName = vendorCompany?.company_name || null;
+
             const vendorInsertionResult = await t.none(
-              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id)
-              VALUES ($1, $2, $3, $4, $5)`,
-              [rfq_id, product.product_id, product.variant, userId, sheet.id]
+              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id, vendor_name)
+              VALUES ($1, $2, $3, $4, $5, $6)`,
+              [rfq_id, product.product_id, product.variant, userId, sheet.id, vendorName]
             );
           }
         }
@@ -3100,6 +3113,18 @@ LIMIT 2;
         'email', TU.email,
         'mobile', TU.mobile,
         -- 'address', TCL.address,
+        'rfq_product_vendor_id', COALESCE(
+          RPV_ALL.id,
+          (
+            SELECT rpv_fallback.id
+            FROM tbl_rfq_product_vendors rpv_fallback
+            WHERE rpv_fallback.rfq_id = TRP.rfq_id
+              AND rpv_fallback.user_id = TU.id
+              AND rpv_fallback.product_variant_id = TRP.product_variant_id
+              AND rpv_fallback.variant = TRP.variant
+            LIMIT 1
+          )
+        ),
 
         -- vendor-specific latest_target_price
         'latest_target_price', (
@@ -3150,6 +3175,10 @@ LIMIT 2;
     FROM tbl_quotes TQ
     JOIN tbl_users TU ON TU.id = TQ.created_by
     LEFT JOIN tbl_company TCC ON TCC.id = TU.company_id
+    LEFT JOIN tbl_rfq_product_vendors RPV_ALL ON RPV_ALL.rfq_id = TRP.rfq_id 
+        AND RPV_ALL.user_id = TU.id 
+        AND RPV_ALL.product_variant_id = TRP.product_variant_id 
+        AND RPV_ALL.variant = TRP.variant
     -- LEFT JOIN tbl_company_location TCL ON TCC.id = TCL.company_id
     LEFT JOIN tbl_quote_finalization _TQF 
         ON _TQF.rfq_id = $1 
@@ -3171,7 +3200,7 @@ LIMIT 2;
                     'global_payment_term', TQ.global_payment_term,
                     'global_comment', TQ.global_comment,
 
-                    'vendor_details', (
+        'vendor_details', (
                         SELECT json_agg(json_build_object(
                             'id', TU.id,
                             'name', TU.name,
@@ -3179,6 +3208,18 @@ LIMIT 2;
                             'mobile', TU.mobile,
                             -- 'address', TCL.address,
                             'organization_name', COALESCE(TCC2.company_name, TU.organization_name, TU.name),
+                            'rfq_product_vendor_id', COALESCE(
+                              RPV.id,
+                              (
+                                SELECT rpv_fallback.id
+                                FROM tbl_rfq_product_vendors rpv_fallback
+                                WHERE rpv_fallback.rfq_id = TRP.rfq_id
+                                  AND rpv_fallback.user_id = TU.id
+                                  AND rpv_fallback.product_variant_id = TRP.product_variant_id
+                                  AND rpv_fallback.variant = TRP.variant
+                                LIMIT 1
+                              )
+                            ),
                             'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END),
                             'prev_worked', (SELECT 1
                                               FROM tbl_rfq_product_vendors rpv
@@ -3191,6 +3232,10 @@ LIMIT 2;
                         FROM tbl_users TU
                         LEFT JOIN tbl_company TCC2 ON TCC2.id = TU.company_id
                         -- LEFT JOIN tbl_company_location TCL ON TCC2.id = TCL.company_id
+                        LEFT JOIN tbl_rfq_product_vendors RPV ON RPV.rfq_id = TRP.rfq_id 
+                            AND RPV.user_id = TU.id 
+                            AND RPV.product_variant_id = TRP.product_variant_id 
+                            AND RPV.variant = TRP.variant
                         LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant
                         WHERE TU.id = TQ.created_by
                         ${TA_Vendors === 'TA' ? vendorCondition : ''}
@@ -7030,7 +7075,8 @@ ORDER BY m.created_at;
                                     'vendor_name', vendor_name,
                                     'vendor_email', vendor_email,
                                     'is_cleared', is_cleared,
-                                    'evaluated_by', evaluated_by
+                                    'evaluated_by', evaluated_by,
+                                    'rfq_product_vendor_id', rfq_product_vendor_id
                             )
                     ) AS vendors
                 FROM (
@@ -7044,6 +7090,7 @@ ORDER BY m.created_at;
                                       tu.email AS vendor_email,
                                       rc.status AS is_cleared,
                                       _TU.name AS evaluated_by,
+                                      rpv.id AS rfq_product_vendor_id,
                                       ROW_NUMBER() OVER (
                                           PARTITION BY te.rfq_id, te.tbl_rfq_product_id, tu.id
                                           ORDER BY te.id
@@ -7057,6 +7104,13 @@ ORDER BY m.created_at;
                                                 ON vr.vendor_id = tu.id
                                             LEFT JOIN tbl_company tc
                                                       ON tc.id = tu.company_id
+                                            LEFT JOIN tbl_rfq_products trp
+                                                      ON trp.id = te.tbl_rfq_product_id
+                                            LEFT JOIN tbl_rfq_product_vendors rpv
+                                                      ON rpv.rfq_id = te.rfq_id
+                                                          AND rpv.user_id = tu.id
+                                                          AND rpv.product_variant_id = trp.product_variant_id
+                                                          AND rpv.variant = trp.variant
                                             LEFT JOIN tbl_rfq_product_tech_evaluation_cleared_vendors rc
                                                       ON rc.tbl_rfq_product_tech_evaluation_id = te.id
                                                           AND rc.vendor_id = tu.id
@@ -8871,7 +8925,8 @@ ORDER BY tq.timestamp DESC;
         rpv.user_id,
         rp.product_variant_id,
         pv.name as product_name,
-        rpv.variant
+        rpv.variant,
+        rpv.id as rfq_product_vendor_id
       FROM tbl_rfq_product_vendors rpv
       JOIN tbl_rfq_products rp ON rp.rfq_id = rpv.rfq_id 
         AND rp.product_variant_id = rpv.product_variant_id 
@@ -8908,12 +8963,14 @@ ORDER BY tq.timestamp DESC;
       rd.bid_end_date as rfq_deadline,
       u.id as user_id,
       COALESCE(u.organization_name, u.name) as vendor_name,
+      MIN(vp.rfq_product_vendor_id) as rfq_product_vendor_id,
       ${contactSelect}
       json_agg(
         json_build_object(
           'product_id', vp.product_variant_id,
           'name', vp.product_name,
-          'variant', vp.variant
+          'variant', vp.variant,
+          'rfq_product_vendor_id', vp.rfq_product_vendor_id
         )
       ) FILTER (WHERE vp.product_variant_id IS NOT NULL) as remaining_products
     FROM rfq_data rd
@@ -8961,6 +9018,7 @@ ORDER BY tq.timestamp DESC;
       const vendors = result.map((row) => ({
         user_id: row.user_id,
         vendor_name: row.vendor_name,
+        rfq_product_vendor_id: row.rfq_product_vendor_id || null,
         email: row.email || null,
         mobile: row.mobile || null,
         organization_name: row.organization_name || null,

@@ -1407,6 +1407,13 @@ const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) =>
   if (!vendor?.user_id || !(vendor.remainingProducts || []).length) return;
   if (!vendor.token) return;
 
+  // Get rfq_product_vendor_id from vendor data if available
+  // For reminders, we use the first product's vendor code, or fallback to user_id
+  const rfqProductVendorId = vendor.rfq_product_vendor_id || 
+    (vendor.remainingProducts && vendor.remainingProducts.length > 0 && vendor.remainingProducts[0].rfq_product_vendor_id) ||
+    null;
+  const vendorCode = rfqProductVendorId ? `VEN-${rfqProductVendorId}` : (vendor.user_id ? `VEN-${vendor.user_id}` : 'VEN-Unknown');
+  
   const vendorName =
     vendor.company_name ||
     vendor.organization_name ||
@@ -1427,7 +1434,7 @@ const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) =>
     )
     .join('');
 
-  const headerContent = `<h2>Hello ${vendorName},</h2>`;
+  const headerContent = `<h2>Hello ${vendorCode},</h2>`;
 
   const containerContent = ` 
       <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
@@ -1525,7 +1532,7 @@ const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) =>
     }
   };
   const payload = {
-    title: `Hello ${vendor.vendor_name || vendor.name || vendorName}`,
+    title: `Hello ${vendorCode}`,
     body: `RFQ Response Pending `
   };
 
@@ -2291,6 +2298,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       terms,
       rfq_type,
       reverse_auction,
+      is_tender,
       ra_start_date,
       ra_end_date,
       project_id,
@@ -2310,6 +2318,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       location,
       rfq_type,
       reverse_auction,
+      is_tender: is_tender !== undefined ? is_tender : 0,
       ra_start_date: reverse_auction == 1 ? ra_start_date : null,
       ra_end_date: reverse_auction == 1 ? ra_end_date : null,
       is_published: 0,
@@ -4376,6 +4385,7 @@ const rfqController = {
           bid_end_date:
             req.body.bid_end_date || bidEndDate.toISOString().split('T')[0],
           location: req.body.location || '',
+          is_tender: req.body.is_tender !== undefined ? req.body.is_tender : 0,
           is_published: 0,
           created_by: user_id,
           updated_by: user_id,
@@ -4441,12 +4451,23 @@ const rfqController = {
       await rfqModel.insert('tbl_rfq_products', productData);
 
       const vendorPromises = product.vendors.map(async (vendor) => {
+        // Get vendor company name
+        const vendorCompany = await db.oneOrNone(
+          `SELECT c.company_name 
+           FROM tbl_users u
+           LEFT JOIN tbl_company c ON u.company_id = c.id
+           WHERE u.id = $1`,
+          [vendor.vendor_id]
+        );
+        const vendorName = vendorCompany?.company_name || null;
+
         const vendorData = {
           rfq_id,
           product_variant_id: product.variant_id,
           user_id: vendor.vendor_id,
           variant: variant,
-          sheet_id
+          sheet_id,
+          vendor_name: vendorName
         };
         return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
       });
@@ -4557,11 +4578,22 @@ const rfqController = {
       }
 
       const vendorPromises = product.vendors.map(async (vendor) => {
+        // Get vendor company name
+        const vendorCompany = await db.oneOrNone(
+          `SELECT c.company_name 
+           FROM tbl_users u
+           LEFT JOIN tbl_company c ON u.company_id = c.id
+           WHERE u.id = $1`,
+          [vendor]
+        );
+        const vendorName = vendorCompany?.company_name || null;
+
         const vendorData = {
           rfq_id,
           product_variant_id: product.variant_id,
           user_id: vendor,
-          variant: variant
+          variant: variant,
+          vendor_name: vendorName
         };
         return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
       });
