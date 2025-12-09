@@ -61,7 +61,7 @@ user_book_demo: async (mobile) => {
           // ------------------------------
           const userFields = [
             "name", "email", "mobile", "created_by", "updated_by",
-            "status", "user_type", "password", "address", "country",
+            "status", "user_type", "password",
             "whatsapp", "state", "city", "postal_code", "subscription_plan_id"
           ];
           const userValues = userFields.map(f => user_data?.[f] ?? null);
@@ -841,9 +841,8 @@ user_book_demo: async (mobile) => {
                   tbl_company.cin,
                   tbl_company.logo,
                   tbl_company.website,
-                  tbl_company.established_year
-                  COALESCE(tbl_company.is_hospitality, 0) AS is_hospitality,
-
+                  tbl_company.established_year,
+                  COALESCE(tbl_company.is_hospitality, 0) AS is_hospitality
               FROM tbl_users 
               LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
               WHERE tbl_users.id = $1`;
@@ -4008,8 +4007,54 @@ getBuyerAccountLimits: async (company_id) => {
   });
 },
 
-
-
+  saveVendorDocument: async (vendorId, documentType, documentUrl, documentNumber = null, bankDetails = null) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const query = `
+          INSERT INTO tbl_vendor_documents (
+            vendor_id, 
+            document_type, 
+            document_url, 
+            document_number,
+            bank_account_number,
+            bank_name,
+            ifsc_code,
+            account_holder_name,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+          ON CONFLICT (vendor_id, document_type) 
+          DO UPDATE SET
+            document_url = EXCLUDED.document_url,
+            document_number = EXCLUDED.document_number,
+            bank_account_number = EXCLUDED.bank_account_number,
+            bank_name = EXCLUDED.bank_name,
+            ifsc_code = EXCLUDED.ifsc_code,
+            account_holder_name = EXCLUDED.account_holder_name,
+            updated_at = NOW()
+          RETURNING id
+        `;
+        
+        const values = [
+          vendorId,
+          documentType,
+          documentUrl,
+          documentNumber,
+          bankDetails?.bank_account_number || null,
+          bankDetails?.bank_name || null,
+          bankDetails?.ifsc_code || null,
+          bankDetails?.account_holder_name || null
+        ];
+        
+        const result = await db.one(query, values);
+        resolve(result);
+      } catch (error) {
+        console.error('Error saving vendor document:', error);
+        reject(error);
+      }
+    });
+  },
 
 };
 

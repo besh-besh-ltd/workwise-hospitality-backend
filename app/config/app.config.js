@@ -305,7 +305,7 @@ const config = {
   )}.txt`,
 
   transportConfig: {
-    host: "smtp-relay.brevo.com",
+    host: "smtp.gmail.com",
     port: 587,
     auth: {
       user: process.env.SMTP_EMAIL || "test b2bportal2023@gmail.com",

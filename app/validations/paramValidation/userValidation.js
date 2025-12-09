@@ -300,14 +300,28 @@ const schemas = {
     website: Joi.string().optional().allow(null).allow(''),
     is_private: Joi.number().optional().allow(null),
     is_hospitality: Joi.number().valid(0, 1).optional().allow(null),
-    hotels: Joi.array()
-      .items(Joi.number().integer().positive())
+    hotels: Joi.alternatives()
+      .try(
+        Joi.array().items(Joi.number().integer().positive()),
+        Joi.string()
+      )
       .optional()
       .allow(null),
     categories: Joi.array()
       .items(Joi.number().integer().positive())
       .optional()
       .allow(null),
+    subcategories: Joi.array()
+      .items(Joi.number().integer().positive())
+      .optional()
+      .allow(null),
+    pan: Joi.string().optional().allow(null).allow(''),
+    fssai: Joi.string().optional().allow(null).allow(''),
+    msme: Joi.string().optional().allow(null).allow(''),
+    bank_account_number: Joi.string().optional().allow(null).allow(''),
+    bank_name: Joi.string().optional().allow(null).allow(''),
+    ifsc_code: Joi.string().optional().allow(null).allow(''),
+    account_holder_name: Joi.string().optional().allow(null).allow(''),
     // Additional fields for buyer registration
     max_top_management: Joi.number().optional().allow(null),
     max_procurement: Joi.number().optional().allow(null),
@@ -1081,5 +1095,6 @@ export {
   validateParam,
   validateBodyController,
   schemas,
-  schema_posts
+  schema_posts,
+  store_vendor_document
 };

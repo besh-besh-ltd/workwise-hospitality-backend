@@ -6,8 +6,10 @@ import {
   validateBody,
   validateParam,
   schemas,
-  schema_posts
+  schema_posts,
+  store_vendor_document
 } from '../../validations/paramValidation/userValidation.js';
+import multer from 'multer';
 import { validateDbBody } from '../../validations/dbValidation/userDbValidation.js';
 import { acl } from '../../helper/common.js';
 import passport from '../../middleware/passport.js';
@@ -65,6 +67,13 @@ UsersRoutes.post(
 );
 UsersRoutes.post(
   '/company-registration',
+  multer({ storage: store_vendor_document }).fields([
+    { name: 'pan', maxCount: 1 },
+    { name: 'gst', maxCount: 1 },
+    { name: 'msme', maxCount: 1 },
+    { name: 'fssai', maxCount: 1 },
+    { name: 'cancelled_cheque', maxCount: 1 }
+  ]),
   validateBody(schemas.company_registration),
   validateDbBody.user_exists,
   UsersController.company_registration

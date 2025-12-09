@@ -230,7 +230,7 @@ const UsersController = {
 
   company_registration: async (req, res, next) => {
     try {
-      const {
+      let {
         name,
         email,
         mobile,
@@ -259,8 +259,34 @@ const UsersController = {
         status,
         is_hospitality,
         hotels,
-        categories
+        categories,
+        subcategories,
+        pan,
+        fssai,
+        msme,
+        bank_account_number,
+        bank_name,
+        ifsc_code,
+        account_holder_name
       } = req.body;
+
+      // Parse JSON strings for arrays sent via multipart/form-data
+      const parseMaybeJsonArray = (val) => {
+        if (Array.isArray(val)) return val;
+        if (typeof val === 'string') {
+          try {
+            const parsed = JSON.parse(val);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        }
+        return [];
+      };
+
+      categories = parseMaybeJsonArray(categories);
+      subcategories = parseMaybeJsonArray(subcategories);
+      hotels = parseMaybeJsonArray(hotels);
 
       const current_user = req.user || null;
 
@@ -320,39 +346,124 @@ const UsersController = {
         } else if (user_type == 3 && company_id) {
         await continueVendorCompanyRegistration(req.body, company_id);
         
-        // For hospitality vendors, map them to buyer companies of selected hotels
-        if (is_hospitality !== undefined && parseInt(is_hospitality, 10) === 1 && hotels && Array.isArray(hotels) && hotels.length > 0) {
+        // For hospitality vendors, handle documents, bank details, and mappings
+        if (is_hospitality !== undefined && parseInt(is_hospitality, 10) === 1) {
           try {
-            // Get unique buyer company IDs from selected hotels
-            const hotelIds = hotels.filter(id => id && !isNaN(parseInt(id, 10))).map(id => parseInt(id, 10));
-            if (hotelIds.length > 0) {
-              const hotelRecords = await hospitalityModel.getHotelsByIds(hotelIds);
-              const buyerCompanyIds = new Set();
-              
-              for (const hotel of hotelRecords) {
-                // Get hospitality company for this hotel
-                const hospitalityCompany = await hospitalityModel.getCompanyById(hotel.hospitality_company_id);
-                if (hospitalityCompany && hospitalityCompany.buyer_company_id) {
-                  buyerCompanyIds.add(hospitalityCompany.buyer_company_id);
+            // Save vendor documents
+            const documentPromises = [];
+            
+            // PAN document (mandatory)
+            if (req.files?.pan && req.files.pan[0]?.location) {
+              documentPromises.push(
+                userModel.saveVendorDocument(user_id, 'pan', req.files.pan[0].location, pan || null)
+              );
+            }
+            
+            // GST document (if GST number provided)
+            if (gstin && req.files?.gst && req.files.gst[0]?.location) {
+              documentPromises.push(
+                userModel.saveVendorDocument(user_id, 'gst', req.files.gst[0].location, gstin)
+              );
+            }
+            
+            // MSME document (if MSME number provided)
+            if (msme && req.files?.msme && req.files.msme[0]?.location) {
+              documentPromises.push(
+                userModel.saveVendorDocument(user_id, 'msme', req.files.msme[0].location, msme)
+              );
+            }
+            
+            // FSSAI document (if FSSAI number provided)
+            if (fssai && req.files?.fssai && req.files.fssai[0]?.location) {
+              documentPromises.push(
+                userModel.saveVendorDocument(user_id, 'fssai', req.files.fssai[0].location, fssai)
+              );
+            }
+            
+            // Cancelled cheque (mandatory)
+            if (req.files?.cancelled_cheque && req.files.cancelled_cheque[0]?.location) {
+              documentPromises.push(
+                userModel.saveVendorDocument(user_id, 'cancelled_cheque', req.files.cancelled_cheque[0].location, null)
+              );
+            }
+            
+            // Bank account details (mandatory)
+            if (bank_account_number && bank_name && ifsc_code && account_holder_name) {
+              documentPromises.push(
+                userModel.saveVendorDocument(user_id, 'bank_account', null, null, {
+                  bank_account_number,
+                  bank_name,
+                  ifsc_code,
+                  account_holder_name
+                })
+              );
+            }
+            
+            await Promise.all(documentPromises);
+            
+            // Bulk map variants for selected subcategories
+            if (subcategories && Array.isArray(subcategories) && subcategories.length > 0) {
+              try {
+                const subcategoryIds = subcategories.filter(id => id && !isNaN(parseInt(id, 10))).map(id => parseInt(id, 10));
+                if (subcategoryIds.length > 0) {
+                  // Get all product variants for these subcategories
+                  const variants = await rfqModel.getProductsByCategories(subcategoryIds.map(id => ({ id })));
+                  
+                  if (variants && variants.length > 0) {
+                    // Prepare mappings for bulk insert
+                    const mappings = variants.map(v => ({
+                      variant_id: v.variant_id,
+                      vendor_id: user_id,
+                      approved_by: [],
+                      make_list: []
+                    }));
+                    
+                    // Bulk insert variant-vendor mappings
+                    const mappingResult = await productModel.bulkInsertVariantVendorMappings(mappings, user_id);
+                    console.log(`[HOSPITALITY] Bulk mapped ${mappingResult.inserted} variants to vendor ${user_id}`);
+                  }
                 }
-              }
-              
-              // Map vendor to each unique buyer company
-              for (const buyerCompanyId of buyerCompanyIds) {
-                // Get a buyer user from this company to use as created_by
-                const buyerUsers = await userModel.getCompanyUsers(buyerCompanyId);
-                const createdBy = buyerUsers && buyerUsers.length > 0 ? buyerUsers[0].id : null;
-                
-                if (createdBy) {
-                  await userModel.mapBuyerToVendor(createdBy, user_id);
-                  console.log(`[HOSPITALITY] Mapped vendor ${user_id} to buyer company ${buyerCompanyId}`);
-                }
+              } catch (variantMappingError) {
+                console.error('[HOSPITALITY] Error bulk mapping variants:', variantMappingError);
+                logError(variantMappingError);
+                // Don't fail registration if variant mapping fails
               }
             }
-          } catch (mappingError) {
-            console.error('[HOSPITALITY] Error mapping vendor to buyer companies:', mappingError);
-            logError(mappingError);
-            // Don't fail registration if mapping fails - vendor is still registered
+            
+            // Map vendor to buyer companies of selected hotels
+            if (hotels && Array.isArray(hotels) && hotels.length > 0) {
+              try {
+                const hotelIds = hotels.filter(id => id && !isNaN(parseInt(id, 10))).map(id => parseInt(id, 10));
+                if (hotelIds.length > 0) {
+                  const hotelRecords = await hospitalityModel.getHotelsByIds(hotelIds);
+                  const buyerCompanyIds = new Set();
+                  
+                  for (const hotel of hotelRecords) {
+                    const hospitalityCompany = await hospitalityModel.getCompanyById(hotel.hospitality_company_id);
+                    if (hospitalityCompany && hospitalityCompany.buyer_company_id) {
+                      buyerCompanyIds.add(hospitalityCompany.buyer_company_id);
+                    }
+                  }
+                  
+                  for (const buyerCompanyId of buyerCompanyIds) {
+                    const buyerUsers = await userModel.getCompanyUsers(buyerCompanyId);
+                    const createdBy = buyerUsers && buyerUsers.length > 0 ? buyerUsers[0].id : null;
+                    
+                    if (createdBy) {
+                      await userModel.mapBuyerToVendor(createdBy, user_id);
+                      console.log(`[HOSPITALITY] Mapped vendor ${user_id} to buyer company ${buyerCompanyId}`);
+                    }
+                  }
+                }
+              } catch (mappingError) {
+                console.error('[HOSPITALITY] Error mapping vendor to buyer companies:', mappingError);
+                logError(mappingError);
+              }
+            }
+          } catch (hospitalityError) {
+            console.error('[HOSPITALITY] Error processing hospitality vendor data:', hospitalityError);
+            logError(hospitalityError);
+            // Don't fail registration if hospitality processing fails
           }
         }
       }
