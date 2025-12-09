@@ -427,38 +427,77 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         });
     });
   },
-  getLocationsByCompanyId: async (company_id) => {
-    try {
-      const query = `
-        SELECT 
-          l.id,
-          l.company_id,
-          l.address,
-          l.postal_code,
-          l.country_id,
-          c.country_name,
-          l.state_id,
-          s.state_name,
-          l.city_id,
-          ci.city_name,
-          l.created_at,
-          l.updated_at
-        FROM tbl_company_location l
-        LEFT JOIN tbl_location_country c ON l.country_id = c.id
-        LEFT JOIN tbl_location_states s ON l.state_id = s.id
-        LEFT JOIN tbl_location_cities ci ON l.city_id = ci.id
-        WHERE l.company_id = $1
-        ORDER BY l.id DESC;
+getLocationsByCompanyId: async (company_id, user_type = 2) => {
+  try {
+    let selectSpoc = "";
+    let joinSpoc = "";
+    let groupSpoc = "";
+
+    if (user_type == 3) {
+
+      selectSpoc = `,
+        COALESCE(
+          json_agg(
+            DISTINCT jsonb_build_object(
+              'spoc_id', us.id,
+              'spoc_name', us.name,
+              'spoc_email', us.email,
+              'spoc_mobile', us.mobile
+            )
+          ) FILTER (WHERE us.id IS NOT NULL),
+        '[]') AS spocs
       `;
 
-      const result = await db.any(query, [company_id]);
-      return result;
+      joinSpoc = `
+        LEFT JOIN tbl_spoc_location_mapping slm ON l.id = slm.location_id
+        LEFT JOIN tbl_users_spoc us ON slm.spoc_id = us.id
+      `;
 
-    } catch (error) {
-      console.error("Error fetching vendor locations with join:", error);
-      throw error;
+      groupSpoc = `,
+        us.id, us.name, us.email, us.mobile
+      `;
     }
-  },
+
+    const query = `
+      SELECT 
+        l.id,
+        l.company_id,
+        l.address,
+        l.postal_code,
+        l.country_id,
+        c.country_name,
+        l.state_id,
+        s.state_name,
+        l.city_id,
+        ci.city_name,
+        l.created_at,
+        l.updated_at
+        ${selectSpoc}
+      FROM tbl_company_location l
+      LEFT JOIN tbl_location_country c ON l.country_id = c.id
+      LEFT JOIN tbl_location_states s ON l.state_id = s.id
+      LEFT JOIN tbl_location_cities ci ON l.city_id = ci.id
+      ${joinSpoc}
+      WHERE l.company_id = $1
+      GROUP BY 
+        l.id, l.company_id, l.address, l.postal_code,
+        l.country_id, c.country_name,
+        l.state_id, s.state_name,
+        l.city_id, ci.city_name,
+        l.created_at, l.updated_at
+      ORDER BY l.id DESC;
+    `;
+
+    const result = await db.any(query, [company_id]);
+    return result;
+
+  } catch (error) {
+    console.error("Error fetching vendor locations:", error);
+    throw error;
+  }
+},
+
+
 
   getFiles: async (vendorId) => {
     return new Promise(function (resolve, reject) {

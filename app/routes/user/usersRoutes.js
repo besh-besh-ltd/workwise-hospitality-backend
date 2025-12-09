@@ -299,6 +299,12 @@ UsersRoutes.delete(
   // acl([2,8,3]),
   vendorController.deleteVendorLocation //utilising same controller as defined in admin routes.
 )
+UsersRoutes.post(
+  '/map-spoc-location',
+  passportSignIn,
+  // acl([2,8,3]),
+  vendorController.mapSpocToLocation 
+)
 
 UsersRoutes.put(
   '/update-buyer-vendor-location',

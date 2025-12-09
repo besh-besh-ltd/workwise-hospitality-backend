@@ -515,8 +515,17 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     const company_id = req.params.id;
 
     // console.log("company_id", company_id)
-    const locations = await vendorModel.getLocationsByCompanyId(company_id);
+    let locations;
+    const user_type = req.user.user_type; // Get the user type from the request object
+    console.log("user_type", user_type)
+    if(user_type ==3){
+      // If the user is a vendor, ensure to pick the spocs as well.
+    locations = await vendorModel.getLocationsByCompanyId(company_id, user_type);
 
+    }
+    else{
+    locations = await vendorModel.getLocationsByCompanyId(company_id);
+  }
     return res.status(200).json({
       status: 1,
       data: locations
@@ -598,6 +607,57 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       });
     }
   },
+
+  mapSpocToLocation : async (req, res, next) => {
+    try {
+      const { spoc_id, location_id } = req.body;
+       
+      if (!spoc_id || !location_id) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Please provide spoc_id and location_id'
+        });
+      }
+             //Delete the existing mapping if there any
+              await rfqModel.delete('tbl_spoc_location_mapping', { location_id });
+
+             //Insert the new mapping
+              const spocLocationCS = new pgp.helpers.ColumnSet(
+              ["spoc_id", "location_id", "assigned_by"],
+              { table: "tbl_spoc_location_mapping" }
+            );
+
+            let locationData = [];
+
+            for (const spoc of spoc_id) {
+              locationData.push({
+                spoc_id: spoc,
+                location_id,
+                assigned_by: req.user.id,
+              });
+            }
+
+            await rfqModel.insertArray(
+              locationData,
+              spocLocationCS,
+              "tbl_spoc_location_mapping"
+            );
+
+
+   
+      return res.status(200).json({
+        status: 1,
+        message: 'Location mapped successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
+    }
+  },
+
 
   deleteVendor: async (req, res, next) => {
     try {
