@@ -3121,7 +3121,7 @@ LIMIT 2;
             WHERE rpv_fallback.rfq_id = TRP.rfq_id
               AND rpv_fallback.user_id = TU.id
               AND rpv_fallback.product_variant_id = TRP.product_variant_id
-              AND rpv_fallback.variant = TRP.variant
+              AND COALESCE(rpv_fallback.variant, 0) = COALESCE(TRP.variant, 0)
             LIMIT 1
           )
         ),
@@ -3178,7 +3178,7 @@ LIMIT 2;
     LEFT JOIN tbl_rfq_product_vendors RPV_ALL ON RPV_ALL.rfq_id = TRP.rfq_id 
         AND RPV_ALL.user_id = TU.id 
         AND RPV_ALL.product_variant_id = TRP.product_variant_id 
-        AND RPV_ALL.variant = TRP.variant
+        AND COALESCE(RPV_ALL.variant, 0) = COALESCE(TRP.variant, 0)
     -- LEFT JOIN tbl_company_location TCL ON TCC.id = TCL.company_id
     LEFT JOIN tbl_quote_finalization _TQF 
         ON _TQF.rfq_id = $1 
@@ -3216,7 +3216,7 @@ LIMIT 2;
                                 WHERE rpv_fallback.rfq_id = TRP.rfq_id
                                   AND rpv_fallback.user_id = TU.id
                                   AND rpv_fallback.product_variant_id = TRP.product_variant_id
-                                  AND rpv_fallback.variant = TRP.variant
+                                  AND COALESCE(rpv_fallback.variant, 0) = COALESCE(TRP.variant, 0)
                                 LIMIT 1
                               )
                             ),
