@@ -3593,6 +3593,15 @@ LIMIT 2;
                       'mobile', TU.mobile,
                       -- 'address', TCL3.address,
                       'organization_name', COALESCE(TCC3.company_name, TU.organization_name, TU.name),
+                      'rfq_product_vendor_id', (
+                        SELECT rpv.id
+                        FROM tbl_rfq_product_vendors rpv
+                        WHERE rpv.rfq_id = $1
+                          AND rpv.user_id = TU.id
+                          AND rpv.product_variant_id = TQI.product_variant_id
+                          AND COALESCE(rpv.variant, 0) = COALESCE(TQI.variant, 0)
+                        LIMIT 1
+                      ),
                       'prev_worked', (SELECT 1
                                         FROM tbl_rfq_product_vendors rpv
                                         JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
