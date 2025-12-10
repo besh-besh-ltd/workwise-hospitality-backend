@@ -517,8 +517,8 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     // console.log("company_id", company_id)
     let locations;
     const user_type = req.user.user_type; // Get the user type from the request object
-    console.log("user_type", user_type)
-    if(user_type ==3){
+
+    if(user_type ==3 || user_type == 1){
       // If the user is a vendor, ensure to pick the spocs as well.
     locations = await vendorModel.getLocationsByCompanyId(company_id, user_type);
 

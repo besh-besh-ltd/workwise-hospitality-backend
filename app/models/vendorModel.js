@@ -433,7 +433,7 @@ getLocationsByCompanyId: async (company_id, user_type = 2) => {
     let joinSpoc = "";
     let groupSpoc = "";
 
-    if (user_type == 3) {
+    if (user_type == 3 || user_type == 1) { // For vendor or admin users, include SPOC details
 
       selectSpoc = `,
         COALESCE(
@@ -497,9 +497,7 @@ getLocationsByCompanyId: async (company_id, user_type = 2) => {
   }
 },
 
-
-
-  getFiles: async (vendorId) => {
+ getFiles: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.any('SELECT * FROM tbl_files WHERE user_id = $1', [vendorId])
         .then(function (data) {
