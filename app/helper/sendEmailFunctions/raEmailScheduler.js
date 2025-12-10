@@ -160,7 +160,7 @@ export const raSchedulerForBuyer = async (rfqNumber, req, products) => {
 };
 
 export const raSchedulerForVendor = async (req, rfqNumber, productVendormap) => {
-    console.log("Reverse Auction Scheduler is running...");
+    
 
     const { ra_start_date, ra_end_date, company_name } = req.body;
 
@@ -183,10 +183,10 @@ export const raSchedulerForVendor = async (req, rfqNumber, productVendormap) => 
                 continue;
             }
 
-            const spocList = await vendorModel.getSpocDetails(vendor.vendorDetails.user_id);
+            const spocList = await vendorModel.getSpocDetails(vendor.vendorDetails.user_id , rfqNumber);
             const token = await rfqModel.getVendorRfqToken(vendor.vendorDetails.user_id, rfqNumber);
 
-            console.log("logging here the console data and spoc list here", token, spocList);
+            // console.log("logging here the console data and spoc list here", token, spocList);
 
             const vendorObject = {
                 vendorDetails: {

@@ -630,7 +630,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
 
    
     const user_details = await userModel.user_profile_detail(vendor.user_id);
-    const spocList = await vendorModel.getSpocDetails(vendor.user_id);
+    const spocList = await vendorModel.getSpocDetails(vendor.user_id, rfqNumber);
 
     if (user_details.length > 0) {
       // Insert token into the table and get the token value
@@ -750,6 +750,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
       }).join(', ');
 
       sendMail(mailRecipients);
+      // console.log('Email send to follwowing people' , mailRecipients.to);
 
       // Send WhatsApp notifications to SPOCs
       await Promise.allSettled(
@@ -856,10 +857,10 @@ const sendMailToVendorsForTargetPrice = async (
     const VendorList = vendorList[0]?.created_by || [];
 
     const buyer_details = await userModel.user_profile_detail(buyer_id);
-    console.log("checking the buyer details", buyer_details);
+    // console.log("checking the buyer details", buyer_details);
     for (const vendor of VendorList) {
       try {
-        const spocList = await vendorModel.getSpocDetails(vendor.id);
+        const spocList = await vendorModel.getSpocDetails(vendor.id, rfq_id);
         const token = await rfqModel.insertVendorRfqToken(vendor.id, rfq_id);
 
         // Create product HTML content
@@ -938,7 +939,7 @@ const sendMailToVendorsForTargetPrice = async (
         // Send the email
         sendMail(mailRecipients);
 
-        console.log(`Email sent successfully to vendor: ${vendor.name}`);
+        // console.log(`Email sent successfully to vendor: ${vendor.name}`);
       } catch (vendorError) {
         console.error(
           `Error sending email to vendor ${vendor.id}:`,
@@ -1080,7 +1081,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
 const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_no) => {
   
   const token = await rfqModel.getVendorRfqToken(user.id, rfq_id);
-  const spocList = await vendorModel.getSpocDetails(user.id)
+  const spocList = await vendorModel.getSpocDetails(user.id , rfq_id);
 
   // Extract vendor details from user object
   const vendorName = user.company_name || user.organization_name || user?.name;
@@ -1267,7 +1268,7 @@ const sendQuoteNotificationToVendor = async (req) => {
   
     const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
-  const spocList = await vendorModel.getSpocDetails(id)
+  const spocList = await vendorModel.getSpocDetails(id , rfq_id);
 
   // console.log(" rfq contoller 569 spoc console  ", id, spocList)
 
@@ -1678,7 +1679,7 @@ const sendQuoteNotificationEmail = async (req) => {
        const { name, email, vendor_id } = vendor;
 
        // Fetch vendor's SPOC details and token
-       const spocs = await vendorModel.getSpocDetails(vendor_id);
+       const spocs = await vendorModel.getSpocDetails(vendor_id , rfq_id);
        const tokenData = await rfqModel.getVendorRfqToken(vendor_id, rfq_id);
        const token = tokenData.length > 0 ? tokenData[0].token : '';
 
@@ -1731,7 +1732,7 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
     const rfq_id = rfq_no.id;
 
     try {
-      const spocList = await vendorModel.getSpocDetails(vendor.vendor_id);
+      const spocList = await vendorModel.getSpocDetails(vendor.vendor_id , rfq_id);
       const token = await rfqModel.insertVendorRfqToken(vendor.vendor_id, rfq_id);
 
       // Product HTML content
@@ -1855,7 +1856,7 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
     const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = '${rfq_id}'`);
 
     try {
-      const spocList = await vendorModel.getSpocDetails(vendor_id);
+      const spocList = await vendorModel.getSpocDetails(vendor_id , rfq_id);
       const token = await rfqModel.insertVendorRfqToken(
         vendor_id,
         rfq_id
@@ -2117,7 +2118,7 @@ const containerContent = `
 // Generate final email layout
 const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
-    const spocList = await vendorModel.getSpocDetails(vendor_id)
+    const spocList = await vendorModel.getSpocDetails(vendor_id , rfQItem[0]?.id);
 
     // console.log(" rfq contoller 901 spoc console ", vendor_id, spocList)
 
@@ -2192,7 +2193,7 @@ const sendFinalizationRemovalMail = async (
     // Generate final email layout
     const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
-    const spocList = await vendorModel.getSpocDetails(vendor_id);
+    const spocList = await vendorModel.getSpocDetails(vendor_id , rfQItem[0]?.id);
 
     // console.log(" rfq contoller 901 spoc console ", vendor_id, spocList)
 
