@@ -2299,7 +2299,36 @@ const saveRfqDraft = async (user_id, reqBody) => {
       termFilesChanged,
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
-  
+
+  const globalFilters = filters?.global;
+
+  const rfqFilters = [];
+
+  for (const key in globalFilters) {
+    const value = globalFilters[key];
+
+    // If value is an array → create multiple rows
+    if (Array.isArray(value)) {
+      value.forEach(v => {
+        rfqFilters.push({
+          rfq_id,
+          type: key,
+          value: v,
+          user_id
+        });
+      });
+    }
+    // If value is NOT an array and NOT null → single row
+    else if (value !== null && value !== undefined && value !== "") {
+      rfqFilters.push({
+        rfq_id,
+        type: key,
+        value: value,
+        user_id
+      });
+    }
+  }
+   console.log(" result ", rfqFilters)
   const rfqData = {
       comment,
       company_name,
@@ -2655,6 +2684,23 @@ const saveRfqDraft = async (user_id, reqBody) => {
         VENDORS_FILTER_KEYS
       );
 
+      const rfqFilterExists = await rfqModel.checkIfExists(
+        'tbl_rfq_filters',
+        `rfq_id = ${rfq_id}`
+      );
+
+    if(rfqFilterExists.length > 0){
+      // Delete existing RFQ filters
+      await rfqModel.delete('tbl_rfq_filters', { rfq_id }, t);
+
+      //insert new RFQ filters
+      await rfqModel.insertArray(rfqFilters , ['rfq_id', 'type', 'value', 'user_id'], 'tbl_rfq_filters', t);
+    } else {
+      //insert new RFQ filters
+      await rfqModel.insertArray(rfqFilters , ['rfq_id', 'type', 'value', 'user_id'], 'tbl_rfq_filters', t);
+    }
+    
+
       const rfqProducts = await rfqModel.checkIfExists(
         'tbl_rfq_products',
         `rfq_id = ${rfq_id} AND id IN (${Object.keys(filters.local)
@@ -2856,7 +2902,7 @@ const rfqController = {
       let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction, selectedSheets } = req.body;
 
 
-      console.log(" rfq controller  create body ", req.body)
+   
       const user_id = req.user.id;
       if (!rfq_id) {
         return res
