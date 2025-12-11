@@ -1530,7 +1530,8 @@ WHERE NOT EXISTS (
         prev_worked_with,
         vendor_name,
         vendor_info,
-        productMakes
+        productMakes,
+        subscription_type,
       } = filters;
 
       const isAnyFilterActive =
@@ -1590,6 +1591,32 @@ WHERE NOT EXISTS (
       //     LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
       //   `;
       // }
+
+      if (subscription_type) {
+        dynamicJoin += `
+          LEFT JOIN (
+            SELECT
+              tus.user_id,
+              MAX(tus.end_date) AS max_end_date,
+              MAX(
+                CASE
+                  WHEN tsp.plan_name ILIKE '%Enterprise%'
+                    AND tus.status = 1
+                    AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                    THEN 2
+                  WHEN tsp.plan_name ILIKE '%Premium%'
+                    AND tus.status = 1
+                    AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                    THEN 1
+                  ELSE 0
+                END
+              ) AS is_premium
+            FROM tbl_user_subscriptions tus
+            LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
+            GROUP BY tus.user_id
+          ) sub_info ON sub_info.user_id = tu.id
+        `
+      }
 
       if (prev_worked_with === 'prev_finalized') {
         dynamicJoin += `
@@ -1655,6 +1682,10 @@ WHERE NOT EXISTS (
             WHERE TRIM(nb) IN ('${vendor_type}')
           )
         `;
+      }
+
+      if (subscription_type) {
+        dynamicWhere += ` ${subscription_type == 'premium' ? 'AND is_premium = 1' : subscription_type == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0'}`
       }
 
       if (
@@ -1727,6 +1758,7 @@ WHERE NOT EXISTS (
         SELECT 
           DISTINCT ON (tu.name, tu.id) tu.id AS user_id, 
           tu.name, 
+          ${subscription_type ? 'COALESCE(sub_info.is_premium, 0) AS is_premium,' : ''}
           ${
             vendor_name
               ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $3) AS similarity_score,'
@@ -2245,6 +2277,7 @@ LIMIT 1;`;
     vendor_name = '',
     myVendorType = null,
     productMakes = [],
+    subscriptionType = null,
     page = 1,
     limit = 20,
     user_id = null
@@ -2309,7 +2342,9 @@ LIMIT 1;`;
 
     const countQuery = `
       WITH vendor_data AS (
-        SELECT DISTINCT tu.id
+        SELECT DISTINCT tu.id,
+        COALESCE(sub_info.is_premium, 0) AS is_premium
+
         FROM tbl_product_variant pvt
         JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
         JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
@@ -2318,6 +2353,28 @@ LIMIT 1;`;
         ${approved_by_id.length > 0 ? `
           JOIN tbl_vendorapprove_product_mapping vum ON vum.variant_vendor_mapping_id = pvm.id
         ` : ''}
+        LEFT JOIN (
+          SELECT
+            tus.user_id,
+            MAX(tus.end_date) AS max_end_date,
+            MAX(
+              CASE
+                WHEN tsp.plan_name ILIKE '%Enterprise%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 2
+                WHEN tsp.plan_name ILIKE '%Premium%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 1
+                ELSE 0
+              END
+            ) AS is_premium
+          FROM tbl_user_subscriptions tus
+          LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
+          GROUP BY tus.user_id
+        ) sub_info ON sub_info.user_id = tu.id
+
         WHERE pvt.status = 1 
           AND pvt.is_deleted = 0 
           AND pvt.is_review = 0 
@@ -2343,6 +2400,7 @@ LIMIT 1;`;
           ${approved_by_id.length > 0 ? `
             AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(',')})
           ` : ''}
+          ${subscriptionType ? subscriptionType == 'premium' ? 'AND is_premium = 1' : subscriptionType == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0' : ''}
           ${myVendorCondition}
           ${prevWorkedCondition}
           ${vendorNameCondition}
@@ -2368,7 +2426,9 @@ LIMIT 1;`;
           ls.id as state_id,
           ls.state_name,
           tc.turnover,
-          tc.nature_of_business
+          tc.nature_of_business,
+          COALESCE(sub_info.is_premium, 0) AS is_premium
+
         FROM tbl_product_variant pvt
         JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
         JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
@@ -2379,6 +2439,28 @@ LIMIT 1;`;
         ${approved_by_id.length > 0 ? `
           JOIN tbl_vendorapprove_product_mapping vum ON vum.variant_vendor_mapping_id = pvm.id
         ` : ''}
+        LEFT JOIN (
+          SELECT
+            tus.user_id,
+            MAX(tus.end_date) AS max_end_date,
+            MAX(
+              CASE
+                WHEN tsp.plan_name ILIKE '%Enterprise%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 2
+                WHEN tsp.plan_name ILIKE '%Premium%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 1
+                ELSE 0
+              END
+            ) AS is_premium
+          FROM tbl_user_subscriptions tus
+          LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
+          GROUP BY tus.user_id
+        ) sub_info ON sub_info.user_id = tu.id
+
         WHERE pvt.status = 1 
           AND pvt.is_deleted = 0 
           AND pvt.is_review = 0 
@@ -2404,6 +2486,7 @@ LIMIT 1;`;
           ${approved_by_id.length > 0 ? `
             AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(',')})
           ` : ''}
+          ${subscriptionType ? subscriptionType == 'premium' ? 'AND is_premium = 1' : subscriptionType == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0' : ''}
           ${myVendorCondition}
           ${prevWorkedCondition}
           ${vendorNameCondition}
@@ -4151,6 +4234,7 @@ WHERE row_num_by_name_category = 1
     prevWorkedWith,
     vendor_name, // Added vendor_name parameter
     myVendorType,
+    subscriptionType,
     responseKeys,
     productMakes
   ) => {
@@ -4391,6 +4475,8 @@ WHERE row_num_by_name_category = 1
               : ``
           }
           ${myVendorType == 'both' ? `AND bvm.vendor_id IS NOT NULL` : ``}
+
+          ${subscriptionType ? subscriptionType == 'premium' ? 'AND is_premium = 1' : subscriptionType == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0' : ''}
 
           ${prevWorkedWith === 'prev_finalized' ? `AND qf.id IS NOT NULL` : ``}
           ${prevWorkedWith === 'rfq_sent' ? `AND rfqv.user_id IS NOT NULL` : ``}
