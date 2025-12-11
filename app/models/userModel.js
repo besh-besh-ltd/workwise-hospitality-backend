@@ -61,8 +61,8 @@ user_book_demo: async (mobile) => {
           // ------------------------------
           const userFields = [
             "name", "email", "mobile", "created_by", "updated_by",
-            "status", "user_type", "password", "address", "country",
-            "whatsapp", "state", "city", "postal_code", "subscription_plan_id"
+            "status", "user_type", "password", 
+            "whatsapp", "subscription_plan_id"
           ];
           const userValues = userFields.map(f => user_data?.[f] ?? null);
           userFields.push("company_id");

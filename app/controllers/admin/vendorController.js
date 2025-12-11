@@ -222,10 +222,7 @@ const vendorController = {
       let vendorObj = {
         name: name || null,
         email: email || null,
-        address: address || null,
-        city: city || null,
-        state: state || null,
-        country: country || 1,
+
         mobile: cleanedMobile || null,
         postal_code: postal_code || null,
         user_type: '3',
