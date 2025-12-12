@@ -212,9 +212,9 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_val
         po = await t.one(
           `INSERT INTO tbl_rfq_purchase_order (
             rfq_id, project_id, quote_id, po_number, total_value, rfq_product_id, quantity,
-            unit_price, finalized_vendor_id, initiated_by, status
+            unit_price, finalized_vendor_id, initiated_by, status, company_id
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
           RETURNING id`,
           [
             rfq_id,
@@ -227,7 +227,8 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_id, total_val
             unit_price,
             finalized_vendor_id,
             initiated_by,
-            PO_STATUSES.DRAFT
+            PO_STATUSES.DRAFT,
+            company_id
           ]
         );
       }
