@@ -1592,31 +1592,29 @@ WHERE NOT EXISTS (
       //   `;
       // }
 
-      if (subscription_type) {
-        dynamicJoin += `
-          LEFT JOIN (
-            SELECT
-              tus.user_id,
-              MAX(tus.end_date) AS max_end_date,
-              MAX(
-                CASE
-                  WHEN tsp.plan_name ILIKE '%Enterprise%'
-                    AND tus.status = 1
-                    AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
-                    THEN 2
-                  WHEN tsp.plan_name ILIKE '%Premium%'
-                    AND tus.status = 1
-                    AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
-                    THEN 1
-                  ELSE 0
-                END
-              ) AS is_premium
-            FROM tbl_user_subscriptions tus
-            LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
-            GROUP BY tus.user_id
-          ) sub_info ON sub_info.user_id = tu.id
-        `
-      }
+      dynamicJoin += `
+        LEFT JOIN (
+          SELECT
+            tus.user_id,
+            MAX(tus.end_date) AS max_end_date,
+            MAX(
+              CASE
+                WHEN tsp.plan_name ILIKE '%Enterprise%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 2
+                WHEN tsp.plan_name ILIKE '%Premium%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 1
+                ELSE 0
+              END
+            ) AS is_premium
+          FROM tbl_user_subscriptions tus
+          LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
+          GROUP BY tus.user_id
+        ) sub_info ON sub_info.user_id = tu.id
+      `;
 
       if (prev_worked_with === 'prev_finalized') {
         dynamicJoin += `
@@ -1758,7 +1756,7 @@ WHERE NOT EXISTS (
         SELECT 
           DISTINCT ON (tu.name, tu.id) tu.id AS user_id, 
           tu.name, 
-          ${subscription_type ? 'COALESCE(sub_info.is_premium, 0) AS is_premium,' : ''}
+          COALESCE(sub_info.is_premium, 0) AS is_premium,
           ${
             vendor_name
               ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $3) AS similarity_score,'
@@ -4266,8 +4264,6 @@ WHERE row_num_by_name_category = 1
         // If country is array of objects with id property
         countryIds = country.map((c) => c.id);
     }
-
-    console.log("COUNTRY IDS:", countryIds);
 
     // Adding dynamic turnover condition
     let turnoverCondition = '';
