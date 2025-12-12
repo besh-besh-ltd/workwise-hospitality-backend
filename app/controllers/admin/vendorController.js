@@ -222,10 +222,7 @@ const vendorController = {
       let vendorObj = {
         name: name || null,
         email: email || null,
-        address: address || null,
-        city: city || null,
-        state: state || null,
-        country: country || 1,
+
         mobile: cleanedMobile || null,
         postal_code: postal_code || null,
         user_type: '3',
@@ -255,7 +252,9 @@ const vendorController = {
       const registrationResult = await userModel.company_registration(vendorObj, companyObj);
       const vendorId = registrationResult.user_id;
       const companyId = registrationResult.company_id;
-      const company_locations = locations.map(loc => ({
+      let company_locations = [];
+      if(locations && locations.length > 0) {
+      company_locations = locations.map(loc => ({
         country_id: Number(loc.country) || null,
         state_id: Number(loc.state) || null,
         city_id: Number(loc.city) || null,
@@ -267,6 +266,7 @@ const vendorController = {
         created_at: new Date(),
         updated_at: new Date(),
       }));
+      }
       const companyLocationCS = new pgp.helpers.ColumnSet([
         'country_id',
         'state_id',
@@ -278,9 +278,9 @@ const vendorController = {
         'created_at',
         'updated_at'
       ], { table: 'tbl_company_location' });
-
+      if(company_locations.length > 0) {
       const result = await rfqModel.insertArray(company_locations ,companyLocationCS ,  'tbl_company_location');
-
+      }
     // Check if spocs array is provided and has valid objects
 if (Array.isArray(spocs) && spocs.length > 0) {
   // Iterate through each SPOC object in the array
