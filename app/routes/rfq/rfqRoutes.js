@@ -85,6 +85,19 @@ RfqRoutes.post(
   rfqController.getRfqDetailsById
 );
 
+RfqRoutes.post(
+  '/tender-payment/create-order',
+  noLogin.customer_auth,
+  validateDbBody.rfq_access_check_req_body,
+  rfqController.createTenderPaymentOrder
+);
+
+RfqRoutes.post(
+  '/tender-payment/verify',
+  noLogin.customer_auth,
+  rfqController.verifyTenderPayment
+);
+
 RfqRoutes.get(
   '/getRfqById/:id',
   noLogin.customer_auth,

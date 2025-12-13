@@ -32,6 +32,8 @@ import { draftPO } from '../po/purchaseOrderController.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
+import Razorpay from 'razorpay';
+import crypto from 'crypto';
 
 const formatPersistentErrors = (errors) => {
   if(errors) {
@@ -2850,6 +2852,137 @@ const saveRfqDraft = async (user_id, reqBody) => {
 };
 
 const rfqController = {
+  createTenderPaymentOrder: async (req, res) => {
+    try {
+      const { rfq_id } = req.body;
+      const vendorId = req.user?.id;
+
+      if (!rfq_id || !vendorId) {
+        return res.status(400).json({ status: 3, message: 'rfq_id and vendor are required' }).end();
+      }
+
+      const rfqDetails = await rfqModel.getRFQDetails(rfq_id);
+      if (!rfqDetails || rfqDetails.length === 0) {
+        return res.status(404).json({ status: 0, message: 'RFQ not found' }).end();
+      }
+
+      const rfq = rfqDetails[0];
+      if (rfq.is_tender !== 1) {
+        return res.status(400).json({ status: 3, message: 'RFQ is not marked as tender' }).end();
+      }
+
+      const amount = parseInt(rfq.tender_fees || 0);
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ status: 3, message: 'Tender fees not configured' }).end();
+      }
+
+      const existingPayment = await db.oneOrNone(
+        `SELECT id, payment_status 
+         FROM tbl_vendor_payments 
+         WHERE vendor_id = $1 AND rfq_id = $2 AND payment_type = 'tender'
+         ORDER BY id DESC LIMIT 1`,
+        [vendorId, rfq_id]
+      );
+
+      if (existingPayment && existingPayment.payment_status === 'success') {
+        return res.status(200).json({
+          status: 1,
+          data: { already_paid: true, payment_id: existingPayment.id }
+        }).end();
+      }
+
+      const razorpay = new Razorpay({
+        key_id: Config.razorpay.razorpay_key,
+        key_secret: Config.razorpay.razorpay_secret
+      });
+
+      const receipt = `TENDER-${rfq_id}-${vendorId}-${Date.now()}`;
+      const order = await razorpay.orders.create({
+        amount,
+        currency: 'INR',
+        receipt,
+        payment_capture: 1
+      });
+
+      const beforePayload = JSON.stringify(order);
+      const paymentRow = await db.one(
+        `INSERT INTO tbl_vendor_payments 
+          (vendor_id, rfq_id, amount, currency, payment_status, razorpay_order_id, payment_type, method, receipt, before_payment_response)
+         VALUES ($1,$2,$3,$4,'created',$5,'tender', $6, $7, $8)
+         RETURNING id`,
+        [vendorId, rfq_id, amount, 'INR', order.id, order.method || null, receipt, beforePayload]
+      );
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          order,
+          payment_id: paymentRow.id
+        }
+      }).end();
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: error.message }).end();
+    }
+  },
+
+  verifyTenderPayment: async (req, res) => {
+    try {
+      const { razorpay_payment_id, razorpay_order_id, razorpay_signature, rfq_id } = req.body;
+      const vendorId = req.user?.id;
+
+      if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature || !rfq_id) {
+        return res.status(400).json({ status: 3, message: 'Missing payment fields' }).end();
+      }
+
+      const sign = `${razorpay_order_id}|${razorpay_payment_id}`;
+      const expectedSign = crypto
+        .createHmac('sha256', Config.razorpay.razorpay_secret)
+        .update(sign.toString())
+        .digest('hex');
+
+      const isValid = expectedSign === razorpay_signature;
+      const paymentStatus = isValid ? 'success' : 'failed';
+
+      const afterPayload = JSON.stringify({
+        razorpay_payment_id,
+        razorpay_order_id,
+        razorpay_signature
+      });
+
+      const updated = await db.result(
+        `UPDATE tbl_vendor_payments
+         SET razorpay_payment_id = $1,
+             razorpay_signature = $2,
+             payment_status = $3,
+             after_payment_response = $4
+         WHERE vendor_id = $5 AND rfq_id = $6 AND razorpay_order_id = $7
+         RETURNING id`,
+        [
+          razorpay_payment_id,
+          razorpay_signature,
+          paymentStatus,
+          afterPayload,
+          vendorId,
+          rfq_id,
+          razorpay_order_id
+        ]
+      );
+
+      if (updated.rowCount === 0) {
+        return res.status(404).json({ status: 0, message: 'Payment record not found' }).end();
+      }
+
+      return res.status(200).json({
+        status: isValid ? 1 : 0,
+        message: isValid ? 'Payment verified' : 'Invalid signature',
+        payment_id: updated.rows[0].id
+      }).end();
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: error.message }).end();
+    }
+  },
   create: async (req, res, next) => {
     if (!req.user.subscription_plan_id) {
       return res
@@ -4670,6 +4803,15 @@ const rfqController = {
       const { rfq_id } = req.body;
 
       const result = await rfqModel.getRFQDetails(rfq_id);
+      if (result && result[0] && req.user && req.user.user_type == 3 && result[0].is_tender === 1 && result[0].tender_fees > 0) {
+        const paymentRow = await db.oneOrNone(
+          `SELECT payment_status FROM tbl_vendor_payments 
+           WHERE vendor_id = $1 AND rfq_id = $2 AND payment_type = 'tender'
+           ORDER BY id DESC LIMIT 1`,
+          [req.user.id, rfq_id]
+        );
+        result[0].has_paid_tender_fees = paymentRow?.payment_status === 'success';
+      }
       res
         .status(200)
         .json({
@@ -4977,6 +5119,17 @@ const rfqController = {
         req.user.user_type,
         includeVendors
       );
+
+      // Add tender payment status for vendor viewers
+      if (rfQItem && rfQItem.is_tender === 1 && rfQItem.tender_fees > 0 && req.user.user_type == 3) {
+        const paymentRow = await db.oneOrNone(
+          `SELECT payment_status FROM tbl_vendor_payments 
+           WHERE vendor_id = $1 AND rfq_id = $2 AND payment_type = 'tender'
+           ORDER BY id DESC LIMIT 1`,
+          [req.user.id, id]
+        );
+        rfQItem.has_paid_tender_fees = paymentRow?.payment_status === 'success';
+      }
 
       res
         .status(200)
@@ -5522,6 +5675,27 @@ const rfqController = {
           }
         }
 
+        // Tender payment validation
+        let tenderPaymentId = null;
+        if (rfqDetails[0].is_tender === 1 && parseInt(rfqDetails[0].tender_fees || 0) > 0) {
+          const paymentRow = await db.oneOrNone(
+            `SELECT id, payment_status FROM tbl_vendor_payments
+             WHERE vendor_id = $1 AND rfq_id = $2 AND payment_type = 'tender'
+             ORDER BY id DESC LIMIT 1`,
+            [user.id, rfq_id]
+          );
+          if (!paymentRow || paymentRow.payment_status !== 'success') {
+            return res
+              .status(400)
+              .json({
+                status: 3,
+                message: 'Payment required to submit quote for this tender RFQ'
+              })
+              .end();
+          }
+          tenderPaymentId = paymentRow.id;
+        }
+
         return await db.tx(async (t) => {
           const tbl_quotes_data = {
             rfq_id,
@@ -5533,7 +5707,8 @@ const rfqController = {
             global_payment_term: globalPaymentTerms,
             global_comment: globalComment,
             regret_reason,
-            gstin: vendorGSTIN
+            gstin: vendorGSTIN,
+            payment_id: tenderPaymentId
           };
 
           // check quote is already exists or not
