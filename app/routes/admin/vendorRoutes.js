@@ -53,6 +53,11 @@ vendorRoutes.get(
  vendorController.getVendorLocations
 )
 vendorRoutes.post(
+  '/map-spoc-location',
+  passportSignIn,
+  vendorController.mapSpocToLocation
+)
+vendorRoutes.post(
   '/add-vendor-location',
   passportSignIn,
   vendorController.addVendorLocation
@@ -62,6 +67,7 @@ vendorRoutes.put(
   passportSignIn,
   vendorController.updateVendorLocation
 )
+
 vendorRoutes.delete(
   '/delete-vendor-location/:id',
   passportSignIn,

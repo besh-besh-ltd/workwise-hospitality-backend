@@ -427,40 +427,77 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         });
     });
   },
-  getLocationsByCompanyId: async (company_id) => {
-    try {
-      const query = `
-        SELECT 
-          l.id,
-          l.company_id,
-          l.address,
-          l.postal_code,
-          l.country_id,
-          c.country_name,
-          l.state_id,
-          s.state_name,
-          l.city_id,
-          ci.city_name,
-          l.created_at,
-          l.updated_at
-        FROM tbl_company_location l
-        LEFT JOIN tbl_location_country c ON l.country_id = c.id
-        LEFT JOIN tbl_location_states s ON l.state_id = s.id
-        LEFT JOIN tbl_location_cities ci ON l.city_id = ci.id
-        WHERE l.company_id = $1
-        ORDER BY l.id DESC;
+getLocationsByCompanyId: async (company_id, user_type = 2) => {
+  try {
+    let selectSpoc = "";
+    let joinSpoc = "";
+    let groupSpoc = "";
+
+    if (user_type == 3 || user_type == 1) { // For vendor or admin users, include SPOC details
+
+      selectSpoc = `,
+        COALESCE(
+          json_agg(
+            DISTINCT jsonb_build_object(
+              'spoc_id', us.id,
+              'spoc_name', us.name,
+              'spoc_email', us.email,
+              'spoc_mobile', us.mobile
+            )
+          ) FILTER (WHERE us.id IS NOT NULL),
+        '[]') AS spocs
       `;
 
-      const result = await db.any(query, [company_id]);
-      return result;
+      joinSpoc = `
+        LEFT JOIN tbl_spoc_location_mapping slm ON l.id = slm.location_id
+        LEFT JOIN tbl_users_spoc us ON slm.spoc_id = us.id
+      `;
 
-    } catch (error) {
-      console.error("Error fetching vendor locations with join:", error);
-      throw error;
+      groupSpoc = `,
+        us.id, us.name, us.email, us.mobile
+      `;
     }
-  },
 
-  getFiles: async (vendorId) => {
+    const query = `
+      SELECT 
+        l.id,
+        l.company_id,
+        l.address,
+        l.postal_code,
+        l.country_id,
+        c.country_name,
+        l.state_id,
+        s.state_name,
+        l.city_id,
+        ci.city_name,
+        l.created_at,
+        l.updated_at
+        ${selectSpoc}
+      FROM tbl_company_location l
+      LEFT JOIN tbl_location_country c ON l.country_id = c.id
+      LEFT JOIN tbl_location_states s ON l.state_id = s.id
+      LEFT JOIN tbl_location_cities ci ON l.city_id = ci.id
+      ${joinSpoc}
+      WHERE l.company_id = $1
+      GROUP BY 
+        l.id, l.company_id, l.address, l.postal_code,
+        l.country_id, c.country_name,
+        l.state_id, s.state_name,
+        l.city_id, ci.city_name,
+        l.created_at, l.updated_at
+      ORDER BY l.id DESC;
+    `;
+
+    const result = await db.any(query, [company_id]);
+    return result;
+
+  } catch (error) {
+    console.error("Error fetching vendor locations:", error);
+    throw error;
+  }
+},
+
+ getFiles: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.any('SELECT * FROM tbl_files WHERE user_id = $1', [vendorId])
         .then(function (data) {
@@ -752,24 +789,106 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     });
   },
   
-  getSpocDetails: async (id, filterByStatus = true) => {
-    return new Promise(function (resolve, reject) {
-      let query = 'SELECT * FROM tbl_users_spoc WHERE user_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)';
+getSpocDetails: async (id, rfq_id = null, filterByStatus = true) => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      // STEP 1 — Get base SPOC list
+      let query = `
+        SELECT * 
+        FROM tbl_users_spoc 
+        WHERE user_id = $1 
+          AND (is_deleted = 0 OR is_deleted IS NULL)
+      `;
+
       if (filterByStatus) {
-        query += ' AND status = 1';
+        query += ` AND status = 1`;
       }
-      query += ' ORDER BY created_at DESC';
-      
-      db.any(query, [id])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
+
+      query += ` ORDER BY created_at DESC`;
+
+      let spocs = await db.any(query, [id]);
+
+      // If no RFQ ID supplied → return normally
+      if (!rfq_id || spocs.length === 0) {
+        return resolve(spocs);
+      }
+
+      // STEP 2 — Check RFQ Filters
+      const filters = await db.any(
+        `SELECT type, value FROM tbl_rfq_filters WHERE rfq_id = $1`,
+        [rfq_id]
+      );
+
+      if (!filters || filters.length === 0) {
+        return resolve(spocs);
+      }
+
+      // Extract country, state, city filters
+      const countryFilter = filters.find(f => f.type === "country");
+      const stateFilter = filters.find(f => f.type === "state");
+      const cityFilter = filters.find(f => f.type === "city");
+
+      // If all three do NOT exist → return original SPOCs
+      if (!countryFilter || !stateFilter || !cityFilter) {
+        return resolve(spocs);
+      }
+
+      const country_id = Number(countryFilter.value);
+      const state_id = Number(stateFilter.value);
+      const city_id = Number(cityFilter.value);
+
+      // STEP 3 — Now filter SPOCs by location logic
+      const finalSpocs = [];
+
+      for (const spoc of spocs) {
+        // Get mapped locations for this SPOC
+        const spocLocations = await db.any(
+          `SELECT location_id 
+           FROM tbl_spoc_location_mapping 
+           WHERE spoc_id = $1`,
+          [spoc.id]
+        );
+
+        if (!spocLocations || spocLocations.length === 0) {
+          continue; // skip this spoc
+        }
+
+        // Check each location
+        let matched = false;
+
+        for (const loc of spocLocations) {
+          const companyLoc = await db.oneOrNone(
+            `SELECT country_id, state_id, city_id 
+             FROM tbl_company_location 
+             WHERE id = $1`,
+            [loc.location_id]
+          );
+
+          if (!companyLoc) continue;
+
+          // Compare all 3 fields
+          if (
+            Number(companyLoc.country_id) === country_id &&
+            Number(companyLoc.state_id) === state_id &&
+            Number(companyLoc.city_id) === city_id
+          ) {
+            matched = true;
+            break;
+          }
+        }
+
+        if (matched) {
+          finalSpocs.push(spoc);
+        }
+      }
+
+      return resolve(finalSpocs);
+    } catch (err) {
+      reject(new Error(err));
+    }
+  });
+},
+
 
   SpocExist: async (vendorId,spocId) => {
     return new Promise(function (resolve, reject) {

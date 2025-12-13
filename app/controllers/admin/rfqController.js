@@ -70,10 +70,7 @@ const rfqController = {
 
   getAllClientsrfqsForAdmin: async (req, res) => {
     try {
-      console.log('Request Query Parameters:', req.query);
-      console.log('Request Body Parameters:', req.body);
-
-      const page = parseInt(req.query.page) || 1;
+       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 10;
       const search = req.query.search || '';
 
