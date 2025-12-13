@@ -253,8 +253,8 @@ const vendorController = {
       const vendorId = registrationResult.user_id;
       const companyId = registrationResult.company_id;
       let company_locations = [];
-      if(locations && locations.length > 0) {
-      company_locations = locations.map(loc => ({
+      if(locations && locations.length > 0){
+       company_locations = locations?.map(loc => ({
         country_id: Number(loc.country) || null,
         state_id: Number(loc.state) || null,
         city_id: Number(loc.city) || null,
@@ -265,8 +265,7 @@ const vendorController = {
         created_by: req.user.id,
         created_at: new Date(),
         updated_at: new Date(),
-      }));
-      }
+      }));}
       const companyLocationCS = new pgp.helpers.ColumnSet([
         'country_id',
         'state_id',
@@ -278,9 +277,11 @@ const vendorController = {
         'created_at',
         'updated_at'
       ], { table: 'tbl_company_location' });
-      if(company_locations.length > 0) {
-      const result = await rfqModel.insertArray(company_locations ,companyLocationCS ,  'tbl_company_location');
+
+      if(company_locations && company_locations.length > 0){
+        const result = await rfqModel.insertArray(company_locations ,companyLocationCS ,  'tbl_company_location');
       }
+
     // Check if spocs array is provided and has valid objects
 if (Array.isArray(spocs) && spocs.length > 0) {
   // Iterate through each SPOC object in the array
@@ -1395,6 +1396,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       const spocExist = await vendorModel.check_exactly_same_spoc({spoc_name, spoc_email:spoc_email.toLowerCase(), spoc_mobile, spoc_role, user_id});
 
       if(spocExist<1){
+        console.log("Adding new spoc");
         // Set initial status based on who's creating the SPOC
         // Auto-approve (status=1) if:
         // 1. Creator is admin (user_type=1)

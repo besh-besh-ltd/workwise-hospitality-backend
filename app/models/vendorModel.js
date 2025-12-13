@@ -1,6 +1,8 @@
 import db from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 import pgp from 'pg-promise';
+import { sendMail } from '../helper/common.js';
+import { generateEmailTemplate } from '../helper/notificationEmailLayout.js';
 
 const vendorModel = {
   // Helper function to escape SQL strings
@@ -1278,21 +1280,118 @@ getSpocDetails: async (id, rfq_id = null, filterByStatus = true) => {
 
   // Add SPOC for vendor - consolidated function
   add_user_spoc: async (spocObj) => {
-    return new Promise(function (resolve, reject) {
-      const status = spocObj.status ?? 1; // default approved
-      const createdBy = spocObj.created_by ?? null;
-      db.any(
+    return new Promise(async function (resolve, reject) {
+        const status = spocObj.status ?? 1;
+        const createdBy = spocObj.created_by ?? null;
+        const userId = spocObj.user_id ?? null;
+        db.any(
         `INSERT INTO tbl_users_spoc (user_id, name, email, mobile, role, status, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-         RETURNING *;`,
-         [spocObj.user_id, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role, status, createdBy]
+        VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING *;`,
+        [
+          spocObj.user_id,
+          spocObj.spoc_name,
+          spocObj.spoc_email,
+          spocObj.spoc_mobile,
+          spocObj.spoc_role,
+          status,
+          createdBy
+        ]
       )
-        .then(function (data) {
+        .then(async function (data) {
+          const spoc = data[0];
+          console.log("SPOC created:", spoc);
           resolve(data);
-        })
+
+        // -------------------------------------------------------
+        // 1) Fetch creator email (if created_by is a user_id)
+        // -------------------------------------------------------
+        let creatorEmail = null;
+        let creatorOrganizationName = null;
+        let vendorName = null;
+
+          const lookupId = userId || createdBy;
+
+          console.log("Looking up creator with ID:", lookupId);
+          try {
+            const creator = await db.oneOrNone(
+              `SELECT email, name, organization_name FROM tbl_users WHERE id = $1`, 
+              [lookupId]
+            );
+            if (creator){ 
+              console.log("Creator found:", creator);
+              creatorEmail = creator.email;
+              creatorOrganizationName = creator.organization_name || creator.name;
+              vendorName = creator.name || creator.organization_name;
+
+              console.log("Creator email:", creatorEmail);
+            }
+          } catch (err) {
+            console.error("Creator lookup failed:", err);
+          }
+
+        // -------------------------------------------------------
+        // 2) Prepare mail options for SPOC 
+        // -------------------------------------------------------
+
+              const spocHeader = `<h2>Hello ${spoc.name},</h2>`;
+
+              const spocContent = `
+                <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+                  <p>You have been added as a <strong>${spoc.role}</strong> for <strong>${creatorOrganizationName}</strong>.</p> 
+                  <p>You will now receive all related communication from Workwise.</p> 
+                  </br> 
+                  <p>Regards,</p>
+                  <p>Workwise Team</p>
+                </div>`;
+
+              const spocTemplate = generateEmailTemplate(spocHeader, spocContent);
+
+        // -------------------------------------------------------
+        // 3) Prepare mail options for SPOC Creator
+        // -------------------------------------------------------
+        
+            const creatorHeader = `<h2>Hello ${vendorName},</h2>`;
+
+              const creatorContent = `
+                <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+                <p>A new SPOC has been added to your vendor profile.</p> 
+                <ul> 
+                <li><strong>Name:</strong> ${spoc.name}</li>
+                <li><strong>Email:</strong> ${spoc.email}</li>
+                <li><strong>Mobile:</strong> ${spoc.mobile}</li>
+                <li><strong>Role:</strong> ${spoc.role}</li>
+                </ul>
+                </br> 
+                <p>Regards,</p>
+                <p>Workwise Team</p>
+                </div>`;
+
+              const creatorTemplate = generateEmailTemplate(creatorHeader, creatorContent);
+
+        
+        // -------------------------------------------------------
+        // 4) Send Emails
+        // -------------------------------------------------------
+        
+        // To SPOC
+        sendMail({
+          from: Config.transportConfig,
+          to: spoc.email,
+          subject: `You Have Been Added as a SPOC for ${creatorOrganizationName}`,
+          html: spocTemplate
+        });
+
+        // To Creator
+        sendMail({
+          from: Config.transportConfig,
+          to: creatorEmail,
+          subject: `New SPOC Added to Your Profile`,
+          html: creatorTemplate
+        });
+      })
         .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
+          reject(new Error(err));
         });
     });
   },
