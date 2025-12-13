@@ -231,7 +231,7 @@ const UsersController = {
 
   company_registration: async (req, res, next) => {
     try {
-       const { name, email, mobile, organization_name, user_type, password, address, country, whatsapp, 
+       const { name, email, mobile, organization_name, user_type, password, address, country, source, subscription_plan, whatsapp, 
         state, city, postal_code, gstin, cin, profile, nature_of_business, type_of_business, turnover, no_of_employess, 
        import_export_code,established_year,website, is_private, status} = req.body;
 
@@ -252,11 +252,13 @@ const UsersController = {
         token: null,
         state: state || null,
         city: city || null,
-        postal_code: postal_code || null
+        postal_code: postal_code || null,
+        subscription_plan_id : subscription_plan ?? null
       };
 
       const company_data = {
         company_name: organization_name || null,
+        source : source || null,
         profile: profile || null,
         nature_of_business: nature_of_business || null,
         type_of_business: type_of_business || null,
@@ -351,6 +353,7 @@ const UsersController = {
   update_company_detail: async (req, res, next) => {
   try {
     const { company_id } = req.user;
+
     const user_id = req.user.id
     const reqData = req.body;
 
@@ -367,15 +370,6 @@ const UsersController = {
       cin: reqData?.cin,
     };
 
-    //  this data stpred in tbl_user but belongs to company, we are storing it here because one comapny may have mulriple location and tehy always has one spoc for each location, ( if this is not work we move this to the tbl_ocmpany )
-    const reqLocationData = {
-      state: reqData?.state,
-      city: reqData?.city,
-      country: reqData?.country,
-      address: reqData?.street_address?.trim(),
-      postal_code:reqData?.postal_code,
-      updated_at: new Date(), // this value  depends on server date and time
-    }
 
     await rfqModel.updateWhere(
       "tbl_company",
@@ -383,11 +377,6 @@ const UsersController = {
       `id = ${company_id}`
     );
 
-    await rfqModel.updateWhere(
-      "tbl_users",
-      reqLocationData,
-      `id = ${user_id}`
-    );
 
     return res.status(200).json({
       status: 1,

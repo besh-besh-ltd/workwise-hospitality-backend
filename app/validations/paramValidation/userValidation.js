@@ -282,6 +282,8 @@ const schemas = {
     status: Joi.number().valid(0, 1).optional().allow(null), // Allow status field for paid subscriptions
     address: Joi.string().optional().allow(null).allow(''),
     country: Joi.string().optional().allow(null).allow(''),
+    source : Joi.string().optional().allow(null).allow(''),
+    subscription_plan : Joi.number().optional().allow(null),
     whatsapp: Joi.string().optional().allow(null).allow(''),
     state: Joi.string().optional().allow(null).allow(''),
     city: Joi.string().optional().allow(null).allow(''),
@@ -361,6 +363,7 @@ const schemas = {
 
   // mukul 09-06-2025, just saprate this from update_profile
   company_profile: Joi.object().keys({
+    company_id: Joi.number().optional(),
     company_name: Joi.string().optional().allow(null).allow(''),
     established_year: Joi.number().optional().allow(null).allow(''),
     about_company : Joi.string().optional().allow(null).allow(''), // in tbl_company this is we have as profile

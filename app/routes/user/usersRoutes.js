@@ -282,6 +282,38 @@ UsersRoutes.get(
 );
 
 UsersRoutes.post(
+  '/add-buyer-vendor-location',
+  passportSignIn,
+  // acl([2,8,3]),
+  vendorController.addVendorLocation //utilising same controller as defined in admin routes.
+);
+
+UsersRoutes.get(
+  '/get-buyer-vendor-location/:id',
+  passportSignIn,
+  vendorController.getVendorLocations
+)
+UsersRoutes.delete(
+  '/delete-buyer-vendor-location/:id',
+  passportSignIn, 
+  // acl([2,8,3]),
+  vendorController.deleteVendorLocation   //utilising same controller as defined in admin routes.
+)
+UsersRoutes.post(
+  '/map-spoc-location',
+  passportSignIn,
+  // acl([2,8,3]),
+  vendorController.mapSpocToLocation 
+)
+
+UsersRoutes.put(
+  '/update-buyer-vendor-location',
+  passportSignIn,
+  // acl([2,8,3]),
+  vendorController.updateVendorLocation //utilising same controller as defined in admin routes.
+)
+
+UsersRoutes.post(
   '/buyer-private-vendor',
   passportSignIn,
   acl([2,8]),

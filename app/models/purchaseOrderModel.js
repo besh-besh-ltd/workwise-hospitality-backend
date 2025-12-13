@@ -242,6 +242,7 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
             PO_STATUSES.DRAFT,
             selected_hierarchy,
             concated_terms.terms_text,
+
             company_id
           ]
         );

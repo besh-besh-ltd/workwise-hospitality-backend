@@ -39,7 +39,7 @@ user_book_demo: async (mobile) => {
           // Step 1: Insert Company
           // ------------------------------
           const companyFields = [
-            "company_name", "profile", "nature_of_business", "type_of_business",
+            "company_name", "source", "profile", "nature_of_business", "type_of_business",
             "turnover", "no_of_employess", "import_export_code", "gstin", "cin", "logo",
             "established_year", "website", "location", "is_private"
           ];
@@ -61,8 +61,8 @@ user_book_demo: async (mobile) => {
           // ------------------------------
           const userFields = [
             "name", "email", "mobile", "created_by", "updated_by",
-            "status", "user_type", "password", "address", "country",
-            "whatsapp", "state", "city", "postal_code"
+            "status", "user_type", "password", 
+            "whatsapp", "subscription_plan_id"
           ];
           const userValues = userFields.map(f => user_data?.[f] ?? null);
           userFields.push("company_id");
@@ -815,13 +815,10 @@ user_book_demo: async (mobile) => {
         .then(function (userBasicInfo) {
           const { user_type, company_id } = userBasicInfo;
           
-          // For company admin (user_type 7) or vendor (user_type 3), show their own company details
-          // For other company users (user_type 2, 8, 9, 10), fetch company details from company admin
           let queryToExecute;
           let queryParams;
           
           if (user_type === 7 || user_type === 3) {
-            // Company admin or vendor - show their own company details
             queryToExecute = `
               SELECT tbl_users.*,
                   tbl_company.company_name,
@@ -837,17 +834,12 @@ user_book_demo: async (mobile) => {
                   tbl_company.cin,
                   tbl_company.logo,
                   tbl_company.website,
-                  tbl_company.established_year,
-                  tbl_location_states.state_name, 
-                  tbl_location_cities.city_name  
+                  tbl_company.established_year
               FROM tbl_users 
               LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
-              LEFT JOIN tbl_location_states ON tbl_users.state = tbl_location_states.id
-              LEFT JOIN tbl_location_cities ON tbl_users.city = tbl_location_cities.id
               WHERE tbl_users.id = $1`;
             queryParams = [user_id];
           } else {
-            // Other company users - fetch company details from company admin (user_type 7)
             queryToExecute = `
               SELECT cu.*,
                   tbl_company.company_name,
@@ -863,33 +855,17 @@ user_book_demo: async (mobile) => {
                   tbl_company.cin,
                   tbl_company.logo,
                   tbl_company.website,
-                  tbl_company.established_year,
-                  admin_states.state_name, 
-                  admin_cities.city_name,
-                  admin_user.address,
-                  admin_user.postal_code,
-                  admin_user.country,
-                  admin_user.state,
-                  admin_user.city,
-                  admin_countries.country_name
+                  tbl_company.established_year
               FROM (
-                SELECT tbl_users.*,
-                    tbl_location_states.state_name as current_user_state_name, 
-                    tbl_location_cities.city_name as current_user_city_name
+                SELECT tbl_users.*
                 FROM tbl_users 
-                LEFT JOIN tbl_location_states ON tbl_users.state = tbl_location_states.id
-                LEFT JOIN tbl_location_cities ON tbl_users.city = tbl_location_cities.id
                 WHERE tbl_users.id = $1
               ) cu
               LEFT JOIN tbl_users admin_user ON (admin_user.company_id = $2 AND admin_user.user_type = 7)
-              LEFT JOIN tbl_company ON cu.company_id = tbl_company.id
-              LEFT JOIN tbl_location_states admin_states ON admin_user.state = admin_states.id
-              LEFT JOIN tbl_location_cities admin_cities ON admin_user.city = admin_cities.id
-              LEFT JOIN tbl_location_country admin_countries ON admin_user.country IS NOT NULL AND admin_user.country = admin_countries.id::text`;
+              LEFT JOIN tbl_company ON cu.company_id = tbl_company.id`;
             queryParams = [user_id, company_id];
           }
 
-          // Execute the determined query
           db.one(queryToExecute, queryParams)
             .then(function (data) {
               resolve(data);
@@ -934,7 +910,7 @@ user_book_demo: async (mobile) => {
         });
     });
   },
-  vendorinfo: async (user_id, current_user = null) => {
+ vendorinfo: async (user_id, current_user = null) => {
     return new Promise(function (resolve, reject) {
 
       // query changes by Mukul Jatav 30-08-2024, 
@@ -952,7 +928,6 @@ user_book_demo: async (mobile) => {
       SELECT tbl_users.id as user_id,
        tbl_users.name as vendor_name,
        tbl_company.logo as profile_image,
-       tbl_users.address,
        tbl_users.status,
        tbl_users.whatsapp,
        tbl_company.id as company_id,
@@ -966,9 +941,24 @@ user_book_demo: async (mobile) => {
        tbl_company.import_export_code,
        tbl_company.company_name,
        tbl_company.profile,
-       tbl_company.location,
-       cl.city_name,
-       sl.state_name,
+
+       ARRAY(
+         SELECT json_build_object(
+             'address', TCL.address,
+             'postal_code', TCL.postal_code,
+             'city_id', TCL.city_id,
+             'city_name', LC.city_name,
+             'state_id', TCL.state_id,
+             'state_name', LS.state_name,
+             'country_id', TCL.country_id,
+             'country_name', LCO.country_name
+         )
+         FROM tbl_company_location TCL
+         LEFT JOIN tbl_location_cities LC ON LC.id = TCL.city_id
+         LEFT JOIN tbl_location_states LS ON LS.id = TCL.state_id
+         LEFT JOIN tbl_location_country LCO ON LCO.id = TCL.country_id
+         WHERE TCL.company_id = tbl_company.id
+       ) AS location,
 
        ARRAY(
                SELECT json_build_object(
@@ -1043,16 +1033,12 @@ user_book_demo: async (mobile) => {
 ) AS vendor_info
 
     `;
-
-
       }
 
       // Completing the query with the FROM clause
       baseQuery += `
       FROM tbl_users
       LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
-      LEFT JOIN tbl_location_cities cl ON cl.id = tbl_users.city
-      LEFT JOIN tbl_location_states sl ON sl.id = tbl_users.state     
       WHERE tbl_users.id = $1`;
 
       // Execute the query
@@ -1066,6 +1052,7 @@ user_book_demo: async (mobile) => {
         });
     });
   },
+
 
   update_change_password_status: async (user_id, password) => {
     return new Promise(function (resolve, reject) {
@@ -3679,50 +3666,70 @@ publishProfileReviews: async (reviewObj) => {
             LEFT JOIN buyers b ON ep.buyer_email = b.buyer_email
             LEFT JOIN vendors v ON ep.vendor_email = v.vendor_email
           ),
-          existing_mappings AS (
-            SELECT vp.buyer_id, vp.vendor_id
+          ranked_pairs AS (
+            SELECT vp.*, 
+                   ROW_NUMBER() OVER (
+                     PARTITION BY vp.company_id, vp.vendor_id 
+                     ORDER BY vp.row_num
+                   ) AS company_vendor_rank
             FROM valid_pairs vp
+            WHERE vp.company_id IS NOT NULL AND vp.vendor_id IS NOT NULL
+          ),
+          enhanced_pairs AS (
+            SELECT vp.*,
+                   COALESCE(rp.company_vendor_rank, 0) AS company_vendor_rank
+            FROM valid_pairs vp
+            LEFT JOIN ranked_pairs rp ON vp.row_num = rp.row_num
+          ),
+          existing_mappings AS (
+            SELECT DISTINCT rp.company_id, rp.vendor_id
+            FROM ranked_pairs rp
             INNER JOIN tbl_buyer_private_vendors_mapping bpvm 
-            ON vp.company_id = bpvm.company_id AND vp.vendor_id = bpvm.vendor_id
-            WHERE vp.buyer_id IS NOT NULL AND vp.vendor_id IS NOT NULL
+              ON rp.company_id = bpvm.company_id AND rp.vendor_id = bpvm.vendor_id
+          ),
+          insert_candidates AS (
+            SELECT rp.*
+            FROM ranked_pairs rp
+            WHERE rp.company_vendor_rank = 1
           ),
           new_mappings AS (
             INSERT INTO tbl_buyer_private_vendors_mapping (created_by, vendor_id, company_id, created_date, updated_date)
-            SELECT $6, vp.vendor_id, vp.company_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-            FROM valid_pairs vp
-            WHERE vp.buyer_id IS NOT NULL 
-            AND vp.vendor_id IS NOT NULL
-            AND NOT EXISTS (
+            SELECT $6, ic.vendor_id, ic.company_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            FROM insert_candidates ic
+            WHERE NOT EXISTS (
               SELECT 1 FROM tbl_buyer_private_vendors_mapping bpvm 
-              WHERE bpvm.company_id = vp.company_id AND bpvm.vendor_id = vp.vendor_id
+              WHERE bpvm.company_id = ic.company_id AND bpvm.vendor_id = ic.vendor_id
             )
-            RETURNING created_by, vendor_id
+            RETURNING vendor_id, company_id
           )
           SELECT 
-            vp.row_num,
-            vp.buyer_email,
-            vp.vendor_email,
-            vp.vendor_id,
+            ep.row_num,
+            ep.buyer_email,
+            ep.vendor_email,
+            ep.vendor_id,
             COALESCE(buyer.name, 'Unknown') AS buyer_name,
             COALESCE(vendor.name, 'Unknown') AS vendor_name,
-            COALESCE(buyer.email, vp.buyer_email) AS buyer_email_display,
-            COALESCE(vendor.email, vp.vendor_email) AS vendor_email_display,
+            COALESCE(buyer.email, ep.buyer_email) AS buyer_email_display,
+            COALESCE(vendor.email, ep.vendor_email) AS vendor_email_display,
             CASE 
-              WHEN vp.error_reason IS NOT NULL THEN vp.error_reason
-              WHEN em.buyer_id IS NOT NULL THEN 'Already mapped to company'
-              WHEN nm.created_by IS NOT NULL THEN 'Mapped successfully'
+              WHEN ep.error_reason IS NOT NULL THEN ep.error_reason
+              WHEN ep.company_vendor_rank > 1 THEN 'Already mapped to company'
+              WHEN em.company_id IS NOT NULL THEN 'Already mapped to company'
+              WHEN nm.vendor_id IS NOT NULL AND ep.company_vendor_rank = 1 THEN 'Mapped successfully'
               ELSE 'Unknown error'
             END AS status,
             CASE 
-              WHEN vp.error_reason IS NOT NULL OR em.buyer_id IS NOT NULL THEN false
+              WHEN ep.error_reason IS NOT NULL THEN false
+              WHEN ep.company_vendor_rank > 1 THEN false
+              WHEN em.company_id IS NOT NULL THEN false
               ELSE true
             END AS is_success
-          FROM valid_pairs vp
-          LEFT JOIN existing_mappings em ON vp.buyer_id = em.buyer_id AND vp.vendor_id = em.vendor_id
-          LEFT JOIN new_mappings nm ON vp.vendor_id = nm.vendor_id
-          LEFT JOIN tbl_users buyer ON buyer.id = vp.buyer_id
-          LEFT JOIN tbl_users vendor ON vendor.id = vp.vendor_id
-          ORDER BY vp.row_num
+          FROM enhanced_pairs ep
+          LEFT JOIN existing_mappings em ON ep.company_id = em.company_id AND ep.vendor_id = em.vendor_id
+          LEFT JOIN new_mappings nm ON ep.company_id = nm.company_id AND ep.vendor_id = nm.vendor_id
+          LEFT JOIN tbl_users buyer ON buyer.id = ep.buyer_id
+          LEFT JOIN tbl_users vendor ON vendor.id = ep.vendor_id
+          ORDER BY ep.row_num
         `;
         
         const result = await db.any(query, [

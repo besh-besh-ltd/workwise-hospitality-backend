@@ -10,12 +10,16 @@ const vendorModel = {
     return str.replace(/'/g, "''");
   },
 
-  getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by) => {
-    return new Promise(function (resolve, reject) {
+ getVendorList: async (limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by, source, subscription_plan, isPrivate,mobile) => {    
+  return new Promise(function (resolve, reject) {
       // Escape input strings to prevent SQL injection and syntax errors
       const escapedName = name ? vendorModel._escapeSqlString(name) : null;
       const escapedOrganization = organization ? vendorModel._escapeSqlString(organization) : null;
       const escapedEmail = email ? vendorModel._escapeSqlString(email) : null;
+      const escapedSource = source ? vendorModel._escapeSqlString(source) : null;
+      const escapedPlan = subscription_plan ? vendorModel._escapeSqlString(subscription_plan) : null;
+      const escapedIsPrivate = isPrivate ? vendorModel._escapeSqlString(isPrivate) : null;
+      const escapedMobile = mobile ? mobile.replace(/[^0-9]/g, '') : null;
       
       let dynamicQuery = '';
       if (name) {
@@ -37,24 +41,41 @@ const vendorModel = {
           )`;
       }
       if (verified == 't') {
-        dynamicQuery += `AND tbl_users.status = 1 `;
+        dynamicQuery += ` AND tbl_users.status = 1`;
       } else if (verified == 'f') {
-        dynamicQuery += `AND tbl_users.status = 0 `;
+        dynamicQuery += ` AND tbl_users.status = 0`;
       }
       if (email) {
-        dynamicQuery += `AND tbl_users.email ILIKE '%${escapedEmail}%'`;
+        dynamicQuery += ` AND tbl_users.email ILIKE '%${escapedEmail}%'`;
       }
       if (status !== undefined && status !== null) {
-        dynamicQuery += `AND tbl_users.status = ${status}`;
+        dynamicQuery += ` AND tbl_users.status = '${status}'`;
       }
-      if (dateFrom) {
-        dynamicQuery += `AND tbl_users.created_at >= '${dateFrom}'`;
+    if (mobile) {
+      dynamicQuery += `
+    AND regexp_replace(tbl_users.mobile, '[^0-9]', '', 'g')
+    ILIKE '%${escapedMobile}%'
+  `;
+}
+    if (dateFrom) {
+        dynamicQuery += ` AND tbl_users.created_at >= '${dateFrom}'`;
       }
       if (dateTo) {
-        dynamicQuery += `AND tbl_users.created_at <= '${dateTo} 23:59:59'`;
+        dynamicQuery += ` AND tbl_users.created_at <= '${dateTo} 23:59:59'`;
       }
       if (created_by) {
-        dynamicQuery += `AND tbl_users.created_by = ${created_by}`;
+        dynamicQuery += ` AND tbl_users.created_by = '${created_by}'`;
+      }
+      if(source === 'unknown' || source === 'null'){
+        dynamicQuery += ` AND tbl_company.source IS NULL`;
+      } else if(source){
+        dynamicQuery += ` AND tbl_company.source ILIKE '${escapedSource}'`;
+      }
+      if(subscription_plan){
+        dynamicQuery += ` AND tbl_users.subscription_plan_id = '${escapedPlan}'`;
+      }
+      if(isPrivate){
+        dynamicQuery += ` AND tbl_company.is_private = '${escapedIsPrivate}'`;
       }
 
       let orderByClause = 'ORDER BY tbl_users.created_at DESC';
@@ -100,6 +121,9 @@ const vendorModel = {
           tbl_users.status,
           tbl_users.created_at,
           tbl_users.updated_at,
+          tbl_company.source,
+          tbl_users.subscription_plan_id,
+          tbl_company.is_private,
           creator.name AS created_by_name,
           updater.name AS updated_by_name,
           trr.reject_reason,
@@ -128,7 +152,7 @@ const vendorModel = {
         LEFT JOIN tbl_reject_reason trr ON tbl_users.reject_reason_id = trr.id
         LEFT JOIN tbl_users creator ON tbl_users.created_by = creator.id
         LEFT JOIN tbl_users updater ON tbl_users.updated_by = updater.id
-        WHERE tbl_users.is_deleted = 0 AND tbl_users.user_type = 3 ${dynamicQuery}
+        WHERE tbl_users.is_deleted = '0' AND tbl_users.user_type = '3' ${dynamicQuery}
         ${orderByClause}
         LIMIT $1 OFFSET $2`
 
@@ -146,12 +170,16 @@ const vendorModel = {
     });
   },
  
-getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo, created_by) => {
-  return new Promise(function (resolve, reject) {
+getVendorListCount: async (organization, verified, name, email, status, dateFrom, dateTo, created_by, source, subscription_plan, is_private,mobile) => {
+    return new Promise(function (resolve, reject) {
     // Escape input strings
     const escapedName = name ? vendorModel._escapeSqlString(name) : null;
     const escapedOrganization = organization ? vendorModel._escapeSqlString(organization) : null;
     const escapedEmail = email ? vendorModel._escapeSqlString(email) : null;
+    const escapedSource = source ? vendorModel._escapeSqlString(source) : null;
+    const escapedPlan = subscription_plan ? vendorModel._escapeSqlString(subscription_plan) : null;
+    const escapedIsPrivate = is_private ? vendorModel._escapeSqlString(is_private) : null;
+    const escapedMobile = mobile ? mobile.replace(/[^0-9]/g, '') : null;
     
     let dynamicQuery = 'AND tbl_users.user_type = 3 ';
     if (name) {
@@ -173,24 +201,38 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         )`;
     }
     if (verified == 't') {
-      dynamicQuery += `AND tbl_users.status = 1 `;
+      dynamicQuery += ` AND tbl_users.status = 1`;
     } else if (verified == 'f') {
-      dynamicQuery += `AND tbl_users.status = 0 `;
+      dynamicQuery += ` AND tbl_users.status = 0`;
     }
     if (email) {
-      dynamicQuery += `AND tbl_users.email ILIKE '%${escapedEmail}%'`;
+      dynamicQuery += ` AND tbl_users.email ILIKE '%${escapedEmail}%'`;
     }
+    if (mobile) {
+        dynamicQuery += ` AND regexp_replace(tbl_users.mobile, '[^0-9]', '', 'g') ILIKE '%${escapedMobile}%'`;
+      }
     if (status !== undefined && status !== null) {
-      dynamicQuery += `AND tbl_users.status = ${status}`;
+      dynamicQuery += ` AND tbl_users.status = '${status}'`;
     }
     if (dateFrom) {
-      dynamicQuery += `AND tbl_users.created_at >= '${dateFrom}'`;
+      dynamicQuery += ` AND tbl_users.created_at >= '${dateFrom}'`;
     }
     if (dateTo) {
-      dynamicQuery += `AND tbl_users.created_at <= '${dateTo} 23:59:59'`;
+      dynamicQuery += ` AND tbl_users.created_at <= '${dateTo} 23:59:59'`;
     }
     if (created_by) {
-      dynamicQuery += `AND tbl_users.created_by = ${created_by}`;
+      dynamicQuery += ` AND tbl_users.created_by = '${created_by}'`;
+    }
+    if(source === 'unknown' || source === 'null'){
+        dynamicQuery += ` AND tbl_company.source IS NULL`;
+      } else if(source){
+        dynamicQuery += ` AND tbl_company.source = '${escapedSource}'`;
+      }
+    if(subscription_plan){
+        dynamicQuery += ` AND tbl_users.subscription_plan_id = '${escapedPlan}'`;
+    }
+    if(is_private){
+        dynamicQuery += ` AND tbl_company.is_private = '${escapedIsPrivate}'`;
     }
 
     const query = `
@@ -385,7 +427,77 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         });
     });
   },
-  getFiles: async (vendorId) => {
+getLocationsByCompanyId: async (company_id, user_type = 2) => {
+  try {
+    let selectSpoc = "";
+    let joinSpoc = "";
+    let groupSpoc = "";
+
+    if (user_type == 3 || user_type == 1) { // For vendor or admin users, include SPOC details
+
+      selectSpoc = `,
+        COALESCE(
+          json_agg(
+            DISTINCT jsonb_build_object(
+              'spoc_id', us.id,
+              'spoc_name', us.name,
+              'spoc_email', us.email,
+              'spoc_mobile', us.mobile
+            )
+          ) FILTER (WHERE us.id IS NOT NULL),
+        '[]') AS spocs
+      `;
+
+      joinSpoc = `
+        LEFT JOIN tbl_spoc_location_mapping slm ON l.id = slm.location_id
+        LEFT JOIN tbl_users_spoc us ON slm.spoc_id = us.id
+      `;
+
+      groupSpoc = `,
+        us.id, us.name, us.email, us.mobile
+      `;
+    }
+
+    const query = `
+      SELECT 
+        l.id,
+        l.company_id,
+        l.address,
+        l.postal_code,
+        l.country_id,
+        c.country_name,
+        l.state_id,
+        s.state_name,
+        l.city_id,
+        ci.city_name,
+        l.created_at,
+        l.updated_at
+        ${selectSpoc}
+      FROM tbl_company_location l
+      LEFT JOIN tbl_location_country c ON l.country_id = c.id
+      LEFT JOIN tbl_location_states s ON l.state_id = s.id
+      LEFT JOIN tbl_location_cities ci ON l.city_id = ci.id
+      ${joinSpoc}
+      WHERE l.company_id = $1
+      GROUP BY 
+        l.id, l.company_id, l.address, l.postal_code,
+        l.country_id, c.country_name,
+        l.state_id, s.state_name,
+        l.city_id, ci.city_name,
+        l.created_at, l.updated_at
+      ORDER BY l.id DESC;
+    `;
+
+    const result = await db.any(query, [company_id]);
+    return result;
+
+  } catch (error) {
+    console.error("Error fetching vendor locations:", error);
+    throw error;
+  }
+},
+
+ getFiles: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.any('SELECT * FROM tbl_files WHERE user_id = $1', [vendorId])
         .then(function (data) {
@@ -677,24 +789,106 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     });
   },
   
-  getSpocDetails: async (id, filterByStatus = true) => {
-    return new Promise(function (resolve, reject) {
-      let query = 'SELECT * FROM tbl_users_spoc WHERE user_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)';
+getSpocDetails: async (id, rfq_id = null, filterByStatus = true) => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      // STEP 1 — Get base SPOC list
+      let query = `
+        SELECT * 
+        FROM tbl_users_spoc 
+        WHERE user_id = $1 
+          AND (is_deleted = 0 OR is_deleted IS NULL)
+      `;
+
       if (filterByStatus) {
-        query += ' AND status = 1';
+        query += ` AND status = 1`;
       }
-      query += ' ORDER BY created_at DESC';
-      
-      db.any(query, [id])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
+
+      query += ` ORDER BY created_at DESC`;
+
+      let spocs = await db.any(query, [id]);
+
+      // If no RFQ ID supplied → return normally
+      if (!rfq_id || spocs.length === 0) {
+        return resolve(spocs);
+      }
+
+      // STEP 2 — Check RFQ Filters
+      const filters = await db.any(
+        `SELECT type, value FROM tbl_rfq_filters WHERE rfq_id = $1`,
+        [rfq_id]
+      );
+
+      if (!filters || filters.length === 0) {
+        return resolve(spocs);
+      }
+
+      // Extract country, state, city filters
+      const countryFilter = filters.find(f => f.type === "country");
+      const stateFilter = filters.find(f => f.type === "state");
+      const cityFilter = filters.find(f => f.type === "city");
+
+      // If all three do NOT exist → return original SPOCs
+      if (!countryFilter || !stateFilter || !cityFilter) {
+        return resolve(spocs);
+      }
+
+      const country_id = Number(countryFilter.value);
+      const state_id = Number(stateFilter.value);
+      const city_id = Number(cityFilter.value);
+
+      // STEP 3 — Now filter SPOCs by location logic
+      const finalSpocs = [];
+
+      for (const spoc of spocs) {
+        // Get mapped locations for this SPOC
+        const spocLocations = await db.any(
+          `SELECT location_id 
+           FROM tbl_spoc_location_mapping 
+           WHERE spoc_id = $1`,
+          [spoc.id]
+        );
+
+        if (!spocLocations || spocLocations.length === 0) {
+          continue; // skip this spoc
+        }
+
+        // Check each location
+        let matched = false;
+
+        for (const loc of spocLocations) {
+          const companyLoc = await db.oneOrNone(
+            `SELECT country_id, state_id, city_id 
+             FROM tbl_company_location 
+             WHERE id = $1`,
+            [loc.location_id]
+          );
+
+          if (!companyLoc) continue;
+
+          // Compare all 3 fields
+          if (
+            Number(companyLoc.country_id) === country_id &&
+            Number(companyLoc.state_id) === state_id &&
+            Number(companyLoc.city_id) === city_id
+          ) {
+            matched = true;
+            break;
+          }
+        }
+
+        if (matched) {
+          finalSpocs.push(spoc);
+        }
+      }
+
+      return resolve(finalSpocs);
+    } catch (err) {
+      reject(new Error(err));
+    }
+  });
+},
+
 
   SpocExist: async (vendorId,spocId) => {
     return new Promise(function (resolve, reject) {
@@ -789,7 +983,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
               TU.organization_name,
               TU.email AS email,
               TU.mobile AS mobile,
-              TU.address AS address,
+              TCL.address AS address,
               TUC.company_name,
               COUNT(DISTINCT TR.id)::INT AS rfq_count
           FROM tbl_rfq_product_vendors TRPV
@@ -806,11 +1000,13 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
               ON TU.id = TRPV.user_id
           LEFT JOIN tbl_company TUC
               ON TU.company_id = TUC.id 
+          LEFT JOIN tbl_company_location TCL
+              ON TUC.id = TCL.company_id
           WHERE TR.created_by = $1
               AND TU.is_deleted = 0 
               AND TU.status = 1 
           GROUP BY 
-              TRPV.user_id, TU.name, TU.organization_name, TU.email, TU.mobile, TU.address, TUC.company_name
+              TRPV.user_id, TU.name, TU.organization_name, TU.email, TU.mobile, TCL.address, TUC.company_name
           ORDER BY 
               rfq_count DESC
           LIMIT 10;
@@ -918,7 +1114,7 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         FROM tbl_users u
         INNER JOIN tbl_company c ON u.company_id = c.id
         WHERE u.is_deleted = 0
-          AND u.user_type IN (2, 8)
+          AND u.user_type IN (7)
           AND c.id IS NOT NULL
           ${searchClause}
         ORDER BY c.id, u.created_at DESC

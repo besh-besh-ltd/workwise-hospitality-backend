@@ -20,6 +20,8 @@ import subscriptionModel from '../../models/subscriptionModel.js';
 import moment from 'moment';
 import userModel from '../../models/userModel.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
+import { isNumber } from 'razorpay/dist/utils/razorpay-utils.js';
+import { pgp } from '../../config/dbConn.js';
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -82,7 +84,7 @@ const extractBuyerCompanyIds = (input) => {
 const vendorController = {
   vendorList: async (req, res, next) => {
     try {
-      let page, limit, offset, organization, verified, name, email, status, dateFrom, dateTo, created_by;
+      let page, limit, offset, organization, verified, name, email, status, source, subscription_plan, is_private, dateFrom, dateTo, created_by , mobile;
       if (req.query.page && req.query.page > 0) {
         page = req.query.page;
         limit = req.query.limit || Config.globalAdminLimit;
@@ -101,6 +103,10 @@ const vendorController = {
       dateFrom = req.query.date_from || null;
       dateTo = req.query.date_to || null;
       created_by = req.query.created_by || null;
+      source = req?.query?.source || null;
+      subscription_plan = req?.query?.subscription_plan ?? null;
+      is_private = req?.query?.is_private || null;
+      mobile = req.query.mobile || null;
 
       let vendorList = await vendorModel.getVendorList(
         limit,
@@ -112,7 +118,11 @@ const vendorController = {
         status,
         dateFrom,
         dateTo,
-        created_by
+        created_by,
+        source,
+        subscription_plan,
+        is_private,
+        mobile
       );
 
       let vendorCount = await vendorModel.getVendorListCount(
@@ -123,7 +133,11 @@ const vendorController = {
         status,
         dateFrom,
         dateTo,
-        created_by
+        created_by,
+        source,
+        subscription_plan,
+        is_private,
+        mobile
       );
 
       res
@@ -170,9 +184,11 @@ const vendorController = {
         total_employees,
         about_vendor_company,
         subscription,
+        subscription_plan,
         spocs,
         vendor_access_type: vendorAccessTypeRaw,
-        buyer_company_ids: buyerCompanyIdsRaw
+        buyer_company_ids: buyerCompanyIdsRaw,
+        locations
       } = req.body;
       const email = req.body.email?.toLowerCase() || '';
 
@@ -206,10 +222,7 @@ const vendorController = {
       let vendorObj = {
         name: name || null,
         email: email || null,
-        address: address || null,
-        city: city || null,
-        state: state || null,
-        country: country || 1,
+
         mobile: cleanedMobile || null,
         postal_code: postal_code || null,
         user_type: '3',
@@ -221,6 +234,8 @@ const vendorController = {
 
       let companyObj = {
         profile: about_vendor_company || null,
+        source : "admin",
+        subscription_plan : subscription_plan || "Free",
         logo: req.files.logo?.[0]?.location || null,
         company_name: organization_name || null,
         nature_of_business: nature_business || null,
@@ -234,13 +249,38 @@ const vendorController = {
         is_private: vendorAccessType === 'private' ? 1 : 0
       };
 
-
       const registrationResult = await userModel.company_registration(vendorObj, companyObj);
       const vendorId = registrationResult.user_id;
       const companyId = registrationResult.company_id;
+      let company_locations = [];
+      if(locations && locations.length > 0) {
+      company_locations = locations.map(loc => ({
+        country_id: Number(loc.country) || null,
+        state_id: Number(loc.state) || null,
+        city_id: Number(loc.city) || null,
+        postal_code: Number(loc.postal_code) || null,
+        address: loc.address || null,
 
-      // let vendor = await productModel.vendor_register(vendorObj);
-
+        company_id: companyId || null,
+        created_by: req.user.id,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }));
+      }
+      const companyLocationCS = new pgp.helpers.ColumnSet([
+        'country_id',
+        'state_id',
+        'city_id',
+        'postal_code',
+        'address',
+        'company_id',
+        'created_by',
+        'created_at',
+        'updated_at'
+      ], { table: 'tbl_company_location' });
+      if(company_locations.length > 0) {
+      const result = await rfqModel.insertArray(company_locations ,companyLocationCS ,  'tbl_company_location');
+      }
     // Check if spocs array is provided and has valid objects
 if (Array.isArray(spocs) && spocs.length > 0) {
   // Iterate through each SPOC object in the array
@@ -431,6 +471,13 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       let vendorId = req.params.id;
       let vendorDetails = await vendorModel.getVendoreditDetails(vendorId);
       let companyDetails = await userModel.getCompanyDetail(vendorId);
+      let companyLocations = await rfqModel.findAll(
+        'tbl_company_location',
+         {
+          company_id : vendorDetails[0].company_id
+         }
+      )
+      
       let files = await vendorModel.getFiles(vendorId);
       let spocDetails = await vendorModel.getSpocDetails(vendorId, false); // Show all SPOCs regardless of status
       let mappedCompanies = await vendorModel.getVendorCompanyMappings(vendorId);
@@ -438,7 +485,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       resObj.vendorDetails = vendorDetails[0];
       resObj.companyDetails = companyDetails[0];
       resObj.files = files || [];
-      resObj.mappedCompanies = mappedCompanies || [];
+      resObj.companyLocations = companyLocations || [];
       const companyIsPrivate =
         companyDetails &&
         companyDetails[0] &&
@@ -463,6 +510,155 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         .end();
     }
   },
+ getVendorLocations: async (req, res, next) => {
+  try {
+    const company_id = req.params.id;
+
+    // console.log("company_id", company_id)
+    let locations;
+    const user_type = req.user.user_type; // Get the user type from the request object
+
+    if(user_type ==3 || user_type == 1){
+      // If the user is a vendor, ensure to pick the spocs as well.
+    locations = await vendorModel.getLocationsByCompanyId(company_id, user_type);
+
+    }
+    else{
+    locations = await vendorModel.getLocationsByCompanyId(company_id);
+  }
+    return res.status(200).json({
+      status: 1,
+      data: locations
+    });
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    });
+  }
+},
+ addVendorLocation: async (req, res, next) => {
+    try {
+      const { company_id, address, postal_code, city, state, country } = req.body;
+      const locationData = {
+        company_id,
+        address,
+        postal_code,
+        city_id : city,
+        state_id :state,
+        country_id : country,
+        created_by: req.user.id,
+      };
+      await rfqModel.insert('tbl_company_location', locationData);
+      return res.status(200).json({
+        status: 1,
+        message: 'Location added successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
+    }
+  },
+  updateVendorLocation: async (req, res, next) => {
+    try {
+      const { id, company_id, address, postal_code, city, state, country } = req.body;
+      const locationData = {
+        company_id,
+        address,
+        postal_code : Number(postal_code) || null,
+        city_id : Number(city) || null,
+        state_id : Number(state) || null, 
+        country_id : Number(country) || null,
+        updated_by: req.user.id,
+      };
+
+      console.log("locationData====>", locationData)
+      await rfqModel.update('tbl_company_location', locationData, id);
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Location updated successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
+    }
+  },
+  deleteVendorLocation: async (req, res, next) => {
+    try {
+      const location_id = req.params.id;
+      const deleted = await rfqModel.delete('tbl_company_location', { id: Number(location_id) });
+      return res.status(200).json({
+        status: 1,
+        message: 'Location deleted successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
+    }
+  },
+
+  mapSpocToLocation : async (req, res, next) => {
+    try {
+      const { spoc_id, location_id } = req.body;
+       
+      if (!spoc_id || !location_id) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Please provide spoc_id and location_id'
+        });
+      }
+             //Delete the existing mapping if there any
+              await rfqModel.delete('tbl_spoc_location_mapping', { location_id });
+
+             //Insert the new mapping
+              const spocLocationCS = new pgp.helpers.ColumnSet(
+              ["spoc_id", "location_id", "assigned_by"],
+              { table: "tbl_spoc_location_mapping" }
+            );
+
+            let locationData = [];
+
+            for (const spoc of spoc_id) {
+              locationData.push({
+                spoc_id: spoc,
+                location_id,
+                assigned_by: req.user.id,
+              });
+            }
+
+            await rfqModel.insertArray(
+              locationData,
+              spocLocationCS,
+              "tbl_spoc_location_mapping"
+            );
+
+
+   
+      return res.status(200).json({
+        status: 1,
+        message: 'Location mapped successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
+    }
+  },
+
+
   deleteVendor: async (req, res, next) => {
     try {
       let vendorId = req.params.id;
@@ -535,6 +731,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         total_employees,
         about_vendor_company,
         subscription,
+        subscription_plan,
         vendor_access_type: vendorAccessTypeRaw,
         buyer_company_ids: buyerCompanyIdsRaw
       } = req.body;
@@ -605,6 +802,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         mobile : mobile || null,
         postal_code: postal_code || null ,
         organization_name: organization_name || null,
+        subscription_plan_id : subscription_plan || null,
         updated_by : updatedBy || null
       }
       let companyObj = {

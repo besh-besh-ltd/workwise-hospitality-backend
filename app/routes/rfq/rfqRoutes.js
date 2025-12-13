@@ -52,6 +52,13 @@ RfqRoutes.post(
   rfqController.createOrUpdateRfqDraftWithProductVendors
 );
 
+RfqRoutes.get(
+  '/fetch-rfq-filters/:rfq_id',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.fetchRfqFilters 
+)
+
 RfqRoutes.post(
   '/remove-vendor-from-draft',
   passportSignIn,
@@ -270,6 +277,7 @@ RfqRoutes.post(
   rfqController.searchProductByCategory
 );
 
+//Changes By Ayush
 RfqRoutes.post(
   '/search-vendor',
   noLogin.customer_auth,
@@ -616,6 +624,7 @@ RfqRoutes.get(
   rfqController.getDraftById
 );
 
+//chnages by ayush
 RfqRoutes.post('/get-draft-vendors/:draftId',
   passportSignIn,
   acl([2, 8]),
