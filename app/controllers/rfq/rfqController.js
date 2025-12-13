@@ -57,7 +57,8 @@ const VENDORS_FILTER_KEYS = [
   'prev_worked_with',
   'vendor_name',
   'vendor_info',
-  'productMakes'
+  'productMakes',
+  'subscription_type',
 ];
 
 const getDownloadURL = (url, excelToJson = false) => {
@@ -6774,6 +6775,7 @@ const rfqController = {
         vendor_name = '',
         myVendorType = null,
         productMakes = [],
+        subscriptionType = null,
         page = 1,
         limit = 20
       } = req.body;
@@ -6800,6 +6802,7 @@ const rfqController = {
         vendor_name,
         myVendorType,
         productMakes,
+        subscriptionType,
         page,
         limit,
         user_id
@@ -6871,6 +6874,8 @@ const rfqController = {
     let vendorType = '';
     let prevWorkedWith = '';
     let myVendorType = '';
+    let subscriptionType = null;
+
     const productMakes = req.body?.productMakes || [];
     search_key = req.body?.search_key ? req.body?.search_key : '';
     category_id = req.body?.category_id ? req.body?.category_id : '';
@@ -6882,6 +6887,7 @@ const rfqController = {
     vendorType = req.body?.vendorType ? req.body?.vendorType : '';
     prevWorkedWith = req.body?.prevWorkedWith ? req.body?.prevWorkedWith : '';
     myVendorType = req.body?.myVendorType ? req.body?.myVendorType : '';
+    subscriptionType = req.body?.subscriptionType ? req.body?.subscriptionType : null;
     let vendor_name = req.body.vendor_name;
 
     // If user is not logged in
@@ -6935,7 +6941,7 @@ const rfqController = {
         });
       }
     } else {
-      // if user is not logged!
+      // if user is  logged!
       let user = req.user;
       if (user && user.user_type != 3) {
         try {
@@ -6952,6 +6958,7 @@ const rfqController = {
             prevWorkedWith,
             vendor_name,
             myVendorType,
+            subscriptionType,
             '', // responseKeys : function accepting this - need to recheck it's use and remove it if not required
             productMakes
           );

@@ -61,8 +61,8 @@ user_book_demo: async (mobile) => {
           // ------------------------------
           const userFields = [
             "name", "email", "mobile", "created_by", "updated_by",
-            "status", "user_type", "password", "address", "country",
-            "whatsapp", "state", "city", "postal_code", "subscription_plan_id"
+            "status", "user_type", "password", 
+            "whatsapp", "subscription_plan_id"
           ];
           const userValues = userFields.map(f => user_data?.[f] ?? null);
           userFields.push("company_id");
@@ -815,13 +815,10 @@ user_book_demo: async (mobile) => {
         .then(function (userBasicInfo) {
           const { user_type, company_id } = userBasicInfo;
           
-          // For company admin (user_type 7) or vendor (user_type 3), show their own company details
-          // For other company users (user_type 2, 8, 9, 10), fetch company details from company admin
           let queryToExecute;
           let queryParams;
           
           if (user_type === 7 || user_type === 3) {
-            // Company admin or vendor - show their own company details
             queryToExecute = `
               SELECT tbl_users.*,
                   tbl_company.company_name,
@@ -837,17 +834,12 @@ user_book_demo: async (mobile) => {
                   tbl_company.cin,
                   tbl_company.logo,
                   tbl_company.website,
-                  tbl_company.established_year,
-                  tbl_location_states.state_name, 
-                  tbl_location_cities.city_name  
+                  tbl_company.established_year
               FROM tbl_users 
               LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
-              LEFT JOIN tbl_location_states ON tbl_users.state = tbl_location_states.id
-              LEFT JOIN tbl_location_cities ON tbl_users.city = tbl_location_cities.id
               WHERE tbl_users.id = $1`;
             queryParams = [user_id];
           } else {
-            // Other company users - fetch company details from company admin (user_type 7)
             queryToExecute = `
               SELECT cu.*,
                   tbl_company.company_name,
@@ -863,33 +855,17 @@ user_book_demo: async (mobile) => {
                   tbl_company.cin,
                   tbl_company.logo,
                   tbl_company.website,
-                  tbl_company.established_year,
-                  admin_states.state_name, 
-                  admin_cities.city_name,
-                  admin_user.address,
-                  admin_user.postal_code,
-                  admin_user.country,
-                  admin_user.state,
-                  admin_user.city,
-                  admin_countries.country_name
+                  tbl_company.established_year
               FROM (
-                SELECT tbl_users.*,
-                    tbl_location_states.state_name as current_user_state_name, 
-                    tbl_location_cities.city_name as current_user_city_name
+                SELECT tbl_users.*
                 FROM tbl_users 
-                LEFT JOIN tbl_location_states ON tbl_users.state = tbl_location_states.id
-                LEFT JOIN tbl_location_cities ON tbl_users.city = tbl_location_cities.id
                 WHERE tbl_users.id = $1
               ) cu
               LEFT JOIN tbl_users admin_user ON (admin_user.company_id = $2 AND admin_user.user_type = 7)
-              LEFT JOIN tbl_company ON cu.company_id = tbl_company.id
-              LEFT JOIN tbl_location_states admin_states ON admin_user.state = admin_states.id
-              LEFT JOIN tbl_location_cities admin_cities ON admin_user.city = admin_cities.id
-              LEFT JOIN tbl_location_country admin_countries ON admin_user.country IS NOT NULL AND admin_user.country = admin_countries.id::text`;
+              LEFT JOIN tbl_company ON cu.company_id = tbl_company.id`;
             queryParams = [user_id, company_id];
           }
 
-          // Execute the determined query
           db.one(queryToExecute, queryParams)
             .then(function (data) {
               resolve(data);
@@ -934,7 +910,7 @@ user_book_demo: async (mobile) => {
         });
     });
   },
-  vendorinfo: async (user_id, current_user = null) => {
+ vendorinfo: async (user_id, current_user = null) => {
     return new Promise(function (resolve, reject) {
 
       // query changes by Mukul Jatav 30-08-2024, 
@@ -952,7 +928,6 @@ user_book_demo: async (mobile) => {
       SELECT tbl_users.id as user_id,
        tbl_users.name as vendor_name,
        tbl_company.logo as profile_image,
-       tbl_users.address,
        tbl_users.status,
        tbl_users.whatsapp,
        tbl_company.id as company_id,
@@ -966,9 +941,24 @@ user_book_demo: async (mobile) => {
        tbl_company.import_export_code,
        tbl_company.company_name,
        tbl_company.profile,
-       tbl_company.location,
-       cl.city_name,
-       sl.state_name,
+
+       ARRAY(
+         SELECT json_build_object(
+             'address', TCL.address,
+             'postal_code', TCL.postal_code,
+             'city_id', TCL.city_id,
+             'city_name', LC.city_name,
+             'state_id', TCL.state_id,
+             'state_name', LS.state_name,
+             'country_id', TCL.country_id,
+             'country_name', LCO.country_name
+         )
+         FROM tbl_company_location TCL
+         LEFT JOIN tbl_location_cities LC ON LC.id = TCL.city_id
+         LEFT JOIN tbl_location_states LS ON LS.id = TCL.state_id
+         LEFT JOIN tbl_location_country LCO ON LCO.id = TCL.country_id
+         WHERE TCL.company_id = tbl_company.id
+       ) AS location,
 
        ARRAY(
                SELECT json_build_object(
@@ -1043,16 +1033,12 @@ user_book_demo: async (mobile) => {
 ) AS vendor_info
 
     `;
-
-
       }
 
       // Completing the query with the FROM clause
       baseQuery += `
       FROM tbl_users
       LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
-      LEFT JOIN tbl_location_cities cl ON cl.id = tbl_users.city
-      LEFT JOIN tbl_location_states sl ON sl.id = tbl_users.state     
       WHERE tbl_users.id = $1`;
 
       // Execute the query
@@ -1066,6 +1052,7 @@ user_book_demo: async (mobile) => {
         });
     });
   },
+
 
   update_change_password_status: async (user_id, password) => {
     return new Promise(function (resolve, reject) {

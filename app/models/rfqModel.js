@@ -222,7 +222,7 @@ WHERE NOT EXISTS (
                     'email', tu.email,
                     'mobile', tu.mobile,
                     'company_name', COALESCE(tc.company_name, tu.organization_name),
-                    'address', tu.address,
+                    'address', tlc.address,
                     'is_private', tc.is_private,
                     'turnover', tc.turnover,
                     'nature_of_business', tc.nature_of_business,
@@ -234,9 +234,10 @@ WHERE NOT EXISTS (
                 FROM tbl_rfq_product_vendors rpv
                 JOIN tbl_users tu ON tu.id = rpv.user_id
                 LEFT JOIN tbl_company tc ON tc.user_id = tu.id
-                LEFT JOIN tbl_location_cities lc ON lc.id = tu.city
-                LEFT JOIN tbl_location_states ls ON ls.id = tu.state
-                LEFT JOIN tbl_location_country lcn ON lcn.id = tu.country::INT
+                LEFT JOIN tbl_company_location tlc ON tlc.company_id = tu.company_id
+                LEFT JOIN tbl_location_cities lc ON lc.id = tlc.city_id
+                LEFT JOIN tbl_location_states ls ON ls.id = tlc.state_id
+                LEFT JOIN tbl_location_country lcn ON lcn.id = tlc.country_id
                 WHERE rpv.product_variant_id = rp.product_variant_id
                   AND rpv.variant = rp.variant
                   AND rpv.rfq_id = rfq.id
@@ -1529,7 +1530,8 @@ WHERE NOT EXISTS (
         prev_worked_with,
         vendor_name,
         vendor_info,
-        productMakes
+        productMakes,
+        subscription_type,
       } = filters;
 
       const isAnyFilterActive =
@@ -1572,23 +1574,47 @@ WHERE NOT EXISTS (
         `;
       }
 
-      if (city) {
-        dynamicJoin += `
-          LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-        `;
-      }
+      // if (city) {
+      //   dynamicJoin += `
+      //     LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
+      //   `;
+      // }
 
-      if (state) {
-        dynamicJoin += `
-          LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-        `;
-      }
+      // if (state) {
+      //   dynamicJoin += `
+      //     LEFT JOIN tbl_location_states ls ON tu.state = ls.id
+      //   `;
+      // }
 
-      if (country) {
-        dynamicJoin += `
-          LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
-        `;
-      }
+      // if (country) {
+      //   dynamicJoin += `
+      //     LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
+      //   `;
+      // }
+
+      dynamicJoin += `
+        LEFT JOIN (
+          SELECT
+            tus.user_id,
+            MAX(tus.end_date) AS max_end_date,
+            MAX(
+              CASE
+                WHEN tsp.plan_name ILIKE '%Enterprise%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 2
+                WHEN tsp.plan_name ILIKE '%Premium%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 1
+                ELSE 0
+              END
+            ) AS is_premium
+          FROM tbl_user_subscriptions tus
+          LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
+          GROUP BY tus.user_id
+        ) sub_info ON sub_info.user_id = tu.id
+      `;
 
       if (prev_worked_with === 'prev_finalized') {
         dynamicJoin += `
@@ -1610,23 +1636,23 @@ WHERE NOT EXISTS (
 
       // WHERE CLAUSES
       if (city && Array.isArray(city) && city.length > 0) {
-        dynamicWhere += ` AND tu.city::int IN (${city.join(',')})`;
+        dynamicWhere += ` AND tcl.city_id::int IN (${city.join(',')})`;
       } else if (typeof city == 'string' || typeof city == 'number') {
-        dynamicWhere += ` AND tu.city = '${city}'`;
+        dynamicWhere += ` AND tcl.city_id = '${city}'`;
       }
 
       if (state && Array.isArray(state) && state.length > 0) {
-        dynamicWhere += ` AND tu.state::int IN (${state.join(',')})`;
+        dynamicWhere += ` AND tcl.state_id::int IN (${state.join(',')})`;
       } else if (typeof state == 'string' || typeof state == 'number') {
-        dynamicWhere += ` AND tu.state = '${state}'`;
+        dynamicWhere += ` AND tcl.state_id = '${state}'`;
       }
 
       if (country && Array.isArray(country) && country.length > 0) {
-        dynamicWhere += ` AND COALESCE(tu.country, '1')::int IN (${country.join(
+        dynamicWhere += ` AND COALESCE(tcl.country_id, '1')::int IN (${country.join(
           ','
         )})`;
       } else if (typeof country == 'string' || typeof country == 'number') {
-        dynamicWhere += ` AND COALESCE(tu.country, '1') = '${country}'`;
+        dynamicWhere += ` AND COALESCE(tcl.country_id, '1') = '${country}'`;
       }
 
       if (turnoverCondition) {
@@ -1654,6 +1680,10 @@ WHERE NOT EXISTS (
             WHERE TRIM(nb) IN ('${vendor_type}')
           )
         `;
+      }
+
+      if (subscription_type) {
+        dynamicWhere += ` ${subscription_type == 'premium' ? 'AND is_premium = 1' : subscription_type == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0'}`
       }
 
       if (
@@ -1726,6 +1756,7 @@ WHERE NOT EXISTS (
         SELECT 
           DISTINCT ON (tu.name, tu.id) tu.id AS user_id, 
           tu.name, 
+          COALESCE(sub_info.is_premium, 0) AS is_premium,
           ${
             vendor_name
               ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $3) AS similarity_score,'
@@ -1736,7 +1767,7 @@ WHERE NOT EXISTS (
             'name', tu.name,
             'company_name', COALESCE(tc.company_name, tu.organization_name, tu.name),
             'email', tu.email,
-            'address', tu.address,
+            'address', tcl.address,
             'mobile', tu.mobile
           ) AS user_details
   
@@ -1747,6 +1778,7 @@ WHERE NOT EXISTS (
               AND trpv.variant = trp.variant
           JOIN tbl_product_variant tpv ON tpv.id = trp.product_variant_id
           JOIN tbl_users tu ON trpv.user_id = tu.id
+          LEFT JOIN tbl_company_location tcl ON tu.company_id = tcl.company_id
           LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
               ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
           JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
@@ -2143,19 +2175,28 @@ LIMIT 1;`;
             ? `
           ,(
             SELECT json_agg(json_build_object('id', RFQ_P_V.id, 'user_id', RFQ_P_V.user_id, 'variant', RFQ_P_V.variant,
-                'user_details', (
+             'user_details', (
                   SELECT json_build_object(
                     'user_id', U.id,
                     'name', U.name,
                     'company_name', C.company_name,
                     'email', U.email,
-                    'address', U.address,
+                    'address', (
+                      SELECT ARRAY_AGG(
+                        json_build_object(
+                          'address', TCL.address
+                        )
+                      )
+                      FROM tbl_company_location TCL
+                      WHERE TCL.company_id = U.company_id
+                    ),
                     'mobile', U.mobile
                   )
                   FROM tbl_users U
                   JOIN tbl_company C ON U.company_id = C.id
                   WHERE RFQ_P_V.user_id = U.id
                 )
+
               ))
             FROM tbl_rfq_product_vendors RFQ_P_V
             JOIN tbl_users U ON RFQ_P_V.user_id = U.id
@@ -2234,6 +2275,7 @@ LIMIT 1;`;
     vendor_name = '',
     myVendorType = null,
     productMakes = [],
+    subscriptionType = null,
     page = 1,
     limit = 20,
     user_id = null
@@ -2298,14 +2340,39 @@ LIMIT 1;`;
 
     const countQuery = `
       WITH vendor_data AS (
-        SELECT DISTINCT tu.id
+        SELECT DISTINCT tu.id,
+        COALESCE(sub_info.is_premium, 0) AS is_premium
+
         FROM tbl_product_variant pvt
         JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
         JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
         LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+        LEFT JOIN tbl_company_location tcl ON tc.id = tcl.company_id
         ${approved_by_id.length > 0 ? `
           JOIN tbl_vendorapprove_product_mapping vum ON vum.variant_vendor_mapping_id = pvm.id
         ` : ''}
+        LEFT JOIN (
+          SELECT
+            tus.user_id,
+            MAX(tus.end_date) AS max_end_date,
+            MAX(
+              CASE
+                WHEN tsp.plan_name ILIKE '%Enterprise%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 2
+                WHEN tsp.plan_name ILIKE '%Premium%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 1
+                ELSE 0
+              END
+            ) AS is_premium
+          FROM tbl_user_subscriptions tus
+          LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
+          GROUP BY tus.user_id
+        ) sub_info ON sub_info.user_id = tu.id
+
         WHERE pvt.status = 1 
           AND pvt.is_deleted = 0 
           AND pvt.is_review = 0 
@@ -2318,9 +2385,9 @@ LIMIT 1;`;
           AND pvt.product_id IN (
             SELECT product_id FROM tbl_product_categories WHERE category_id = ${category_id}
           )
-          ${state.length > 0 ? `AND tu.state::int IN (${state.map(s => s.id).join(',')})` : ''}
-          ${city.length > 0 ? `AND tu.city::int IN (${city.map(c => c.id).join(',')})` : ''}
-          ${country.length > 0 ? `AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(',')})` : ''}
+          ${state.length > 0 ? `AND tcl.state_id::int IN (${state.map(s => s.id).join(',')})` : ''}
+          ${city.length > 0 ? `AND tcl.city_id::int IN (${city.map(c => c.id).join(',')})` : ''}
+          ${country.length > 0 ? `AND COALESCE(tcl.country_id, '1')::int IN (${country.map(c => c.id).join(',')})` : ''}
           ${turnoverCondition}
           ${vendorType.length > 0 ? `
             AND EXISTS (
@@ -2331,6 +2398,7 @@ LIMIT 1;`;
           ${approved_by_id.length > 0 ? `
             AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(',')})
           ` : ''}
+          ${subscriptionType ? subscriptionType == 'premium' ? 'AND is_premium = 1' : subscriptionType == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0' : ''}
           ${myVendorCondition}
           ${prevWorkedCondition}
           ${vendorNameCondition}
@@ -2347,7 +2415,7 @@ LIMIT 1;`;
           tu.email,
           tu.mobile,
           COALESCE(tc.company_name, tu.organization_name, tu.name) as organization_name,
-          tu.address,
+          tcl.address,
           tc.profile as about,
           tc.website,
           tc.company_name as original_company_name,
@@ -2356,16 +2424,41 @@ LIMIT 1;`;
           ls.id as state_id,
           ls.state_name,
           tc.turnover,
-          tc.nature_of_business
+          tc.nature_of_business,
+          COALESCE(sub_info.is_premium, 0) AS is_premium
+
         FROM tbl_product_variant pvt
         JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
         JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
         LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-        LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-        LEFT JOIN tbl_location_states ls ON tu.state = ls.id
+        LEFT JOIN tbl_company_location tcl ON tc.id = tcl.company_id
+        LEFT JOIN tbl_location_cities lc ON tcl.city_id = lc.id
+        LEFT JOIN tbl_location_states ls ON tcl.state_id = ls.id
         ${approved_by_id.length > 0 ? `
           JOIN tbl_vendorapprove_product_mapping vum ON vum.variant_vendor_mapping_id = pvm.id
         ` : ''}
+        LEFT JOIN (
+          SELECT
+            tus.user_id,
+            MAX(tus.end_date) AS max_end_date,
+            MAX(
+              CASE
+                WHEN tsp.plan_name ILIKE '%Enterprise%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 2
+                WHEN tsp.plan_name ILIKE '%Premium%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 1
+                ELSE 0
+              END
+            ) AS is_premium
+          FROM tbl_user_subscriptions tus
+          LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
+          GROUP BY tus.user_id
+        ) sub_info ON sub_info.user_id = tu.id
+
         WHERE pvt.status = 1 
           AND pvt.is_deleted = 0 
           AND pvt.is_review = 0 
@@ -2378,9 +2471,9 @@ LIMIT 1;`;
           AND pvt.product_id IN (
             SELECT product_id FROM tbl_product_categories WHERE category_id = ${category_id}
           )
-          ${state.length > 0 ? `AND tu.state::int IN (${state.map(s => s.id).join(',')})` : ''}
-          ${city.length > 0 ? `AND tu.city::int IN (${city.map(c => c.id).join(',')})` : ''}
-          ${country.length > 0 ? `AND COALESCE(tu.country, '1')::int IN (${country.map(c => c.id).join(',')})` : ''}
+          ${state.length > 0 ? `AND tcl.state_id::int IN (${state.map(s => s.id).join(',')})` : ''}
+          ${city.length > 0 ? `AND tcl.city_id::int IN (${city.map(c => c.id).join(',')})` : ''}
+          ${country.length > 0 ? `AND COALESCE(tcl.country_id, '1')::int IN (${country.map(c => c.id).join(',')})` : ''}
           ${turnoverCondition}
           ${vendorType.length > 0 ? `
             AND EXISTS (
@@ -2391,6 +2484,7 @@ LIMIT 1;`;
           ${approved_by_id.length > 0 ? `
             AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(',')})
           ` : ''}
+          ${subscriptionType ? subscriptionType == 'premium' ? 'AND is_premium = 1' : subscriptionType == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0' : ''}
           ${myVendorCondition}
           ${prevWorkedCondition}
           ${vendorNameCondition}
@@ -2419,7 +2513,7 @@ LIMIT 1;`;
       throw err;
     }
   },
-
+  
   searchVendorWithoutLogin: async (
     search_key,
     category_id,
@@ -2435,56 +2529,49 @@ LIMIT 1;`;
     // mukul jatav 28/apr/2024 - product migration changes - added product_variant_vendor_mapping and replaced tbl_product with tbl_product_variant
 
     let countQuery = `
-      WITH vendor_data AS (
-        SELECT DISTINCT tu.id
-        FROM tbl_product_variant pvt
-        JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
-                JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
-        LEFT JOIN tbl_company tc ON tc.id = tu.company_id AND tc.is_private = 0
-        ${
-          approved_by_id != ''
-            ? `
-          JOIN tbl_vendorapprove_product_mapping vum 
-            ON vum.variant_vendor_mapping_id = pvm.id
-        `
-            : ``
-        }
-          WHERE pvt.status = 1 AND pvt.is_deleted = 0 AND pvt.is_review = 0 AND pvt.is_approve = 1
-         AND pvm.status = TRUE AND pvm.is_approved = TRUE
-         AND tu.is_deleted = 0 AND tu.status = 1 AND pvt.name = '${search_key}' AND tc.is_private = 0
-        ${
-          state != ''
-            ? `AND tu.state::int IN (${state.map((s) => s.id).join(',')})`
-            : ``
-        }
-        ${
-          city != ''
-            ? `AND tu.city::int IN (${city.map((c) => c.id).join(',')})`
-            : ``
-        }
-        ${
-          country != ''
-            ? `AND COALESCE(tu.country, '1')::int IN (${country
-                .map((c) => c.id)
-                .join(',')})`
-            : ``
-        }
-        ${
-          category_id != ''
-            ? `AND pvt.product_id IN (SELECT product_id FROM tbl_product_categories WHERE category_id = ${category_id})`
-            : ``
-        }
-        ${
-          approved_by_id != ''
-            ? `
-          AND vum.vendor_approve_id IN (${approved_by_id
-            .map((vui) => vui.id)
-            .join(',')})
-        `
-            : ``
-        }
-      )
-      SELECT COUNT(*) AS total FROM vendor_data;
+   WITH vendor_data AS (
+   SELECT DISTINCT tu.id
+   FROM tbl_product_variant pvt
+   JOIN tbl_product_variant_vendor_mapping pvm 
+        ON pvt.id = pvm.product_variant_id
+   JOIN tbl_users tu 
+        ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
+   LEFT JOIN tbl_company tc 
+        ON tc.id = tu.company_id AND tc.is_private = 0
+   LEFT JOIN tbl_company_location tcl
+        ON tcl.company_id = tc.id
+   ${approved_by_id != '' ? `
+   JOIN tbl_vendorapprove_product_mapping vum 
+        ON vum.variant_vendor_mapping_id = pvm.id` : ``}
+
+   WHERE pvt.status = 1 
+     AND pvt.is_deleted = 0 
+     AND pvt.is_review = 0 
+     AND pvt.is_approve = 1
+     AND pvm.status = TRUE 
+     AND pvm.is_approved = TRUE
+     AND tu.is_deleted = 0 
+     AND tu.status = 1
+     AND pvt.name = '${search_key}'
+     AND tc.is_private = 0
+
+   ${state != '' ? `AND tcl.state_id IN (${state.map(s => s.id).join(',')})` : ``}
+   ${city != '' ? `AND tcl.city_id IN (${city.map(c => c.id).join(',')})` : ``}
+   ${country != '' ? `AND tcl.country_id IN (${country.map(c => c.id).join(',')})` : ``}
+
+   ${category_id != '' ?
+     `AND pvt.product_id IN (
+          SELECT product_id FROM tbl_product_categories 
+          WHERE category_id = ${category_id}
+      )`
+   : ``}
+
+   ${approved_by_id != '' ? `
+     AND vum.vendor_approve_id IN (${approved_by_id.map(v => v.id).join(',')})
+   ` : ``}
+)
+SELECT COUNT(*) AS total FROM vendor_data;
+
     `;
     let turnoverCondition = '';
 
@@ -2501,83 +2588,88 @@ LIMIT 1;`;
       turnoverCondition += ')';
     }
 
-    let dataQuery = `
-    WITH vendor_data AS (
-      SELECT DISTINCT tu.id, tu.name as vendor_name, COALESCE(tc.company_name, tu.organization_name, tu.name) as company_name,
-      tu.address, tc.profile as about, tc.website, tc.company_name as original_company_name, lc.city_name, ls.state_name
+    let dataQuery = `WITH vendor_data AS (
+   SELECT DISTINCT 
+        tu.id,
+        tu.name AS vendor_name,
+        COALESCE(tc.company_name, tu.organization_name, tu.name) AS company_name,
+        tcl.address,
+        tc.profile AS about,
+        tc.website,
+        tc.company_name AS original_company_name,
+        lc.city_name,
+        ls.state_name
 
-      FROM tbl_product_variant pvt
-      JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
-        JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
-      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
-      LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-      LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-      ${
-        approved_by_id != ''
-          ? `
-        JOIN tbl_vendorapprove_product_mapping vum 
-          ON vum.variant_vendor_mapping_id = pvm.id
-      `
-          : ``
-      }
-        WHERE pvt.status = 1 AND pvt.is_deleted = 0 AND pvt.is_review = 0 AND pvt.is_approve = 1
-        AND pvm.status = TRUE AND pvm.is_approved = TRUE
-        AND tu.is_deleted = 0 AND tu.status = 1 AND pvt.name = '${search_key}' AND tc.is_private = 0
-      ${
-        state != ''
-          ? `AND tu.state::int IN (${state.map((s) => s.id).join(',')})`
-          : ``
-      }
-      ${
-        city != ''
-          ? `AND tu.city::int IN (${city.map((c) => c.id).join(',')})`
-          : ``
-      }
-      ${
-        country != ''
-          ? `AND COALESCE(tu.country, '1')::int IN (${country
-              .map((c) => c.id)
-              .join(',')})`
-          : ``
-      }
-      ${turnoverCondition}
-      ${
-        category_id != ''
-          ? `AND pvt.product_id IN (SELECT product_id FROM tbl_product_categories WHERE category_id = ${category_id})`
-          : ``
-      }
-      ${
-        vendorType.length > 0
-          ? `
-        AND EXISTS (
-          SELECT 1
-          FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
-          WHERE TRIM(nb) IN (${vendorType
-            .map((vt) => `'${vt.value.toLowerCase().trim()}'`)
-            .join(', ')})
-        )
-      `
-          : ``
-      }
-      ${
-        approved_by_id != ''
-          ? `
-        AND vum.vendor_approve_id IN (${approved_by_id
-          .map((vui) => vui.id)
-          .join(',')})
-      `
-          : ``
-      }
-    )
-    SELECT * FROM vendor_data ORDER BY RANDOM() LIMIT 2;
-  `;
+   FROM tbl_product_variant pvt
+   JOIN tbl_product_variant_vendor_mapping pvm 
+        ON pvt.id = pvm.product_variant_id
+   JOIN tbl_users tu 
+        ON tu.id = pvm.vendor_id 
+       AND tu.user_type IN (3,4)
+   LEFT JOIN tbl_company tc 
+        ON tc.id = tu.company_id
+   LEFT JOIN tbl_company_location tcl 
+        ON tcl.company_id = tc.id
+   LEFT JOIN tbl_location_cities lc 
+        ON tcl.city_id = lc.id
+   LEFT JOIN tbl_location_states ls 
+        ON tcl.state_id = ls.id
+
+   ${approved_by_id != '' ? `
+   JOIN tbl_vendorapprove_product_mapping vum 
+        ON vum.variant_vendor_mapping_id = pvm.id` : ``}
+
+   WHERE pvt.status = 1 
+     AND pvt.is_deleted = 0 
+     AND pvt.is_review = 0 
+     AND pvt.is_approve = 1
+     AND pvm.status = TRUE 
+     AND pvm.is_approved = TRUE
+     AND tu.is_deleted = 0 
+     AND tu.status = 1
+     AND pvt.name = '${search_key}'
+     AND tc.is_private = 0
+
+   ${state != '' ? `AND tcl.state_id IN (${state.map(s => s.id).join(',')})` : ``}
+   ${city != '' ? `AND tcl.city_id IN (${city.map(c => c.id).join(',')})` : ``}
+   ${country != '' ? `AND tcl.country_id IN (${country.map(c => c.id).join(',')})` : ``}
+
+   ${turnoverCondition}
+
+   ${category_id != '' ?
+     `AND pvt.product_id IN (
+          SELECT product_id FROM tbl_product_categories 
+          WHERE category_id = ${category_id}
+      )`
+   : ``}
+
+   ${vendorType.length > 0 ? `
+     AND EXISTS (
+        SELECT 1
+        FROM unnest(string_to_array(LOWER(tc.nature_of_business), ',')) AS nb
+        WHERE TRIM(nb) IN (${vendorType
+           .map(vt => `'${vt.value.toLowerCase().trim()}'`)
+           .join(', ')})
+     )
+   ` : ``}
+
+   ${approved_by_id != '' ? `
+     AND vum.vendor_approve_id IN (${approved_by_id.map(v => v.id).join(',')})
+   ` : ``}
+)
+SELECT * 
+FROM vendor_data 
+ORDER BY RANDOM() 
+LIMIT 2;
+`;
 
     try {
       const countResult = await db.query(countQuery);
+      console.log('countQueery', countQuery);
       const totalCount = countResult[0].total;
-
+      
       const dataResult = await db.query(dataQuery);
-
+      console.log('dataQuwry', dataQuery);
       return {
         total: totalCount,
         vendor: dataResult.length > 0 ? dataResult : null
@@ -2782,7 +2874,7 @@ LIMIT 1;`;
       TU.name,
       TU.email,
       TU.mobile,
-      TU.address,
+      tcl.address,
       TU.organization_name,
       TC.company_name,
       ${rfq_id ? `COALESCE(MAX(TRPV.is_rfq_viewed), 0) AS is_rfq_viewed,` : ''}
@@ -2794,6 +2886,7 @@ LIMIT 1;`;
       ) AS "products"
       FROM tbl_users TU
       JOIN tbl_company TC ON TU.company_id = TC.id
+      JOIN tbl_company_location tcl ON TC.id = tcl.company_id
       ${
         rfq_id
           ? 'LEFT JOIN tbl_rfq_product_vendors TRPV ON TU.id = TRPV.user_id AND TRPV.rfq_id = ' +
@@ -2803,7 +2896,7 @@ LIMIT 1;`;
       WHERE TU.id IN (${placeholders})
       ${
         rfq_id
-          ? 'GROUP BY TU.id, TU.name, TU.email, TU.mobile, TU.address, TU.organization_name, TC.company_name'
+          ? 'GROUP BY TU.id, TU.name, TU.email, TU.mobile, tcl.address, TU.organization_name, TC.company_name'
           : ''
       }`;
 
@@ -2840,7 +2933,7 @@ LIMIT 1;`;
         U.name,
         U.email,
         U.mobile,
-        U.address,
+        CL.address,
         U.organization_name,
         C.company_name,
         ${
@@ -2857,6 +2950,7 @@ LIMIT 1;`;
         JOIN tbl_product_variant PV ON PVVM.product_variant_id = PV.id
         JOIN tbl_users U ON PVVM.vendor_id = U.id
         JOIN tbl_company C ON C.id = U.company_id
+        JOIN tbl_company_location CL ON C.id = CL.company_id
         LEFT JOIN tbl_buyer_private_vendors_mapping BVM ON U.id = BVM.vendor_id AND BVM.company_id = ${companyId}
   
         WHERE PVVM.product_variant_id = $1
@@ -2895,7 +2989,7 @@ LIMIT 1;`;
       throw error;
     }
   },
-  getVendorsByRfqProduct: async (rfq_product_id) => {
+ getVendorsByRfqProduct: async (rfq_product_id) => {
     try {
       let q = `
         SELECT 
@@ -2903,9 +2997,21 @@ LIMIT 1;`;
           U.name,
           U.email,
           U.mobile,
-          U.address,
           C.company_name,
-          COALESCE(RPV.is_rfq_viewed, 0) AS is_rfq_viewed
+          COALESCE(RPV.is_rfq_viewed, 0) AS is_rfq_viewed,
+          (
+            SELECT ARRAY_AGG(
+              json_build_object(
+                'address', CL.address,
+                'country', CL.country_id,
+                'state', CL.state_id,
+                'city', CL.city_id,
+                'postal_code', CL.postal_code
+              )
+            )
+            FROM tbl_company_location CL
+            WHERE CL.company_id = U.company_id
+          ) AS addresses
         FROM tbl_rfq_products RP
         JOIN tbl_rfq_product_vendors RPV ON RP.rfq_id = RPV.rfq_id 
           AND RP.product_variant_id = RPV.product_variant_id 
@@ -2914,6 +3020,7 @@ LIMIT 1;`;
         JOIN tbl_company C ON U.company_id = C.id
         WHERE RP.id = $1
           AND U.status = 1
+        GROUP BY U.id, U.name, U.email, U.mobile, C.company_name, RPV.is_rfq_viewed
         ORDER BY C.company_name
       `;
 
@@ -2922,6 +3029,7 @@ LIMIT 1;`;
       throw error;
     }
   },
+
   checkIfExists: async (table_name, parameter, db_con = db) => {
     const query = `SELECT * FROM ${table_name} WHERE ${parameter}`;
 
@@ -2944,9 +3052,10 @@ LIMIT 1;`;
           ARRAY(
             SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,
                 'vendor_details', (
-                    SELECT json_agg(json_build_object('id', TU.id, 'name' , TU.name, 'email', TU.email,'mobile' , TU.mobile,'address' , TU.address,'organization_name' , COALESCE(TCC.company_name, TU.organization_name, TU.name))) 
+                    SELECT json_agg(json_build_object('id', TU.id, 'name' , TU.name, 'email', TU.email,'mobile' , TU.mobile,'address' , TCL.address,'organization_name' , COALESCE(TCC.company_name, TU.organization_name, TU.name))) 
                     FROM tbl_users TU 
                     LEFT JOIN tbl_company TCC ON TCC.id = TU.company_id 
+                    LEFT JOIN tbl_company_location TCL ON TCC.id = TCL.company_id
                     WHERE TU.id = TQ.created_by
                 ),
                 'products', (
@@ -2972,7 +3081,7 @@ LIMIT 1;`;
         });
     });
   },
-  getQuotesByRfqByIdByProduct: async (
+ getQuotesByRfqByIdByProduct: async (
     id,
     user_id,
     company_id,
@@ -3071,7 +3180,7 @@ LIMIT 1;`;
         'name', TU.name,
         'email', TU.email,
         'mobile', TU.mobile,
-        'address', TU.address,
+        -- 'address', TCL.address,
 
         -- vendor-specific latest_target_price
         'latest_target_price', (
@@ -3122,6 +3231,7 @@ LIMIT 1;`;
     FROM tbl_quotes TQ
     JOIN tbl_users TU ON TU.id = TQ.created_by
     LEFT JOIN tbl_company TCC ON TCC.id = TU.company_id
+    -- LEFT JOIN tbl_company_location TCL ON TCC.id = TCL.company_id
     LEFT JOIN tbl_quote_finalization _TQF 
         ON _TQF.rfq_id = $1 
        AND _TQF.vendor_id = TU.id 
@@ -3148,7 +3258,7 @@ LIMIT 1;`;
                             'name', TU.name,
                             'email', TU.email,
                             'mobile', TU.mobile,
-                            'address', TU.address,
+                            -- 'address', TCL.address,
                             'organization_name', COALESCE(TCC2.company_name, TU.organization_name, TU.name),
                             'is_finalized', (CASE WHEN _TQF.id IS NOT NULL THEN TRUE ELSE FALSE END),
                             'prev_worked', (SELECT 1
@@ -3161,6 +3271,7 @@ LIMIT 1;`;
                         ))
                         FROM tbl_users TU
                         LEFT JOIN tbl_company TCC2 ON TCC2.id = TU.company_id
+                        -- LEFT JOIN tbl_company_location TCL ON TCC2.id = TCL.company_id
                         LEFT JOIN tbl_quote_finalization _TQF ON _TQF.rfq_id = $1 AND _TQF.vendor_id = TU.id AND _TQF.product_variant_id = TRP.product_variant_id AND _TQF.variant = TRP.variant
                         WHERE TU.id = TQ.created_by
                         ${TA_Vendors === 'TA' ? vendorCondition : ''}
@@ -3480,12 +3591,14 @@ LIMIT 1;`;
                       'company_name', TC.company_name,
                       'email', TUU.email,
                       'mobile', TUU.mobile,
-                      'address', TUU.address,
+                      -- 'address', TCL.address,
                       'organization_name', TUU.organization_name
                     )
                     FROM tbl_users TUU
                     JOIN tbl_company TC ON TUU.company_id = TC.id
+                    -- JOIN tbl_company_location TCL ON TC.id = TCL.company_id
                     WHERE TUU.id = TQF.vendor_id
+                    LIMIT 1
                   )
                 )
                 FROM tbl_quote_finalization TQF
@@ -3514,7 +3627,7 @@ LIMIT 1;`;
                       'name', TU.name,
                       'email', TU.email,
                       'mobile', TU.mobile,
-                      'address', TU.address,
+                      -- 'address', TCL3.address,
                       'organization_name', COALESCE(TCC3.company_name, TU.organization_name, TU.name),
                       'prev_worked', (SELECT 1
                                         FROM tbl_rfq_product_vendors rpv
@@ -3526,7 +3639,9 @@ LIMIT 1;`;
                     )
                     FROM tbl_users TU
                     LEFT JOIN tbl_company TCC3 ON TCC3.id = TU.company_id
+                    -- LEFT JOIN tbl_company_location TCL3 ON TCC3.id = TCL3.company_id
                     WHERE TU.id = TQ_INNER.created_by
+                    LIMIT 1
                   )
                 )
                 FROM tbl_quotes TQ_INNER
@@ -4117,6 +4232,7 @@ WHERE row_num_by_name_category = 1
     prevWorkedWith,
     vendor_name, // Added vendor_name parameter
     myVendorType,
+    subscriptionType,
     responseKeys,
     productMakes
   ) => {
@@ -4134,64 +4250,19 @@ WHERE row_num_by_name_category = 1
     let cityIds = [];
     let countryIds = [];
 
-    // Process all location lookups in parallel for better performance
-    const locationPromises = [];
-
     if (state && Array.isArray(state) && state.length > 0) {
-      if (typeof state[0] === 'string') {
-        // If state is array of strings, convert to IDs
-        locationPromises.push(
-          Promise.all(
-            state.map((stateName) => cmsModel.findStateByName(stateName))
-          ).then((results) => {
-            stateIds = results.filter((result) => result !== null);
-          })
-        );
-      } else {
         // If state is array of objects with id property
         stateIds = state.map((s) => s.id);
-      }
     }
 
     if (city && Array.isArray(city) && city.length > 0) {
-      if (typeof city[0] === 'string') {
-        // If city is array of strings, convert to IDs
-        locationPromises.push(
-          Promise.all(
-            city.map((cityName) =>
-              cmsModel.findCityByNameAndState(null, cityName)
-            )
-          ).then((results) => {
-            cityIds = results.filter((result) => result !== null);
-          })
-        );
-      } else {
         // If city is array of objects with id property
         cityIds = city.map((c) => c.id);
-      }
     }
 
     if (country && Array.isArray(country) && country.length > 0) {
-      if (typeof country[0] === 'string') {
-        // If country is array of strings, convert to IDs
-        locationPromises.push(
-          Promise.all(
-            country.map((countryName) =>
-              cmsModel.findCountryByName(countryName)
-            )
-          ).then((results) => {
-            countryIds = results.filter((result) => result !== null);
-          })
-        );
-      } else {
         // If country is array of objects with id property
         countryIds = country.map((c) => c.id);
-      }
-    }
-
-    // Wait for all location lookups to complete
-    if (locationPromises.length > 0) {
-      await Promise.all(locationPromises);
     }
 
     // Adding dynamic turnover condition
@@ -4240,19 +4311,34 @@ WHERE row_num_by_name_category = 1
           tu.email,
           tu.mobile,
           COALESCE(tc.company_name, tu.organization_name) AS company_name,
-          tu.address,
+          tcl.address,
           tc.profile AS about,
           tc.is_private,
           tc.website,
           tc.turnover,
           tc.nature_of_business,
-          lc.city_name,
-          ls.state_name,
-          lcn.country_name,
+
+          ARRAY(
+            SELECT json_build_object(
+              'address', tcl2.address,
+              'postal_code', tcl2.postal_code,
+              'city_id', tcl2.city_id,
+              'city_name', lc.city_name,
+              'state_id', tcl2.state_id,
+              'state_name', ls.state_name,
+              'country_id', tcl2.country_id,
+              'country_name', lco.country_name
+            )
+            FROM tbl_company_location tcl2
+            LEFT JOIN tbl_location_cities lc ON lc.id = tcl2.city_id
+            LEFT JOIN tbl_location_states ls ON ls.id = tcl2.state_id
+            LEFT JOIN tbl_location_country lco ON lco.id = tcl2.country_id
+            WHERE tcl2.company_id = tc.id
+          ) AS location,
           CASE
           WHEN tc.logo IS NULL THEN NULL
-          ELSE tc.logo
-          END AS image_url,
+           ELSE tc.logo
+           END AS image_url,
           CASE
             WHEN bvm.vendor_id IS NOT NULL THEN 1
             ELSE 0
@@ -4274,10 +4360,8 @@ WHERE row_num_by_name_category = 1
         JOIN tbl_category c ON pc.category_id = c.id
         JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
         LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+        LEFT JOIN tbl_company_location tcl on tc.id = tcl.company_id
         LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
-        LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-        LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-        LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
         LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
         LEFT JOIN (
           SELECT DISTINCT rpv.user_id
@@ -4336,17 +4420,17 @@ WHERE row_num_by_name_category = 1
 
           ${
             stateIds.length > 0
-              ? `AND tu.state::int IN (${stateIds.join(',')})`
+              ? `AND tcl.state_id::int IN (${stateIds.join(',')})`
               : ``
           }
           ${
             cityIds.length > 0
-              ? `AND tu.city::int IN (${cityIds.join(',')})`
+              ? `AND tcl.city_id::int IN (${cityIds.join(',')})`
               : ``
           }
           ${
             countryIds.length > 0
-              ? `AND COALESCE(tu.country, '1')::int IN (${countryIds.join(
+              ? `AND COALESCE(tcl.country_id, '1')::int IN (${countryIds.join(
                   ','
                 )})`
               : ``
@@ -4388,6 +4472,8 @@ WHERE row_num_by_name_category = 1
           }
           ${myVendorType == 'both' ? `AND bvm.vendor_id IS NOT NULL` : ``}
 
+          ${subscriptionType ? subscriptionType == 'premium' ? 'AND is_premium = 1' : subscriptionType == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0' : ''}
+
           ${prevWorkedWith === 'prev_finalized' ? `AND qf.id IS NOT NULL` : ``}
           ${prevWorkedWith === 'rfq_sent' ? `AND rfqv.user_id IS NOT NULL` : ``}
 
@@ -4426,7 +4512,7 @@ WHERE row_num_by_name_category = 1
     });
   },
 
-  genericSearchVendors: async (
+ genericSearchVendors: async (
     buyerId,
     productId,
     productName,
@@ -4458,7 +4544,7 @@ WHERE row_num_by_name_category = 1
         tu.email,
         tu.mobile,
         COALESCE(tc.company_name, tu.organization_name) AS company_name,
-        tu.address,
+        tcl.address,
         tc.is_private,
         tc.turnover,
         tc.nature_of_business,
@@ -4484,6 +4570,7 @@ WHERE row_num_by_name_category = 1
       JOIN tbl_category c ON pc.category_id = c.id
       JOIN tbl_users tu ON tu.id = pvvm.vendor_id AND tu.user_type IN (3, 4)
       LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+      LEFT JOIN tbl_company_location tcl on tc.id = tcl.company_id
       LEFT JOIN tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
       LEFT JOIN tbl_quote_finalization qf ON qf.vendor_id = tu.id AND qf.created_by = ${buyerId}
       LEFT JOIN (
@@ -4492,19 +4579,26 @@ WHERE row_num_by_name_category = 1
         JOIN tbl_rfq rfq ON rfq.id = rpv.rfq_id
         WHERE rfq.created_by = ${buyerId} AND rfq.is_published = 1
       ) rfqv ON rfqv.user_id = tu.id
-      LEFT JOIN tbl_location_cities lc ON tu.city = lc.id
-      LEFT JOIN tbl_location_states ls ON tu.state = ls.id
-      LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
+      LEFT JOIN tbl_location_cities lc ON tcl.city_id = lc.id
+      LEFT JOIN tbl_location_states ls ON tcl.state_id = ls.id
+      LEFT JOIN tbl_location_country lcn ON tcl.country_id = lcn.id
 
-      WHERE p.status = 1 AND pv.status = 1 AND p.is_deleted = 0 AND p.is_review = 0 AND p.is_approve = 1 AND pv.is_approve = 1 AND (pvvm.is_approved OR bvm.vendor_id IS NOT NULL)
+      WHERE p.status = 1 
+        AND pv.status = 1 
+        AND p.is_deleted = 0 
+        AND p.is_review = 0 
+        AND p.is_approve = 1 
+        AND pv.is_approve = 1 
+        AND (pvvm.is_approved = TRUE OR bvm.vendor_id IS NOT NULL)
         AND (tc.is_private = 0 OR (tc.is_private = 1 AND bvm.vendor_id IS NOT NULL))
-        AND tu.is_deleted = 0 AND tu.status = 1 
+        AND tu.is_deleted = 0 
+        AND tu.status = 1 
         AND ${
           productId
             ? `pv.id = $1`
             : productName
             ? `LOWER(pv.name) = LOWER($1)`
-            : ``
+            : `1=1`
         }
         AND tu.email IS NOT NULL
 
@@ -4547,7 +4641,7 @@ WHERE row_num_by_name_category = 1
             tu.email,
             tu.mobile,
             tc.company_name AS company_name,
-            tu.address,
+            tcl.address,
             ${
               vendor_name
                 ? "ts_rank_cd(to_tsvector('english', tc.company_name), plainto_tsquery('english', $1)) AS rank,"
@@ -4591,11 +4685,13 @@ WHERE row_num_by_name_category = 1
         LEFT JOIN
             tbl_company tc ON tc.id = tu.company_id
         LEFT JOIN
+            tbl_company_location tcl on tc.id = tcl.company_id
+        LEFT JOIN
             tbl_buyer_private_vendors_mapping bvm ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
         LEFT JOIN
-            tbl_location_cities lc ON tu.city = lc.id
+            tbl_location_cities lc ON tcl.city_id = lc.id
         LEFT JOIN
-            tbl_location_states ls ON tu.state = ls.id
+            tbl_location_states ls ON tcl.state_id = ls.id
         WHERE
             tu.user_type = 3 -- Vendor user types
             AND tu.status = 1 -- Active vendors
