@@ -2,7 +2,8 @@ import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN } from "../../models/purchaseOrderModel.js";
+import rfqModel from "../../models/rfqModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
 import { sendApprovalNotification } from "./purchaseOrderEmails.js";
 
@@ -10,9 +11,9 @@ export const getPOByRFQ = async (req, res) => {
     try {
         const { rfq_id } = req.params;
         const { page = 1, limit = 10, ...filters } = req.query;
-        const { id } = req.user;
+        const { id, user_type } = req.user;
 
-        const result = await getPOByRFQId(rfq_id, id, page, limit, filters);
+        const result = await getPOByRFQId(rfq_id, id, user_type, page, limit, filters);
 
         return res.json(result);
 
@@ -47,9 +48,31 @@ export const getPODetails = async (req, res) => {
     }
 };
 
+export const updatePO = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+    const { changes } = req.body;
+
+    const updated = await handleUpdatePO(po_id, changes, req.user);
+
+    return res.json({
+      status: 1,
+      message: "PO has been updated!",
+      updated,
+    });
+  } catch (error) {
+      logError(error);
+      return res.status(500).json({
+          status: 0,
+          message: error.message || 'An error occurred while approving the PO.',
+          error
+      });
+  }
+};
+
 export const draftPO = async (poInfo, user, txn) => {
   try {
-    const { rfq_id, project_id, total_value, product_info, quote_id, existing_po_id } = poInfo;
+    const { rfq_id, project_id, total_value, product_info, quote_item_id, existing_po_id, selected_hierarchy } = poInfo;
     const { id: initiated_by, company_id } = user;
 
     if (!rfq_id || !product_info || !product_info.rfq_product_id) {
@@ -59,13 +82,14 @@ export const draftPO = async (poInfo, user, txn) => {
     const result = await draftPurchaseOrder(
       rfq_id,
       project_id,
-      quote_id,
+      quote_item_id,
       total_value,
       product_info,
       initiated_by,
       company_id,
       user,
       existing_po_id,
+      selected_hierarchy,
       txn
     );
 
@@ -81,7 +105,9 @@ export const initiatePO = async (req, res) => {
     const { po_id } = req.params;
     const initiator = req.user;
   
-    const result = await initiatePurchaseOrder(po_id, initiator);
+    const result = await db.tx(async t => {
+      return await initiatePurchaseOrder(po_id, initiator, t);
+    })
     if(result.approval_required) {
       const purchaseOrder = await db.oneOrNone(
         `SELECT * FROM tbl_rfq_purchase_order
@@ -97,8 +123,8 @@ export const initiatePO = async (req, res) => {
       message: "Purchase order has been initiated"
     })
   } catch (error) {
-    logError(error);
-    return res.status(500).json({
+    // logError(error);
+    return res.status(400).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
       error
@@ -150,14 +176,19 @@ export const approvePO = async (req, res) => {
           t,
         });
     
+        const purchaseOrder = await t.oneOrNone(`
+          SELECT * FROM tbl_rfq_purchase_order trpo 
+            JOIN tbl_approval_hierarchy_transactions taht ON taht.id = $1 
+          WHERE trpo.id = taht.target_entity_id`,
+        [trx.id])
+
         if (result && (!result.approval_required || result.is_rejected)) {
           await markPOStatusChange(po_id, t, result.is_rejected, req.user);
+
+          if(result.is_rejected) {
+            await handlePORejection(purchaseOrder, userId, t);
+          }
         } else if (result && (!result.is_rejected && result.approval_required)) {
-          const purchaseOrder = await t.oneOrNone(`
-            SELECT * FROM tbl_rfq_purchase_order trpo 
-              JOIN tbl_approval_hierarchy_transactions taht ON taht.id = $1 
-            WHERE trpo.id = taht.target_entity_id`,
-          [trx.id])
 
           await sendApprovalNotification(purchaseOrder, result.current_approver_id);
         }
@@ -180,6 +211,49 @@ export const approvePO = async (req, res) => {
       message: error.message || 'An error occurred while approving the PO.',
       error
     });
+  }
+};
+
+export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
+  try {
+    if(!purchaseOrder) throw new Error("Purchase order is required to handle Reject Case")
+    if(!t) throw new Error("Transaction is required for PO Rejection Case handling")
+
+    for (let product of purchaseOrder.rfq_product_id) {
+      const alreadyExists = await t.one(`
+        SELECT TQF.* FROM tbl_quote_finalization TQF
+        JOIN tbl_rfq_products TRP ON TRP.id = $2
+        WHERE TQF.rfq_id = $1
+        AND TQF.product_variant_id = TRP.product_variant_id AND TQF.variant = TRP.variant 
+        LIMIT 1
+      `, [purchaseOrder.rfq_id, product])
+
+      const history_data = {
+        rfq_id: alreadyExists.rfq_id,
+        rfq_no: alreadyExists.rfq_no,
+        product_variant_id: alreadyExists.product_variant_id,
+        vendor_id: alreadyExists.vendor_id,
+        quote_id: alreadyExists.quote_id,
+        created_by: alreadyExists.created_by,
+        timestamp: alreadyExists.timestamp,
+        variant: alreadyExists.variant,
+        changed_by: rejectedBy
+      };
+  
+      await rfqModel.insert(
+        'tbl_quote_finalization_history',
+        history_data,
+        t
+      );
+
+      await t.one(`
+        DELETE FROM tbl_quote_finalization
+        WHERE id = $1 RETURNING *
+      `, [alreadyExists.id]);
+    }
+  } catch (error) {
+    logError(error);
+    return false;
   }
 };
 
@@ -217,7 +291,91 @@ export const updateHSNForProduct = async (req, res) => {
       data: updatedData
     });
   } catch (error) {
-    logError(error);
+    console.error(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || 'An error occurred while approving the PO.',
+      error
+    });
+  }
+};
+
+export const raiseInvoice = async (req, res) => {
+  try {
+    const { po_id, invoice_url } = req.body;
+    const { id } = req.user;
+
+    const result = await handleRaiseInvoice(po_id, invoice_url, id);
+    return res.json({
+      status: 1,
+      message: 'Invoice has been raised for this PO.',
+      data: result
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || 'An error occurred while approving the PO.',
+      error
+    });
+  }
+};
+
+export const markGRN = async (req, res) => {
+  try {
+    const { po_id, grn_document_url, remarks } = req.body;
+    const { id } = req.user;
+
+    const result = await handleMarkGRN(po_id, grn_document_url, id, remarks);
+    return res.json({
+      status: 1,
+      message: 'GRN has been marked for this PO.',
+      data: result
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || 'An error occurred while approving the PO.',
+      error
+    });
+  }
+};
+
+export const markDispatched = async (req, res) => {
+  try {
+    const { po_id } = req.body;
+    const { id } = req.user;
+
+    const result = await handleMarkDispatched(po_id, id);
+    return res.json({
+      status: 1,
+      message: 'Marked as Dispatched for this PO.',
+      data: result
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || 'An error occurred while approving the PO.',
+      error
+    });
+  }
+};
+
+export const addSiteRepresentative = async (req, res) => {
+  try {
+    const { po_id, name, email, phone } = req.body;
+    const { id, company_id } = req.user;
+
+    const result = await handleAddSiteRepresentative(po_id, id, name, email, phone);
+    return res.json({
+      status: 1,
+      message: 'Site Rep has been added for this PO',
+      data: result
+    });
+  } catch (error) {
+    console.error(error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
@@ -242,8 +400,10 @@ export const getMilestonesController = async (req, res) => {
 
 export const createMilestoneController = async (req, res) => {
   try {
-    const milestone = await createMilestone(req.body, req.user);
-    if(milestone) await scheduleMilestoneReminder(milestone);
+    let milestone = await createMilestone(req.body, req.user);
+    if(milestone) {
+      await scheduleMilestoneReminder(milestone)
+    };
 
     return res.status(201).json({ success: true, data: milestone });
   } catch (error) {

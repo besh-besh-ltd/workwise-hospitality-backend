@@ -11535,6 +11535,8 @@ getClauses: async (req, res) => {
   getRfqs: async (req, res) => {
     try {
       const user_id = req.user.id;
+      const user_type = req.user.user_type;
+      
       let {
         tech_eval,
         po = 'false',
@@ -11565,6 +11567,7 @@ getClauses: async (req, res) => {
       // Get RFQs
       const rfqs = await rfqModel.getRfqs(
         user_id,
+        user_type,
         tech_eval,
         po,
         limit,
