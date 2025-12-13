@@ -833,12 +833,12 @@ export const getPODetailsById = async (po_id, user_id) => {
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2
        JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = po.id
        JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
-       JOIN tbl_approval_hierarchy_history TAHH ON trx.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
+       LEFT JOIN tbl_approval_hierarchy_history TAHH ON trx.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
        WHERE po.id = $1`,
       [po_id, user_id]
     );
 
-    return { ...result, poPdfUrl: result.po_pdf_url };
+    return { ...result, poPdfUrl: result?.po_pdf_url };
   } catch (error) {
     console.error('Error in getPODetails:', error);
     throw error;
