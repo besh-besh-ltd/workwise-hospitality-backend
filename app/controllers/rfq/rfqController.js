@@ -57,7 +57,8 @@ const VENDORS_FILTER_KEYS = [
   'prev_worked_with',
   'vendor_name',
   'vendor_info',
-  'productMakes'
+  'productMakes',
+  'subscription_type',
 ];
 
 const getDownloadURL = (url, excelToJson = false) => {
@@ -630,7 +631,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
 
    
     const user_details = await userModel.user_profile_detail(vendor.user_id);
-    const spocList = await vendorModel.getSpocDetails(vendor.user_id);
+    const spocList = await vendorModel.getSpocDetails(vendor.user_id, rfqNumber);
 
     if (user_details.length > 0) {
       // Insert token into the table and get the token value
@@ -750,6 +751,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
       }).join(', ');
 
       sendMail(mailRecipients);
+      // console.log('Email send to follwowing people' , mailRecipients.to);
 
       // Send WhatsApp notifications to SPOCs
       await Promise.allSettled(
@@ -856,10 +858,10 @@ const sendMailToVendorsForTargetPrice = async (
     const VendorList = vendorList[0]?.created_by || [];
 
     const buyer_details = await userModel.user_profile_detail(buyer_id);
-    console.log("checking the buyer details", buyer_details);
+    // console.log("checking the buyer details", buyer_details);
     for (const vendor of VendorList) {
       try {
-        const spocList = await vendorModel.getSpocDetails(vendor.id);
+        const spocList = await vendorModel.getSpocDetails(vendor.id, rfq_id);
         const token = await rfqModel.insertVendorRfqToken(vendor.id, rfq_id);
 
         // Create product HTML content
@@ -938,7 +940,7 @@ const sendMailToVendorsForTargetPrice = async (
         // Send the email
         sendMail(mailRecipients);
 
-        console.log(`Email sent successfully to vendor: ${vendor.name}`);
+        // console.log(`Email sent successfully to vendor: ${vendor.name}`);
       } catch (vendorError) {
         console.error(
           `Error sending email to vendor ${vendor.id}:`,
@@ -1080,7 +1082,7 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
 const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_no) => {
   
   const token = await rfqModel.getVendorRfqToken(user.id, rfq_id);
-  const spocList = await vendorModel.getSpocDetails(user.id)
+  const spocList = await vendorModel.getSpocDetails(user.id , rfq_id);
 
   // Extract vendor details from user object
   const vendorName = user.company_name || user.organization_name || user?.name;
@@ -1267,7 +1269,7 @@ const sendQuoteNotificationToVendor = async (req) => {
   
     const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
-  const spocList = await vendorModel.getSpocDetails(id)
+  const spocList = await vendorModel.getSpocDetails(id , rfq_id);
 
   // console.log(" rfq contoller 569 spoc console  ", id, spocList)
 
@@ -1678,7 +1680,7 @@ const sendQuoteNotificationEmail = async (req) => {
        const { name, email, vendor_id } = vendor;
 
        // Fetch vendor's SPOC details and token
-       const spocs = await vendorModel.getSpocDetails(vendor_id);
+       const spocs = await vendorModel.getSpocDetails(vendor_id , rfq_id);
        const tokenData = await rfqModel.getVendorRfqToken(vendor_id, rfq_id);
        const token = tokenData.length > 0 ? tokenData[0].token : '';
 
@@ -1731,7 +1733,7 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
     const rfq_id = rfq_no.id;
 
     try {
-      const spocList = await vendorModel.getSpocDetails(vendor.vendor_id);
+      const spocList = await vendorModel.getSpocDetails(vendor.vendor_id , rfq_id);
       const token = await rfqModel.insertVendorRfqToken(vendor.vendor_id, rfq_id);
 
       // Product HTML content
@@ -1855,7 +1857,7 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
     const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = '${rfq_id}'`);
 
     try {
-      const spocList = await vendorModel.getSpocDetails(vendor_id);
+      const spocList = await vendorModel.getSpocDetails(vendor_id , rfq_id);
       const token = await rfqModel.insertVendorRfqToken(
         vendor_id,
         rfq_id
@@ -2117,7 +2119,7 @@ const containerContent = `
 // Generate final email layout
 const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
-    const spocList = await vendorModel.getSpocDetails(vendor_id)
+    const spocList = await vendorModel.getSpocDetails(vendor_id , rfQItem[0]?.id);
 
     // console.log(" rfq contoller 901 spoc console ", vendor_id, spocList)
 
@@ -2192,7 +2194,7 @@ const sendFinalizationRemovalMail = async (
     // Generate final email layout
     const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
-    const spocList = await vendorModel.getSpocDetails(vendor_id);
+    const spocList = await vendorModel.getSpocDetails(vendor_id , rfQItem[0]?.id);
 
     // console.log(" rfq contoller 901 spoc console ", vendor_id, spocList)
 
@@ -2299,7 +2301,36 @@ const saveRfqDraft = async (user_id, reqBody) => {
       termFilesChanged,
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
-  
+
+  const globalFilters = filters?.global;
+
+  const rfqFilters = [];
+
+  for (const key in globalFilters) {
+    const value = globalFilters[key];
+
+    // If value is an array → create multiple rows
+    if (Array.isArray(value)) {
+      value.forEach(v => {
+        rfqFilters.push({
+          rfq_id,
+          type: key,
+          value: v,
+          user_id
+        });
+      });
+    }
+    // If value is NOT an array and NOT null → single row
+    else if (value !== null && value !== undefined && value !== "") {
+      rfqFilters.push({
+        rfq_id,
+        type: key,
+        value: value,
+        user_id
+      });
+    }
+  }
+   console.log(" result ", rfqFilters)
   const rfqData = {
       comment,
       company_name,
@@ -2655,6 +2686,23 @@ const saveRfqDraft = async (user_id, reqBody) => {
         VENDORS_FILTER_KEYS
       );
 
+      const rfqFilterExists = await rfqModel.checkIfExists(
+        'tbl_rfq_filters',
+        `rfq_id = ${rfq_id}`
+      );
+
+    if(rfqFilterExists.length > 0){
+      // Delete existing RFQ filters
+      await rfqModel.delete('tbl_rfq_filters', { rfq_id }, t);
+
+      //insert new RFQ filters
+      await rfqModel.insertArray(rfqFilters , ['rfq_id', 'type', 'value', 'user_id'], 'tbl_rfq_filters', t);
+    } else {
+      //insert new RFQ filters
+      await rfqModel.insertArray(rfqFilters , ['rfq_id', 'type', 'value', 'user_id'], 'tbl_rfq_filters', t);
+    }
+    
+
       const rfqProducts = await rfqModel.checkIfExists(
         'tbl_rfq_products',
         `rfq_id = ${rfq_id} AND id IN (${Object.keys(filters.local)
@@ -2856,7 +2904,7 @@ const rfqController = {
       let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction, selectedSheets } = req.body;
 
 
-      console.log(" rfq controller  create body ", req.body)
+   
       const user_id = req.user.id;
       if (!rfq_id) {
         return res
@@ -4334,6 +4382,9 @@ const rfqController = {
       let isNew = false;
 
       const sheet_id = req.body.sheet_id;
+      const variant_id = req.body.variant_id;
+
+      const globalFilters = req.body.filters;
 
       // Changes by Agnij 2025-06-17 [Improved handling of specific RFQ ID]
       // If rfq_id is provided in request, use that specific ID instead of creating a new draft
@@ -4468,18 +4519,60 @@ const rfqController = {
         }
       }
 
-      // if(product.isUnfoundProduct && product.unfoundName) {
-      //   let validationErrors = sheetData.validation_errors;
-      //   if(validationErrors && Array.isArray(validationErrors) && validationErrors.length > 0) {
-      //     const updatedErrors = validationErrors.filter(error => error.name != product.unfoundName);
 
-      //     const updatedSheetData = {
-      //       validation_errors: JSON.stringify(updatedErrors)
-      //     }
-      //     await rfqModel.update('tbl_rfq_draft_sheets', updatedSheetData, sheet_id);
-      //   }
-      // }
 
+      //Add global filters to sheet data
+      if (!globalFilters || typeof globalFilters !== "object") return;
+      else {
+        const extractors = {
+          country: (v) => v.map((x) => x.id),
+          state: (v) => v.map((x) => x.id),
+          city: (v) => v.map((x) => x.id),
+
+          approved_by_id: (v) => v.map((x) => x.id),
+
+          vendorType: (v) => v.map((x) => x.value),    // store "branch" only
+          productMakes: (v) => v,                      // store string array as-is
+
+          category_id: (v) => v,                       // direct ID
+          search_key: (v) => v,
+          vendor_name: (v) => v,
+          include_variants: (v) => v,
+
+          myVendorType: (v) => v,
+          prevWorkedWith: (v) => v,
+          // store object as JSON
+        };
+
+
+        console.log("checcking the logs here -------------", globalFilters);
+        for (const [key, rawValue] of Object.entries(globalFilters)) {
+          if (rawValue === null || rawValue === "" || rawValue?.length === 0) continue;
+
+          const extractor = extractors[key];
+          if (!extractor) continue; // skip unknown fields
+
+          const extracted = extractor(rawValue);
+
+          console.log(`Extracted filter - ${key}:`, extracted);
+
+          // Handle arrays → multiple inserts
+          const values = Array.isArray(extracted) ? extracted : [extracted];
+
+          for (const val of values) {
+            if (val === null || val === "" || val === undefined) continue;
+
+            const filterData = {
+              variant_id,
+              rfq_id,
+              type: key,
+              value: val,
+              user_id: req.user.id,
+            };
+            await rfqModel.insert("tbl_rfq_filters", filterData);
+          }
+        }
+      }
       res.status(200).json({
         status: 1,
         message: 'RFQ draft created/updated successfully',
@@ -4490,6 +4583,23 @@ const rfqController = {
       });
     } catch (error) {
       logError('Error while creating or updating RFQ with products:', error);
+      res.status(500).json({
+        status: 3,
+        message: 'An error occurred while processing your request'
+      });
+    }
+  },
+  fetchRfqFilters : async (req, res) => {
+    try {
+      const { rfq_id } = req.params;
+      const filters =  await rfqModel.findAll('tbl_rfq_filters', {rfq_id});
+      res.status(200).json({
+        status: 1,
+        message: 'RFQ filters fetched successfully',
+        data: filters
+      });
+    } catch (error) {
+      logError('Error while fetching RFQ filters:', error);
       res.status(500).json({
         status: 3,
         message: 'An error occurred while processing your request'
@@ -6774,6 +6884,7 @@ const rfqController = {
         vendor_name = '',
         myVendorType = null,
         productMakes = [],
+        subscriptionType = null,
         page = 1,
         limit = 20
       } = req.body;
@@ -6800,6 +6911,7 @@ const rfqController = {
         vendor_name,
         myVendorType,
         productMakes,
+        subscriptionType,
         page,
         limit,
         user_id
@@ -6871,6 +6983,8 @@ const rfqController = {
     let vendorType = '';
     let prevWorkedWith = '';
     let myVendorType = '';
+    let subscriptionType = null;
+
     const productMakes = req.body?.productMakes || [];
     search_key = req.body?.search_key ? req.body?.search_key : '';
     category_id = req.body?.category_id ? req.body?.category_id : '';
@@ -6882,6 +6996,7 @@ const rfqController = {
     vendorType = req.body?.vendorType ? req.body?.vendorType : '';
     prevWorkedWith = req.body?.prevWorkedWith ? req.body?.prevWorkedWith : '';
     myVendorType = req.body?.myVendorType ? req.body?.myVendorType : '';
+    subscriptionType = req.body?.subscriptionType ? req.body?.subscriptionType : null;
     let vendor_name = req.body.vendor_name;
 
     // If user is not logged in
@@ -6952,6 +7067,7 @@ const rfqController = {
             prevWorkedWith,
             vendor_name,
             myVendorType,
+            subscriptionType,
             '', // responseKeys : function accepting this - need to recheck it's use and remove it if not required
             productMakes
           );
@@ -11419,6 +11535,8 @@ getClauses: async (req, res) => {
   getRfqs: async (req, res) => {
     try {
       const user_id = req.user.id;
+      const user_type = req.user.user_type;
+      
       let {
         tech_eval,
         po = 'false',
@@ -11449,6 +11567,7 @@ getClauses: async (req, res) => {
       // Get RFQs
       const rfqs = await rfqModel.getRfqs(
         user_id,
+        user_type,
         tech_eval,
         po,
         limit,

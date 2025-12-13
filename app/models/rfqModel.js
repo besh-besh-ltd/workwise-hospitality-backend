@@ -1530,7 +1530,8 @@ WHERE NOT EXISTS (
         prev_worked_with,
         vendor_name,
         vendor_info,
-        productMakes
+        productMakes,
+        subscription_type,
       } = filters;
 
       const isAnyFilterActive =
@@ -1590,6 +1591,30 @@ WHERE NOT EXISTS (
       //     LEFT JOIN tbl_location_country lcn ON tu.country IS NOT NULL AND tu.country = lcn.id::text
       //   `;
       // }
+
+      dynamicJoin += `
+        LEFT JOIN (
+          SELECT
+            tus.user_id,
+            MAX(tus.end_date) AS max_end_date,
+            MAX(
+              CASE
+                WHEN tsp.plan_name ILIKE '%Enterprise%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 2
+                WHEN tsp.plan_name ILIKE '%Premium%'
+                  AND tus.status = 1
+                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  THEN 1
+                ELSE 0
+              END
+            ) AS is_premium
+          FROM tbl_user_subscriptions tus
+          LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
+          GROUP BY tus.user_id
+        ) sub_info ON sub_info.user_id = tu.id
+      `;
 
       if (prev_worked_with === 'prev_finalized') {
         dynamicJoin += `
@@ -1655,6 +1680,10 @@ WHERE NOT EXISTS (
             WHERE TRIM(nb) IN ('${vendor_type}')
           )
         `;
+      }
+
+      if (subscription_type) {
+        dynamicWhere += ` ${subscription_type == 'premium' ? 'AND is_premium = 1' : subscription_type == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0'}`
       }
 
       if (
@@ -1727,6 +1756,7 @@ WHERE NOT EXISTS (
         SELECT 
           DISTINCT ON (tu.name, tu.id) tu.id AS user_id, 
           tu.name, 
+          COALESCE(sub_info.is_premium, 0) AS is_premium,
           ${
             vendor_name
               ? 'similarity(COALESCE(tc.company_name, tu.organization_name), $3) AS similarity_score,'
@@ -4181,6 +4211,7 @@ WHERE row_num_by_name_category = 1
     prevWorkedWith,
     vendor_name, // Added vendor_name parameter
     myVendorType,
+    subscriptionType,
     responseKeys,
     productMakes
   ) => {
@@ -4212,8 +4243,6 @@ WHERE row_num_by_name_category = 1
         // If country is array of objects with id property
         countryIds = country.map((c) => c.id);
     }
-
-    console.log("COUNTRY IDS:", countryIds);
 
     // Adding dynamic turnover condition
     let turnoverCondition = '';
@@ -4421,6 +4450,8 @@ WHERE row_num_by_name_category = 1
               : ``
           }
           ${myVendorType == 'both' ? `AND bvm.vendor_id IS NOT NULL` : ``}
+
+          ${subscriptionType ? subscriptionType == 'premium' ? 'AND is_premium = 1' : subscriptionType == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0' : ''}
 
           ${prevWorkedWith === 'prev_finalized' ? `AND qf.id IS NOT NULL` : ``}
           ${prevWorkedWith === 'rfq_sent' ? `AND rfqv.user_id IS NOT NULL` : ``}
@@ -9062,6 +9093,7 @@ ORDER BY tq.timestamp DESC;
   // New optimized method for sidebar data
   getRfqs: async (
     user_id,
+    user_type,
     tech_eval,
     po,
     limit,
@@ -9082,8 +9114,13 @@ ORDER BY tq.timestamp DESC;
       }
 
       if (po) {
-        dynamicJoins +=
-          'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
+        if(user_type == 3) {
+          dynamicJoins += 
+           `JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id AND TRPO.finalized_vendor_id = ${user_id}`
+        } else {
+          dynamicJoins +=
+            'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
+        }
       }
 
       let q = `
@@ -9120,7 +9157,11 @@ ORDER BY tq.timestamp DESC;
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
       ${dynamicJoins}
-      WHERE (RFQ.created_by = ${user_id} OR EXISTS (
+      WHERE (${
+        user_type == 3
+          ? `EXISTS (SELECT 1 FROM tbl_rfq_product_vendors WHERE rfq_id = RFQ.id AND user_id = ${user_id})`
+          : `RFQ.created_by = ${user_id}`
+      } OR EXISTS (
         ${
           po
             ? `
