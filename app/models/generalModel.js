@@ -282,15 +282,17 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         });
     });
   },
-  doesHierarchyExist: async (type, companyId) => {
+  doesHierarchyExist: async (type, companyId, firstUser) => {
     try {
       const raw = await db.any(`
         SELECT id
         FROM tbl_approval_hierarchy
         WHERE company_id = $1
-        AND hierarchy_type = $2
-        ORDER BY hierarchy_type, approval_level ASC
-      `, [companyId, type]);
+          AND hierarchy_type = $2
+          AND approval_level = 1
+          AND (user_id = $3 OR $3 IS NULL)
+        ORDER BY hierarchy_type, approval_level
+      `, [companyId, type, firstUser?.user_id]);
 
       return raw && raw.length > 0;
     } catch (error) {
@@ -416,6 +418,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       const raw = await db.any(`
         SELECT
           TAH.hierarchy_type,
+          TAH.hierarchy_id,
           TAH.company_id,
           user_id AS id,
           U.name,
@@ -423,26 +426,53 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
           TAH.approval_level AS level,
           TAH.bypass_cap,
           TAH.is_active AS active,
+          EXISTS (
+              SELECT 1
+              FROM tbl_hierarchy_default_mapping THDM
+              WHERE THDM.company_id = $1
+              AND THDM.hierarchy_type = TAH.hierarchy_type
+              AND THDM.hierarchy_id = TAH.hierarchy_id
+          ) AS is_default,
+          COALESCE(
+            (
+              SELECT JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                      'id', THPM.id,
+                      'project_id', THPM.project_id,
+                      'hierarchy_id', THPM.hierarchy_id,
+                      'hierarchy_type', THPM.hierarchy_type
+                  )
+              )
+              FROM tbl_hierarchy_project_mapping THPM
+              WHERE THPM.hierarchy_id = TAH.hierarchy_id AND THPM.hierarchy_type = TAH.hierarchy_type
+            ),
+            '[]'::json
+          ) AS mapped_project_ids,
           TAH.created_at
         FROM tbl_approval_hierarchy TAH
         JOIN tbl_users U ON TAH.user_id = U.id
         WHERE TAH.company_id = $1
         ${type ? ' AND hierarchy_type = $2' : ''}
-        ORDER BY hierarchy_type, approval_level ASC
+        ORDER BY hierarchy_id, approval_level
       `, [companyId, type]);
 
       const grouped = raw.reduce((acc, row) => {
-        const { hierarchy_type, company_id, ...rest } = row;
+        const { hierarchy_type, company_id, hierarchy_id, mapped_project_ids, is_default, ...rest } = row;
 
-        if (!acc[hierarchy_type]) {
-          acc[hierarchy_type] = {
+        const accKey = `${hierarchy_type}_${hierarchy_id}`
+
+        if (!acc[accKey]) {
+          acc[accKey] = {
             hierarchy_type,
             company_id,
+            hierarchy_id,
+            mapped_project_ids,
+            is_default,
             approvers: [],
           };
         }
 
-        acc[hierarchy_type].approvers.push(rest);
+        acc[accKey].approvers.push(rest);
 
         return acc;
       }, {});
@@ -452,28 +482,175 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       throw error;
     }
   },
-  createHierarchy: async (type, approvers, companyId) => {
+  getUserHierarchies: async (type, companyId, userId, projectId, currentUserOnly) => {
     try {
+      // Initialize an array for query parameters
+      const params = [companyId];
+      let paramIndex = 2; // Start index for dynamic parameters
+
+      // Build the WHERE clause dynamically
+      let whereClauses = ['TAH.company_id = $1'];
+
+      // 1. Filter by hierarchy_type
+      if (type) {
+        whereClauses.push(`TAH.hierarchy_type = $${paramIndex++}`);
+        params.push(type);
+      }
+
+      // 2. Filter by currentUserOnly (requires joining TAH to itself or using a subquery)
+      let currentUserOnlyJoin = '';
+      if (currentUserOnly) {
+        // Use a subquery/EXISTS to check if the current user is part of the hierarchy
+        whereClauses.push(`EXISTS (
+            SELECT 1
+            FROM tbl_approval_hierarchy TAH2
+            WHERE TAH2.hierarchy_id = TAH.hierarchy_id
+              AND TAH2.hierarchy_type = TAH.hierarchy_type
+              AND TAH2.company_id = $1
+              AND TAH2.user_id = $${paramIndex++}
+          )`);
+        params.push(userId);
+      }
+      
+      // Determine the parameter index for the current user's ID in the main SELECT (used for is_current_user)
+      const userIdParamIndex = paramIndex++; 
+      params.push(userId); // Add userId to parameters for the CASE statement
+
+      const whereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+      const raw = await db.any(
+        `
+        SELECT
+          TAH.hierarchy_type,
+          TAH.hierarchy_id,
+          TAH.company_id,
+          TAH.user_id AS id,
+          CASE WHEN TAH.user_id = $${userIdParamIndex} THEN TRUE ELSE FALSE END AS is_current_user,
+          U.name,
+          U.email,
+          TAH.approval_level AS level,
+          TAH.bypass_cap,
+          TAH.is_active AS active,
+          -- New is_default logic: Check project mapping first, then global default
+          CASE
+            WHEN $${paramIndex} IS NOT NULL AND THPM_main.project_id IS NOT NULL THEN TRUE
+            WHEN EXISTS (
+                SELECT 1
+                FROM tbl_hierarchy_default_mapping THDM
+                WHERE THDM.company_id = $1
+                AND THDM.hierarchy_type = TAH.hierarchy_type
+                AND THDM.hierarchy_id = TAH.hierarchy_id
+            ) THEN TRUE
+            ELSE FALSE
+          END AS is_default,
+          COALESCE(
+            (
+              SELECT JSON_AGG(
+                  JSON_BUILD_OBJECT(
+                      'id', THPM.id,
+                      'project_id', THPM.project_id,
+                      'hierarchy_id', THPM.hierarchy_id,
+                      'hierarchy_type', THPM.hierarchy_type
+                  )
+              )
+              FROM tbl_hierarchy_project_mapping THPM
+              WHERE THPM.hierarchy_id = TAH.hierarchy_id AND THPM.hierarchy_type = TAH.hierarchy_type
+            ),
+            '[]'::json
+          ) AS mapped_project_ids,
+          TAH.created_at
+        FROM tbl_approval_hierarchy TAH
+        JOIN tbl_users U ON TAH.user_id = U.id
+        -- Main join for project-specific default check
+        LEFT JOIN tbl_hierarchy_project_mapping THPM_main 
+          ON THPM_main.hierarchy_id = TAH.hierarchy_id
+          AND THPM_main.hierarchy_type = TAH.hierarchy_type
+          AND THPM_main.company_id = $1
+          AND THPM_main.project_id = $${paramIndex}
+        ${whereClause}
+        ORDER BY hierarchy_id, approval_level
+        `,
+        [...params, projectId] // Append projectId to the end for the main JOIN/CASE statement
+      );
+      
+      // Since projectId is used in the main SELECT and JOIN, we append it to the params array last
+      // and update paramIndex to point to its position.
+      const projectIdParamIndex = paramIndex; 
+      params.push(projectId);
+
+
+      const grouped = raw.reduce((acc, row) => {
+        const { hierarchy_type, company_id, hierarchy_id, mapped_project_ids, is_default, ...rest } = row;
+
+        // Use a consistent key for grouping
+        const accKey = `${hierarchy_type}_${hierarchy_id}`;
+
+        if (!acc[accKey]) {
+          acc[accKey] = {
+            hierarchy_type,
+            company_id,
+            hierarchy_id,
+            // mapped_project_ids is duplicated on every row, so we can pick it up once.
+            mapped_project_ids, 
+            is_default,
+            approvers: [],
+          };
+        }
+
+        acc[accKey].approvers.push(rest);
+
+        return acc;
+      }, {});
+
+      return Object.values(grouped);
+    } catch (error) {
+      throw error;
+    }
+  },
+  createHierarchy: async (type, approvers, companyId, createdBy) => {
+    try {
+      const lastHierarchy = await db.oneOrNone(
+        `SELECT hierarchy_id 
+        FROM tbl_approval_hierarchy WHERE company_id = $1
+        ORDER BY hierarchy_id DESC
+        LIMIT 1`,
+        [companyId]
+      );
+
+      const hierarchyExist = await generalModel.doesHierarchyExist(type, companyId)
+
+      const nextHierarchyId = lastHierarchy?.hierarchy_id ? parseInt(lastHierarchy.hierarchy_id) + 1 : 1
+
       let baseData = {
         hierarchy_type: type,
         company_id: companyId,
         created_at: new Date(),
+        hierarchy_id: nextHierarchyId
       };
       const insertableData = approvers.map(approver => ({...baseData, ...approver}));
 
       await generalModel.insertMany('tbl_approval_hierarchy', insertableData);
+
+      if(!hierarchyExist) {
+        await db.none(
+          `INSERT INTO tbl_hierarchy_default_mapping
+          (hierarchy_id, hierarchy_type, company_id, created_by)
+          VALUES($1, $2, $3, $4)`,
+          [nextHierarchyId, type, companyId, createdBy]
+        )
+      }
       return true;
     } catch (error) {
       throw error;
     }
   },
-  updateHierarchy: async (type, approvers, removableApprovers = [], companyId) => {
+  updateHierarchy: async (type, approvers, removableApprovers = [], companyId, hierarchyId) => {
     try {
       const updatePromises = approvers.map(async (approver) => {
         const exists = await db.oneOrNone(
           `SELECT id FROM tbl_approval_hierarchy
-          WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3`,
-          [companyId, approver.user_id, type]
+          WHERE hierarchy_id = $1 AND company_id = $2 AND user_id = $3 AND hierarchy_type = $4`,
+          [hierarchyId, companyId, approver.user_id, type]
         );
 
         if (exists) {
@@ -526,11 +703,82 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       throw error;
     }
   },
+  mapHierarchyToProject: async (hierarchy_id, hierarchy_type, project_id, company_id, mapped_by) => {
+    return db.tx(async t => {
+      let result = [];
+
+      if(project_id && Array.isArray(project_id)) {
+        await t.none(
+          `DELETE FROM tbl_hierarchy_project_mapping
+          WHERE company_id = $1 AND hierarchy_id = $2 AND hierarchy_type = $3`,
+          [company_id, hierarchy_id, hierarchy_type]
+        )
+        for(let project of project_id) {
+    
+          const r = await t.one(
+            `INSERT INTO tbl_hierarchy_project_mapping
+            (company_id, hierarchy_id, hierarchy_type, project_id, mapped_by)
+            VALUES ($1, $2, $3, $4, $5)
+            
+            RETURNING *`,
+            [company_id, hierarchy_id, hierarchy_type, project, mapped_by]
+          )
+    
+          result.push(r);
+        }
+      }
+
+      return result;
+    })
+  },
+  setDefaultHierarchy: async (hierarchy_id, hierarchy_type, company_id, mapped_by) => {
+    return db.tx(async t => {
+      const exists = await t.oneOrNone(
+        `SELECT id FROM tbl_hierarchy_default_mapping
+          WHERE hierarchy_type = $1 AND company_id = $2
+          LIMIT 1`,
+          [hierarchy_type, company_id]
+      );
+
+      if(exists) {
+        await t.none(
+          `UPDATE tbl_hierarchy_default_mapping
+            SET hierarchy_id = $2,
+            created_by = $3
+            WHERE id = $1`,
+            [exists.id, hierarchy_id, mapped_by]
+        )
+      } else {
+        await t.none(
+          `INSERT INTO tbl_hierarchy_default_mapping
+            (hierarchy_id, company_id, hierarchy_type, created_by)
+            VALUES ($1, $2, $3, $4)`,
+            [hierarchy_id, company_id, hierarchy_type, mapped_by]
+        )
+      }
+
+      return true;
+    })
+  },
+  getHierarchyTypes: async () => {
+    return await db.any(
+      `SELECT
+        enumlabel AS value,
+        INITCAP(REPLACE(enumlabel, '_', ' ')) AS label
+        
+      FROM pg_enum
+      JOIN pg_type ON pg_type.oid = pg_enum.enumtypid
+      WHERE pg_type.typname = 'hierarchy_type'
+      ORDER BY pg_enum.enumsortorder;
+      `
+    );
+  },
   initiateApproval: async (
     type, // 'po'
     entityId,
     companyId,
     initiatedBy,
+    selected_hierarchy,
     meta = {},
     errors = {},
     t
@@ -541,14 +789,14 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       FROM tbl_approval_hierarchy_transactions
       WHERE hierarchy_type = $1
         AND company_id = $2
-        AND status IN ('pending', 'approved')
+        AND status IN ('pending', 'approved', 'rejected')
         AND meta ->> 'rfq_id' = $3
-        AND meta ->> 'rfq_product_id' = $4`,
+        AND meta ->> 'po_id' = $4`,
       [
         type,
         companyId,
         String(meta.rfq_id),           // meta.rfq_id must be passed as string
-        String(meta.rfq_product_id)    // meta.rfq_product_id must be passed as string
+        String(entityId)
       ]
     );
 
@@ -557,36 +805,163 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         throw new Error(errors.exist ?? 'An already approved request exists for this entity.');
       } else {
         // cancel old pending transaction and any ongoing PO for current rfqProductId
-        await t.none(
-          `UPDATE tbl_approval_hierarchy_transactions
-          SET status = 'cancelled', final_decision_by = $3, current_approver_id = NULL, updated_at = NOW()
-          WHERE id = $1`,
-          [existingTrx.id, APPROVAL_DECISIONS.CANCELLED, initiatedBy]
-        );
+        // await t.none(
+        //   `UPDATE tbl_approval_hierarchy_transactions
+        //   SET status = 'cancelled', final_decision_by = $3, current_approver_id = NULL, updated_at = NOW()
+        //   WHERE id = $1`,
+        //   [existingTrx.id, APPROVAL_DECISIONS.CANCELLED, initiatedBy]
+        // );
 
-        await t.none(
-          `INSERT INTO tbl_approval_hierarchy_history
-          (approval_transaction_id, approved_by, action, created_at)
-          VALUES ($1, $2, $3, NOW())`,
-          [existingTrx.id, initiatedBy, APPROVAL_DECISIONS.CANCELLED]
-        );
+        // await t.none(
+        //   `INSERT INTO tbl_approval_hierarchy_history
+        //   (approval_transaction_id, approved_by, action, created_at)
+        //   VALUES ($1, $2, $3, NOW())`,
+        //   [existingTrx.id, initiatedBy, APPROVAL_DECISIONS.CANCELLED]
+        // );
+
+        // FOR NEW: Delete old transactions for ongoing PO approval hierarchy
+        // await t.none(
+        //   `DELETE FROM tbl_approval_hierarchy_transactions WHERE id = $1`,
+        //   [existingTrx.id]
+        // )
       }
     }
 
     // 1. Initiator's hierarchy
-    const initiatorHierarchy = await t.oneOrNone(
-      `SELECT * FROM tbl_approval_hierarchy
-      WHERE company_id = $1 AND user_id = $2 AND hierarchy_type = $3 AND is_active = true`,
-      [companyId, initiatedBy, type]
-    );
+    let initiatorHierarchy = null;
 
-    if (!initiatorHierarchy) {
-      const transaction = await t.one(
-        `INSERT INTO tbl_approval_hierarchy_transactions 
-        (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
-        VALUES ($1, $2, $3, $4, NULL, $4, $5, $6) RETURNING *`,
-        [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
+    const projectId = (meta && meta.project_id) ? meta.project_id : null;
+    const doesCompanyHaveHierarchy = await t.oneOrNone(
+      `SELECT id
+      FROM tbl_approval_hierarchy
+      WHERE company_id = $1
+      LIMIT 1`,
+      [companyId]
+    )
+
+    if(selected_hierarchy) {
+      initiatorHierarchy = await t.oneOrNone(
+        `SELECT TAH.*
+        FROM tbl_approval_hierarchy TAH
+        
+        WHERE TAH.company_id = $1
+          AND TAH.user_id = $2
+          AND TAH.hierarchy_type = $3
+          AND TAH.hierarchy_id = $4
+        LIMIT 1`,
+        [companyId, initiatedBy, type, selected_hierarchy]
       );
+
+      if (!initiatorHierarchy) {
+        throw new Error('User is not part of the PO selected approval hierarchy');
+      }
+    } else {
+      if (projectId) {
+        // 1) Get hierarchy ids mapped to this company + project
+        const mappedRows = await t.any(
+          `SELECT hierarchy_id
+          FROM tbl_hierarchy_project_mapping
+          WHERE company_id = $1 AND project_id = $2 AND hierarchy_type = $3`,
+          [companyId, projectId, type]
+        );
+  
+        const mappedHierarchyIds = mappedRows && mappedRows.length
+          ? [...new Set(mappedRows.map(r => parseInt(r.hierarchy_id)).filter(Boolean))]
+          : [];
+  
+        if (mappedHierarchyIds.length) {
+          // There are mappings - restrict to these hierarchy ids
+          initiatorHierarchy = await t.oneOrNone(
+            `SELECT TAH.*,
+            CASE WHEN THDM.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_default
+            FROM tbl_approval_hierarchy TAH
+            LEFT JOIN tbl_hierarchy_default_mapping THDM ON TAH.hierarchy_id = THDM.hierarchy_id 
+              AND THDM.hierarchy_type = $3 
+              AND THDM.company_id = $1
+            
+            WHERE TAH.company_id = $1
+              AND TAH.user_id = $2
+              AND TAH.hierarchy_type = $3
+              AND is_active = true
+              AND TAH.hierarchy_id = ANY($4)
+            ORDER BY created_at DESC
+            LIMIT 1`,
+            [companyId, initiatedBy, type, mappedHierarchyIds]
+          );
+  
+          // If mappings exist but user is not present in any mapped hierarchy -> throw error
+          if (!initiatorHierarchy) {
+            throw new Error('User is not part of the selected project approval hierarchy');
+          }
+        } else {
+          // No mappings found for this project — fall back to company-wide behavior
+          initiatorHierarchy = await t.oneOrNone(
+            `SELECT TAH.*,
+            CASE WHEN THDM.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_default
+            FROM tbl_approval_hierarchy TAH
+            LEFT JOIN tbl_hierarchy_default_mapping THDM ON TAH.hierarchy_id = THDM.hierarchy_id 
+              AND THDM.hierarchy_type = $3 
+              AND THDM.company_id = $1
+  
+            WHERE TAH.company_id = $1
+              AND TAH.user_id = $2
+              AND TAH.hierarchy_type = $3
+              AND TAH.is_active = true
+              AND THDM.id IS NOT NULL
+            ORDER BY TAH.created_at DESC
+            LIMIT 1`,
+            [companyId, initiatedBy, type]
+          );
+  
+          if (!initiatorHierarchy) {
+            throw new Error('User is not part of the company\'s default approval hierarchy');
+          }
+        }
+      } else if(!projectId && doesCompanyHaveHierarchy) {
+        // No project specified — original behavior
+        initiatorHierarchy = await t.oneOrNone(
+          `SELECT TAH.*,
+          CASE WHEN THDM.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_default
+          FROM tbl_approval_hierarchy TAH
+          LEFT JOIN tbl_hierarchy_default_mapping THDM ON TAH.hierarchy_id = THDM.hierarchy_id 
+            AND THDM.hierarchy_type = $3 
+            AND THDM.company_id = $1
+  
+          WHERE TAH.company_id = $1
+            AND TAH.user_id = $2
+            AND TAH.hierarchy_type = $3
+            AND TAH.is_active = true
+            AND THDM.id IS NOT NULL
+          ORDER BY TAH.created_at DESC
+          LIMIT 1`,
+          [companyId, initiatedBy, type]
+        );
+  
+        if (!initiatorHierarchy) {
+          throw new Error('User is not part of the company\'s approval hierarchy');
+        }
+      }
+    }
+
+    // If there's no hierarchy at all (company has no hierarchies) -> auto-approve (your existing flow)
+    if (!initiatorHierarchy) {
+      let transaction = null;
+
+      if(existingTrx) {
+        transaction = await t.one(
+          `UPDATE tbl_approval_hierarchy_transactions 
+          SET current_approver_id = NULL, final_decision_by = $1, status = $2
+          WHERE id = $3 RETURNING *`,
+          [initiatedBy, APPROVAL_DECISIONS.APPROVED, existingTrx.id]
+        );
+      } else {
+        transaction = await t.one(
+          `INSERT INTO tbl_approval_hierarchy_transactions 
+          (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
+          VALUES ($1, $2, $3, $4, NULL, $4, $5, $6) RETURNING *`,
+          [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
+        );
+      }
       await t.none(
         `INSERT INTO tbl_approval_hierarchy_history
         (approval_transaction_id, approved_by, action, created_at)
@@ -606,20 +981,30 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
     const nextApprover = await t.oneOrNone(
       `SELECT user_id FROM tbl_approval_hierarchy
       WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
-        AND approval_level > $3
+        AND approval_level > $3 AND hierarchy_id = $4
       ORDER BY approval_level
       LIMIT 1`,
-      [companyId, type, initiatorHierarchy.approval_level]
+      [companyId, type, initiatorHierarchy.approval_level, initiatorHierarchy.hierarchy_id]
     );
 
     // 2. Auto-approve case: bypass cap OR if there exist no higher approver
     if ((totalValue <= bypassCap) || !nextApprover) {
-      const transaction = await t.one(
-        `INSERT INTO tbl_approval_hierarchy_transactions 
-        (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status)
-        VALUES ($1, $2, $3, $4, NULL, $4, $5, $6) RETURNING *`,
-        [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED]
-      );
+      let transaction = null;
+      if(existingTrx) {
+        transaction = await t.one(
+          `UPDATE tbl_approval_hierarchy_transactions 
+          SET current_approver_id = NULL, final_decision_by = $1, status = $2, hierarchy_id = $3
+          WHERE id = $4 RETURNING *`,
+          [initiatedBy, APPROVAL_DECISIONS.APPROVED, initiatorHierarchy.hierarchy_id, existingTrx.id]
+        );
+      } else {
+        transaction = await t.one(
+          `INSERT INTO tbl_approval_hierarchy_transactions 
+          (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, final_decision_by, meta, status, hierarchy_id)
+          VALUES ($1, $2, $3, $4, NULL, $4, $5, $6, $7) RETURNING *`,
+          [type, entityId, companyId, initiatedBy, meta, APPROVAL_DECISIONS.APPROVED, initiatorHierarchy.hierarchy_id]
+        );
+      }
       await t.none(
         `INSERT INTO tbl_approval_hierarchy_history
         (approval_transaction_id, approved_by, action, created_at)
@@ -633,12 +1018,21 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
     }
 
     // 4. Start approval chain
-    await t.none(
-      `INSERT INTO tbl_approval_hierarchy_transactions
-      (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, meta, status)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [type, entityId, companyId, initiatedBy, nextApprover.user_id, meta, APPROVAL_DECISIONS.PENDING]
-    );
+    if(existingTrx) {
+      await t.one(
+        `UPDATE tbl_approval_hierarchy_transactions 
+        SET current_approver_id = $1, final_decision_by = NULL, status = $2, hierarchy_id = $3
+        WHERE id = $4 RETURNING *`,
+        [nextApprover.user_id, APPROVAL_DECISIONS.PENDING, initiatorHierarchy.hierarchy_id, existingTrx.id]
+      );
+    } else {
+      await t.none(
+        `INSERT INTO tbl_approval_hierarchy_transactions
+        (hierarchy_type, target_entity_id, company_id, initiated_by, current_approver_id, meta, status, hierarchy_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [type, entityId, companyId, initiatedBy, nextApprover.user_id, meta, APPROVAL_DECISIONS.PENDING, initiatorHierarchy.hierarchy_id]
+      );
+    }
 
     return {
       approval_required: true,
@@ -684,17 +1078,17 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
       // Find next approver
       const currentLevel = await t.oneOrNone(
         `SELECT approval_level, bypass_cap FROM tbl_approval_hierarchy
-        WHERE company_id = $1 AND hierarchy_type = $2 AND user_id = $3`,
-        [company_id, hierarchy_type, approvedBy]
+        WHERE company_id = $1 AND hierarchy_type = $2 AND user_id = $3 AND hierarchy_id = $4`,
+        [company_id, hierarchy_type, approvedBy, trx.hierarchy_id]
       );
 
       const nextApprover = await t.oneOrNone(
         `SELECT user_id FROM tbl_approval_hierarchy
         WHERE company_id = $1 AND hierarchy_type = $2 AND is_active = true
-          AND approval_level > $3
+          AND approval_level > $3 AND hierarchy_id = $4
         ORDER BY approval_level
         LIMIT 1`,
-        [company_id, hierarchy_type, currentLevel?.approval_level ?? 999]
+        [company_id, hierarchy_type, currentLevel?.approval_level ?? 999, trx.hierarchy_id]
       );
 
       const totalValue = Number(trx?.meta?.total_value ?? 0);
@@ -753,11 +1147,8 @@ export const markPOStatusChange = async (po_id, t, reject = false, user) => {
       [po_id, reject ? PO_STATUSES.REJECTED : PO_STATUSES.APPROVED]
     );
 
-    console.log("PO TEST -> PO STATUS IS BEING CHANGED!")
-
     // ⏳ Trigger email notifications to vendors and all the team members (Not yet)!
     if(!reject) {
-      console.log("PO TEST -> IS NOT REJECTED, sending mail for approval")
       await sendPONotificationToVendor(purchaseOrder, user);
     }
 

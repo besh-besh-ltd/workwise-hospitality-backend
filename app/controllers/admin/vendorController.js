@@ -226,10 +226,7 @@ const vendorController = {
       let vendorObj = {
         name: name || null,
         email: email || null,
-        address: address || null,
-        city: city || null,
-        state: state || null,
-        country: country || 1,
+
         mobile: cleanedMobile || null,
         postal_code: postal_code || null,
         user_type: '3',
@@ -260,7 +257,9 @@ const vendorController = {
       const registrationResult = await userModel.company_registration(vendorObj, companyObj);
       const vendorId = registrationResult.user_id;
       const companyId = registrationResult.company_id;
-      const company_locations = locations.map(loc => ({
+      let company_locations = [];
+      if(locations && locations.length > 0){
+       company_locations = locations?.map(loc => ({
         country_id: Number(loc.country) || null,
         state_id: Number(loc.state) || null,
         city_id: Number(loc.city) || null,
@@ -271,7 +270,7 @@ const vendorController = {
         created_by: req.user.id,
         created_at: new Date(),
         updated_at: new Date(),
-      }));
+      }));}
       const companyLocationCS = new pgp.helpers.ColumnSet([
         'country_id',
         'state_id',
@@ -284,7 +283,9 @@ const vendorController = {
         'updated_at'
       ], { table: 'tbl_company_location' });
 
-      const result = await rfqModel.insertArray(company_locations ,companyLocationCS ,  'tbl_company_location');
+      if(company_locations && company_locations.length > 0){
+        const result = await rfqModel.insertArray(company_locations ,companyLocationCS ,  'tbl_company_location');
+      }
 
     // Check if spocs array is provided and has valid objects
 if (Array.isArray(spocs) && spocs.length > 0) {
@@ -526,8 +527,17 @@ if (Array.isArray(spocs) && spocs.length > 0) {
     const company_id = req.params.id;
 
     // console.log("company_id", company_id)
-    const locations = await vendorModel.getLocationsByCompanyId(company_id);
+    let locations;
+    const user_type = req.user.user_type; // Get the user type from the request object
 
+    if(user_type ==3 || user_type == 1){
+      // If the user is a vendor, ensure to pick the spocs as well.
+    locations = await vendorModel.getLocationsByCompanyId(company_id, user_type);
+
+    }
+    else{
+    locations = await vendorModel.getLocationsByCompanyId(company_id);
+  }
     return res.status(200).json({
       status: 1,
       data: locations
@@ -609,6 +619,57 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       });
     }
   },
+
+  mapSpocToLocation : async (req, res, next) => {
+    try {
+      const { spoc_id, location_id } = req.body;
+       
+      if (!spoc_id || !location_id) {
+        return res.status(400).json({
+          status: 3,
+          message: 'Please provide spoc_id and location_id'
+        });
+      }
+             //Delete the existing mapping if there any
+              await rfqModel.delete('tbl_spoc_location_mapping', { location_id });
+
+             //Insert the new mapping
+              const spocLocationCS = new pgp.helpers.ColumnSet(
+              ["spoc_id", "location_id", "assigned_by"],
+              { table: "tbl_spoc_location_mapping" }
+            );
+
+            let locationData = [];
+
+            for (const spoc of spoc_id) {
+              locationData.push({
+                spoc_id: spoc,
+                location_id,
+                assigned_by: req.user.id,
+              });
+            }
+
+            await rfqModel.insertArray(
+              locationData,
+              spocLocationCS,
+              "tbl_spoc_location_mapping"
+            );
+
+
+   
+      return res.status(200).json({
+        status: 1,
+        message: 'Location mapped successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
+    }
+  },
+
 
   deleteVendor: async (req, res, next) => {
     try {
@@ -1360,6 +1421,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       const spocExist = await vendorModel.check_exactly_same_spoc({spoc_name, spoc_email:spoc_email.toLowerCase(), spoc_mobile, spoc_role, user_id});
 
       if(spocExist<1){
+        console.log("Adding new spoc");
         // Set initial status based on who's creating the SPOC
         // Auto-approve (status=1) if:
         // 1. Creator is admin (user_type=1)

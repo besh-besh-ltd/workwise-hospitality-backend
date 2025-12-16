@@ -103,14 +103,26 @@ const generalController = {
       const { type } = req.query;
       const { company_id } = req.user;
 
-      if (type && !AVAILABLE_HIERARCHY_TYPES[type]) {
-        return res.status(400).json({
-          status: 2,
-          message: `Provided hierarchy type \`${type}\` is not supported!`
-        });
-      }
-
       const hierarchies = await generalModel.getHierarchies(type, company_id);
+      return res.json({
+        status: 1,
+        data: hierarchies
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message ?? Config.errorText.value,
+        error
+      });
+    }
+  },
+  getUserHierarchies: async (req, res) => {
+    try {
+      const { type, project_id, currentUserOnly = false } = req.query;
+      const { id, company_id } = req.user;
+
+      const hierarchies = await generalModel.getUserHierarchies(type, company_id, id, project_id, currentUserOnly);
       return res.json({
         status: 1,
         data: hierarchies
@@ -127,20 +139,21 @@ const generalController = {
   createHierarchy: async (req, res) => {
     try {
       const { type, approvers } = req.body;
-      const { company_id } = req.user;
+      const { id, company_id } = req.user;
 
-      const doesExist = await generalModel.doesHierarchyExist(type, company_id);
-      if (doesExist) {
-        return res.status(400).json({
-          status: 2,
-          message: `A Hierarchy already exist for type \`${type}\`!`
-        });
-      }
+      // const doesExist = await generalModel.doesHierarchyExist(type, company_id, approvers[0]);
+      // if (doesExist) {
+      //   return res.status(400).json({
+      //     status: 2,
+      //     message: `A Hierarchy already exist for type \`${type}\` with given initial user!`
+      //   });
+      // }
 
       const createdHierarchy = await generalModel.createHierarchy(
         type,
         approvers,
-        company_id
+        company_id,
+        id
       );
       if (createdHierarchy) return res.status(201).end();
 
@@ -163,14 +176,15 @@ const generalController = {
   },
   updateHierarchy: async (req, res) => {
     try {
-      const { type, approvers, removableApprovers } = req.body;
+      const { hierarchy_id, type, approvers, removableApprovers } = req.body;
       const { company_id } = req.user;
 
       const updated = await generalModel.updateHierarchy(
         type,
         approvers,
         removableApprovers,
-        company_id
+        company_id,
+        hierarchy_id
       );
 
       if (updated) return res.status(200).end();
@@ -187,6 +201,78 @@ const generalController = {
         error
       }).end();
     }
+  },
+  mapHierarchyToProject: async (req, res) => {
+    try {
+      const { hierarchy_id, hierarchy_type, project_id } = req.body;
+      const { id, company_id } = req.user;
+
+      const updated = await generalModel.mapHierarchyToProject(
+        hierarchy_id,
+        hierarchy_type,
+        project_id,
+        company_id,
+        id
+      );
+
+      if (updated) return res.status(200).end();
+
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while mapping hierarchy to project'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message ?? Config.errorText.value,
+        error
+      }).end();
+    }
+  },
+  setDefaultHierarchy: async (req, res) => {
+    try {
+      const { hierarchy_id, hierarchy_type } = req.body;
+      const { id, company_id } = req.user;
+
+      const updated = await generalModel.setDefaultHierarchy(
+        hierarchy_id,
+        hierarchy_type,
+        company_id,
+        id
+      );
+
+      if (updated) return res.status(200).end();
+
+      return res.status(400).json({
+        status: 3,
+        message: 'Something went wrong while setting hierarchy as default'
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message ?? Config.errorText.value,
+        error
+      }).end();
+    }
+  },
+  getHierarchyTypes: async (req, res) => {
+    try {
+      const result = await generalModel.getHierarchyTypes();
+      return res.json({
+        status: 1,
+        data: result,
+      })
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message ?? Config.errorText.value,
+        error
+      }).end();
+    }
   }
 };
+
 export default generalController;

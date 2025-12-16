@@ -52,6 +52,13 @@ RfqRoutes.post(
   rfqController.createOrUpdateRfqDraftWithProductVendors
 );
 
+RfqRoutes.get(
+  '/fetch-rfq-filters/:rfq_id',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.fetchRfqFilters 
+)
+
 RfqRoutes.post(
   '/remove-vendor-from-draft',
   passportSignIn,
@@ -563,7 +570,7 @@ RfqRoutes.post('/get-tech-evaluation-rfqs',
 RfqRoutes.get('/get-rfqs',
   passportSignIn,
   validateDbBody.user_id_profileexists,
-  acl([2, 8, 9, 10]),
+  acl([2, 3, 8, 9, 10]),
   validateGetRfqsQuery,
   rfqController.getRfqs
 )

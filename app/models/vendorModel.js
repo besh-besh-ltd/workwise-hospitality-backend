@@ -1,6 +1,8 @@
 import db from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 import pgp from 'pg-promise';
+import { sendMail } from '../helper/common.js';
+import { generateEmailTemplate } from '../helper/notificationEmailLayout.js';
 
 const vendorModel = {
   // Helper function to escape SQL strings
@@ -435,40 +437,77 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
         });
     });
   },
-  getLocationsByCompanyId: async (company_id) => {
-    try {
-      const query = `
-        SELECT 
-          l.id,
-          l.company_id,
-          l.address,
-          l.postal_code,
-          l.country_id,
-          c.country_name,
-          l.state_id,
-          s.state_name,
-          l.city_id,
-          ci.city_name,
-          l.created_at,
-          l.updated_at
-        FROM tbl_company_location l
-        LEFT JOIN tbl_location_country c ON l.country_id = c.id
-        LEFT JOIN tbl_location_states s ON l.state_id = s.id
-        LEFT JOIN tbl_location_cities ci ON l.city_id = ci.id
-        WHERE l.company_id = $1
-        ORDER BY l.id DESC;
+getLocationsByCompanyId: async (company_id, user_type = 2) => {
+  try {
+    let selectSpoc = "";
+    let joinSpoc = "";
+    let groupSpoc = "";
+
+    if (user_type == 3 || user_type == 1) { // For vendor or admin users, include SPOC details
+
+      selectSpoc = `,
+        COALESCE(
+          json_agg(
+            DISTINCT jsonb_build_object(
+              'spoc_id', us.id,
+              'spoc_name', us.name,
+              'spoc_email', us.email,
+              'spoc_mobile', us.mobile
+            )
+          ) FILTER (WHERE us.id IS NOT NULL),
+        '[]') AS spocs
       `;
 
-      const result = await db.any(query, [company_id]);
-      return result;
+      joinSpoc = `
+        LEFT JOIN tbl_spoc_location_mapping slm ON l.id = slm.location_id
+        LEFT JOIN tbl_users_spoc us ON slm.spoc_id = us.id
+      `;
 
-    } catch (error) {
-      console.error("Error fetching vendor locations with join:", error);
-      throw error;
+      groupSpoc = `,
+        us.id, us.name, us.email, us.mobile
+      `;
     }
-  },
 
-  getFiles: async (vendorId) => {
+    const query = `
+      SELECT 
+        l.id,
+        l.company_id,
+        l.address,
+        l.postal_code,
+        l.country_id,
+        c.country_name,
+        l.state_id,
+        s.state_name,
+        l.city_id,
+        ci.city_name,
+        l.created_at,
+        l.updated_at
+        ${selectSpoc}
+      FROM tbl_company_location l
+      LEFT JOIN tbl_location_country c ON l.country_id = c.id
+      LEFT JOIN tbl_location_states s ON l.state_id = s.id
+      LEFT JOIN tbl_location_cities ci ON l.city_id = ci.id
+      ${joinSpoc}
+      WHERE l.company_id = $1
+      GROUP BY 
+        l.id, l.company_id, l.address, l.postal_code,
+        l.country_id, c.country_name,
+        l.state_id, s.state_name,
+        l.city_id, ci.city_name,
+        l.created_at, l.updated_at
+      ORDER BY l.id DESC;
+    `;
+
+    const result = await db.any(query, [company_id]);
+    return result;
+
+  } catch (error) {
+    console.error("Error fetching vendor locations:", error);
+    throw error;
+  }
+},
+
+ getFiles: async (vendorId) => {
     return new Promise(function (resolve, reject) {
       db.any('SELECT * FROM tbl_files WHERE user_id = $1', [vendorId])
         .then(function (data) {
@@ -760,24 +799,106 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
     });
   },
   
-  getSpocDetails: async (id, filterByStatus = true) => {
-    return new Promise(function (resolve, reject) {
-      let query = 'SELECT * FROM tbl_users_spoc WHERE user_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)';
+getSpocDetails: async (id, rfq_id = null, filterByStatus = true) => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      // STEP 1 — Get base SPOC list
+      let query = `
+        SELECT * 
+        FROM tbl_users_spoc 
+        WHERE user_id = $1 
+          AND (is_deleted = 0 OR is_deleted IS NULL)
+      `;
+
       if (filterByStatus) {
-        query += ' AND status = 1';
+        query += ` AND status = 1`;
       }
-      query += ' ORDER BY created_at DESC';
-      
-      db.any(query, [id])
-        .then(function (data) {
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
-  },
+
+      query += ` ORDER BY created_at DESC`;
+
+      let spocs = await db.any(query, [id]);
+
+      // If no RFQ ID supplied → return normally
+      if (!rfq_id || spocs.length === 0) {
+        return resolve(spocs);
+      }
+
+      // STEP 2 — Check RFQ Filters
+      const filters = await db.any(
+        `SELECT type, value FROM tbl_rfq_filters WHERE rfq_id = $1`,
+        [rfq_id]
+      );
+
+      if (!filters || filters.length === 0) {
+        return resolve(spocs);
+      }
+
+      // Extract country, state, city filters
+      const countryFilter = filters.find(f => f.type === "country");
+      const stateFilter = filters.find(f => f.type === "state");
+      const cityFilter = filters.find(f => f.type === "city");
+
+      // If all three do NOT exist → return original SPOCs
+      if (!countryFilter || !stateFilter || !cityFilter) {
+        return resolve(spocs);
+      }
+
+      const country_id = Number(countryFilter.value);
+      const state_id = Number(stateFilter.value);
+      const city_id = Number(cityFilter.value);
+
+      // STEP 3 — Now filter SPOCs by location logic
+      const finalSpocs = [];
+
+      for (const spoc of spocs) {
+        // Get mapped locations for this SPOC
+        const spocLocations = await db.any(
+          `SELECT location_id 
+           FROM tbl_spoc_location_mapping 
+           WHERE spoc_id = $1`,
+          [spoc.id]
+        );
+
+        if (!spocLocations || spocLocations.length === 0) {
+          continue; // skip this spoc
+        }
+
+        // Check each location
+        let matched = false;
+
+        for (const loc of spocLocations) {
+          const companyLoc = await db.oneOrNone(
+            `SELECT country_id, state_id, city_id 
+             FROM tbl_company_location 
+             WHERE id = $1`,
+            [loc.location_id]
+          );
+
+          if (!companyLoc) continue;
+
+          // Compare all 3 fields
+          if (
+            Number(companyLoc.country_id) === country_id &&
+            Number(companyLoc.state_id) === state_id &&
+            Number(companyLoc.city_id) === city_id
+          ) {
+            matched = true;
+            break;
+          }
+        }
+
+        if (matched) {
+          finalSpocs.push(spoc);
+        }
+      }
+
+      return resolve(finalSpocs);
+    } catch (err) {
+      reject(new Error(err));
+    }
+  });
+},
+
 
   SpocExist: async (vendorId,spocId) => {
     return new Promise(function (resolve, reject) {
@@ -1167,21 +1288,118 @@ getVendorListCount: async (organization, verified, name, email, status, dateFrom
 
   // Add SPOC for vendor - consolidated function
   add_user_spoc: async (spocObj) => {
-    return new Promise(function (resolve, reject) {
-      const status = spocObj.status ?? 1; // default approved
-      const createdBy = spocObj.created_by ?? null;
-      db.any(
+    return new Promise(async function (resolve, reject) {
+        const status = spocObj.status ?? 1;
+        const createdBy = spocObj.created_by ?? null;
+        const userId = spocObj.user_id ?? null;
+        db.any(
         `INSERT INTO tbl_users_spoc (user_id, name, email, mobile, role, status, created_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-         RETURNING *;`,
-         [spocObj.user_id, spocObj.spoc_name, spocObj.spoc_email, spocObj.spoc_mobile, spocObj.spoc_role, status, createdBy]
+        VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING *;`,
+        [
+          spocObj.user_id,
+          spocObj.spoc_name,
+          spocObj.spoc_email,
+          spocObj.spoc_mobile,
+          spocObj.spoc_role,
+          status,
+          createdBy
+        ]
       )
-        .then(function (data) {
+        .then(async function (data) {
+          const spoc = data[0];
+          console.log("SPOC created:", spoc);
           resolve(data);
-        })
+
+        // -------------------------------------------------------
+        // 1) Fetch creator email (if created_by is a user_id)
+        // -------------------------------------------------------
+        let creatorEmail = null;
+        let creatorOrganizationName = null;
+        let vendorName = null;
+
+          const lookupId = userId || createdBy;
+
+          console.log("Looking up creator with ID:", lookupId);
+          try {
+            const creator = await db.oneOrNone(
+              `SELECT email, name, organization_name FROM tbl_users WHERE id = $1`, 
+              [lookupId]
+            );
+            if (creator){ 
+              console.log("Creator found:", creator);
+              creatorEmail = creator.email;
+              creatorOrganizationName = creator.organization_name || creator.name;
+              vendorName = creator.name || creator.organization_name;
+
+              console.log("Creator email:", creatorEmail);
+            }
+          } catch (err) {
+            console.error("Creator lookup failed:", err);
+          }
+
+        // -------------------------------------------------------
+        // 2) Prepare mail options for SPOC 
+        // -------------------------------------------------------
+
+              const spocHeader = `<h2>Hello ${spoc.name},</h2>`;
+
+              const spocContent = `
+                <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+                  <p>You have been added as a <strong>${spoc.role}</strong> for <strong>${creatorOrganizationName}</strong>.</p> 
+                  <p>You will now receive all related communication from Workwise.</p> 
+                  </br> 
+                  <p>Regards,</p>
+                  <p>Workwise Team</p>
+                </div>`;
+
+              const spocTemplate = generateEmailTemplate(spocHeader, spocContent);
+
+        // -------------------------------------------------------
+        // 3) Prepare mail options for SPOC Creator
+        // -------------------------------------------------------
+        
+            const creatorHeader = `<h2>Hello ${vendorName},</h2>`;
+
+              const creatorContent = `
+                <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+                <p>A new SPOC has been added to your vendor profile.</p> 
+                <ul> 
+                <li><strong>Name:</strong> ${spoc.name}</li>
+                <li><strong>Email:</strong> ${spoc.email}</li>
+                <li><strong>Mobile:</strong> ${spoc.mobile}</li>
+                <li><strong>Role:</strong> ${spoc.role}</li>
+                </ul>
+                </br> 
+                <p>Regards,</p>
+                <p>Workwise Team</p>
+                </div>`;
+
+              const creatorTemplate = generateEmailTemplate(creatorHeader, creatorContent);
+
+        
+        // -------------------------------------------------------
+        // 4) Send Emails
+        // -------------------------------------------------------
+        
+        // To SPOC
+        sendMail({
+          from: Config.transportConfig,
+          to: spoc.email,
+          subject: `You Have Been Added as a SPOC for ${creatorOrganizationName}`,
+          html: spocTemplate
+        });
+
+        // To Creator
+        sendMail({
+          from: Config.transportConfig,
+          to: creatorEmail,
+          subject: `New SPOC Added to Your Profile`,
+          html: creatorTemplate
+        });
+      })
         .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
+          reject(new Error(err));
         });
     });
   },

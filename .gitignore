@@ -65,4 +65,5 @@ app/uploads/
 # internal error
 app/storage/internal/*
 app/storage/logs/*
+app/storage/invoices/*
 ecosystem.config.js

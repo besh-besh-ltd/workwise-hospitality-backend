@@ -1587,7 +1587,6 @@ const cmsController = {
     // state_name and country_id to add new state
     // city_name and state_id to add new city
     const {country_name, state_name, country_id, city_name,state_id   } = req.body;
-    console.log("Controller Executed");
     let result = null;
     try {
      // Create the location object and call the service model to add the city

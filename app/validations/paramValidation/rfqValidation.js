@@ -321,9 +321,12 @@ export const rfqSchemas = {
     product_info: Joi.object({
       rfq_product_id: Joi.number().required(),
       quantity: Joi.number().required(),
+      unit: Joi.string().required(),
+      charges_meta: Joi.object().optional(),
       unit_price: Joi.number().required(),
       finalized_vendor_id: Joi.number().required()
-    })
+    }),
+    selected_hierarchy: Joi.number().optional(),
   }),
   getAllRfqsForAdminValidation: Joi.object().keys({
     page: Joi.number().integer().optional(),
