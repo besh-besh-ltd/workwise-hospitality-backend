@@ -1,6 +1,11 @@
 import db from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 
+// Convert undefined action_key to null for PostgreSQL
+function normalizeActionKey(value) {
+  return value === undefined ? null : value;
+}
+
 const buyerModel = {
   getBuyerList: async (limit, offset, organization, verified, name, user_type) => {
     return new Promise(function (resolve, reject) {
@@ -227,7 +232,91 @@ const buyerModel = {
           reject(error);
         });
     });
-  }
+  },
+
+  // ------------------------------------------------------------
+  // 1️⃣ INSERT FEEDBACK EVENT LOG
+  // ------------------------------------------------------------
+  logEvent: async (data) => {
+    return new Promise(function (resolve, reject) {
+      const { user_id, action_key, event, rating, comment, next_allowed_at } = data;
+
+      console.log('Logging feedback event:', data);
+
+      db.one(
+        `INSERT INTO tbl_feedback_events
+          (user_id, action_key, event, rating, comment, next_allowed_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [
+          user_id,
+          action_key,
+          event,
+          rating || null,
+          comment || null,
+          next_allowed_at || null
+        ]
+      )
+        .then(resolve)
+        .catch(err => reject(new Error(err)));
+    });
+  },
+
+  // ------------------------------------------------------------
+  // 2️⃣ GET ALL EVENTS FOR A USER (OPTIONAL)
+  // ------------------------------------------------------------
+  getLatestGlobalEvent: async (user_id) => {
+    return new Promise(function (resolve, reject) {
+      db.oneOrNone(
+        `SELECT *
+         FROM tbl_feedback_events
+         WHERE user_id = $1
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [user_id]
+      )
+        .then(resolve)
+        .catch(err => reject(new Error(err)));
+    });
+  },
+  // ------------------------------------------------------------
+  // 3️⃣ GET MOST RECENT EVENT FOR ACTION (OPTIONAL)
+  // ------------------------------------------------------------
+  getLatestEvent: async (user_id, action_key) => {
+    return new Promise(function (resolve, reject) {
+      db.oneOrNone(
+        `SELECT *
+         FROM tbl_feedback_events
+         WHERE user_id = $1
+           AND action_key = $2
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [user_id, action_key]
+      )
+        .then(resolve)
+        .catch(err => reject(new Error(err)));
+    });
+  },
+
+
+  // ------------------------------------------------------------
+  // 2️⃣ UPSERT COOLDOWN
+  // ------------------------------------------------------------
+  hasSubmitted: async (user_id, action_key) => {
+    return new Promise(function (resolve, reject) {
+      db.one(
+        `SELECT COUNT(*) as count
+         FROM tbl_feedback_events
+         WHERE user_id = $1
+           AND action_key = $2
+           AND event = 'submitted'`,
+        [user_id, action_key]
+      )
+        .then(data => resolve(parseInt(data.count)))
+        .catch(err => reject(new Error(err)));
+    });
+  },
+
 };
 
 export default buyerModel;

@@ -461,6 +461,32 @@ async function deleteFileFromS3(s3Client, fileUrl) {
   }
 }
 
+function now() {
+  return new Date();
+}
+
+function isAfter(dateString) {
+  return new Date() > new Date(dateString);
+}
+
+function addDays(days) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
+function addHours(hours) {
+  const date = new Date();
+  date.setHours(date.getHours() + hours);
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
+function addMonths(months) {
+  const date = new Date();
+  date.setMonth(date.getMonth() + months);
+  return date.toISOString().slice(0, 19).replace("T", " ");
+}
+
 
 function withTransaction(model, transaction) {
   // Wraps the model methods to automatically pass the transaction
@@ -511,5 +537,10 @@ export {
   deleteFileFromS3,
   buildProductFilters,
   withTransaction,
-  validateNumber
+  validateNumber,
+  now,
+  isAfter,
+  addDays,
+  addHours,
+  addMonths
 };

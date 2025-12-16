@@ -423,5 +423,27 @@ UsersRoutes.post(
   UsersController.searchVendorsByName
 )
 
+UsersRoutes.get(
+  '/feedback/should-show/:action_key',
+   passportSignIn,
+  //  validateBody(schemas.should_show_feedback),
+  UsersController.shouldShowFeedback
+);
+
+UsersRoutes.post(
+  '/feedback/submit',
+   passportSignIn,
+  validateBody(schemas.submit_feedback),
+  UsersController.submitFeedback
+);
+
+UsersRoutes.post(
+  '/feedback/dismiss',
+   passportSignIn,
+   validateBody(schemas.dismiss_feedback),
+  UsersController.dismissFeedback
+);
+
+
 
 export default UsersRoutes;

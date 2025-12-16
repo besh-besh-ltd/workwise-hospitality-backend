@@ -3,6 +3,7 @@ import subscriptionModel from '../../models/subscriptionModel.js';
 import notificationModel from '../../models/notificationModel.js';
 import couponModel from '../../models/couponModel.js';
 import Config from '../../config/app.config.js';
+import {isAfter, addDays, addHours, addMonths} from '../../helper/common.js';
 import {
   logError,
   currentDateTime,
@@ -36,6 +37,7 @@ import vendorapproveModel from '../../models/vendorapproveModel.js';
 import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISensy.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { pgp } from '../../config/dbConn.js';
+import buyerModel from '../../models/buyerModel.js';
 
 
 const generatePassword = (password) => {
@@ -53,6 +55,14 @@ webpush.setVapidDetails(
 const cryptr = new Cryptr(Config.cryptR.secret);
 
 var global_subscription = '';
+
+const ACTIONS = [
+  "overall",
+  "created_rfq",
+  "boq_ai",
+  "po_created",
+  "pr_submitted"
+];
 
 
 /**
@@ -4228,6 +4238,151 @@ publish_profile_reviews: async (req, res, next) => {
       .end();
     }
   },
+
+  // ---------------------------------------------------------------
+  // SHOULD SHOW FEEDBACK?
+  // ---------------------------------------------------------------
+ shouldShowFeedback: async (req, res) => {
+  try {
+    const user_id = req.user.id;
+    const requestedKey = req.params.action_key;
+
+    console.log("Requested Key: ", requestedKey);
+
+    // Get the latest GLOBAL event (any action_key)
+    const latestGlobal = await buyerModel.getLatestGlobalEvent(user_id);
+
+    // Check global 15-day cooldown
+    if (latestGlobal && latestGlobal.event === "submitted") {
+      const sevenDaysLater = addDays(15);
+      
+      if (!isAfter(sevenDaysLater)) {
+        // Still within 15-day global cooldown → don't show ANY feedback
+        return res.json({
+          status: true,
+          shouldShow: false
+        });
+      }
+    }
+
+    // Get the latest event for the requested action_key after 15 days.
+    const latestForKey = await buyerModel.getLatestEvent(user_id, requestedKey);
+
+    // No event for this action_key → show it and log "shown"
+    if (!latestForKey) {
+      await buyerModel.logEvent({
+        user_id,
+        action_key: requestedKey,
+        event: "shown",
+        next_allowed_at: null
+      });
+
+      return res.json({
+        status: true,
+        shouldShow: true,
+        action_key: requestedKey
+      });
+    }
+
+    // If event is "shown" with null next_allowed_at → show it again (already logged)
+    if (latestForKey.event === "shown" && !latestForKey.next_allowed_at) {
+      return res.json({
+        status: true,
+        shouldShow: true,
+        action_key: requestedKey
+      });
+    }
+
+    // If next_allowed_at is null OR has passed → show it and log "shown"
+    if (!latestForKey.next_allowed_at || isAfter(latestForKey.next_allowed_at)) {
+      await buyerModel.logEvent({
+        user_id,
+        action_key: requestedKey,
+        event: "shown",
+        next_allowed_at: null
+      });
+
+      return res.json({
+        status: true,
+        shouldShow: true,
+        action_key: requestedKey
+      });
+    }
+
+    // next_allowed_at hasn't passed yet → don't show
+    return res.json({
+      status: true,
+      shouldShow: false
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ status: false, message: "Internal error" });
+  }
+},
+
+// ---------------------------------------------------------------
+// SUBMIT FEEDBACK
+// ---------------------------------------------------------------
+
+
+submitFeedback: async (req, res) => {
+  try {
+    const { action_key, rating, comment } = req.body;
+    const user_id = req.user.id;
+
+    let nextAllowed = null;
+    
+    // Determine cooldown based on submitted event
+    if (action_key === "overall_experience") {
+      nextAllowed = addDays(60);    // overall submitted → ask again in 2 months
+    } else {
+      nextAllowed = addDays(15);  // action feedback submitted → ask again in 15 days
+    }
+
+    await buyerModel.logEvent({
+      user_id,
+      action_key,
+      event: "submitted",
+      rating,
+      comment,
+      next_allowed_at: nextAllowed
+    });
+
+    return res.json({ status: true, message: "Feedback submitted" });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: false });
+  }
+},
+
+// ---------------------------------------------------------------
+// DISMISS FEEDBACK
+// ---------------------------------------------------------------
+
+dismissFeedback: async (req, res) => {
+  try {
+    const { action_key } = req.body;
+    const user_id = req.user.id;
+
+    const nextAllowed = addHours(24);
+
+    await buyerModel.logEvent({
+      user_id,
+      action_key,
+      event: "dismissed",
+      next_allowed_at: nextAllowed
+    });
+
+    return res.json({ status: true, message: "Dismiss logged" });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: false });
+  }
+},
+
 
 
   // Changes by Agnij 10-06-2025 [Added function to get buyer account limits]

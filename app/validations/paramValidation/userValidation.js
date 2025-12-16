@@ -353,6 +353,16 @@ const schemas = {
     })
   }),
 
+  submit_feedback: Joi.object().keys({
+    action_key: Joi.string().valid("created_rfq", "overall_experience", "boq_ai", "po_created", "pr_submitted").required(),
+    rating: Joi.number().min(1).max(5).required(),
+    comment: Joi.string().optional().allow("", null)
+  }),
+
+  dismiss_feedback: Joi.object().keys({
+    action_key: Joi.string().valid("created_rfq", "overall_experience", "boq_ai", "po_created", "pr_submitted").required(),
+  }),
+
   update_profile: Joi.object().keys({
     email: Joi.string().email().optional(),
     name: Joi.string().optional(),
