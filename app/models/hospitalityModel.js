@@ -4,14 +4,25 @@ const hospitalityModel = {
   createCompany: async (companyObj) => {
     return db.one(
       `INSERT INTO tbl_hospitality_companies
-        (buyer_company_id, name, region, contact_email, created_by, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $5)
+        (buyer_company_id, name, region, contact_email, registered_office_address, 
+         corporate_office_address, gst, pan, bank_account_number, bank_name, 
+         ifsc_code, account_holder_name, msme, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)
        RETURNING *`,
       [
         companyObj.buyer_company_id,
         companyObj.name,
         companyObj.region,
         companyObj.contact_email,
+        companyObj.registered_office_address || null,
+        companyObj.corporate_office_address || null,
+        companyObj.gst || null,
+        companyObj.pan || null,
+        companyObj.bank_account_number || null,
+        companyObj.bank_name || null,
+        companyObj.ifsc_code || null,
+        companyObj.account_holder_name || null,
+        companyObj.msme || null,
         companyObj.created_by
       ]
     );
@@ -23,14 +34,32 @@ const hospitalityModel = {
        SET name = $1,
            region = $2,
            contact_email = $3,
-           updated_by = $4,
+           registered_office_address = $4,
+           corporate_office_address = $5,
+           gst = $6,
+           pan = $7,
+           bank_account_number = $8,
+           bank_name = $9,
+           ifsc_code = $10,
+           account_holder_name = $11,
+           msme = $12,
+           updated_by = $13,
            updated_at = NOW()
-       WHERE id = $5 AND buyer_company_id = $6 AND is_deleted = 0
+       WHERE id = $14 AND buyer_company_id = $15 AND is_deleted = 0
        RETURNING *`,
       [
         companyObj.name,
         companyObj.region,
         companyObj.contact_email,
+        companyObj.registered_office_address || null,
+        companyObj.corporate_office_address || null,
+        companyObj.gst || null,
+        companyObj.pan || null,
+        companyObj.bank_account_number || null,
+        companyObj.bank_name || null,
+        companyObj.ifsc_code || null,
+        companyObj.account_holder_name || null,
+        companyObj.msme || null,
         companyObj.updated_by,
         companyId,
         buyerCompanyId
@@ -68,8 +97,10 @@ const hospitalityModel = {
   createHotel: async (hotelObj) => {
     return db.one(
       `INSERT INTO tbl_hospitality_company_hotels
-        (hospitality_company_id, name, city, keys, status, created_by, updated_by, fee_amount)
-       VALUES ($1, $2, $3, $4, $5, $6, $6, $7)
+        (hospitality_company_id, name, city, keys, status, full_address, state,
+         gst, pan, bank_account_number, bank_name, ifsc_code, account_holder_name,
+         msme, delivery_address, created_by, updated_by, fee_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17)
        RETURNING *`,
       [
         hotelObj.hospitality_company_id,
@@ -77,6 +108,16 @@ const hospitalityModel = {
         hotelObj.city,
         hotelObj.keys,
         hotelObj.status,
+        hotelObj.full_address || null,
+        hotelObj.state || null,
+        hotelObj.gst || null,
+        hotelObj.pan || null,
+        hotelObj.bank_account_number || null,
+        hotelObj.bank_name || null,
+        hotelObj.ifsc_code || null,
+        hotelObj.account_holder_name || null,
+        hotelObj.msme || null,
+        hotelObj.delivery_address || null,
         hotelObj.created_by,
         hotelObj.fee_amount
       ]
@@ -526,6 +567,52 @@ const hospitalityModel = {
     }
 
     return Boolean(row);
+  },
+
+  saveCompanyDocument: async (companyId, documentType, documentUrl, documentNumber = null) => {
+    return db.one(
+      `INSERT INTO tbl_hospitality_company_documents
+        (hospitality_company_id, document_type, document_url, document_number)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (hospitality_company_id, document_type)
+       DO UPDATE SET document_url = EXCLUDED.document_url,
+                     document_number = EXCLUDED.document_number,
+                     updated_at = NOW()
+       RETURNING *`,
+      [companyId, documentType, documentUrl, documentNumber]
+    );
+  },
+
+  getCompanyDocuments: async (companyId) => {
+    return db.any(
+      `SELECT * FROM tbl_hospitality_company_documents
+       WHERE hospitality_company_id = $1
+       ORDER BY created_at DESC`,
+      [companyId]
+    );
+  },
+
+  saveHotelDocument: async (hotelId, documentType, documentUrl, documentNumber = null) => {
+    return db.one(
+      `INSERT INTO tbl_hospitality_hotel_documents
+        (hospitality_hotel_id, document_type, document_url, document_number)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (hospitality_hotel_id, document_type)
+       DO UPDATE SET document_url = EXCLUDED.document_url,
+                     document_number = EXCLUDED.document_number,
+                     updated_at = NOW()
+       RETURNING *`,
+      [hotelId, documentType, documentUrl, documentNumber]
+    );
+  },
+
+  getHotelDocuments: async (hotelId) => {
+    return db.any(
+      `SELECT * FROM tbl_hospitality_hotel_documents
+       WHERE hospitality_hotel_id = $1
+       ORDER BY created_at DESC`,
+      [hotelId]
+    );
   }
 };
 

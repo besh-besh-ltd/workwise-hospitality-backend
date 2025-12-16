@@ -36,10 +36,75 @@ const HospitalityController = {
         name: req.body.name?.trim(),
         region: req.body.region?.trim() || null,
         contact_email: req.body.contact_email?.trim() || null,
+        registered_office_address: req.body.registered_office_address?.trim() || null,
+        corporate_office_address: req.body.corporate_office_address?.trim() || null,
+        gst: req.body.gst?.trim() || null,
+        pan: req.body.pan?.trim() || null,
+        bank_account_number: req.body.bank_account_number?.trim() || null,
+        bank_name: req.body.bank_name?.trim() || null,
+        ifsc_code: req.body.ifsc_code?.trim() || null,
+        account_holder_name: req.body.account_holder_name?.trim() || null,
+        msme: req.body.msme?.trim() || null,
         created_by: req.user.id
       };
 
       const created = await hospitalityModel.createCompany(payload);
+
+      // Handle document uploads if files are present
+      if (req.files) {
+        const documentPromises = [];
+        
+        // GST document
+        if (req.files.gst && req.files.gst[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveCompanyDocument(
+              created.id,
+              'gst',
+              req.files.gst[0].location,
+              payload.gst
+            )
+          );
+        }
+        
+        // PAN document
+        if (req.files.pan && req.files.pan[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveCompanyDocument(
+              created.id,
+              'pan',
+              req.files.pan[0].location,
+              payload.pan
+            )
+          );
+        }
+        
+        // Cancelled cheque
+        if (req.files.cancelled_cheque && req.files.cancelled_cheque[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveCompanyDocument(
+              created.id,
+              'cancelled_cheque',
+              req.files.cancelled_cheque[0].location,
+              null
+            )
+          );
+        }
+        
+        // MSME document
+        if (payload.msme && req.files.msme && req.files.msme[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveCompanyDocument(
+              created.id,
+              'msme',
+              req.files.msme[0].location,
+              payload.msme
+            )
+          );
+        }
+        
+        await Promise.all(documentPromises);
+      }
+
       return res.status(200).json({
         status: 1,
         data: created,
@@ -70,10 +135,70 @@ const HospitalityController = {
           name: req.body.name?.trim(),
           region: req.body.region?.trim() || null,
           contact_email: req.body.contact_email?.trim() || null,
+          registered_office_address: req.body.registered_office_address?.trim() || null,
+          corporate_office_address: req.body.corporate_office_address?.trim() || null,
+          gst: req.body.gst?.trim() || null,
+          pan: req.body.pan?.trim() || null,
+          bank_account_number: req.body.bank_account_number?.trim() || null,
+          bank_name: req.body.bank_name?.trim() || null,
+          ifsc_code: req.body.ifsc_code?.trim() || null,
+          account_holder_name: req.body.account_holder_name?.trim() || null,
+          msme: req.body.msme?.trim() || null,
           updated_by: req.user.id
         },
         company.id
       );
+
+      // Handle document uploads if files are present
+      if (req.files) {
+        const documentPromises = [];
+        
+        if (req.files.gst && req.files.gst[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveCompanyDocument(
+              hospitalityCompanyId,
+              'gst',
+              req.files.gst[0].location,
+              req.body.gst?.trim() || null
+            )
+          );
+        }
+        
+        if (req.files.pan && req.files.pan[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveCompanyDocument(
+              hospitalityCompanyId,
+              'pan',
+              req.files.pan[0].location,
+              req.body.pan?.trim() || null
+            )
+          );
+        }
+        
+        if (req.files.cancelled_cheque && req.files.cancelled_cheque[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveCompanyDocument(
+              hospitalityCompanyId,
+              'cancelled_cheque',
+              req.files.cancelled_cheque[0].location,
+              null
+            )
+          );
+        }
+        
+        if (req.body.msme && req.files.msme && req.files.msme[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveCompanyDocument(
+              hospitalityCompanyId,
+              'msme',
+              req.files.msme[0].location,
+              req.body.msme?.trim() || null
+            )
+          );
+        }
+        
+        await Promise.all(documentPromises);
+      }
 
       return res.status(200).json({
         status: 1,
@@ -132,6 +257,16 @@ const HospitalityController = {
         city: req.body.city?.trim() || null,
         keys: req.body.keys ? parseInt(req.body.keys, 10) : 0,
         status: req.body.status?.trim() || 'Active',
+        full_address: req.body.full_address?.trim() || null,
+        state: req.body.state?.trim() || null,
+        gst: req.body.gst?.trim() || null,
+        pan: req.body.pan?.trim() || null,
+        bank_account_number: req.body.bank_account_number?.trim() || null,
+        bank_name: req.body.bank_name?.trim() || null,
+        ifsc_code: req.body.ifsc_code?.trim() || null,
+        account_holder_name: req.body.account_holder_name?.trim() || null,
+        msme: req.body.msme?.trim() || null,
+        delivery_address: req.body.delivery_address?.trim() || null,
         created_by: req.user.id,
         fee_amount: req.body.fee_amount
           ? parseInt(req.body.fee_amount, 10)
@@ -139,6 +274,57 @@ const HospitalityController = {
       };
 
       const created = await hospitalityModel.createHotel(payload);
+
+      // Handle document uploads if files are present
+      if (req.files) {
+        const documentPromises = [];
+        
+        if (req.files.gst && req.files.gst[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveHotelDocument(
+              created.id,
+              'gst',
+              req.files.gst[0].location,
+              payload.gst
+            )
+          );
+        }
+        
+        if (req.files.pan && req.files.pan[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveHotelDocument(
+              created.id,
+              'pan',
+              req.files.pan[0].location,
+              payload.pan
+            )
+          );
+        }
+        
+        if (req.files.cancelled_cheque && req.files.cancelled_cheque[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveHotelDocument(
+              created.id,
+              'cancelled_cheque',
+              req.files.cancelled_cheque[0].location,
+              null
+            )
+          );
+        }
+        
+        if (payload.msme && req.files.msme && req.files.msme[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveHotelDocument(
+              created.id,
+              'msme',
+              req.files.msme[0].location,
+              payload.msme
+            )
+          );
+        }
+        
+        await Promise.all(documentPromises);
+      }
 
       return res.status(200).json({
         status: 1,

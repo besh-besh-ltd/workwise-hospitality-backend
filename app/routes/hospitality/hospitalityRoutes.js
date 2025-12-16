@@ -7,7 +7,8 @@ import passport from '../../middleware/passport.js';
 import {
   validateBody,
   validateParam,
-  schemas
+  schemas,
+  uploadHospitalityDocuments
 } from '../../validations/paramValidation/hospitalityValidation.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
@@ -27,6 +28,7 @@ HospitalityRoutes.post(
   passportSignIn,
   acl([7]),
   hospitalityMiddleware.requireHospitality,
+  uploadHospitalityDocuments,
   validateBody(schemas.hospitalityCompany),
   hospitalityController.createCompany
 );
@@ -37,6 +39,7 @@ HospitalityRoutes.put(
   acl([7]),
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.companyIdParam),
+  uploadHospitalityDocuments,
   validateBody(schemas.hospitalityCompany),
   hospitalityController.updateCompany
 );
@@ -56,6 +59,7 @@ HospitalityRoutes.post(
   acl([7]),
   hospitalityMiddleware.requireHospitality,
   validateParam(schemas.companyIdParam),
+  uploadHospitalityDocuments,
   validateBody(schemas.hospitalityHotel),
   hospitalityController.createHotel
 );
