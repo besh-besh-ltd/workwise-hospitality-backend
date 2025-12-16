@@ -637,20 +637,10 @@ WHERE NOT EXISTS (
             // Use id as user_id if user_id is not available
             const userId = vendor.user_id || vendor.id;
 
-            // Get vendor company name
-            const vendorCompany = await t.oneOrNone(
-              `SELECT c.company_name 
-               FROM tbl_users u
-               LEFT JOIN tbl_company c ON u.company_id = c.id
-               WHERE u.id = $1`,
-              [userId]
-            );
-            const vendorName = vendorCompany?.company_name || null;
-
-            const vendorInsertionResult = await t.none(
-              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id, vendor_name)
-              VALUES ($1, $2, $3, $4, $5, $6)`,
-              [rfq_id, product.product_id, product.variant, userId, sheet.id, vendorName]
+            await t.none(
+              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id)
+              VALUES ($1, $2, $3, $4, $5)`,
+              [rfq_id, product.product_id, product.variant, userId, sheet.id]
             );
           }
         }

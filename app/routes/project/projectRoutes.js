@@ -29,22 +29,37 @@ projectRoutes.post(
     projectController.saveProjectFiles
 )
 
-// route for getting the project details using project id
-projectRoutes.post(
-    '/:project_id',
+// Route for getting projects by hospitality context (company/hotel)
+// IMPORTANT: This must come before /:project_id routes
+projectRoutes.get(
+    '/by-hospitality-context',
     passportSignIn,
     acl([2, 7, 8]),
-    validateParam(projectSchemas.project_id),
-    projectController.getProjectById
+    projectController.getProjectsByHospitalityContext
 )
 
-// route for getting the project table data using project id
+// route for getting all projects of the user with projectid and projectName
 projectRoutes.get(
-    '/:project_id',
+    '/name/list',
+    passportSignIn,
+    // acl([2, 7]),
+    projectController.getIdAndNameOfProjects
+)
+
+// Route for getting all projects where the current user is a team member
+projectRoutes.get(
+    '/team/user-projects',
+    passportSignIn,
+    projectController.getUserProjects
+)
+
+// Route for getting all projects assigned to a specific user
+projectRoutes.get(
+    '/user/:user_id/projects',
     passportSignIn,
     acl([2, 7, 8]),
-    validateParam(projectSchemas.project_id),
-    projectController.getProjectTableDataById
+    validateParam(projectSchemas.user_id),
+    projectController.getUserProjectsByUserId
 )
 
 projectRoutes.get('/project-budget/:project_id',
@@ -53,6 +68,7 @@ projectRoutes.get('/project-budget/:project_id',
     validateParam(projectSchemas.project_id),
     projectController.getProjectBudget
 )
+
 //For fetching available budget By Ayush
 projectRoutes.get('/available-budget/:project_id',
     passportSignIn,
@@ -77,14 +93,6 @@ projectRoutes.put(
     validateBody(projectSchemas.update),
     validateParam(projectSchemas.project_id), 
     projectController.update
-)
-
-// route for getting all projects of the user with projectid and projectName
-projectRoutes.get(
-    '/name/list',
-    passportSignIn,
-    // acl([2, 7]),
-    projectController.getIdAndNameOfProjects
 )
 
 // Changes by Agnij 14-01-2025 [Added routes for project team operations]
@@ -118,19 +126,31 @@ projectRoutes.delete(
     projectController.removeTeamMember
 )
 
-// Route for getting all projects where the current user is a team member
+// Route for getting hospitality context of a project
 projectRoutes.get(
-    '/team/user-projects',
-    passportSignIn,
-    projectController.getUserProjects
-)
-// Route for getting all projects assigned to a specific user
-projectRoutes.get(
-    '/user/:user_id/projects',
+    '/:project_id/hospitality-context',
     passportSignIn,
     acl([2, 7, 8]),
-    validateParam(projectSchemas.user_id),
-    projectController.getUserProjectsByUserId
+    validateParam(projectSchemas.project_id),
+    projectController.getProjectHospitalityContext
+)
+
+// route for getting the project details using project id
+projectRoutes.post(
+    '/:project_id',
+    passportSignIn,
+    acl([2, 7, 8]),
+    validateParam(projectSchemas.project_id),
+    projectController.getProjectById
+)
+
+// route for getting the project table data using project id
+projectRoutes.get(
+    '/:project_id',
+    passportSignIn,
+    acl([2, 7, 8]),
+    validateParam(projectSchemas.project_id),
+    projectController.getProjectTableDataById
 )
 
 export default projectRoutes;

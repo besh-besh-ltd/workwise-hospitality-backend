@@ -301,13 +301,16 @@ ORDER BY
       db.any(
         `SELECT 
                 p.id,
-                p.name 
+                p.name,
+                hpm.hospitality_company_id,
+                hpm.hospitality_hotel_id as hotel_id
             FROM 
                 tbl_projects p
             LEFT JOIN tbl_project_team pt ON p.id = pt.project_id
+            LEFT JOIN tbl_hospitality_project_mappings hpm ON p.id = hpm.project_id
             WHERE 
                 p.user_id = $1 OR pt.user_id = $1
-            GROUP BY p.id, p.name`,
+            GROUP BY p.id, p.name, hpm.hospitality_company_id, hpm.hospitality_hotel_id`,
         [user_id]
       )
         .then(function (data) {
