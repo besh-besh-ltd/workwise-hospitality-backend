@@ -1416,6 +1416,7 @@ WHERE NOT EXISTS (
           'project_id', RFQ.project_id,
           'location', RFQ.location,
           'rfq_added_from', RFQ.rfq_added_from,
+          'is_tender', RFQ.is_tender,
 
           -- Selected Terms
           'terms', (
