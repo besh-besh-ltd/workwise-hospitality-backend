@@ -930,6 +930,7 @@ user_book_demo: async (mobile) => {
        tbl_company.logo as profile_image,
        tbl_users.status,
        tbl_users.whatsapp,
+       tbl_users.subscription_plan_id,
        tbl_company.id as company_id,
        tbl_company.gstin,
        tbl_company.cin,
