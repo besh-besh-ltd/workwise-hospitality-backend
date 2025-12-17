@@ -8,6 +8,76 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 import JWT from 'jsonwebtoken';
 import db from '../config/dbConn.js';
 
+export const can = (permKey) => {
+  return async (req, res, next) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({
+          status: false,
+          message: "Unauthorized"
+        });
+      }
+
+      const userId = req.user.id;
+      const companyId = req.user.company_id;
+
+      // hotel context (optional)
+      const hotelId =
+        req.headers["x-hotel-id"] ||
+        req.query.hotel_id ||
+        null;
+
+      const [resource, action] = permKey.split(".");
+
+      if (!resource || !action) {
+        throw new Error("Invalid permission key format");
+      }
+
+      const hasPermission = await db.oneOrNone(
+        `
+        SELECT 1
+        FROM tbl_user_role_scopes urs
+        JOIN tbl_role_permissions rp
+          ON rp.role_id = urs.role_id
+        JOIN tbl_permissions p
+          ON p.id = rp.permission_id
+        WHERE urs.user_id = $1
+          AND urs.company_id = $2
+          AND (
+            urs.hotel_id IS NULL
+            OR urs.hotel_id = $3
+          )
+          AND p.resource = $4
+          AND p.action = $5
+        LIMIT 1
+        `,
+        [
+          userId,
+          companyId,
+          hotelId,
+          resource,
+          action
+        ]
+      );
+
+      if (!hasPermission) {
+        return res.status(403).json({
+          status: false,
+          message: "You do not have permission to perform this action"
+        });
+      }
+
+      return next();
+    } catch (err) {
+      console.error("RBAC can() error:", err);
+      return res.status(500).json({
+        status: false,
+        message: "Authorization check failed"
+      });
+    }
+  };
+};
+
 const auth = {
   customer_auth: async (req, res, next) => {
     try {
@@ -148,6 +218,6 @@ const auth = {
         }
       }
     )(req, res, next);
-  }
+  },
 };
 export default auth;

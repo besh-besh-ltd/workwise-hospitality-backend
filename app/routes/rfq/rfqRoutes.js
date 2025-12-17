@@ -10,6 +10,7 @@ const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 import { acl, verifyAIWebhookBody } from '../../helper/common.js';
 import { schema_posts } from '../../validations/paramValidation/productValidation.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
+import { can } from '../../middleware/auth.js';
 
 
 const RfqRoutes = Router();
@@ -19,6 +20,7 @@ RfqRoutes.post(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2, 8]),
+  // can('rfq.create'),
   validateDbBody.project_access_check,
   validateBody(rfqSchemas.create),
   rfqController.create
