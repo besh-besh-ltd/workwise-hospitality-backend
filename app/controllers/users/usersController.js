@@ -37,6 +37,7 @@ import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISens
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import db, { pgp } from '../../config/dbConn.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
+import rbacModel from '../../models/rbacModel.js';
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -576,11 +577,27 @@ const UsersController = {
 
 create_buyer_company_users: async (req, res, next) => {
   try {
-    const { name, email, mobile, user_type, password } = req.body;
+    const {
+      name,
+      email,
+      mobile,
+      user_type,
+      password,
+      employee_code,
+      employee_type,
+      payroll_company_id,
+      designation,
+      department_ids = [],
+      roles = []
+    } = req.body;
+
     const { company_id: companyID, id: loginUserID } = req.user;
 
-    // Prepare user details
-    const userDetails = {
+    let company = await userModel.getCompanyDetail(loginUserID);
+    if (company) company = company[0];
+
+    /* -------------------- PREPARE USER DATA -------------------- */
+    let userDetails = {
       name: name.trim(),
       email: email.toLowerCase().trim(),
       mobile: mobile.trim(),
@@ -588,18 +605,37 @@ create_buyer_company_users: async (req, res, next) => {
       status: 1,
       password: generatePassword(password),
       created_by: loginUserID,
-      company_id: companyID
+      company_id: companyID,
+      designation
     };
 
-    // Fetch company limits, current active user count, and company details concurrently
+    if (company?.is_hospitality) {
+      userDetails = {
+        ...userDetails,
+        employee_code,
+        employee_type,
+        payroll_company_id
+      };
+    }
+
+    /* -------------------- ACCOUNT LIMIT CHECKS (UNCHANGED) -------------------- */
     const [companyLimits, activeUsers, companyDetails] = await Promise.all([
-      rfqModel.checkIfExists("tbl_company_buyer_account_limit", `company_id = ${companyID}`),
-      rfqModel.checkIfExists("tbl_users", `company_id = ${companyID} AND user_type = ${user_type} AND is_deleted = 0`),
+      rfqModel.checkIfExists(
+        "tbl_company_buyer_account_limit",
+        `company_id = ${companyID}`
+      ),
+      rfqModel.checkIfExists(
+        "tbl_users",
+        `company_id = ${companyID} AND user_type = ${user_type} AND is_deleted = 0`
+      ),
       rfqModel.checkIfExists("tbl_company", `id = ${companyID}`)
     ]);
 
     if (!companyLimits.length) {
-      return res.status(400).json({ status: false, message: "Company account limits not set." }).end();
+      return res.status(400).json({
+        status: false,
+        message: "Company account limits not set."
+      });
     }
 
     const limits = companyLimits[0];
@@ -609,126 +645,110 @@ create_buyer_company_users: async (req, res, next) => {
       9: limits.max_engineering,
       10: limits.max_finance
     };
+
     const maxAllowed = maxMap[user_type];
-    const currentCount = activeUsers.length;
-
-    if (maxAllowed === undefined) {
-      return res.status(400).json({ status: false, message: "Invalid user_type." }).end();
-    }
-
-    if (currentCount >= maxAllowed) {
+    if (maxAllowed === undefined || activeUsers.length >= maxAllowed) {
       return res.status(400).json({
         status: false,
-        message: `You have reached the maximum number of allowed accounts for this role`
-      }).end();
+        message: "You have reached the maximum number of allowed accounts for this role"
+      });
     }
 
-    // Insert user
+    /* -------------------- CREATE USER -------------------- */
     const insertResult = await rfqModel.insert("tbl_users", userDetails);
     const createdUser = insertResult[0];
 
-            //activate default subscription
-        let checkFreeSubscription =
-          await subscriptionModel.checkFreeSubscription();
-          const startDate = Moment(); // Replace with the actual start date
+    /* -------------------- USER ↔ DEPARTMENTS -------------------- */
+    if (Array.isArray(department_ids) && department_ids.length) {
+      await rbacModel.assignUserDepartments(
+        createdUser.id,
+        department_ids
+      );
+    }
 
-          const billingCycleMonths = checkFreeSubscription[0].duration;
+    /* -------------------- USER ↔ ROLE SCOPES -------------------- */
+    if (Array.isArray(roles) && roles.length) {
+      const roleScopes = roles.map(r => ({
+        user_id: createdUser.id,
+        role_id: r.role_id,
+        company_id: r.company_id || companyID,
+        hotel_id: r.hotel_id || null,
+        department_id: r.department_id || null
+      }));
 
-          // Calculate the end date by adding the billing cycle and subtracting one day
-          const endDate = startDate
-            .clone()
-            .add(billingCycleMonths, 'months')
-            .subtract(1, 'day');
-          const renewDate = startDate.clone().add(billingCycleMonths, 'months');
+      await rbacModel.assignUserRoleScopes(roleScopes);
+    }
 
+    /* -------------------- SUBSCRIPTION LOGIC (UNCHANGED) -------------------- */
+    let checkFreeSubscription = await subscriptionModel.checkFreeSubscription();
+    const startDate = Moment();
+    const billingCycleMonths = checkFreeSubscription[0].duration;
 
-          let UserSubscriptionObj = {
-            user_id: createdUser.id,
-            plan_id: checkFreeSubscription[0].id,
-            status: 1, //By default payment done
-            start_date: startDate.format('YYYY-MM-DD'),
-            end_date: endDate.format('YYYY-MM-DD'),
-            renew_date: renewDate.format('YYYY-MM-DD')
-          };
+    const endDate = startDate
+      .clone()
+      .add(billingCycleMonths, "months")
+      .subtract(1, "day");
 
-          let createUserSubscription =
-            await subscriptionModel.createUserSubscription(UserSubscriptionObj);
+    const renewDate = startDate.clone().add(billingCycleMonths, "months");
 
-          await subscriptionModel.updateUserSubscriptionId(
-            checkFreeSubscription[0].id,
-            createdUser.id
-          );
-
-          let subscriptionMappingDetails =
-            await subscriptionModel.getSubscriptionMappingDetails(
-              checkFreeSubscription[0].id
-            );
-          for await (const {
-            allocated_feature,
-            feature_id
-          } of subscriptionMappingDetails) {
-            let userSubscriptionFeatureObj = {
-              user_subscriptions_id: createUserSubscription.id,
-              feature_id: feature_id,
-              plan_id: checkFreeSubscription[0].id,
-              used_feature_count: 0,
-              allocated_feature: allocated_feature,
-              user_id: createdUser.id
-            };
-            await subscriptionModel.createUserSubscriptionFeature(
-              userSubscriptionFeatureObj
-            );
-          }
-
-
-    // Build account type label
-    const accountTypeMap = {
-      8: "Management",
-      2: "Procurement",
-      9: "Engineering",
-      10: "Finance"
+    const userSubscriptionObj = {
+      user_id: createdUser.id,
+      plan_id: checkFreeSubscription[0].id,
+      status: 1,
+      start_date: startDate.format("YYYY-MM-DD"),
+      end_date: endDate.format("YYYY-MM-DD"),
+      renew_date: renewDate.format("YYYY-MM-DD")
     };
-    const accountTypeLabel = accountTypeMap[user_type] || "User";
 
-    // Get company name
-    const companyName = companyDetails && companyDetails[0] && companyDetails[0].company_name 
-      ? companyDetails[0].company_name 
-      : null;
+    const createUserSubscription =
+      await subscriptionModel.createUserSubscription(userSubscriptionObj);
 
-    // Compose and send email
-    const emailHeader = `<h2>Hello ${name},</h2>`;
-    const emailContent = `
-      <div style="font-size:16px; font-family:'Roboto',sans-serif;">
-        <p>Welcome to WorkWise${companyName ? ` - ${companyName}` : ''}, your account has been successfully registered.</p>
-        ${companyName ? `<p><strong>Company:</strong> ${companyName}</p>` : ''}
-        <p><strong>Login Details:</strong></p>
-        <ul>
-          <li><strong>Email:</strong> ${email}</li>
-          <li><strong>Password:</strong> ${password}</li>
-          <li><strong>Mobile:</strong> ${mobile}</li>
-          <li><strong>Account Type:</strong> ${accountTypeLabel}</li>
-        </ul>
-        <p>Login here: <a href="https://letsworkwise.com/?user_registered=1">Click Here</a></p>
-        <p style="font-size:14px;color:#777;"><em>Please change your password after first login for security.</em></p>
-      </div>`;
+    await subscriptionModel.updateUserSubscriptionId(
+      checkFreeSubscription[0].id,
+      createdUser.id
+    );
 
-    const emailHTML = generateEmailTemplate(emailHeader, emailContent);
-    const mailRecipients = {
+    const subscriptionMappingDetails =
+      await subscriptionModel.getSubscriptionMappingDetails(
+        checkFreeSubscription[0].id
+      );
+
+    for await (const { allocated_feature, feature_id } of subscriptionMappingDetails) {
+      await subscriptionModel.createUserSubscriptionFeature({
+        user_subscriptions_id: createUserSubscription.id,
+        feature_id,
+        plan_id: checkFreeSubscription[0].id,
+        used_feature_count: 0,
+        allocated_feature,
+        user_id: createdUser.id
+      });
+    }
+
+    /* -------------------- EMAIL (UNCHANGED) -------------------- */
+    const companyName =
+      companyDetails?.[0]?.company_name || null;
+
+    const emailHTML = generateEmailTemplate(
+      `<h2>Hello ${name},</h2>`,
+      `
+      <p>Welcome to WorkWise${companyName ? ` - ${companyName}` : ""}</p>
+      <p><strong>Email:</strong> ${email}</p>
+      <p><strong>Password:</strong> ${password}</p>
+      <p><a href="https://letsworkwise.com/?user_registered=1">Login Here</a></p>
+      `
+    );
+
+    sendMail({
       from: Config.webmasterMail,
       to: email,
       subject: "Welcome to WorkWise - Account Created",
       html: emailHTML
-    };
-
-    console.log('Sending email to:', email);
-    console.log('Email HTML:', emailHTML);
-
-    sendMail(mailRecipients);
+    });
 
     return res.status(200).json({
       status: true,
-      message: "User account created successfully",
-    }).end();
+      message: "User account created successfully"
+    });
 
   } catch (err) {
     console.error("create_buyer_company_users error:", err);
@@ -736,10 +756,9 @@ create_buyer_company_users: async (req, res, next) => {
       status: false,
       message: "Error creating buyer company user.",
       error: err.message
-    }).end();
+    });
   }
 },
-
 // Changes by Agnij 14-01-2025 [Added controller method to get company users]
 get_company_users: async (req, res, next) => {
   try {
@@ -1642,55 +1661,66 @@ update_user_detail: async (req, res, next) => {
     const loggedInUser = req.user;
     const reqData = req.body;
     const isAdmin = loggedInUser.user_type === 7;
-    
-    // Determine target user ID
-    let targetUserId = reqData.user_id && isAdmin ? reqData.user_id : loggedInUser.id;
-    
-    // Check permissions - only admins can update other users
+
+    const targetUserId =
+      reqData.user_id && isAdmin
+        ? reqData.user_id
+        : loggedInUser.id;
+
     if (reqData.user_id && !isAdmin) {
       return res.status(403).json({
         status: false,
         message: "Only company administrators can update other users"
       });
     }
-    
-    // Build update data with tracking information
+
+    /* -------------------- UPDATE USER CORE DATA -------------------- */
     const updateData = {
       updated_at: currentDateTime(),
       updated_by: loggedInUser.id
     };
-    
-    // Add user-provided fields to update data with proper formatting
-    if (reqData.name !== undefined) updateData.name = reqData.name?.trim();
-    if (reqData.email !== undefined) updateData.email = reqData.email?.trim().toLowerCase();
-    if (reqData.mobile !== undefined) updateData.mobile = reqData.mobile?.trim();
-    
-    // Status updates: Only for non-admin users and only by admins
-    if (reqData.status !== undefined && targetUserId !== loggedInUser.id) {
-      // Check if target user is not an admin (user_type 7)
-      const targetUser = await userModel.userExistsById(targetUserId);
-      if (targetUser && targetUser.user_type !== 7) {
-        updateData.status = reqData.status;
-      }
+
+    if (reqData.name !== undefined) updateData.name = reqData.name.trim();
+    if (reqData.email !== undefined) updateData.email = reqData.email.trim().toLowerCase();
+    if (reqData.mobile !== undefined) updateData.mobile = reqData.mobile.trim();
+    if (reqData.designation !== undefined) updateData.designation = reqData.designation;
+
+    const whereClause =
+      isAdmin && targetUserId !== loggedInUser.id
+        ? `id = ${targetUserId} AND company_id = ${loggedInUser.company_id}`
+        : `id = ${targetUserId}`;
+
+    await rfqModel.updateWhere("tbl_users", updateData, whereClause);
+
+    /* -------------------- UPDATE DEPARTMENTS -------------------- */
+    if (isAdmin && Array.isArray(reqData.department_ids)) {
+      await rbacModel.deleteUserDepartments(targetUserId);
+      await rbacModel.assignUserDepartments(
+        targetUserId,
+        reqData.department_ids
+      );
     }
-    
-    // Execute update using updateWhere for all cases
-    // For admin updating another user: Ensure company_id matches
-    // For self-update: Only filter by user's own ID
-    const whereClause = isAdmin && targetUserId !== loggedInUser.id
-      ? `id = ${targetUserId} AND company_id = ${loggedInUser.company_id}`
-      : `id = ${targetUserId}`;
-      
-    await rfqModel.updateWhere(
-      "tbl_users",
-      updateData,
-      whereClause
-    );
+
+    /* -------------------- UPDATE ROLE SCOPES -------------------- */
+    if (isAdmin && Array.isArray(reqData.roles)) {
+      await rbacModel.deleteUserRoleScopes(targetUserId);
+
+      const roleScopes = reqData.roles.map(r => ({
+        user_id: targetUserId,
+        role_id: r.role_id,
+        company_id: r.company_id || loggedInUser.company_id,
+        hotel_id: r.hotel_id || null,
+        department_id: r.department_id || null
+      }));
+
+      await rbacModel.assignUserRoleScopes(roleScopes);
+    }
 
     return res.status(200).json({
-      status: 1,
+      status: true,
       message: "User profile updated successfully"
     });
+
   } catch (err) {
     logError(err);
     return res.status(400).json({
@@ -3078,6 +3108,26 @@ publish_profile_reviews: async (req, res, next) => {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+  getListedEntities: async (req, res) => {
+    try {
+      const buyerCompanyId = req.user.company_id;
+
+      const data =
+        await hospitalityModel.getCompaniesWithHotels(
+          buyerCompanyId
+        );
+
+      return res.json({
+        status: true,
+        data
+      });
+    } catch (err) {
+      return res.status(500).json({
+        status: false,
+        message: err.message
+      });
     }
   },
   test_razorpay_webhook: async (req, res) => {

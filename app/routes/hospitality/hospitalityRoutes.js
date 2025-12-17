@@ -157,6 +157,8 @@ HospitalityRoutes.post(
   UsersController.hospitalitySubscriptionPayment
 );
 
+HospitalityRoutes.get('/entities', passportSignIn, acl([7]), UsersController.getListedEntities);
+
 export default HospitalityRoutes;
 
 

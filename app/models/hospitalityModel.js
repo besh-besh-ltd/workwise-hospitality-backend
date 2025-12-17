@@ -613,6 +613,62 @@ const hospitalityModel = {
        ORDER BY created_at DESC`,
       [hotelId]
     );
+  },
+
+  getCompaniesWithHotels: async (buyerCompanyId) => {
+    const rows = await db.any(
+      `
+      SELECT
+        hc.id AS company_id,
+        hc.name AS company_name,
+        hc.region,
+        h.id AS hotel_id,
+        h.name AS hotel_name,
+        h.city,
+        h.status
+      FROM tbl_hospitality_companies hc
+      LEFT JOIN tbl_hospitality_company_hotels h
+        ON h.hospitality_company_id = hc.id
+       AND h.is_deleted = 0
+      WHERE hc.buyer_company_id = $1
+        AND hc.is_deleted = 0
+      ORDER BY hc.name, h.name
+      `,
+      [buyerCompanyId]
+    );
+
+    /**
+     * Transform into:
+     * [
+     *   {
+     *     company_id,
+     *     company_name,
+     *     hotels: [...]
+     *   }
+     * ]
+     */
+    const map = {};
+    for (const row of rows) {
+      if (!map[row.company_id]) {
+        map[row.company_id] = {
+          company_id: row.company_id,
+          company_name: row.company_name,
+          region: row.region,
+          hotels: []
+        };
+      }
+
+      if (row.hotel_id) {
+        map[row.company_id].hotels.push({
+          hotel_id: row.hotel_id,
+          hotel_name: row.hotel_name,
+          city: row.city,
+          status: row.status
+        });
+      }
+    }
+
+    return Object.values(map);
   }
 };
 
