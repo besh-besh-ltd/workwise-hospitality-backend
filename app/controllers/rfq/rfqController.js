@@ -10974,7 +10974,7 @@ processBoqAndDownload : async (req, res) => {
   addClause: async (req, res) => {
     try {
       // console.log("add clause controller");
-      const { rfq_id, rfq_product_id, clause_text, file_url } = req.body;
+      const { rfq_id, rfq_product_id, clause_text, file_url, clause_type = 'clause', weightage = null } = req.body;
       // console.log("bodyy = ",req.body);
 
       if (!rfq_id || !rfq_product_id || !clause_text) {
@@ -10991,7 +10991,9 @@ processBoqAndDownload : async (req, res) => {
         rfq_id,
         rfq_product_id,
         clause_text,
-        file_url
+        file_url,
+        clause_type,
+        weightage
       );
 
       res.status(200).json(result).end();
@@ -11008,13 +11010,15 @@ processBoqAndDownload : async (req, res) => {
 
   updateClause: async (req, res) => {
     try {
-      const { clause_id, clause_text, file_url } = req.body;
+      const { clause_id, clause_text, file_url, clause_type, weightage } = req.body;
       // console.log("data from update clause controller = ",clause_id,clause_text,file_url);
 
       const result = await rfqModel.updateClause(
         clause_id,
         clause_text,
-        file_url
+        file_url,
+        clause_type,
+        weightage
       );
 
       res.status(200).json(result).end();
@@ -11815,6 +11819,66 @@ getClauses: async (req, res) => {
       return res.status(500).json({
         status: 0,
         message: 'Error saving Excel to database',
+        error: error.message
+      });
+    }
+  },
+
+  updateMinimumPassingScore: async (req, res) => {
+    try {
+      const { rfq_id, rfq_product_id, minimum_passing_score } = req.body;
+      const user_id = req.user.id;
+
+      if (!rfq_id || !rfq_product_id || minimum_passing_score === undefined) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Invalid input. Ensure RFQ_ID, rfq_product_id and minimum_passing_score are provided.'
+        });
+      }
+
+      const result = await rfqModel.updateMinimumPassingScore(
+        rfq_id,
+        rfq_product_id,
+        minimum_passing_score
+      );
+
+      res.status(200).json(result).end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
+        status: 0,
+        message: 'Error updating minimum passing score.',
+        error: error.message
+      });
+    }
+  },
+
+  updateBuyerMarks: async (req, res) => {
+    try {
+      const { clause_id, vendor_id, buyer_marks, buyer_remark } = req.body;
+      const buyer_id = req.user.id;
+
+      if (!clause_id || !vendor_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Invalid input. Ensure clause_id and vendor_id are provided.'
+        });
+      }
+
+      const result = await rfqModel.updateBuyerMarks(
+        clause_id,
+        vendor_id,
+        buyer_id,
+        buyer_marks,
+        buyer_remark
+      );
+
+      res.status(200).json(result).end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
+        status: 0,
+        message: 'Error updating buyer marks.',
         error: error.message
       });
     }

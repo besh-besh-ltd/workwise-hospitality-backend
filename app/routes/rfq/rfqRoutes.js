@@ -657,4 +657,18 @@ RfqRoutes.post(
   rfqController.saveExcel
 );
 
+RfqRoutes.post(
+  '/update-minimum-passing-score',
+  passportSignIn,
+  validateBody(rfqSchemas.updateMinimumPassingScore),
+  rfqController.updateMinimumPassingScore
+);
+
+RfqRoutes.post(
+  '/update-buyer-marks',
+  passportSignIn,
+  validateBody(rfqSchemas.updateBuyerMarks),
+  rfqController.updateBuyerMarks
+);
+
 export default RfqRoutes;
