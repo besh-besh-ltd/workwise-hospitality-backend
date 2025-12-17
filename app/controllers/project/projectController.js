@@ -813,6 +813,89 @@ const projectController = {
         message: err.message || Config.errorText.value
       });
     }
+  },
+
+  // Get projects filtered by hospitality context (company or hotel)
+  getProjectsByHospitalityContext: async (req, res, next) => {
+    try {
+      const { hospitality_company_id, hotel_id } = req.query;
+      const user_id = req.user.id;
+
+      let projectIds = [];
+
+      if (hospitality_company_id || hotel_id) {
+        // Get project IDs mapped to the hospitality context
+        const mappedProjects = await hospitalityModel.getProjectIdsForContext(
+          hospitality_company_id,
+          hotel_id
+        );
+        projectIds = mappedProjects.map(p => p.project_id);
+      }
+
+      // Get project names and IDs from the mapped project IDs
+      let projects = [];
+      if (projectIds.length > 0) {
+        const projectData = await db.any(
+          `SELECT p.id, p.name 
+           FROM tbl_projects p
+           LEFT JOIN tbl_project_team pt ON p.id = pt.project_id
+           WHERE p.id = ANY($1::int[])
+             AND (p.user_id = $2 OR pt.user_id = $2)
+           GROUP BY p.id, p.name
+           ORDER BY p.name`,
+          [projectIds, user_id]
+        );
+        projects = projectData;
+      }
+
+      return res.status(200).json({
+        status: true,
+        data: projects
+      });
+    } catch (err) {
+      logError(err);
+      return res.status(400).json({
+        status: false,
+        message: err.message || Config.errorText.value
+      });
+    }
+  },
+
+  // Get hospitality context (company and hotel) for a project
+  getProjectHospitalityContext: async (req, res, next) => {
+    try {
+      const { project_id } = req.params;
+
+      // Get hospitality mappings for the project
+      const mappings = await hospitalityModel.getProjectMappings(project_id);
+
+      if (!mappings || mappings.length === 0) {
+        return res.status(200).json({
+          status: true,
+          data: null
+        });
+      }
+
+      // Return the first mapping (usually there's one primary context)
+      const primaryMapping = mappings[0];
+
+      return res.status(200).json({
+        status: true,
+        data: {
+          hospitality_company_id: primaryMapping.hospitality_company_id,
+          company_name: primaryMapping.company_name,
+          hotel_id: primaryMapping.hospitality_hotel_id,
+          hotel_name: primaryMapping.hotel_name,
+          mapping_type: primaryMapping.mapping_type
+        }
+      });
+    } catch (err) {
+      logError(err);
+      return res.status(400).json({
+        status: false,
+        message: err.message || Config.errorText.value
+      });
+    }
   }
 };
 

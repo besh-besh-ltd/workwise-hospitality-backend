@@ -17,6 +17,7 @@ import xlsx from 'xlsx';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import vendorModel from '../../models/vendorModel.js';
 import projectModel from '../../models/projectModel.js';
+import hospitalityModel from '../../models/hospitalityModel.js';
 import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISensy.js';
 import { generateEmailTemplate, getRfqEmailContent, RFQ_EMAIL_TYPE } from '../../helper/notificationEmailLayout.js';
 import fs from 'fs';
@@ -1039,7 +1040,7 @@ const sendMailtoVendors = async (req, rfqNumber) => {
 const sendQuotationMailToBuyer = async (req, rfqNumber) => {
   try {
     const { name, email, id } = req.user;
-    const spocList = await vendorModel.getSpocDetails(id);
+    const spocList = await vendorModel.getSpocDetails(id, rfqNumber);
 
     // Validate email addresses
     const allEmails = [email, ...(spocList?.map(spoc => spoc.email) || [])];
@@ -1658,7 +1659,7 @@ const sendQuoteNotificationEmail = async (req) => {
       };
 
       // fetch spoc for buyer
-       const spocList = await vendorModel.getSpocDetails(buyer?.id)
+       const spocList = await vendorModel.getSpocDetails(buyer?.id, rfq_id)
 
       if (spocList && spocList.length > 0) {
         mailRecipients.to = spocList.map(spoc => spoc.email);
@@ -2303,6 +2304,11 @@ const saveRfqDraft = async (user_id, reqBody) => {
       rfq_type,
       reverse_auction,
       is_tender,
+      tender_fees,
+      tender_publish_date,
+      vendor_clarification_date,
+      hospitality_company_id,
+      hotel_id,
       ra_start_date,
       ra_end_date,
       project_id,
@@ -2311,6 +2317,21 @@ const saveRfqDraft = async (user_id, reqBody) => {
       termFilesChanged,
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
+
+  // Validate hospitality context access if provided
+  if (hospitality_company_id) {
+    const hasAccess = await hospitalityModel.userHasContext(
+      user_id,
+      hospitality_company_id,
+      hotel_id || null
+    );
+    if (!hasAccess) {
+      throw new Error(JSON.stringify({
+        message: 'You do not have access to the selected hospitality company or hotel',
+        status: 2
+      }));
+    }
+  }
 
   const globalFilters = filters?.global;
 
@@ -2352,6 +2373,11 @@ const saveRfqDraft = async (user_id, reqBody) => {
       rfq_type,
       reverse_auction,
       is_tender: is_tender !== undefined ? is_tender : 0,
+      tender_fees: is_tender === 1 ? (tender_fees || 0) : 0,
+      tender_publish_date: is_tender === 1 ? tender_publish_date : null,
+      vendor_clarification_date: is_tender === 1 ? vendor_clarification_date : null,
+      hospitality_company_id: hospitality_company_id || null,
+      hotel_id: hotel_id || null,
       ra_start_date: reverse_auction == 1 ? ra_start_date : null,
       ra_end_date: reverse_auction == 1 ? ra_end_date : null,
       is_published: 0,
@@ -4635,23 +4661,12 @@ const rfqController = {
       await rfqModel.insert('tbl_rfq_products', productData);
 
       const vendorPromises = product.vendors.map(async (vendor) => {
-        // Get vendor company name
-        const vendorCompany = await db.oneOrNone(
-          `SELECT c.company_name 
-           FROM tbl_users u
-           LEFT JOIN tbl_company c ON u.company_id = c.id
-           WHERE u.id = $1`,
-          [vendor.vendor_id]
-        );
-        const vendorName = vendorCompany?.company_name || null;
-
         const vendorData = {
           rfq_id,
           product_variant_id: product.variant_id,
           user_id: vendor.vendor_id,
           variant: variant,
-          sheet_id,
-          vendor_name: vendorName
+          sheet_id
         };
         return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
       });
@@ -4675,9 +4690,8 @@ const rfqController = {
 
 
 
-      //Add global filters to sheet data
-      if (!globalFilters || typeof globalFilters !== "object") return;
-      else {
+      //Add global filters to sheet data (skip gracefully if missing)
+      if (globalFilters && typeof globalFilters === "object") {
         const extractors = {
           country: (v) => v.map((x) => x.id),
           state: (v) => v.map((x) => x.id),
@@ -4821,22 +4835,11 @@ const rfqController = {
       }
 
       const vendorPromises = product.vendors.map(async (vendor) => {
-        // Get vendor company name
-        const vendorCompany = await db.oneOrNone(
-          `SELECT c.company_name 
-           FROM tbl_users u
-           LEFT JOIN tbl_company c ON u.company_id = c.id
-           WHERE u.id = $1`,
-          [vendor]
-        );
-        const vendorName = vendorCompany?.company_name || null;
-
         const vendorData = {
           rfq_id,
           product_variant_id: product.variant_id,
           user_id: vendor,
-          variant: variant,
-          vendor_name: vendorName
+          variant: variant
         };
         return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
       });
@@ -10409,7 +10412,7 @@ sendFollowUpEmails: async (req, res) => {
       const receiver_details = await userModel.user_profile_detail(receiver_id);
       if (receiver_details.length > 0) {
         const receiverDetails = receiver_details[0];
-        const spocList = await vendorModel.getSpocDetails(receiver_id);
+        const spocList = await vendorModel.getSpocDetails(receiver_id, rfq_id);
 
         const receiverCompanyName = receiverDetails?.company_name || receiverDetails?.organization_name || receiverDetails?.name;
         const senderCompanyName = senderDetails?.company_name || senderDetails?.organization_name || senderDetails?.name;
@@ -10971,7 +10974,7 @@ processBoqAndDownload : async (req, res) => {
   addClause: async (req, res) => {
     try {
       // console.log("add clause controller");
-      const { rfq_id, rfq_product_id, clause_text, file_url } = req.body;
+      const { rfq_id, rfq_product_id, clause_text, file_url, clause_type = 'clause', weightage = null } = req.body;
       // console.log("bodyy = ",req.body);
 
       if (!rfq_id || !rfq_product_id || !clause_text) {
@@ -10988,7 +10991,9 @@ processBoqAndDownload : async (req, res) => {
         rfq_id,
         rfq_product_id,
         clause_text,
-        file_url
+        file_url,
+        clause_type,
+        weightage
       );
 
       res.status(200).json(result).end();
@@ -11005,13 +11010,15 @@ processBoqAndDownload : async (req, res) => {
 
   updateClause: async (req, res) => {
     try {
-      const { clause_id, clause_text, file_url } = req.body;
+      const { clause_id, clause_text, file_url, clause_type, weightage } = req.body;
       // console.log("data from update clause controller = ",clause_id,clause_text,file_url);
 
       const result = await rfqModel.updateClause(
         clause_id,
         clause_text,
-        file_url
+        file_url,
+        clause_type,
+        weightage
       );
 
       res.status(200).json(result).end();
@@ -11812,6 +11819,66 @@ getClauses: async (req, res) => {
       return res.status(500).json({
         status: 0,
         message: 'Error saving Excel to database',
+        error: error.message
+      });
+    }
+  },
+
+  updateMinimumPassingScore: async (req, res) => {
+    try {
+      const { rfq_id, rfq_product_id, minimum_passing_score } = req.body;
+      const user_id = req.user.id;
+
+      if (!rfq_id || !rfq_product_id || minimum_passing_score === undefined) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Invalid input. Ensure RFQ_ID, rfq_product_id and minimum_passing_score are provided.'
+        });
+      }
+
+      const result = await rfqModel.updateMinimumPassingScore(
+        rfq_id,
+        rfq_product_id,
+        minimum_passing_score
+      );
+
+      res.status(200).json(result).end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
+        status: 0,
+        message: 'Error updating minimum passing score.',
+        error: error.message
+      });
+    }
+  },
+
+  updateBuyerMarks: async (req, res) => {
+    try {
+      const { clause_id, vendor_id, buyer_marks, buyer_remark } = req.body;
+      const buyer_id = req.user.id;
+
+      if (!clause_id || !vendor_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Invalid input. Ensure clause_id and vendor_id are provided.'
+        });
+      }
+
+      const result = await rfqModel.updateBuyerMarks(
+        clause_id,
+        vendor_id,
+        buyer_id,
+        buyer_marks,
+        buyer_remark
+      );
+
+      res.status(200).json(result).end();
+    } catch (error) {
+      logError(error);
+      res.status(500).json({
+        status: 0,
+        message: 'Error updating buyer marks.',
         error: error.message
       });
     }

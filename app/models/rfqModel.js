@@ -637,20 +637,10 @@ WHERE NOT EXISTS (
             // Use id as user_id if user_id is not available
             const userId = vendor.user_id || vendor.id;
 
-            // Get vendor company name
-            const vendorCompany = await t.oneOrNone(
-              `SELECT c.company_name 
-               FROM tbl_users u
-               LEFT JOIN tbl_company c ON u.company_id = c.id
-               WHERE u.id = $1`,
-              [userId]
-            );
-            const vendorName = vendorCompany?.company_name || null;
-
-            const vendorInsertionResult = await t.none(
-              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id, vendor_name)
-              VALUES ($1, $2, $3, $4, $5, $6)`,
-              [rfq_id, product.product_id, product.variant, userId, sheet.id, vendorName]
+            await t.none(
+              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id, sheet_id)
+              VALUES ($1, $2, $3, $4, $5)`,
+              [rfq_id, product.product_id, product.variant, userId, sheet.id]
             );
           }
         }
@@ -6683,7 +6673,7 @@ ORDER BY m.created_at;
     });
   },
 
-  addClause: async (rfq_id, rfq_product_id, clause_text, file_url) => {
+  addClause: async (rfq_id, rfq_product_id, clause_text, file_url, clause_type = 'clause', weightage = null) => {
     // console.log("values in add clause model", rfq_id, rfq_product_id, clause_text, file_url);
 
     const validateRfqQuery = `
@@ -6713,8 +6703,8 @@ ORDER BY m.created_at;
 
     const insertClauseQuery = `
       INSERT INTO tbl_rfq_product_tech_evaluation_clauses
-      (tbl_rfq_product_tech_evaluation_id, clause_text, timestamp)
-      VALUES ($1, $2, NOW())
+      (tbl_rfq_product_tech_evaluation_id, clause_text, clause_type, weightage, timestamp)
+      VALUES ($1, $2, $3, $4, NOW())
       RETURNING id;
     `;
 
@@ -6772,7 +6762,7 @@ ORDER BY m.created_at;
           }
 
           // Insert the Clause
-          return db.query(insertClauseQuery, [evaluationId, clause_text]);
+          return db.query(insertClauseQuery, [evaluationId, clause_text, clause_type, weightage]);
         })
         .then(async (clauseResult) => {
           const clauseId = clauseResult[0].id; // Extract the returned clause ID
@@ -6806,7 +6796,9 @@ ORDER BY m.created_at;
   updateClause: async (
     tbl_rfq_product_tech_evaluation_clauses_id,
     clause_text,
-    file_url
+    file_url,
+    clause_type = null,
+    weightage = null
   ) => {
     // console.log("entered update clause = ", tbl_rfq_product_tech_evaluation_clauses_id, clause_text,file_url);
     const queryCheckClauseId = `
@@ -6816,10 +6808,24 @@ ORDER BY m.created_at;
     `;
     const queryUpdateClause = `
       UPDATE tbl_rfq_product_tech_evaluation_clauses
-      SET clause_text = $1, timestamp = NOW()
-      WHERE id = $2
-      RETURNING id;
-    `;
+      SET clause_text = $1, timestamp = NOW()`;
+    const params = [clause_text];
+    let paramIndex = 2;
+    
+    if (clause_type) {
+      queryUpdateClause += `, clause_type = $${paramIndex}`;
+      params.push(clause_type);
+      paramIndex++;
+    }
+    
+    if (weightage !== null) {
+      queryUpdateClause += `, weightage = $${paramIndex}`;
+      params.push(weightage);
+      paramIndex++;
+    }
+    
+    queryUpdateClause += ` WHERE id = $${paramIndex} RETURNING id;`;
+    params.push(tbl_rfq_product_tech_evaluation_clauses_id);
 
     const queryGetExistingFiles = `
       SELECT file_url
@@ -6856,106 +6862,104 @@ ORDER BY m.created_at;
             status: 0,
             message: `Clause with ID ${tbl_rfq_product_tech_evaluation_clauses_id} does not exist.`
           });
+          return; // Prevent further execution
         }
-      });
 
-      // Updating the clause text
-      db.query(queryUpdateClause, [
-        clause_text,
-        tbl_rfq_product_tech_evaluation_clauses_id
-      ])
-        .then(async (updateResult) => {
-          if (updateResult.length === 0) {
-            reject({
-              success: false,
-              message: `Clause ID ${tbl_rfq_product_tech_evaluation_clauses_id} not found.`
-            });
-            return;
-          }
+        // Updating the clause text
+        return db.query(queryUpdateClause, params);
+      }).then(async (updateResult) => {
+        if (!updateResult) return; // Skip if validation failed
+        if (updateResult.length === 0) {
+          reject({
+            success: false,
+            message: `Clause ID ${tbl_rfq_product_tech_evaluation_clauses_id} not found.`
+          });
+          return;
+        }
 
-          // console.log(`Clause updated: ${tbl_rfq_product_tech_evaluation_clauses_id}`);
+        // console.log(`Clause updated: ${tbl_rfq_product_tech_evaluation_clauses_id}`);
 
-          // Handling file URLs
-          if (file_url && file_url.length > 0) {
-            // Get existing file URLs from the database
-            db.query(queryGetExistingFiles, [
-              tbl_rfq_product_tech_evaluation_clauses_id
-            ])
-              .then((existingFilesResult) => {
-                // const existingFiles = existingFilesResult.rows.map(row => row.file_url);
-                const existingFiles = [];
-                for (let i = 0; i < existingFilesResult.length; i++) {
-                  existingFiles.push(existingFilesResult[i].file_url);
-                }
-                // console.log("existing files = ",existingFiles);
+        // Handling file URLs
+        if (file_url && file_url.length > 0) {
+          // Get existing file URLs from the database
+          db.query(queryGetExistingFiles, [
+            tbl_rfq_product_tech_evaluation_clauses_id
+          ])
+            .then((existingFilesResult) => {
+              // const existingFiles = existingFilesResult.rows.map(row => row.file_url);
+              const existingFiles = [];
+              for (let i = 0; i < existingFilesResult.length; i++) {
+                existingFiles.push(existingFilesResult[i].file_url);
+              }
+              // console.log("existing files = ",existingFiles);
 
-                // Determining files to delete and to add
-                const filesToDelete = existingFiles.filter(
-                  (file) => !file_url.includes(file)
-                );
-                const filesToAdd = file_url.filter(
-                  (file) => !existingFiles.includes(file)
-                );
-                // console.log("files to add = ",filesToAdd);
-                // console.log("files to delete = ",filesToDelete);
-                // Deleting files no longer needed
-                if (filesToDelete.length > 0) {
-                  db.query(queryDeleteFiles, [
+              // Determining files to delete and to add
+              const filesToDelete = existingFiles.filter(
+                (file) => !file_url.includes(file)
+              );
+              const filesToAdd = file_url.filter(
+                (file) => !existingFiles.includes(file)
+              );
+              // console.log("files to add = ",filesToAdd);
+              // console.log("files to delete = ",filesToDelete);
+              // Deleting files no longer needed
+              if (filesToDelete.length > 0) {
+                db.query(queryDeleteFiles, [
+                  tbl_rfq_product_tech_evaluation_clauses_id,
+                  filesToDelete
+                ])
+                  .then(() => {
+                    console.log(`Deleted files: ${filesToDelete}`);
+                  })
+                  .catch((error) => {
+                    console.error(`Error deleting files: ${error.message}`);
+                    reject({
+                      success: false,
+                      message: 'Error deleting files.',
+                      error: error.message
+                    });
+                  });
+              }
+
+              // Inserting new files
+              if (filesToAdd.length > 0) {
+                for (const fileUrl of filesToAdd) {
+                  db.query(queryInsertFile, [
                     tbl_rfq_product_tech_evaluation_clauses_id,
-                    filesToDelete
+                    fileUrl
                   ])
                     .then(() => {
-                      console.log(`Deleted files: ${filesToDelete}`);
+                      // console.log(`Inserted file: ${fileUrl}`);
                     })
                     .catch((error) => {
-                      console.error(`Error deleting files: ${error.message}`);
+                      console.error(
+                        `Error inserting file: ${fileUrl}. Error: ${error.message}`
+                      );
                       reject({
                         success: false,
-                        message: 'Error deleting files.',
+                        message: 'Error inserting files.',
                         error: error.message
                       });
                     });
                 }
+              }
 
-                // Inserting new files
-                if (filesToAdd.length > 0) {
-                  for (const fileUrl of filesToAdd) {
-                    db.query(queryInsertFile, [
-                      tbl_rfq_product_tech_evaluation_clauses_id,
-                      fileUrl
-                    ])
-                      .then(() => {
-                        // console.log(`Inserted file: ${fileUrl}`);
-                      })
-                      .catch((error) => {
-                        console.error(
-                          `Error inserting file: ${fileUrl}. Error: ${error.message}`
-                        );
-                        reject({
-                          success: false,
-                          message: 'Error inserting files.',
-                          error: error.message
-                        });
-                      });
-                  }
-                }
-
-                resolve({
-                  success: true,
-                  message: 'Clause and associated files updated successfully.'
-                });
-              })
-              .catch((error) => {
-                console.error(
-                  `Error retrieving existing files: ${error.message}`
-                );
-                reject({
-                  success: false,
-                  message: 'Error retrieving existing files.',
-                  error: error.message
-                });
+              resolve({
+                success: true,
+                message: 'Clause and associated files updated successfully.'
               });
-          } else {
+            })
+            .catch((error) => {
+              console.error(
+                `Error retrieving existing files: ${error.message}`
+              );
+              reject({
+                success: false,
+                message: 'Error retrieving existing files.',
+                error: error.message
+              });
+            });
+        } else {
             // If no file URLs provided, deleting all files
             db.query(queryDeleteAllFiles, [
               tbl_rfq_product_tech_evaluation_clauses_id
@@ -7070,8 +7074,11 @@ ORDER BY m.created_at;
       WITH clause_files AS (SELECT TE.id                 as evaluation_id,
                                     TE_C.id               AS clause_id,
                                     TE_C.clause_text,
+                                    TE_C.clause_type,
+                                    TE_C.weightage,
                                     TE.rfq_id,
                                     TE.tbl_rfq_product_id AS rfq_product_id,
+                                    TE.minimum_passing_score,
                                     COALESCE(
                                                     JSON_AGG(TE_F.file_url) FILTER (WHERE TE_F.file_url IS NOT NULL),
                                                     '[]'
@@ -7082,7 +7089,7 @@ ORDER BY m.created_at;
                                       LEFT JOIN tbl_rfq_product_tech_evaluation_clauses_files AS TE_F
                                                 ON TE_C.id = TE_F.tbl_rfq_product_tech_evaluation_clauses_id
                               WHERE TE.rfq_id = $1
-                              GROUP BY TE.id, TE_C.id, TE_C.clause_text, TE.rfq_id, TE.tbl_rfq_product_id
+                              GROUP BY TE.id, TE_C.id, TE_C.clause_text, TE_C.clause_type, TE_C.weightage, TE.rfq_id, TE.tbl_rfq_product_id, TE.minimum_passing_score
                               ),
 
             vendor_response_files AS (SELECT vr.id                                                          AS vendor_response_id,
@@ -7095,6 +7102,9 @@ ORDER BY m.created_at;
             vendor_responses_raw AS (SELECT vr.tbl_rfq_product_tech_evaluation_clauses_id AS clause_id,
                                             vr.vendor_id,
                                             vr.vendor_response,
+                                            vr.buyer_id,
+                                            vr.buyer_marks,
+                                            vr.buyer_remark,
                                             COALESCE(vrf.files, '[]')                     AS vendor_response_files
                                       FROM tbl_rfq_product_tech_evaluation_vendors_response vr
                                               LEFT JOIN vendor_response_files vrf
@@ -7105,7 +7115,10 @@ ORDER BY m.created_at;
                                                             JSON_BUILD_OBJECT(
                                                                     'vendor_id', vendor_id,
                                                                     'vendor_response', vendor_response,
-                                                                    'vendor_response_files', vendor_response_files
+                                                                    'vendor_response_files', vendor_response_files,
+                                                                    'buyer_id', buyer_id,
+                                                                    'buyer_marks', buyer_marks,
+                                                                    'buyer_remark', buyer_remark
                                                             )
                                                     ) AS vendor_responses
                                             FROM vendor_responses_raw
@@ -7125,6 +7138,8 @@ ORDER BY m.created_at;
                               JSON_BUILD_OBJECT(
                                       'clause_id', cf.clause_id,
                                       'clause_text', cf.clause_text,
+                                      'clause_type', cf.clause_type,
+                                      'weightage', cf.weightage,
                                       'files', cf.files,
                                       'vendor_responses', COALESCE(vra.vendor_responses, '[]')
                               ) AS clause_entry
@@ -7195,7 +7210,8 @@ ORDER BY m.created_at;
               cd.rfq_product_id,
               cd.evaluation_id,
               cd.clauses,
-              vl.vendors
+              vl.vendors,
+              (SELECT minimum_passing_score FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = cd.rfq_id AND tbl_rfq_product_id = cd.rfq_product_id LIMIT 1) AS minimum_passing_score
         FROM clauses_data cd
                 LEFT JOIN vendors_list vl
                           ON cd.rfq_id = vl.rfq_id AND cd.rfq_product_id = vl.rfq_product_id;
@@ -8047,6 +8063,17 @@ ORDER BY m.created_at;
         const tbl_rfq_product_tech_evaluation_id =
           validationResult[0].tbl_rfq_product_tech_evaluation_id;
 
+        // Step 1.5: Fetch minimum passing score
+        const fetchMinimumScoreQuery = `
+          SELECT minimum_passing_score
+          FROM tbl_rfq_product_tech_evaluation
+          WHERE id = $1;
+        `;
+        const minimumScoreResult = await db.query(fetchMinimumScoreQuery, [
+          tbl_rfq_product_tech_evaluation_id
+        ]);
+        const minimum_passing_score = minimumScoreResult.length > 0 ? minimumScoreResult[0].minimum_passing_score : null;
+
         // Step 2: Check if at least one vendor response exists
         const vendorResponseQuery = `
       SELECT 1 AS has_response
@@ -8069,10 +8096,13 @@ ORDER BY m.created_at;
 
         // Step 3: Fetch clauses and associated files
         // Changes by Agnij May 13, 2025 [Fixed clause display limitation]
+        // Filter sampling clauses for vendors - vendors should not see sampling clauses
         const fetchClausesQuery = `
         SELECT
           c.id AS clause_id,
           c.clause_text,
+          c.clause_type,
+          c.weightage,
           f.file_url
         FROM
           tbl_rfq_product_tech_evaluation_clauses AS c
@@ -8082,6 +8112,7 @@ ORDER BY m.created_at;
           c.id = f.tbl_rfq_product_tech_evaluation_clauses_id
         WHERE
           c.tbl_rfq_product_tech_evaluation_id = $1
+          ${vendor_id ? `AND c.clause_type != 'sampling'` : ''}
         ORDER BY c.id;
       `;
         const clausesResult = await db.query(fetchClausesQuery, [
@@ -8090,11 +8121,13 @@ ORDER BY m.created_at;
 
         // Step 4: Group clauses by clause_id
         const groupedClauses = clausesResult.reduce((acc, row) => {
-          const { clause_id, clause_text, file_url } = row;
+          const { clause_id, clause_text, clause_type, weightage, file_url } = row;
           if (!acc[clause_id]) {
             acc[clause_id] = {
               clause_id,
               clause_text,
+              clause_type: clause_type || 'clause',
+              weightage: weightage || 0,
               files: []
             };
           }
@@ -8108,15 +8141,18 @@ ORDER BY m.created_at;
         const response = Object.keys(groupedClauses).map((key) => ({
           clause_id: parseInt(key, 10),
           clause_text: groupedClauses[key].clause_text,
+          clause_type: groupedClauses[key].clause_type,
+          weightage: groupedClauses[key].weightage,
           files: groupedClauses[key].files
         }));
 
         // console.log("Response data =", response);
 
-        // Step 6: Add vendor_response to the final response
+        // Step 6: Add vendor_response and minimum_passing_score to the final response
         resolve({
           success: true,
           vendor_response: vendorResponse,
+          minimum_passing_score: minimum_passing_score,
           data: response
         });
       } catch (error) {
@@ -9479,6 +9515,90 @@ ORDER BY tq.timestamp DESC;
     } catch (error) {
       throw error;
     }
+  },
+
+  updateMinimumPassingScore: async (rfq_id, rfq_product_id, minimum_passing_score) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const updateQuery = `
+          UPDATE tbl_rfq_product_tech_evaluation
+          SET minimum_passing_score = $1
+          WHERE rfq_id = $2 AND tbl_rfq_product_id = $3
+          RETURNING id;
+        `;
+
+        const result = await db.query(updateQuery, [minimum_passing_score, rfq_id, rfq_product_id]);
+
+        if (result.length === 0) {
+          resolve({
+            status: 0,
+            message: 'Technical evaluation not found for the given RFQ and product.'
+          });
+          return;
+        }
+
+        resolve({
+          status: 1,
+          message: 'Minimum passing score updated successfully.'
+        });
+      } catch (error) {
+        console.error('Error updating minimum passing score:', error);
+        reject({
+          status: 0,
+          message: 'Error updating minimum passing score.',
+          error: error.message
+        });
+      }
+    });
+  },
+
+  updateBuyerMarks: async (clause_id, vendor_id, buyer_id, buyer_marks, buyer_remark) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        // First check if vendor response exists
+        const checkQuery = `
+          SELECT id FROM tbl_rfq_product_tech_evaluation_vendors_response
+          WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 AND vendor_id = $2;
+        `;
+
+        const existing = await db.query(checkQuery, [clause_id, vendor_id]);
+
+        if (existing.length === 0) {
+          resolve({
+            status: 0,
+            message: 'Vendor response not found for this clause.'
+          });
+          return;
+        }
+
+        const updateQuery = `
+          UPDATE tbl_rfq_product_tech_evaluation_vendors_response
+          SET buyer_id = $1, buyer_marks = $2, buyer_remark = $3, score_timestamp = NOW()
+          WHERE tbl_rfq_product_tech_evaluation_clauses_id = $4 AND vendor_id = $5
+          RETURNING id;
+        `;
+
+        const result = await db.query(updateQuery, [
+          buyer_id,
+          buyer_marks,
+          buyer_remark,
+          clause_id,
+          vendor_id
+        ]);
+
+        resolve({
+          status: 1,
+          message: 'Buyer marks and remark updated successfully.'
+        });
+      } catch (error) {
+        console.error('Error updating buyer marks:', error);
+        reject({
+          status: 0,
+          message: 'Error updating buyer marks.',
+          error: error.message
+        });
+      }
+    });
   }
 };
 export default rfqModel;

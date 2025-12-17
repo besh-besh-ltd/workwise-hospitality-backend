@@ -414,7 +414,9 @@ export const rfqSchemas = {
     rfq_id: Joi.number().integer().required(),
     rfq_product_id: Joi.number().integer().required(),
     clause_text: Joi.string().required(),
-    file_url: Joi.array().items(Joi.string().uri()).optional().allow(null)
+    file_url: Joi.array().items(Joi.string().uri()).optional().allow(null),
+    clause_type: Joi.string().valid('clause', 'sampling').default('clause'),
+    weightage: Joi.number().integer().min(0).max(100).optional().allow(null)
     // file_url: Joi.alternatives().try(
     //   Joi.array()
     //     .items(
@@ -438,7 +440,9 @@ export const rfqSchemas = {
   updateClause: Joi.object().keys({
     clause_id: Joi.number().integer().required(),
     clause_text: Joi.string().required(),
-    file_url: Joi.array().items(Joi.string().uri()).optional().allow(null)
+    file_url: Joi.array().items(Joi.string().uri()).optional().allow(null),
+    clause_type: Joi.string().valid('clause', 'sampling').optional(),
+    weightage: Joi.number().integer().min(0).max(100).optional().allow(null)
   }),
 
   id: Joi.object().keys({
@@ -498,6 +502,19 @@ export const rfqSchemas = {
   getClausesOfProduct: Joi.object({
     rfq_product_id: Joi.number().integer().required(),
     vendor_id: Joi.number().integer().allow(null).optional()
+  }),
+
+  updateMinimumPassingScore: Joi.object({
+    rfq_id: Joi.number().integer().required(),
+    rfq_product_id: Joi.number().integer().required(),
+    minimum_passing_score: Joi.number().integer().min(0).max(100).required()
+  }),
+
+  updateBuyerMarks: Joi.object({
+    clause_id: Joi.number().integer().required(),
+    vendor_id: Joi.number().integer().required(),
+    buyer_marks: Joi.number().integer().min(0).optional().allow(null),
+    buyer_remark: Joi.string().optional().allow(null, '')
   }),
 
   getTechEvaluationResult: Joi.object({

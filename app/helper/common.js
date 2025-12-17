@@ -134,8 +134,24 @@ var createPay = (payment) => {
   });
 };
 
-const logError = (err) => {
-  console.error('Error from common ==>', err);
+const logError = (...args) => {
+  // Support both (err) and (message, err) signatures
+  let err = null;
+  let msg = null;
+
+  if (args.length === 1) {
+    err = args[0] instanceof Error ? args[0] : null;
+    msg = err ? null : args[0];
+  } else if (args.length >= 2) {
+    msg = args[0];
+    err = args[1] instanceof Error ? args[1] : null;
+  }
+
+  console.error('Error from common ==>', msg || err, err || msg);
+
+  if (!err || !err.stack) {
+    return;
+  }
 
   let matches = err.stack.split('\n');
   let regex1 = /\((.*):(\d+):(\d+)\)$/;
