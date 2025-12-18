@@ -54,35 +54,89 @@ Grouped permissions by resource.
 
 ---
 
-## 4. Get All Permissions
+## 4. Get All Permissions (Grouped)
 GET /permissions
 
-Used for role creation UI.
+Fetch all permissions grouped by resource, used for custom role creation UI.
+
+Response:
+```json
+{
+  "status": true,
+  "data": {
+    "tender": [
+      { "id": 1, "action": "read" },
+      { "id": 2, "action": "create" }
+    ],
+    "project": [
+      { "id": 3, "action": "read" }
+    ]
+  }
+}
+```
 
 ---
 
 ## 5. Create Custom Role
 POST /roles
 
+Create a custom role and assign permissions in a single request.
+
 Request:
 ```json
 {
   "title": "Custom Tender Manager",
   "description": "Can manage tenders",
-  "permission_ids": [1,2,3]
+  "permission_ids": [1, 2, 3]
+}
+```
+
+Response:
+```json
+{
+  "status": true,
+  "message": "Role created successfully",
+  "data": {
+    "role_id": 10
+  }
 }
 ```
 
 ---
 
-## 6. Get Hospitality Entities
+## 6. Get User Role Scopes
+GET /users/:userId/roles
+
+Fetch all role scopes (company / hotel / department) assigned to a user.
+
+Response:
+```json
+{
+  "status": true,
+  "data": [
+    {
+      "id": 1,
+      "user_id": 5,
+      "role_id": 10,
+      "role_title": "Custom Tender Manager",
+      "company_id": 3,
+      "hotel_id": null,
+      "department_id": 1
+    }
+  ]
+}
+```
+
+---
+
+## 7. Get Hospitality Entities
 GET /hospitality/entities
 
 Fetch hospitality companies and hotels.
 
 ---
 
-## 7. Create / Update User (RBAC Enabled)
+## 8. Create / Update User (RBAC Enabled)
 
 Supports:
 - Multiple departments
@@ -90,7 +144,7 @@ Supports:
 
 ---
 
-## 8. Permission Middleware – can()
+## 9. Permission Middleware – can()
 
 Usage:
 ```js
