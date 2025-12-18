@@ -74,6 +74,27 @@ const rbacModel = {
     );
   },
 
+  getUserRoleScopes: (userId) => {
+    return db.any(
+      `
+      SELECT
+        urs.id,
+        urs.user_id,
+        urs.role_id,
+        r.title AS role_title,
+        urs.company_id,
+        urs.hotel_id,
+        urs.department_id
+      FROM tbl_user_role_scopes urs
+      JOIN tbl_roles r
+        ON r.id = urs.role_id
+      WHERE urs.user_id = $1
+      ORDER BY r.title
+      `,
+      [userId]
+    );
+  },
+
   /* -------------------- ROLES -------------------- */
 
   getRoles: () => {
