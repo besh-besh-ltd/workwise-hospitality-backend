@@ -4551,6 +4551,7 @@ const rfqController = {
 
       const sheet_id = req.body.sheet_id;
       const variant_id = req.body.variant_id;
+      const is_tender = req.body.is_tender || 0;
 
       const globalFilters = req.body.filters;
 
@@ -4599,7 +4600,8 @@ const rfqController = {
           is_published: 0,
           created_by: user_id,
           updated_by: user_id,
-          status: 1
+          status: 1,
+          is_tender: is_tender ,
           // timestamp: currentDate,
         };
 
