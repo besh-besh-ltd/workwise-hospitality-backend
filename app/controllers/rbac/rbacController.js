@@ -90,10 +90,27 @@ const rbacController = {
       return res.status(500).json({
         status: false,
         message: "Failed to create role"
+    });
+    }
+  },
+  /* -------------------- USER ROLE SCOPES -------------------- */
+  getUserRoleScopes: async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      const scopes = await rbacModel.getUserRoleScopes(userId);
+
+      return res.json({
+        status: true,
+        data: scopes
+      });
+    } catch (err) {
+      return res.status(500).json({
+        status: false,
+        message: err.message
       });
     }
   },
-
   getAllPermissionsGrouped: async (req, res) => {
     try {
       const permissions = await rbacModel.getAllPermissions();

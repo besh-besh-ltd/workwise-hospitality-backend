@@ -126,9 +126,8 @@ HospitalityRoutes.get(
 );
 
 HospitalityRoutes.get(
-  '/user/:user_id/mappings',
+  '/user/mappings',
   passportSignIn,
-  acl([7]),
   hospitalityMiddleware.checkHospitality(false),
   hospitalityController.getUserMappings
 );

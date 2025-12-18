@@ -615,7 +615,7 @@ const HospitalityController = {
 
   getUserMappings: async (req, res) => {
     try {
-      const userId = parseInt(req.params.user_id, 10);
+      const userId = parseInt(req?.query?.userId, 10) || req.user.id;
       const mappings = await hospitalityModel.getUserMappings(userId);
 
       return res.status(200).json({

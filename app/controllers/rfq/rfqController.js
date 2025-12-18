@@ -2337,31 +2337,85 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
   const rfqFilters = [];
 
-  for (const key in globalFilters) {
-    const value = globalFilters[key];
+  // Build RFQ filter rows only when global filters are present
+  if (globalFilters) {
+    for (const key in globalFilters) {
+      const value = globalFilters[key];
 
-    // If value is an array → create multiple rows
-    if (Array.isArray(value)) {
-      value.forEach(v => {
+      // If value is an array → create multiple rows
+      if (Array.isArray(value)) {
+        value.forEach((v) => {
+          rfqFilters.push({
+            rfq_id,
+            type: key,
+            value: v,
+            user_id,
+          });
+        });
+      }
+      // If value is NOT an array and NOT null → single row
+      else if (value !== null && value !== undefined && value !== "") {
         rfqFilters.push({
           rfq_id,
           type: key,
-          value: v,
-          user_id
+          value: value,
+          user_id,
         });
-      });
-    }
-    // If value is NOT an array and NOT null → single row
-    else if (value !== null && value !== undefined && value !== "") {
-      rfqFilters.push({
-        rfq_id,
-        type: key,
-        value: value,
-        user_id
-      });
+      }
     }
   }
-   console.log(" result ", rfqFilters)
+
+  // Auto-assign or create a default project mapped to the selected hotel
+  let effectiveProjectId = project_id;
+  try {
+    if ((!effectiveProjectId || effectiveProjectId === '' || effectiveProjectId === -1) && hospitality_company_id && hotel_id) {
+      // 1 = hotel-level mapping
+      const existingMappings = await hospitalityModel.getProjectMappingsForContext(
+        hospitality_company_id,
+        1,
+        hotel_id
+      );
+
+      if (existingMappings && existingMappings.length > 0) {
+        effectiveProjectId = existingMappings[0].project_id;
+      } else {
+        // Create a minimal default project for this hotel context
+        const defaultProjectName = `Auto Project - Hotel ${hotel_id}`;
+        const tbl_project_data = {
+          name: defaultProjectName,
+          description: `Auto-created project for hotel ${hotel_id}`,
+          location: null,
+          ended_at: null,
+          rfq_type,
+          reverse_auction,
+          budget: 0,
+          user_id,
+        };
+
+        const createdProject = await projectModel.createProject(tbl_project_data);
+        const newProjectId = createdProject?.id || createdProject?.project_id;
+
+        if (newProjectId) {
+          effectiveProjectId = newProjectId;
+
+          // Map the project to the hospitality hotel context
+          await hospitalityModel.insertProjectMappings([
+            {
+              project_id: newProjectId,
+              hospitality_company_id,
+              hospitality_hotel_id: hotel_id,
+              mapping_type: 1,
+              created_by: user_id,
+            },
+          ]);
+        }
+      }
+    }
+  } catch (autoProjectErr) {
+    // Log but do not block RFQ creation if auto project logic fails
+    logError(autoProjectErr);
+  }
+
   const rfqData = {
       comment,
       company_name,
@@ -2386,9 +2440,9 @@ const saveRfqDraft = async (user_id, reqBody) => {
 
   const errorObj = { vendorNotPresent: [] };
 
-  if (project_id && project_id !== -1) {
-      rfqData.project_id = project_id;
-  } else if (!project_id || project_id == '') {
+  if (effectiveProjectId && effectiveProjectId !== -1) {
+      rfqData.project_id = effectiveProjectId;
+  } else if (!effectiveProjectId || effectiveProjectId == '') {
     rfqData.project_id = null;
   }
 
@@ -4551,6 +4605,7 @@ const rfqController = {
 
       const sheet_id = req.body.sheet_id;
       const variant_id = req.body.variant_id;
+      const is_tender = req.body.is_tender || 0;
 
       const globalFilters = req.body.filters;
 
@@ -4595,12 +4650,11 @@ const rfqController = {
           bid_end_date:
             req.body.bid_end_date || bidEndDate.toISOString().split('T')[0],
           location: req.body.location || '',
-          is_tender: req.body.is_tender !== undefined ? req.body.is_tender : 0,
           is_published: 0,
           created_by: user_id,
           updated_by: user_id,
-          status: 1
-          // timestamp: currentDate,
+          status: 1,
+          is_tender: is_tender,
         };
 
         const nextRFQNumber = await getNextRfQNumber();
