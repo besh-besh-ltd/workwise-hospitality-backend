@@ -666,8 +666,8 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
         } else {
           // INSERT new record
           return db.none(
-            `INSERT INTO tbl_approval_hierarchy (company_id, user_id, approval_level, bypass_cap, hierarchy_type, is_active, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            `INSERT INTO tbl_approval_hierarchy (company_id, user_id, approval_level, bypass_cap, hierarchy_type, is_active, hierarchy_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
             [
               companyId,
               approver.user_id,
@@ -675,6 +675,7 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
               approver.bypass_cap,
               type,
               approver.is_active ?? true,
+              hierarchyId,
               new Date()
             ]
           );
@@ -702,6 +703,23 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
     } catch (error) {
       throw error;
     }
+  },
+  deleteHierarchy: async (hierarchyId, companyId, type) => {
+    const exists = await db.any(
+      `SELECT id FROM tbl_approval_hierarchy
+      WHERE hierarchy_id = $1 AND company_id = $2 AND hierarchy_type = $3`,
+      [hierarchyId, companyId, type]
+    );
+
+    if (exists.length == 0) throw new Error("Hierarchy does not exist!");
+
+    await db.none(
+      `DELETE FROM tbl_approval_hierarchy
+      WHERE hierarchy_id = $1 AND company_id = $2 AND hierarchy_type = $3`,
+      [hierarchyId, companyId, type]
+    );
+
+    return true
   },
   mapHierarchyToProject: async (hierarchy_id, hierarchy_type, project_id, company_id, mapped_by) => {
     return db.tx(async t => {
