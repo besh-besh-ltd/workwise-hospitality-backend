@@ -54,6 +54,75 @@ const rbacController = {
     }
   },
 
+  createRoleWithPermissions: async (req, res) => {
+    try {
+      const { title, description, permission_ids = [] } = req.body;
+
+      if (!title || !permission_ids.length) {
+        return res.status(400).json({
+          status: false,
+          message: "Role title and permissions are required"
+        });
+      }
+
+      // Create role
+      const role = await rbacModel.createRole({
+        title,
+        description
+      });
+
+      // Assign permissions
+      await rbacModel.assignPermissionsToRole(
+        role.id,
+        permission_ids
+      );
+
+      return res.status(201).json({
+        status: true,
+        message: "Role created successfully",
+        data: {
+          role_id: role.id
+        }
+      });
+
+    } catch (err) {
+      console.error("createRoleWithPermissions error:", err);
+      return res.status(500).json({
+        status: false,
+        message: "Failed to create role"
+      });
+    }
+  },
+
+  getAllPermissionsGrouped: async (req, res) => {
+    try {
+      const permissions = await rbacModel.getAllPermissions();
+
+      /**
+       * Group by resource
+       */
+      const grouped = {};
+      for (const p of permissions) {
+        if (!grouped[p.resource]) grouped[p.resource] = [];
+        grouped[p.resource].push({
+          id: p.id,
+          action: p.action
+        });
+      }
+
+      return res.json({
+        status: true,
+        data: grouped
+      });
+
+    } catch (err) {
+      console.error("getAllPermissionsGrouped error:", err);
+      return res.status(500).json({
+        status: false,
+        message: "Failed to fetch permissions"
+      });
+    }
+  }
 };
 
 export default rbacController;

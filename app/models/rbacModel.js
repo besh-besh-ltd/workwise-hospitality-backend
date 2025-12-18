@@ -91,6 +91,42 @@ const rbacModel = {
       JOIN tbl_permissions p ON p.id = rp.permission_id
       WHERE rp.role_id = $1
     `, [roleId]);
+  },
+  createRole: async ({ title, description }) => {
+    const [role] = await db.any(
+      `
+      INSERT INTO tbl_roles (title, description)
+      VALUES ($1, $2)
+      RETURNING id, title
+      `,
+      [title.trim(), description || null]
+    );
+
+    return role;
+  },
+  assignPermissionsToRole: async (roleId, permissionIds = []) => {
+    if (!permissionIds.length) return;
+
+    return db.tx(t =>
+      t.batch(
+        permissionIds.map(pid =>
+          t.none(
+            `
+            INSERT INTO tbl_role_permissions (role_id, permission_id)
+            VALUES ($1, $2)
+            `,
+            [roleId, pid]
+          )
+        )
+      )
+    );
+  },
+  getAllPermissions: () => {
+    return db.any(`
+      SELECT id, resource, action
+      FROM tbl_permissions
+      ORDER BY resource, action
+    `);
   }
 
 };

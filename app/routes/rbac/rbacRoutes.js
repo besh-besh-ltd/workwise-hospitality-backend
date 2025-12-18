@@ -21,6 +21,17 @@ router.get(
   acl([7]),
   rbacController.getPermissionsForRole
 );
-
+router.post(
+  "/roles",
+  passportSignIn,
+  acl([7]),
+  rbacController.createRoleWithPermissions
+);
+router.get(
+  "/permissions",
+  passportSignIn,
+  acl([7]),
+  rbacController.getAllPermissionsGrouped
+);
 
 export default router;
