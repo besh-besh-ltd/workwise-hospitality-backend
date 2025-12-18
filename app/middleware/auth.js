@@ -19,7 +19,7 @@ export const can = (permKey) => {
       }
 
       const userId = req.user.id;
-      const companyId = req.user.company_id;
+      const companyId = req.headers["x-company-id"] || req.user.company_id;
 
       // hotel context (optional)
       const hotelId =
