@@ -3324,6 +3324,16 @@ publish_profile_reviews: async (req, res, next) => {
           [razorpay_payment_id || null, razorpay_signature || null, order_id]
         );
 
+        // Link any subscriptions without payment_id to this successful payment
+        await db.none(
+          `UPDATE tbl_vendor_hotel_category_subscription
+           SET payment_id = $1
+           WHERE vendor_id = $2
+             AND payment_id IS NULL
+             AND status = 'active'`,
+          [payment.id, userId]
+        );
+
         // Always approve hospitality vendor after successful payment
         console.log('[HOSPITALITY] Approving vendor:', userId);
         await userModel.updateUserAccount(userId, { status: 1 });
@@ -3345,8 +3355,10 @@ publish_profile_reviews: async (req, res, next) => {
                FROM tbl_vendor_hotel_category_subscription vhcs
                LEFT JOIN tbl_category c ON vhcs.item_type = 'category' AND c.id = vhcs.item_id
                LEFT JOIN tbl_hospitality_company_hotels h ON vhcs.item_type = 'hotel' AND h.id = vhcs.item_id
-               WHERE vhcs.payment_id = $1 AND vhcs.vendor_id = $2`,
-              [payment.id, userId]
+               WHERE vhcs.vendor_id = $1
+                 AND (vhcs.payment_id = $2 OR vhcs.payment_id IS NULL)
+                 AND vhcs.status = 'active'`,
+              [userId, payment.id]
             );
             
             const categories = subscriptions.filter(s => s.item_type === 'category').map(s => s.item_name);
@@ -3583,6 +3595,16 @@ publish_profile_reviews: async (req, res, next) => {
           const payment = vendorPayment[0];
           const userId = payment.vendor_id;
           
+          // Link any subscriptions without payment_id to this successful payment
+          await db.none(
+            `UPDATE tbl_vendor_hotel_category_subscription
+             SET payment_id = $1
+             WHERE vendor_id = $2
+               AND payment_id IS NULL
+               AND status = 'active'`,
+            [payment.id, userId]
+          );
+          
           // Always approve hospitality vendor after successful payment
           console.log('[HOSPITALITY LIVE] Approving vendor:', userId);
           await userModel.updateUserAccount(userId, { status: 1 });
@@ -3596,18 +3618,21 @@ publish_profile_reviews: async (req, res, next) => {
                   
                   // Send confirmation email
                   try {
-                    const subscriptions = await db.any(
-                      `SELECT vhcs.*, 
-                       CASE 
-                         WHEN vhcs.item_type = 'category' THEN c.title
-                         WHEN vhcs.item_type = 'hotel' THEN h.name
-                       END AS item_name
-                       FROM tbl_vendor_hotel_category_subscription vhcs
-                       LEFT JOIN tbl_category c ON vhcs.item_type = 'category' AND c.id = vhcs.item_id
-                       LEFT JOIN tbl_hospitality_company_hotels h ON vhcs.item_type = 'hotel' AND h.id = vhcs.item_id
-                       WHERE vhcs.payment_id = $1 AND vhcs.vendor_id = $2`,
-                      [payment.id, userId]
-                    );
+            // Get all subscriptions for this vendor (linked to payment or not)
+            const subscriptions = await db.any(
+              `SELECT vhcs.*, 
+               CASE 
+                 WHEN vhcs.item_type = 'category' THEN c.title
+                 WHEN vhcs.item_type = 'hotel' THEN h.name
+               END AS item_name
+               FROM tbl_vendor_hotel_category_subscription vhcs
+               LEFT JOIN tbl_category c ON vhcs.item_type = 'category' AND c.id = vhcs.item_id
+               LEFT JOIN tbl_hospitality_company_hotels h ON vhcs.item_type = 'hotel' AND h.id = vhcs.item_id
+               WHERE vhcs.vendor_id = $1
+                 AND (vhcs.payment_id = $2 OR vhcs.payment_id IS NULL)
+                 AND vhcs.status = 'active'`,
+              [userId, payment.id]
+            );
                     
                     const categories = subscriptions.filter(s => s.item_type === 'category').map(s => s.item_name);
                     const hotels = subscriptions.filter(s => s.item_type === 'hotel').map(s => s.item_name);
