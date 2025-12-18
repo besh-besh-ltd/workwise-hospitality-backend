@@ -202,6 +202,28 @@ const generalController = {
       }).end();
     }
   },
+  deleteHierarchy: async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { type } = req.query;
+    const { company_id } = req.user;
+
+    const deleted = await generalModel.deleteHierarchy(id, company_id, type);
+
+    if (deleted) return res.status(200).end();
+
+    return res.status(400).json({
+      status: 3,
+      message: 'Something went wrong while deleting the hierarchy.'
+    });
+  } catch (error) {
+    return res.status(400).json({
+      status: 3,
+      message: error.message,
+      error
+    }).end();
+  }
+},
   mapHierarchyToProject: async (req, res) => {
     try {
       const { hierarchy_id, hierarchy_type, project_id } = req.body;
