@@ -226,7 +226,13 @@ export const rfqSchemas = {
     selectedSheets: Joi.array().items(Joi.number()).allow(null),
     terms: Joi.array().items(termsItems).allow(null).allow(''),
     project_id: Joi.number().integer().required(),
-    term_and_condition_files: Joi.array().items(Joi.string()).optional()
+    term_and_condition_files: Joi.array().items(Joi.string()).optional(),
+    is_tender: Joi.number().integer().valid(0, 1).optional().allow(null),
+    tender_fees: Joi.number().integer().min(0).optional().allow(null),
+    tender_publish_date: Joi.string().optional().allow(null).allow(''),
+    vendor_clarification_date: Joi.string().optional().allow(null).allow(''),
+    hospitality_company_id: Joi.number().integer().optional().allow(null),
+    hotel_id: Joi.number().integer().optional().allow(null)
   }),
   update: Joi.object().keys({
     rfq_id: Joi.number().required(),

@@ -5820,7 +5820,6 @@ const rfqController = {
             global_payment_term: globalPaymentTerms,
             global_comment: globalComment,
             regret_reason,
-            gstin: vendorGSTIN,
             payment_id: tenderPaymentId
           };
 
@@ -10148,8 +10147,7 @@ sendFollowUpEmails: async (req, res) => {
       // update global comment and payment term
       if (
         globalPaymentTerms !== quoteExists[0].global_payment_term ||
-        globalComment !== quoteExists[0].global_comment || 
-        vendorGSTIN !== quoteExists[0].gstin
+        globalComment !== quoteExists[0].global_comment
       ) {
         const tbl_quotes_data = {
           rfq_id: quoteExists[0].rfq_id,
@@ -10160,8 +10158,7 @@ sendFollowUpEmails: async (req, res) => {
           timestamp: new Date().toISOString(),
           is_regret: 0,
           global_payment_term: globalPaymentTerms,
-          global_comment: globalComment,
-          gstin: vendorGSTIN
+          global_comment: globalComment
         };
         await rfqModel.update('tbl_quotes', tbl_quotes_data, quoteId);
 
