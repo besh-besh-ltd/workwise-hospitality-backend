@@ -443,16 +443,21 @@ const hospitalityModel = {
         vp.payment_status,
         vp.id AS payment_id
        FROM tbl_vendor_hotel_category_subscription vhcs
-       JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
+       LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
        WHERE vhcs.vendor_id = $1
-         AND vp.payment_status IN ('created', 'pending')
          AND vhcs.status = 'active'
-       ORDER BY vp.created_at DESC, vhcs.id DESC`,
+         AND (
+           vp.id IS NULL 
+           OR vp.payment_status IN ('created', 'pending')
+         )
+       ORDER BY COALESCE(vp.created_at, vhcs.start_date) DESC, vhcs.id DESC`,
       [vendorId]
     );
   },
 
   hasValidPaidSubscription: async (vendorId) => {
+    // Check if vendor has active paid subscriptions that haven't expired
+    // Subscriptions expire on March 31st of the financial year
     const result = await db.oneOrNone(
       `SELECT COUNT(*) as count
        FROM tbl_vendor_hotel_category_subscription vhcs
@@ -460,7 +465,6 @@ const hospitalityModel = {
        WHERE vhcs.vendor_id = $1
          AND vp.payment_status IN ('paid', 'success')
          AND vhcs.status = 'active'
-         AND vhcs.start_date <= CURRENT_DATE
          AND vhcs.end_date >= CURRENT_DATE`,
       [vendorId]
     );

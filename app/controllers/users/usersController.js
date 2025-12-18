@@ -131,6 +131,82 @@ const continueVendorCompanyRegistration = async (inputData, company_id)=>{
 }
 
 
+// Bulk map a vendor to all variants under selected categories / subcategories
+const bulkMapVendorVariantsFromCategories = async (
+  vendorId,
+  categories = [],
+  subcategories = []
+) => {
+  try {
+    console.log('[BULK_MAP] Starting for vendor:', vendorId, 'categories:', categories, 'subcategories:', subcategories);
+    
+    const allIdsSet = new Set();
+
+    // First add subcategories
+    if (Array.isArray(subcategories)) {
+      subcategories
+        .filter((id) => id && !isNaN(parseInt(id, 10)))
+        .forEach((id) => allIdsSet.add(parseInt(id, 10)));
+    }
+
+    // Also add categories (not just fallback - include both)
+    if (Array.isArray(categories)) {
+      categories
+        .filter((id) => id && !isNaN(parseInt(id, 10)))
+        .forEach((id) => allIdsSet.add(parseInt(id, 10)));
+    }
+
+    const allIds = Array.from(allIdsSet);
+    console.log('[BULK_MAP] All category IDs to map:', allIds);
+    
+    if (!allIds.length) {
+      console.log('[BULK_MAP] No category IDs found, skipping');
+      return;
+    }
+
+    const variants = await rfqModel.getProductsByCategories(
+      allIds.map((id) => ({ id }))
+    );
+    
+    console.log('[BULK_MAP] Found variants:', variants?.length || 0);
+
+    if (!variants || !variants.length) {
+      console.log('[BULK_MAP] No variants found for categories');
+      return;
+    }
+
+    const mappings = variants.map((v) => ({
+      variant_id: v.variant_id,
+      vendor_id: vendorId,
+      approved_by: [],
+      make_list: []
+    }));
+
+    console.log('[BULK_MAP] Creating mappings:', mappings.length);
+    await productModel.bulkInsertVariantVendorMappings(mappings, vendorId);
+
+    // Ensure new mappings are treated as approved so they are visible in searches/UI
+    const variantIds = Array.from(
+      new Set(variants.map((v) => parseInt(v.variant_id, 10)).filter(Boolean))
+    );
+    if (variantIds.length) {
+      console.log('[BULK_MAP] Approving', variantIds.length, 'variant mappings');
+      await db.none(
+        `UPDATE tbl_product_variant_vendor_mapping
+         SET is_approved = TRUE
+         WHERE vendor_id = $1
+           AND product_variant_id = ANY($2::int[])`,
+        [vendorId, variantIds]
+      );
+    }
+    console.log('[BULK_MAP] Completed successfully');
+  } catch (error) {
+    console.error('[BULK_MAP] Error:', error);
+    logError(error);
+    // Do not block registration on mapping failures
+  }
+};
+
 
 const add_vendor_product = async (productDetails, vendorId) => {
   try {
@@ -465,6 +541,74 @@ const UsersController = {
             console.error('[HOSPITALITY] Error processing hospitality vendor data:', hospitalityError);
             logError(hospitalityError);
             // Don't fail registration if hospitality processing fails
+          }
+        }
+
+        // Bulk map variants for selected categories / subcategories (for all vendors)
+        await bulkMapVendorVariantsFromCategories(
+          user_id,
+          categories,
+          subcategories
+        );
+        
+        // Create subscriptions during registration (with payment_id = NULL) so they're available during login
+        if (is_hospitality && (categories.length > 0 || subcategories.length > 0 || hotels.length > 0)) {
+          try {
+            const startDate = Moment();
+            const currentYear = startDate.year();
+            const fyEndThisYear = Moment(`${currentYear}-03-31`, 'YYYY-MM-DD');
+            const fyEnd =
+              startDate.isAfter(fyEndThisYear) || startDate.isSame(fyEndThisYear, 'day')
+                ? fyEndThisYear.clone().add(1, 'year')
+                : fyEndThisYear.clone();
+            const fyEndDateStr = fyEnd.format('YYYY-MM-DD');
+            
+            const subscriptionRows = [];
+            const allCategoryIds = [...new Set([...categories, ...subcategories])];
+            
+            if (allCategoryIds.length) {
+              const dbCategories = await productModel.getCategoriesByIds(allCategoryIds);
+              for (const row of dbCategories) {
+                subscriptionRows.push({
+                  vendor_id: user_id,
+                  item_type: 'category',
+                  item_id: row.id,
+                  fee_amount: row.fee_amount || 500,
+                  start_date: startDate.format('YYYY-MM-DD'),
+                  end_date: fyEndDateStr,
+                  status: 'active',
+                  payment_id: null // No payment yet
+                });
+              }
+            }
+            
+            if (hotels.length) {
+              const hotelIds = hotels.filter(id => id && !isNaN(parseInt(id, 10))).map(id => parseInt(id, 10));
+              if (hotelIds.length > 0) {
+                const dbHotels = await hospitalityModel.getHotelsByIds(hotelIds);
+                for (const row of dbHotels) {
+                  subscriptionRows.push({
+                    vendor_id: user_id,
+                    item_type: 'hotel',
+                    item_id: row.id,
+                    fee_amount: row.fee_amount || 500,
+                    start_date: startDate.format('YYYY-MM-DD'),
+                    end_date: fyEndDateStr,
+                    status: 'active',
+                    payment_id: null // No payment yet
+                  });
+                }
+              }
+            }
+            
+            if (subscriptionRows.length > 0) {
+              await hospitalityModel.createVendorHotelCategorySubscription(subscriptionRows);
+              console.log(`[HOSPITALITY] Created ${subscriptionRows.length} subscriptions during registration for vendor ${user_id}`);
+            }
+          } catch (subscriptionError) {
+            console.error('[HOSPITALITY] Error creating subscriptions during registration:', subscriptionError);
+            logError(subscriptionError);
+            // Don't fail registration if subscription creation fails
           }
         }
       }
@@ -1085,6 +1229,16 @@ get_company_users: async (req, res, next) => {
       const isHospitalityPending =
         req.user && req.user.login_status === 'hospitality_pending';
       if (isHospitalityPending) {
+        // Re-check if vendor has already completed hospitality payment.
+        // If payment is done, approve vendor and proceed with normal login.
+        const hasValidSubscription =
+          await hospitalityModel.hasValidPaidSubscription(req.user.id);
+        if (hasValidSubscription) {
+          // Approve vendor if still pending
+          await userModel.updateUserAccount(req.user.id, { status: 1 });
+          // Update req.user to reflect approval for downstream logic
+          req.user.status = '1';
+        } else {
         // Fetch pending subscriptions for this vendor
         const pendingSubscriptions = await hospitalityModel.getPendingSubscriptionsForVendor(req.user.id);
         
@@ -1133,6 +1287,7 @@ get_company_users: async (req, res, next) => {
             hospitality_user: hospitalityUser
           })
           .end();
+        }
       }
       const { fcm_id } = req.body;
       if (req.user && req.user.id > 0 && req.query?.conform) {
@@ -1860,6 +2015,7 @@ update_user_detail: async (req, res, next) => {
             const pendingSubs = await hospitalityModel.getPendingSubscriptionsForVendor(user_id);
             if (pendingSubs && pendingSubs.length > 0) {
               const categories = [];
+              const subcategories = [];
               const hotels = [];
               for (const sub of pendingSubs) {
                 if (sub.item_type === 'category' && !categories.includes(sub.item_id)) {
@@ -1869,6 +2025,7 @@ update_user_detail: async (req, res, next) => {
                 }
               }
               user.pending_hospitality_categories = categories;
+              user.pending_hospitality_subcategories = subcategories;
               user.pending_hospitality_hotels = hotels;
             }
           }
@@ -2922,7 +3079,7 @@ publish_profile_reviews: async (req, res, next) => {
   },
   hospitalitySubscriptionPayment: async (req, res, next) => {
     try {
-      const { user_key, categories, hotels } = req.body;
+      const { user_key, categories, subcategories, hotels } = req.body;
 
       if (!user_key) {
         return res.status(400).json({
@@ -2988,11 +3145,13 @@ publish_profile_reviews: async (req, res, next) => {
       // Check for existing pending subscriptions
       const existingPendingSubs = await hospitalityModel.getPendingSubscriptionsForVendor(decryptedUserId);
       
-      // If we have existing pending subscriptions but no categories/hotels in request, use existing ones
+      // If we have existing pending subscriptions but no categories/subcategories/hotels in request, use existing ones
       let categoryIds = Array.isArray(categories) ? categories : [];
+      let subcategoryIds = Array.isArray(subcategories) ? subcategories : [];
       let hotelIds = Array.isArray(hotels) ? hotels : [];
       
-      if (existingPendingSubs && existingPendingSubs.length > 0 && (!categoryIds.length && !hotelIds.length)) {
+      // Only use existing subscriptions if user hasn't provided any categories, subcategories, or hotels
+      if (existingPendingSubs && existingPendingSubs.length > 0 && (!categoryIds.length && !subcategoryIds.length && !hotelIds.length)) {
         // Extract from existing subscriptions
         for (const sub of existingPendingSubs) {
           if (sub.item_type === 'category' && !categoryIds.includes(sub.item_id)) {
@@ -3006,8 +3165,10 @@ publish_profile_reviews: async (req, res, next) => {
       let totalAmount = 0;
       const subscriptionRows = [];
 
-      if (categoryIds.length) {
-        const dbCategories = await productModel.getCategoriesByIds(categoryIds);
+      const allCategoryIds = [...new Set([...categoryIds, ...subcategoryIds])];
+
+      if (allCategoryIds.length) {
+        const dbCategories = await productModel.getCategoriesByIds(allCategoryIds);
         for (const row of dbCategories) {
           const fee = row.fee_amount || 500;
           totalAmount += fee;
@@ -3132,13 +3293,154 @@ publish_profile_reviews: async (req, res, next) => {
   },
   test_razorpay_webhook: async (req, res) => {
     try {
+      const { order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+
+      if (!order_id) {
+        return res
+          .status(400)
+          .json({
+            status: 3,
+            message: 'Order ID is required'
+          })
+          .end();
+      }
+
+      // First, check if this is a hospitality vendor payment
+      const vendorPayment = await hospitalityModel.getVendorPaymentByOrderId(
+        order_id
+      );
+
+      if (vendorPayment && vendorPayment.length > 0) {
+        const payment = vendorPayment[0];
+        const userId = payment.vendor_id;
+
+        // Mark hospitality vendor payment as successful
+        await db.none(
+          `UPDATE tbl_vendor_payments 
+           SET razorpay_payment_id = $1, 
+               razorpay_signature = $2, 
+               payment_status = 'success'
+           WHERE razorpay_order_id = $3`,
+          [razorpay_payment_id || null, razorpay_signature || null, order_id]
+        );
+
+        // Always approve hospitality vendor after successful payment
+        console.log('[HOSPITALITY] Approving vendor:', userId);
+        await userModel.updateUserAccount(userId, { status: 1 });
+
+        // Send confirmation email (same as live webhook)
+        try {
+          const userDetails = await userModel.userinfo(userId);
+          if (userDetails && userDetails.length > 0) {
+            const user = userDetails[0];
+            const companyDetails = await userModel.getCompanyDetail(userId);
+            const company = companyDetails && companyDetails.length > 0 ? companyDetails[0] : {};
+            
+            const subscriptions = await db.any(
+              `SELECT vhcs.*, 
+               CASE 
+                 WHEN vhcs.item_type = 'category' THEN c.title
+                 WHEN vhcs.item_type = 'hotel' THEN h.name
+               END AS item_name
+               FROM tbl_vendor_hotel_category_subscription vhcs
+               LEFT JOIN tbl_category c ON vhcs.item_type = 'category' AND c.id = vhcs.item_id
+               LEFT JOIN tbl_hospitality_company_hotels h ON vhcs.item_type = 'hotel' AND h.id = vhcs.item_id
+               WHERE vhcs.payment_id = $1 AND vhcs.vendor_id = $2`,
+              [payment.id, userId]
+            );
+            
+            const categories = subscriptions.filter(s => s.item_type === 'category').map(s => s.item_name);
+            const hotels = subscriptions.filter(s => s.item_type === 'hotel').map(s => s.item_name);
+            const expiryDate = subscriptions.length > 0 ? subscriptions[0].end_date : null;
+            const expiryDateFormatted = expiryDate 
+              ? Moment(expiryDate).format('MMMM DD, YYYY')
+              : 'March 31, ' + (Moment().month() >= 2 ? Moment().year() + 1 : Moment().year());
+            const totalAmount = subscriptions.reduce((sum, s) => sum + (s.fee_amount || 0), 0);
+            
+            const emailHeader = `<h2>Dear ${user.name},</h2>`;
+            const emailContent = `
+              <p style="font-size: 16px; line-height: 1.6; color: #333;">
+                Congratulations! Your hospitality vendor registration has been successfully completed and your payment has been processed.
+              </p>
+              
+              <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                <h3 style="color: #158993; margin-top: 0;">Registration Details</h3>
+                
+                <p style="margin: 10px 0;"><strong>Company Name:</strong> ${company.organization_name || company.name || 'N/A'}</p>
+                <p style="margin: 10px 0;"><strong>Email:</strong> ${user.email}</p>
+                <p style="margin: 10px 0;"><strong>Payment Amount:</strong> ₹${totalAmount.toLocaleString('en-IN')}</p>
+                <p style="margin: 10px 0;"><strong>Payment ID:</strong> ${razorpay_payment_id || 'Test Payment'}</p>
+                <p style="margin: 10px 0;"><strong>Order ID:</strong> ${order_id}</p>
+              </div>
+              
+              ${categories.length > 0 ? `
+              <div style="margin: 20px 0;">
+                <h3 style="color: #158993;">Selected Categories</h3>
+                <ul style="list-style-type: none; padding-left: 0;">
+                  ${categories.map(cat => `<li style="padding: 5px 0;">• ${cat}</li>`).join('')}
+                </ul>
+              </div>
+              ` : ''}
+              
+              ${hotels.length > 0 ? `
+              <div style="margin: 20px 0;">
+                <h3 style="color: #158993;">Selected Hotels</h3>
+                <ul style="list-style-type: none; padding-left: 0;">
+                  ${hotels.map(hotel => `<li style="padding: 5px 0;">• ${hotel}</li>`).join('')}
+                </ul>
+              </div>
+              ` : ''}
+              
+              <div style="background-color: #e8f5e9; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #4caf50;">
+                <p style="margin: 0; font-weight: 600; color: #2e7d32;">
+                  <strong>Subscription Expiry Date:</strong> ${expiryDateFormatted}
+                </p>
+              </div>
+              
+              <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
+                Your account has been approved and you can now start using the Workwise platform.
+              </p>
+              
+              <div style="text-align: center; margin: 30px 0;">
+                <a href="${process.env.FRONT_END_WEBSITE}/dashboard" 
+                   style="background-color: #158993; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
+                  Go to Dashboard
+                </a>
+              </div>
+            `;
+            
+            const dynamicHTML = generateEmailTemplate(emailHeader, emailContent);
+            
+            sendMail({
+              from: Config.webmasterMail,
+              to: user.email,
+              subject: 'Workwise - Hospitality Vendor Registration Confirmation',
+              html: dynamicHTML
+            });
+          }
+        } catch (emailError) {
+          console.error('[HOSPITALITY] Error sending confirmation email:', emailError);
+          logError(emailError);
+        }
+
+        return res
+          .status(200)
+          .json({
+            status: 1,
+            message: 'Successfully Triggered the Webhook!',
+            data: { is_hospitality: true }
+          })
+          .end();
+      }
+
+      // Fallback: regular subscription payment handling (non-hospitality)
       let subscriptionPaymentObj = {
           status: 1,
-          after_payment_response: "Requested Body",
-          payment_id: "Some id",
-          method: "rzpy",
-          order_id: req.body.order_id,
-          receipt: "Some receipt",
+        after_payment_response: 'Requested Body',
+        payment_id: 'Some id',
+        method: 'rzpy',
+        order_id: order_id,
+        receipt: 'Some receipt',
           date: Moment().format('YYYY-MM-DD')
         };
 
@@ -3149,8 +3451,7 @@ publish_profile_reviews: async (req, res, next) => {
         let paymentUpdate = await subscriptionModel.updateSubscriptionPayment(
           subscriptionPaymentObj
         );
-        console.log("PAYMENT UPDATE => ", paymentUpdate);
-
+      console.log('PAYMENT UPDATE => ', paymentUpdate);
         
         if (paymentUpdate.length > 0) {
           const condition = `user_id = ${parseInt(
@@ -3196,12 +3497,19 @@ publish_profile_reviews: async (req, res, next) => {
           if (userDetails && userDetails.length > 0) {
             const user = userDetails[0];
             // Check if user is vendor (user_type = 3) and status is 0 (unapproved)
-            if (user.user_type === 3 && user.status === 0) {
+            const isVendor =
+              user.user_type === 3 || user.user_type === '3';
+            const isPending =
+              user.status === 0 || user.status === '0';
+            if (isVendor && isPending) {
               // Check if company is hospitality
               const companyDetails = await userModel.getCompanyDetail(userId);
               if (companyDetails && companyDetails.length > 0) {
                 const company = companyDetails[0];
-                if (company.is_hospitality === 1 || company.is_hospitality === '1') {
+                if (
+                  company.is_hospitality === 1 ||
+                  company.is_hospitality === '1'
+                ) {
                   // Approve the hospitality vendor
                   await userModel.updateUserAccount(userId, { status: 1 });
                 }
@@ -3213,7 +3521,7 @@ publish_profile_reviews: async (req, res, next) => {
             .status(200)
             .json({
               status: 1,
-              message: "Successfully Triggered the Webhook!"
+            message: 'Successfully Triggered the Webhook!'
             })
             .end();
         } else {
@@ -3221,7 +3529,7 @@ publish_profile_reviews: async (req, res, next) => {
             .status(400)
             .json({
               status: 3,
-              message: "Payment Update Not Found!"
+            message: 'Payment Update Not Found!'
             })
             .end();
         }
@@ -3274,16 +3582,17 @@ publish_profile_reviews: async (req, res, next) => {
           
           const payment = vendorPayment[0];
           const userId = payment.vendor_id;
-          const userDetails = await userModel.userinfo(userId);
           
+          // Always approve hospitality vendor after successful payment
+          console.log('[HOSPITALITY LIVE] Approving vendor:', userId);
+          await userModel.updateUserAccount(userId, { status: 1 });
+          
+          const userDetails = await userModel.userinfo(userId);
           if (userDetails && userDetails.length > 0) {
             const user = userDetails[0];
-            if (user.user_type === 3 && user.status === 0) {
-              const companyDetails = await userModel.getCompanyDetail(userId);
-              if (companyDetails && companyDetails.length > 0) {
-                const company = companyDetails[0];
-                if (company.is_hospitality === 1 || company.is_hospitality === '1') {
-                  await userModel.updateUserAccount(userId, { status: 1 });
+            const companyDetails = await userModel.getCompanyDetail(userId);
+            if (companyDetails && companyDetails.length > 0) {
+              const company = companyDetails[0];
                   
                   // Send confirmation email
                   try {
@@ -3379,8 +3688,6 @@ publish_profile_reviews: async (req, res, next) => {
                     console.error('Error sending hospitality vendor confirmation email:', emailError);
                     logError(emailError);
                   }
-                }
-              }
             }
           }
           

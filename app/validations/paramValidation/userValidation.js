@@ -307,12 +307,18 @@ const schemas = {
       )
       .optional()
       .allow(null),
-    categories: Joi.array()
-      .items(Joi.number().integer().positive())
+    categories: Joi.alternatives()
+      .try(
+        Joi.array().items(Joi.number().integer().positive()),
+        Joi.string()
+      )
       .optional()
       .allow(null),
-    subcategories: Joi.array()
-      .items(Joi.number().integer().positive())
+    subcategories: Joi.alternatives()
+      .try(
+        Joi.array().items(Joi.number().integer().positive()),
+        Joi.string()
+      )
       .optional()
       .allow(null),
     pan: Joi.string().optional().allow(null).allow(''),

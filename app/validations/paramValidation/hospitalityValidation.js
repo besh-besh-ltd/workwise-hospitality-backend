@@ -156,9 +156,12 @@ const schemas = {
       .items(Joi.number().integer().positive())
       .min(1)
       .required(),
+    subcategories: Joi.array()
+      .items(Joi.number().integer().positive())
+      .optional(),
     hotels: Joi.array()
       .items(Joi.number().integer().positive())
-      .optional()
+      .min(1)
       .allow(null),
   }),
   deleteMapping: Joi.object().keys({
