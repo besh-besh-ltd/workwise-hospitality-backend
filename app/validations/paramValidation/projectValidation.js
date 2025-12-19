@@ -77,6 +77,7 @@ export const projectSchemas = {
         reverse_auction: Joi.valid('0', '1', '-1'),  // Reverse auction flag,
         limit: Joi.number().integer(),  // add limit,
         rfq_no: Joi.number().integer().optional().allow(null),
+        is_tender: Joi.string().valid('0', '1').optional().allow(null).allow(''),  // Filter by RFQ (0) or Tender (1)
     }),
 
 

@@ -5469,7 +5469,7 @@ const rfqController = {
         offset = 0;
       }
 
-      let { project_id, sort, reverse_auction, rfq_type, rfq_no } = req.body;
+      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender } = req.body;
       if (project_id == -1) {
         project_id = null;
       }
@@ -5478,6 +5478,11 @@ const rfqController = {
       }
       if (reverse_auction == '-1') {
         reverse_auction = null;
+      }
+      if (is_tender === '' || is_tender === undefined || is_tender === null) {
+        is_tender = null;
+      } else {
+        is_tender = is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0;
       }
 
       const listRfq = await rfqModel.getAllBuyerRfq(
@@ -5488,7 +5493,8 @@ const rfqController = {
         sort,
         reverse_auction,
         rfq_type,
-        rfq_no
+        rfq_no,
+        is_tender
       );
 
       let count = await rfqModel.getBuyerRfqCount(
@@ -5496,7 +5502,8 @@ const rfqController = {
         project_id,
         rfq_type,
         reverse_auction,
-        rfq_no
+        rfq_no,
+        is_tender
       );
       res
         .status(200)
@@ -11809,7 +11816,8 @@ getClauses: async (req, res) => {
         limit = 10,
         project_id,
         rfq_no,
-        sort = 'DESC'
+        sort = 'DESC',
+        is_tender
       } = req.query;
 
       // Convert string query parameters to proper types
@@ -11820,6 +11828,7 @@ getClauses: async (req, res) => {
       limit = parseInt(limit) || 10;
       project_id = project_id ? parseInt(project_id) : null;
       rfq_no = rfq_no ? parseInt(rfq_no) : null;
+      is_tender = is_tender !== undefined && is_tender !== null ? (is_tender === 'true' || is_tender === true || is_tender === '1' || is_tender === 1) : null;
 
       // Calculate offset
       const offset = (page - 1) * limit;
@@ -11839,7 +11848,8 @@ getClauses: async (req, res) => {
         offset,
         project_id,
         rfq_no,
-        sort
+        sort,
+        is_tender
       );
 
       res.status(200).json({

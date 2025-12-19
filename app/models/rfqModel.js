@@ -2685,7 +2685,8 @@ LIMIT 2;
     sort,
     reverse_auction,
     rfq_type,
-    rfq_no
+    rfq_no,
+    is_tender
   ) => {
     return new Promise(function (resolve, reject) {
       let q = `
@@ -2806,6 +2807,7 @@ LIMIT 2;
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
       AND (RFQ.rfq_no::text LIKE '%$6%' OR $6 IS NULL) -- Filter by rfq_no if provided
+      ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0}` : ''}
       ORDER BY RFQ.timestamp ${sort ?? ''}
       LIMIT $5 OFFSET $4;`;
 
@@ -2824,9 +2826,14 @@ LIMIT 2;
     project_id,
     rfq_type,
     reverse_auction,
-    rfq_no
+    rfq_no,
+    is_tender
   ) => {
     return new Promise(function (resolve, reject) {
+      let isTenderFilter = '';
+      if (is_tender !== null && is_tender !== undefined) {
+        isTenderFilter = `AND RFQ.is_tender = ${is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0}`;
+      }
       db.any(
         `SELECT COUNT(*) from tbl_rfq RFQ
         LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
@@ -2836,7 +2843,8 @@ LIMIT 2;
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
-        AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL); -- Filter by rfq_no if provided
+        AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL) -- Filter by rfq_no if provided
+        ${isTenderFilter};
         `,
         [project_id, rfq_type, reverse_auction, rfq_no]
       )
@@ -9210,7 +9218,8 @@ ORDER BY tq.timestamp DESC;
     offset,
     project_id,
     rfq_no,
-    sort
+    sort,
+    is_tender
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicJoins = '';
@@ -9263,7 +9272,8 @@ ORDER BY tq.timestamp DESC;
         RFQ.response_email,
         RFQ.contact_number,
         RFQ.bid_end_date,
-        RFQ.reverse_auction
+        RFQ.reverse_auction,
+        RFQ.is_tender
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
       ${dynamicJoins}
@@ -9298,6 +9308,7 @@ ORDER BY tq.timestamp DESC;
       }
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
+      ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender ? 1 : 0}` : ''}
       ${dynamicConditions}
       ORDER BY RFQ.timestamp ${sort || 'DESC'}
       LIMIT $3 OFFSET $2;`;
