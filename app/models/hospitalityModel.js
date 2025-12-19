@@ -671,7 +671,74 @@ const hospitalityModel = {
     }
 
     return Object.values(map);
-  }
+  },
+
+/**
+ * Returns the list of eligible vendors for a given product variant.
+ * Eligibility logic:
+ * 1. Vendor must be explicitly mapped to the product variant.
+ * 2. Vendor must have an ACTIVE subscription for at least one
+ *    category associated with the product.
+ * 3. Vendor must have an ACTIVE subscription for at least one
+ *    of the provided hotel IDs.
+ * 4. Subscriptions are considered valid only if the current date
+ *    falls within the subscription start and end dates.
+ * Vendors failing any of the above conditions are excluded.
+ */
+getEligibleVendorsForVariant: async (variantId, hotelIds) => {
+  return db.any(
+    `WITH vp AS (
+    SELECT product_id
+    FROM tbl_product_variant
+    WHERE id = $1
+      AND is_deleted = 0
+),
+
+variant_vendors AS (
+    SELECT DISTINCT vendor_id
+    FROM tbl_product_variant_vendor_mapping
+    WHERE product_variant_id = $1
+),
+
+product_categories AS (
+    SELECT DISTINCT pc.category_id
+    FROM tbl_product_categories pc
+    JOIN vp ON vp.product_id = pc.product_id
+),
+
+eligible_category_vendors AS (
+    SELECT DISTINCT s.vendor_id
+    FROM tbl_vendor_hotel_category_subscription s
+    JOIN product_categories pc
+        ON pc.category_id = s.item_id
+    JOIN variant_vendors vv
+        ON vv.vendor_id = s.vendor_id
+    WHERE s.item_type = 'category'
+      AND s.status = 'active'
+      AND CURRENT_DATE BETWEEN s.start_date AND s.end_date
+),
+
+eligible_hotel_vendors AS (
+    SELECT DISTINCT s.vendor_id
+    FROM tbl_vendor_hotel_category_subscription s
+    JOIN variant_vendors vv
+        ON vv.vendor_id = s.vendor_id
+    WHERE s.item_type = 'hotel'
+      AND s.item_id = ANY ($2)
+      AND s.status = 'active'
+      AND CURRENT_DATE BETWEEN s.start_date AND s.end_date
+)
+
+SELECT vv.vendor_id
+FROM variant_vendors vv
+JOIN eligible_category_vendors ecv ON ecv.vendor_id = vv.vendor_id
+JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id;
+`,
+    [variantId, hotelIds]
+  );
+},
+
+
 };
 
 export default hospitalityModel;

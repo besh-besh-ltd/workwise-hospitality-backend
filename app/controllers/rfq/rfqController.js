@@ -4606,7 +4606,7 @@ const rfqController = {
       const sheet_id = req.body.sheet_id;
       const variant_id = req.body.variant_id;
       const is_tender = req.body.is_tender || 0;
-
+      const hotel_ids = req.body.hotel_ids || [];
       const globalFilters = req.body.filters;
 
       // Changes by Agnij 2025-06-17 [Improved handling of specific RFQ ID]
@@ -4683,18 +4683,51 @@ const rfqController = {
           .json({ status: 2, message: 'Invalid product data' });
       }
 
-      if (!product.vendors || product.vendors.length === 0) {
-        const vendors = await rfqModel.genericSearchVendors(
+
+        // map rfq with hotels
+          const hotelRfqMapping = hotel_ids?.map((item ) => ({
+            rfq_id: rfq_id,
+            hotel_id: item,
+            created_by: user_id
+        }));
+        await generalModel.insertMany( 'tbl_rfq_hotel_mappings', hotelRfqMapping);
+
+
+      let vendorsList = [];
+      // ---------------- Determine vendor source ----------------
+      if (is_tender === 1) {
+        // Tender: strict eligibility (variant + category + hotel)
+        vendorsList = await hospitalityModel.getEligibleVendorsForVariant(
+          variant_id,
+          hotel_ids
+        );
+      } else {
+        // Non-tender: generic vendor discovery
+        vendorsList = await rfqModel.genericSearchVendors(
           user_id,
           product.variant_id
         );
-        if (vendors && vendors.length > 0) {
-          product.vendors = vendors.map((vendor) => ({ vendor_id: vendor.id }));
-        } else {
-          return res
-            .status(400)
-            .json({ status: 2, errors: { vendors: "No Vendors found for your selected product, please select some other product!" } });
-        }
+      }
+      
+      // ---------------- Assign vendors in product.vendors or give error ----------------
+      if (vendorsList && vendorsList.length > 0) {
+                console.log(" vendorsListvendorsList ", vendorsList)
+        product.vendors = vendorsList.map((vendor) => ({
+          vendor_id: vendor.id || vendor.vendor_id ,
+        }));
+
+        console.log(" product.vendorsproduct.vendorsproduct.vendors", product.vendors)
+
+      } else {
+        return res.status(400).json({
+          status: 2,
+          errors: {
+            vendors:
+              is_tender === 1
+                ? "No eligible vendors found for the selected product based on hotel and category subscriptions."
+                : "No vendors found for your selected product. Please select a different product.",
+          },
+        });
       }
 
       const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
