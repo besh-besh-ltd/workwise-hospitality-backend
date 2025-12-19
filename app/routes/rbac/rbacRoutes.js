@@ -27,11 +27,22 @@ router.post(
   acl([7]),
   rbacController.createRoleWithPermissions
 );
+router.put(
+  "/roles/:roleId",
+  passportSignIn,
+  acl([7]),
+  rbacController.updateRoleWithPermissions
+);
 router.get(
   "/permissions",
   passportSignIn,
   acl([7]),
   rbacController.getAllPermissionsGrouped
+);
+router.get(
+  "/me/permissions",
+  passportSignIn,
+  rbacController.getMyPermissionsGrouped
 );
 router.get(
   '/users/:userId/roles',

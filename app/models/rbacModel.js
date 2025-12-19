@@ -66,6 +66,27 @@ const rbacModel = {
       )
     );
   },
+  getUserPermissions: async (userId, companyId, hotelId = null) => {
+    return db.any(
+      `
+      SELECT DISTINCT
+        p.resource,
+        p.action
+      FROM tbl_user_role_scopes urs
+      JOIN tbl_role_permissions rp
+        ON rp.role_id = urs.role_id
+      JOIN tbl_permissions p
+        ON p.id = rp.permission_id
+      WHERE urs.user_id = $1
+        AND urs.company_id = $2
+        AND (
+          urs.hotel_id IS NULL
+          OR urs.hotel_id = $3
+        )
+      `,
+      [userId, companyId, hotelId]
+    );
+  },
 
   deleteUserRoleScopes: (userId) => {
     return db.none(
@@ -99,7 +120,7 @@ const rbacModel = {
 
   getRoles: () => {
     return db.any(`
-      SELECT id, title, description
+      SELECT *
       FROM tbl_roles
       ORDER BY title
     `);
@@ -113,17 +134,48 @@ const rbacModel = {
       WHERE rp.role_id = $1
     `, [roleId]);
   },
-  createRole: async ({ title, description }) => {
+  createRole: async ({ title, description }, createdBy) => {
     const [role] = await db.any(
       `
-      INSERT INTO tbl_roles (title, description)
-      VALUES ($1, $2)
-      RETURNING id, title
+      INSERT INTO tbl_roles (title, description, created_by)
+      VALUES ($1, $2, $3)
+      RETURNING id, title, created_by
       `,
-      [title.trim(), description || null]
+      [title.trim(), description || null, createdBy]
     );
 
     return role;
+  },
+  getRoleById: async (roleId) => {
+    return db.oneOrNone(
+      `
+      SELECT id, title, description, created_by
+      FROM tbl_roles
+      WHERE id = $1
+      `,
+      [roleId]
+    );
+  },
+  updateRole: async (roleId, { title, description }) => {
+    return db.none(
+      `
+      UPDATE tbl_roles
+      SET title = $1,
+          description = $2,
+          updated_at = NOW()
+      WHERE id = $3
+      `,
+      [title.trim(), description || null, roleId]
+    );
+  },
+  deleteRolePermissions: async (roleId) => {
+    return db.none(
+      `
+      DELETE FROM tbl_role_permissions
+      WHERE role_id = $1
+      `,
+      [roleId]
+    );
   },
   assignPermissionsToRole: async (roleId, permissionIds = []) => {
     if (!permissionIds.length) return;

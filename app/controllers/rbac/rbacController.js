@@ -57,6 +57,7 @@ const rbacController = {
   createRoleWithPermissions: async (req, res) => {
     try {
       const { title, description, permission_ids = [] } = req.body;
+      const { id: userId } = req.user;
 
       if (!title || !permission_ids.length) {
         return res.status(400).json({
@@ -69,7 +70,7 @@ const rbacController = {
       const role = await rbacModel.createRole({
         title,
         description
-      });
+      }, userId);
 
       // Assign permissions
       await rbacModel.assignPermissionsToRole(
@@ -93,6 +94,68 @@ const rbacController = {
     });
     }
   },
+  updateRoleWithPermissions: async (req, res) => {
+  try {
+    const { roleId } = req.params;
+    const { title, description, permission_ids = [] } = req.body;
+    const userId = req.user.id;
+
+    if (!title || !permission_ids.length) {
+      return res.status(400).json({
+        status: false,
+        message: "Role title and permissions are required"
+      });
+    }
+
+    // 1️⃣ Fetch role & validate ownership
+    const role = await rbacModel.getRoleById(roleId);
+
+    if (!role) {
+      return res.status(404).json({
+        status: false,
+        message: "Role not found"
+      });
+    }
+
+    // System role protection
+    if (role.created_by === null) {
+      return res.status(403).json({
+        status: false,
+        message: "System roles cannot be modified"
+      });
+    }
+
+    // Ownership check
+    if (role.created_by !== userId) {
+      return res.status(403).json({
+        status: false,
+        message: "You are not allowed to edit this role"
+      });
+    }
+
+    // 2️⃣ Update role meta
+    await rbacModel.updateRole(roleId, {
+      title,
+      description
+    });
+
+    // 3️⃣ Replace permissions
+    await rbacModel.deleteRolePermissions(roleId);
+    await rbacModel.assignPermissionsToRole(roleId, permission_ids);
+
+    return res.json({
+      status: true,
+      message: "Role updated successfully"
+    });
+
+  } catch (err) {
+    console.error("updateRoleWithPermissions error:", err);
+    return res.status(500).json({
+      status: false,
+      message: "Failed to update role"
+    });
+  }
+},
   /* -------------------- USER ROLE SCOPES -------------------- */
   getUserRoleScopes: async (req, res) => {
     try {
@@ -139,7 +202,59 @@ const rbacController = {
         message: "Failed to fetch permissions"
       });
     }
-  }
+  },
+  getMyPermissionsGrouped: async (req, res) => {
+    try {
+        const userId = req.user.id;
+
+        const companyId =
+        req.headers["x-company-id"] || req.user.company_id;
+
+        const hotelId =
+        req.headers["x-hotel-id"] ||
+        req.query.hotel_id ||
+        null;
+
+        const permissions =
+        await rbacModel.getUserPermissions(
+            userId,
+            companyId,
+            hotelId
+        );
+
+        /**
+         * Combine + deduplicate
+         * {
+         *   tender: ['read','create']
+         * }
+         */
+        const grouped = {};
+
+        for (const p of permissions) {
+        if (!grouped[p.resource]) {
+            grouped[p.resource] = new Set();
+        }
+        grouped[p.resource].add(p.action);
+        }
+
+        // Convert Set → Array
+        Object.keys(grouped).forEach(resource => {
+        grouped[resource] = Array.from(grouped[resource]);
+        });
+
+        return res.json({
+        status: true,
+        data: grouped
+        });
+
+    } catch (err) {
+        console.error("getMyPermissionsGrouped error:", err);
+        return res.status(500).json({
+        status: false,
+        message: "Failed to fetch permissions"
+        });
+    }
+    },
 };
 
 export default rbacController;
