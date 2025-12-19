@@ -3291,6 +3291,249 @@ publish_profile_reviews: async (req, res, next) => {
       });
     }
   },
+  // Helper function to generate hospitality vendor invoice
+  generateHospitalityInvoice: async (payment, userDetails, company, subscriptions) => {
+    try {
+      const invoiceNumber = `INV-${payment.razorpay_order_id || payment.id}-${Date.now()}`;
+      const invoiceDate = Moment().format('YYYY-MM-DD');
+      const expiryDate = subscriptions.length > 0 ? subscriptions[0].end_date : null;
+      const expiryDateFormatted = expiryDate 
+        ? dateFormat(expiryDate, 'yyyy-mm-dd')
+        : dateFormat(Moment().month() >= 2 ? Moment().add(1, 'year').month(2).date(31) : Moment().month(2).date(31), 'yyyy-mm-dd');
+      
+      const totalAmount = subscriptions.reduce((sum, s) => sum + (s.fee_amount || 0), 0);
+      
+      // Group subscriptions by type
+      const categorySubs = subscriptions.filter(s => s.item_type === 'category');
+      const hotelSubs = subscriptions.filter(s => s.item_type === 'hotel');
+      
+      // Build invoice items HTML
+      let invoiceItemsHTML = '';
+      
+      // Add category subscriptions
+      categorySubs.forEach(sub => {
+        invoiceItemsHTML += `
+          <tr>
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #979797;">
+              Category Subscription: ${sub.item_name || 'N/A'}
+            </td>
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal;text-align: center; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #979797;">1</td>
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal;font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: center;border-top: 1px solid #979797;">₹ ${sub.fee_amount || 0}</td>
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: right;border-top: 1px solid #979797;">₹ ${sub.fee_amount || 0}</td>
+          </tr>
+        `;
+      });
+      
+      // Add hotel subscriptions
+      hotelSubs.forEach(sub => {
+        invoiceItemsHTML += `
+          <tr>
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #979797;">
+              Hotel Subscription: ${sub.item_name || 'N/A'}
+            </td>
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal;text-align: center; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #979797;">1</td>
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal;font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: center;border-top: 1px solid #979797;">₹ ${sub.fee_amount || 0}</td>
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: right;border-top: 1px solid #979797;">₹ ${sub.fee_amount || 0}</td>
+          </tr>
+        `;
+      });
+      
+      const htmlPdf = `<table width="100%" border="0" cellspacing="0" cellpadding="0" align="center" style="table-layout: fixed;border-collapse: collapse;border-spacing:0;font-family:Tahoma,Arial,sans-serif;color:#000000;margin: 0 auto 10px;width: 100%;min-width:615px;max-width:615px;background-color: #ffffff;padding: 0;font-size: 12px;">
+  <tbody>
+    <tr>
+      <td style="padding:0;font-size: 18px;font-weight: bold; font-family:Tahoma,Arial,sans-serif;color:#000000;"> Invoice <table width="100%" border="0" cellspacing="0" cellpadding="0" align="center">
+          <tbody>
+            <tr>
+              <td style="padding: 10px 0 5px; font-weight: bold;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Invoice number</td>
+              <td style="padding: 10px 0 5px; font-weight: bold;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${invoiceNumber}</td>
+            </tr>
+            <tr>
+              <td style="font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Date of issue</td>
+              <td style="font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${invoiceDate}</td>
+            </tr>
+            <tr>
+              <td style="font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Date due</td>
+              <td style="font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${expiryDateFormatted}</td>
+            </tr>
+          </tbody>
+        </table>
+      </td>
+      <td>&nbsp;</td>
+      <td width="100px">
+        <div style="width: 80px;max-width: 100%;margin:0;font-size: 20px;font-weight: bold;color:#158993;">Workwise</div>
+      </td>
+    </tr>
+  </tbody>
+</table>
+<table width="100%" border="0" cellspacing="0" cellpadding="0" align="center" style="table-layout: fixed;border-collapse: collapse;border-spacing:0;font-family:Tahoma,Arial,sans-serif;color:#000000;margin: 0 auto 10px;width: 100%;min-width:615px;max-width:615px;background-color: #ffffff;padding: 0;font-size: 12px;">
+  <tbody>
+    <tr>
+      <td style="padding:10px 0 0;font-size: 14px;font-weight: bold; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;"> Work Wise <table width="100%" border="0" cellspacing="0" cellpadding="0" align="center">
+          <tbody>
+            <tr>
+              <td style="padding: 10px 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;"> 1st Floor, 271 Business Park, Model Industrial Estate, near Virwani Industrial Estate </td>
+            </tr>
+            <tr>
+              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">off Western Express Highway, Vishveshwar Nagar </td>
+            </tr>
+            <tr>
+              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">Goregaon, Mumbai, Maharashtra 400063</td>
+            </tr>
+            <tr>
+              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">
+                <a style="text-decoration: none;color: #000000;" href="mailto:support@workwise.com">support@workwise.com</a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">IN GST 19AABCD1743K1ZM</td>
+            </tr>
+          </tbody>
+        </table>
+      </td>
+      <td style="padding:10px 0 0;font-size: 14px;font-weight: bold; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;"> Bill to <table width="100%" border="0" cellspacing="0" cellpadding="0" align="center">
+          <tbody>
+            ${company.organization_name || company.name
+              ? `<tr>
+              <td style="padding: 10px 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${company.organization_name || company.name}</td>
+            </tr>`
+              : ''
+            }
+            ${userDetails.name
+              ? `<tr>
+              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${userDetails.name}</td>
+            </tr>`
+              : ''
+            }
+            ${userDetails.address
+              ? `<tr>
+            <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${userDetails.address}</td>
+          </tr>`
+              : ''
+            }
+            ${userDetails.city_name
+              ? `<tr>
+            <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${userDetails.city_name}</td>
+          </tr>`
+              : ''
+            }
+            ${userDetails.state_name
+              ? `<tr>
+            <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">${userDetails.state_name}</td>
+          </tr>`
+              : ''
+            }            
+            <tr>
+              <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">India</td>
+            </tr>
+            ${userDetails.email
+              ? `<tr>
+            <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">
+              <a style="text-decoration: none;color: #000000;" href="mailto:${userDetails.email}">${userDetails.email}</a>
+            </td>
+          </tr>`
+              : ''
+            }
+          ${userDetails.gstin
+              ? `<tr>
+          <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">IN GST ${userDetails.gstin}</td>
+        </tr>`
+              : ''
+            }
+            
+          </tbody>
+        </table>
+      </td>
+    </tr>
+  </tbody>
+</table>
+<table width="100%" border="0" cellspacing="0" cellpadding="0" align="center" style="table-layout: fixed;border-collapse: collapse;border-spacing:0;font-family:Tahoma,Arial,sans-serif;color:#000000;margin: 0 auto 10px;width: 100%;min-width:615px;max-width:615px;background-color: #ffffff;padding: 0;font-size: 12px;">
+  <tr>
+    <td>
+      <table width="100%" border="0" cellspacing="0" cellpadding="0" align="center">
+        <thead>
+          <tr>
+            <th style="padding:10px 0;font-size: 12px;font-weight: normal;font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: left;width: 355px;">Description</th>
+            <th style="padding:10px 0;font-size: 12px;font-weight: normal;font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: center;width: 20px;">Qty</th>
+            <th style="padding:10px 0;font-size: 12px;font-weight: normal;font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: center;width: 140px;">Unit price</th>
+            <th style="padding:10px 0;font-size: 12px;font-weight: normal;font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;text-align: right;width: 140px;">Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${invoiceItemsHTML}
+        </tbody>
+      </table>
+    </td>
+  </tr>
+</table>
+<table width="100%" border="0" cellspacing="0" cellpadding="0" align="center" style="table-layout: fixed;border-collapse: collapse;border-spacing:0;font-family:Tahoma,Arial,sans-serif;color:#000000;margin: 0 auto 10px;width: 100%;min-width:615px;max-width:615px;background-color: #ffffff;padding:0;font-size: 12px;">
+  <tr>
+    <td style="width:250px;padding-top: 20px">&nbsp;</td>
+    <td style="width:365px;padding-top: 20px">
+      <table width="100%" border="0" cellspacing="0" cellpadding="0" align="center">
+        <tbody>
+          <tr>
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #d3d3d3;">Total</td>
+            <td style="padding:10px 0;font-size: 12px;font-weight: normal; font-family:Tahoma,Arial,sans-serif;color:#000000;vertical-align: top;border-top: 1px solid #d3d3d3;text-align: right;">₹ ${totalAmount}</td>
+          </tr>
+        </tbody>
+      </table>
+    </td>
+  </tr>
+</table>`;
+
+      // Ensure invoice directory exists
+      const invoiceDir = Config.upload.invoice_file;
+      if (!fs.existsSync(invoiceDir)) {
+        fs.mkdirSync(invoiceDir, { recursive: true });
+      }
+
+      const fileName = `invoice-hospitality-${payment.id}-${Date.now()}.pdf`;
+      const outputPath = `${invoiceDir}/${fileName}`;
+
+      const browser = await puppeteer.launch({
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+      });
+      const page = await browser.newPage();
+      await page.setContent(htmlPdf, { waitUntil: 'networkidle0' });
+      await page.pdf({
+        path: outputPath,
+        format: 'A4',
+        printBackground: true
+      });
+      await browser.close();
+
+      // Ensure invoice_file column exists, then update payment record
+      try {
+        await db.none(
+          `ALTER TABLE tbl_vendor_payments 
+           ADD COLUMN IF NOT EXISTS invoice_file VARCHAR(255)`
+        );
+      } catch (alterError) {
+        // Column might already exist, ignore error
+        console.log('[INVOICE] Column check:', alterError.message);
+      }
+      
+      // Update payment record with invoice file path
+      await db.none(
+        `UPDATE tbl_vendor_payments 
+         SET invoice_file = $1
+         WHERE id = $2`,
+        [fileName, payment.id]
+      );
+
+      return {
+        fileName,
+        filePath: outputPath,
+        downloadUrl: `${Config.download_url}/invoice_file/${fileName}`
+      };
+    } catch (error) {
+      console.error('[INVOICE] Error generating invoice:', error);
+      logError(error);
+      return null;
+    }
+  },
+
   test_razorpay_webhook: async (req, res) => {
     try {
       const { order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
@@ -3369,10 +3612,18 @@ publish_profile_reviews: async (req, res, next) => {
               : 'March 31, ' + (Moment().month() >= 2 ? Moment().year() + 1 : Moment().year());
             const totalAmount = subscriptions.reduce((sum, s) => sum + (s.fee_amount || 0), 0);
             
+            // Generate invoice
+            const invoiceResult = await UsersController.generateHospitalityInvoice(
+              payment,
+              user,
+              company,
+              subscriptions
+            );
+            
             const emailHeader = `<h2>Dear ${user.name},</h2>`;
             const emailContent = `
               <p style="font-size: 16px; line-height: 1.6; color: #333;">
-                Congratulations! Your hospitality vendor registration has been successfully completed and your payment has been processed.
+                Congratulations! Your Vendor registration has been successfully completed and your payment has been processed.
               </p>
               
               <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
@@ -3409,6 +3660,18 @@ publish_profile_reviews: async (req, res, next) => {
                 </p>
               </div>
               
+              ${invoiceResult && invoiceResult.downloadUrl ? `
+              <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #2196f3;">
+                <p style="margin: 0 0 10px; font-weight: 600; color: #1565c0;">
+                  <strong>Invoice Generated</strong>
+                </p>
+                <a href="${invoiceResult.downloadUrl}" 
+                   style="background-color: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
+                  Download Invoice
+                </a>
+              </div>
+              ` : ''}
+              
               <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
                 Your account has been approved and you can now start using the Workwise platform.
               </p>
@@ -3423,12 +3686,24 @@ publish_profile_reviews: async (req, res, next) => {
             
             const dynamicHTML = generateEmailTemplate(emailHeader, emailContent);
             
-            sendMail({
+            // Prepare email with invoice attachment if available
+            const emailOptions = {
               from: Config.webmasterMail,
               to: user.email,
               subject: 'Workwise - Hospitality Vendor Registration Confirmation',
               html: dynamicHTML
-            });
+            };
+            
+            // Attach invoice PDF if generated
+            if (invoiceResult && invoiceResult.filePath && fs.existsSync(invoiceResult.filePath)) {
+              emailOptions.attachments = [{
+                filename: invoiceResult.fileName,
+                path: invoiceResult.filePath,
+                contentType: 'application/pdf'
+              }];
+            }
+            
+            sendMail(emailOptions);
           }
         } catch (emailError) {
           console.error('[HOSPITALITY] Error sending confirmation email:', emailError);
@@ -3440,7 +3715,18 @@ publish_profile_reviews: async (req, res, next) => {
           .json({
             status: 1,
             message: 'Successfully Triggered the Webhook!',
-            data: { is_hospitality: true }
+            data: {
+              is_hospitality: true,
+              payment_summary: {
+                amount: totalAmount,
+                expiry_date: expiryDateFormatted,
+                categories,
+                hotels,
+                invoice_url: invoiceResult && invoiceResult.downloadUrl ? invoiceResult.downloadUrl : null,
+                order_id: order_id,
+                payment_id: razorpay_payment_id || null
+              }
+            }
           })
           .end();
       }
@@ -3642,6 +3928,14 @@ publish_profile_reviews: async (req, res, next) => {
                       : 'March 31, ' + (Moment().month() >= 2 ? Moment().year() + 1 : Moment().year());
                     const totalAmount = subscriptions.reduce((sum, s) => sum + (s.fee_amount || 0), 0);
                     
+                    // Generate invoice
+                    const invoiceResult = await UsersController.generateHospitalityInvoice(
+                      payment,
+                      user,
+                      company,
+                      subscriptions
+                    );
+                    
                     const emailHeader = `<h2>Dear ${user.name},</h2>`;
                     const emailContent = `
                       <p style="font-size: 16px; line-height: 1.6; color: #333;">
@@ -3685,6 +3979,18 @@ publish_profile_reviews: async (req, res, next) => {
                         </p>
                       </div>
                       
+                      ${invoiceResult && invoiceResult.downloadUrl ? `
+                      <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #2196f3;">
+                        <p style="margin: 0 0 10px; font-weight: 600; color: #1565c0;">
+                          <strong>Invoice Generated</strong>
+                        </p>
+                        <a href="${invoiceResult.downloadUrl}" 
+                           style="background-color: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
+                          Download Invoice
+                        </a>
+                      </div>
+                      ` : ''}
+                      
                       <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
                         Your account has been approved and you can now start using the Workwise platform. Log in to your dashboard to begin exploring opportunities.
                       </p>
@@ -3703,12 +4009,24 @@ publish_profile_reviews: async (req, res, next) => {
                     
                     const dynamicHTML = generateEmailTemplate(emailHeader, emailContent);
                     
-                    sendMail({
+                    // Prepare email with invoice attachment if available
+                    const emailOptions = {
                       from: Config.webmasterMail,
                       to: user.email,
                       subject: 'Workwise - Hospitality Vendor Registration Confirmation',
                       html: dynamicHTML
-                    });
+                    };
+                    
+                    // Attach invoice PDF if generated
+                    if (invoiceResult && invoiceResult.filePath && fs.existsSync(invoiceResult.filePath)) {
+                      emailOptions.attachments = [{
+                        filename: invoiceResult.fileName,
+                        path: invoiceResult.filePath,
+                        contentType: 'application/pdf'
+                      }];
+                    }
+                    
+                    sendMail(emailOptions);
                   } catch (emailError) {
                     console.error('Error sending hospitality vendor confirmation email:', emailError);
                     logError(emailError);
