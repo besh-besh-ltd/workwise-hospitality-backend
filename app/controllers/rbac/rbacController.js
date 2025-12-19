@@ -15,7 +15,7 @@ const rbacController = {
   /* -------------------- ROLES -------------------- */
   getRoles: async (req, res) => {
     try {
-      const rows = await rbacModel.getRoles();
+      const rows = await rbacModel.getRoles(req.user);
       return res.json({ status: true, data: rows });
     } catch (err) {
       return res.status(500).json({ status: false, message: err.message });

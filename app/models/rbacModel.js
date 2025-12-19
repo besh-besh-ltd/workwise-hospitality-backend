@@ -118,12 +118,13 @@ const rbacModel = {
 
   /* -------------------- ROLES -------------------- */
 
-  getRoles: () => {
+  getRoles: (user) => {
     return db.any(`
       SELECT *
       FROM tbl_roles
+      WHERE created_by IS NULL OR created_by = $1
       ORDER BY title
-    `);
+    `, [user.id]);
   },
 
   getPermissionsByRoleId: (roleId) => {
