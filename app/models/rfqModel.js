@@ -2279,6 +2279,8 @@ bulkSearchVendorsByCategory: async (
   limit = 20,
   user_id = null
 ) => {
+  page = Number.isInteger(+page) && +page > 0 ? +page : 1;
+  limit = Number.isInteger(+limit) && +limit > 0 ? +limit : 20;
   const offset = (page - 1) * limit;
 
   const turnoverCondition = turnOver && (turnOver.from > 0 || turnOver.to > 0)
