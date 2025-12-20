@@ -2275,6 +2275,7 @@ bulkSearchVendorsByCategory: async (
   vendor_name = '',
   myVendorType = null,
   productMakes = [],
+  subscriptionType = null,
   page = 1,
   limit = 20,
   user_id = null
@@ -2373,6 +2374,7 @@ bulkSearchVendorsByCategory: async (
         ${approved_by_id.length > 0 ? `
           AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(',')})
         ` : ''}
+        ${subscriptionType ? subscriptionType == 'premium' ? 'AND is_premium = 1' : subscriptionType == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0' : ''}
         ${myVendorCondition}
         ${prevWorkedCondition}
         ${vendorNameCondition}
