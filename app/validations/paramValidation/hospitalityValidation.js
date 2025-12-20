@@ -173,6 +173,13 @@ const schemas = {
       otherwise: Joi.any().optional().allow(null),
     }),
   }),
+
+  rfqIdParam: Joi.object()
+    .keys({
+      rfq_id: Joi.number().integer().required(),
+    })
+    .required(),
+  
 };
 
 const uploadHospitalityDocuments = async (req, res, next) => {

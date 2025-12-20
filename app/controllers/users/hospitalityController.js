@@ -1,7 +1,9 @@
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
+import generalModel from '../../models/generalModel.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 import projectModel from '../../models/projectModel.js';
+import rfqModel from '../../models/rfqModel.js';
 
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
@@ -772,7 +774,47 @@ const HospitalityController = {
       logError(error);
       return formatErrorResponse(res, error);
     }
+  },
+
+  
+  /**
+   * @created : mukul jatav 
+   * get all hotels currently mapped to the specified RFQ.
+ */
+  getRFQHotels: async (req, res) => {
+    try {
+
+      const rfq_id = req.params.rfq_id;
+
+      //  check if rfg exist
+      const rfqExist = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}`);
+      if( rfqExist.length === 0 ) {
+        return res.status(404).json({
+          status: 2,
+          message: 'RFQ not found'
+        });
+      }
+
+      //  fetch mapped hotels
+      const mappedHotels = await rfqModel.checkIfExists('tbl_rfq_hotel_mappings', `rfq_id = ${rfq_id}`);
+      
+      return res.status(200).json({
+        status: 1,
+        data: mappedHotels
+      });
+
+    } catch (error) {
+      logError(error);
+
+      //  throw error
+       return res.status(500).json({
+        message: "failed to fetch hotels",
+        error: error
+      });
+    }
   }
+
+
 };
 
 export default HospitalityController;
