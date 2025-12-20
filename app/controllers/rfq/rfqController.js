@@ -2301,35 +2301,55 @@ const saveRfqDraft = async (user_id, reqBody) => {
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
 
-  const globalFilters = filters?.global;
+const globalFilters = filters?.global || {};
 
-  const rfqFilters = [];
+const rfqFilters = [];
 
-  for (const key in globalFilters) {
-    const value = globalFilters[key];
+/**
+ * Normalize any filter value into array of primitive values
+ * Supported:
+ *  - [1, 2]
+ *  - "manufacturer"
+ *  - { label, value }
+ */
+const normalizeFilterValue = (value) => {
+  if (value === null || value === undefined || value === '') return [];
 
-    // If value is an array → create multiple rows
-    if (Array.isArray(value)) {
-      value.forEach(v => {
-        rfqFilters.push({
-          rfq_id,
-          type: key,
-          value: v,
-          user_id
-        });
-      });
-    }
-    // If value is NOT an array and NOT null → single row
-    else if (value !== null && value !== undefined && value !== "") {
-      rfqFilters.push({
-        rfq_id,
-        type: key,
-        value: value,
-        user_id
-      });
-    }
+  // Array → flatten
+  if (Array.isArray(value)) {
+    return value
+      .map(v => {
+        if (v && typeof v === 'object' && 'value' in v) return v.value;
+        return v;
+      })
+      .filter(v => v !== null && v !== undefined && v !== '');
   }
-   console.log(" result ", rfqFilters)
+
+  // Object with { value }
+  if (typeof value === 'object' && 'value' in value) {
+    return [value.value];
+  }
+
+  // Primitive
+  return [value];
+};
+
+for (const key of Object.keys(globalFilters)) {
+  const rawValue = globalFilters[key];
+
+  const normalizedValues = normalizeFilterValue(rawValue);
+
+  for (const val of normalizedValues) {
+    rfqFilters.push({
+      rfq_id,
+      type: key,
+      value: String(val), // always store primitive
+      user_id
+    });
+  }
+}
+
+  
   const rfqData = {
       comment,
       company_name,
