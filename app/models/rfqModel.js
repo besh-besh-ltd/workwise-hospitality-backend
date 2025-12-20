@@ -1828,18 +1828,6 @@ WHERE NOT EXISTS (
   },
 
   getRfqById: async (id, user_id, user_type, includeVendors = false) => {
-    // First, let's directly check the auction dates in the database
-    try {
-      //  unused code written by
-      // const dateCheckQuery = `
-      //   SELECT id, reverse_auction, ra_start_date, ra_end_date
-      //   FROM tbl_rfq
-      //   WHERE id = $1
-      // `;
-      // const dateCheckResult = await db.query(dateCheckQuery, [id]);
-    } catch (error) {
-      console.error('Error checking auction dates:', error);
-    }
 
     //query changes by mukul on 20-11-2024
     // type casting for TVA.id = NULLIF(RFQ_P.qap, '')::INTEGER
@@ -1861,7 +1849,11 @@ WHERE NOT EXISTS (
       RFQ.timestamp,
       RFQ.status,
       RFQ.rfq_type,
+      RFQ.tender_publish_date,
+      RFQ.vendor_clarification_date,
+      RFQ.tender_fees,
       RFQ.reverse_auction,
+      RFQ.is_tender,
       RFQ.ra_start_date, -- Select raw timestamp
       RFQ.ra_end_date,   -- Select raw timestamp
       RFQ.project_id,
