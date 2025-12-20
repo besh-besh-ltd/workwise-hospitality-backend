@@ -7795,10 +7795,12 @@ ORDER BY m.created_at;
     `;
 
     // Query to fetch clauses associated with the tbl_rfq_product_tech_evaluation_id
+    // Changes by Agnij [Filter sampling clauses for vendors - vendors should not see sampling clauses]
     const getClausesQuery = `
       SELECT id AS clause_id, clause_text
       FROM tbl_rfq_product_tech_evaluation_clauses
-      WHERE tbl_rfq_product_tech_evaluation_id = $1;
+      WHERE tbl_rfq_product_tech_evaluation_id = $1
+        AND clause_type != 'sampling';
     `;
 
     // Query to fetch clause files associated with each clause
