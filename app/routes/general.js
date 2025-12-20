@@ -49,6 +49,12 @@ GeneralRoutes.put(
   validateBody(hierarchySchema.updateHierarchy),
   generalController.updateHierarchy
 );
+GeneralRoutes.delete(
+  '/hierarchy/:id',
+  passportSignIn,
+  acl([7]),
+  generalController.deleteHierarchy
+);
 GeneralRoutes.post(
   '/mapHierarchyToProject',
   passportSignIn,

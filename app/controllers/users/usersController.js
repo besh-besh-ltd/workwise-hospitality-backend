@@ -280,7 +280,7 @@ const UsersController = {
       sendMail({
         from: Config.webmasterMail, // sender address
         to: "siddharth@letsworkwise.com", // list of receivers
-        cc:"mukul@letsworkwise.com",
+        cc:"parth@letsworkwise.com",
         subject: `Work wise | Book A Call - Request `, // Subject line
         html: dynamicEmailHtml // plain text body
       });

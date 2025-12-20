@@ -1,7 +1,7 @@
 import db from "../config/dbConn.js";
 import { sendApprovalNotification } from "../controllers/po/purchaseOrderEmails.js";
 import seoController from "../controllers/seo/seoController.js";
-import { generateSignature } from "../helper/common.js";
+import { consoleLogData, generateSignature } from "../helper/common.js";
 import { scheduleGRNReminders } from "../helper/cronManager.js";
 import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
@@ -283,7 +283,13 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
           'name', SUP.name,
           'email', SUP.email,
           'phone', SUP.mobile,
-          'address', SUP.address,
+          'address', (
+            SELECT address
+            FROM tbl_company_location
+            WHERE company_id = SUP.company_id
+            ORDER BY created_at DESC
+            LIMIT 1
+          ),
           'gstin', COALESCE(TQ.gstin, TCSUP.gstin),
           'cin', TCSUP.cin
         ) AS supplier,
@@ -292,7 +298,13 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
           'name', TC.company_name,
           'email', FIN.email,
           'phone', FIN.mobile,
-          'address', FIN.address,
+          'address', (
+            SELECT address
+            FROM tbl_company_location
+            WHERE company_id = FIN.company_id
+            ORDER BY created_at DESC
+            LIMIT 1
+          ),
           'logoUrl', TC.logo
         ) AS company,
         (
@@ -852,6 +864,22 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
 
   const poId = Number(po_id);
 
+  const po = await db.one(
+    `SELECT * FROM tbl_rfq_purchase_order
+    WHERE id = $1`,
+    [poId]
+  );
+
+  const isUserInHierarchy = await db.oneOrNone(
+    `SELECT 1 FROM tbl_approval_hierarchy
+    WHERE company_id = $1
+    AND hierarchy_id = $2
+    AND user_id = $3`,
+    [po.company_id, po.hierarchy_id, current_user.id]
+  );
+
+  if(!isUserInHierarchy) throw new Error("Edit failed! Logged in user is not in the PO selected hierarchy")
+
   return db.tx(async (t) => {
     // --- Buckets for updates ---
     const poUpdates = {}; // root-level PO column => latest value
@@ -1315,10 +1343,8 @@ export const handleRaiseInvoice = async (po_id, invoice_url, vendor_id) => {
       WHERE company_id = $1
       AND hierarchy_type = 'po'
       AND hierarchy_id = $2`,
-      [po.company_id, po.selected_hierarchy]
+      [po.company_id, (po.selected_hierarchy ?? 1)]
     );
-
-    console.log("REMINDER USERS:", reminderUsers);
 
     const txn = await t.one(
       `SELECT id FROM tbl_approval_hierarchy_transactions
@@ -1450,7 +1476,7 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
       JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
       JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
       JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND target_entity_id = PO.id
-      JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
+      LEFT JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
       JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
       JOIN tbl_company TC ON TU.company_id = TC.id
 
@@ -1533,7 +1559,7 @@ export const handleAddSiteRepresentative = async (po_id, added_by, name, email, 
       JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
       JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
       JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND target_entity_id = PO.id
-      JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
+      LEFT JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
       JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
       JOIN tbl_company TC ON TU.company_id = TC.id
 
