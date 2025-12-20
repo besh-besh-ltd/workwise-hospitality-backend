@@ -1416,6 +1416,9 @@ WHERE NOT EXISTS (
           'project_id', RFQ.project_id,
           'location', RFQ.location,
           'rfq_added_from', RFQ.rfq_added_from,
+          'tender_publish_date', RFQ.tender_publish_date ,
+          'vendor_clarification_date', RFQ.vendor_clarification_date ,
+          'tender_fees', RFQ.tender_fees,
           'is_tender', RFQ.is_tender,
 
           -- Selected Terms

@@ -4525,6 +4525,10 @@ const rfqController = {
         }
       }
 
+      //  fetch rfq mapped hotels, create and assign the mapped hotels in draftData.mappedHotels
+       const mappedHotels = await rfqModel.checkIfExists('tbl_rfq_hotel_mappings', `rfq_id = ${id}`);
+       draftData[0].mappedHotels = mappedHotels || [];
+
       // Return in the same format as getRFQDraftData
       res.status(200).json({
         status: 1,
