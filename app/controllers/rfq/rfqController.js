@@ -2999,8 +2999,12 @@ const rfqController = {
         return res.status(400).json({ status: 3, message: 'RFQ is not marked as tender' }).end();
       }
 
-      const amount = parseInt(rfq.tender_fees || 0);
-      if (!amount || amount <= 0) {
+      // Changes by Agnij [Database stores tender_fees in paise already - don't convert]
+      // Frontend stores tender_fees in paise (multiplies by 100 when user enters rupees)
+      // So we use the value directly without multiplying by 100
+      const amountInPaise = parseInt(rfq.tender_fees || 0);
+      
+      if (!amountInPaise || amountInPaise <= 0) {
         return res.status(400).json({ status: 3, message: 'Tender fees not configured' }).end();
       }
 
@@ -3025,20 +3029,22 @@ const rfqController = {
       });
 
       const receipt = `TENDER-${rfq_id}-${vendorId}-${Date.now()}`;
+
       const order = await razorpay.orders.create({
-        amount,
+        amount: amountInPaise,
         currency: 'INR',
         receipt,
         payment_capture: 1
       });
 
       const beforePayload = JSON.stringify(order);
+      // Changes by Agnij [Store amount in paise in database to match how it's stored in RFQ]
       const paymentRow = await db.one(
         `INSERT INTO tbl_vendor_payments 
           (vendor_id, rfq_id, amount, currency, payment_status, razorpay_order_id, payment_type, method, receipt, before_payment_response)
          VALUES ($1,$2,$3,$4,'created',$5,'tender', $6, $7, $8)
          RETURNING id`,
-        [vendorId, rfq_id, amount, 'INR', order.id, order.method || null, receipt, beforePayload]
+        [vendorId, rfq_id, amountInPaise, 'INR', order.id, order.method || null, receipt, beforePayload]
       );
 
       return res.status(200).json({
@@ -4684,13 +4690,11 @@ const rfqController = {
       }
 
 
-        // map rfq with hotels
-          const hotelRfqMapping = hotel_ids?.map((item ) => ({
-            rfq_id: rfq_id,
-            hotel_id: item,
-            created_by: user_id
-        }));
-        await generalModel.insertMany( 'tbl_rfq_hotel_mappings', hotelRfqMapping);
+        // Changes by Agnij [Use reconcileRFQHotels to properly sync hotels for both new and existing drafts]
+        // This ensures hotels are added/updated correctly when adding products to draft
+        if (hotel_ids && hotel_ids.length > 0) {
+          await hospitalityModel.reconcileRFQHotels(rfq_id, hotel_ids, user_id);
+        }
 
 
       let vendorsList = [];
