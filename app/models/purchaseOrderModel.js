@@ -641,17 +641,43 @@ export const getPODetailsById = async (po_id, user_id) => {
                 SELECT COALESCE(SUM(TPOP.quantity), 0)::double precision
                 FROM tbl_purchase_order_product TPOP
                 WHERE TPOP.purchase_order_id = po.id
+                GROUP BY TPOP.purchase_order_id
               ) AS quantity,
               (
                 SELECT COALESCE(SUM(TPOP.unit_price), 0)::bigint
                 FROM tbl_purchase_order_product TPOP
                 WHERE TPOP.purchase_order_id = po.id
+                GROUP BY TPOP.purchase_order_id
               ) AS unit_price,
               (
                 SELECT COALESCE(SUM(TPOP.total_price), 0)::bigint
                 FROM tbl_purchase_order_product TPOP
                 WHERE TPOP.purchase_order_id = po.id
+                GROUP BY TPOP.purchase_order_id
               ) AS total_value,
+               (
+                  SELECT SUM(delivery_period::int)
+                    FROM tbl_quote_items QI
+                    JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
+                    WHERE QI.quote_id = TPOP.quote_id
+                ) AS delivery_period,
+              COALESCE(
+                (
+                  SELECT JSON_AGG(
+                      JSON_BUILD_OBJECT(
+                          'id', PT.id,
+                          'type', PT.type,
+                          'value', PT.value,
+                          'days', PT.days,
+                          'comment', PT.comment
+                      )
+                  )
+                  FROM tbl_quotes_payment_terms PT
+                  JOIN tbl_quotes TQ ON TQ.rfq_id = po.rfq_id AND TQ.created_by = po.finalized_vendor_id
+                  WHERE PT.quote_id = TQ.id
+                ),
+                '[]'::json
+              ) AS payment_terms,
               CASE
                 WHEN PD.id IS NOT NULL THEN
                   JSON_BUILD_OBJECT(
@@ -668,6 +694,7 @@ export const getPODetailsById = async (po_id, user_id) => {
               ) AS logged_in_user,
               TU.name AS initiated_by_name,
               TU.email AS initiated_by_email,
+              TU.mobile AS initiated_by_mobile,
               CASE WHEN trx.current_approver_id = $2 THEN TRUE ELSE FALSE END AS is_approver,
               COALESCE(
                 (
@@ -830,9 +857,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                 WHERE M.po_id = po.id
               ),
               '[]'::json
-            ) AS tasks,
-            TAHH.created_at AS po_approved_on,
-            QI.delivery_period
+            ) AS tasks
 
        FROM tbl_rfq_purchase_order po
        LEFT JOIN tbl_approval_hierarchy_transactions trx
@@ -843,8 +868,6 @@ export const getPODetailsById = async (po_id, user_id) => {
        JOIN tbl_users TU ON TU.id = po.initiated_by
        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2
-       JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = po.id
-       JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
        LEFT JOIN tbl_approval_hierarchy_history TAHH ON trx.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
        WHERE po.id = $1`,
       [po_id, user_id]
@@ -1423,7 +1446,7 @@ export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks) =
       WHERE company_id = $1
       AND hierarchy_type = 'po'
       AND hierarchy_id = $2`,
-      [po.company_id, po.selected_hierarchy]
+      [po.company_id, po.selected_hierarchy ?? 1]
     );
 
     const txn = await t.one(
@@ -1470,11 +1493,14 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
       TU.name AS finalized_vendor_name,
       TU.email AS finalized_vendor_email,
       TAHH.created_at AS po_approved_on,
-      QI.delivery_period
+      (
+      SELECT SUM(delivery_period::int)
+       FROM tbl_quote_items QI
+       JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
+       WHERE QI.quote_id = TPOP.quote_id
+      ) AS delivery_period
 
       FROM tbl_rfq_purchase_order PO
-      JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
-      JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
       JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND target_entity_id = PO.id
       LEFT JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
       JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
@@ -1490,11 +1516,11 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
       WHERE company_id = $1
       AND hierarchy_type = 'po'
       AND hierarchy_id = $2`,
-      [po.company_id, po.selected_hierarchy]
+      [po.company_id, po.selected_hierarchy ?? 1]
     );
 
     const grnRepData = await t.oneOrNone(
-      `SELECT id, name, email, phone
+      `SELECT id, name, email, phone, token
       FROM tbl_token_login_data
       WHERE token_type = 'GRN'
       AND entity_id = $1`,
@@ -1502,7 +1528,7 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
     );
     
     await scheduleGRNReminders(formattedPOData, reminderUsers.users_list, grnRepData);
-    await sendDispatchedEmail(formattedPOData, reminderUsers.users_list);
+    await sendDispatchedEmail(formattedPOData, reminderUsers.users_list, grnRepData);
 
     return true;
   })
@@ -1553,11 +1579,14 @@ export const handleAddSiteRepresentative = async (po_id, added_by, name, email, 
       TU.name AS finalized_vendor_name,
       TU.email AS finalized_vendor_email,
       TAHH.created_at AS po_approved_on,
-      QI.delivery_period
+      (
+        SELECT SUM(delivery_period::int)
+          FROM tbl_quote_items QI
+          JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
+          WHERE QI.quote_id = TPOP.quote_id
+      ) AS delivery_period
 
       FROM tbl_rfq_purchase_order PO
-      JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
-      JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
       JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND target_entity_id = PO.id
       LEFT JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
       JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id

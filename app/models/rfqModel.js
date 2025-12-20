@@ -9106,21 +9106,21 @@ ORDER BY tq.timestamp DESC;
       let dynamicJoins = '';
       let dynamicConditions = '';
 
+      if (po) {
+        if(user_type == 3) {
+          dynamicJoins += 
+           `JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id AND TRPO.finalized_vendor_id = ${user_id} AND TRPO.status NOT IN ('draft', 'pending_approval', 'rejected', 'cancelled')`
+        } else {
+          dynamicJoins +=
+            'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
+        }
+      }
+
       if (tech_eval) {
         dynamicJoins +=
           'JOIN tbl_rfq_product_tech_evaluation RFQ_T_E ON RFQ.id = RFQ_T_E.rfq_id';
         dynamicConditions +=
           'GROUP BY RFQ.id, P.name HAVING COUNT(RFQ_T_E.id) > 0';
-      }
-
-      if (po) {
-        if(user_type == 3) {
-          dynamicJoins += 
-           `JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id AND TRPO.finalized_vendor_id = ${user_id}`
-        } else {
-          dynamicJoins +=
-            'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
-        }
       }
 
       let q = `
@@ -9188,7 +9188,7 @@ ORDER BY tq.timestamp DESC;
       }
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
-      ${dynamicConditions}
+      ${dynamicConditions ? `AND ${dynamicConditions}` : ''}
       ORDER BY RFQ.timestamp ${sort || 'DESC'}
       LIMIT $3 OFFSET $2;`;
 

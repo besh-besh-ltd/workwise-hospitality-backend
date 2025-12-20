@@ -1926,6 +1926,51 @@ update_user_detail: async (req, res, next) => {
         .end();
     }
   },
+  upload_grn_documents: async (req, res, next) => {
+    
+    try {
+      let user_id;
+
+      user_id = req.user.id;
+
+      let { doc_type } = req.body;
+      if (!doc_type) {
+        doc_type = 'general';
+      }
+      if (req.files) {
+        const result = await userModel.uploadFiles(
+          req.files.file,
+          user_id,
+          doc_type
+        );
+
+        res
+          .status(200)
+          .json({
+            status: 1,
+            data: result
+          })
+          .end();
+      } else {
+        res
+          .status(400)
+          .json({
+            status: 3,
+            message: 'Please select a file!'
+          })
+          .end();
+      }
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
 
 enhance_vendor_profile: async (req, res, next) => {
   try {

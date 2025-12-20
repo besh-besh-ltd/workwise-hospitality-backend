@@ -70,7 +70,8 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
 
       const headerContent = `<h2>Goods Received Note (GRN) Reminder</h2>`;
 
-      const containerContent = `
+      const getContainerContent = (isGRN) => {
+        return `
       <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
         <p>${reminderTagLine}</p>
 
@@ -92,24 +93,44 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
         </p>
 
         <div style="text-align:center; margin-top:24px;">
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
-            style="background-color: #3B82F6; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; display: inline-block; font-weight: 600;">
-            View PO in Dashboard
-          </a>
+          ${isGRN ? (
+            `<a
+                href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order/grn?rfq=${purchase_order.rfq_id}&po=${purchase_order.id}&token=${grnRepData.token}"
+                style="background-color:#10B981; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600; margin-bottom:12px;"
+            >
+                Open GRN Page
+            </a>`
+          ) : (
+            `<a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
+              style="background-color: #3B82F6; color: white; text-align: center; padding: 12px 24px; border-radius: 8px; text-decoration: none; display: inline-block; font-weight: 600;">
+              View PO in Dashboard
+            </a>`
+          )}
         </div>
 
         <p style="text-align:center; margin-top: 30px;">
           Thank you for keeping your GRNs up to date.<br/>
           <strong>— Workwise Team</strong>
         </p>
-      </div>`;
+      </div>`
+      }
+
+      const containerContent = getContainerContent(false);
+      const grnContent = getContainerContent(true);
 
       const htmlContent = generateEmailTemplate(headerContent, containerContent);
+      const grnHtmlContent = generateEmailTemplate(headerContent, grnContent);
 
       let recipients = {
         from: config.webmasterMail,
         subject: `GRN Reminder: PO #${po_number} – ${subjectSuffix}`,
         html: htmlContent,
+      };
+
+      let grnRecipients = {
+        from: config.webmasterMail,
+        subject: `GRN Reminder: PO #${po_number} – ${subjectSuffix}`,
+        html: grnHtmlContent,
       };
 
       const emails = [];
@@ -122,7 +143,7 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
       }
 
       if(grnRepData && grnRepData.email)
-        emails.push(grnRepData.email);
+        grnRecipients.to = [grnRepData.email];
 
       if (emails && emails.length > 0) {
         recipients.to = emails;
@@ -132,6 +153,8 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
       }
 
       sendMail(recipients);
+      if(grnRepData)
+        sendMail(grnRecipients);
       return resolve(true);
     } catch (err) {
       console.error("Error sending GRN reminder:", err);
@@ -317,7 +340,7 @@ export const sendGRNUpdationEmail = async (purchase_order, grn_document_url, use
   });
 };
 
-export const sendDispatchedEmail = async (purchase_order, userList) => {
+export const sendDispatchedEmail = async (purchase_order, userList, grnRepData) => {
   return new Promise(async (resolve, reject) => {
     try {
       const {
@@ -350,7 +373,7 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
 
       const headerContent = `<h2>Dispatch Update for Purchase Order</h2>`;
 
-      const containerContent = `
+      const getContainerContent = (isGRN) => `
       <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
         <p>
           This is to inform you that the vendor <strong>${vendorName}</strong> has updated the status of 
@@ -389,24 +412,47 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
         </p>
 
         <div style="text-align:center; margin-top:24px;">
-          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
-             style="background-color:#3B82F6; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
-            View PO in Dashboard
-          </a>
+          ${isGRN ? (
+            `
+              <a
+                  href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order/grn?rfq=${purchase_order.rfq_id}&po=${purchase_order.id}&token=${grnRepData.token}"
+                  style="background-color:#10B981; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600; margin-bottom:12px;"
+              >
+                  Open GRN Page
+              </a>
+            `
+          ) : (
+            `
+              <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/purchase-order?rfq_id=${rfq_id}&po=${po_id}" 
+                style="background-color:#3B82F6; color:white; text-align:center; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
+                View PO in Dashboard
+              </a>
+            `
+          )}
         </div>
 
         <p style="text-align:center; margin-top: 30px;">
           Thank you for coordinating a smooth delivery and GRN posting.<br/>
           <strong>— Workwise Team</strong>
         </p>
-      </div>`;
+      </div>`
+
+      const containerContent = getContainerContent(false);
+      const grnContent = getContainerContent(true);
 
       const htmlContent = generateEmailTemplate(headerContent, containerContent);
+      const grnHtmlContent = generateEmailTemplate(headerContent, grnContent);
 
       let recipients = {
         from: config.webmasterMail,
         subject: `Dispatch Update: PO #${po_number} marked as Dispatched`,
         html: htmlContent,
+      };
+
+      let grnRecipients = {
+        from: config.webmasterMail,
+        subject: `Dispatch Update: PO #${po_number} marked as Dispatched`,
+        html: grnHtmlContent,
       };
 
       const emails = [];
@@ -425,7 +471,11 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
         return resolve(false);
       }
 
+      if(grnRepData && grnRepData.email)
+        grnRecipients.to = [grnRepData.email]
+
       sendMail(recipients);
+      sendMail(grnRecipients);
       return resolve(true);
     } catch (err) {
       console.error("Error sending dispatched email:", err);
