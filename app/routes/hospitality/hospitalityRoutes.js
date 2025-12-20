@@ -150,11 +150,27 @@ HospitalityRoutes.delete(
   hospitalityController.deleteUserMapping
 );
 
+
+  /**
+   * @created : mukul jatav 
+   * validate rfq_id params ( not in db just format )
+   * Retrieves all hotels currently mapped to the specified RFQ.
+ */
+HospitalityRoutes.get(
+  '/rfq-hotels/:rfq_id',
+  passportSignIn,
+  validateParam(schemas.rfqIdParam),
+  hospitalityController.getRFQHotels
+);
+
+
 HospitalityRoutes.post(
   '/subscription-payment',
   validateBody(schemas.hospitalitySubscriptionPayment),
   UsersController.hospitalitySubscriptionPayment
 );
+
+
 
 HospitalityRoutes.get('/entities', passportSignIn, acl([7]), UsersController.getListedEntities);
 
