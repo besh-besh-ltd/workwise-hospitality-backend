@@ -739,6 +739,81 @@ JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id;
 },
 
 
+/**
+ * @created_by: Mukul jatav
+ * Synchronizes RFQ ↔ Hotel mappings using a "desired state" approach.
+ 
+ * HOW IT WORKS:
+ * 1. Frontend sends the FINAL list of hotel_ids for an RFQ.
+ * 2. Backend treats this list as the single source of truth.
+ * 3. Inside a DB transaction:
+ *    - Deletes mappings that are no longer present in the incoming list.
+ *    - Inserts only missing mappings using a single bulk SQL statement.
+ * 4. Database unique constraint (rfq_id, hotel_id) guarantees safety.
+ *
+ * WHY THIS APPROACH:
+ * - Idempotent: same request can be safely retried multiple times.
+ * - Prevents duplicate key violations without extra JS checks.
+ * - Backend owns business logic; frontend stays simple.
+ * - Uses set-based SQL (UNNEST + ON CONFLICT) which is faster and safer
+ * - Handles add/remove/update in one API call.
+ * - Safe against race conditions and partial failures (transactional).
+ * - Scales well as hotel counts grow.
+ * - Easy to extend with validations (e.g., lock updates after RFQ publish).
+* This follows a desired-state reconciliation pattern used in, declarative systems and large-scale backends for safe state syncing.
+ */
+ reconcileRFQHotels: async ( rfq_id, hotel_ids = [], created_by ) => {
+  if (!rfq_id) {
+    throw new Error("rfq_id is required");
+  }
+
+  // Normalize & de-duplicate
+  const incomingHotelIds = [...new Set(hotel_ids.map(Number))];
+
+  return db.tx(async (t) => {
+    /**
+     * STEP 1: Delete removed mappings
+     * - Simple & fast
+     */
+    await t.none(
+      `
+        DELETE FROM tbl_rfq_hotel_mappings
+        WHERE rfq_id = $1
+        AND hotel_id NOT IN (
+          SELECT UNNEST($2::int[])
+        )
+      `,
+      [rfq_id, incomingHotelIds]
+    );
+
+    /**
+     * STEP 2: Insert new mappings
+     * - Single SQL statement
+     * - Conflict-safe
+     */
+    if (incomingHotelIds.length > 0) {
+      await t.none(
+        `
+          INSERT INTO tbl_rfq_hotel_mappings (rfq_id, hotel_id, created_by)
+          SELECT $1, hotel_id, $3
+          FROM UNNEST($2::int[]) AS hotel_id
+          ON CONFLICT (rfq_id, hotel_id) DO NOTHING
+        `,
+        [rfq_id, incomingHotelIds, created_by]
+      );
+    }
+
+    return {
+      rfq_id,
+      hotels: incomingHotelIds,
+    };
+  });
+},
+
+
+
+
+
 };
 
 export default hospitalityModel;
