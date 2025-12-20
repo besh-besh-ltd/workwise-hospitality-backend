@@ -930,7 +930,10 @@ get_company_users: async (req, res, next) => {
         role: user.user_type,
         role_name: userTypeMap[user.user_type] || "Unknown",
         status: user.status === 1 ? "active" : "inactive",
-        created_at: user.created_at
+        created_at: user.created_at,
+        employee_type: user.employee_type,
+        employee_code: user.employee_code,
+        payroll_company_id: user.payroll_company_id
       }));
 
     
@@ -1839,6 +1842,17 @@ update_user_detail: async (req, res, next) => {
     if (reqData.email !== undefined) updateData.email = reqData.email.trim().toLowerCase();
     if (reqData.mobile !== undefined) updateData.mobile = reqData.mobile.trim();
     if (reqData.designation !== undefined) updateData.designation = reqData.designation;
+    
+    // Handle hospitality employee fields
+    if (isAdmin && reqData.employee_type !== undefined) {
+      updateData.employee_type = reqData.employee_type;
+    }
+    if (isAdmin && reqData.employee_code !== undefined) {
+      updateData.employee_code = reqData.employee_code;
+    }
+    if (isAdmin && reqData.payroll_company_id !== undefined) {
+      updateData.payroll_company_id = reqData.payroll_company_id;
+    }
 
     const whereClause =
       isAdmin && targetUserId !== loggedInUser.id
@@ -1926,6 +1940,23 @@ update_user_detail: async (req, res, next) => {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+  get_my_departments: async (req, res, next) => {
+    try {
+      const userId = req.user.id;
+      const departments = await rbacModel.getUserDepartments(userId);
+      
+      res.status(200).json({
+        status: true,
+        data: departments
+      }).end();
+    } catch (err) {
+      logError(err);
+      res.status(400).json({
+        status: false,
+        message: err.message || Config.errorText.value
+      }).end();
     }
   },
   get_profile: async (req, res, next) => {

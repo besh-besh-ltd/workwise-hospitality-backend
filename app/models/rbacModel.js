@@ -40,6 +40,19 @@ const rbacModel = {
     );
   },
 
+  getUserDepartments: (userId) => {
+    return db.any(
+      `
+      SELECT d.id, d.title
+      FROM tbl_user_department ud
+      JOIN tbl_department d ON d.id = ud.department_id
+      WHERE ud.user_id = $1
+      ORDER BY d.title
+      `,
+      [userId]
+    );
+  },
+
   /* -------------------- ROLES & SCOPES -------------------- */
 
   assignUserRoleScopes: (scopes = []) => {

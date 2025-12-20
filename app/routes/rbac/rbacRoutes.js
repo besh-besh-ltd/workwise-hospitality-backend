@@ -50,5 +50,11 @@ router.get(
   acl([7]),
   rbacController.getUserRoleScopes
 );
+router.get(
+  '/users/:userId/departments',
+  passportSignIn,
+  acl([7]),
+  rbacController.getUserDepartments
+);
 
 export default router;

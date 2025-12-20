@@ -174,6 +174,23 @@ const rbacController = {
       });
     }
   },
+  getUserDepartments: async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      const departments = await rbacModel.getUserDepartments(userId);
+
+      return res.json({
+        status: true,
+        data: departments
+      });
+    } catch (err) {
+      return res.status(500).json({
+        status: false,
+        message: err.message
+      });
+    }
+  },
   getAllPermissionsGrouped: async (req, res) => {
     try {
       const permissions = await rbacModel.getAllPermissions();

@@ -152,6 +152,11 @@ UsersRoutes.get(
   UsersController.get_profile
 );
 UsersRoutes.get(
+  '/me/departments',
+  passportSignIn,
+  UsersController.get_my_departments
+);
+UsersRoutes.get(
   '/get-profile-documents',
   passportSignIn,
   validateDbBody.user_id_profileexists,
