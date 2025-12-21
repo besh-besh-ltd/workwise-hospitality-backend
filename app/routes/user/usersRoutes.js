@@ -437,13 +437,5 @@ UsersRoutes.post(
   UsersController.submitFeedback
 );
 
-UsersRoutes.post(
-  '/feedback/dismiss',
-   passportSignIn,
-   validateBody(schemas.dismiss_feedback),
-  UsersController.dismissFeedback
-);
-
-
 
 export default UsersRoutes;

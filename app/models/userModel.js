@@ -1,5 +1,6 @@
 import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
+import { addMonths } from '../helper/common.js';
 
 const userModel = {
 
@@ -3998,8 +3999,143 @@ getBuyerAccountLimits: async (company_id) => {
   });
 },
 
+  // ------------------------------------------------------------
+  // GET MOST RECENT EVENT FOR ACTION 
+  // ------------------------------------------------------------
+  getLatestEvent: async (user_id, action_key) => {
+  try {
+    const row = await db.oneOrNone(
+      `SELECT next_allowed_at
+       FROM tbl_feedback_events
+       WHERE user_id = $1
+         AND action_key = $2
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [user_id, action_key]
+    );
+
+    const now = new Date();
+
+    // CASE 1: No record found → create + allow show
+    if(!row && action_key == 'overall_experience') {
+      const nextAllowedAt = addMonths(2);
+      await db.none(
+        `INSERT INTO tbl_feedback_events (user_id, action_key, event, created_at)
+         VALUES ($1, $2, 'shown', $3)`,
+        [user_id, action_key, nextAllowedAt]
+      );
+
+      return {
+        action_key,
+        shouldShow: false
+      };
+    }
+    
+    if (!row) {
+      await db.none(
+        `INSERT INTO tbl_feedback_events (user_id, action_key, event, created_at)
+         VALUES ($1, $2, 'shown', NOW())`,
+        [user_id, action_key]
+      );
+
+      return {
+        action_key,
+        shouldShow: true
+      };
+    }
+
+    const nextAllowed = new Date(row.next_allowed_at);
+
+    // CASE 2: Cooldown expired → create + allow show
+    // CASE 3: Cooldown expired
+if (row.next_allowed_at !== null && nextAllowed <= now) {
+
+    // Update only if last event was "shown"
+    await db.none(
+      `UPDATE tbl_feedback_events
+       SET created_at = NOW()
+       WHERE id = $1`,
+      [row.id]
+    );
+  
+    // Otherwise create a new "shown" row
+    await db.none(
+      `INSERT INTO tbl_feedback_events (user_id, action_key, event, created_at)
+       VALUES ($1, $2, 'shown', NOW())`,
+      [user_id, action_key]
+    );
+  
+
+  return { action_key, shouldShow: true };
+}
+else if(row.next_allowed_at === null){
+    // Update only if last event was "shown"
+    await db.none(
+      `UPDATE tbl_feedback_events
+       SET created_at = NOW()
+       WHERE id = $1`,
+      [row.id]
+    );
+
+      return { action_key, shouldShow: true };
+}
+
+    // CASE 3: Cooldown active → DO NOT create, hide it
+    return {
+      action_key,
+      shouldShow: false
+    };
+
+  } catch (err) {
+    throw new Error(err);
+  }
+},
 
 
+  // ------------------------------------------------------------
+  // INSERT FEEDBACK EVENT LOG
+  // ------------------------------------------------------------
+  logEvent: async (data) => {
+  const { user_id, action_key, event, rating, comment, next_allowed_at } = data;
+
+  try {
+    const row = await db.oneOrNone(
+      `SELECT id 
+       FROM tbl_feedback_events
+       WHERE user_id = $1 AND action_key = $2
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [user_id, action_key]
+    );
+
+    if (!row) {
+      // If for some reason no row exists, fallback to insert
+      return await db.one(
+        `INSERT INTO tbl_feedback_events 
+          (user_id, action_key, event, rating, comment, next_allowed_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+         RETURNING *`,
+        [user_id, action_key, event, rating || null, comment || null, next_allowed_at]
+      );
+    }
+
+    // UPDATE the latest row
+    return await db.one(
+      `UPDATE tbl_feedback_events
+       SET event = $1,
+           rating = $2,
+           comment = $3,
+           next_allowed_at = $4,
+           created_at = NOW()
+       WHERE id = $5
+       RETURNING *`,
+      [event, rating || null, comment || null, next_allowed_at, row.id]
+    );
+
+  } catch (err) {
+    throw new Error(err);
+  }
+}
 
 };
 
