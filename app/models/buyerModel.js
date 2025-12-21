@@ -1,11 +1,6 @@
 import db from '../config/dbConn.js';
 import Config from '../config/app.config.js';
 
-// Convert undefined action_key to null for PostgreSQL
-function normalizeActionKey(value) {
-  return value === undefined ? null : value;
-}
-
 const buyerModel = {
   getBuyerList: async (limit, offset, organization, verified, name, user_type) => {
     return new Promise(function (resolve, reject) {
@@ -232,8 +227,7 @@ const buyerModel = {
           reject(error);
         });
     });
-  },
-
+  }
 };
 
 export default buyerModel;
