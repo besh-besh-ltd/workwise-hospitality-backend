@@ -4261,86 +4261,11 @@ publish_profile_reviews: async (req, res, next) => {
         error: err.message
       });
     }
-},//   try {
-//     const user_id = req.user.id;
-//     const requestedKey = req.params.action_key;
-
-//     // Get the latest GLOBAL event (any action_key)
-//     const latestGlobal = await userModel.getLatestGlobalEvent(user_id);
-
-//     // Check global 15-day cooldown
-//     if (latestGlobal && latestGlobal.event === "submitted") {
-//       const sevenDaysLater = addDays(15);
-      
-//       if (!isAfter(sevenDaysLater)) {
-//         // Still within 15-day global cooldown → don't show ANY feedback
-//         return res.json({
-//           status: true,
-//           shouldShow: false
-//         });
-//       }
-//     }
-
-//     // Get the latest event for the requested action_key after 15 days.
-//     const latestForKey = await userModel.getLatestEvent(user_id, requestedKey);
-
-//     // No event for this action_key → show it and log "shown"
-//     if (!latestForKey) {
-//       await userModel.logEvent({
-//         user_id,
-//         action_key: requestedKey,
-//         event: "shown",
-//         next_allowed_at: null
-//       });
-
-//       return res.json({
-//         status: true,
-//         shouldShow: true,
-//         action_key: requestedKey
-//       });
-//     }
-
-//     // If event is "shown" with null next_allowed_at → show it again (already logged)
-//     if (latestForKey.event === "shown" && !latestForKey.next_allowed_at) {
-//       return res.json({
-//         status: true,
-//         shouldShow: true,
-//         action_key: requestedKey
-//       });
-//     }
-
-//     // If next_allowed_at is null OR has passed → show it and log "shown"
-//     if (!latestForKey.next_allowed_at || isAfter(latestForKey.next_allowed_at)) {
-//       await userModel.logEvent({
-//         user_id,
-//         action_key: requestedKey,
-//         event: "shown",
-//         next_allowed_at: null
-//       });
-
-//       return res.json({
-//         status: true,
-//         shouldShow: true,
-//         action_key: requestedKey
-//       });
-//     }
-
-//     // next_allowed_at hasn't passed yet → don't show
-//     return res.json({
-//       status: true,
-//       shouldShow: false
-//     });
-
-//   } catch (err) {
-//     console.error(err);
-//     return res.status(500).json({ status: false, message: "Internal error" });
-//   }
-// },
+},
 
 // ---------------------------------------------------------------
 // SUBMIT FEEDBACK
 // ---------------------------------------------------------------
-
 
 submitFeedback: async (req, res) => {
   try {
