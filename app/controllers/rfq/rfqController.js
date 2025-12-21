@@ -742,7 +742,6 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
       } else {
         mailRecipients.to = user_details[0].email;
       }
-
       // Construct an array of product descriptions
       const productDescriptions = productsWithTechEval.map((product) => {
         const quantitySpec = product.spec.find(specItem => specItem.title === 'Quantity');
@@ -2302,35 +2301,55 @@ const saveRfqDraft = async (user_id, reqBody) => {
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
 
-  const globalFilters = filters?.global;
+const globalFilters = filters?.global || {};
 
-  const rfqFilters = [];
+const rfqFilters = [];
 
-  for (const key in globalFilters) {
-    const value = globalFilters[key];
+/**
+ * Normalize any filter value into array of primitive values
+ * Supported:
+ *  - [1, 2]
+ *  - "manufacturer"
+ *  - { label, value }
+ */
+const normalizeFilterValue = (value) => {
+  if (value === null || value === undefined || value === '') return [];
 
-    // If value is an array → create multiple rows
-    if (Array.isArray(value)) {
-      value.forEach(v => {
-        rfqFilters.push({
-          rfq_id,
-          type: key,
-          value: v,
-          user_id
-        });
-      });
-    }
-    // If value is NOT an array and NOT null → single row
-    else if (value !== null && value !== undefined && value !== "") {
-      rfqFilters.push({
-        rfq_id,
-        type: key,
-        value: value,
-        user_id
-      });
-    }
+  // Array → flatten
+  if (Array.isArray(value)) {
+    return value
+      .map(v => {
+        if (v && typeof v === 'object' && 'value' in v) return v.value;
+        return v;
+      })
+      .filter(v => v !== null && v !== undefined && v !== '');
   }
-   console.log(" result ", rfqFilters)
+
+  // Object with { value }
+  if (typeof value === 'object' && 'value' in value) {
+    return [value.value];
+  }
+
+  // Primitive
+  return [value];
+};
+
+for (const key of Object.keys(globalFilters)) {
+  const rawValue = globalFilters[key];
+
+  const normalizedValues = normalizeFilterValue(rawValue);
+
+  for (const val of normalizedValues) {
+    rfqFilters.push({
+      rfq_id,
+      type: key,
+      value: String(val), // always store primitive
+      user_id
+    });
+  }
+}
+
+  
   const rfqData = {
       comment,
       company_name,
@@ -4524,54 +4543,59 @@ const rfqController = {
       //Add global filters to sheet data
       if (!globalFilters || typeof globalFilters !== "object") return;
       else {
-        const extractors = {
-          country: (v) => v.map((x) => x.id),
-          state: (v) => v.map((x) => x.id),
-          city: (v) => v.map((x) => x.id),
+        const normalizedFilters = {
+  ...globalFilters,
 
-          approved_by_id: (v) => v.map((x) => x.id),
+  country: globalFilters.country
+    ? [globalFilters.country]
+    : [],
 
-          vendorType: (v) => v.map((x) => x.value),    // store "branch" only
-          productMakes: (v) => v,                      // store string array as-is
+  vendorType: globalFilters.vendorTypes || [],
+  vendor_name: globalFilters.vendorName || ''
+};
 
-          category_id: (v) => v,                       // direct ID
-          search_key: (v) => v,
-          vendor_name: (v) => v,
-          include_variants: (v) => v,
+       const extractors = {
+  country: (v) => Array.isArray(v) ? v.map(x => x.id) : [],
+  state: (v) => Array.isArray(v) ? v.map(x => x.id) : [],
+  city: (v) => Array.isArray(v) ? v.map(x => x.id) : [],
 
-          myVendorType: (v) => v,
-          prevWorkedWith: (v) => v,
-          // store object as JSON
-        };
+  approvedBy: (v) => Array.isArray(v) ? v.map(x => x.id) : [],
+  vendorType: (v) => Array.isArray(v) ? v.map(x => x.value) : [],
+  makes: (v) => Array.isArray(v) ? v : [],
+
+  vendor_name: (v) => typeof v === 'string' ? v : null,
+  myVendorType: (v) => v ?? null,
+  prevWorkedWith: (v) => v ?? null,
+};
 
 
-        console.log("checcking the logs here -------------", globalFilters);
-        for (const [key, rawValue] of Object.entries(globalFilters)) {
-          if (rawValue === null || rawValue === "" || rawValue?.length === 0) continue;
 
-          const extractor = extractors[key];
-          if (!extractor) continue; // skip unknown fields
 
-          const extracted = extractor(rawValue);
+       try {
+  for (const [key, rawValue] of Object.entries(normalizedFilters)) {
+    if (!rawValue || rawValue.length === 0) continue;
 
-          console.log(`Extracted filter - ${key}:`, extracted);
+    const extractor = extractors[key];
+    if (!extractor) continue;
 
-          // Handle arrays → multiple inserts
-          const values = Array.isArray(extracted) ? extracted : [extracted];
+    const values = [].concat(extractor(rawValue));
 
-          for (const val of values) {
-            if (val === null || val === "" || val === undefined) continue;
+    for (const val of values) {
+      if (val === null || val === '') continue;
 
-            const filterData = {
-              variant_id,
-              rfq_id,
-              type: key,
-              value: val,
-              user_id: req.user.id,
-            };
-            await rfqModel.insert("tbl_rfq_filters", filterData);
-          }
-        }
+      await rfqModel.insert("tbl_rfq_filters", {
+        variant_id,
+        rfq_id,
+        type: key,
+        value: val,
+        user_id
+      });
+    }
+  }
+} catch (filterErr) {
+  logError('Filter insert failed', filterErr);
+}
+
       }
       res.status(200).json({
         status: 1,
