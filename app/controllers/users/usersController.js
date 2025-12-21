@@ -3,6 +3,7 @@ import subscriptionModel from '../../models/subscriptionModel.js';
 import notificationModel from '../../models/notificationModel.js';
 import couponModel from '../../models/couponModel.js';
 import Config from '../../config/app.config.js';
+import {isAfter, addDays, addHours, addMonths} from '../../helper/common.js';
 import {
   logError,
   currentDateTime,
@@ -37,7 +38,6 @@ import whatsappNotificationAISensy from '../../helper/whatsappNotificationAISens
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { pgp } from '../../config/dbConn.js';
 
-
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -53,6 +53,14 @@ webpush.setVapidDetails(
 const cryptr = new Cryptr(Config.cryptR.secret);
 
 var global_subscription = '';
+
+const ACTIONS = [
+  "overall",
+  "created_rfq",
+  "boq_ai",
+  "po_created",
+  "pr_submitted"
+];
 
 
 /**
@@ -4228,6 +4236,72 @@ publish_profile_reviews: async (req, res, next) => {
       .end();
     }
   },
+
+  // ---------------------------------------------------------------
+  // SHOULD SHOW FEEDBACK?
+  // ---------------------------------------------------------------
+
+   shouldShowFeedback: async (req, res) => {
+    try {
+      const user_id = req.user.id;
+      const requestedKey = req.params.action_key;
+
+      const result = await userModel.getLatestEvent(user_id, requestedKey);
+
+      return res.status(200).json({
+        success: true,
+        data: result
+      });
+    } catch (err) {
+      console.error(err);
+
+      return res.status(500).json({
+        success: false,
+        message: "Something went wrong",
+        error: err.message
+      });
+    }
+},
+
+// ---------------------------------------------------------------
+// SUBMIT FEEDBACK
+// ---------------------------------------------------------------
+
+submitFeedback: async (req, res) => {
+  try {
+    const { action_key, rating, comment, event } = req.body;
+    const user_id = req.user.id;
+
+    let nextAllowed = null;
+    
+    // Determine cooldown based on submitted event
+    if (action_key === "overall_experience") {
+      nextAllowed = addDays(60);    // overall submitted → ask again in 2 months
+    } else {
+      nextAllowed = addDays(15);  // action feedback submitted → ask again in 15 days
+    }
+
+    if(event === "dismissed"){
+        nextAllowed = addHours(24);
+    }
+
+    await userModel.logEvent({
+      user_id,
+      action_key,
+      event,
+      rating,
+      comment,
+      next_allowed_at: nextAllowed
+    });
+
+    return res.json({ status: true, message: "Feedback submitted" });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: false });
+  }
+},
+
 
 
   // Changes by Agnij 10-06-2025 [Added function to get buyer account limits]
