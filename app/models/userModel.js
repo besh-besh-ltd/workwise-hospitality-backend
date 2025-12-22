@@ -1006,7 +1006,8 @@ user_book_demo: async (mobile) => {
            WHEN tbl_company.logo IS NULL THEN
                NULL
            ELSE tbl_company.logo
-           END AS profile_image_url`;
+           END AS profile_image_url,
+        COALESCE(sub_info.is_premium, 0) AS is_premium`;
 
       // Additional fields if current_user is not null
      if (current_user !== null) {
@@ -1041,6 +1042,28 @@ user_book_demo: async (mobile) => {
       baseQuery += `
       FROM tbl_users
       LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
+      LEFT JOIN (
+        SELECT
+          tus.user_id,
+          MAX(tus.end_date) AS max_end_date,
+          MAX(
+            CASE
+              WHEN tsp.plan_name ILIKE '%Enterprise%'
+                AND tus.status = 1
+                AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                THEN 2
+              WHEN tsp.plan_name ILIKE '%Premium%'
+                AND tus.status = 1
+                AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                THEN 1
+              ELSE 0
+            END
+          ) AS is_premium
+        FROM tbl_user_subscriptions tus
+        LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
+        GROUP BY tus.user_id
+      ) sub_info ON sub_info.user_id = tbl_users.id
+       
       WHERE tbl_users.id = $1`;
 
       // Execute the query
