@@ -823,6 +823,8 @@ WHERE NOT EXISTS (
     });
   },
 
+
+  //  mukul need to delete
   getLastRfQNumber: async () => {
     const query = `SELECT rfq_no FROM tbl_rfq ORDER BY id DESC LIMIT 1`;
     return new Promise(function (resolve, reject) {

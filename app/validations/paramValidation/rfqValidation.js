@@ -232,7 +232,8 @@ export const rfqSchemas = {
     tender_publish_date: Joi.string().optional().allow(null).allow(''),
     vendor_clarification_date: Joi.string().optional().allow(null).allow(''),
     hospitality_company_id: Joi.number().integer().optional().allow(null),
-    hotel_id: Joi.number().integer().optional().allow(null)
+    hotel_id: Joi.number().integer().optional().allow(null),
+    hotel_ids: Joi.array().items(Joi.number()).optional().allow(null)
   }),
   update: Joi.object().keys({
     rfq_id: Joi.number().required(),

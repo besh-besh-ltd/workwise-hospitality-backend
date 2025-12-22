@@ -36,16 +36,6 @@ import { summaries } from '../../util/constants.js';
 import Razorpay from 'razorpay';
 import crypto from 'crypto';
 
-const formatPersistentErrors = (errors) => {
-  if(errors) {
-    if(Array.isArray(errors)) {
-      return errors.map(error => ``)
-    }
-  } else {
-    return ""
-  }
-}
-
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
   new Promise((resolve) => setImmediate(resolve));
@@ -226,6 +216,7 @@ export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, st
 };
 
 
+//  mukul need to delete - not in use anywhere
 const getNextRfQNumber = async () => {
   // get last rfq
   return new Promise(async function (resolve, reject) {
@@ -246,120 +237,13 @@ const hasValidValue = (value) =>
 const hasValidFilters = (obj) =>
   obj && Object.keys(obj).length > 0 && Object.values(obj).some(hasValidValue);
 
-const removeSpecsDynamically = (data) => {
-  // modified my mukul on 23-AUG
-  // No longer use of this function
-
-  const groupedData = data.reduce((acc, item) => {
-    acc[item.product_id] = acc[item.product_id] || [];
-    acc[item.product_id].push(item);
-    return acc;
-  }, {});
-
-  Object.keys(groupedData).forEach((product_id) => {
-    const items = groupedData[product_id];
-    items.forEach((item, idx) => {
-      const totalSets = Math.floor(item.product_specs.length / 4);
-      const setToKeep = totalSets - idx;
-
-      if (setToKeep > 0 && setToKeep <= totalSets) {
-        const start = (setToKeep - 1) * 4;
-        item.product_specs = item.product_specs.slice(start, start + 4);
-      } else if (setToKeep <= 0) {
-        item.product_specs = [];
-      }
-      // If setToKeep > totalSets, keep all specs
-    });
-  });
-
-  return data;
-};
-
-function filterQuotations(data) {
-  // Group by product_id
-  const grouped = data.reduce((acc, item, index) => {
-    if (!acc[item.product_id]) {
-      acc[item.product_id] = [];
-    }
-    acc[item.product_id].push({ index, item });
-    return acc;
-  }, {});
-
-  // Filter quotations
-  const filteredData = Object.values(grouped).flatMap((group) =>
-    group.map((entry, i) => {
-      const newItem = { ...entry.item };
-      if (i < newItem.quotations.length) {
-        newItem.quotations = [newItem.quotations[i]];
-      } else {
-        newItem.quotations = [];
-      }
-      return { index: entry.index, item: newItem };
-    })
-  );
-
-  // Sort by original index and return only the items
-  return filteredData
-    .sort((a, b) => a.index - b.index)
-    .map((entry) => entry.item);
-}
-
-
-
-function processQuotations(data) {
-  const grouped = data.reduce((acc, item) => {
-    if (!acc[item.product_id]) {
-      acc[item.product_id] = [];
-    }
-    acc[item.product_id].push(item);
-    return acc;
-  }, {});
-
-  Object.values(grouped).forEach((items) => {
-    items.forEach((item, idx) => {
-      if (items.length > 1) {
-        item.quotations = item.quotations.filter(
-          (_, i) => i % items.length === idx
-        );
-      }
-    });
-  });
-
-  return data.flat();
-}
-
-function processQuotCompare(data) {
-  const grouped = data.reduce((acc, item) => {
-    if (!acc[item.product_id]) {
-      acc[item.product_id] = [];
-    }
-    acc[item.product_id].push(item);
-    return acc;
-  }, {});
-
-  Object.values(grouped).forEach((items) => {
-    items.forEach((item, idx) => {
-      if (items.length > 1) {
-        item.quotations = item.quotations.filter(
-          (_, i) => i % items.length === idx
-        );
-        // Keep only the quote_details at the index corresponding to the product's index
-        item.quotations.forEach((quotation) => {
-          quotation.quote_details = [quotation.quote_details[idx]];
-        });
-      }
-    });
-  });
-
-  return data;
-}
 
 const saveMagicSearchInDraft = async (data, createdBy, processedUrl, rfqId, sheetId) => {
   try {
 
    
-    const nextRfqNumber = await getNextRfQNumber()
-    return await rfqModel.saveMagicSearchInDraft(data, nextRfqNumber, createdBy, processedUrl, rfqId, sheetId);
+    // const nextRfqNumber = await getNextRfQNumber()
+    return await rfqModel.saveMagicSearchInDraft(data, createdBy, processedUrl, rfqId, sheetId);
   } catch (error) {
     throw error
   }
@@ -373,151 +257,8 @@ const saveEstimates = async (data, createdBy) => {
   }
 }
 
-const insertProduct = async (
-  {
-    product_id,
-    variant,
-    comment,
-    datasheet,
-    spec_file,
-    qap_file,
-    spec,
-    vendors,
-    datasheet_file,
-    qap
-  },
-  created_rfq_id,
-  sheet_id,
-) => {
-  try {
-    let tbl_rfq_products_data = {
-      product_variant_id: product_id,
-      variant,
-      comment,
-      datasheet: datasheet || '', // Changes by Agnij 2025-06-18 [Fixed not-null constraint violation]
-      spec_file:'',// this field we have to remove from database
-      qap_file:'',// this field we have to remove from database
-      rfq_id: created_rfq_id,
-      datasheet_file:"",// this field we have to remove from database
-      qap: qap || '', // Also ensuring qap is not null
-      sheet_id,
-    };
-    
-    let spec_array = spec?.map((item) => {
-      item.rfq_id = created_rfq_id;
-      item.product_variant_id = product_id;
-      item.variant = variant;
-      item.sheet_id = sheet_id;
-      return item;
-    });
-    const spec_keys = ['title', 'value', 'rfq_id', 'product_variant_id', 'variant', 'sheet_id'];
 
-    const vendor_keys = ['user_id', 'rfq_id', 'product_variant_id', 'variant', 'sheet_id'];
-    var vendor_array = [];
-    // Changes by Agnij 2025-06-18 [Added null check for vendors]
-    if (vendors && vendors.length > 0) {
-      vendor_array = vendors.map((item) => {
-        // Changes by Agnij 2025-06-18 [Fixed missing user_id property]
-        // Check if vendor has user_id property, if not try to get it from id
-        if (!item.user_id && item.id) {
-          item.user_id = item.id;
-        }
-        
-        item.rfq_id = created_rfq_id;
-        item.product_variant_id = product_id;
-        item.variant = variant;
-        item.sheet_id = sheet_id;
-        return item;
-      });
-      
-      // Filter out any vendors that still don't have user_id
-      vendor_array = vendor_array.filter(item => item.user_id);
-    }
 
-    const productResult = await rfqModel.insert(
-      'tbl_rfq_products',
-      tbl_rfq_products_data
-    );
-
-    const spec_info = spec_array && await rfqModel.insertArray(
-      spec_array,
-      spec_keys,
-      'tbl_rfq_products_specs'
-    );
-
-    var vendor_info = [];
-    // Changes by Agnij 2025-06-18 [Added null check for vendors and vendor_array]
-    if (vendors && vendors.length > 0 && vendor_array.length > 0) {
-      vendor_info = await rfqModel.insertArray(
-        vendor_array,
-        vendor_keys,
-        'tbl_rfq_product_vendors'
-      );
-    }
-
-    // Handle multiple datasheet files
-    if (datasheet_file && datasheet_file.length > 0) {
-      const fileDataArray = datasheet_file.map(url => ({
-        rfq_product_id:productResult[0].id,
-        file_type: 'TDS',
-        file_url: url
-      }));
-      for (const fileData of fileDataArray) {
-        await rfqModel.insert('tbl_rfq_product_files', fileData);
-      }
-    }
-
-    if (qap_file && qap_file.length > 0) {
-      const qapFiles = qap_file.map(url => ({
-        rfq_product_id:productResult[0].id,
-        file_type: 'QAP',
-        file_url: url
-      }));
-      for (const fileData of qapFiles) {
-        await rfqModel.insert('tbl_rfq_product_files', fileData);
-      }
-    }
-
-    if (spec_file && spec_file.length > 0) {
-      const specFiles = spec_file.map(url => ({
-        rfq_product_id:productResult[0].id,
-        file_type: 'SPEC',
-        file_url: url
-      }));
-      for (const fileData of specFiles) {
-        await rfqModel.insert('tbl_rfq_product_files', fileData);
-      }
-    }
-
-    return { product_info: productResult[0], spec_info, vendor_info };
-  } catch (error) {
-    console.error('Error inserting data:', error);
-    throw error;
-  }
-};
-
-const updateRfqProductIdInTechEvaluation = async (oldProductId, newProductId) => {
-  try {
-
-    const records = await rfqModel.getTechEvaluationRecordsByProductId(oldProductId);
-
-    if (records.length > 0) {
-      await Promise.all(
-        records.map((record) =>
-          rfqModel.update(
-            'tbl_rfq_product_tech_evaluation',
-            { tbl_rfq_product_id: newProductId },
-            record.id
-          )
-        )
-      );
-    }
-
-  } catch (error) {
-    console.error('Error updating RFQ Product IDs:', error.message);
-    throw error;
-  }
-};
 
 const getQUOTES = async ({ id }, user_id) => {
   try {
@@ -2267,26 +2008,6 @@ const shuffleArray = (array) => {
   }
 };
 
-const deleteRelatedRecords = async (rfq_id) => {
-  try {
-      await Promise.all([
-          rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }),
-          rfqModel.deleteWithReturnIds('tbl_rfq_product_vendors', { rfq_id }),
-          rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id }),
-          rfqModel.deleteWithReturnIds('tbl_rfq_products_specs', { rfq_id })
-      ]);
-
-      const rfqProductIds = await rfqModel.deleteWithReturnIds('tbl_rfq_products', { rfq_id });
-
-      // Delete from tbl_rfq_product_files based on retrieved rfq_product_ids
-      if (rfqProductIds.length > 0) {
-          await rfqModel.deleteProductFilesByIds(rfqProductIds);
-      }
-  } catch (error) {
-      logError("Error deleting related records:", error);
-      throw error;
-  }
-};
 
 const saveRfqDraft = async (user_id, reqBody) => {
   const {
@@ -2979,6 +2700,386 @@ const saveRfqDraft = async (user_id, reqBody) => {
   return { status: 1, message: 'Draft has been saved successfully', rfq: {...rfqDetail} };
 };
 
+
+/**
+ * duplicateRfqForHotels
+ *
+ * Duplicates a published RFQ for multiple hotels.
+ * - Keeps the original RFQ for the first hotel
+ * - Creates independent RFQs for remaining hotels
+ * - Copies all related data (products, specs, vendors, files, terms)
+ *
+ * Approach:
+ * - Uses a single DB transaction for atomicity
+ * - Uses INSERT … SELECT for fast, set-based duplication
+ * - Uses RETURNING only where new IDs are required
+ * - Relies on DB sequence for unique rfq_no (concurrency-safe)
+ *
+ * Advantages:
+ * - Prevents partial RFQ creation
+ * - Scales well for large RFQs (100k+ rows)
+ * - Safe under concurrent requests
+ *
+ * Limitations:
+ * - Product rows are duplicated individually to remap IDs
+ * - New NOT NULL columns must be added explicitly
+ *
+ * @param {number} rfq_id
+ * @param {number[]} hotel_ids
+ * @param {number} user_id
+ * @createdby mukul
+ */
+const duplicateRfqForHotels = async (rfq_id, hotel_ids, user_id) => {
+
+  // Nothing to duplicate if only one or zero hotels
+  if (!Array.isArray(hotel_ids) || hotel_ids.length <= 1) return;
+
+  // First hotel is already associated with parent RFQ
+  const [, ...childHotels] = hotel_ids;
+
+  // Use a single DB transaction - Guarantees atomicity + Prevents partial RFQ duplication
+   
+  return db.tx(async (t) => {
+    
+    // -------------------------  1 Fetch parent RFQ ONCE  -------------------------
+
+    // Used as the source template for all child RFQs
+    const parentRfq = await t.one(`SELECT * FROM tbl_rfq WHERE id = $1`, [
+      rfq_id
+    ]);
+
+    // -------------------------  2️ Fetch all RFQ products ONCE   -------------------------
+
+    // Needed because RFQ products are parents for
+    // specs, vendors, tech evaluation, etc.
+    const rfqProducts = await t.any(
+      `SELECT * FROM tbl_rfq_products WHERE rfq_id = $1`,
+      [rfq_id]
+    );
+
+    // -------------------------  3️ Loop through each additional hotel  -----------------------
+
+    for (const hotel_id of childHotels) {
+      // -------------------------  3A️ Create NEW RFQ for this hotel  -------------------------
+
+      // RETURNING id is CRITICAL because: All child tables depend on rfq_id
+      const { id: newRfqId } = await t.one(
+        `
+INSERT INTO tbl_rfq (
+  comment,
+  company_name,
+  response_email,
+  contact_name,
+  contact_number,
+  bid_end_date,
+  location,
+  is_published,
+  created_by,
+  updated_by,              
+  status,
+  rfq_type,
+  reverse_auction,
+  project_id,
+  ra_start_date,
+  ra_end_date,
+  rfq_added_from,
+  processed_url,
+  is_tender,
+  tender_publish_date,
+  vendor_clarification_date,
+  hospitality_company_id,
+  tender_fees,
+  hotel_id
+)
+SELECT
+  comment,
+  company_name,
+  response_email,
+  contact_name,
+  contact_number,
+  bid_end_date,
+  location,
+  1,
+  created_by,
+  created_by,            
+  status,
+  rfq_type,
+  reverse_auction,
+  project_id,
+  ra_start_date,
+  ra_end_date,
+  rfq_added_from,
+  processed_url,
+  is_tender,
+  tender_publish_date,
+  vendor_clarification_date,
+  hospitality_company_id,
+  tender_fees,
+  $2
+FROM tbl_rfq
+WHERE id = $1
+RETURNING id;
+        `,
+        [rfq_id, hotel_id]
+      );
+
+      // -------------------------  4️ Duplicate RFQ PRODUCTS  -------------------------
+
+      // We MUST capture old → new product ID mapping
+      // because child tables depend on product_id
+      const productIdMap = {};
+
+      for (const product of rfqProducts) {
+        const { id: newProductId } = await t.one(
+          `
+          INSERT INTO tbl_rfq_products (
+            rfq_id, comment, datasheet, spec_file, qap_file,
+            product_variant_id, qap, datasheet_file, variant, sheet_id
+          )
+          VALUES (
+            $1, $2, $3, $4, $5,
+            $6, $7, $8, $9, $10
+          )
+          RETURNING id
+          `,
+          [
+            newRfqId,
+            product.comment,
+            product.datasheet,
+            product.spec_file,
+            product.qap_file,
+            product.product_variant_id,
+            product.qap,
+            product.datasheet_file,
+            product.variant,
+            product.sheet_id
+          ]
+        );
+
+        // Build mapping: old_product_id → new_product_id
+        productIdMap[product.id] = newProductId;
+      }
+
+      // -------------------------  5️ Duplicate PRODUCT SPECS (leaf table)  -------------------------
+
+      // No RETURNING needed — nothing depends on this row
+      await t.none(
+        `
+        INSERT INTO tbl_rfq_products_specs (
+          rfq_id, product_variant_id, title, value, variant, sheet_id
+        )
+        SELECT
+          $2, product_variant_id, title, value, variant, sheet_id
+        FROM tbl_rfq_products_specs
+        WHERE rfq_id = $1
+        `,
+        [rfq_id, newRfqId]
+      );
+
+      // -------------------------  6 Duplicate PRODUCT FILES  -------------------------
+
+      
+      // Fetch product files for parent RFQ
+      const productFiles = await t.any(
+        `
+  SELECT pf.*
+  FROM tbl_rfq_product_files pf
+  JOIN tbl_rfq_products p ON p.id = pf.rfq_product_id
+  WHERE p.rfq_id = $1
+  `,
+        [rfq_id]
+      );
+
+      for (const file of productFiles) {
+        const newProductId = productIdMap[file.rfq_product_id];
+
+        // Safety check (should always exist)
+        if (!newProductId) continue;
+
+        await t.none(
+          `
+    INSERT INTO tbl_rfq_product_files (
+      rfq_product_id,
+      file_type,
+      file_url,
+      created_at,
+      updated_at
+    )
+    VALUES ($1, $2, $3, $4, $5)
+    `,
+          [
+            newProductId,
+            file.file_type,
+            file.file_url,
+            file.created_at,
+            file.updated_at
+          ]
+        );
+      }
+
+      // -------------------------  7 Duplicate PRODUCT VENDORS (leaf table)  -------------------------
+      
+      // Reset vendor view flags for new RFQ
+      await t.none(
+        `
+        INSERT INTO tbl_rfq_product_vendors (
+          rfq_id, product_variant_id, user_id, variant, sheet_id,
+          is_rfq_viewed, vendor_name
+        )
+        SELECT
+          $2, product_variant_id, user_id, variant, sheet_id,
+          0, vendor_name
+        FROM tbl_rfq_product_vendors
+        WHERE rfq_id = $1
+        `,
+        [rfq_id, newRfqId]
+      );
+
+      // ------------------------  8 Duplicate RFQ FILES (leaf table)  --------------------------
+     
+      await t.none(
+        `
+        INSERT INTO tbl_rfq_files (rfq_id, file_type, file_url)
+        SELECT
+          $2, file_type, file_url
+        FROM tbl_rfq_files
+        WHERE rfq_id = $1
+        `,
+        [rfq_id, newRfqId]
+      );
+
+      // -----------------------  9 Duplicate RFQ TERMS (leaf table)  ---------------------------
+      
+      await t.none(
+        `
+        INSERT INTO tbl_rfq_terms_map (rfq_id, terms_id)
+        SELECT
+          $2, terms_id
+        FROM tbl_rfq_terms_map
+        WHERE rfq_id = $1
+        `,
+        [rfq_id, newRfqId]
+      );
+
+      // ------------------------  10 Duplicate TECH EVALUATION (parent table)  --------------------------
+
+      
+      // Map: old_tech_eval_id → new_tech_eval_id
+      const techEvalIdMap = {};
+
+      // Fetch tech evaluations for parent RFQ
+      const techEvaluations = await t.any(
+        `
+  SELECT *
+  FROM tbl_rfq_product_tech_evaluation
+  WHERE rfq_id = $1
+  `,
+        [rfq_id]
+      );
+
+      for (const te of techEvaluations) {
+        const newProductId = productIdMap[te.tbl_rfq_product_id];
+
+        // Skip if product was not duplicated (safety)
+        if (!newProductId) continue;
+
+        const { id: newTechEvalId } = await t.one(
+          `
+    INSERT INTO tbl_rfq_product_tech_evaluation (
+      rfq_id,
+      tbl_rfq_product_id,
+      minimum_passing_score
+    )
+    VALUES ($1, $2, $3)
+    RETURNING id
+    `,
+          [newRfqId, newProductId, te.minimum_passing_score]
+        );
+
+        techEvalIdMap[te.id] = newTechEvalId;
+      }
+
+      // -------------------------  11 Duplicate TECH EVALUATION CLAUSES  -------------------------
+
+      
+      const clauseIdMap = {};
+
+      // Fetch clauses for parent RFQ
+      const clauses = await t.any(
+        `
+  SELECT *
+  FROM tbl_rfq_product_tech_evaluation_clauses
+  WHERE tbl_rfq_product_tech_evaluation_id IN (
+    SELECT id
+    FROM tbl_rfq_product_tech_evaluation
+    WHERE rfq_id = $1
+  )
+  `,
+        [rfq_id]
+      );
+
+      for (const clause of clauses) {
+        const newTechEvalId =
+          techEvalIdMap[clause.tbl_rfq_product_tech_evaluation_id];
+        if (!newTechEvalId) continue;
+
+        const { id: newClauseId } = await t.one(
+          `
+    INSERT INTO tbl_rfq_product_tech_evaluation_clauses (
+      tbl_rfq_product_tech_evaluation_id,
+      clause_text,
+      weightage,
+      clause_type
+    )
+    VALUES ($1, $2, $3, $4)
+    RETURNING id
+    `,
+          [
+            newTechEvalId,
+            clause.clause_text,
+            clause.weightage,
+            clause.clause_type
+          ]
+        );
+
+        clauseIdMap[clause.id] = newClauseId;
+      }
+
+      // --------------------------  1️2 Duplicate TECH EVALUATION CLAUSE FILES  ------------------------
+      
+      await t.none(
+        `
+  INSERT INTO tbl_rfq_product_tech_evaluation_clauses_files (
+    tbl_rfq_product_tech_evaluation_clauses_id,
+    file_url
+  )
+  SELECT
+    c_new.id,
+    f.file_url
+  FROM tbl_rfq_product_tech_evaluation_clauses_files f
+  JOIN tbl_rfq_product_tech_evaluation_clauses c_old
+    ON c_old.id = f.tbl_rfq_product_tech_evaluation_clauses_id
+  JOIN tbl_rfq_product_tech_evaluation_clauses c_new
+    ON c_new.clause_text = c_old.clause_text
+   AND c_new.tbl_rfq_product_tech_evaluation_id IN (
+     SELECT id
+     FROM tbl_rfq_product_tech_evaluation
+     WHERE rfq_id = $2
+   )
+  WHERE c_old.tbl_rfq_product_tech_evaluation_id IN (
+    SELECT id
+    FROM tbl_rfq_product_tech_evaluation
+    WHERE rfq_id = $1
+  )
+  `,
+        [rfq_id, newRfqId]
+      );
+    }
+  });
+};
+
+
+
 const rfqController = {
   createTenderPaymentOrder: async (req, res) => {
     try {
@@ -3207,6 +3308,14 @@ const rfqController = {
         { is_published: 1 },
         rfq_id
       );
+
+      // duplicate rfq for other hotels as well, notification logic need to update next
+      await duplicateRfqForHotels(rfq_id, req.body.hotel_ids || [], user_id);
+
+
+
+
+      // -------------------
 
       await sendMailtoVendors(req, rfq_id);
       await sendQuotationMailToBuyer(req, rfq_id);
@@ -4667,8 +4776,8 @@ const rfqController = {
           is_tender: is_tender,
         };
 
-        const nextRFQNumber = await getNextRfQNumber();
-        rfqData.rfq_no = nextRFQNumber;
+        // const nextRFQNumber = await getNextRfQNumber();
+        // rfqData.rfq_no = nextRFQNumber;
 
         const response = await rfqModel.insert('tbl_rfq', rfqData);
         rfq_id = response[0].id;
@@ -6292,7 +6401,6 @@ const rfqController = {
         no_freight,
         rfq_product_id
       );
-      // rfQItem = filterQuotations(rfQItem);
       // rfQItem = processQuotations(rfQItem);
        if (pageSource === "quote_compare") {
       // 👇 Check if an entry already exists
@@ -9005,11 +9113,10 @@ const rfqController = {
       );
       if (hasProductNotFound || hasVendorNotFound) {
         try {
-          const rfqNumber = await getNextRfQNumber();
           let emailContent = `
             <h2>Products or Vendors Not Found in Workwise Magic Search</h2>
             <p>Needs to work on these missing products or Vendors urgently.</p>
-            <p><strong>RFQ Number:</strong> ${rfqNumber}</p>
+            <p><strong>RFQ Number:</strong> ${rfqDetails?.rfq_no}</p>
             <p><strong>User:</strong> ${user.name} (${user.email})</p>
             <p><strong>Organization:</strong> ${
               user.organization_name || 'N/A'
