@@ -133,7 +133,6 @@ export const rescheduleAllMilestoneReminders = async () => {
 
 export const scheduleGRNReminders = async (purchase_order, reminder_users = [], grn_rep_data, testMode = false) => {
   const { id: poId, delivery_period, po_approved_on } = purchase_order || {};
-  console.log("SCHEDULING GRN REMINDERS")
 
   if (!poId || !delivery_period || !po_approved_on) {
     return false;
@@ -185,8 +184,6 @@ export const scheduleGRNReminders = async (purchase_order, reminder_users = [], 
         return;
       }
     }
-
-    console.log("ALL THE TIMERS HAVE BEEN SET:", remindAt);
 
     // node-cron expression for specific date/time
     const cronExpression = `${remindAt.getMinutes()} ${remindAt.getHours()} ${remindAt.getDate()} ${

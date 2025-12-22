@@ -12,6 +12,7 @@ import { validateDbBody } from '../../validations/dbValidation/userDbValidation.
 import { acl } from '../../helper/common.js';
 import passport from '../../middleware/passport.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
+import auth from '../../middleware/auth.js';
 
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
@@ -181,6 +182,12 @@ UsersRoutes.post(
   UsersController.upload_documents
 );
 
+UsersRoutes.post(
+  '/upload-grn-file/:po_id',
+  auth.authUserOrGRNToken,
+  schema_posts.upload_user_document,
+  UsersController.upload_grn_documents
+);
 
 UsersRoutes.post
 (
