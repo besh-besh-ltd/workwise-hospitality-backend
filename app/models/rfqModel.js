@@ -2340,7 +2340,8 @@ bulkSearchVendorsByCategory: async (
 
   const countQuery = `
     WITH vendor_data AS (
-      SELECT DISTINCT tu.id
+      SELECT DISTINCT tu.id,
+      COALESCE(sub_info.is_premium, 0) AS is_premium
       FROM tbl_product_variant pvt
       JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
       JOIN tbl_users tu ON tu.id = pvm.vendor_id AND tu.user_type IN (3,4)
@@ -2349,6 +2350,28 @@ bulkSearchVendorsByCategory: async (
       ${approved_by_id.length > 0 ? `
         JOIN tbl_vendorapprove_product_mapping vum ON vum.variant_vendor_mapping_id = pvm.id
       ` : ''}
+      LEFT JOIN (
+        SELECT
+          tus.user_id,
+          MAX(tus.end_date) AS max_end_date,
+          MAX(
+            CASE
+              WHEN tsp.plan_name ILIKE '%Enterprise%'
+                AND tus.status = 1
+                AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                THEN 2
+              WHEN tsp.plan_name ILIKE '%Premium%'
+                AND tus.status = 1
+                AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                THEN 1
+              ELSE 0
+            END
+          ) AS is_premium
+        FROM tbl_user_subscriptions tus
+        LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
+        GROUP BY tus.user_id
+      ) sub_info ON sub_info.user_id = tu.id
+
       WHERE pvt.status = 1
         AND pvt.is_deleted = 0
         AND pvt.is_review = 0
@@ -2403,6 +2426,7 @@ bulkSearchVendorsByCategory: async (
         ls.id AS state_id,
         ls.state_name,
         COALESCE(tcl.country_id, 1) AS country_id,
+        COALESCE(sub_info.is_premium, 0) AS is_premium,
         lco.country_name
       FROM tbl_product_variant pvt
       JOIN tbl_product_variant_vendor_mapping pvm ON pvt.id = pvm.product_variant_id
@@ -2412,6 +2436,27 @@ bulkSearchVendorsByCategory: async (
       LEFT JOIN tbl_location_cities lc ON tcl.city_id = lc.id
       LEFT JOIN tbl_location_states ls ON tcl.state_id = ls.id
       LEFT JOIN tbl_location_country lco ON COALESCE(tcl.country_id, 1) = lco.id
+      LEFT JOIN (
+        SELECT
+          tus.user_id,
+          MAX(tus.end_date) AS max_end_date,
+          MAX(
+            CASE
+              WHEN tsp.plan_name ILIKE '%Enterprise%'
+                AND tus.status = 1
+                AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                THEN 2
+              WHEN tsp.plan_name ILIKE '%Premium%'
+                AND tus.status = 1
+                AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                THEN 1
+              ELSE 0
+            END
+          ) AS is_premium
+        FROM tbl_user_subscriptions tus
+        LEFT JOIN tbl_subscription_plans tsp ON tsp.id = tus.plan_id
+        GROUP BY tus.user_id
+      ) sub_info ON sub_info.user_id = tu.id
       ${approved_by_id.length > 0 ? `
         JOIN tbl_vendorapprove_product_mapping vum ON vum.variant_vendor_mapping_id = pvm.id
       ` : ''}
@@ -2440,6 +2485,7 @@ bulkSearchVendorsByCategory: async (
         ${approved_by_id.length > 0 ? `
           AND vum.vendor_approve_id IN (${approved_by_id.map(vui => vui.id).join(',')})
         ` : ''}
+        ${subscriptionType ? subscriptionType == 'premium' ? 'AND is_premium = 1' : subscriptionType == 'enterprise' ? 'AND is_premium = 2' : 'AND is_premium = 0' : ''}
         ${myVendorCondition}
         ${prevWorkedCondition}
         ${vendorNameCondition}
@@ -2456,6 +2502,7 @@ bulkSearchVendorsByCategory: async (
       original_company_name,
       turnover,
       nature_of_business,
+      is_premium,
       jsonb_agg(DISTINCT jsonb_build_object(
         'address', address,
         'postal_code', postal_code,
@@ -2470,8 +2517,9 @@ bulkSearchVendorsByCategory: async (
     GROUP BY
       id, vendor_name, email, mobile,
       organization_name, about, website,
-      original_company_name, turnover, nature_of_business
-    ORDER BY vendor_name ASC
+      original_company_name, turnover, nature_of_business, is_premium
+      
+    ORDER BY is_premium DESC, RANDOM()
     LIMIT ${limit} OFFSET ${offset};
   `;
 
