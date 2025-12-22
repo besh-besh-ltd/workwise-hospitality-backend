@@ -9282,9 +9282,14 @@ ORDER BY tq.timestamp DESC;
         RFQ.contact_number,
         RFQ.bid_end_date,
         RFQ.reverse_auction,
-        RFQ.is_tender
+        RFQ.is_tender,
+        H.name AS hotel_name
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
+      LEFT JOIN tbl_hospitality_company_hotels H
+      ON H.id = RFQ.hotel_id
+      AND H.is_deleted = 0
+
       ${dynamicJoins}
       WHERE (${
         user_type == 3
