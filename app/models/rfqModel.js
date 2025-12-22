@@ -1862,6 +1862,7 @@ WHERE NOT EXISTS (
       RFQ.ra_start_date, -- Select raw timestamp
       RFQ.ra_end_date,   -- Select raw timestamp
       RFQ.project_id,
+      H.name AS hotel_name,
         -- Add here
       (
         SELECT EXISTS (
@@ -1978,7 +1979,14 @@ WHERE NOT EXISTS (
         )
       ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = ${user_id}
     ) AS "quotations"
-FROM tbl_rfq RFQ WHERE id=$1
+FROM tbl_rfq RFQ
+LEFT JOIN tbl_hospitality_company_hotels H
+  ON H.id = RFQ.hotel_id
+ AND H.is_deleted = 0
+WHERE RFQ.id = $1
+
+
+
 ORDER BY RFQ.id DESC   
 LIMIT 1;`;
 
