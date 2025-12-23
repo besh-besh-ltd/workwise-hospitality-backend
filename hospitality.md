@@ -244,6 +244,64 @@ Fetch all role scopes (company / hotel / department) assigned to a user.
 
 ---
 
+## 7.1. Get My Departments
+
+**GET** `/users/me/departments`
+
+Fetch departments assigned to the currently logged-in user.
+
+### Authentication
+
+* Requires `passportSignIn` (JWT authentication)
+* No admin role required (any authenticated user)
+
+### Response
+
+```json
+{
+  "status": true,
+  "data": [
+    { "id": 1, "title": "department 1" },
+    { "id": 3, "title": "department 2" }
+  ]
+}
+```
+
+### Use Case
+
+Used to filter department dropdowns in role scope selectors to only show departments the user is assigned to.
+
+---
+
+## 7.2. Get User Departments
+
+**GET** `/rbac/users/:userId/departments`
+
+Fetch departments assigned to a specific user (admin only).
+
+### Authentication
+
+* Requires `passportSignIn` (JWT authentication)
+* Requires `acl([7])` – Company Admin only
+
+### Response
+
+```json
+{
+  "status": true,
+  "data": [
+    { "id": 1, "title": "Department 1" },
+    { "id": 3, "title": "Department 2" }
+  ]
+}
+```
+
+### Use Case
+
+Used in edit user modals to filter department options based on the user's current department assignments.
+
+---
+
 ## 8. Get Hospitality Entities
 
 **GET** `/hospitality/entities`
