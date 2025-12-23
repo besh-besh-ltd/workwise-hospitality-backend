@@ -1154,7 +1154,999 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
 };
 
 
-// Reusable components
+// --- Hospitality Approval Engine: Robust & Scalable Implementation ---
+
+/**
+ * APPROVAL ENGINE DESIGN:
+ *
+ * Policy Hierarchy (deepest match wins):
+ *   1. Company + Hotel + Department (most specific)
+ *   2. Company + Hotel
+ *   3. Company only (least specific)
+ *
+ * Tables:
+ *   - tbl_approval_policies: Policy definitions with scope (hospitality_company_id, hotel_id, department_id)
+ *   - tbl_approval_policy_steps: Steps within a policy (order, decision_rule, approver source)
+ *   - tbl_approval_instances: Runtime instances of approvals
+ *   - tbl_approval_instance_steps: Runtime steps for an instance
+ *   - tbl_approval_step_approvers: Approvers assigned to each step
+ *   - tbl_approval_actions: Audit log of all actions taken
+ *
+ * Scope Validation:
+ *   - Company/Hotel access: tbl_hospitality_user_mappings
+ *   - Department membership: tbl_user_department
+ */
+
+// ============= HELPER FUNCTIONS =============
+
+/**
+ * Check if a user has access to a specific hospitality company/hotel scope
+ * Uses tbl_hospitality_user_mappings for company/hotel validation
+ */
+async function userHasHospitalityAccess(userId, hospitalityCompanyId, hotelId = null, t = db) {
+  if (hotelId) {
+    // Check for hotel-level access or company-level access (which covers all hotels)
+    const row = await t.oneOrNone(`
+      SELECT 1 FROM tbl_hospitality_user_mappings
+      WHERE user_id = $1
+        AND hospitality_company_id = $2
+        AND (
+          (mapping_type = 1 AND hospitality_hotel_id = $3)
+          OR (mapping_type = 0 AND hospitality_hotel_id IS NULL)
+        )
+    `, [userId, hospitalityCompanyId, hotelId]);
+    return Boolean(row);
+  } else {
+    // Check for company-level access
+    const row = await t.oneOrNone(`
+      SELECT 1 FROM tbl_hospitality_user_mappings
+      WHERE user_id = $1
+        AND hospitality_company_id = $2
+    `, [userId, hospitalityCompanyId]);
+    return Boolean(row);
+  }
+}
+
+/**
+ * Check if a user belongs to a specific department
+ * Uses tbl_user_department for department membership validation
+ */
+async function userBelongsToDepartment(userId, departmentId, t = db) {
+  if (!departmentId) return true; // No department restriction
+  const row = await t.oneOrNone(`
+    SELECT 1 FROM tbl_user_department
+    WHERE user_id = $1 AND department_id = $2
+  `, [userId, departmentId]);
+  return Boolean(row);
+}
+
+/**
+ * Full scope validation: company/hotel + department
+ */
+async function userHasFullScopeAccess(userId, hospitalityCompanyId, hotelId = null, departmentId = null, t = db) {
+  const hasHospitalityAccess = await userHasHospitalityAccess(userId, hospitalityCompanyId, hotelId, t);
+  if (!hasHospitalityAccess) return false;
+
+  const belongsToDept = await userBelongsToDepartment(userId, departmentId, t);
+  return belongsToDept;
+}
+
+// ============= APPROVAL POLICIES =============
+
+/**
+ * Create a new approval policy
+ * @param {Object} params - Policy parameters
+ * @param {string} params.entity_type - Type of entity (e.g., 'RFQ', 'PO', 'INDENT')
+ * @param {number} params.hospitality_company_id - Hospitality Company ID (required)
+ * @param {number|null} params.hotel_id - Hotel ID (optional, for hotel-specific policies)
+ * @param {number|null} params.department_id - Department ID (optional, for dept-specific policies)
+ * @param {number} params.created_by - User ID who created the policy
+ * @param {boolean} params.is_active - Whether policy is active
+ */
+export async function createApprovalPolicy({
+  entity_type,
+  hospitality_company_id,
+  hotel_id = null,
+  department_id = null,
+  created_by,
+  is_active = true
+}) {
+  if (!entity_type || !hospitality_company_id || !created_by) {
+    throw new Error('entity_type, hospitality_company_id, and created_by are required');
+  }
+
+  // Check for duplicate policy with same scope
+  const existing = await db.oneOrNone(
+    `SELECT id FROM tbl_approval_policies
+     WHERE entity_type = $1
+       AND hospitality_company_id = $2
+       AND COALESCE(hotel_id, 0) = COALESCE($3, 0)
+       AND COALESCE(department_id, 0) = COALESCE($4, 0)
+       AND is_active = true`,
+    [entity_type, hospitality_company_id, hotel_id, department_id]
+  );
+
+  if (existing) {
+    throw new Error(`An active policy already exists for this scope. Policy ID: ${existing.id}`);
+  }
+
+  return db.one(
+    `INSERT INTO tbl_approval_policies
+     (entity_type, hospitality_company_id, hotel_id, department_id, created_by, is_active)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [entity_type, hospitality_company_id, hotel_id, department_id, created_by, is_active]
+  );
+}
+
+/**
+ * Update an existing approval policy
+ */
+export async function updateApprovalPolicy(id, patch) {
+  if (!id) throw new Error('Policy ID is required');
+
+  const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'is_active'];
+  const sets = [];
+  const vals = [];
+  let idx = 1;
+
+  for (const key of allowedFields) {
+    if (patch.hasOwnProperty(key)) {
+      sets.push(`${key} = $${idx++}`);
+      vals.push(patch[key]);
+    }
+  }
+
+  if (sets.length === 0) {
+    throw new Error('No valid fields to update');
+  }
+
+  vals.push(id);
+  return db.oneOrNone(
+    `UPDATE tbl_approval_policies SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${idx} RETURNING *`,
+    vals
+  );
+}
+
+/**
+ * Get approval policies with optional filtering
+ * Returns policies ordered by specificity (most specific first)
+ */
+export async function getApprovalPolicies({ hospitality_company_id, hotel_id, department_id, entity_type, include_inactive = false }) {
+  const conditions = ['TRUE'];
+  const vals = [];
+  let paramIdx = 1;
+
+  if (hospitality_company_id) {
+    conditions.push(`hospitality_company_id = $${paramIdx++}`);
+    vals.push(hospitality_company_id);
+  }
+  if (hotel_id !== undefined) {
+    conditions.push(`(hotel_id IS NULL OR hotel_id = $${paramIdx++})`);
+    vals.push(hotel_id);
+  }
+  if (department_id !== undefined) {
+    conditions.push(`(department_id IS NULL OR department_id = $${paramIdx++})`);
+    vals.push(department_id);
+  }
+  if (entity_type) {
+    conditions.push(`entity_type = $${paramIdx++}`);
+    vals.push(entity_type);
+  }
+  if (!include_inactive) {
+    conditions.push('is_active = true');
+  }
+
+  // Order by specificity: dept > hotel > company only
+  const query = `
+    SELECT p.*,
+           hc.name as company_name,
+           hh.name as hotel_name,
+           d.title as department_name,
+           CASE
+             WHEN department_id IS NOT NULL THEN 3
+             WHEN hotel_id IS NOT NULL THEN 2
+             ELSE 1
+           END as specificity_score,
+           u.name as created_by_name
+    FROM tbl_approval_policies p
+    LEFT JOIN tbl_hospitality_companies hc ON p.hospitality_company_id = hc.id
+    LEFT JOIN tbl_hospitality_company_hotels hh ON p.hotel_id = hh.id
+    LEFT JOIN tbl_department d ON p.department_id = d.id
+    LEFT JOIN tbl_users u ON p.created_by = u.id
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY specificity_score DESC, p.created_at DESC
+  `;
+  return db.any(query, vals);
+}
+
+/**
+ * Find the best matching policy for a given scope (deepest match wins)
+ * @param {Object} params - Scope parameters
+ * @returns {Object|null} The most specific matching policy or null
+ */
+export async function findBestMatchingPolicy({ entity_type, hospitality_company_id, hotel_id = null, department_id = null }) {
+  if (!entity_type || !hospitality_company_id) {
+    throw new Error('entity_type and hospitality_company_id are required');
+  }
+
+  // Query policies matching the scope, ordered by specificity (most specific first)
+  const policies = await db.any(`
+    SELECT p.*,
+           CASE
+             WHEN department_id IS NOT NULL AND hotel_id IS NOT NULL THEN 3
+             WHEN hotel_id IS NOT NULL THEN 2
+             ELSE 1
+           END as specificity_score
+    FROM tbl_approval_policies p
+    WHERE entity_type = $1
+      AND hospitality_company_id = $2
+      AND is_active = true
+      AND (
+        -- Match company + hotel + department (most specific)
+        (department_id = $4 AND hotel_id = $3)
+        -- OR Match company + hotel
+        OR (department_id IS NULL AND hotel_id = $3)
+        -- OR Match company only (fallback)
+        OR (department_id IS NULL AND hotel_id IS NULL)
+      )
+    ORDER BY specificity_score DESC
+    LIMIT 1
+  `, [entity_type, hospitality_company_id, hotel_id, department_id]);
+
+  return policies.length > 0 ? policies[0] : null;
+}
+
+/**
+ * Get a policy with all its steps
+ */
+export async function getApprovalPolicyWithSteps(id) {
+  const policy = await db.oneOrNone(`
+    SELECT p.*,
+           hc.name as company_name,
+           hh.name as hotel_name,
+           d.title as department_name,
+           u.name as created_by_name
+    FROM tbl_approval_policies p
+    LEFT JOIN tbl_hospitality_companies hc ON p.hospitality_company_id = hc.id
+    LEFT JOIN tbl_hospitality_company_hotels hh ON p.hotel_id = hh.id
+    LEFT JOIN tbl_department d ON p.department_id = d.id
+    LEFT JOIN tbl_users u ON p.created_by = u.id
+    WHERE p.id = $1
+  `, [id]);
+
+  if (!policy) throw new Error('Policy not found');
+
+  const steps = await db.any(`
+    SELECT s.*,
+           CASE
+             WHEN s.approver_source_type = 'USER' THEN (SELECT name FROM tbl_users WHERE id = s.approver_source_id)
+             WHEN s.approver_source_type = 'ROLE' THEN (SELECT title FROM tbl_roles WHERE id = s.approver_source_id)
+             WHEN s.approver_source_type = 'DEPARTMENT' THEN (SELECT title FROM tbl_department WHERE id = s.approver_source_id)
+             ELSE NULL
+           END as approver_source_name
+    FROM tbl_approval_policy_steps s
+    WHERE approval_policy_id = $1
+    ORDER BY step_order ASC
+  `, [id]);
+
+  return { ...policy, steps };
+}
+
+/**
+ * Soft delete a policy (mark as inactive)
+ */
+export async function deleteApprovalPolicy(id) {
+  // Check if there are pending instances using this policy
+  const pendingInstances = await db.oneOrNone(`
+    SELECT COUNT(*) as count
+    FROM tbl_approval_instances
+    WHERE approval_policy_id = $1 AND status = 'PENDING'
+  `, [id]);
+
+  if (pendingInstances && parseInt(pendingInstances.count) > 0) {
+    throw new Error(`Cannot delete policy: ${pendingInstances.count} pending approval(s) exist`);
+  }
+
+  return db.none('UPDATE tbl_approval_policies SET is_active = false, updated_at = NOW() WHERE id = $1', [id]);
+}
+
+// ============= POLICY STEPS =============
+
+/**
+ * Insert steps for a policy (transactional)
+ */
+export async function insertPolicySteps(steps, approval_policy_id) {
+  if (!steps || !Array.isArray(steps) || steps.length === 0) {
+    throw new Error('At least one step is required');
+  }
+
+  return db.tx(async t => {
+    const results = [];
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+
+      // Validate step
+      if (!step.approver_source_type || !step.approver_source_id) {
+        throw new Error(`Step ${i + 1}: approver_source_type and approver_source_id are required`);
+      }
+      if (!['USER', 'ROLE', 'DEPARTMENT'].includes(step.approver_source_type)) {
+        throw new Error(`Step ${i + 1}: Invalid approver_source_type. Must be USER, ROLE, or DEPARTMENT`);
+      }
+      if (!['ALL', 'ANY'].includes(step.decision_rule || 'ANY')) {
+        throw new Error(`Step ${i + 1}: Invalid decision_rule. Must be ALL or ANY`);
+      }
+
+      const r = await t.one(`
+        INSERT INTO tbl_approval_policy_steps
+        (approval_policy_id, step_order, approval_type, decision_rule, approver_source_type, approver_source_id)
+        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        [
+          approval_policy_id,
+          step.step_order || (i + 1),
+          step.approval_type || 'STANDARD',
+          step.decision_rule || 'ANY',
+          step.approver_source_type,
+          step.approver_source_id
+        ]
+      );
+      results.push(r);
+    }
+    return results;
+  });
+}
+
+/**
+ * Delete all steps for a policy
+ */
+export async function deletePolicySteps(approval_policy_id) {
+  return db.none('DELETE FROM tbl_approval_policy_steps WHERE approval_policy_id = $1', [approval_policy_id]);
+}
+
+// ============= APPROVAL INSTANCES =============
+
+/**
+ * Resolve approver user IDs based on source type
+ * Uses tbl_hospitality_user_mappings for company/hotel scoping
+ * Uses tbl_user_department for department membership
+ * @param {Object} step - Policy step with approver_source_type and approver_source_id
+ * @param {number} hospitality_company_id - Hospitality Company ID for scoping
+ * @param {number|null} hotel_id - Hotel ID for scoping (optional)
+ * @param {number|null} department_id - Department ID for filtering (optional)
+ * @returns {Array<number>} Array of user IDs
+ */
+async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db) {
+  const userIds = [];
+
+  if (step.approver_source_type === 'USER') {
+    // Direct user assignment - verify user has access to this scope
+    const hasAccess = await userHasFullScopeAccess(step.approver_source_id, hospitality_company_id, hotel_id, department_id, t);
+    if (hasAccess) {
+      const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND is_active = true', [step.approver_source_id]);
+      if (user) userIds.push(user.id);
+    }
+  } else if (step.approver_source_type === 'ROLE') {
+    // Find all active users with this role who have access to this hospitality context
+    // and belong to the department if specified
+    const users = await t.any(`
+      SELECT DISTINCT u.id
+      FROM tbl_users u
+      JOIN tbl_user_role_scopes urs ON u.id = urs.user_id AND urs.role_id = $1
+      JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
+      ${department_id ? 'JOIN tbl_user_department ud ON u.id = ud.user_id AND ud.department_id = $5' : ''}
+      WHERE u.is_active = true
+        AND hum.hospitality_company_id = $2
+        AND (
+          ($3::int IS NULL AND hum.mapping_type = 0)
+          OR (hum.hospitality_hotel_id = $3)
+          OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
+        )
+    `, department_id
+      ? [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id, department_id]
+      : [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id]
+    );
+    userIds.push(...users.map(u => u.id));
+  } else if (step.approver_source_type === 'DEPARTMENT') {
+    // Find all active users in this department who have access to this hospitality context
+    const users = await t.any(`
+      SELECT DISTINCT u.id
+      FROM tbl_users u
+      JOIN tbl_user_department ud ON u.id = ud.user_id AND ud.department_id = $1
+      JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
+      WHERE u.is_active = true
+        AND hum.hospitality_company_id = $2
+        AND (
+          ($3::int IS NULL AND hum.mapping_type = 0)
+          OR (hum.hospitality_hotel_id = $3)
+          OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
+        )
+    `, [step.approver_source_id, hospitality_company_id, hotel_id]);
+    userIds.push(...users.map(u => u.id));
+  }
+
+  return [...new Set(userIds)]; // Remove duplicates
+}
+
+/**
+ * Create an approval instance for an entity
+ * Automatically finds the best matching policy if approval_policy_id is not provided
+ *
+ * @param {Object} params
+ * @param {string} params.entity_type - Type of entity (e.g., 'RFQ', 'PO')
+ * @param {number} params.entity_id - ID of the entity being approved
+ * @param {number} params.hospitality_company_id - Hospitality Company ID
+ * @param {number|null} params.hotel_id - Hotel ID (optional)
+ * @param {number|null} params.department_id - Department ID (optional)
+ * @param {number|null} params.approval_policy_id - Specific policy to use (optional, auto-detected if not provided)
+ * @param {number} params.initiated_by - User ID who initiated the approval
+ * @param {Object} params.metadata - Additional metadata to store with the instance
+ */
+export async function createApprovalInstance({
+  entity_type,
+  entity_id,
+  hospitality_company_id,
+  hotel_id = null,
+  department_id = null,
+  approval_policy_id = null,
+  initiated_by,
+  metadata = {}
+}) {
+  if (!entity_type || !entity_id || !hospitality_company_id || !initiated_by) {
+    throw new Error('entity_type, entity_id, hospitality_company_id, and initiated_by are required');
+  }
+
+  return db.tx(async t => {
+    // 1. Check for existing pending/approved instance for this entity
+    const existingInstance = await t.oneOrNone(`
+      SELECT id, status FROM tbl_approval_instances
+      WHERE entity_type = $1 AND entity_id = $2 AND status IN ('PENDING', 'APPROVED')
+      ORDER BY created_at DESC LIMIT 1
+    `, [entity_type, entity_id]);
+
+    if (existingInstance) {
+      if (existingInstance.status === 'APPROVED') {
+        throw new Error('This entity has already been approved');
+      }
+      throw new Error(`A pending approval instance already exists. Instance ID: ${existingInstance.id}`);
+    }
+
+    // 2. Find the best matching policy
+    let policy;
+    if (approval_policy_id) {
+      policy = await t.oneOrNone(`
+        SELECT * FROM tbl_approval_policies WHERE id = $1 AND is_active = true
+      `, [approval_policy_id]);
+      if (!policy) {
+        throw new Error('Specified policy not found or is inactive');
+      }
+      // Validate policy scope matches the request
+      if (policy.hospitality_company_id !== hospitality_company_id) {
+        throw new Error('Policy company does not match request company');
+      }
+    } else {
+      policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id }, t);
+      if (!policy) {
+        throw new Error(`No approval policy found for ${entity_type} in this scope`);
+      }
+    }
+
+    // 3. Get policy steps
+    const policySteps = await t.any(`
+      SELECT * FROM tbl_approval_policy_steps
+      WHERE approval_policy_id = $1
+      ORDER BY step_order ASC
+    `, [policy.id]);
+
+    if (policySteps.length === 0) {
+      throw new Error('Policy has no approval steps configured');
+    }
+
+    // 4. Create the approval instance
+    const instance = await t.one(`
+      INSERT INTO tbl_approval_instances
+      (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, metadata)
+      VALUES ($1, $2, $3, 'PENDING', 1, $4, $5, $6, $7, $8) RETURNING *
+    `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, JSON.stringify(metadata)]);
+
+    // 5. Create instance steps and resolve approvers
+    const instanceSteps = [];
+    for (const policyStep of policySteps) {
+      const instanceStep = await t.one(`
+        INSERT INTO tbl_approval_instance_steps
+        (approval_instance_id, step_order, decision_rule, status, policy_step_id)
+        VALUES ($1, $2, $3, 'PENDING', $4) RETURNING *
+      `, [instance.id, policyStep.step_order, policyStep.decision_rule, policyStep.id]);
+
+      // Resolve approvers for this step (pass department_id for filtering)
+      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, department_id, t);
+
+      if (approverUserIds.length === 0) {
+        throw new Error(`No approvers found for step ${policyStep.step_order}. Check approver configuration.`);
+      }
+
+      // Insert approvers for this step
+      for (const userId of approverUserIds) {
+        await t.none(`
+          INSERT INTO tbl_approval_step_approvers
+          (approval_instance_step_id, approver_user_id, status)
+          VALUES ($1, $2, 'PENDING')
+        `, [instanceStep.id, userId]);
+      }
+
+      instanceSteps.push({ ...instanceStep, approverCount: approverUserIds.length });
+    }
+
+    return {
+      instance,
+      policy: { id: policy.id, entity_type: policy.entity_type },
+      steps: instanceSteps,
+      totalSteps: policySteps.length
+    };
+  });
+}
+
+// Transaction-safe version of findBestMatchingPolicy
+async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id }, t) {
+  const policies = await t.any(`
+    SELECT p.*,
+           CASE
+             WHEN department_id IS NOT NULL AND hotel_id IS NOT NULL THEN 3
+             WHEN hotel_id IS NOT NULL THEN 2
+             ELSE 1
+           END as specificity_score
+    FROM tbl_approval_policies p
+    WHERE entity_type = $1
+      AND hospitality_company_id = $2
+      AND is_active = true
+      AND (
+        (department_id = $4 AND hotel_id = $3)
+        OR (department_id IS NULL AND hotel_id = $3)
+        OR (department_id IS NULL AND hotel_id IS NULL)
+      )
+    ORDER BY specificity_score DESC
+    LIMIT 1
+  `, [entity_type, hospitality_company_id, hotel_id, department_id]);
+
+  return policies.length > 0 ? policies[0] : null;
+}
+
+/**
+ * Get detailed approval instance information
+ * Includes policy info, all steps, approvers, and action history
+ */
+export async function getApprovalInstanceDetails(instance_id, user_id = null) {
+  const instance = await db.oneOrNone(`
+    SELECT
+      i.*,
+      p.entity_type as policy_entity_type,
+      p.hospitality_company_id as policy_company_id,
+      p.hotel_id as policy_hotel_id,
+      p.department_id as policy_department_id,
+      hc.name as company_name,
+      hh.name as hotel_name,
+      d.title as department_name,
+      initiator.name as initiated_by_name,
+      initiator.email as initiated_by_email
+    FROM tbl_approval_instances i
+    JOIN tbl_approval_policies p ON i.approval_policy_id = p.id
+    LEFT JOIN tbl_hospitality_companies hc ON i.hospitality_company_id = hc.id
+    LEFT JOIN tbl_hospitality_company_hotels hh ON i.hotel_id = hh.id
+    LEFT JOIN tbl_department d ON i.department_id = d.id
+    LEFT JOIN tbl_users initiator ON i.initiated_by = initiator.id
+    WHERE i.id = $1
+  `, [instance_id]);
+
+  if (!instance) throw new Error('Approval instance not found');
+
+  // Get all steps with approvers
+  const steps = await db.any(`
+    SELECT s.*, ps.approval_type, ps.approver_source_type, ps.approver_source_id
+    FROM tbl_approval_instance_steps s
+    LEFT JOIN tbl_approval_policy_steps ps ON s.policy_step_id = ps.id
+    WHERE s.approval_instance_id = $1
+    ORDER BY s.step_order ASC
+  `, [instance_id]);
+
+  let canUserApprove = false;
+  let userCurrentStep = null;
+
+  for (const step of steps) {
+    // Get approvers for this step
+    const approvers = await db.any(`
+      SELECT
+        sa.*,
+        u.name as user_name,
+        u.email as user_email
+      FROM tbl_approval_step_approvers sa
+      JOIN tbl_users u ON sa.approver_user_id = u.id
+      WHERE sa.approval_instance_step_id = $1
+    `, [step.id]);
+
+    step.approvers = approvers.map(ap => ({
+      user_id: ap.approver_user_id,
+      user_name: ap.user_name,
+      user_email: ap.user_email,
+      status: ap.status,
+      acted_at: ap.acted_at,
+      comment: ap.comment
+    }));
+
+    // Check if current user can approve at this step
+    if (user_id && step.step_order === instance.current_step && instance.status === 'PENDING') {
+      const userApprover = approvers.find(ap => ap.approver_user_id === user_id && ap.status === 'PENDING');
+      if (userApprover) {
+        canUserApprove = true;
+        userCurrentStep = step.id;
+      }
+    }
+  }
+
+  // Get action history
+  const actionHistory = await db.any(`
+    SELECT
+      a.*,
+      u.name as actor_name,
+      u.email as actor_email
+    FROM tbl_approval_actions a
+    JOIN tbl_users u ON a.approver_user_id = u.id
+    WHERE a.approval_instance_id = $1
+    ORDER BY a.created_at ASC
+  `, [instance_id]);
+
+  return {
+    id: instance.id,
+    entity_type: instance.entity_type,
+    entity_id: instance.entity_id,
+    status: instance.status,
+    current_step: instance.current_step,
+    total_steps: steps.length,
+    initiated_by: {
+      user_id: instance.initiated_by,
+      name: instance.initiated_by_name,
+      email: instance.initiated_by_email
+    },
+    policy: {
+      id: instance.approval_policy_id,
+      hospitality_company_id: instance.policy_company_id,
+      hotel_id: instance.policy_hotel_id,
+      department_id: instance.policy_department_id
+    },
+    scope: {
+      hospitality_company_id: instance.hospitality_company_id,
+      company_name: instance.company_name,
+      hotel_id: instance.hotel_id,
+      hotel_name: instance.hotel_name,
+      department_id: instance.department_id,
+      department_name: instance.department_name
+    },
+    metadata: instance.metadata,
+    created_at: instance.created_at,
+    completed_at: instance.completed_at,
+    can_user_approve: canUserApprove,
+    user_approval_step_id: userCurrentStep,
+    steps: steps.map(step => ({
+      id: step.id,
+      step_order: step.step_order,
+      decision_rule: step.decision_rule,
+      status: step.status,
+      approval_type: step.approval_type,
+      completed_at: step.completed_at,
+      approvers: step.approvers
+    })),
+    action_history: actionHistory.map(a => ({
+      action: a.action,
+      actor: { user_id: a.approver_user_id, name: a.actor_name, email: a.actor_email },
+      comment: a.comment,
+      created_at: a.created_at
+    }))
+  };
+}
+
+/**
+ * Get approval instances for an entity
+ */
+export async function getApprovalInstancesByEntity(entity_type, entity_id) {
+  return db.any(`
+    SELECT
+      i.*,
+      p.entity_type as policy_entity_type,
+      hc.name as company_name,
+      hh.name as hotel_name,
+      initiator.name as initiated_by_name
+    FROM tbl_approval_instances i
+    JOIN tbl_approval_policies p ON i.approval_policy_id = p.id
+    LEFT JOIN tbl_hospitality_companies hc ON i.hospitality_company_id = hc.id
+    LEFT JOIN tbl_hospitality_company_hotels hh ON i.hotel_id = hh.id
+    LEFT JOIN tbl_users initiator ON i.initiated_by = initiator.id
+    WHERE i.entity_type = $1 AND i.entity_id = $2
+    ORDER BY i.created_at DESC
+  `, [entity_type, entity_id]);
+}
+
+// ============= APPROVAL ACTIONS =============
+
+/**
+ * Submit an approval action (APPROVE or REJECT)
+ * Validates user permission and handles step progression
+ */
+export async function submitApprovalAction({
+  approval_instance_id,
+  approval_instance_step_id,
+  approver_user_id,
+  action,
+  comment = null
+}) {
+  if (!approval_instance_id || !approver_user_id || !action) {
+    throw new Error('approval_instance_id, approver_user_id, and action are required');
+  }
+
+  if (!['APPROVE', 'REJECT'].includes(action.toUpperCase())) {
+    throw new Error('Action must be APPROVE or REJECT');
+  }
+
+  const normalizedAction = action.toUpperCase();
+
+  return db.tx(async t => {
+    // 1. Get instance with FOR UPDATE lock to prevent race conditions
+    const instance = await t.oneOrNone(`
+      SELECT * FROM tbl_approval_instances
+      WHERE id = $1
+      FOR UPDATE
+    `, [approval_instance_id]);
+
+    if (!instance) throw new Error('Approval instance not found');
+    if (instance.status !== 'PENDING') {
+      throw new Error(`Cannot act on instance with status: ${instance.status}`);
+    }
+
+    // 2. Get the current step
+    const currentStep = await t.oneOrNone(`
+      SELECT * FROM tbl_approval_instance_steps
+      WHERE approval_instance_id = $1 AND step_order = $2
+      FOR UPDATE
+    `, [approval_instance_id, instance.current_step]);
+
+    if (!currentStep) throw new Error('Current approval step not found');
+
+    // If step_id was provided, validate it matches the current step
+    if (approval_instance_step_id && approval_instance_step_id !== currentStep.id) {
+      throw new Error('Provided step is not the current pending step');
+    }
+
+    const stepId = approval_instance_step_id || currentStep.id;
+
+    // 3. Validate user is an approver for this step and is PENDING
+    const approverRecord = await t.oneOrNone(`
+      SELECT * FROM tbl_approval_step_approvers
+      WHERE approval_instance_step_id = $1 AND approver_user_id = $2
+      FOR UPDATE
+    `, [stepId, approver_user_id]);
+
+    if (!approverRecord) {
+      throw new Error('User is not an approver for this step');
+    }
+    if (approverRecord.status !== 'PENDING') {
+      throw new Error(`User has already acted on this step with status: ${approverRecord.status}`);
+    }
+
+    // 4. Validate user belongs to the policy scope
+    // Check hospitality access + department membership
+    const hasAccess = await userHasFullScopeAccess(
+      approver_user_id,
+      instance.hospitality_company_id,
+      instance.hotel_id,
+      instance.department_id,
+      t
+    );
+
+    if (!hasAccess) {
+      throw new Error('User does not belong to the approval policy scope');
+    }
+
+    // 5. Record the action in audit log
+    await t.none(`
+      INSERT INTO tbl_approval_actions
+      (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+      VALUES ($1, $2, $3, $4, $5)
+    `, [approval_instance_id, stepId, approver_user_id, normalizedAction, comment]);
+
+    // 6. Update approver status
+    await t.none(`
+      UPDATE tbl_approval_step_approvers
+      SET status = $1, acted_at = NOW(), comment = $2
+      WHERE approval_instance_step_id = $3 AND approver_user_id = $4
+    `, [normalizedAction === 'APPROVE' ? 'APPROVED' : 'REJECTED', comment, stepId, approver_user_id]);
+
+    // 7. Handle REJECT - immediately reject the entire instance
+    if (normalizedAction === 'REJECT') {
+      await t.none(`
+        UPDATE tbl_approval_instance_steps
+        SET status = 'REJECTED', completed_at = NOW()
+        WHERE id = $1
+      `, [stepId]);
+
+      await t.none(`
+        UPDATE tbl_approval_instances
+        SET status = 'REJECTED', completed_at = NOW()
+        WHERE id = $1
+      `, [approval_instance_id]);
+
+      return {
+        status: 'REJECTED',
+        instance_status: 'REJECTED',
+        message: 'Approval request has been rejected'
+      };
+    }
+
+    // 8. Handle APPROVE - check decision rule
+    const allApprovers = await t.any(`
+      SELECT status FROM tbl_approval_step_approvers
+      WHERE approval_instance_step_id = $1
+    `, [stepId]);
+
+    const allApproved = allApprovers.every(a => a.status === 'APPROVED');
+    const anyApproved = allApprovers.some(a => a.status === 'APPROVED');
+
+    const stepComplete =
+      (currentStep.decision_rule === 'ALL' && allApproved) ||
+      (currentStep.decision_rule === 'ANY' && anyApproved);
+
+    if (!stepComplete) {
+      // Step not yet complete, waiting for more approvals
+      return {
+        status: 'APPROVED',
+        instance_status: 'PENDING',
+        step_status: 'PENDING',
+        message: `Approval recorded. Waiting for ${currentStep.decision_rule === 'ALL' ? 'all' : 'other'} approvers.`
+      };
+    }
+
+    // 9. Step is complete - mark it and check for next step
+    await t.none(`
+      UPDATE tbl_approval_instance_steps
+      SET status = 'APPROVED', completed_at = NOW()
+      WHERE id = $1
+    `, [stepId]);
+
+    // Get all steps to find next
+    const allSteps = await t.any(`
+      SELECT * FROM tbl_approval_instance_steps
+      WHERE approval_instance_id = $1
+      ORDER BY step_order ASC
+    `, [approval_instance_id]);
+
+    const nextStep = allSteps.find(s => s.step_order === currentStep.step_order + 1);
+
+    if (nextStep) {
+      // Move to next step
+      await t.none(`
+        UPDATE tbl_approval_instances
+        SET current_step = $1
+        WHERE id = $2
+      `, [nextStep.step_order, approval_instance_id]);
+
+      return {
+        status: 'APPROVED',
+        instance_status: 'PENDING',
+        step_status: 'APPROVED',
+        next_step: nextStep.step_order,
+        next_step_id: nextStep.id,
+        message: `Step ${currentStep.step_order} approved. Moving to step ${nextStep.step_order}.`
+      };
+    } else {
+      // This was the last step - approve the entire instance
+      await t.none(`
+        UPDATE tbl_approval_instances
+        SET status = 'APPROVED', completed_at = NOW()
+        WHERE id = $1
+      `, [approval_instance_id]);
+
+      return {
+        status: 'APPROVED',
+        instance_status: 'APPROVED',
+        step_status: 'APPROVED',
+        message: 'All steps completed. Approval request has been fully approved.'
+      };
+    }
+  });
+}
+
+/**
+ * Cancel a pending approval instance
+ */
+export async function cancelApprovalInstance(instance_id, cancelled_by, reason = null) {
+  return db.tx(async t => {
+    const instance = await t.oneOrNone(`
+      SELECT * FROM tbl_approval_instances
+      WHERE id = $1
+      FOR UPDATE
+    `, [instance_id]);
+
+    if (!instance) throw new Error('Approval instance not found');
+    if (instance.status !== 'PENDING') {
+      throw new Error(`Cannot cancel instance with status: ${instance.status}`);
+    }
+
+    // Update instance
+    await t.none(`
+      UPDATE tbl_approval_instances
+      SET status = 'CANCELLED', completed_at = NOW()
+      WHERE id = $1
+    `, [instance_id]);
+
+    // Update all pending steps
+    await t.none(`
+      UPDATE tbl_approval_instance_steps
+      SET status = 'CANCELLED', completed_at = NOW()
+      WHERE approval_instance_id = $1 AND status = 'PENDING'
+    `, [instance_id]);
+
+    // Log the cancellation
+    await t.none(`
+      INSERT INTO tbl_approval_actions
+      (approval_instance_id, approver_user_id, action, comment)
+      VALUES ($1, $2, 'CANCELLED', $3)
+    `, [instance_id, cancelled_by, reason]);
+
+    return { status: 'CANCELLED', message: 'Approval instance cancelled' };
+  });
+}
+
+/**
+ * Get pending approvals for a user
+ * Only returns instances where user has hospitality access
+ */
+export async function getPendingApprovalsForUser(user_id, { hospitality_company_id, hotel_id, entity_type } = {}) {
+  const conditions = [
+    'i.status = \'PENDING\'',
+    'sa.approver_user_id = $1',
+    'sa.status = \'PENDING\'',
+    's.step_order = i.current_step'
+  ];
+  const params = [user_id];
+  let paramIdx = 2;
+
+  if (hospitality_company_id) {
+    conditions.push(`i.hospitality_company_id = $${paramIdx++}`);
+    params.push(hospitality_company_id);
+  }
+  if (hotel_id) {
+    conditions.push(`(i.hotel_id IS NULL OR i.hotel_id = $${paramIdx++})`);
+    params.push(hotel_id);
+  }
+  if (entity_type) {
+    conditions.push(`i.entity_type = $${paramIdx++}`);
+    params.push(entity_type);
+  }
+
+  return db.any(`
+    SELECT
+      i.id as instance_id,
+      i.entity_type,
+      i.entity_id,
+      i.current_step,
+      i.created_at,
+      i.metadata,
+      s.id as step_id,
+      s.decision_rule,
+      p.hospitality_company_id,
+      p.hotel_id as policy_hotel_id,
+      hc.name as company_name,
+      hh.name as hotel_name,
+      initiator.name as initiated_by_name
+    FROM tbl_approval_instances i
+    JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
+    JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+    JOIN tbl_approval_policies p ON i.approval_policy_id = p.id
+    LEFT JOIN tbl_hospitality_companies hc ON i.hospitality_company_id = hc.id
+    LEFT JOIN tbl_hospitality_company_hotels hh ON i.hotel_id = hh.id
+    LEFT JOIN tbl_users initiator ON i.initiated_by = initiator.id
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY i.created_at ASC
+  `, params);
+}
+
+// --- Hospitality Approval Engine: End ---
+
 export const markPOStatusChange = async (po_id, t, reject = false, user) => {
   try {
     const purchaseOrder = await t.one(
