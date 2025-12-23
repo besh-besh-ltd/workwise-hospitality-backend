@@ -395,6 +395,17 @@ const schemas = {
     mobile: Joi.string().optional(),
     status: Joi.number().valid(0, 1).optional(),
     user_id: Joi.number().optional(),
+    department_ids: Joi.array().items(Joi.number()).optional(),
+    roles: Joi.array().items(
+      Joi.object().keys({
+        role_id: Joi.number().required(),
+        role_title: Joi.string().optional().allow(null).allow(''),
+        company_id: Joi.number().optional().allow(null),
+        hotel_id: Joi.number().optional().allow(null),
+        department_id: Joi.number().optional().allow(null),
+        permissions: Joi.object().optional()
+      })
+    ).optional(),
   }),
 
   // mukul 09-06-2025, just saprate this from update_profile

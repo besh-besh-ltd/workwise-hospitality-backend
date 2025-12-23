@@ -9238,7 +9238,7 @@ ORDER BY tq.timestamp DESC;
         dynamicJoins +=
           'JOIN tbl_rfq_product_tech_evaluation RFQ_T_E ON RFQ.id = RFQ_T_E.rfq_id';
         dynamicConditions +=
-          'GROUP BY RFQ.id, P.name HAVING COUNT(RFQ_T_E.id) > 0';
+          'GROUP BY RFQ.id, P.name, H.name HAVING COUNT(RFQ_T_E.id) > 0';
       }
 
       if (po) {
