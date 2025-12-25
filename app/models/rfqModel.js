@@ -7140,6 +7140,35 @@ ORDER BY m.created_at;
                                             FROM vendor_responses_raw
                                             GROUP BY clause_id),
 
+            vendor_scores AS (
+                SELECT
+                    te.rfq_id,
+                    te.tbl_rfq_product_id AS rfq_product_id,
+                    vr.vendor_id,
+                    COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
+                    COALESCE(SUM(c.weightage), 0) AS total_weightage,
+                    CASE 
+                        WHEN COALESCE(SUM(c.weightage), 0) > 0 
+                        THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
+                        ELSE 0
+                    END AS calculated_score,
+                    te.minimum_passing_score,
+                    CASE 
+                        WHEN COALESCE(SUM(c.weightage), 0) > 0 
+                        THEN CASE 
+                            WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE(te.minimum_passing_score, 0)
+                            THEN true
+                            ELSE false
+                        END
+                        ELSE NULL
+                    END AS is_passed
+                FROM tbl_rfq_product_tech_evaluation te
+                JOIN tbl_rfq_product_tech_evaluation_clauses c ON te.id = c.tbl_rfq_product_tech_evaluation_id
+                LEFT JOIN tbl_rfq_product_tech_evaluation_vendors_response vr ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+                WHERE te.rfq_id = $1
+                GROUP BY te.rfq_id, te.tbl_rfq_product_id, vr.vendor_id, te.minimum_passing_score
+            ),
+
             clauses_data AS (
                 SELECT
                     ordered_clauses.rfq_id,
@@ -7166,6 +7195,33 @@ ORDER BY m.created_at;
                 GROUP BY rfq_id, rfq_product_id, evaluation_id
             ),
 
+            vendor_scores AS (
+                SELECT
+                    te.rfq_id,
+                    te.tbl_rfq_product_id AS rfq_product_id,
+                    vr.vendor_id,
+                    COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
+                    COALESCE(SUM(c.weightage), 0) AS total_weightage,
+                    CASE 
+                        WHEN COALESCE(SUM(c.weightage), 0) > 0 
+                        THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
+                        ELSE 0
+                    END AS calculated_score,
+                    te.minimum_passing_score,
+                    CASE 
+                        WHEN COALESCE(SUM(c.weightage), 0) > 0 
+                        THEN CASE 
+                            WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE(te.minimum_passing_score, 0)
+                            THEN true
+                            ELSE false
+                        END
+                        ELSE NULL
+                    END AS is_passed
+                FROM tbl_rfq_product_tech_evaluation te
+                JOIN tbl_rfq_product_tech_evaluation_clauses c ON te.id = c.tbl_rfq_product_tech_evaluation_id
+                LEFT JOIN tbl_rfq_product_tech_evaluation_vendors_response vr ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+                GROUP BY te.rfq_id, te.tbl_rfq_product_id, vr.vendor_id, te.minimum_passing_score
+            ),
             vendors_list AS (
                 SELECT
                     rfq_id,
@@ -7177,7 +7233,9 @@ ORDER BY m.created_at;
                                     'vendor_email', vendor_email,
                                     'is_cleared', is_cleared,
                                     'evaluated_by', evaluated_by,
-                                    'rfq_product_vendor_id', rfq_product_vendor_id
+                                    'rfq_product_vendor_id', rfq_product_vendor_id,
+                                    'calculated_score', COALESCE(vs.calculated_score::NUMERIC, 0),
+                                    'is_passed', vs.is_passed
                             )
                     ) AS vendors
                 FROM (
@@ -7216,6 +7274,10 @@ ORDER BY m.created_at;
                                                       ON rc.tbl_rfq_product_tech_evaluation_id = te.id
                                                           AND rc.vendor_id = tu.id
                                             LEFT JOIN tbl_users _TU ON _TU.id = rc.created_by
+                                            LEFT JOIN vendor_scores vs
+                                                      ON vs.rfq_id = te.rfq_id
+                                                          AND vs.rfq_product_id = te.tbl_rfq_product_id
+                                                          AND vs.vendor_id = tu.id
                               ) ranked
                           WHERE row_num = 1  -- ✅ This removes all duplicates
                       ) deduped

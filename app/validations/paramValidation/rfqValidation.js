@@ -423,7 +423,7 @@ export const rfqSchemas = {
     clause_text: Joi.string().required(),
     file_url: Joi.array().items(Joi.string().uri()).optional().allow(null),
     clause_type: Joi.string().valid('clause', 'sampling').default('clause'),
-    weightage: Joi.number().integer().min(0).max(100).optional().allow(null)
+    weightage: Joi.number().integer().min(0).optional().allow(null)
     // file_url: Joi.alternatives().try(
     //   Joi.array()
     //     .items(
@@ -449,7 +449,7 @@ export const rfqSchemas = {
     clause_text: Joi.string().required(),
     file_url: Joi.array().items(Joi.string().uri()).optional().allow(null),
     clause_type: Joi.string().valid('clause', 'sampling').optional(),
-    weightage: Joi.number().integer().min(0).max(100).optional().allow(null)
+    weightage: Joi.number().integer().min(0).optional().allow(null)
   }),
 
   id: Joi.object().keys({
