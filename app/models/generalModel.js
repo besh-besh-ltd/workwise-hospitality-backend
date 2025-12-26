@@ -1317,23 +1317,23 @@ export async function getApprovalPolicies({ hospitality_company_id, hotel_id, de
   let paramIdx = 1;
 
   if (hospitality_company_id) {
-    conditions.push(`hospitality_company_id = $${paramIdx++}`);
+    conditions.push(`p.hospitality_company_id = $${paramIdx++}`);
     vals.push(hospitality_company_id);
   }
   if (hotel_id !== undefined) {
-    conditions.push(`(hotel_id IS NULL OR hotel_id = $${paramIdx++})`);
+    conditions.push(`(p.hotel_id IS NULL OR p.hotel_id = $${paramIdx++})`);
     vals.push(hotel_id);
   }
   if (department_id !== undefined) {
-    conditions.push(`(department_id IS NULL OR department_id = $${paramIdx++})`);
+    conditions.push(`(p.department_id IS NULL OR p.department_id = $${paramIdx++})`);
     vals.push(department_id);
   }
   if (entity_type) {
-    conditions.push(`entity_type = $${paramIdx++}`);
+    conditions.push(`p.entity_type = $${paramIdx++}`);
     vals.push(entity_type);
   }
   if (!include_inactive) {
-    conditions.push('is_active = true');
+    conditions.push('p.is_active = true');
   }
 
   // Order by specificity: dept > hotel > company only
@@ -1343,8 +1343,8 @@ export async function getApprovalPolicies({ hospitality_company_id, hotel_id, de
            hh.name as hotel_name,
            d.title as department_name,
            CASE
-             WHEN department_id IS NOT NULL THEN 3
-             WHEN hotel_id IS NOT NULL THEN 2
+             WHEN p.department_id IS NOT NULL THEN 3
+             WHEN p.hotel_id IS NOT NULL THEN 2
              ELSE 1
            END as specificity_score,
            u.name as created_by_name
