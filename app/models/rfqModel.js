@@ -7195,33 +7195,6 @@ ORDER BY m.created_at;
                 GROUP BY rfq_id, rfq_product_id, evaluation_id
             ),
 
-            vendor_scores AS (
-                SELECT
-                    te.rfq_id,
-                    te.tbl_rfq_product_id AS rfq_product_id,
-                    vr.vendor_id,
-                    COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
-                    COALESCE(SUM(c.weightage), 0) AS total_weightage,
-                    CASE 
-                        WHEN COALESCE(SUM(c.weightage), 0) > 0 
-                        THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
-                        ELSE 0
-                    END AS calculated_score,
-                    te.minimum_passing_score,
-                    CASE 
-                        WHEN COALESCE(SUM(c.weightage), 0) > 0 
-                        THEN CASE 
-                            WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE(te.minimum_passing_score, 0)
-                            THEN true
-                            ELSE false
-                        END
-                        ELSE NULL
-                    END AS is_passed
-                FROM tbl_rfq_product_tech_evaluation te
-                JOIN tbl_rfq_product_tech_evaluation_clauses c ON te.id = c.tbl_rfq_product_tech_evaluation_id
-                LEFT JOIN tbl_rfq_product_tech_evaluation_vendors_response vr ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
-                GROUP BY te.rfq_id, te.tbl_rfq_product_id, vr.vendor_id, te.minimum_passing_score
-            ),
             vendors_list AS (
                 SELECT
                     rfq_id,
@@ -7234,8 +7207,8 @@ ORDER BY m.created_at;
                                     'is_cleared', is_cleared,
                                     'evaluated_by', evaluated_by,
                                     'rfq_product_vendor_id', rfq_product_vendor_id,
-                                    'calculated_score', COALESCE(vs.calculated_score::NUMERIC, 0),
-                                    'is_passed', vs.is_passed
+                                    'calculated_score', calculated_score,
+                                    'is_passed', is_passed
                             )
                     ) AS vendors
                 FROM (
@@ -7250,6 +7223,8 @@ ORDER BY m.created_at;
                                       rc.status AS is_cleared,
                                       _TU.name AS evaluated_by,
                                       rpv.id AS rfq_product_vendor_id,
+                                      COALESCE(vs.calculated_score::NUMERIC, 0) AS calculated_score,
+                                      vs.is_passed AS is_passed,
                                       ROW_NUMBER() OVER (
                                           PARTITION BY te.rfq_id, te.tbl_rfq_product_id, tu.id
                                           ORDER BY te.id
@@ -9636,6 +9611,27 @@ ORDER BY tq.timestamp DESC;
           message: 'Error updating minimum passing score.',
           error: error.message
         });
+      }
+    });
+  },
+
+  getClauseType: async (clause_id) => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const query = `
+          SELECT clause_type
+          FROM tbl_rfq_product_tech_evaluation_clauses
+          WHERE id = $1;
+        `;
+        const result = await db.query(query, [clause_id]);
+        if (result.length > 0) {
+          resolve(result[0]);
+        } else {
+          resolve(null);
+        }
+      } catch (error) {
+        console.error('Error fetching clause type:', error);
+        reject(error);
       }
     });
   },

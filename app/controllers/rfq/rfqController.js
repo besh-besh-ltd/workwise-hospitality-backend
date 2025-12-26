@@ -4776,8 +4776,8 @@ const rfqController = {
           is_tender: is_tender,
         };
 
-        // const nextRFQNumber = await getNextRfQNumber();
-        // rfqData.rfq_no = nextRFQNumber;
+        const nextRFQNumber = await getNextRfQNumber();
+        rfqData.rfq_no = nextRFQNumber;
 
         const response = await rfqModel.insert('tbl_rfq', rfqData);
         rfq_id = response[0].id;
@@ -12074,12 +12074,24 @@ getClauses: async (req, res) => {
         });
       }
 
+      // Check clause type - remarks only allowed for sampling
+      const clauseCheck = await rfqModel.getClauseType(clause_id);
+      if (clauseCheck && clauseCheck.clause_type !== 'sampling' && buyer_remark) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Remarks are only allowed for sampling clauses. Regular clauses can only have marks.'
+        });
+      }
+
+      // If not sampling, set remark to null
+      const finalRemark = (clauseCheck && clauseCheck.clause_type === 'sampling') ? buyer_remark : null;
+
       const result = await rfqModel.updateBuyerMarks(
         clause_id,
         vendor_id,
         buyer_id,
         buyer_marks,
-        buyer_remark
+        finalRemark
       );
 
       res.status(200).json(result).end();
