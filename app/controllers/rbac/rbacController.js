@@ -272,6 +272,101 @@ const rbacController = {
         });
     }
     },
+
+  /**
+   * POST /rbac/me/permissions/bulk
+   * Get permissions for multiple hotels, combining permissions from all relevant hospitality companies.
+   */
+  getMyPermissionsForHotels: async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const { hotel_ids, key } = req.body;
+
+      // Validation: hotel_ids must be a non-empty array
+      if (!hotel_ids || !Array.isArray(hotel_ids)) {
+        return res.status(400).json({
+          status: false,
+          message: "hotel_ids must be provided as an array"
+        });
+      }
+
+      // Normalize: ensure all IDs are integers and deduplicate
+      const normalizedHotelIds = [...new Set(
+        hotel_ids
+          .map(id => parseInt(id, 10))
+          .filter(id => !isNaN(id) && id > 0)
+      )];
+
+      // Edge case: empty array after normalization
+      if (normalizedHotelIds.length === 0) {
+        return res.status(400).json({
+          status: false,
+          message: "hotel_ids array must contain at least one valid hotel ID"
+        });
+      }
+
+      // Step 1: Validate hotels exist and get their company mappings
+      const hotelMappings = await rbacModel.getHotelCompanyMappings(normalizedHotelIds);
+
+      const validHotelIds = hotelMappings.map(m => m.hotel_id);
+      const invalidHotelIds = normalizedHotelIds.filter(id => !validHotelIds.includes(id));
+      const companyIds = [...new Set(hotelMappings.map(m => m.hospitality_company_id))];
+
+      // Edge case: no valid hotels found
+      if (validHotelIds.length === 0) {
+        return res.status(404).json({
+          status: false,
+          message: "None of the provided hotel IDs exist",
+          data: {
+            requested_hotel_ids: normalizedHotelIds,
+            invalid_hotel_ids: invalidHotelIds
+          }
+        });
+      }
+
+      // Step 2: Get permissions for valid hotels (optionally filtered by key)
+      const permissions = await rbacModel.getUserPermissionsForHotels(
+        userId,
+        validHotelIds,
+        key || null
+      );
+
+      // Step 3: Group permissions by resource
+      const grouped = {};
+      for (const p of permissions) {
+        if (!grouped[p.resource]) {
+          grouped[p.resource] = new Set();
+        }
+        grouped[p.resource].add(p.action);
+      }
+
+      // Convert Sets to Arrays
+      Object.keys(grouped).forEach(resource => {
+        grouped[resource] = Array.from(grouped[resource]);
+      });
+
+      return res.json({
+        status: true,
+        data: {
+          permissions: grouped,
+          meta: {
+            requested_hotel_ids: normalizedHotelIds,
+            valid_hotel_ids: validHotelIds,
+            invalid_hotel_ids: invalidHotelIds,
+            company_ids: companyIds,
+            module_filter: key || null
+          }
+        }
+      });
+
+    } catch (err) {
+      console.error("getMyPermissionsForHotels error:", err);
+      return res.status(500).json({
+        status: false,
+        message: "Failed to fetch permissions"
+      });
+    }
+  },
 };
 
 export default rbacController;

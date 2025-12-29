@@ -44,6 +44,11 @@ router.get(
   passportSignIn,
   rbacController.getMyPermissionsGrouped
 );
+router.post(
+  "/me/permissions/bulk",
+  passportSignIn,
+  rbacController.getMyPermissionsForHotels
+);
 router.get(
   '/users/:userId/roles',
   passportSignIn,

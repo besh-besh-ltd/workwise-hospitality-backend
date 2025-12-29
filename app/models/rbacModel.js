@@ -101,6 +101,81 @@ const rbacModel = {
     );
   },
 
+  /**
+   * Get user permissions for multiple hotels across potentially multiple companies.
+   * Infers company_id from each hotel and includes both company-level and hotel-specific permissions.
+   * @param {number} userId - The authenticated user's ID
+   * @param {number[]} hotelIds - Array of hotel IDs to check permissions for
+   * @param {string|null} key - Optional resource/module filter (e.g., "tender")
+   */
+  getUserPermissionsForHotels: async (userId, hotelIds = [], key = null) => {
+    if (!hotelIds || hotelIds.length === 0) {
+      return [];
+    }
+
+    const params = [userId, hotelIds];
+    let moduleFilter = '';
+
+    if (key) {
+      moduleFilter = 'AND p.resource = $3';
+      params.push(key);
+    }
+
+    return db.any(
+      `
+      WITH hotel_companies AS (
+        SELECT DISTINCT
+          h.id AS hotel_id,
+          h.hospitality_company_id
+        FROM tbl_hospitality_company_hotels h
+        WHERE h.id IN ($2:csv)
+          AND h.is_deleted = 0
+      ),
+      relevant_companies AS (
+        SELECT DISTINCT hospitality_company_id
+        FROM hotel_companies
+      )
+      SELECT DISTINCT
+        p.resource,
+        p.action
+      FROM tbl_user_role_scopes urs
+      JOIN tbl_role_permissions rp
+        ON rp.role_id = urs.role_id
+      JOIN tbl_permissions p
+        ON p.id = rp.permission_id
+      WHERE urs.user_id = $1
+        AND urs.company_id IN (SELECT hospitality_company_id FROM relevant_companies)
+        AND (
+          urs.hotel_id IS NULL
+          OR urs.hotel_id IN ($2:csv)
+        )
+        ${moduleFilter}
+      `,
+      params
+    );
+  },
+
+  /**
+   * Validate hotel IDs exist and return their company mappings.
+   */
+  getHotelCompanyMappings: async (hotelIds = []) => {
+    if (!hotelIds || hotelIds.length === 0) {
+      return [];
+    }
+
+    return db.any(
+      `
+      SELECT
+        id AS hotel_id,
+        hospitality_company_id
+      FROM tbl_hospitality_company_hotels
+      WHERE id IN ($1:csv)
+        AND is_deleted = 0
+      `,
+      [hotelIds]
+    );
+  },
+
   deleteUserRoleScopes: (userId) => {
     return db.none(
       `DELETE FROM tbl_user_role_scopes WHERE user_id = $1`,

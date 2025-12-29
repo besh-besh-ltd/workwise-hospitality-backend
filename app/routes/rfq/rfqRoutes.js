@@ -20,7 +20,7 @@ RfqRoutes.post(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2, 8]),
-  // can('rfq.create'),
+  can('tender.create'),
   validateDbBody.project_access_check,
   validateBody(rfqSchemas.create),
   rfqController.create
@@ -29,6 +29,7 @@ RfqRoutes.post(
 RfqRoutes.post(
   '/save-draft',
   passportSignIn,
+  can('tender.create'),
   acl([2, 8]),
   rfqController.saveDraft
 );
