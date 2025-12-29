@@ -1521,7 +1521,7 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
     // Direct user assignment - verify user has access to this scope
     const hasAccess = await userHasFullScopeAccess(step.approver_source_id, hospitality_company_id, hotel_id, department_id, t);
     if (hasAccess) {
-      const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND is_active = true', [step.approver_source_id]);
+      const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
       if (user) userIds.push(user.id);
     }
   } else if (step.approver_source_type === 'ROLE') {
@@ -1533,7 +1533,7 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
       JOIN tbl_user_role_scopes urs ON u.id = urs.user_id AND urs.role_id = $1
       JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
       ${department_id ? 'JOIN tbl_user_department ud ON u.id = ud.user_id AND ud.department_id = $5' : ''}
-      WHERE u.is_active = true
+      WHERE u.status = 1
         AND hum.hospitality_company_id = $2
         AND (
           ($3::int IS NULL AND hum.mapping_type = 0)
@@ -1552,7 +1552,7 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
       FROM tbl_users u
       JOIN tbl_user_department ud ON u.id = ud.user_id AND ud.department_id = $1
       JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
-      WHERE u.is_active = true
+      WHERE u.status = 1
         AND hum.hospitality_company_id = $2
         AND (
           ($3::int IS NULL AND hum.mapping_type = 0)
@@ -1588,13 +1588,15 @@ export async function createApprovalInstance({
   department_id = null,
   approval_policy_id = null,
   initiated_by,
-  metadata = {}
+  metadata = {},
+  txContext = null  // Optional transaction context for participating in outer transaction
 }) {
   if (!entity_type || !entity_id || !hospitality_company_id || !initiated_by) {
     throw new Error('entity_type, entity_id, hospitality_company_id, and initiated_by are required');
   }
 
-  return db.tx(async t => {
+  // If a transaction context is provided, use it; otherwise create a new transaction
+  const executor = async (t) => {
     // 1. Check for existing pending/approved instance for this entity
     const existingInstance = await t.oneOrNone(`
       SELECT id, status FROM tbl_approval_instances
@@ -1624,6 +1626,7 @@ export async function createApprovalInstance({
       }
     } else {
       policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id }, t);
+      console.log("FOUND POLICY:", policy)
       if (!policy) {
         throw new Error(`No approval policy found for ${entity_type} in this scope`);
       }
@@ -1681,7 +1684,13 @@ export async function createApprovalInstance({
       steps: instanceSteps,
       totalSteps: policySteps.length
     };
-  });
+  };
+
+  // If transaction context provided, use it; otherwise create new transaction
+  if (txContext) {
+    return executor(txContext);
+  }
+  return db.tx(executor);
 }
 
 // Transaction-safe version of findBestMatchingPolicy

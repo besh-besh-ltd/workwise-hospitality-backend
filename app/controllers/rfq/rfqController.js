@@ -25,7 +25,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance } from '../../models/generalModel.js';
 import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
@@ -2727,19 +2727,29 @@ const saveRfqDraft = async (user_id, reqBody) => {
  * @param {number} rfq_id
  * @param {number[]} hotel_ids
  * @param {number} user_id
+ * @param {Object} txContext - Optional transaction context for participating in outer transaction
  * @createdby mukul
  */
-const duplicateRfqForHotels = async (rfq_id, hotel_ids, user_id) => {
+const duplicateRfqForHotels = async (rfq_id, hotel_ids, user_id, txContext = null) => {
 
   // Nothing to duplicate if only one or zero hotels
-  if (!Array.isArray(hotel_ids) || hotel_ids.length <= 1) return;
+  // Return the original RFQ ID for approval processing
+  if (!Array.isArray(hotel_ids) || hotel_ids.length <= 1) {
+    return {
+      originalRfqId: rfq_id,
+      duplicatedRfqIds: [],
+      allRfqIds: [rfq_id]
+    };
+  }
 
   // First hotel is already associated with parent RFQ
   const [, ...childHotels] = hotel_ids;
 
-  // Use a single DB transaction - Guarantees atomicity + Prevents partial RFQ duplication
-   
-  return db.tx(async (t) => {
+  // Track all created RFQ IDs for approval processing
+  const createdRfqIds = [];
+
+  // Executor function for the duplication logic
+  const executor = async (t) => {
     
     // -------------------------  1 Fetch parent RFQ ONCE  -------------------------
 
@@ -2822,6 +2832,9 @@ RETURNING id;
         `,
         [rfq_id, hotel_id]
       );
+
+      // Track created RFQ ID for approval processing
+      createdRfqIds.push(newRfqId);
 
       // -------------------------  4️ Duplicate RFQ PRODUCTS  -------------------------
 
@@ -3075,9 +3088,75 @@ RETURNING id;
         [rfq_id, newRfqId]
       );
     }
-  });
+  };
+
+  // If transaction context provided, use it; otherwise create new transaction
+  if (txContext) {
+    await executor(txContext);
+  } else {
+    await db.tx(executor);
+  }
+
+  // Return all RFQ IDs for approval processing
+  return {
+    originalRfqId: rfq_id,
+    duplicatedRfqIds: createdRfqIds,
+    allRfqIds: [rfq_id, ...createdRfqIds]
+  };
 };
 
+
+/**
+ * startApprovalForRfq
+ *
+ * Submits an RFQ for approval by creating an approval instance.
+ * Only applies to hospitality RFQs (those with hospitality_company_id).
+ *
+ * IMPORTANT: This function throws if no approval policy exists for the scope.
+ * Hospitality RFQs MUST have an approval policy configured.
+ *
+ * @param {number} rfqId - The RFQ ID to submit for approval
+ * @param {number} userId - The user ID initiating the approval
+ * @param {Object} txContext - Optional transaction context for participating in outer transaction
+ * @returns {Promise<Object|null>} - Approval instance result or null if not hospitality
+ * @throws {Error} - If no approval policy exists for the hospitality RFQ scope
+ */
+const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
+  // Use transaction context if provided, otherwise use db directly
+  const dbContext = txContext || db;
+
+  const rfq = await dbContext.oneOrNone(
+    `SELECT id, rfq_no, hospitality_company_id, hotel_id, is_tender, company_name
+     FROM tbl_rfq WHERE id = $1`,
+    [rfqId]
+  );
+
+  // Skip non-hospitality RFQs - they don't require approval
+  if (!rfq || !rfq.hospitality_company_id) {
+    return null;
+  }
+
+  // For hospitality RFQs/Tenders, approval is REQUIRED
+  // Determine entity type based on is_tender flag
+  const entityType = rfq.is_tender === 1 ? 'TENDER' : 'RFQ';
+
+  // Let errors propagate (especially "no policy found" errors)
+  const result = await createApprovalInstance({
+    entity_type: entityType,
+    entity_id: rfqId,
+    hospitality_company_id: rfq.hospitality_company_id,
+    hotel_id: rfq.hotel_id,
+    initiated_by: userId,
+    metadata: {
+      rfq_number: rfq.rfq_no,
+      is_tender: rfq.is_tender,
+      company_name: rfq.company_name
+    },
+    txContext  // Pass transaction context to createApprovalInstance
+  });
+
+  return result;
+};
 
 
 const rfqController = {
@@ -3283,7 +3362,7 @@ const rfqController = {
             .end();
         }
       }
-     const saveRfqDataResult =  await saveRfqDraft(user_id, req.body);
+      await saveRfqDraft(user_id, req.body);
 
       const isRFQComplete = await rfqModel.checkRFQCompletion(rfq_id, selectedSheets);
 
@@ -3303,19 +3382,46 @@ const rfqController = {
 
       await rfqModel.removeRFQData(rfq_id, selectedSheets);
 
-      const responseUpdate = await rfqModel.update(
-        'tbl_rfq',
-        { is_published: 1 },
-        rfq_id
-      );
+      const [hotel_id] = req.body.hotel_ids || [];
 
-      // duplicate rfq for other hotels as well, notification logic need to update next
-      await duplicateRfqForHotels(rfq_id, req.body.hotel_ids || [], user_id);
+      // Wrap RFQ update, duplication, and approval in a single transaction
+      // If any step fails (e.g., no approval policy), everything rolls back
+      const { responseUpdate, allRfqIds } = await db.tx(async (t) => {
+        // Look up hospitality_company_id from the hotel
+        let hospitality_company_id = null;
+        if (hotel_id) {
+          const hotelRecord = await t.oneOrNone(
+            `SELECT hospitality_company_id FROM tbl_hospitality_company_hotels WHERE id = $1 AND is_deleted = 0`,
+            [hotel_id]
+          );
+          hospitality_company_id = hotelRecord?.hospitality_company_id || null;
+        }
 
+        // Update RFQ with hotel_id, hospitality_company_id, and publish
+        const updateResult = await t.any(
+          `UPDATE tbl_rfq
+           SET is_published = 1, hotel_id = $1, hospitality_company_id = $2
+           WHERE id = $3
+           RETURNING *`,
+          [hotel_id || null, hospitality_company_id, rfq_id]
+        );
 
+        // Duplicate RFQ for other hotels (passes transaction context)
+        const duplicationResult = await duplicateRfqForHotels(rfq_id, req.body.hotel_ids || [], user_id, t);
 
+        // Start approval process for all RFQs (original + duplicates)
+        // IMPORTANT: For hospitality RFQs, approval policy is REQUIRED
+        // If no policy exists, this will throw and rollback the entire transaction
+        const rfqIds = duplicationResult?.allRfqIds || [rfq_id];
+        await Promise.all(
+          rfqIds.map(id => startApprovalForRfq(id, user_id, t))
+        );
+
+        return { responseUpdate: updateResult, allRfqIds: rfqIds };
+      });
 
       // -------------------
+      // Email notifications happen AFTER successful transaction
 
       await sendMailtoVendors(req, rfq_id);
       await sendQuotationMailToBuyer(req, rfq_id);
@@ -3337,17 +3443,12 @@ const rfqController = {
         })
         .end();
     } catch (error) {
-     logError(error);
-   
-     let parsedError = {};
-       parsedError = JSON.parse(error?.message);
-   
      return res
        .status(400)
        .json({
          status: 2,
-         message: parsedError?.message || 'An error occurred while creating RFQ',
-         details: parsedError?.details || [],
+         message: error.message || 'An error occurred while creating RFQ',
+         details: error || [],
        })
        .end();
       }

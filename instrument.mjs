@@ -14,7 +14,7 @@ const sentryConfig = {
   dsn: process.env.SENTRY_DSN,
   environment: env,
   sendDefaultPii: true,
-  debug: env === 'development', // Enable debug mode in development
+  debug: false, // Enable debug mode in development
   tracesSampleRate: env === 'production' ? 0.1 : 1.0, // 10% in production, 100% in staging/dev
   profilesSampleRate: env === 'production' ? 0.1 : 1.0, // 10% in production, 100% in staging/dev
   integrations: [

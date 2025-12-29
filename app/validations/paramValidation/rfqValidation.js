@@ -243,6 +243,7 @@ export const rfqSchemas = {
     termsChanged: Joi.boolean().optional(),
     selectedTerms: Joi.array().items(termsItems).allow(null).allow(''),
     contact_number: Joi.string().trim().min(6).max(17).required(),
+    is_tender: Joi.number().required(),
     bid_end_date: Joi.string()
       .optional()
       .allow(null)

@@ -223,7 +223,7 @@ const hospitalityModel = {
       return [];
     }
     return db.any(
-      `SELECT id FROM tbl_users WHERE id IN ($1:csv) AND company_id = $2 AND is_deleted = 0`,
+      `SELECT id FROM tbl_users WHERE id IN ($1:csv) AND company_id = $2 AND status = 1 AND is_deleted = 0`,
       [userIds, companyId]
     );
   },
