@@ -100,19 +100,19 @@ GeneralRoutes.get(
 GeneralRoutes.get(
   '/hospitality/approval/policies',
   passportSignIn,
-  acl([7]),
+  acl([7, 2]),
   hospitalityApprovalController.getApprovalPolicies
 );
 GeneralRoutes.get(
   '/hospitality/approval/policies/:id',
   passportSignIn,
-  acl([7]),
+  acl([7, 2]),
   hospitalityApprovalController.getApprovalPolicy
 );
 GeneralRoutes.delete(
   '/hospitality/approval/policies/:id',
   passportSignIn,
-  acl([7]),
+  acl([7, 2]),
   hospitalityApprovalController.deleteApprovalPolicy
 );
 
