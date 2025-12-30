@@ -151,6 +151,14 @@ RfqRoutes.post(
   rfqController.getBuyerRfq
 );
 
+// Get RFQs/Tenders where user is in the approval line (current pending step)
+RfqRoutes.post(
+  '/pending-approvals',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  rfqController.getPendingApprovalRfqs
+);
+
 RfqRoutes.get('/get-terms', rfqController.getTerms);
 
 RfqRoutes.post(

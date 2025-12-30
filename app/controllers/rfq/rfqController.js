@@ -5775,6 +5775,75 @@ const rfqController = {
         .end();
     }
   },
+  // Get RFQs/Tenders where user is in the approval line (current pending step)
+  getPendingApprovalRfqs: async (req, res, next) => {
+    let user_id = req.user.id;
+    try {
+      let page, limit, offset;
+      if (req.body.page && req.body.page > 0) {
+        page = req.body.page;
+        limit = req.body.limit || Config.globalAdminLimit;
+        offset = (page - 1) * limit;
+      } else {
+        limit = Config.globalAdminLimit;
+        offset = 0;
+      }
+
+      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender } = req.body;
+      if (project_id == -1) {
+        project_id = null;
+      }
+      if (rfq_type == '') {
+        rfq_type = null;
+      }
+      if (reverse_auction == '-1') {
+        reverse_auction = null;
+      }
+      if (is_tender === '' || is_tender === undefined || is_tender === null) {
+        is_tender = null;
+      } else {
+        is_tender = is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0;
+      }
+
+      const listRfq = await rfqModel.getPendingApprovalRfqs(
+        limit,
+        offset,
+        user_id,
+        project_id,
+        sort,
+        reverse_auction,
+        rfq_type,
+        rfq_no,
+        is_tender
+      );
+
+      let count = await rfqModel.getPendingApprovalRfqCount(
+        user_id,
+        project_id,
+        rfq_type,
+        reverse_auction,
+        rfq_no,
+        is_tender
+      );
+      res
+        .status(200)
+        .json({
+          status: 1,
+          data: listRfq,
+          total_items: count
+        })
+        .end();
+    } catch (error) {
+      logError(error);
+      res
+        .status(400)
+        .json({
+          status: 3,
+          message: Config.errorText.value
+        })
+        .end();
+    }
+  },
   getVendors: async (req, res, next) => {
     let { vendors, rfq_id } = req.body;
     console.log(vendors);

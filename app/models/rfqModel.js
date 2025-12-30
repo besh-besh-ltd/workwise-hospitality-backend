@@ -2864,6 +2864,197 @@ LIMIT 2;
         });
     });
   },
+  // Get RFQs/Tenders where user is in the approval line (current pending step)
+  getPendingApprovalRfqs: async (
+    limit,
+    offset,
+    user_id,
+    project_id,
+    sort,
+    reverse_auction,
+    rfq_type,
+    rfq_no,
+    is_tender
+  ) => {
+    return new Promise(function (resolve, reject) {
+      let q = `
+        SELECT
+          RFQ.*,
+          P.name AS project_name,
+          (SELECT COUNT(*)
+          FROM tbl_query_messages TQM
+          WHERE TQM.receiver_id = ${user_id}
+          AND TQM.rfq_id = RFQ.id
+          AND TQM.is_seen = false
+          ) AS "unseen_query_count",
+          (
+            SELECT
+              CASE
+                WHEN COUNT(*) = 0 THEN false
+                ELSE
+                  (
+                    SELECT COUNT(*)
+                      FROM tbl_rfq_products _rpv
+                      WHERE _rpv.rfq_id = RFQ.id
+                  ) = (
+                    SELECT COUNT(*)
+                      FROM tbl_quote_finalization tqf2
+                      WHERE tqf2.rfq_id = RFQ.id
+                  )
+              END
+            FROM tbl_quotes tq
+            WHERE tq.rfq_id = RFQ.id
+          ) AS is_finalized,
+          ARRAY(
+              SELECT json_build_object('id', TQ.id)
+              FROM tbl_quotes TQ
+              WHERE TQ.rfq_id = RFQ.id
+          ) AS "quotes",
+          ARRAY(
+            SELECT json_build_object(
+              'total_vendors', COUNT(DISTINCT TRPV.user_id),
+              'quote_received',
+              (
+                SELECT COUNT(*) FROM (
+                  SELECT
+                    trpv.user_id
+                  FROM
+                    tbl_rfq_product_vendors trpv
+                  LEFT JOIN tbl_quotes tq
+                    ON trpv.rfq_id = tq.rfq_id AND trpv.user_id = tq.created_by
+                  LEFT JOIN tbl_quote_items qi
+                    ON trpv.product_variant_id = qi.product_variant_id
+                    AND trpv.variant = qi.variant
+                    AND trpv.rfq_id = qi.rfq_id
+                    AND qi.quote_id = tq.id
+                    AND (qi.unit_price > 0 OR (qi.comment IS NOT NULL AND qi.comment != '') OR (qi.delivery_period IS NOT NULL AND qi.delivery_period != '') OR EXISTS(SELECT 1 FROM tbl_quote_item_files qif WHERE qif.quote_item_id = qi.id))
+                  WHERE
+                    trpv.rfq_id = rfq.id
+                  GROUP BY
+                    trpv.user_id
+                  HAVING
+                    BOOL_OR(tq.is_regret = 1)
+                    OR COUNT(DISTINCT trpv.id) = COUNT(DISTINCT qi.id)
+                ) AS fully_quoted_vendors
+              )
+            )
+            FROM tbl_rfq_product_vendors trpv
+            WHERE trpv.rfq_id = rfq.id
+            GROUP BY trpv.rfq_id
+          ) AS "vendors",
+          ARRAY(
+              SELECT json_build_object(
+                  'id', RFQ_P.id,
+                  'product_id', RFQ_P.product_variant_id,
+                  'product_specs', (
+                      SELECT json_agg(json_build_object(
+                          'title', RFQ_P_SPEC.title,
+                          'value', RFQ_P_SPEC.value,
+                          'id', RFQ_P_SPEC.id,
+                          'product_id', RFQ_P_SPEC.product_variant_id,
+                          'rfq_id', RFQ_P_SPEC.rfq_id))
+                      FROM tbl_rfq_products_specs RFQ_P_SPEC
+                      WHERE RFQ_P.product_variant_id = RFQ_P_SPEC.product_variant_id
+                        AND RFQ_P.rfq_id = RFQ_P_SPEC.rfq_id
+                        AND RFQ_P.variant = RFQ_P_SPEC.variant
+                  ),
+                  'product_details', (
+                      SELECT json_agg(json_build_object(
+                          'id', T_P.id,
+                          'name', T_P.name))
+                      FROM tbl_product_variant T_P
+                      WHERE RFQ_P.product_variant_id = T_P.id
+                  ),
+                  'vendor_details', (
+                      SELECT json_agg(json_build_object(
+                          'id', RFQ_P_V.id,
+                          'user_id', RFQ_P_V.user_id,
+                          'user_details', (
+                              SELECT json_build_object(
+                                  'user_id', U.id,
+                                  'name', U.name,
+                                  'email', U.email)
+                              FROM tbl_users U
+                              WHERE RFQ_P_V.user_id = U.id
+                          )))
+                      FROM tbl_rfq_product_vendors RFQ_P_V
+                      WHERE RFQ_P.product_variant_id = RFQ_P_V.product_variant_id
+                        AND RFQ_P.rfq_id = RFQ_P_V.rfq_id
+                        AND RFQ_P.variant = RFQ_P_V.variant
+                  )
+              )
+              FROM tbl_rfq_products RFQ_P
+              WHERE RFQ.id = RFQ_P.rfq_id
+          ) AS "products"
+      FROM tbl_rfq RFQ
+      LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
+      JOIN tbl_approval_instances ai ON (ai.entity_type = 'RFQ' OR ai.entity_type = 'TENDER') AND ai.entity_id = RFQ.id
+      JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+      JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
+      WHERE ai.status = 'PENDING'
+        AND asa.approver_user_id = ${user_id}
+        AND asa.status = 'PENDING'
+        AND ais.step_order = ai.current_step
+        AND RFQ.is_published = 1
+      AND (RFQ.project_id = $1 OR $1 IS NULL)
+      AND (RFQ.rfq_type = $2 OR $2 IS NULL)
+      AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
+      AND (RFQ.rfq_no::text LIKE '%$6%' OR $6 IS NULL)
+      ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0}` : ''}
+      ORDER BY RFQ.timestamp ${sort ?? ''}
+      LIMIT $5 OFFSET $4;`;
+
+      db.any(q, [project_id, rfq_type, reverse_auction, offset, limit, rfq_no])
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+  getPendingApprovalRfqCount: async (
+    user_id,
+    project_id,
+    rfq_type,
+    reverse_auction,
+    rfq_no,
+    is_tender
+  ) => {
+    return new Promise(function (resolve, reject) {
+      let isTenderFilter = '';
+      if (is_tender !== null && is_tender !== undefined) {
+        isTenderFilter = `AND RFQ.is_tender = ${is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0}`;
+      }
+      db.any(
+        `SELECT COUNT(*) from tbl_rfq RFQ
+        LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
+        JOIN tbl_approval_instances ai ON (ai.entity_type = 'RFQ' OR ai.entity_type = 'TENDER') AND ai.entity_id = RFQ.id
+        JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+        JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
+        WHERE ai.status = 'PENDING'
+          AND asa.approver_user_id = ${user_id}
+          AND asa.status = 'PENDING'
+          AND ais.step_order = ai.current_step
+          AND RFQ.is_published = 1
+        AND (RFQ.project_id = $1 OR $1 IS NULL)
+        AND (RFQ.rfq_type = $2 OR $2 IS NULL)
+        AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
+        AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
+        ${isTenderFilter};
+        `,
+        [project_id, rfq_type, reverse_auction, rfq_no]
+      )
+        .then(function (data) {
+          resolve(data[0].count);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   getVendors: async (vendors, rfq_id = null) => {
     const placeholders = vendors.map((_, index) => `$${index + 1}`).join(', ');
 
