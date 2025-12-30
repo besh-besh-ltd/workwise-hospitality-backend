@@ -1514,7 +1514,7 @@ export async function deletePolicySteps(approval_policy_id) {
  * @param {number|null} department_id - Department ID for filtering (optional)
  * @returns {Array<number>} Array of user IDs
  */
-async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db) {
+async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null) {
   const userIds = [];
 
   if (step.approver_source_type === 'USER') {
@@ -1563,7 +1563,12 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
     userIds.push(...users.map(u => u.id));
   }
 
-  return [...new Set(userIds)]; // Remove duplicates
+  // Remove duplicates and filter out the creator (maker-checker pattern)
+  let finalApprovers = [...new Set(userIds)];
+  if (initiatedBy) {
+    finalApprovers = finalApprovers.filter(id => id !== initiatedBy);
+  }
+  return finalApprovers;
 }
 
 /**
@@ -1652,19 +1657,24 @@ export async function createApprovalInstance({
 
     // 5. Create instance steps and resolve approvers
     const instanceSteps = [];
+    let stepNumber = 0; // Track sequential step numbering
+
     for (const policyStep of policySteps) {
+      // Resolve approvers for this step (pass initiated_by to exclude creator)
+      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, department_id, t, initiated_by);
+
+      // Skip step if no approvers remain after excluding creator
+      if (approverUserIds.length === 0) {
+        continue;
+      }
+
+      stepNumber++; // Increment sequential step number
+
       const instanceStep = await t.one(`
         INSERT INTO tbl_approval_instance_steps
         (approval_instance_id, step_order, decision_rule, status, policy_step_id)
         VALUES ($1, $2, $3, 'PENDING', $4) RETURNING *
-      `, [instance.id, policyStep.step_order, policyStep.decision_rule, policyStep.id]);
-
-      // Resolve approvers for this step (pass department_id for filtering)
-      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, department_id, t);
-
-      if (approverUserIds.length === 0) {
-        throw new Error(`No approvers found for step ${policyStep.step_order}. Check approver configuration.`);
-      }
+      `, [instance.id, stepNumber, policyStep.decision_rule, policyStep.id]);
 
       // Insert approvers for this step
       for (const userId of approverUserIds) {
@@ -1678,11 +1688,28 @@ export async function createApprovalInstance({
       instanceSteps.push({ ...instanceStep, approverCount: approverUserIds.length });
     }
 
+    // Handle case where all steps were skipped (creator was only approver for all steps)
+    if (instanceSteps.length === 0) {
+      await t.none(`
+        UPDATE tbl_approval_instances
+        SET status = 'APPROVED', current_step = 0, completed_at = NOW()
+        WHERE id = $1
+      `, [instance.id]);
+
+      return {
+        instance: { ...instance, status: 'APPROVED', current_step: 0 },
+        policy: { id: policy.id, entity_type: policy.entity_type },
+        steps: [],
+        totalSteps: 0,
+        autoApproved: true
+      };
+    }
+
     return {
       instance,
       policy: { id: policy.id, entity_type: policy.entity_type },
       steps: instanceSteps,
-      totalSteps: policySteps.length
+      totalSteps: instanceSteps.length
     };
   };
 
