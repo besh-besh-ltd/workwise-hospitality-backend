@@ -17,18 +17,18 @@ const formatErrorResponse = (res, error) => {
 
 const NegotiationController = {
   /**
-   * Create a new negotiation round
+   * Create a new negotiation round (product-specific)
    * POST /negotiation/rounds
    */
   createRound: async (req, res) => {
     try {
-      const { rfq_id, target_price, end_date } = req.body;
+      const { rfq_id, rfq_product_id, target_price, end_date } = req.body;
       const user_id = req.user.id;
 
-      if (!rfq_id || !target_price || !end_date) {
+      if (!rfq_id || !rfq_product_id || !target_price || !end_date) {
         return res.status(400).json({
           status: 2,
-          message: 'rfq_id, target_price, and end_date are required'
+          message: 'rfq_id, rfq_product_id, target_price, and end_date are required'
         });
       }
 
@@ -59,27 +59,39 @@ const NegotiationController = {
         });
       }
 
-      // Check if there's an active round
-      const activeRound = await negotiationModel.getActiveRound(rfq_id);
-      if (activeRound) {
-        return res.status(400).json({
+      // Check if product exists
+      const product = await db.oneOrNone(
+        `SELECT * FROM tbl_rfq_products WHERE id = $1 AND rfq_id = $2`,
+        [rfq_product_id, rfq_id]
+      );
+      if (!product) {
+        return res.status(404).json({
           status: 2,
-          message: `Round ${activeRound.round_number} is still active. Please complete or cancel it first.`
+          message: 'Product not found in this RFQ'
         });
       }
 
-      // Get next round number
-      const round_number = await negotiationModel.getNextRoundNumber(rfq_id);
+      // Check if there's an active round for this product
+      const activeRound = await negotiationModel.getActiveRound(rfq_id, rfq_product_id);
+      if (activeRound) {
+        return res.status(400).json({
+          status: 2,
+          message: `Round ${activeRound.round_number} is still active for this product. Please complete or cancel it first.`
+        });
+      }
+
+      // Get next round number for this product
+      const round_number = await negotiationModel.getNextRoundNumber(rfq_id, rfq_product_id);
 
       // Create round in transaction
       const result = await db.tx(async (t) => {
         // Create the round
         const round = await t.one(
           `INSERT INTO tbl_negotiation_rounds
-            (rfq_id, round_number, target_price, end_date, status, created_by)
-           VALUES ($1, $2, $3, $4, 'PENDING_APPROVAL', $5)
+            (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by)
+           VALUES ($1, $2, $3, $4, $5, 'PENDING_APPROVAL', $6)
            RETURNING *`,
-          [rfq_id, round_number, target_price, end_date, user_id]
+          [rfq_id, rfq_product_id, round_number, target_price, end_date, user_id]
         );
 
         // Find negotiation approval policy
@@ -159,6 +171,7 @@ const NegotiationController = {
           metadata: {
             round_id: round.id,
             round_number: round_number,
+            rfq_product_id: rfq_product_id,
             target_price: target_price
           },
           txContext: t
@@ -217,12 +230,13 @@ const NegotiationController = {
   },
 
   /**
-   * Get active round for an RFQ
-   * GET /negotiation/rounds/:rfq_id/active
+   * Get active round for a product
+   * GET /negotiation/rounds/:rfq_id/active?rfq_product_id=123
    */
   getActiveRound: async (req, res) => {
     try {
       const rfq_id = parseInt(req.params.rfq_id);
+      const rfq_product_id = req.query.rfq_product_id ? parseInt(req.query.rfq_product_id) : null;
 
       if (!rfq_id) {
         return res.status(400).json({
@@ -231,13 +245,20 @@ const NegotiationController = {
         });
       }
 
-      const round = await negotiationModel.getActiveRound(rfq_id);
+      if (!rfq_product_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'rfq_product_id is required'
+        });
+      }
+
+      const round = await negotiationModel.getActiveRound(rfq_id, rfq_product_id);
 
       if (!round) {
         return res.status(200).json({
           status: 1,
           data: null,
-          message: 'No active round found'
+          message: 'No active round found for this product'
         });
       }
 
@@ -252,6 +273,46 @@ const NegotiationController = {
           approvals,
           approvalStatus
         }
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * Get all active rounds for an RFQ (all products)
+   * GET /negotiation/rounds/:rfq_id/active-all
+   */
+  getActiveRounds: async (req, res) => {
+    try {
+      const rfq_id = parseInt(req.params.rfq_id);
+
+      if (!rfq_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'rfq_id is required'
+        });
+      }
+
+      const rounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id);
+
+      // Get approvals for each round
+      const roundsWithApprovals = await Promise.all(
+        rounds.map(async (round) => {
+          const approvals = await negotiationModel.getRoundApprovals(round.id);
+          const approvalStatus = await negotiationModel.areAllApprovalsComplete(round.id);
+          return {
+            ...round,
+            approvals,
+            approvalStatus
+          };
+        })
+      );
+
+      return res.status(200).json({
+        status: 1,
+        data: roundsWithApprovals
       });
     } catch (error) {
       logError(error);
@@ -601,11 +662,25 @@ const NegotiationController = {
         });
       }
 
-      // Upsert quote
+      // Check if vendor has already submitted a quote for this round
+      const existingQuote = await db.oneOrNone(
+        `SELECT id, submitted_at FROM tbl_negotiation_round_quotes 
+         WHERE negotiation_round_id = $1 AND vendor_id = $2 AND rfq_product_id = $3`,
+        [round_id, vendor_id, round.rfq_product_id]
+      );
+
+      if (existingQuote) {
+        return res.status(400).json({
+          status: 2,
+          message: 'You have already submitted a quote for this negotiation round. Only one submission is allowed per round.'
+        });
+      }
+
+      // Insert quote (no update allowed)
       const quote = await negotiationModel.upsertRoundQuote({
         negotiation_round_id: round_id,
         vendor_id: vendor_id,
-        rfq_product_id: rfq_product_id,
+        rfq_product_id: round.rfq_product_id,
         quoted_price: quoted_price,
         previous_price: previous_price || null
       });

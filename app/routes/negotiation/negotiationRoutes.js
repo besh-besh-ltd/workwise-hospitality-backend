@@ -26,13 +26,21 @@ NegotiationRoutes.get(
   negotiationController.getRounds
 );
 
-// Get active round for an RFQ
+// Get active round for a product
 NegotiationRoutes.get(
   '/rounds/:rfq_id/active',
   passportSignIn,
   acl([7]),
   hospitalityMiddleware.checkHospitality(false),
   negotiationController.getActiveRound
+);
+
+// Get all active rounds for an RFQ
+NegotiationRoutes.get(
+  '/rounds/:rfq_id/active-all',
+  passportSignIn,
+  acl([7]),
+  negotiationController.getActiveRounds
 );
 
 // Approve a round

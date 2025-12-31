@@ -4,11 +4,12 @@ const negotiationModel = {
   // ============= NEGOTIATION ROUNDS =============
 
   /**
-   * Create a new negotiation round
+   * Create a new negotiation round (product-specific)
    */
   createRound: async (roundData) => {
     const {
       rfq_id,
+      rfq_product_id,
       round_number,
       target_price,
       end_date,
@@ -17,12 +18,16 @@ const negotiationModel = {
       remarks = null
     } = roundData;
 
+    if (!rfq_product_id) {
+      throw new Error('rfq_product_id is required for product-specific negotiation rounds');
+    }
+
     return db.one(
       `INSERT INTO tbl_negotiation_rounds
-        (rfq_id, round_number, target_price, end_date, status, created_by, remarks)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+        (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [rfq_id, round_number, target_price, end_date, status, created_by, remarks]
+      [rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks]
     );
   },
 
@@ -37,50 +42,90 @@ const negotiationModel = {
   },
 
   /**
-   * Get all rounds for an RFQ
+   * Get all rounds for an RFQ (optionally filtered by product)
    */
-  getRoundsByRfqId: async (rfqId) => {
-    return db.any(
-      `SELECT 
+  getRoundsByRfqId: async (rfqId, rfqProductId = null) => {
+    let query = `SELECT 
         nr.*,
         u.name as created_by_name,
-        u.email as created_by_email
+        u.email as created_by_email,
+        rp.product_details
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
-       WHERE nr.rfq_id = $1
-       ORDER BY nr.round_number ASC, nr.created_at DESC`,
-      [rfqId]
-    );
+       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+       WHERE nr.rfq_id = $1`;
+    
+    const values = [rfqId];
+    
+    if (rfqProductId) {
+      query += ` AND nr.rfq_product_id = $2`;
+      values.push(rfqProductId);
+    }
+    
+    query += ` ORDER BY nr.rfq_product_id, nr.round_number ASC, nr.created_at DESC`;
+    
+    return db.any(query, values);
   },
 
   /**
-   * Get active round for an RFQ
+   * Get active round for a product
    */
-  getActiveRound: async (rfqId) => {
+  getActiveRound: async (rfqId, rfqProductId) => {
+    if (!rfqProductId) {
+      throw new Error('rfq_product_id is required');
+    }
+    
     return db.oneOrNone(
       `SELECT 
         nr.*,
         u.name as created_by_name,
-        u.email as created_by_email
+        u.email as created_by_email,
+        rp.product_details
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
+       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
        WHERE nr.rfq_id = $1
+         AND nr.rfq_product_id = $2
          AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
        ORDER BY nr.round_number DESC
        LIMIT 1`,
+      [rfqId, rfqProductId]
+    );
+  },
+
+  /**
+   * Get all active rounds for an RFQ (multiple products)
+   */
+  getActiveRoundsByRfqId: async (rfqId) => {
+    return db.any(
+      `SELECT 
+        nr.*,
+        u.name as created_by_name,
+        u.email as created_by_email,
+        rp.product_details
+       FROM tbl_negotiation_rounds nr
+       LEFT JOIN tbl_users u ON u.id = nr.created_by
+       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+       WHERE nr.rfq_id = $1
+         AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+       ORDER BY nr.rfq_product_id, nr.round_number DESC`,
       [rfqId]
     );
   },
 
   /**
-   * Get next round number for an RFQ
+   * Get next round number for a product
    */
-  getNextRoundNumber: async (rfqId) => {
+  getNextRoundNumber: async (rfqId, rfqProductId) => {
+    if (!rfqProductId) {
+      throw new Error('rfq_product_id is required');
+    }
+    
     const result = await db.oneOrNone(
       `SELECT COALESCE(MAX(round_number), 0) + 1 as next_round
        FROM tbl_negotiation_rounds
-       WHERE rfq_id = $1`,
-      [rfqId]
+       WHERE rfq_id = $1 AND rfq_product_id = $2`,
+      [rfqId, rfqProductId]
     );
     return result ? parseInt(result.next_round) : 1;
   },
