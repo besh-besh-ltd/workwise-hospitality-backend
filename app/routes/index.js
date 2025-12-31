@@ -13,6 +13,7 @@ import seoRoutes from './seo/seoRoutes.js';
 import Project from './project/projectRoutes.js';
 import PORoutes from './purchase_order/poRoutes.js';
 import HospitalityRoutes from './hospitality/hospitalityRoutes.js';
+import NegotiationRoutes from './negotiation/negotiationRoutes.js';
 import PublicRoutes from './public/publicRoutes.js';
 import RbacRoutes from './rbac/rbacRoutes.js';
 
@@ -31,6 +32,7 @@ v1.use('/project', Project);
 v1.use('/po', PORoutes);
 v1.use('/public', PublicRoutes)
 v1.use('/hospitality', HospitalityRoutes);
+v1.use('/negotiation', NegotiationRoutes);
 v1.use('/rbac', RbacRoutes);
 
 export default v1;

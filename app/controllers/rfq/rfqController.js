@@ -25,7 +25,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent } from '../../models/generalModel.js';
 import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
@@ -3414,8 +3414,43 @@ const rfqController = {
         // If no policy exists, this will throw and rollback the entire transaction
         const rfqIds = duplicationResult?.allRfqIds || [rfq_id];
         await Promise.all(
-          rfqIds.map(id => startApprovalForRfq(id, user_id, t))
+          rfqIds.map(async (id) => {
+            const approvalResult = await startApprovalForRfq(id, user_id, t);
+            
+            // Record lifecycle: SUBMITTED for approval
+            const rfqData = await t.oneOrNone(
+              `SELECT is_tender FROM tbl_rfq WHERE id = $1`,
+              [id]
+            );
+            if (rfqData && approvalResult) {
+              await recordLifecycleEvent({
+                entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+                entity_id: id,
+                stage: 'SUBMITTED',
+                action: 'SUBMIT',
+                performed_by: user_id,
+                metadata: { approval_instance_id: approvalResult.instance?.id },
+                txContext: t
+              });
+            }
+            
+            return approvalResult;
+          })
         );
+
+        // Record lifecycle: PUBLISHED (after approval process started)
+        const publishedRfq = updateResult[0];
+        if (publishedRfq && publishedRfq.hospitality_company_id) {
+          await recordLifecycleEvent({
+            entity_type: publishedRfq.is_tender === 1 ? 'TENDER' : 'RFQ',
+            entity_id: rfq_id,
+            stage: 'PUBLISHED',
+            action: 'PUBLISH',
+            performed_by: user_id,
+            metadata: { rfq_no: publishedRfq.rfq_no },
+            txContext: t
+          });
+        }
 
         return { responseUpdate: updateResult, allRfqIds: rfqIds };
       });

@@ -2006,6 +2006,26 @@ export async function submitApprovalAction({
         WHERE id = $1
       `, [approval_instance_id]);
 
+      // Record lifecycle event for rejection
+      try {
+        await recordLifecycleEvent({
+          entity_type: instance.entity_type,
+          entity_id: instance.entity_id,
+          stage: 'APPROVED', // Stage before rejection
+          action: 'REJECT',
+          performed_by: approver_user_id,
+          metadata: {
+            approval_instance_id: approval_instance_id,
+            step_order: currentStep.step_order
+          },
+          remarks: comment,
+          txContext: t
+        });
+      } catch (lifecycleError) {
+        // Log but don't fail the transaction
+        console.error('Error recording lifecycle event:', lifecycleError);
+      }
+
       return {
         status: 'REJECTED',
         instance_status: 'REJECTED',
@@ -2075,6 +2095,26 @@ export async function submitApprovalAction({
         SET status = 'APPROVED', completed_at = NOW()
         WHERE id = $1
       `, [approval_instance_id]);
+
+      // Record lifecycle event for final approval
+      try {
+        await recordLifecycleEvent({
+          entity_type: instance.entity_type,
+          entity_id: instance.entity_id,
+          stage: 'APPROVED',
+          action: 'APPROVE',
+          performed_by: approver_user_id,
+          metadata: {
+            approval_instance_id: approval_instance_id,
+            step_order: currentStep.step_order
+          },
+          remarks: comment,
+          txContext: t
+        });
+      } catch (lifecycleError) {
+        // Log but don't fail the transaction
+        console.error('Error recording lifecycle event:', lifecycleError);
+      }
 
       return {
         status: 'APPROVED',
@@ -2247,5 +2287,73 @@ export const uploadToS3 = async (filePath, fileName) => {
     };
   }
 };
+
+// ============= LIFECYCLE TRACKING =============
+
+/**
+ * Record a lifecycle event for any entity type (RFQ, TENDER, NEGOTIATION, PO, INDENT)
+ * @param {string} entity_type - Type of entity ('RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT')
+ * @param {number} entity_id - ID of the entity
+ * @param {string} stage - Stage in lifecycle (e.g., 'CREATED', 'SUBMITTED', 'APPROVED', 'PUBLISHED')
+ * @param {string} action - Action performed (e.g., 'SUBMIT', 'APPROVE', 'REJECT', 'PUBLISH')
+ * @param {number} performed_by - User ID who performed the action
+ * @param {Object} metadata - Additional metadata (optional, defaults to {})
+ * @param {string} remarks - Remarks/notes (optional)
+ * @param {Object} txContext - Optional transaction context for atomicity
+ * @returns {Promise<Object>} Created lifecycle history record
+ */
+export async function recordLifecycleEvent({
+  entity_type,
+  entity_id,
+  stage,
+  action,
+  performed_by,
+  metadata = {},
+  remarks = null,
+  txContext = null
+}) {
+  if (!entity_type || !entity_id || !stage || !action || !performed_by) {
+    throw new Error('entity_type, entity_id, stage, action, and performed_by are required');
+  }
+
+  // Validate entity_type is in enum
+  const validTypes = ['RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT'];
+  if (!validTypes.includes(entity_type)) {
+    throw new Error(`Invalid entity_type. Must be one of: ${validTypes.join(', ')}`);
+  }
+
+  const dbContext = txContext || db;
+
+  return dbContext.one(
+    `INSERT INTO tbl_lifecycle_history
+      (entity_id, entity_type, stage, action, performed_by, metadata, remarks)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *`,
+    [entity_id, entity_type, stage, action, performed_by, JSON.stringify(metadata), remarks]
+  );
+}
+
+/**
+ * Get lifecycle history for an entity
+ * @param {string} entity_type - Type of entity
+ * @param {number} entity_id - ID of the entity
+ * @param {Object} txContext - Optional transaction context
+ * @returns {Promise<Array>} Array of lifecycle history records
+ */
+export async function getLifecycleHistory(entity_type, entity_id, txContext = null) {
+  const dbContext = txContext || db;
+
+  return dbContext.any(
+    `SELECT 
+      lh.*,
+      u.name as performed_by_name,
+      u.email as performed_by_email
+     FROM tbl_lifecycle_history lh
+     LEFT JOIN tbl_users u ON u.id = lh.performed_by
+     WHERE lh.entity_type = $1 AND lh.entity_id = $2
+     ORDER BY lh.created_at ASC`,
+    [entity_type, entity_id]
+  );
+}
 
 export default generalModel;

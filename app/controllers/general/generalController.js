@@ -359,6 +359,15 @@ const hospitalityApprovalController = {
             message: 'entity_type and hospitality_company_id are required'
           });
         }
+
+        // Validate entity_type
+        const validEntityTypes = ['RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT'];
+        if (!validEntityTypes.includes(entity_type)) {
+          return res.status(400).json({
+            status: 3,
+            message: `Invalid entity_type. Must be one of: ${validEntityTypes.join(', ')}`
+          });
+        }
         policy = await createApprovalPolicy({
           entity_type,
           hospitality_company_id,
