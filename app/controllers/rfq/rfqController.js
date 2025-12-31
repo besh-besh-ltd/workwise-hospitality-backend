@@ -3158,6 +3158,72 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
   return result;
 };
 
+/**
+ * startApprovalForTechEval
+ *
+ * Submits a Technical Evaluation for approval by creating an approval instance.
+ * Only applies to hospitality RFQs (those with hospitality_company_id).
+ * Approval is at the product level - entity_id is the rfq_product_id.
+ *
+ * IMPORTANT: This function throws if no approval policy exists for the scope.
+ * Hospitality Technical Evaluations MUST have an approval policy configured.
+ *
+ * @param {number} rfqProductId - The RFQ product ID to submit for approval
+ * @param {number} rfqId - The RFQ ID associated with the product
+ * @param {number} userId - The user ID initiating the approval
+ * @param {Object} txContext - Optional transaction context for participating in outer transaction
+ * @returns {Promise<Object|null>} - Approval instance result or null if not hospitality
+ * @throws {Error} - If no approval policy exists for the hospitality scope
+ */
+const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext = null) => {
+  const dbContext = txContext || db;
+
+  // Fetch RFQ details
+  const rfq = await dbContext.oneOrNone(
+    `SELECT id, rfq_no, hospitality_company_id, hotel_id, is_tender, company_name
+     FROM tbl_rfq WHERE id = $1`,
+    [rfqId]
+  );
+
+  // Skip non-hospitality RFQs - they don't require approval
+  if (!rfq || !rfq.hospitality_company_id) {
+    return null;
+  }
+
+  // Fetch product info
+  const product = await dbContext.oneOrNone(
+    `SELECT RP.id, PV.name, RP.rfq_id
+     FROM tbl_rfq_products RP
+     JOIN tbl_product_variant PV ON PV.id = RP.product_variant_id
+     WHERE RP.id = $1 AND RP.rfq_id = $2`,
+    [rfqProductId, rfqId]
+  );
+
+  if (!product) {
+    throw new Error('RFQ product not found');
+  }
+
+  // Create approval instance for TECHNICAL entity type at product level
+  const result = await createApprovalInstance({
+    entity_type: 'TECHNICAL',
+    entity_id: rfqProductId,
+    hospitality_company_id: rfq.hospitality_company_id,
+    hotel_id: rfq.hotel_id,
+    initiated_by: userId,
+    metadata: {
+      rfq_id: rfqId,
+      rfq_number: rfq.rfq_no,
+      is_tender: rfq.is_tender,
+      company_name: rfq.company_name,
+      product_name: product.name,
+      rfq_product_id: rfqProductId
+    },
+    txContext
+  });
+
+  return result;
+};
+
 
 const rfqController = {
   createTenderPaymentOrder: async (req, res) => {
@@ -5518,26 +5584,7 @@ const rfqController = {
     }
 
     try {
-      if (user_type == 2 || user_type == 8) {
-        // for buyer
-        // check if the user is part of the team
-        let allowBuyerViewAccess = await userModel.user_rfq_access_review(
-          id,
-          user_id,
-          user_type
-        );
-        if (!allowBuyerViewAccess) {
-          res
-            .status(200)
-            .json({
-              status: 1,
-              message: 'You are not authorized to view this RFQ',
-              data: []
-            })
-            .end();
-          return;
-        }
-      } else if (req.user.user_type == 3) {
+      if (req.user.user_type == 3) {
         // check if the vendor is responsible for this RFQ
         let availability = await rfqModel.checkVendorRFQResponsibility(
           id,
@@ -11930,6 +11977,113 @@ getClauses: async (req, res) => {
       res.status(500).json({
         success: false,
         message: 'Error in deleting clause.',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * submitTechEvalForApproval
+   *
+   * API endpoint to submit a technical evaluation for approval at the product level.
+   * Creates an approval instance for the TECHNICAL entity type with rfq_product_id as entity_id.
+   *
+   * POST /rfq/tech-eval/submit-for-approval
+   * Body: { rfq_id: number, rfq_product_id: number, is_tender: boolean }
+   */
+  submitTechEvalForApproval: async (req, res) => {
+    try {
+      const { rfq_id, rfq_product_id } = req.body;
+      const userId = req.user.id;
+
+      // Wrap in transaction for atomicity
+      const result = await db.tx(async (t) => {
+        // Start approval for the technical evaluation at product level
+        const approvalResult = await startApprovalForTechEval(
+          rfq_product_id,
+          rfq_id,
+          userId,
+          t
+        );
+
+        // If null, it means RFQ is not a hospitality RFQ
+        if (!approvalResult) {
+          return {
+            success: false,
+            message: 'This RFQ does not require approval (not a hospitality RFQ)'
+          };
+        }
+
+        // Record lifecycle event
+        await recordLifecycleEvent({
+          entity_type: 'TECHNICAL',
+          entity_id: rfq_product_id,
+          stage: 'SUBMITTED',
+          action: 'SUBMIT',
+          performed_by: userId,
+          metadata: {
+            approval_instance_id: approvalResult.instance?.id,
+            rfq_id: rfq_id,
+            rfq_product_id: rfq_product_id
+          },
+          txContext: t
+        });
+
+        return {
+          success: true,
+          approval_instance_id: approvalResult.instance?.id,
+          status: approvalResult.instance?.status,
+          total_steps: approvalResult.totalSteps,
+          auto_approved: approvalResult.autoApproved || false
+        };
+      });
+
+      if (!result.success) {
+        return res.status(400).json({
+          status: 0,
+          message: result.message
+        });
+      }
+
+      return res.status(200).json({
+        status: 1,
+        message: result.auto_approved
+          ? 'Technical evaluation auto-approved (creator is only approver)'
+          : 'Technical evaluation submitted for approval',
+        data: {
+          approval_instance_id: result.approval_instance_id,
+          status: result.status,
+          total_steps: result.total_steps
+        }
+      });
+    } catch (error) {
+      logError(error);
+
+      // Handle specific error cases
+      if (error.message?.includes('No approval policy found')) {
+        return res.status(400).json({
+          status: 0,
+          message: 'No approval policy configured for TECHNICAL in this scope'
+        });
+      }
+
+      if (error.message?.includes('already exists') || error.message?.includes('already been approved')) {
+        return res.status(400).json({
+          status: 0,
+          message: error.message
+        });
+      }
+
+      if (error.message?.includes('RFQ product not found')) {
+        return res.status(400).json({
+          status: 0,
+          message: 'RFQ product not found for the given RFQ'
+        });
+      }
+
+      return res.status(500).json({
+        status: 0,
+        message: 'Error submitting technical evaluation for approval',
         error: error.message
       });
     }

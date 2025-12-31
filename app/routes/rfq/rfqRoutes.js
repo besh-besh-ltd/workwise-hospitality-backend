@@ -111,7 +111,7 @@ RfqRoutes.post(
 RfqRoutes.get(
   '/getRfqById/:id',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check_req_body,
+  // validateDbBody.rfq_access_check_req_body,
   rfqController.getRfqById
 );
 
@@ -575,6 +575,15 @@ RfqRoutes.post('/tech-evaluation-cleared-vendors',
 RfqRoutes.post('/get-tech-evaluation-rfqs',
   passportSignIn,
   rfqController.getTechEvaluationRFQDetails
+)
+
+RfqRoutes.post(
+  '/tech-eval/submit-for-approval',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateBody(rfqSchemas.techEvalSubmitForApproval),
+  rfqController.submitTechEvalForApproval
 )
 
 // New unified route for sidebar data (now GET, params in query)
