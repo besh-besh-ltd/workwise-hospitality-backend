@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { acl } from '../../helper/common.js';
+import { can } from '../../middleware/auth.js';
 import negotiationController from '../../controllers/negotiation/negotiationController.js';
 import hospitalityMiddleware from '../../middleware/hospitality.js';
 import passport from '../../middleware/passport.js';
@@ -13,6 +14,7 @@ NegotiationRoutes.post(
   '/rounds',
   passportSignIn,
   acl([7]),
+  can('negotiation.create'),
   hospitalityMiddleware.requireHospitality,
   negotiationController.createRound
 );
@@ -22,6 +24,7 @@ NegotiationRoutes.get(
   '/rounds/:rfq_id',
   passportSignIn,
   acl([7]),
+  can('negotiation.read'),
   hospitalityMiddleware.checkHospitality(false),
   negotiationController.getRounds
 );
@@ -31,6 +34,7 @@ NegotiationRoutes.get(
   '/rounds/:rfq_id/active',
   passportSignIn,
   acl([7]),
+  can('negotiation.read'),
   hospitalityMiddleware.checkHospitality(false),
   negotiationController.getActiveRound
 );
@@ -40,6 +44,7 @@ NegotiationRoutes.get(
   '/rounds/:rfq_id/active-all',
   passportSignIn,
   acl([7]),
+  can('negotiation.read'),
   negotiationController.getActiveRounds
 );
 
@@ -48,6 +53,7 @@ NegotiationRoutes.post(
   '/rounds/:id/approve',
   passportSignIn,
   acl([7]),
+  can('negotiation.approve'),
   hospitalityMiddleware.requireHospitality,
   negotiationController.approveRound
 );
@@ -57,6 +63,7 @@ NegotiationRoutes.post(
   '/rounds/:id/reject',
   passportSignIn,
   acl([7]),
+  can('negotiation.approve'),
   hospitalityMiddleware.requireHospitality,
   negotiationController.rejectRound
 );
@@ -66,6 +73,7 @@ NegotiationRoutes.post(
   '/rounds/:id/close',
   passportSignIn,
   acl([7]),
+  can('negotiation.update'),
   hospitalityMiddleware.requireHospitality,
   negotiationController.closeRound
 );
@@ -75,6 +83,7 @@ NegotiationRoutes.get(
   '/rounds/:id/quotes',
   passportSignIn,
   acl([7]),
+  can('negotiation.read'),
   hospitalityMiddleware.checkHospitality(false),
   negotiationController.getRoundQuotes
 );
