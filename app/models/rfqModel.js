@@ -1863,6 +1863,8 @@ WHERE NOT EXISTS (
       RFQ.ra_end_date,   -- Select raw timestamp
       RFQ.project_id,
       H.name AS hotel_name,
+      RFQ.hotel_id,
+      RFQ.hospitality_company_id,
         -- Add here
       (
         SELECT EXISTS (

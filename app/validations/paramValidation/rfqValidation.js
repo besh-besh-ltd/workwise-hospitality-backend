@@ -538,6 +538,12 @@ export const rfqSchemas = {
     workEmail: Joi.string().email().optional(),
     phoneNumber: Joi.string().optional()
   }),
+
+  techEvalSubmitForApproval: Joi.object({
+    rfq_id: Joi.number().integer().required(),
+    rfq_product_id: Joi.number().integer().required(),
+    is_tender: Joi.boolean().required()
+  }),
 };
 
 /**
