@@ -13,7 +13,7 @@ const NegotiationRoutes = Router();
 NegotiationRoutes.post(
   '/rounds',
   passportSignIn,
-  acl([2, 8]), // Procurement and Top Management (same as RFQ routes)
+  acl([2, 8, 3]), // Procurement and Top Management and Vendor (same as RFQ routes)
   // can('negotiation.create'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.requireHospitality,
   negotiationController.createRound
@@ -23,7 +23,7 @@ NegotiationRoutes.post(
 NegotiationRoutes.get(
   '/rounds/:rfq_id',
   passportSignIn,
-  acl([2, 8]), // Procurement and Top Management
+  acl([2, 8, 3]), // Procurement and Top Management and Vendor
   // can('negotiation.read'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.checkHospitality(false),
   negotiationController.getRounds
@@ -33,7 +33,7 @@ NegotiationRoutes.get(
 NegotiationRoutes.get(
   '/rounds/:rfq_id/active',
   passportSignIn,
-  acl([2, 8]), // Procurement and Top Management
+  acl([2, 8, 3]), // Procurement and Top Management and Vendor
   // can('negotiation.read'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.checkHospitality(false),
   negotiationController.getActiveRound
@@ -43,7 +43,7 @@ NegotiationRoutes.get(
 NegotiationRoutes.get(
   '/rounds/:rfq_id/active-all',
   passportSignIn,
-  acl([2, 8]), // Procurement and Top Management
+  acl([2, 8, 3]), // Procurement and Top Management and Vendor
   // can('negotiation.read'), // Uncomment after running migration: add_negotiation_permissions.sql
   negotiationController.getActiveRounds
 );
