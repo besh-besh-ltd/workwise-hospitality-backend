@@ -48,11 +48,9 @@ const negotiationModel = {
     let query = `SELECT 
         nr.*,
         u.name as created_by_name,
-        u.email as created_by_email,
-        rp.product_details
+        u.email as created_by_email
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
-       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
        WHERE nr.rfq_id = $1`;
     
     const values = [rfqId];
@@ -79,11 +77,9 @@ const negotiationModel = {
       `SELECT 
         nr.*,
         u.name as created_by_name,
-        u.email as created_by_email,
-        rp.product_details
+        u.email as created_by_email
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
-       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
        WHERE nr.rfq_id = $1
          AND nr.rfq_product_id = $2
          AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
@@ -101,11 +97,9 @@ const negotiationModel = {
       `SELECT 
         nr.*,
         u.name as created_by_name,
-        u.email as created_by_email,
-        rp.product_details
+        u.email as created_by_email
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
-       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
        WHERE nr.rfq_id = $1
          AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
        ORDER BY nr.rfq_product_id, nr.round_number DESC`,
@@ -303,12 +297,10 @@ const negotiationModel = {
         u.name as vendor_name,
         u.email as vendor_email,
         c.company_name,
-        c.organization_name,
-        rp.product_details
+        c.organization_name
        FROM tbl_negotiation_round_quotes nrq
        LEFT JOIN tbl_users u ON u.id = nrq.vendor_id
        LEFT JOIN tbl_company c ON c.id = u.company_id
-       LEFT JOIN tbl_rfq_products rp ON rp.id = nrq.rfq_product_id
        WHERE nrq.negotiation_round_id = $1
        ORDER BY nrq.submitted_at DESC`,
       [roundId]

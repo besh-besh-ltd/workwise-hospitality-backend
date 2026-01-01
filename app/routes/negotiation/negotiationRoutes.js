@@ -13,8 +13,8 @@ const NegotiationRoutes = Router();
 NegotiationRoutes.post(
   '/rounds',
   passportSignIn,
-  acl([7]),
-  can('negotiation.create'),
+  acl([2, 8]), // Procurement and Top Management (same as RFQ routes)
+  // can('negotiation.create'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.requireHospitality,
   negotiationController.createRound
 );
@@ -23,8 +23,8 @@ NegotiationRoutes.post(
 NegotiationRoutes.get(
   '/rounds/:rfq_id',
   passportSignIn,
-  acl([7]),
-  can('negotiation.read'),
+  acl([2, 8]), // Procurement and Top Management
+  // can('negotiation.read'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.checkHospitality(false),
   negotiationController.getRounds
 );
@@ -33,8 +33,8 @@ NegotiationRoutes.get(
 NegotiationRoutes.get(
   '/rounds/:rfq_id/active',
   passportSignIn,
-  acl([7]),
-  can('negotiation.read'),
+  acl([2, 8]), // Procurement and Top Management
+  // can('negotiation.read'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.checkHospitality(false),
   negotiationController.getActiveRound
 );
@@ -43,8 +43,8 @@ NegotiationRoutes.get(
 NegotiationRoutes.get(
   '/rounds/:rfq_id/active-all',
   passportSignIn,
-  acl([7]),
-  can('negotiation.read'),
+  acl([2, 8]), // Procurement and Top Management
+  // can('negotiation.read'), // Uncomment after running migration: add_negotiation_permissions.sql
   negotiationController.getActiveRounds
 );
 
@@ -52,8 +52,8 @@ NegotiationRoutes.get(
 NegotiationRoutes.post(
   '/rounds/:id/approve',
   passportSignIn,
-  acl([7]),
-  can('negotiation.approve'),
+  acl([2, 8]), // Procurement and Top Management
+  // can('negotiation.approve'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.requireHospitality,
   negotiationController.approveRound
 );
@@ -62,8 +62,8 @@ NegotiationRoutes.post(
 NegotiationRoutes.post(
   '/rounds/:id/reject',
   passportSignIn,
-  acl([7]),
-  can('negotiation.approve'),
+  acl([2, 8]), // Procurement and Top Management
+  // can('negotiation.approve'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.requireHospitality,
   negotiationController.rejectRound
 );
@@ -72,8 +72,8 @@ NegotiationRoutes.post(
 NegotiationRoutes.post(
   '/rounds/:id/close',
   passportSignIn,
-  acl([7]),
-  can('negotiation.update'),
+  acl([2, 8]), // Procurement and Top Management
+  // can('negotiation.update'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.requireHospitality,
   negotiationController.closeRound
 );
@@ -82,8 +82,8 @@ NegotiationRoutes.post(
 NegotiationRoutes.get(
   '/rounds/:id/quotes',
   passportSignIn,
-  acl([7]),
-  can('negotiation.read'),
+  acl([2, 8]), // Procurement and Top Management
+  // can('negotiation.read'), // Uncomment after running migration: add_negotiation_permissions.sql
   hospitalityMiddleware.checkHospitality(false),
   negotiationController.getRoundQuotes
 );
