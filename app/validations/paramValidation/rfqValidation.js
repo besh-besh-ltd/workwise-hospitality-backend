@@ -88,14 +88,27 @@ let store_query_message_upload_file = multerS3({
   key: function (req, file, cb) {
     // 1. Extract file extension
     const ext = path.extname(file.originalname).toLowerCase();
-    
+
     // 2. Generate unique filename with timestamp + UUID
     const fileName = `${Date.now()}-${uuidv4()}${ext}`;
-    
+
     // 3. Create full S3 path matching your URL structure
     const fullPath = `query_message_files/${fileName}`; // Exact path you want
-    
+
     // 4. Pass the complete path to callback
+    cb(null, fullPath);
+  }
+});
+
+// S3 storage for clarification files (one-at-a-time clarification system)
+let store_clarification_upload_file = multerS3({
+  s3: s3Client,
+  bucket: process.env.AWS_S3_BUCKET,
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: function (req, file, cb) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const fileName = `${Date.now()}-${uuidv4()}${ext}`;
+    const fullPath = `clarification_files/${fileName}`;
     cb(null, fullPath);
   }
 });
@@ -544,6 +557,40 @@ export const rfqSchemas = {
     rfq_product_id: Joi.number().integer().required(),
     is_tender: Joi.boolean().required()
   }),
+
+  // One-at-a-time Clarification System schemas
+  raiseClarification: Joi.object({
+    rfq_id: Joi.number().integer().required(),
+    subject: Joi.string().trim().min(5).max(200).required(),
+    question: Joi.string().trim().min(10).max(5000).required()
+  }),
+
+  resolveClarification: Joi.object({
+    clarification_id: Joi.number().integer().required(),
+    response: Joi.string().trim().min(1).max(5000).required()
+  }),
+
+  // File upload handler for clarifications (supports up to 10 files, 100MB each)
+  clarificationFileUploadHandler: async (req, res, next) => {
+    try {
+      let upload = multer({
+        storage: store_clarification_upload_file,
+        limits: {
+          fileSize: 100 * 1024 * 1024 // 100 MB in bytes
+        }
+      }).array('files', 10);
+      upload(req, res, async function (err) {
+        if (err) {
+          res.status(400).json({ status: 2, errors: { file: err.message || err } });
+          return;
+        }
+        next();
+      });
+    } catch (err) {
+      console.error('Server error:', err);
+      res.status(500).json({ status: 3, message: 'server error' });
+    }
+  },
 };
 
 /**

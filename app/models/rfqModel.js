@@ -9876,6 +9876,219 @@ ORDER BY tq.timestamp DESC;
         });
       }
     });
+  },
+
+  // ============================================
+  // One-at-a-Time Clarification System Functions
+  // ============================================
+
+  /**
+   * checkActiveClarification
+   * Returns active (OPEN) clarification for an RFQ if exists, null otherwise
+   * Used to enforce one-at-a-time rule
+   */
+  checkActiveClarification: async (rfq_id, db_con = db) => {
+    try {
+      const query = `
+        SELECT c.id, c.rfq_id, c.raised_by as raised_by_vendor_id,
+          u.name as raised_by_vendor_name,
+          c.subject, c.question, c.status, c.created_at
+        FROM tbl_rfq_clarifications c
+        JOIN tbl_users u ON u.id = c.raised_by
+        WHERE c.rfq_id = $1 AND c.status = 'OPEN'
+      `;
+      return await db_con.oneOrNone(query, [rfq_id]);
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
+  },
+
+  /**
+   * createClarification
+   * Creates a new clarification with optional file attachments
+   * Will fail if active (OPEN) clarification exists due to unique index
+   */
+  createClarification: async (
+    rfq_id,
+    raised_by,
+    vendor_company_id,
+    subject,
+    question,
+    files = [],
+    db_con = db
+  ) => {
+    try {
+      return await db_con.tx(async (t) => {
+        // Insert clarification
+        const clarification = await t.one(
+          `
+          INSERT INTO tbl_rfq_clarifications
+          (rfq_id, raised_by, vendor_company_id, subject, question, status, created_at)
+          VALUES ($1, $2, $3, $4, $5, 'OPEN', NOW())
+          RETURNING *
+        `,
+          [rfq_id, raised_by, vendor_company_id, subject, question]
+        );
+
+        // Insert question files if any
+        let insertedFiles = [];
+        if (files && files.length > 0) {
+          for (const file of files) {
+            const insertedFile = await t.one(
+              `
+              INSERT INTO tbl_rfq_clarification_files
+              (clarification_id, file_name, file_url, file_type, is_response_file)
+              VALUES ($1, $2, $3, $4, FALSE)
+              RETURNING id, file_name, file_url
+            `,
+              [
+                clarification.id,
+                file.originalname,
+                file.location,
+                file.mimetype
+              ]
+            );
+            insertedFiles.push(insertedFile);
+          }
+        }
+
+        return { ...clarification, question_files: insertedFiles };
+      });
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
+  },
+
+  /**
+   * resolveClarification
+   * Adds response to clarification and marks as CLOSED
+   */
+  resolveClarification: async (
+    clarification_id,
+    responded_by,
+    response,
+    response_files = [],
+    db_con = db
+  ) => {
+    try {
+      return await db_con.tx(async (t) => {
+        // Update clarification with response
+        const resolved = await t.oneOrNone(
+          `
+          UPDATE tbl_rfq_clarifications
+          SET status = 'CLOSED',
+              responded_by = $2,
+              response = $3,
+              responded_at = NOW(),
+              closed_at = NOW()
+          WHERE id = $1 AND status = 'OPEN'
+          RETURNING *
+        `,
+          [clarification_id, responded_by, response]
+        );
+
+        if (!resolved) {
+          return null;
+        }
+
+        // Insert response files if any
+        let insertedFiles = [];
+        if (response_files && response_files.length > 0) {
+          for (const file of response_files) {
+            const insertedFile = await t.one(
+              `
+              INSERT INTO tbl_rfq_clarification_files
+              (clarification_id, file_name, file_url, file_type, is_response_file)
+              VALUES ($1, $2, $3, $4, TRUE)
+              RETURNING id, file_name, file_url
+            `,
+              [
+                clarification_id,
+                file.originalname,
+                file.location,
+                file.mimetype
+              ]
+            );
+            insertedFiles.push(insertedFile);
+          }
+        }
+
+        return { ...resolved, response_files: insertedFiles };
+      });
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
+  },
+
+  /**
+   * getClarifications
+   * Gets all clarifications for an RFQ with files, ordered by created_at DESC
+   * Public - visible to all vendors for tender transparency
+   */
+  getClarifications: async (rfq_id, db_con = db) => {
+    try {
+      const query = `
+        SELECT
+          c.id,
+          c.rfq_id,
+          c.raised_by as raised_by_vendor_id,
+          u.name as raised_by_vendor_name,
+          c.subject,
+          c.question,
+          c.response,
+          c.responded_by,
+          c.status,
+          c.created_at,
+          c.responded_at,
+          c.closed_at,
+          COALESCE(
+            json_agg(
+              json_build_object('file_url', f.file_url, 'file_name', f.file_name)
+            ) FILTER (WHERE f.id IS NOT NULL AND f.is_response_file = FALSE), '[]'
+          ) as question_files,
+          COALESCE(
+            json_agg(
+              json_build_object('file_url', f.file_url, 'file_name', f.file_name)
+            ) FILTER (WHERE f.id IS NOT NULL AND f.is_response_file = TRUE), '[]'
+          ) as response_files
+        FROM tbl_rfq_clarifications c
+        JOIN tbl_users u ON u.id = c.raised_by
+        LEFT JOIN tbl_rfq_clarification_files f ON f.clarification_id = c.id
+        WHERE c.rfq_id = $1
+        GROUP BY c.id, u.name
+        ORDER BY c.created_at DESC
+      `;
+      return await db_con.any(query, [rfq_id]);
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
+  },
+
+  /**
+   * getClarificationById
+   * Gets a single clarification by ID with RFQ details
+   */
+  getClarificationById: async (clarification_id, db_con = db) => {
+    try {
+      const query = `
+        SELECT c.*,
+          r.created_by as rfq_created_by,
+          r.is_tender,
+          u.name as raised_by_vendor_name
+        FROM tbl_rfq_clarifications c
+        JOIN tbl_rfq r ON r.id = c.rfq_id
+        JOIN tbl_users u ON u.id = c.raised_by
+        WHERE c.id = $1
+      `;
+      return await db_con.oneOrNone(query, [clarification_id]);
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
   }
 };
 export default rfqModel;

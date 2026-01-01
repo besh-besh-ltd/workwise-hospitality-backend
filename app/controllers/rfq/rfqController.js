@@ -6272,6 +6272,25 @@ const rfqController = {
           tenderPaymentId = paymentRow.id;
         }
 
+        // Check for open clarification - blocks all vendors from quoting (tenders only)
+        if (rfqDetails[0].is_tender === 1) {
+          const openClarification =
+            await rfqModel.checkActiveClarification(rfq_id);
+          if (openClarification) {
+            return res.status(400).json({
+              status: 3,
+              message:
+                'Quote submission is blocked. There is an open clarification pending response.',
+              data: {
+                clarification_id: openClarification.id,
+                raised_by_vendor_name: openClarification.raised_by_vendor_name,
+                subject: openClarification.subject,
+                created_at: openClarification.created_at
+              }
+            });
+          }
+        }
+
         return await db.tx(async (t) => {
           const tbl_quotes_data = {
             rfq_id,
@@ -10603,6 +10622,26 @@ sendFollowUpEmails: async (req, res) => {
         }
       }
 
+      // Check for open clarification - blocks all vendors from quoting (tenders only)
+      if (rfqDetails[0].is_tender === 1) {
+        const openClarification = await rfqModel.checkActiveClarification(
+          quoteExists[0].rfq_id
+        );
+        if (openClarification) {
+          return res.status(400).json({
+            status: 3,
+            message:
+              'Quote update is blocked. There is an open clarification pending response.',
+            data: {
+              clarification_id: openClarification.id,
+              raised_by_vendor_name: openClarification.raised_by_vendor_name,
+              subject: openClarification.subject,
+              created_at: openClarification.created_at
+            }
+          });
+        }
+      }
+
       let paymentTermAndCommentChanges = false;
 
       // update global comment and payment term
@@ -12459,6 +12498,411 @@ getClauses: async (req, res) => {
       res.status(500).json({
         status: 0,
         message: 'Error updating buyer marks.',
+        error: error.message
+      });
+    }
+  },
+
+  // ============================================
+  // One-at-a-Time Clarification System Controllers
+  // ============================================
+
+  /**
+   * raiseClarification
+   * Vendor raises a clarification for a tender
+   * POST /rfq/clarification/raise
+   */
+  raiseClarification: async (req, res) => {
+    try {
+      const { rfq_id, subject, question } = req.body;
+      const files = req.files || [];
+      const user = req.user;
+
+      // Fetch RFQ details
+      const rfq = await db.oneOrNone(
+        `SELECT id, is_tender, tender_publish_date, vendor_clarification_date, created_by, rfq_no
+         FROM tbl_rfq WHERE id = $1`,
+        [rfq_id]
+      );
+
+      if (!rfq) {
+        return res.status(400).json({
+          status: 0,
+          message: 'RFQ not found'
+        });
+      }
+
+      // Only allow clarifications for tenders
+      if (rfq.is_tender !== 1) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Clarifications are only allowed for tenders'
+        });
+      }
+
+      // Validate clarification period
+      const now = new Date();
+      const publishDate = rfq.tender_publish_date
+        ? new Date(rfq.tender_publish_date)
+        : null;
+      const clarificationEndDate = rfq.vendor_clarification_date
+        ? new Date(rfq.vendor_clarification_date)
+        : null;
+
+      if (publishDate && now < publishDate) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Clarification period has not started yet'
+        });
+      }
+
+      if (clarificationEndDate && now > clarificationEndDate) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Clarification period has ended'
+        });
+      }
+
+      // Check if active clarification exists (one-at-a-time rule)
+      const activeClarification =
+        await rfqModel.checkActiveClarification(rfq_id);
+      if (activeClarification) {
+        // Private visibility: don't expose other vendor's clarification details
+        return res.status(400).json({
+          status: 0,
+          message:
+            'Another clarification is already open. Please wait for it to be closed before raising a new one.'
+        });
+      }
+
+      // Create clarification
+      const clarification = await rfqModel.createClarification(
+        rfq_id,
+        user.id,
+        user.company_id,
+        subject,
+        question,
+        files
+      );
+
+      // Get vendor name for response
+      const vendorName = await db.oneOrNone(
+        `SELECT name FROM tbl_users WHERE id = $1`,
+        [user.id]
+      );
+
+      // Format response
+      const responseData = {
+        id: clarification.id,
+        rfq_id: clarification.rfq_id,
+        raised_by_vendor_id: clarification.raised_by,
+        raised_by_vendor_name: vendorName?.name || null,
+        subject: clarification.subject,
+        question: clarification.question,
+        question_files: clarification.question_files.map((f) => ({
+          file_url: f.file_url,
+          file_name: f.file_name
+        })),
+        response: null,
+        response_files: null,
+        responded_by: null,
+        status: clarification.status,
+        created_at: clarification.created_at,
+        responded_at: null,
+        closed_at: null
+      };
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Clarification raised successfully',
+        data: responseData
+      });
+    } catch (error) {
+      logError(error);
+
+      if (
+        error.message?.includes('unique') ||
+        error.message?.includes('duplicate')
+      ) {
+        return res.status(400).json({
+          status: 0,
+          message:
+            'Another clarification was just raised. Please wait for it to be closed.'
+        });
+      }
+
+      return res.status(500).json({
+        status: 0,
+        message: 'Error raising clarification',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * resolveClarification
+   * Buyer responds to and closes a clarification
+   * POST /rfq/clarification/resolve
+   */
+  resolveClarification: async (req, res) => {
+    try {
+      const { clarification_id, response } = req.body;
+      const response_files = req.files || [];
+      const user = req.user;
+
+      // Fetch clarification with RFQ details
+      const clarification =
+        await rfqModel.getClarificationById(clarification_id);
+
+      if (!clarification) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Clarification not found'
+        });
+      }
+
+      if (clarification.status !== 'OPEN') {
+        return res.status(400).json({
+          status: 0,
+          message: 'This clarification has already been closed'
+        });
+      }
+
+      // Validate user is RFQ creator (or later: proxy clarifier)
+      if (clarification.rfq_created_by !== user.id) {
+        return res.status(403).json({
+          status: 0,
+          message: 'Only the tender creator can respond to clarifications'
+        });
+      }
+
+      // Resolve clarification with response files
+      const resolved = await rfqModel.resolveClarification(
+        clarification_id,
+        user.id,
+        response,
+        response_files
+      );
+
+      if (!resolved) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Failed to close clarification'
+        });
+      }
+
+      // Format response
+      const responseData = {
+        id: resolved.id,
+        rfq_id: resolved.rfq_id,
+        raised_by_vendor_id: resolved.raised_by,
+        raised_by_vendor_name: clarification.raised_by_vendor_name,
+        subject: resolved.subject,
+        question: resolved.question,
+        question_files: [], // Would need separate query to get these
+        response: resolved.response,
+        response_files: resolved.response_files.map((f) => ({
+          file_url: f.file_url,
+          file_name: f.file_name
+        })),
+        responded_by: resolved.responded_by,
+        status: resolved.status,
+        created_at: resolved.created_at,
+        responded_at: resolved.responded_at,
+        closed_at: resolved.closed_at
+      };
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Clarification closed successfully',
+        data: responseData
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Error closing clarification',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * listClarifications
+   * List clarifications for an RFQ (private - vendor sees only their own)
+   * GET /rfq/clarifications/:rfq_id
+   *
+   * Privacy rules:
+   * - Buyer (tender creator): sees ALL clarifications
+   * - Vendor who raised clarification: sees their OWN clarifications
+   * - Other vendors: only see has_open=true without details
+   */
+  listClarifications: async (req, res) => {
+    try {
+      const { rfq_id } = req.params;
+      const currentUserId = req.user ? req.user.id : null;
+
+      if (!rfq_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'rfq_id is required'
+        });
+      }
+
+      // Verify RFQ exists and is a tender, also get created_by for buyer check
+      const rfq = await db.oneOrNone(
+        `SELECT id, is_tender, created_by FROM tbl_rfq WHERE id = $1`,
+        [rfq_id]
+      );
+
+      if (!rfq) {
+        return res.status(400).json({
+          status: 0,
+          message: 'RFQ not found'
+        });
+      }
+
+      if (rfq.is_tender !== 1) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Clarifications are only available for tenders'
+        });
+      }
+
+      // Check if current user is the buyer (tender creator)
+      const isBuyer = currentUserId && rfq.created_by === currentUserId;
+
+      // Get all clarifications
+      const allClarifications = await rfqModel.getClarifications(rfq_id);
+
+      // Find open clarification if any
+      const openClarification = allClarifications.find(
+        (c) => c.status === 'OPEN'
+      );
+
+      // Determine if current user owns the open clarification
+      const isOwnOpenClarification = openClarification &&
+        currentUserId &&
+        openClarification.raised_by_vendor_id === currentUserId;
+
+      // Buyer sees all clarifications
+      if (isBuyer) {
+        return res.status(200).json({
+          status: 1,
+          data: {
+            clarifications: allClarifications,
+            open_clarification: openClarification || null,
+            has_open: !!openClarification,
+            is_own_clarification: false, // Not applicable for buyer
+            is_buyer: true
+          }
+        });
+      }
+
+      // Vendor: filter to only their own clarifications
+      const ownClarifications = currentUserId
+        ? allClarifications.filter(c => c.raised_by_vendor_id === currentUserId)
+        : [];
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          clarifications: ownClarifications,
+          open_clarification: isOwnOpenClarification ? openClarification : null,
+          has_open: !!openClarification,
+          is_own_clarification: isOwnOpenClarification,
+          is_buyer: false
+        }
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Error fetching clarifications',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * getActiveClarification
+   * Check if there's an open clarification for an RFQ (private visibility)
+   * GET /rfq/clarification/active/:rfq_id
+   *
+   * Privacy rules:
+   * - Buyer (tender creator): sees full clarification details
+   * - Vendor who raised clarification: sees full details
+   * - Other vendors: only see has_open=true, is_own_clarification=false
+   */
+  getActiveClarification: async (req, res) => {
+    try {
+      const { rfq_id } = req.params;
+      const currentUserId = req.user ? req.user.id : null;
+
+      if (!rfq_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'rfq_id is required'
+        });
+      }
+
+      // Get RFQ to check if user is buyer
+      const rfq = await db.oneOrNone(
+        `SELECT id, created_by FROM tbl_rfq WHERE id = $1`,
+        [rfq_id]
+      );
+
+      if (!rfq) {
+        return res.status(400).json({
+          status: 0,
+          message: 'RFQ not found'
+        });
+      }
+
+      const isBuyer = currentUserId && rfq.created_by === currentUserId;
+
+      const openClarification =
+        await rfqModel.checkActiveClarification(rfq_id);
+
+      // No open clarification
+      if (!openClarification) {
+        return res.status(200).json({
+          status: 1,
+          has_open: false,
+          is_own_clarification: false,
+          is_buyer: isBuyer,
+          data: null
+        });
+      }
+
+      // Check if current user owns the open clarification
+      const isOwnClarification = currentUserId &&
+        openClarification.raised_by_vendor_id === currentUserId;
+
+      // Buyer or owner sees full details
+      if (isBuyer || isOwnClarification) {
+        return res.status(200).json({
+          status: 1,
+          has_open: true,
+          is_own_clarification: isOwnClarification,
+          is_buyer: isBuyer,
+          data: openClarification
+        });
+      }
+
+      // Other vendors: only indicate clarification is ongoing, no details
+      return res.status(200).json({
+        status: 1,
+        has_open: true,
+        is_own_clarification: false,
+        is_buyer: false,
+        data: null
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Error checking open clarification',
         error: error.message
       });
     }

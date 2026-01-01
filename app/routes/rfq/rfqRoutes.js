@@ -691,4 +691,43 @@ RfqRoutes.post(
   rfqController.updateBuyerMarks
 );
 
+// ============================================
+// One-at-a-Time Clarification System Routes
+// ============================================
+
+// Vendor raises clarification (with file uploads)
+RfqRoutes.post(
+  '/clarification/raise',
+  noLogin.customer_auth,
+  rfqSchemas.clarificationFileUploadHandler,
+  validateDbBody.rfq_access_check_req_body,
+  validateBody(rfqSchemas.raiseClarification),
+  rfqController.raiseClarification
+);
+
+// Buyer resolves clarification (with optional file uploads)
+RfqRoutes.post(
+  '/clarification/resolve',
+  passportSignIn,
+  rfqSchemas.clarificationFileUploadHandler,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  validateBody(rfqSchemas.resolveClarification),
+  rfqController.resolveClarification
+);
+
+// List all clarifications for tender (public - all vendors can see)
+RfqRoutes.get(
+  '/clarifications/:rfq_id',
+  noLogin.customer_auth,
+  rfqController.listClarifications
+);
+
+// Check active clarification status (for quote blocking check)
+RfqRoutes.get(
+  '/clarification/active/:rfq_id',
+  noLogin.customer_auth,
+  rfqController.getActiveClarification
+);
+
 export default RfqRoutes;

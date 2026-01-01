@@ -1187,4 +1187,521 @@ Cancel a pending approval instance.
 
 ---
 
+## Tender Clarification System (One-at-a-Time)
+
+The Tender Clarification System allows vendors to raise clarifications on tenders, with a one-at-a-time rule to ensure orderly communication. While a clarification is open, all vendors are blocked from submitting quotes.
+
+### Key Concepts
+
+- **One-at-a-Time Rule**: Only one clarification can be OPEN per tender at any time
+- **Private Visibility**: Clarifications are private between the vendor who raised it and the tender creator
+  - **Buyer (tender creator)**: Sees ALL clarifications
+  - **Vendor who raised**: Sees only their OWN clarifications
+  - **Other vendors**: Only see `has_open: true` to know a clarification is in progress (no details)
+- **Quote Blocking**: ALL vendors cannot submit/update quotes while ANY clarification is OPEN
+- **Clarification Period**: Vendors can only raise clarifications between `tender_publish_date` and `vendor_clarification_date`
+
+### Status Values
+
+| Status | Description |
+|--------|-------------|
+| `OPEN` | Clarification raised, awaiting buyer response |
+| `CLOSED` | Buyer has responded, vendors can submit quotes |
+
+---
+
+### Quick Reference (Frontend)
+
+#### Endpoints Summary
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/rfq/clarification/raise` | Vendor | Raise new clarification |
+| POST | `/rfq/clarification/resolve` | Buyer (ACL 2,8) | Respond & close clarification |
+| GET | `/rfq/clarifications/:rfq_id` | Vendor | List clarifications (private) |
+| GET | `/rfq/clarification/active/:rfq_id` | Vendor | Check if open clarification exists |
+
+#### Clarification Object
+
+```typescript
+{
+  id: number,
+  rfq_id: number,
+  raised_by_vendor_id: number,
+  raised_by_vendor_name: string,
+  subject: string,
+  question: string,
+  question_files: { file_url: string, file_name: string }[],
+  response: string | null,
+  response_files: { file_url: string, file_name: string }[] | null,
+  responded_by: number | null,
+  status: 'OPEN' | 'CLOSED',
+  created_at: datetime,
+  responded_at: datetime | null,
+  closed_at: datetime | null
+}
+```
+
+#### Privacy Matrix
+
+| User Type | `clarifications` | `open_clarification` / `data` | `has_open` |
+|-----------|------------------|-------------------------------|------------|
+| Buyer | All | Full details | true/false |
+| Own Vendor | Own only | Full details | true/false |
+| Other Vendor | `[]` | `null` | true/false |
+
+> `has_open: true` always indicates quote submission is blocked, regardless of who raised it.
+
+---
+
+### 1. Raise Clarification (Vendor)
+
+**POST** `/rfq/clarification/raise`
+
+Vendor raises a new clarification for a tender.
+
+#### Authentication
+
+- Requires vendor authentication (`noLogin.customer_auth`)
+- Vendor must have access to the RFQ
+
+#### Request Body (multipart/form-data)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `rfq_id` | number | Yes | Tender ID |
+| `subject` | string | Yes | Brief subject (5-200 chars) |
+| `question` | string | Yes | Detailed question (10-5000 chars) |
+| `files` | File[] | No | Supporting documents (max 10 files, 100MB each) |
+
+#### Response (200 OK)
+
+```json
+{
+  "status": 1,
+  "message": "Clarification raised successfully",
+  "data": {
+    "id": 123,
+    "rfq_id": 456,
+    "raised_by_vendor_id": 789,
+    "raised_by_vendor_name": "ABC Vendor Corp",
+    "subject": "Delivery timeline query",
+    "question": "Please clarify the delivery timeline requirements for bulk orders...",
+    "question_files": [
+      { "file_url": "https://s3.../file.pdf", "file_name": "specifications.pdf" }
+    ],
+    "response": null,
+    "response_files": null,
+    "responded_by": null,
+    "status": "OPEN",
+    "created_at": "2026-01-15T10:00:00Z",
+    "responded_at": null,
+    "closed_at": null
+  }
+}
+```
+
+#### Error Responses
+
+```json
+{
+  "status": 0,
+  "message": "Another clarification is already open. Please wait for it to be closed before raising a new one."
+}
+```
+
+> **Note**: Due to private visibility, details of the other vendor's clarification are not exposed.
+
+```json
+{ "status": 0, "message": "Clarification period has ended" }
+```
+
+```json
+{ "status": 0, "message": "Clarifications are only allowed for tenders" }
+```
+
+---
+
+### 2. Resolve/Close Clarification (Buyer)
+
+**POST** `/rfq/clarification/resolve`
+
+Buyer responds to and closes a clarification.
+
+#### Authentication
+
+- Requires `passportSignIn` (JWT authentication)
+- Requires `acl([2, 8])` – Buyer roles only
+- Only the tender creator can respond
+
+#### Request Body (multipart/form-data)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `clarification_id` | number | Yes | Clarification ID to respond to |
+| `response` | string | Yes | Response text (1-5000 chars) |
+| `files` | File[] | No | Response documents (max 10 files, 100MB each) |
+
+#### Response (200 OK)
+
+```json
+{
+  "status": 1,
+  "message": "Clarification closed successfully",
+  "data": {
+    "id": 123,
+    "rfq_id": 456,
+    "raised_by_vendor_id": 789,
+    "raised_by_vendor_name": "ABC Vendor Corp",
+    "subject": "Delivery timeline query",
+    "question": "Please clarify the delivery timeline requirements...",
+    "question_files": [],
+    "response": "The delivery timeline is 30 days from PO date for orders under 1000 units...",
+    "response_files": [
+      { "file_url": "https://s3.../response.pdf", "file_name": "delivery_schedule.pdf" }
+    ],
+    "responded_by": 100,
+    "status": "CLOSED",
+    "created_at": "2026-01-15T10:00:00Z",
+    "responded_at": "2026-01-15T14:30:00Z",
+    "closed_at": "2026-01-15T14:30:00Z"
+  }
+}
+```
+
+#### Error Responses
+
+```json
+{ "status": 0, "message": "Clarification not found" }
+```
+
+```json
+{ "status": 0, "message": "This clarification has already been closed" }
+```
+
+```json
+{ "status": 0, "message": "Only the tender creator can respond to clarifications" }
+```
+
+---
+
+### 3. List Clarifications (Private Visibility)
+
+**GET** `/rfq/clarifications/:rfq_id`
+
+Get clarifications for a tender with private visibility rules.
+
+#### Authentication
+
+- Requires authentication (`noLogin.customer_auth`)
+
+#### Path Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `rfq_id` | number | Tender ID |
+
+#### Privacy Rules
+
+| User Type | Sees |
+|-----------|------|
+| Buyer (tender creator) | ALL clarifications |
+| Vendor who raised | Only their OWN clarifications |
+| Other vendors | Only `has_open: true` (no clarification details) |
+
+#### Response - Buyer View (200 OK)
+
+```json
+{
+  "status": 1,
+  "data": {
+    "clarifications": [
+      {
+        "id": 123,
+        "rfq_id": 456,
+        "raised_by_vendor_id": 789,
+        "raised_by_vendor_name": "ABC Vendor Corp",
+        "subject": "Delivery timeline query",
+        "question": "Please clarify the delivery timeline...",
+        "question_files": [
+          { "file_url": "https://s3.../file.pdf", "file_name": "spec.pdf" }
+        ],
+        "response": "The delivery timeline is 30 days...",
+        "response_files": [
+          { "file_url": "https://s3.../response.pdf", "file_name": "schedule.pdf" }
+        ],
+        "responded_by": 100,
+        "status": "CLOSED",
+        "created_at": "2026-01-15T10:00:00Z",
+        "responded_at": "2026-01-15T14:30:00Z",
+        "closed_at": "2026-01-15T14:30:00Z"
+      },
+      {
+        "id": 124,
+        "rfq_id": 456,
+        "raised_by_vendor_id": 790,
+        "raised_by_vendor_name": "XYZ Supplies",
+        "subject": "Payment terms",
+        "question": "What are the payment terms?",
+        "question_files": [],
+        "response": null,
+        "response_files": [],
+        "responded_by": null,
+        "status": "OPEN",
+        "created_at": "2026-01-16T09:00:00Z",
+        "responded_at": null,
+        "closed_at": null
+      }
+    ],
+    "open_clarification": { "id": 124, "...": "..." },
+    "has_open": true,
+    "is_own_clarification": false,
+    "is_buyer": true
+  }
+}
+```
+
+#### Response - Vendor (Own Clarification) (200 OK)
+
+```json
+{
+  "status": 1,
+  "data": {
+    "clarifications": [
+      {
+        "id": 124,
+        "rfq_id": 456,
+        "raised_by_vendor_id": 790,
+        "raised_by_vendor_name": "XYZ Supplies",
+        "subject": "Payment terms",
+        "question": "What are the payment terms?",
+        "question_files": [],
+        "response": null,
+        "response_files": [],
+        "responded_by": null,
+        "status": "OPEN",
+        "created_at": "2026-01-16T09:00:00Z",
+        "responded_at": null,
+        "closed_at": null
+      }
+    ],
+    "open_clarification": { "id": 124, "...": "full details..." },
+    "has_open": true,
+    "is_own_clarification": true,
+    "is_buyer": false
+  }
+}
+```
+
+#### Response - Other Vendor (200 OK)
+
+When another vendor has an open clarification:
+
+```json
+{
+  "status": 1,
+  "data": {
+    "clarifications": [],
+    "open_clarification": null,
+    "has_open": true,
+    "is_own_clarification": false,
+    "is_buyer": false
+  }
+}
+```
+
+> **Note**: `has_open: true` indicates a clarification is in progress, but `clarifications` is empty and `open_clarification` is null because the current vendor doesn't own the open clarification.
+
+#### Error Responses
+
+```json
+{ "status": 0, "message": "RFQ not found" }
+```
+
+```json
+{ "status": 0, "message": "Clarifications are only available for tenders" }
+```
+
+---
+
+### 4. Check Active/Open Clarification (Private Visibility)
+
+**GET** `/rfq/clarification/active/:rfq_id`
+
+Check if there's an open clarification blocking quote submission, with private visibility rules.
+
+#### Authentication
+
+- Requires authentication (`noLogin.customer_auth`)
+
+#### Path Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `rfq_id` | number | Tender ID |
+
+#### Privacy Rules
+
+| User Type | Sees |
+|-----------|------|
+| Buyer (tender creator) | Full clarification details |
+| Vendor who raised | Full details of their own clarification |
+| Other vendors | Only `has_open: true`, `data: null` |
+
+#### Response - Buyer / Own Clarification
+
+```json
+{
+  "status": 1,
+  "has_open": true,
+  "is_own_clarification": true,
+  "is_buyer": false,
+  "data": {
+    "id": 124,
+    "rfq_id": 456,
+    "raised_by_vendor_id": 790,
+    "raised_by_vendor_name": "XYZ Supplies",
+    "subject": "Payment terms",
+    "question": "What are the payment terms?",
+    "status": "OPEN",
+    "created_at": "2026-01-16T09:00:00Z"
+  }
+}
+```
+
+#### Response - Other Vendor (Clarification by someone else)
+
+```json
+{
+  "status": 1,
+  "has_open": true,
+  "is_own_clarification": false,
+  "is_buyer": false,
+  "data": null
+}
+```
+
+> **Note**: `has_open: true` tells the frontend to block quote submission, but `data: null` because the clarification belongs to another vendor.
+
+#### Response - No Open Clarification
+
+```json
+{
+  "status": 1,
+  "has_open": false,
+  "is_own_clarification": false,
+  "is_buyer": false,
+  "data": null
+}
+```
+
+---
+
+### Quote Blocking Behavior
+
+When a vendor attempts to submit or update a quote while a clarification is OPEN:
+
+**POST** `/rfq/quote/create` or **PUT** `/rfq/quote/update/:quoteId`
+
+#### Blocked Response (400)
+
+```json
+{
+  "status": 3,
+  "message": "Quote submission is blocked. There is an open clarification pending response.",
+  "data": {
+    "clarification_id": 124,
+    "raised_by_vendor_name": "XYZ Supplies",
+    "subject": "Payment terms",
+    "created_at": "2026-01-16T09:00:00Z"
+  }
+}
+```
+
+---
+
+### Clarification Response Object
+
+All clarification endpoints return data in this format:
+
+```typescript
+interface Clarification {
+  id: number;
+  rfq_id: number;
+  raised_by_vendor_id: number;
+  raised_by_vendor_name: string;
+  subject: string;
+  question: string;
+  question_files: Array<{ file_url: string; file_name: string }>;
+  response: string | null;
+  response_files: Array<{ file_url: string; file_name: string }> | null;
+  responded_by: number | null;
+  status: 'OPEN' | 'CLOSED';
+  created_at: datetime;
+  responded_at: datetime | null;
+  closed_at: datetime | null;
+}
+```
+
+---
+
+### Clarification Database Tables
+
+| Table | Purpose |
+|-------|---------|
+| `tbl_rfq_clarifications` | Clarification records |
+| `tbl_rfq_clarification_files` | File attachments for clarifications |
+
+#### tbl_rfq_clarifications
+
+```sql
+CREATE TABLE tbl_rfq_clarifications (
+  id SERIAL PRIMARY KEY,
+  rfq_id INTEGER NOT NULL REFERENCES tbl_rfq(id),
+  raised_by INTEGER NOT NULL REFERENCES tbl_users(id),
+  vendor_company_id INTEGER,
+  subject VARCHAR(200) NOT NULL,
+  question TEXT NOT NULL,
+  response TEXT,
+  responded_by INTEGER REFERENCES tbl_users(id),
+  status VARCHAR(20) DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'CLOSED')),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  responded_at TIMESTAMP,
+  closed_at TIMESTAMP
+);
+
+-- Ensures only ONE open clarification per tender
+CREATE UNIQUE INDEX idx_one_open_clarification_per_rfq
+ON tbl_rfq_clarifications (rfq_id)
+WHERE status = 'OPEN';
+```
+
+#### tbl_rfq_clarification_files
+
+```sql
+CREATE TABLE tbl_rfq_clarification_files (
+  id SERIAL PRIMARY KEY,
+  clarification_id INTEGER NOT NULL REFERENCES tbl_rfq_clarifications(id) ON DELETE CASCADE,
+  file_name VARCHAR(255) NOT NULL,
+  file_url TEXT NOT NULL,
+  file_type VARCHAR(50),
+  is_response_file BOOLEAN DEFAULT FALSE,
+  uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+### Frontend Usage Notes
+
+1. **Before submitting quote**: Call `GET /rfq/clarification/active/:rfq_id` to check if blocked
+2. **Clarification period**: Only show "Raise Clarification" button between `tender_publish_date` and `vendor_clarification_date`
+3. **Status badges**:
+   - `OPEN` → Yellow/Orange badge, "Pending Response"
+   - `CLOSED` → Green badge, "Resolved"
+4. **File uploads**: Use `FormData` with field name `files`
+5. **Real-time updates**: Consider polling `/rfq/clarification/active/:rfq_id` or using push notifications
+
+---
+
 **End of Document**
