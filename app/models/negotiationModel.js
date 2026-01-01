@@ -296,8 +296,8 @@ const negotiationModel = {
         nrq.*,
         u.name as vendor_name,
         u.email as vendor_email,
-        c.company_name,
-        c.organization_name
+        u.organization_name,
+        c.company_name
        FROM tbl_negotiation_round_quotes nrq
        LEFT JOIN tbl_users u ON u.id = nrq.vendor_id
        LEFT JOIN tbl_company c ON c.id = u.company_id
