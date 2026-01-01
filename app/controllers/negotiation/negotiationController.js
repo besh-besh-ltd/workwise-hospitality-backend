@@ -102,64 +102,86 @@ const NegotiationController = {
           department_id: null
         });
 
-        if (!policy) {
-          throw new Error('No negotiation approval policy found. Please configure one in the approval hierarchy.');
+        if (policy) {
+          // Get policy steps to find approvers
+          const policySteps = await t.any(
+            `SELECT * FROM tbl_approval_policy_steps
+             WHERE approval_policy_id = $1
+             ORDER BY step_order ASC
+             LIMIT 1`,
+            [policy.id]
+          );
+
+          if (policySteps.length > 0) {
+            const firstStep = policySteps[0];
+
+            // Resolve approvers based on step configuration
+            const approvers = [];
+            if (firstStep.approver_source_type === 'ROLE') {
+              // Get users with this role
+              const roleUsers = await t.any(
+                `SELECT DISTINCT u.id
+                 FROM tbl_users u
+                 JOIN tbl_user_role_scopes urs ON urs.user_id = u.id
+                 JOIN tbl_hospitality_user_mappings hum ON hum.user_id = u.id
+                 WHERE urs.role_id = $1
+                   AND hum.hospitality_company_id = $2
+                   AND (hum.mapping_type = 0 OR (hum.mapping_type = 1 AND hum.hospitality_hotel_id = $3))
+                   AND u.status = 1 AND u.is_deleted = 0`,
+                [firstStep.approver_source_id, rfqData.hospitality_company_id, rfqData.hotel_id || null]
+              );
+              approvers.push(...roleUsers.map(u => u.id));
+            } else if (firstStep.approver_source_type === 'USER') {
+              approvers.push(firstStep.approver_source_id);
+            }
+
+            if (approvers.length > 0) {
+              // Create approval records
+              const approvalRows = approvers.map(approverId => ({
+                negotiation_round_id: round.id,
+                approver_user_id: approverId,
+                status: 'PENDING'
+              }));
+
+              const columnSet = new pgp.helpers.ColumnSet(
+                ['negotiation_round_id', 'approver_user_id', 'status'],
+                { table: 'tbl_negotiation_round_approvals' }
+              );
+              const query = pgp.helpers.insert(approvalRows, columnSet);
+              await t.none(query);
+            } else {
+              // No approvers found, auto-approve the round
+              await t.none(
+                `UPDATE tbl_negotiation_rounds 
+                 SET status = 'ACTIVE', published_at = NOW() 
+                 WHERE id = $1`,
+                [round.id]
+              );
+            }
+          } else {
+            // No policy steps, auto-approve the round
+            await t.none(
+              `UPDATE tbl_negotiation_rounds 
+               SET status = 'ACTIVE', published_at = NOW() 
+               WHERE id = $1`,
+              [round.id]
+            );
+          }
+        } else {
+          // No approval policy found, auto-approve the round
+          await t.none(
+            `UPDATE tbl_negotiation_rounds 
+             SET status = 'ACTIVE', published_at = NOW() 
+             WHERE id = $1`,
+            [round.id]
+          );
         }
 
-        // Get policy steps to find approvers
-        const policySteps = await t.any(
-          `SELECT * FROM tbl_approval_policy_steps
-           WHERE approval_policy_id = $1
-           ORDER BY step_order ASC
-           LIMIT 1`,
-          [policy.id]
+        // Get updated round status
+        const updatedRound = await t.oneOrNone(
+          `SELECT * FROM tbl_negotiation_rounds WHERE id = $1`,
+          [round.id]
         );
-
-        if (policySteps.length === 0) {
-          throw new Error('Negotiation approval policy has no steps configured');
-        }
-
-        const firstStep = policySteps[0];
-
-        // Resolve approvers based on step configuration
-        const approvers = [];
-        if (firstStep.approver_source_type === 'ROLE') {
-          // Get users with this role
-          const roleUsers = await t.any(
-            `SELECT DISTINCT u.id
-             FROM tbl_users u
-             JOIN tbl_user_role_scopes urs ON urs.user_id = u.id
-             JOIN tbl_hospitality_user_mappings hum ON hum.user_id = u.id
-             WHERE urs.role_id = $1
-               AND hum.hospitality_company_id = $2
-               AND (hum.mapping_type = 0 OR (hum.mapping_type = 1 AND hum.hospitality_hotel_id = $3))
-               AND u.status = 1 AND u.is_deleted = 0`,
-            [firstStep.approver_source_id, rfqData.hospitality_company_id, rfqData.hotel_id || null]
-          );
-          approvers.push(...roleUsers.map(u => u.id));
-        } else if (firstStep.approver_source_type === 'USER') {
-          approvers.push(firstStep.approver_source_id);
-        }
-
-        if (approvers.length === 0) {
-          throw new Error('No approvers found for negotiation round approval');
-        }
-
-        // Create approval records
-        const approvalRows = approvers.map(approverId => ({
-          negotiation_round_id: round.id,
-          approver_user_id: approverId,
-          status: 'PENDING'
-        }));
-
-        if (approvalRows.length > 0) {
-          const columnSet = new pgp.helpers.ColumnSet(
-            ['negotiation_round_id', 'approver_user_id', 'status'],
-            { table: 'tbl_negotiation_round_approvals' }
-          );
-          const query = pgp.helpers.insert(approvalRows, columnSet);
-          await t.none(query);
-        }
 
         // Record lifecycle event
         await recordLifecycleEvent({
@@ -169,15 +191,16 @@ const NegotiationController = {
           action: 'CREATE_ROUND',
           performed_by: user_id,
           metadata: {
-            round_id: round.id,
+            round_id: updatedRound.id,
             round_number: round_number,
             rfq_product_id: rfq_product_id,
-            target_price: target_price
+            target_price: target_price,
+            status: updatedRound.status
           },
           txContext: t
         });
 
-        return round;
+        return updatedRound || round;
       });
 
       return res.status(200).json({
@@ -304,7 +327,7 @@ const NegotiationController = {
           const approvalStatus = await negotiationModel.areAllApprovalsComplete(round.id);
           return {
             ...round,
-            approvals,
+            approvals: approvals || [],
             approvalStatus
           };
         })
@@ -312,7 +335,7 @@ const NegotiationController = {
 
       return res.status(200).json({
         status: 1,
-        data: roundsWithApprovals
+        data: roundsWithApprovals || []
       });
     } catch (error) {
       logError(error);
