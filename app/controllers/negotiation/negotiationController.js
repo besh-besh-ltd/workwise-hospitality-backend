@@ -717,6 +717,70 @@ const NegotiationController = {
       logError(error);
       return formatErrorResponse(res, error);
     }
+  },
+
+  /**
+   * Get vendor's negotiation status for a specific product
+   * GET /negotiation/rounds/:rfq_id/product/:rfq_product_id/vendor-status
+   */
+  getVendorNegotiationStatus: async (req, res) => {
+    try {
+      const rfq_id = parseInt(req.params.rfq_id);
+      const rfq_product_id = parseInt(req.params.rfq_product_id);
+      const vendor_id = req.user.vendor_id || req.user.id;
+
+      if (!rfq_id || !rfq_product_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'rfq_id and rfq_product_id are required'
+        });
+      }
+
+      const status = await negotiationModel.getVendorNegotiationStatus(
+        rfq_id,
+        rfq_product_id,
+        vendor_id
+      );
+
+      return res.status(200).json({
+        status: 1,
+        data: status
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * Get all active negotiation rounds for an RFQ with vendor's quote status
+   * GET /negotiation/rounds/:rfq_id/vendor-status
+   */
+  getAllVendorNegotiationStatus: async (req, res) => {
+    try {
+      const rfq_id = parseInt(req.params.rfq_id);
+      const vendor_id = req.user.vendor_id || req.user.id;
+
+      if (!rfq_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'rfq_id is required'
+        });
+      }
+
+      const rounds = await negotiationModel.getActiveRoundsWithVendorStatus(
+        rfq_id,
+        vendor_id
+      );
+
+      return res.status(200).json({
+        status: 1,
+        data: rounds
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
   }
 };
 

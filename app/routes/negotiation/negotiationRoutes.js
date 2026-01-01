@@ -95,5 +95,19 @@ NegotiationRoutes.post(
   negotiationController.submitVendorQuote
 );
 
+// Get vendor's negotiation status for a specific product
+NegotiationRoutes.get(
+  '/rounds/:rfq_id/product/:rfq_product_id/vendor-status',
+  passportSignIn,
+  negotiationController.getVendorNegotiationStatus
+);
+
+// Get all vendor's negotiation statuses for an RFQ
+NegotiationRoutes.get(
+  '/rounds/:rfq_id/vendor-status',
+  passportSignIn,
+  negotiationController.getAllVendorNegotiationStatus
+);
+
 export default NegotiationRoutes;
 

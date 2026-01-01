@@ -285,15 +285,11 @@ const negotiationModel = {
       previous_price
     } = quoteData;
 
+    // Insert-only (one submission per round); conflict will throw
     return db.one(
       `INSERT INTO tbl_negotiation_round_quotes
         (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price, submitted_at)
        VALUES ($1, $2, $3, $4, $5, NOW())
-       ON CONFLICT (negotiation_round_id, vendor_id, rfq_product_id)
-       DO UPDATE SET
-         quoted_price = EXCLUDED.quoted_price,
-         previous_price = EXCLUDED.previous_price,
-         submitted_at = NOW()
        RETURNING *`,
       [negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price]
     );
@@ -350,6 +346,109 @@ const negotiationModel = {
       endDate: result.end_date,
       status: result.status
     };
+  },
+
+  /**
+   * Get vendor's negotiation quote status for a product (checks active rounds)
+   */
+  getVendorNegotiationStatus: async (rfqId, rfqProductId, vendorId) => {
+    // Find active negotiation round for this product
+    const activeRound = await db.oneOrNone(
+      `SELECT nr.*, 
+        COALESCE(PV.name, P.name) as product_name
+       FROM tbl_negotiation_rounds nr
+       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+       LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+       LEFT JOIN tbl_product P ON P.id = PV.product_id
+       WHERE nr.rfq_id = $1 
+         AND nr.rfq_product_id = $2 
+         AND nr.status = 'ACTIVE'
+       LIMIT 1`,
+      [rfqId, rfqProductId]
+    );
+
+    if (!activeRound) {
+      return {
+        hasActiveRound: false,
+        round: null,
+        vendorQuote: null,
+        hasSubmittedQuote: false
+      };
+    }
+
+    // Check if vendor has submitted a quote for this round
+    const vendorQuote = await db.oneOrNone(
+      `SELECT * FROM tbl_negotiation_round_quotes
+       WHERE negotiation_round_id = $1 AND vendor_id = $2`,
+      [activeRound.id, vendorId]
+    );
+
+    const now = new Date();
+    const endDate = new Date(activeRound.end_date);
+    const isExpired = now > endDate;
+
+    return {
+      hasActiveRound: true,
+      round: {
+        ...activeRound,
+        isExpired
+      },
+      vendorQuote: vendorQuote,
+      hasSubmittedQuote: !!vendorQuote
+    };
+  },
+
+  /**
+   * Get all active rounds for an RFQ with vendor quote status
+   */
+  getActiveRoundsWithVendorStatus: async (rfqId, vendorId) => {
+    const activeRounds = await db.any(
+      `SELECT nr.*, 
+        COALESCE(PV.name, P.name) as product_name,
+        nrq.id as vendor_quote_id,
+        nrq.quoted_price as vendor_quoted_price,
+        nrq.submitted_at as vendor_submitted_at
+       FROM tbl_negotiation_rounds nr
+       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+       LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+       LEFT JOIN tbl_product P ON P.id = PV.product_id
+       LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id AND nrq.vendor_id = $2
+       WHERE nr.rfq_id = $1 
+         AND nr.status = 'ACTIVE'
+       ORDER BY nr.rfq_product_id`,
+      [rfqId, vendorId]
+    );
+
+    return activeRounds.map(round => {
+      const now = new Date();
+      const endDate = new Date(round.end_date);
+      return {
+        ...round,
+        isExpired: now > endDate,
+        hasSubmittedQuote: !!round.vendor_quote_id
+      };
+    });
+  },
+
+  /**
+   * Insert vendor quote for negotiation round (only insert, no update)
+   */
+  insertRoundQuote: async (quoteData) => {
+    const {
+      negotiation_round_id,
+      vendor_id,
+      rfq_product_id,
+      quoted_price,
+      previous_price
+    } = quoteData;
+
+    return db.one(
+      `INSERT INTO tbl_negotiation_round_quotes
+        (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price, submitted_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       RETURNING *`,
+      [negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price]
+    );
   }
 };
 

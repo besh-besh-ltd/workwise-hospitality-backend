@@ -35,6 +35,7 @@ import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
 import Razorpay from 'razorpay';
 import crypto from 'crypto';
+import negotiationModel from '../../models/negotiationModel.js';
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -6594,6 +6595,52 @@ const rfqController = {
               });
             }
 
+            // Save quotes to negotiation round quotes table if there's an active negotiation round
+            try {
+              for (const quoteItem of quotes_items) {
+                // Find the rfq_product_id for this quote item
+                const rfqProductResult = await t.oneOrNone(
+                  `SELECT id FROM tbl_rfq_products 
+                   WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+                  [rfq_id, quoteItem.product_variant_id, quoteItem.variant]
+                );
+
+                if (rfqProductResult) {
+                  const rfqProductId = rfqProductResult.id;
+
+                  // Check if there's an active negotiation round for this product
+                  const activeRound = await t.oneOrNone(
+                    `SELECT id, rfq_product_id FROM tbl_negotiation_rounds 
+                     WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE' 
+                     AND end_date > NOW()`,
+                    [rfq_id, rfqProductId]
+                  );
+
+                  if (activeRound) {
+                    // Check if vendor has already submitted a quote for this round
+                    const existingNegotiationQuote = await t.oneOrNone(
+                      `SELECT id FROM tbl_negotiation_round_quotes 
+                       WHERE negotiation_round_id = $1 AND vendor_id = $2`,
+                      [activeRound.id, user.id]
+                    );
+
+                    if (!existingNegotiationQuote) {
+                      // Insert negotiation round quote
+                      await t.none(
+                        `INSERT INTO tbl_negotiation_round_quotes 
+                          (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price, submitted_at)
+                         VALUES ($1, $2, $3, $4, NULL, NOW())`,
+                        [activeRound.id, user.id, rfqProductId, quoteItem.total_price]
+                      );
+                    }
+                  }
+                }
+              }
+            } catch (negotiationError) {
+              // Log but don't fail the main quote submission
+              console.error('Error saving negotiation round quote:', negotiationError);
+            }
+
             await sendQuoteNotificationEmail(req);
             await sendQuoteNotificationToVendor(req);
 
@@ -10783,6 +10830,52 @@ sendFollowUpEmails: async (req, res) => {
         fileUpdates || quoteItemChanges.some((result) => result.changed);
       // const changedProducts = quoteItemChanges.filter((result) =>  result.changed);
       // console.log(" quoteItemChanges ", changedProducts)
+
+      // Save quotes to negotiation round quotes table if there's an active negotiation round
+      try {
+        for (const prodItem of products) {
+          // Find the rfq_product_id for this product
+          const rfqProductResult = await db.oneOrNone(
+            `SELECT id FROM tbl_rfq_products 
+             WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+            [rfq_id, prodItem.product_id, prodItem.variant]
+          );
+
+          if (rfqProductResult) {
+            const rfqProductId = rfqProductResult.id;
+
+            // Check if there's an active negotiation round for this product
+            const activeRound = await db.oneOrNone(
+              `SELECT id, rfq_product_id FROM tbl_negotiation_rounds 
+               WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE' 
+               AND end_date > NOW()`,
+              [rfq_id, rfqProductId]
+            );
+
+            if (activeRound) {
+              // Check if vendor has already submitted a quote for this round
+              const existingNegotiationQuote = await db.oneOrNone(
+                `SELECT id FROM tbl_negotiation_round_quotes 
+                 WHERE negotiation_round_id = $1 AND vendor_id = $2`,
+                [activeRound.id, user.id]
+              );
+
+              if (!existingNegotiationQuote) {
+                // Insert negotiation round quote
+                await db.none(
+                  `INSERT INTO tbl_negotiation_round_quotes 
+                    (negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price, submitted_at)
+                   VALUES ($1, $2, $3, $4, NULL, NOW())`,
+                  [activeRound.id, user.id, rfqProductId, prodItem.total_price]
+                );
+              }
+            }
+          }
+        }
+      } catch (negotiationError) {
+        // Log but don't fail the main quote update
+        console.error('Error saving negotiation round quote during update:', negotiationError);
+      }
 
       let status = true;
       if (!anyQuoteChanged && !paymentTermAndCommentChanges) {
