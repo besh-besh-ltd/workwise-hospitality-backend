@@ -48,9 +48,13 @@ const negotiationModel = {
     let query = `SELECT 
         nr.*,
         u.name as created_by_name,
-        u.email as created_by_email
+        u.email as created_by_email,
+        COALESCE(PV.name, P.name) as product_name
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
+       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+       LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+       LEFT JOIN tbl_product P ON P.id = PV.product_id
        WHERE nr.rfq_id = $1`;
     
     const values = [rfqId];
@@ -77,9 +81,13 @@ const negotiationModel = {
       `SELECT 
         nr.*,
         u.name as created_by_name,
-        u.email as created_by_email
+        u.email as created_by_email,
+        COALESCE(PV.name, P.name) as product_name
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
+       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+       LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+       LEFT JOIN tbl_product P ON P.id = PV.product_id
        WHERE nr.rfq_id = $1
          AND nr.rfq_product_id = $2
          AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
@@ -97,9 +105,13 @@ const negotiationModel = {
       `SELECT 
         nr.*,
         u.name as created_by_name,
-        u.email as created_by_email
+        u.email as created_by_email,
+        COALESCE(PV.name, P.name) as product_name
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_users u ON u.id = nr.created_by
+       LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+       LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
+       LEFT JOIN tbl_product P ON P.id = PV.product_id
        WHERE nr.rfq_id = $1
          AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
        ORDER BY nr.rfq_product_id, nr.round_number DESC`,

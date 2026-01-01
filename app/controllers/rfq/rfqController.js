@@ -7352,6 +7352,24 @@ const rfqController = {
             );
           }
 
+          // Record lifecycle event for vendor finalization
+          const { recordLifecycleEvent } = await import('../models/generalModel.js');
+          await recordLifecycleEvent({
+            entity_type: 'RFQ',
+            entity_id: rfq_id,
+            stage: 'VENDOR_FINALIZED',
+            action: 'FINALIZE',
+            performed_by: req.user.id,
+            metadata: {
+              product_variant_id,
+              vendor_id,
+              quote_id,
+              variant,
+              reFinalized
+            },
+            remarks: null
+          });
+
           return {
             reFinalized,
             result

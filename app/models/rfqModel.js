@@ -7367,12 +7367,14 @@ ORDER BY m.created_at;
                     ordered_clauses.rfq_id,
                     ordered_clauses.rfq_product_id,
                     ordered_clauses.evaluation_id,
+                    ordered_clauses.minimum_passing_score,
                     JSON_AGG(clause_entry ORDER BY clause_entry->>'clause_id') AS clauses
                 FROM (
                           SELECT
                               cf.rfq_id,
                               cf.rfq_product_id,
                               cf.evaluation_id,
+                              cf.minimum_passing_score,
                               JSON_BUILD_OBJECT(
                                       'clause_id', cf.clause_id,
                                       'clause_text', cf.clause_text,
@@ -7385,7 +7387,7 @@ ORDER BY m.created_at;
                                   LEFT JOIN vendor_responses_aggregated vra
                                             ON cf.clause_id = vra.clause_id
                       ) AS ordered_clauses
-                GROUP BY rfq_id, rfq_product_id, evaluation_id
+                GROUP BY rfq_id, rfq_product_id, evaluation_id, minimum_passing_score
             ),
 
             vendors_list AS (
@@ -7457,7 +7459,7 @@ ORDER BY m.created_at;
               cd.evaluation_id,
               cd.clauses,
               vl.vendors,
-              (SELECT minimum_passing_score FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = cd.rfq_id AND tbl_rfq_product_id = cd.rfq_product_id LIMIT 1) AS minimum_passing_score
+              cd.minimum_passing_score
         FROM clauses_data cd
                 LEFT JOIN vendors_list vl
                           ON cd.rfq_id = vl.rfq_id AND cd.rfq_product_id = vl.rfq_product_id;
@@ -9776,26 +9778,52 @@ ORDER BY tq.timestamp DESC;
   updateMinimumPassingScore: async (rfq_id, rfq_product_id, minimum_passing_score) => {
     return new Promise(async (resolve, reject) => {
       try {
-        const updateQuery = `
-          UPDATE tbl_rfq_product_tech_evaluation
-          SET minimum_passing_score = $1
-          WHERE rfq_id = $2 AND tbl_rfq_product_id = $3
-          RETURNING id;
+        // First, check if technical evaluation record exists
+        const checkQuery = `
+          SELECT id FROM tbl_rfq_product_tech_evaluation
+          WHERE rfq_id = $1 AND tbl_rfq_product_id = $2;
         `;
+        const existingRecord = await db.query(checkQuery, [rfq_id, rfq_product_id]);
 
-        const result = await db.query(updateQuery, [minimum_passing_score, rfq_id, rfq_product_id]);
+        // If record doesn't exist, create it
+        if (existingRecord.length === 0) {
+          const insertQuery = `
+            INSERT INTO tbl_rfq_product_tech_evaluation (rfq_id, tbl_rfq_product_id, minimum_passing_score, timestamp)
+            VALUES ($1, $2, $3, NOW())
+            RETURNING id;
+          `;
+          const insertResult = await db.query(insertQuery, [rfq_id, rfq_product_id, minimum_passing_score]);
+          
+          if (insertResult.length > 0) {
+            resolve({
+              status: 1,
+              message: 'Minimum passing score set successfully.'
+            });
+            return;
+          }
+        } else {
+          // Record exists, update it
+          const updateQuery = `
+            UPDATE tbl_rfq_product_tech_evaluation
+            SET minimum_passing_score = $1
+            WHERE rfq_id = $2 AND tbl_rfq_product_id = $3
+            RETURNING id;
+          `;
 
-        if (result.length === 0) {
-          resolve({
-            status: 0,
-            message: 'Technical evaluation not found for the given RFQ and product.'
-          });
-          return;
+          const result = await db.query(updateQuery, [minimum_passing_score, rfq_id, rfq_product_id]);
+
+          if (result.length > 0) {
+            resolve({
+              status: 1,
+              message: 'Minimum passing score updated successfully.'
+            });
+            return;
+          }
         }
 
         resolve({
-          status: 1,
-          message: 'Minimum passing score updated successfully.'
+          status: 0,
+          message: 'Failed to save minimum passing score.'
         });
       } catch (error) {
         console.error('Error updating minimum passing score:', error);
