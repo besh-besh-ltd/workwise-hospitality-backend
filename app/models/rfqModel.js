@@ -9489,6 +9489,8 @@ ORDER BY tq.timestamp DESC;
         RFQ.id,
         RFQ.rfq_no,
         RFQ.timestamp,
+        RFQ.hospitality_company_id,
+        RFQ.hotel_id,
         (
           SELECT
             CASE
