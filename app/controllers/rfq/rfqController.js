@@ -3225,6 +3225,71 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   return result;
 };
 
+/**
+ * startApprovalForArc
+ *
+ * Submits an RFQ/Tender for ARC (Award Recommendation Committee) approval by creating an approval instance.
+ * Only applies to hospitality RFQs (those with hospitality_company_id).
+ * Approval is at the RFQ level - entity_id is the rfq_id.
+ * This should be triggered when ALL products in the RFQ have been finalized.
+ *
+ * IMPORTANT: This function throws if no approval policy exists for the scope.
+ * Hospitality RFQs/Tenders MUST have an approval policy configured for ARC.
+ *
+ * @param {number} rfqId - The RFQ ID to submit for ARC approval
+ * @param {number} userId - The user ID initiating the approval
+ * @param {Object} txContext - Optional transaction context for participating in outer transaction
+ * @returns {Promise<Object|null>} - Approval instance result or null if not hospitality
+ * @throws {Error} - If no approval policy exists for the hospitality scope
+ */
+const startApprovalForArc = async (rfqId, userId, txContext = null) => {
+  const dbContext = txContext || db;
+  
+  // Fetch RFQ details - use transaction context if available
+  const rfq = await dbContext.oneOrNone(
+    `SELECT id, rfq_no, hospitality_company_id, hotel_id, is_tender, company_name
+     FROM tbl_rfq WHERE id = $1`,
+    [rfqId]
+  );
+
+  // Skip non-hospitality RFQs - they don't require ARC approval
+  if (!rfq || !rfq.hospitality_company_id) {
+    return null;
+  }
+
+  // Check if all products are finalized using model (with transaction context)
+  const allFinalized = await rfqModel.checkAllProductsFinalizedForArc(rfqId, dbContext);
+
+  if (!allFinalized || allFinalized.total_products === 0) {
+    throw new Error('No products found in RFQ');
+  }
+
+  if (allFinalized.finalized_products !== allFinalized.total_products) {
+    throw new Error('Not all products are finalized. Cannot submit for ARC approval.');
+  }
+
+  // Use 'ARC' as entity type for ARC approvals
+  const entityType = 'ARC';
+
+  // Create approval instance for ARC entity type at RFQ level
+  const result = await createApprovalInstance({
+    entity_type: entityType,
+    entity_id: rfqId,
+    hospitality_company_id: rfq.hospitality_company_id,
+    hotel_id: rfq.hotel_id,
+    initiated_by: userId,
+    metadata: {
+      rfq_id: rfqId,
+      rfq_number: rfq.rfq_no,
+      is_tender: rfq.is_tender,
+      company_name: rfq.company_name
+    },
+    txContext
+  });
+
+  return result;
+};
+
 
 const rfqController = {
   createTenderPaymentOrder: async (req, res) => {
@@ -7417,9 +7482,56 @@ const rfqController = {
             remarks: null
           });
 
+          // Check if all products are finalized - if so, trigger ARC approval
+          const allFinalized = await rfqModel.checkAllProductsFinalizedForArc(rfq_id, t);
+
+          let arcApprovalCreated = false;
+          if (allFinalized && 
+              allFinalized.total_products > 0 && 
+              allFinalized.finalized_products === allFinalized.total_products) {
+            // All products are finalized - create ARC approval instance
+            try {
+              const arcApprovalResult = await startApprovalForArc(rfq_id, req.user.id, t);
+              if (arcApprovalResult) {
+                arcApprovalCreated = true;
+                // Record lifecycle event for ARC submission
+                await recordLifecycleEvent({
+                  entity_type: 'RFQ',
+                  entity_id: rfq_id,
+                  stage: 'ARC_SUBMITTED',
+                  action: 'SUBMIT_ARC',
+                  performed_by: req.user.id,
+                  metadata: {
+                    approval_instance_id: arcApprovalResult.instance?.id,
+                    auto_approved: arcApprovalResult.autoApproved || false
+                  },
+                  remarks: null,
+                  txContext: t
+                });
+              }
+            } catch (arcError) {
+              // Log error but don't fail the finalization
+              console.error('Error creating ARC approval instance:', arcError);
+              // Still record that we attempted ARC submission
+              await recordLifecycleEvent({
+                entity_type: 'RFQ',
+                entity_id: rfq_id,
+                stage: 'ARC_SUBMISSION_FAILED',
+                action: 'SUBMIT_ARC',
+                performed_by: req.user.id,
+                metadata: {
+                  error: arcError.message
+                },
+                remarks: arcError.message,
+                txContext: t
+              });
+            }
+          }
+
           return {
             reFinalized,
-            result
+            result,
+            arcApprovalCreated
           };
         });
       

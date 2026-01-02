@@ -1197,6 +1197,274 @@ WHERE NOT EXISTS (
     });
   },
 
+  /**
+   * Check if all products in an RFQ are finalized (without user filter)
+   * Used for ARC approval creation
+   * @param {number} rfq_id - The RFQ ID
+   * @param {Object} dbContext - Optional transaction context
+   * @returns {Promise<Object>} - { total_products, finalized_products }
+   */
+  checkAllProductsFinalizedForArc: async (rfq_id, dbContext = db) => {
+    const query = `
+      SELECT 
+        COUNT(*) AS total_products,
+        SUM(CASE
+          WHEN EXISTS (
+            SELECT 1 FROM tbl_quote_finalization TQF
+            WHERE TQF.rfq_id = RP.rfq_id
+            AND TQF.product_variant_id = RP.product_variant_id
+            AND TQF.variant = RP.variant
+          ) THEN 1
+          ELSE 0
+        END) AS finalized_products
+      FROM tbl_rfq_products RP
+      WHERE RP.rfq_id = $1
+    `;
+
+    return new Promise((resolve, reject) => {
+      dbContext.oneOrNone(query, [rfq_id])
+        .then((data) => {
+          if (data) {
+            resolve({
+              total_products: parseInt(data.total_products) || 0,
+              finalized_products: parseInt(data.finalized_products) || 0
+            });
+          } else {
+            resolve({ total_products: 0, finalized_products: 0 });
+          }
+        })
+        .catch((err) => {
+          console.error('Error checking if all products are finalized for ARC:', err);
+          reject(new Error(err));
+        });
+    });
+  },
+
+
+  /**
+   * Get quotes with vendor details for ARC lifecycle
+   * @param {number} rfq_id - The RFQ ID
+   * @returns {Promise<Array>} - Array of quotes with vendor details
+   */
+  getQuotesWithVendorDetails: async (rfq_id) => {
+    const query = `
+      SELECT 
+        q.*,
+        u.name as vendor_name,
+        u.email as vendor_email,
+        u.organization_name,
+        c.company_name,
+        (
+          SELECT json_agg(
+            json_build_object(
+              'id', qi.id,
+              'product_id', qi.product_variant_id,
+              'product_name', qi.product_name,
+              'quantity', qi.quantity,
+              'unit', qi.unit,
+              'unit_price', qi.unit_price,
+              'freight_price', qi.freight_price,
+              'package_price', qi.package_price,
+              'tax', qi.tax,
+              'total_price', qi.total_price,
+              'delivery_period', qi.delivery_period,
+              'comment', qi.comment
+            )
+          )
+          FROM tbl_quote_items qi
+          WHERE qi.quote_id = q.id
+        ) as quote_items
+      FROM tbl_quotes q
+      LEFT JOIN tbl_users u ON u.id = q.created_by
+      LEFT JOIN tbl_company c ON c.id = u.company_id
+      WHERE q.rfq_id = $1
+      ORDER BY q.created_at DESC
+    `;
+    return db.any(query, [rfq_id]);
+  },
+
+  /**
+   * Get technical evaluation data for ARC lifecycle
+   * @param {number} rfq_id - The RFQ ID
+   * @returns {Promise<Array>} - Array of technical evaluation data
+   */
+  getTechEvaluationData: async (rfq_id) => {
+    const query = `
+      SELECT 
+        te.*,
+        rp.id as rfq_product_id,
+        rp.product_variant_id,
+        (
+          SELECT json_agg(
+            json_build_object(
+              'vendor_id', tev.vendor_id,
+              'vendor_name', u.name,
+              'vendor_email', u.email,
+              'is_accepted', tev.is_accepted,
+              'score', tev.score,
+              'remarks', tev.remarks,
+              'created_at', tev.created_at
+            )
+          )
+          FROM tbl_rfq_product_tech_evaluation_vendors tev
+          LEFT JOIN tbl_users u ON u.id = tev.vendor_id
+          WHERE tev.tech_evaluation_id = te.id
+        ) as vendor_evaluations
+      FROM tbl_rfq_product_tech_evaluation te
+      JOIN tbl_rfq_products rp ON rp.id = te.rfq_product_id
+      WHERE te.rfq_id = $1
+    `;
+    return db.any(query, [rfq_id]);
+  },
+
+  /**
+   * Get vendor rankings (L1-L5) for each product
+   * @param {number} rfq_id - The RFQ ID
+   * @returns {Promise<Array>} - Array of vendor rankings
+   */
+  getVendorRankingsByProduct: async (rfq_id) => {
+    const query = `
+      SELECT 
+        rp.id as rfq_product_id,
+        rp.product_variant_id,
+        rp.variant,
+        q.id as quote_id,
+        q.created_by as vendor_id,
+        u.name as vendor_name,
+        u.email as vendor_email,
+        u.organization_name,
+        c.company_name,
+        qi.total_price as quoted_price,
+        qi.unit_price,
+        qi.quantity,
+        qi.unit,
+        qf.id as finalization_id,
+        qf.created_at as finalized_at
+      FROM tbl_rfq_products rp
+      LEFT JOIN tbl_quote_items qi ON qi.product_variant_id = rp.product_variant_id AND qi.variant = rp.variant
+      LEFT JOIN tbl_quotes q ON q.id = qi.quote_id AND q.rfq_id = rp.rfq_id
+      LEFT JOIN tbl_quote_finalization qf ON qf.rfq_id = rp.rfq_id 
+        AND qf.product_variant_id = rp.product_variant_id 
+        AND qf.variant = rp.variant
+        AND qf.vendor_id = q.created_by
+      LEFT JOIN tbl_users u ON u.id = q.created_by
+      LEFT JOIN tbl_company c ON c.id = u.company_id
+      WHERE rp.rfq_id = $1 AND q.id IS NOT NULL
+      ORDER BY rp.id, qi.total_price ASC
+    `;
+    return db.any(query, [rfq_id]);
+  },
+
+  /**
+   * Get sampling data for ARC lifecycle
+   * @param {number} rfq_id - The RFQ ID
+   * @returns {Promise<Array>} - Array of sampling data
+   */
+  getSamplingData: async (rfq_id) => {
+    const query = `
+      SELECT 
+        c.*,
+        u.name as vendor_name,
+        u.email as vendor_email,
+        rp.id as rfq_product_id
+      FROM tbl_rfq_product_clauses c
+      LEFT JOIN tbl_users u ON u.id = c.vendor_id
+      JOIN tbl_rfq_products rp ON rp.id = c.rfq_product_id
+      WHERE c.rfq_id = $1 AND c.clause_type = 'sampling'
+      ORDER BY c.created_at DESC
+    `;
+    try {
+      return await db.any(query, [rfq_id]);
+    } catch (error) {
+      // Sampling table might not exist or have different structure
+      console.log('Sampling data not available:', error.message);
+      return [];
+    }
+  },
+
+  /**
+   * Get RFQs pending ARC approval
+   * @param {Object} filters - { page, limit, project_id, is_tender }
+   * @returns {Promise<Object>} - { rfqs, total }
+   */
+  getRfqsPendingArcApproval: async (filters = {}) => {
+    const { page = 1, limit = 50, project_id, is_tender } = filters;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    const whereConditions = [
+      'r.hospitality_company_id IS NOT NULL',
+      'r.status IN (1, 2)',
+      `EXISTS (
+        SELECT 1 FROM tbl_approval_instances ai2
+        WHERE ai2.entity_type = 'ARC' 
+        AND ai2.entity_id = r.id
+        AND ai2.status IN ('PENDING', 'APPROVED')
+      )`
+    ];
+    const params = [];
+    let paramIndex = 1;
+
+    if (is_tender !== undefined && is_tender !== null) {
+      whereConditions.push(`r.is_tender = $${paramIndex++}`);
+      params.push(is_tender === '1' || is_tender === 1 ? 1 : 0);
+    }
+
+    if (project_id) {
+      whereConditions.push(`r.project_id = $${paramIndex++}`);
+      params.push(parseInt(project_id));
+    }
+
+    const whereClause = whereConditions.join(' AND ');
+
+    const query = `
+      SELECT DISTINCT
+        r.id,
+        r.rfq_no,
+        r.is_tender,
+        r.company_name,
+        r.timestamp,
+        r.bid_end_date,
+        r.status,
+        p.name as project_name,
+        ai.id as approval_instance_id,
+        ai.status as approval_status,
+        (
+          SELECT COUNT(*)
+          FROM tbl_quotes q
+          WHERE q.rfq_id = r.id
+        ) as quote_count,
+        (
+          SELECT COUNT(*)
+          FROM tbl_rfq_products rp
+          WHERE rp.rfq_id = r.id
+        ) as product_count
+      FROM tbl_rfq r
+      LEFT JOIN tbl_projects p ON p.id = r.project_id
+      LEFT JOIN tbl_approval_instances ai ON ai.entity_type = 'ARC' AND ai.entity_id = r.id AND ai.status = 'PENDING'
+      WHERE ${whereClause}
+      ORDER BY r.timestamp DESC
+      LIMIT $${paramIndex++} OFFSET $${paramIndex++}
+    `;
+
+    const countQuery = `
+      SELECT COUNT(DISTINCT r.id)
+      FROM tbl_rfq r
+      WHERE ${whereClause}
+    `;
+
+    params.push(parseInt(limit), offset);
+
+    const [rfqs, total] = await Promise.all([
+      db.any(query, params),
+      db.one(countQuery, params.slice(0, -2))
+    ]);
+
+    return {
+      rfqs,
+      total: parseInt(total.count)
+    };
+  },
+
   updateWithTimestamp: async (table_name, data, primary_key) => {
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
