@@ -3612,6 +3612,13 @@ publish_profile_reviews: async (req, res, next) => {
         console.log('[HOSPITALITY] Approving vendor:', userId);
         await userModel.updateUserAccount(userId, { status: 1 });
 
+        // Initialize variables for response
+        let totalAmount = 0;
+        let expiryDateFormatted = 'March 31, ' + (Moment().month() >= 2 ? Moment().year() + 1 : Moment().year());
+        let categories = [];
+        let hotels = [];
+        let invoiceResult = null;
+
         // Send confirmation email (same as live webhook)
         try {
           const userDetails = await userModel.userinfo(userId);
@@ -3635,16 +3642,16 @@ publish_profile_reviews: async (req, res, next) => {
               [userId, payment.id]
             );
             
-            const categories = subscriptions.filter(s => s.item_type === 'category').map(s => s.item_name);
-            const hotels = subscriptions.filter(s => s.item_type === 'hotel').map(s => s.item_name);
+            categories = subscriptions.filter(s => s.item_type === 'category').map(s => s.item_name);
+            hotels = subscriptions.filter(s => s.item_type === 'hotel').map(s => s.item_name);
             const expiryDate = subscriptions.length > 0 ? subscriptions[0].end_date : null;
-            const expiryDateFormatted = expiryDate 
+            expiryDateFormatted = expiryDate 
               ? Moment(expiryDate).format('MMMM DD, YYYY')
               : 'March 31, ' + (Moment().month() >= 2 ? Moment().year() + 1 : Moment().year());
-            const totalAmount = subscriptions.reduce((sum, s) => sum + (s.fee_amount || 0), 0);
+            totalAmount = subscriptions.reduce((sum, s) => sum + (s.fee_amount || 0), 0);
             
             // Generate invoice
-            const invoiceResult = await UsersController.generateHospitalityInvoice(
+            invoiceResult = await UsersController.generateHospitalityInvoice(
               payment,
               user,
               company,
