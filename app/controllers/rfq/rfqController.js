@@ -7292,8 +7292,11 @@ const rfqController = {
   },
 
   finalize: async (req, res, next) => {
-    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, quote_item_id, variant } =
+    const { product_variant_id, vendor_id, rfq_id, rfq_no, quote_id, quote_item_id, variant, route_type } =
       req.body;
+    
+    // Default to PO route for non-hospitality RFQs, route_type for hospitality
+    const selectedRoute = route_type || 'PO';
 
     try {
       const vendor_details = await userModel.user_profile_detail(vendor_id);
@@ -7370,30 +7373,33 @@ const rfqController = {
           if(!isEligibleInHierarcy)
             throw new Error('Failed to finalize a vendor, as you don\'t belong to the company\'s approval hierarchy!')
 
-          let alreadyExists = await rfqModel.checkIfExists(
+          // Check if THIS SPECIFIC VENDOR is already finalized for this product
+          // Multiple vendors can be finalized for the same product
+          let sameVendorExists = await rfqModel.checkIfExists(
             'tbl_quote_finalization',
-            `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} LIMIT 1`,
+            `rfq_id=${rfq_id} AND product_variant_id=${product_variant_id} AND variant=${variant} AND vendor_id=${vendor_id} LIMIT 1`,
             t
           );
 
           let reFinalized = false;
 
-          if (alreadyExists.length > 0) {
-            alreadyExists = alreadyExists[0];
+          // Only replace if same vendor is being finalized again (re-finalization)
+          if (sameVendorExists.length > 0) {
+            const existingFinalization = sameVendorExists[0];
 
             const history_data = {
-              rfq_id: alreadyExists.rfq_id,
-              rfq_no: alreadyExists.rfq_no,
-              product_variant_id: alreadyExists.product_variant_id,
-              vendor_id: alreadyExists.vendor_id,
-              quote_id: alreadyExists.quote_id,
-              created_by: alreadyExists.created_by,
-              timestamp: alreadyExists.timestamp,
-              variant: alreadyExists.variant,
+              rfq_id: existingFinalization.rfq_id,
+              rfq_no: existingFinalization.rfq_no,
+              product_variant_id: existingFinalization.product_variant_id,
+              vendor_id: existingFinalization.vendor_id,
+              quote_id: existingFinalization.quote_id,
+              created_by: existingFinalization.created_by,
+              timestamp: existingFinalization.timestamp,
+              variant: existingFinalization.variant,
               changed_by: req.user.id
             };
 
-            const res = await rfqModel.insert(
+            await rfqModel.insert(
               'tbl_quote_finalization_history',
               history_data,
               t
@@ -7401,7 +7407,7 @@ const rfqController = {
             await rfqModel.delete(
               'tbl_quote_finalization',
               {
-                id: alreadyExists.id
+                id: existingFinalization.id
               },
               t
             );
@@ -7431,8 +7437,14 @@ const rfqController = {
           
           await userModel.mapBuyerToVendor(req.user.id, vendor_id);
           
-          // Pre-initiate PO as if this throws error after this, it will trigger mail without ever finalizing anyone!
-          const result = await draftPO({...req.body, quote_id: quote_item_id}, req.user, t);
+          let result = null;
+          let arcApprovalCreated = false;
+          
+          // Route-based logic: PO route creates PO draft, ARC route skips PO
+          if (selectedRoute === 'PO') {
+            // PO Route: Create PO draft
+            result = await draftPO({...req.body, quote_id: quote_item_id}, req.user, t);
+          }
           
           await sendWinningNotificaion(
             vendorNonLoginRfqAccessToken,
@@ -7455,7 +7467,7 @@ const rfqController = {
             const lostVendorName = lostVendorDetails[0].name;
 
             await sendFinalizationRemovalMail(
-              alreadyExists.vendor_id,
+              sameVendorExists[0]?.vendor_id || vendor_id,
               rfQItem,
               winning_product,
               lostVendorOrganization,
@@ -7477,61 +7489,64 @@ const rfqController = {
               vendor_id,
               quote_id,
               variant,
-              reFinalized
+              reFinalized,
+              route_type: selectedRoute
             },
             remarks: null
           });
 
-          // Check if all products are finalized - if so, trigger ARC approval
-          const allFinalized = await rfqModel.checkAllProductsFinalizedForArc(rfq_id, t);
+          // ARC Route: Check if all products are finalized and trigger ARC approval
+          if (selectedRoute === 'ARC') {
+            const allFinalized = await rfqModel.checkAllProductsFinalizedForArc(rfq_id, t);
 
-          let arcApprovalCreated = false;
-          if (allFinalized && 
-              allFinalized.total_products > 0 && 
-              allFinalized.finalized_products === allFinalized.total_products) {
-            // All products are finalized - create ARC approval instance
-            try {
-              const arcApprovalResult = await startApprovalForArc(rfq_id, req.user.id, t);
-              if (arcApprovalResult) {
-                arcApprovalCreated = true;
-                // Record lifecycle event for ARC submission
+            if (allFinalized && 
+                allFinalized.total_products > 0 && 
+                allFinalized.finalized_products === allFinalized.total_products) {
+              // All products are finalized - create ARC approval instance
+              try {
+                const arcApprovalResult = await startApprovalForArc(rfq_id, req.user.id, t);
+                if (arcApprovalResult) {
+                  arcApprovalCreated = true;
+                  // Record lifecycle event for ARC submission
+                  await recordLifecycleEvent({
+                    entity_type: 'RFQ',
+                    entity_id: rfq_id,
+                    stage: 'ARC_SUBMITTED',
+                    action: 'SUBMIT_ARC',
+                    performed_by: req.user.id,
+                    metadata: {
+                      approval_instance_id: arcApprovalResult.instance?.id,
+                      auto_approved: arcApprovalResult.autoApproved || false
+                    },
+                    remarks: null,
+                    txContext: t
+                  });
+                }
+              } catch (arcError) {
+                // Log error but don't fail the finalization
+                console.error('Error creating ARC approval instance:', arcError);
+                // Still record that we attempted ARC submission
                 await recordLifecycleEvent({
                   entity_type: 'RFQ',
                   entity_id: rfq_id,
-                  stage: 'ARC_SUBMITTED',
+                  stage: 'ARC_SUBMISSION_FAILED',
                   action: 'SUBMIT_ARC',
                   performed_by: req.user.id,
                   metadata: {
-                    approval_instance_id: arcApprovalResult.instance?.id,
-                    auto_approved: arcApprovalResult.autoApproved || false
+                    error: arcError.message
                   },
-                  remarks: null,
+                  remarks: arcError.message,
                   txContext: t
                 });
               }
-            } catch (arcError) {
-              // Log error but don't fail the finalization
-              console.error('Error creating ARC approval instance:', arcError);
-              // Still record that we attempted ARC submission
-              await recordLifecycleEvent({
-                entity_type: 'RFQ',
-                entity_id: rfq_id,
-                stage: 'ARC_SUBMISSION_FAILED',
-                action: 'SUBMIT_ARC',
-                performed_by: req.user.id,
-                metadata: {
-                  error: arcError.message
-                },
-                remarks: arcError.message,
-                txContext: t
-              });
             }
           }
 
           return {
             reFinalized,
             result,
-            arcApprovalCreated
+            arcApprovalCreated,
+            route_type: selectedRoute
           };
         });
       
