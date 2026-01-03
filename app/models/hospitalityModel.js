@@ -142,6 +142,49 @@ const hospitalityModel = {
     );
   },
 
+  updateHotel: async (hotelId, hotelObj, companyId) => {
+    return db.one(
+      `UPDATE tbl_hospitality_company_hotels
+       SET name = $1,
+           city = $2,
+           keys = $3,
+           status = $4,
+           full_address = $5,
+           state = $6,
+           gst = $7,
+           pan = $8,
+           bank_account_number = $9,
+           bank_name = $10,
+           ifsc_code = $11,
+           account_holder_name = $12,
+           msme = $13,
+           delivery_address = $14,
+           updated_by = $15,
+           updated_at = NOW()
+       WHERE id = $16 AND hospitality_company_id = $17 AND is_deleted = 0
+       RETURNING *`,
+      [
+        hotelObj.name,
+        hotelObj.city,
+        hotelObj.keys,
+        hotelObj.status,
+        hotelObj.full_address || null,
+        hotelObj.state || null,
+        hotelObj.gst || null,
+        hotelObj.pan || null,
+        hotelObj.bank_account_number || null,
+        hotelObj.bank_name || null,
+        hotelObj.ifsc_code || null,
+        hotelObj.account_holder_name || null,
+        hotelObj.msme || null,
+        hotelObj.delivery_address || null,
+        hotelObj.updated_by,
+        hotelId,
+        companyId
+      ]
+    );
+  },
+
   insertUserMappings: async (rows) => {
     if (!rows?.length) {
       return [];
