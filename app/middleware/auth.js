@@ -8,7 +8,21 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 import JWT from 'jsonwebtoken';
 import db from '../config/dbConn.js';
 
-export const can = (permKey) => {
+/**
+ * RBAC permission middleware
+ * @param {string|string[]} permKey - Single permission key (e.g., 'tender.create') or array of permissions
+ * @param {boolean} needEvery - If true, user needs ALL permissions (AND logic). Default false (OR logic).
+ *
+ * Usage examples:
+ *   can('tender.create')                           // Single permission
+ *   can(['rfq.create', 'tender.create'])           // Multiple, OR logic (default)
+ *   can(['rfq.create', 'tender.create'], true)     // Multiple, AND logic
+ *
+ * Headers:
+ *   x-hotel-id: 123           // Single hotel
+ *   x-hotel-ids: 1,2,3        // Multiple hotels (OR logic)
+ */
+export const can = (permKey, needEvery = false) => {
   return async (req, res, next) => {
     try {
       if (!req.user) {
@@ -21,44 +35,76 @@ export const can = (permKey) => {
       const userId = req.user.id;
       const companyId = req.headers["x-company-id"] || req.user.company_id;
 
-      // hotel context (optional)
-      const hotelId =
-        req.headers["x-hotel-id"] ||
-        req.query.hotel_id ||
-        null;
-
-      const [resource, action] = permKey.split(".");
-
-      if (!resource || !action) {
-        throw new Error("Invalid permission key format");
+      // Multi-hotel support: parse from header or query
+      // Priority: x-hotel-ids (multiple) > x-hotel-id (single) > query.hotel_id
+      let hotelIds = [];
+      if (req.headers["x-hotel-ids"]) {
+        hotelIds = req.headers["x-hotel-ids"]
+          .split(",")
+          .map(id => parseInt(id.trim(), 10))
+          .filter(id => !isNaN(id) && id > 0);
+      } else if (req.headers["x-hotel-id"]) {
+        const id = parseInt(req.headers["x-hotel-id"], 10);
+        if (!isNaN(id) && id > 0) hotelIds = [id];
+      } else if (req.query.hotel_id) {
+        const id = parseInt(req.query.hotel_id, 10);
+        if (!isNaN(id) && id > 0) hotelIds = [id];
       }
 
-      const hasPermission = await db.oneOrNone(
-        `
-        SELECT 1
-        FROM tbl_user_role_scopes urs
-        JOIN tbl_role_permissions rp
-          ON rp.role_id = urs.role_id
-        JOIN tbl_permissions p
-          ON p.id = rp.permission_id
-        WHERE urs.user_id = $1
-          AND urs.company_id = $2
-          AND (
-            urs.hotel_id IS NULL
-            OR urs.hotel_id = $3
-          )
-          AND p.resource = $4
-          AND p.action = $5
-        LIMIT 1
-        `,
-        [
-          userId,
-          companyId,
-          hotelId,
-          resource,
-          action
-        ]
-      );
+      // Multi-permission support: normalize to array
+      const permKeys = Array.isArray(permKey) ? permKey : [permKey];
+
+      // Validate permission key formats
+      for (const key of permKeys) {
+        const [resource, action] = key.split(".");
+        if (!resource || !action) {
+          throw new Error(`Invalid permission key format: ${key}`);
+        }
+      }
+
+      let hasPermission;
+
+      if (needEvery && permKeys.length > 1) {
+        // AND logic: user must have ALL permissions
+        // Count distinct matching permissions, must equal total required
+        hasPermission = await db.oneOrNone(
+          `
+          SELECT 1
+          FROM tbl_user_role_scopes urs
+          JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+          JOIN tbl_permissions p ON p.id = rp.permission_id
+          WHERE urs.user_id = $1
+            AND urs.company_id = $2
+            AND (
+              urs.hotel_id IS NULL
+              ${hotelIds.length > 0 ? 'OR urs.hotel_id = ANY($3::int[])' : ''}
+            )
+            AND (p.resource || '.' || p.action) = ANY($4::text[])
+          GROUP BY urs.user_id
+          HAVING COUNT(DISTINCT (p.resource || '.' || p.action)) = $5
+          `,
+          [userId, companyId, hotelIds.length > 0 ? hotelIds : null, permKeys, permKeys.length]
+        );
+      } else {
+        // OR logic: user needs ANY one of the permissions
+        hasPermission = await db.oneOrNone(
+          `
+          SELECT 1
+          FROM tbl_user_role_scopes urs
+          JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+          JOIN tbl_permissions p ON p.id = rp.permission_id
+          WHERE urs.user_id = $1
+            AND urs.company_id = $2
+            AND (
+              urs.hotel_id IS NULL
+              ${hotelIds.length > 0 ? 'OR urs.hotel_id = ANY($3::int[])' : ''}
+            )
+            AND (p.resource || '.' || p.action) = ANY($4::text[])
+          LIMIT 1
+          `,
+          [userId, companyId, hotelIds.length > 0 ? hotelIds : null, permKeys]
+        );
+      }
 
       if (!hasPermission) {
         return res.status(403).json({
@@ -66,6 +112,9 @@ export const can = (permKey) => {
           message: "You do not have permission to perform this action"
         });
       }
+
+      // Attach context to request for downstream use
+      req.permissionContext = { hotelIds, permKeys, needEvery };
 
       return next();
     } catch (err) {
