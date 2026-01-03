@@ -12105,6 +12105,73 @@ getClauses: async (req, res) => {
     }
   },
 
+  replaceTechEvalVendor: async (req, res) => {
+    try {
+      const { rfq_id, rfq_product_id, old_vendor_id, new_vendor_id } = req.body;
+      const user_id = req.user.id;
+
+      if (!rfq_id || !rfq_product_id || !old_vendor_id || !new_vendor_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'rfq_id, rfq_product_id, old_vendor_id, and new_vendor_id are required'
+        });
+      }
+
+      const result = await rfqModel.replaceTechEvalVendor(
+        rfq_id,
+        rfq_product_id,
+        old_vendor_id,
+        new_vendor_id,
+        user_id
+      );
+
+      return res.status(200).json(result);
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Error replacing vendor',
+        error: error.message
+      });
+    }
+  },
+
+  getNextVendorsForTechEval: async (req, res) => {
+    try {
+      const { rfq_id, rfq_product_id, exclude_vendor_ids } = req.query;
+
+      if (!rfq_id || !rfq_product_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'rfq_id and rfq_product_id are required'
+        });
+      }
+
+      const excludeIds = exclude_vendor_ids 
+        ? exclude_vendor_ids.split(',').map(id => parseInt(id)).filter(id => !isNaN(id))
+        : [];
+
+      const result = await rfqModel.getNextVendorsForProduct(
+        parseInt(rfq_id),
+        parseInt(rfq_product_id),
+        excludeIds,
+        10
+      );
+
+      return res.status(200).json({
+        status: 1,
+        data: result
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Error getting next vendors',
+        error: error.message
+      });
+    }
+  },
+
   getVendorNames: async (req, res) => {
     try {
       const { rfq_id, rfq_product_id } = req.body;

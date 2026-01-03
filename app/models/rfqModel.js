@@ -3553,15 +3553,29 @@ LIMIT 2;
     }
 
     return new Promise(function (resolve, reject) {
+      // Filter for technically accepted vendors only
+      // If product has tech eval, only show vendors with status = 1
+      // If product has no tech eval, show all vendors (no filtering needed)
       const vendorCondition = `
-        AND EXISTS (
+        AND (
+          -- Product has no technical evaluation, so all vendors are allowed
+          NOT EXISTS (
+            SELECT 1
+            FROM tbl_rfq_product_tech_evaluation TEC
+            WHERE TEC.rfq_id = $1
+              AND TEC.tbl_rfq_product_id = TRP.id
+          )
+          OR
+          -- Product has tech eval, vendor must be technically accepted (status = 1)
+          EXISTS (
             SELECT 1
             FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
             JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
             WHERE TEC.rfq_id = $1
-                AND TEC.tbl_rfq_product_id = TRP.id
-                AND TECV.vendor_id = TQ.created_by
-                AND TECV.status = 1
+              AND TEC.tbl_rfq_product_id = TRP.id
+              AND TECV.vendor_id = TQ.created_by
+              AND TECV.status = 1
+          )
         )`;
 
       const mainQuery = `SELECT TRP.product_variant_id, TRP.variant, TRP.rfq_id, TRP.id,
@@ -3913,16 +3927,30 @@ LIMIT 2;
     }
 
     return new Promise(function (resolve, reject) {
+      // Filter for technically accepted vendors only
+      // If product has tech eval, only show vendors with status = 1
+      // If product has no tech eval, show all vendors (no filtering needed)
       const vendorCondition = `
-      AND EXISTS (
-        SELECT 1
-        FROM tbl_quotes TQ
-        JOIN tbl_rfq_product_tech_evaluation_cleared_vendors TECV ON TQ.created_by = TECV.vendor_id
-        JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
-        WHERE TEC.rfq_id = $1
-          AND TEC.tbl_rfq_product_id = TRF.id
-          AND TQ.id = TQI.quote_id
-          AND TECV.status = 1
+      AND (
+        -- Product has no technical evaluation, so all vendors are allowed
+        NOT EXISTS (
+          SELECT 1
+          FROM tbl_rfq_product_tech_evaluation TEC
+          WHERE TEC.rfq_id = $1
+            AND TEC.tbl_rfq_product_id = TRF.id
+        )
+        OR
+        -- Product has tech eval, vendor must be technically accepted (status = 1)
+        EXISTS (
+          SELECT 1
+          FROM tbl_quotes TQ
+          JOIN tbl_rfq_product_tech_evaluation_cleared_vendors TECV ON TQ.created_by = TECV.vendor_id
+          JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
+          WHERE TEC.rfq_id = $1
+            AND TEC.tbl_rfq_product_id = TRF.id
+            AND TQ.id = TQI.quote_id
+            AND TECV.status = 1
+        )
       )`;
 
       let mainQuery = `SELECT TRF.*,
@@ -7658,24 +7686,31 @@ ORDER BY m.created_at;
                 GROUP BY rfq_id, rfq_product_id, evaluation_id, minimum_passing_score
             ),
 
+            vendor_replacements AS (
+                SELECT rfq_id, rfq_product_id, old_vendor_id, new_vendor_id
+                FROM tbl_rfq_product_tech_eval_vendor_replacements
+                WHERE rfq_id = $1
+            ),
             vendors_list AS (
                 SELECT
-                    rfq_id,
-                    rfq_product_id,
+                    deduped.rfq_id,
+                    deduped.rfq_product_id,
                     JSON_AGG(
                             JSON_BUILD_OBJECT(
-                                    'vendor_id', vendor_id,
-                                    'vendor_name', vendor_name,
-                                    'vendor_email', vendor_email,
-                                    'is_cleared', is_cleared,
-                                    'evaluated_by', evaluated_by,
-                                    'rfq_product_vendor_id', rfq_product_vendor_id,
-                                    'calculated_score', calculated_score,
-                                    'is_passed', is_passed
+                                    'vendor_id', COALESCE(vr.new_vendor_id, deduped.vendor_id),
+                                    'vendor_name', deduped.vendor_name,
+                                    'vendor_email', deduped.vendor_email,
+                                    'is_cleared', deduped.is_cleared,
+                                    'evaluated_by', deduped.evaluated_by,
+                                    'rfq_product_vendor_id', deduped.rfq_product_vendor_id,
+                                    'calculated_score', deduped.calculated_score,
+                                    'is_passed', deduped.is_passed,
+                                    'quote_price', deduped.quote_price,
+                                    'rank', deduped.rank,
+                                    'is_replaced', (vr.new_vendor_id IS NOT NULL)
                             )
+                            ORDER BY deduped.rank
                     ) AS vendors
-                FROM (
-                          SELECT *
                           FROM (
                                   SELECT
                                       te.rfq_id,
@@ -7688,10 +7723,15 @@ ORDER BY m.created_at;
                                       rpv.id AS rfq_product_vendor_id,
                                       COALESCE(vs.calculated_score::NUMERIC, 0) AS calculated_score,
                                       vs.is_passed AS is_passed,
+                              COALESCE(tqi.total_price, 999999999) AS quote_price,
                                       ROW_NUMBER() OVER (
                                           PARTITION BY te.rfq_id, te.tbl_rfq_product_id, tu.id
                                           ORDER BY te.id
-                                          ) AS row_num
+                                  ) AS row_num,
+                              DENSE_RANK() OVER (
+                                  PARTITION BY te.rfq_id, te.tbl_rfq_product_id
+                                  ORDER BY COALESCE(tqi.total_price, 999999999) ASC
+                              ) AS rank
                                   FROM tbl_rfq_product_tech_evaluation te
                                             JOIN tbl_rfq_product_tech_evaluation_clauses c
                                                 ON te.id = c.tbl_rfq_product_tech_evaluation_id
@@ -7716,10 +7756,22 @@ ORDER BY m.created_at;
                                                       ON vs.rfq_id = te.rfq_id
                                                           AND vs.rfq_product_id = te.tbl_rfq_product_id
                                                           AND vs.vendor_id = tu.id
-                              ) ranked
-                          WHERE row_num = 1  -- ✅ This removes all duplicates
+                                    LEFT JOIN tbl_quotes tq
+                                              ON tq.rfq_id = te.rfq_id
+                                                  AND tq.created_by = tu.id
+                                                  AND tq.is_regret != 1
+                                    LEFT JOIN tbl_quote_items tqi
+                                              ON tqi.quote_id = tq.id
+                                                  AND tqi.product_variant_id = trp.product_variant_id
+                                                  AND tqi.variant = trp.variant
                       ) deduped
-                GROUP BY rfq_id, rfq_product_id
+                      LEFT JOIN vendor_replacements vr
+                                ON deduped.rfq_id = vr.rfq_id
+                                    AND deduped.rfq_product_id = vr.rfq_product_id
+                                    AND deduped.vendor_id = vr.old_vendor_id
+                      WHERE deduped.row_num = 1  -- ✅ This removes all duplicates
+                          AND deduped.rank <= 5  -- ✅ Only L1-L5 vendors
+                GROUP BY deduped.rfq_id, deduped.rfq_product_id
             )
 
         SELECT cd.rfq_id,
@@ -10138,12 +10190,44 @@ ORDER BY tq.timestamp DESC;
 
         const existing = await db.query(checkQuery, [clause_id, vendor_id]);
 
+        // Check if this is a sampling clause - if so, create response if it doesn't exist
         if (existing.length === 0) {
+          const clauseTypeQuery = `
+            SELECT clause_type 
+            FROM tbl_rfq_product_tech_evaluation_clauses 
+            WHERE id = $1;
+          `;
+          const clauseTypeResult = await db.query(clauseTypeQuery, [clause_id]);
+          
+          // For sampling clauses, create a vendor response record if it doesn't exist
+          if (clauseTypeResult.length > 0 && clauseTypeResult[0].clause_type === 'sampling') {
+            // For sampling clauses, vendor_response is not applicable, so use a placeholder value
+            const insertQuery = `
+              INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response
+              (tbl_rfq_product_tech_evaluation_clauses_id, vendor_id, vendor_response, buyer_id, buyer_marks, buyer_remark, score_timestamp)
+              VALUES ($1, $2, 'N/A', $3, $4, $5, NOW())
+              RETURNING id;
+            `;
+            const insertResult = await db.query(insertQuery, [
+              clause_id,
+              vendor_id,
+              buyer_id,
+              buyer_marks,
+              buyer_remark
+            ]);
+            
+            resolve({
+              status: 1,
+              message: 'Buyer marks and remark saved successfully.'
+            });
+            return;
+          } else {
           resolve({
             status: 0,
             message: 'Vendor response not found for this clause.'
           });
           return;
+          }
         }
 
         const updateQuery = `
@@ -10387,6 +10471,133 @@ ORDER BY tq.timestamp DESC;
       logError(error);
       throw error;
     }
-  }
+  },
+
+  /**
+   * Replace a vendor in technical evaluation with the next vendor in line
+   * @param {number} rfq_id - RFQ ID
+   * @param {number} rfq_product_id - RFQ Product ID
+   * @param {number} old_vendor_id - Vendor ID to replace
+   * @param {number} new_vendor_id - New vendor ID (next in line)
+   * @param {number} user_id - User performing the replacement
+   * @returns {Promise<Object>} - Replacement result
+   */
+  replaceTechEvalVendor: async (rfq_id, rfq_product_id, old_vendor_id, new_vendor_id, user_id) => {
+    const insertQuery = `
+      INSERT INTO tbl_rfq_product_tech_eval_vendor_replacements
+      (rfq_id, rfq_product_id, old_vendor_id, new_vendor_id, created_by, created_at)
+      VALUES ($1, $2, $3, $4, $5, NOW())
+      ON CONFLICT (rfq_id, rfq_product_id, old_vendor_id) 
+      DO UPDATE SET 
+        new_vendor_id = $4,
+        created_by = $5,
+        created_at = NOW()
+      RETURNING *;
+    `;
+
+    return new Promise((resolve, reject) => {
+      db.query(insertQuery, [rfq_id, rfq_product_id, old_vendor_id, new_vendor_id, user_id])
+        .then((result) => {
+          resolve({
+            status: 1,
+            message: 'Vendor replaced successfully',
+            data: result[0]
+          });
+        })
+        .catch((error) => {
+          console.error('Error replacing vendor:', error);
+          reject({
+            status: 0,
+            message: 'Error replacing vendor',
+            error: error.message
+          });
+        });
+    });
+  },
+
+  /**
+   * Get vendor replacements for a product
+   * @param {number} rfq_id - RFQ ID
+   * @param {number} rfq_product_id - RFQ Product ID
+   * @returns {Promise<Map>} - Map of old_vendor_id -> new_vendor_id
+   */
+  getTechEvalVendorReplacements: async (rfq_id, rfq_product_id) => {
+    const query = `
+      SELECT old_vendor_id, new_vendor_id
+      FROM tbl_rfq_product_tech_eval_vendor_replacements
+      WHERE rfq_id = $1 AND rfq_product_id = $2;
+    `;
+
+    return new Promise((resolve, reject) => {
+      db.query(query, [rfq_id, rfq_product_id])
+        .then((result) => {
+          const replacementMap = new Map();
+          result.forEach(row => {
+            replacementMap.set(row.old_vendor_id, row.new_vendor_id);
+          });
+          resolve(replacementMap);
+        })
+        .catch((error) => {
+          // Table might not exist, return empty map
+          resolve(new Map());
+        });
+    });
+  },
+
+  /**
+   * Get next vendor in line (L6, L7, etc.) for a product, sorted by quote price
+   * @param {number} rfq_id - RFQ ID
+   * @param {number} rfq_product_id - RFQ Product ID
+   * @param {Array<number>} exclude_vendor_ids - Vendor IDs to exclude (already in L1-L5)
+   * @param {number} limit - Number of vendors to return
+   * @returns {Promise<Array>} - Array of vendors with quotes
+   */
+  getNextVendorsForProduct: async (rfq_id, rfq_product_id, exclude_vendor_ids = [], limit = 10) => {
+    let query = `
+      SELECT DISTINCT
+        tu.id AS vendor_id,
+        COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name,
+        tu.email AS vendor_email,
+        rpv.id AS rfq_product_vendor_id,
+        COALESCE(tqi.total_price, 999999999) AS quote_price,
+        DENSE_RANK() OVER (ORDER BY COALESCE(tqi.total_price, 999999999) ASC) AS rank
+      FROM tbl_rfq_products trp
+      JOIN tbl_quotes tq ON tq.rfq_id = trp.rfq_id AND tq.is_regret != 1
+      JOIN tbl_users tu ON tu.id = tq.created_by
+      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+      LEFT JOIN tbl_rfq_product_vendors rpv ON rpv.rfq_id = trp.rfq_id
+        AND rpv.user_id = tu.id
+        AND rpv.product_variant_id = trp.product_variant_id
+        AND rpv.variant = trp.variant
+      LEFT JOIN tbl_quote_items tqi ON tqi.quote_id = tq.id
+        AND tqi.product_variant_id = trp.product_variant_id
+        AND tqi.variant = trp.variant
+      WHERE trp.id = $1
+        AND trp.rfq_id = $2
+    `;
+
+    const params = [rfq_product_id, rfq_id];
+    
+    if (exclude_vendor_ids.length > 0) {
+      const placeholders = exclude_vendor_ids.map((_, idx) => `$${params.length + idx + 1}`).join(',');
+      query += ` AND tu.id NOT IN (${placeholders})`;
+      params.push(...exclude_vendor_ids);
+    }
+    
+    query += ` AND tqi.total_price IS NOT NULL ORDER BY quote_price ASC LIMIT $${params.length + 1};`;
+    params.push(limit);
+
+    return new Promise((resolve, reject) => {
+      db.query(query, params)
+        .then((result) => {
+          resolve(result);
+        })
+        .catch((error) => {
+          console.error('Error getting next vendors:', error);
+          reject(error);
+        });
+    });
+  },
 };
+
 export default rfqModel;

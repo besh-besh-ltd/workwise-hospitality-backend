@@ -603,6 +603,16 @@ RfqRoutes.post('/get-clauses-of-product',
 )
 
 // vendor side
+RfqRoutes.post('/replace-tech-eval-vendor',
+  acl([2, 8, 10]),
+  rfqController.replaceTechEvalVendor
+);
+
+RfqRoutes.get('/get-next-vendors-for-tech-eval',
+  acl([2, 8, 10]),
+  rfqController.getNextVendorsForTechEval
+);
+
 RfqRoutes.post('/get-tech-evaluation-result',
   noLogin.customer_auth,
   validateBody(rfqSchemas.getTechEvaluationResult),
