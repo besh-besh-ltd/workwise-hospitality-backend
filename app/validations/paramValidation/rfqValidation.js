@@ -333,12 +333,13 @@ export const rfqSchemas = {
     vendor_id: Joi.number().required(),
     quote_id: Joi.number().required(),
     quote_item_id: Joi.number().required(),
-    existing_po_id: Joi.number().optional(),
+    existing_po_id: Joi.number().optional().allow(null),
     variant: Joi.number().required(),
+    route_type: Joi.string().valid('ARC', 'PO').optional().allow(null), // ARC or PO route selection
 
-    // PO Related Validations
+    // PO Related Validations (only required for PO route)
     project_id: Joi.number().optional().allow(null),
-    total_value: Joi.number().required(),
+    total_value: Joi.number().optional().allow(null), // Optional for ARC route
     product_info: Joi.object({
       rfq_product_id: Joi.number().required(),
       quantity: Joi.number().required(),
@@ -346,8 +347,8 @@ export const rfqSchemas = {
       charges_meta: Joi.object().optional(),
       unit_price: Joi.number().required(),
       finalized_vendor_id: Joi.number().required()
-    }),
-    selected_hierarchy: Joi.number().optional(),
+    }).optional(), // Optional for ARC route
+    selected_hierarchy: Joi.number().optional().allow(null),
   }),
   getAllRfqsForAdminValidation: Joi.object().keys({
     page: Joi.number().integer().optional(),

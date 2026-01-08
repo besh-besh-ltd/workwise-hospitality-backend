@@ -339,6 +339,110 @@ const HospitalityController = {
     }
   },
 
+  updateHotel: async (req, res) => {
+    try {
+      const company = req.companyDetails;
+      const hospitalityCompanyId = parseInt(req.params.company_id, 10);
+      const hotelId = parseInt(req.params.hotel_id, 10);
+
+      const record = await hospitalityModel.getCompanyById(hospitalityCompanyId);
+      if (!record || record.buyer_company_id !== company.id) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Hospitality company not found'
+        });
+      }
+
+      const hotelRecord = await hospitalityModel.getHotelById(hotelId);
+      if (!hotelRecord || hotelRecord.hospitality_company_id !== record.id) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Hotel not found in selected company'
+        });
+      }
+
+      const payload = {
+        name: req.body.name?.trim(),
+        city: req.body.city?.trim() || null,
+        keys: req.body.keys ? parseInt(req.body.keys, 10) : 0,
+        status: req.body.status?.trim() || 'Active',
+        full_address: req.body.full_address?.trim() || null,
+        state: req.body.state?.trim() || null,
+        gst: req.body.gst?.trim() || null,
+        pan: req.body.pan?.trim() || null,
+        bank_account_number: req.body.bank_account_number?.trim() || null,
+        bank_name: req.body.bank_name?.trim() || null,
+        ifsc_code: req.body.ifsc_code?.trim() || null,
+        account_holder_name: req.body.account_holder_name?.trim() || null,
+        msme: req.body.msme?.trim() || null,
+        delivery_address: req.body.delivery_address?.trim() || null,
+        updated_by: req.user.id
+      };
+
+      const updated = await hospitalityModel.updateHotel(hotelId, payload, record.id);
+
+      // Handle document uploads if files are present
+      if (req.files) {
+        const documentPromises = [];
+        
+        if (req.files.gst && req.files.gst[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveHotelDocument(
+              hotelId,
+              'gst',
+              req.files.gst[0].location,
+              payload.gst
+            )
+          );
+        }
+        
+        if (req.files.pan && req.files.pan[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveHotelDocument(
+              hotelId,
+              'pan',
+              req.files.pan[0].location,
+              payload.pan
+            )
+          );
+        }
+        
+        if (req.files.cancelled_cheque && req.files.cancelled_cheque[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveHotelDocument(
+              hotelId,
+              'cancelled_cheque',
+              req.files.cancelled_cheque[0].location,
+              null
+            )
+          );
+        }
+        
+        if (payload.msme && req.files.msme && req.files.msme[0]?.location) {
+          documentPromises.push(
+            hospitalityModel.saveHotelDocument(
+              hotelId,
+              'msme',
+              req.files.msme[0].location,
+              payload.msme
+            )
+          );
+        }
+        
+        await Promise.all(documentPromises);
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: updated,
+        message: 'Business unit updated successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
   mapUsers: async (req, res) => {
     try {
       const company = req.companyDetails;

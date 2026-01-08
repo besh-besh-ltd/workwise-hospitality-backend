@@ -89,6 +89,12 @@ const schemas = {
       company_id: Joi.number().integer().required(),
     })
     .required(),
+  hotelIdParam: Joi.object()
+    .keys({
+      company_id: Joi.number().integer().required(),
+      hotel_id: Joi.number().integer().required(),
+    })
+    .required(),
   hospitalityCompany: Joi.object().keys({
     name: Joi.string().trim().max(120).required(),
     region: Joi.string().trim().allow('', null),
