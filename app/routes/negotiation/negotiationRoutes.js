@@ -109,5 +109,25 @@ NegotiationRoutes.get(
   negotiationController.getAllVendorNegotiationStatus
 );
 
+// ============= NEGOTIATION QUOTES APPROVAL =============
+
+// Submit selected negotiation quotes for approval
+NegotiationRoutes.post(
+  '/quotes/submit-for-approval',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management
+  hospitalityMiddleware.requireHospitality,
+  negotiationController.submitQuotesForApproval
+);
+
+// Get quote approval status for a product
+NegotiationRoutes.get(
+  '/quotes/:rfq_product_id/approval-status',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management
+  hospitalityMiddleware.checkHospitality(false),
+  negotiationController.getQuoteApprovalStatus
+);
+
 export default NegotiationRoutes;
 

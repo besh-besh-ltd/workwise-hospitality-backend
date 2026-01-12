@@ -449,6 +449,57 @@ const negotiationModel = {
        RETURNING *`,
       [negotiation_round_id, vendor_id, rfq_product_id, quoted_price, previous_price]
     );
+  },
+
+  // ============= QUOTE APPROVAL FUNCTIONS =============
+
+  /**
+   * Get quotes by IDs with vendor details
+   */
+  getQuotesByIds: async (quoteIds) => {
+    if (!quoteIds || quoteIds.length === 0) {
+      return [];
+    }
+    return db.any(
+      `SELECT
+        nrq.*,
+        nr.status as round_status,
+        nr.round_number,
+        nr.rfq_id,
+        u.name as vendor_name,
+        u.organization_name,
+        c.company_name
+       FROM tbl_negotiation_round_quotes nrq
+       JOIN tbl_negotiation_rounds nr ON nr.id = nrq.negotiation_round_id
+       LEFT JOIN tbl_users u ON u.id = nrq.vendor_id
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+       WHERE nrq.id = ANY($1)`,
+      [quoteIds]
+    );
+  },
+
+  /**
+   * Get all quotes for a product across all completed rounds
+   */
+  getCompletedRoundQuotesForProduct: async (rfqProductId) => {
+    return db.any(
+      `SELECT
+        nrq.*,
+        nr.round_number,
+        nr.target_price,
+        nr.rfq_id,
+        u.name as vendor_name,
+        u.organization_name,
+        c.company_name
+       FROM tbl_negotiation_round_quotes nrq
+       JOIN tbl_negotiation_rounds nr ON nr.id = nrq.negotiation_round_id
+       LEFT JOIN tbl_users u ON u.id = nrq.vendor_id
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+       WHERE nrq.rfq_product_id = $1
+         AND nr.status = 'COMPLETED'
+       ORDER BY nr.round_number DESC, nrq.quoted_price ASC`,
+      [rfqProductId]
+    );
   }
 };
 

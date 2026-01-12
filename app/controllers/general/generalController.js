@@ -361,7 +361,7 @@ const hospitalityApprovalController = {
         }
 
         // Validate entity_type
-        const validEntityTypes = ['RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC'];
+        const validEntityTypes = ['RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC', 'NEGOTIATION_QUOTE'];
         if (!validEntityTypes.includes(entity_type)) {
           return res.status(400).json({
             status: 3,

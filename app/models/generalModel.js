@@ -2116,11 +2116,144 @@ export async function submitApprovalAction({
         console.error('Error recording lifecycle event:', lifecycleError);
       }
 
+      // Add approved negotiation quotes to finalization when NEGOTIATION_QUOTE approval completes
+      if (instance.entity_type === 'NEGOTIATION_QUOTE') {
+        try {
+          const rfq_product_id = instance.entity_id;
+          const metadata = instance.metadata || {};
+          const rfq_id = metadata.rfq_id;
+
+          if (rfq_id && metadata.selected_quotes && metadata.selected_quotes.length > 0) {
+            // Get RFQ data
+            const rfq = await t.oneOrNone(`SELECT * FROM tbl_rfq WHERE id = $1`, [rfq_id]);
+
+            if (rfq) {
+              // Get product details
+              const product = await t.oneOrNone(`
+                SELECT rp.*, rp.product_variant_id, rp.variant
+                FROM tbl_rfq_products rp
+                WHERE rp.id = $1
+              `, [rfq_product_id]);
+
+              if (product) {
+                // Add each selected quote to finalization
+                for (const selectedQuote of metadata.selected_quotes) {
+                  // Check if this vendor is already finalized for this product
+                  const existingFinalization = await t.oneOrNone(`
+                    SELECT id FROM tbl_quote_finalization
+                    WHERE rfq_id = $1
+                      AND product_variant_id = $2
+                      AND variant = $3
+                      AND vendor_id = $4
+                  `, [rfq_id, product.product_variant_id, product.variant, selectedQuote.vendor_id]);
+
+                  if (existingFinalization) {
+                    // Update existing finalization
+                    await t.none(`
+                      UPDATE tbl_quote_finalization
+                      SET quote_id = $1, created_by = $2, created_at = NOW()
+                      WHERE id = $3
+                    `, [selectedQuote.quote_id, approver_user_id, existingFinalization.id]);
+                  } else {
+                    // Insert new finalization record
+                    await t.none(`
+                      INSERT INTO tbl_quote_finalization
+                      (rfq_id, rfq_no, product_variant_id, vendor_id, quote_id, created_by, variant, timestamp)
+                      VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                    `, [
+                      rfq_id,
+                      rfq.rfq_no,
+                      product.product_variant_id,
+                      selectedQuote.vendor_id,
+                      selectedQuote.quote_id,
+                      approver_user_id,
+                      product.variant
+                    ]);
+                  }
+                }
+
+                // Record lifecycle event
+                await recordLifecycleEvent({
+                  entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
+                  entity_id: rfq_id,
+                  stage: 'NEGOTIATION_QUOTES_APPROVED',
+                  action: 'APPROVE',
+                  performed_by: approver_user_id,
+                  metadata: {
+                    approval_instance_id: approval_instance_id,
+                    rfq_product_id: rfq_product_id,
+                    quote_ids: metadata.selected_quotes.map(q => q.quote_id),
+                    vendor_ids: metadata.selected_quotes.map(q => q.vendor_id)
+                  },
+                  txContext: t
+                });
+
+                // Check if all products are finalized and trigger ARC if needed
+                const allFinalized = await t.oneOrNone(`
+                  SELECT
+                    (SELECT COUNT(DISTINCT rp.id) FROM tbl_rfq_products rp WHERE rp.rfq_id = $1) as total_products,
+                    (SELECT COUNT(DISTINCT qf.product_variant_id) FROM tbl_quote_finalization qf WHERE qf.rfq_id = $1) as finalized_products
+                `, [rfq_id]);
+
+                if (allFinalized &&
+                    parseInt(allFinalized.total_products) > 0 &&
+                    parseInt(allFinalized.finalized_products) >= parseInt(allFinalized.total_products)) {
+                  // All products finalized - check if ARC approval already exists
+                  const existingArcApproval = await t.oneOrNone(`
+                    SELECT id FROM tbl_approval_instances
+                    WHERE entity_type = 'ARC' AND entity_id = $1 AND status IN ('PENDING', 'APPROVED')
+                  `, [rfq_id]);
+
+                  if (!existingArcApproval) {
+                    try {
+                      // Create ARC approval instance
+                      await createApprovalInstance({
+                        entity_type: 'ARC',
+                        entity_id: rfq_id,
+                        hospitality_company_id: rfq.hospitality_company_id,
+                        hotel_id: rfq.hotel_id || null,
+                        initiated_by: approver_user_id,
+                        metadata: {
+                          rfq_id: rfq_id,
+                          rfq_number: rfq.rfq_no,
+                          is_tender: rfq.is_tender,
+                          company_name: rfq.company_name,
+                          triggered_by: 'negotiation_quote_approval'
+                        },
+                        txContext: t
+                      });
+
+                      // Record ARC submission lifecycle event
+                      await recordLifecycleEvent({
+                        entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
+                        entity_id: rfq_id,
+                        stage: 'ARC_SUBMITTED',
+                        action: 'SUBMIT_FOR_APPROVAL',
+                        performed_by: approver_user_id,
+                        metadata: {
+                          rfq_id: rfq_id,
+                          triggered_by: 'negotiation_quote_approval'
+                        },
+                        txContext: t
+                      });
+                    } catch (arcError) {
+                      console.error('Error creating ARC approval instance:', arcError.message);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } catch (negQuoteError) {
+          console.error('Error processing NEGOTIATION_QUOTE approval:', negQuoteError);
+        }
+      }
+
       // Auto-accept/reject vendors when TECHNICAL evaluation approval completes
       if (instance.entity_type === 'TECHNICAL') {
         try {
           const rfq_product_id = instance.entity_id;
-          
+
           // Get tech evaluation ID for this product
           const techEval = await t.oneOrNone(`
             SELECT id, rfq_id, tbl_rfq_product_id, minimum_passing_score

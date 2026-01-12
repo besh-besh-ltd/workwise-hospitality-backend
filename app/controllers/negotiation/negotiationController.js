@@ -2,8 +2,12 @@ import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import negotiationModel from '../../models/negotiationModel.js';
 import rfqModel from '../../models/rfqModel.js';
-import { recordLifecycleEvent } from '../../models/generalModel.js';
-import { findBestMatchingPolicy, createApprovalInstance } from '../../models/generalModel.js';
+import {
+  recordLifecycleEvent,
+  createApprovalInstance,
+  submitApprovalAction,
+  getApprovalInstancesByEntity
+} from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
 
 const formatErrorResponse = (res, error) => {
@@ -13,6 +17,206 @@ const formatErrorResponse = (res, error) => {
     status: 3,
     message
   });
+};
+
+/**
+ * startApprovalForNegotiation
+ *
+ * Creates an approval instance for a negotiation round using the centralized approval engine.
+ * Uses entity_type: 'NEGOTIATION' and entity_id: rfq_product_id.
+ *
+ * @param {number} rfqProductId - The RFQ product ID (used as entity_id)
+ * @param {number} roundId - The negotiation round ID
+ * @param {number} roundNumber - The round number
+ * @param {number} rfqId - The RFQ ID
+ * @param {Object} rfqData - The RFQ data containing hospitality_company_id, hotel_id, etc.
+ * @param {number} userId - The user ID initiating the approval
+ * @param {Object} txContext - Transaction context for participating in outer transaction
+ * @returns {Promise<Object|null>} - Approval instance result or null if auto-approved
+ */
+const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, rfqId, rfqData, userId, txContext) => {
+  try {
+    const result = await createApprovalInstance({
+      entity_type: 'NEGOTIATION',
+      entity_id: rfqProductId,
+      hospitality_company_id: rfqData.hospitality_company_id,
+      hotel_id: rfqData.hotel_id || null,
+      initiated_by: userId,
+      metadata: {
+        round_id: roundId,
+        round_number: roundNumber,
+        rfq_id: rfqId,
+        rfq_number: rfqData.rfq_no,
+        is_tender: rfqData.is_tender,
+        rfq_product_id: rfqProductId
+      },
+      txContext
+    });
+
+    return result;
+  } catch (error) {
+    // If no policy exists, return null (will trigger auto-approval)
+    if (error.message && error.message.includes('No approval policy found')) {
+      return null;
+    }
+    throw error;
+  }
+};
+
+/**
+ * startApprovalForNegotiationQuotes
+ *
+ * Creates an approval instance for selected negotiation quotes.
+ * Uses entity_type: 'NEGOTIATION_QUOTE' and entity_id: rfq_product_id.
+ *
+ * @param {number} rfqProductId - The RFQ product ID (used as entity_id)
+ * @param {number} rfqId - The RFQ ID
+ * @param {Array} selectedQuotes - Array of selected quote objects with full details
+ * @param {Object} rfqData - The RFQ data containing hospitality_company_id, hotel_id, etc.
+ * @param {number} userId - The user ID initiating the approval
+ * @param {Object} txContext - Transaction context for participating in outer transaction
+ * @returns {Promise<Object|null>} - Approval instance result or null if auto-approved
+ */
+const startApprovalForNegotiationQuotes = async (rfqProductId, rfqId, selectedQuotes, rfqData, userId, txContext) => {
+  try {
+    const result = await createApprovalInstance({
+      entity_type: 'NEGOTIATION_QUOTE',
+      entity_id: rfqProductId,
+      hospitality_company_id: rfqData.hospitality_company_id,
+      hotel_id: rfqData.hotel_id || null,
+      initiated_by: userId,
+      metadata: {
+        rfq_id: rfqId,
+        rfq_no: rfqData.rfq_no,
+        rfq_product_id: rfqProductId,
+        is_tender: rfqData.is_tender,
+        selected_quotes: selectedQuotes.map(q => ({
+          quote_id: q.id,
+          vendor_id: q.vendor_id,
+          vendor_name: q.vendor_name || q.organization_name,
+          quoted_price: q.quoted_price,
+          negotiation_round_id: q.negotiation_round_id,
+          submitted_at: q.submitted_at
+        })),
+        submitted_at: new Date().toISOString()
+      },
+      txContext
+    });
+
+    return result;
+  } catch (error) {
+    // If no policy exists, return null (will trigger auto-approval)
+    if (error.message && error.message.includes('No approval policy found')) {
+      return null;
+    }
+    throw error;
+  }
+};
+
+/**
+ * addQuotesToFinalization
+ *
+ * Adds approved negotiation quotes to tbl_quote_finalization.
+ * This is called either on auto-approval or after full committee approval.
+ *
+ * @param {number} rfqId - The RFQ ID
+ * @param {number} rfqProductId - The RFQ product ID
+ * @param {Array} quotes - Array of approved quote objects
+ * @param {number} userId - The user ID who approved/initiated
+ * @param {Object} rfqData - The RFQ data
+ * @param {Object} txContext - Transaction context
+ */
+const addQuotesToFinalization = async (rfqId, rfqProductId, quotes, userId, rfqData, txContext) => {
+  const t = txContext || db;
+
+  // Get product details for finalization
+  const product = await t.one(
+    `SELECT rp.*, rp.product_variant_id, rp.variant
+     FROM tbl_rfq_products rp
+     WHERE rp.id = $1`,
+    [rfqProductId]
+  );
+
+  for (const quote of quotes) {
+    // Check if this vendor is already finalized for this product
+    const existingFinalization = await t.oneOrNone(
+      `SELECT id FROM tbl_quote_finalization
+       WHERE rfq_id = $1
+         AND product_variant_id = $2
+         AND variant = $3
+         AND vendor_id = $4`,
+      [rfqId, product.product_variant_id, product.variant, quote.vendor_id]
+    );
+
+    if (existingFinalization) {
+      // Update existing finalization with new quote info
+      await t.none(
+        `UPDATE tbl_quote_finalization
+         SET quote_id = $1, created_by = $2, created_at = NOW()
+         WHERE id = $3`,
+        [quote.id, userId, existingFinalization.id]
+      );
+    } else {
+      // Insert new finalization record
+      await t.none(
+        `INSERT INTO tbl_quote_finalization
+         (rfq_id, rfq_no, product_variant_id, vendor_id, quote_id, created_by, variant, timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+        [
+          rfqId,
+          rfqData.rfq_no,
+          product.product_variant_id,
+          quote.vendor_id,
+          quote.id,
+          userId,
+          product.variant
+        ]
+      );
+    }
+  }
+
+  // Check if all products are finalized and trigger ARC if needed
+  const allFinalized = await rfqModel.checkAllProductsFinalizedForArc(rfqId, t);
+
+  if (allFinalized &&
+      allFinalized.total_products > 0 &&
+      allFinalized.finalized_products === allFinalized.total_products) {
+    // All products finalized - trigger ARC approval
+    try {
+      // Import startApprovalForArc from rfqController or call createApprovalInstance directly
+      await createApprovalInstance({
+        entity_type: 'ARC',
+        entity_id: rfqId,
+        hospitality_company_id: rfqData.hospitality_company_id,
+        hotel_id: rfqData.hotel_id || null,
+        initiated_by: userId,
+        metadata: {
+          rfq_id: rfqId,
+          rfq_number: rfqData.rfq_no,
+          is_tender: rfqData.is_tender,
+          company_name: rfqData.company_name
+        },
+        txContext: t
+      });
+
+      // Record lifecycle event for ARC submission
+      await recordLifecycleEvent({
+        entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+        entity_id: rfqId,
+        stage: 'ARC_SUBMITTED',
+        action: 'SUBMIT_FOR_APPROVAL',
+        performed_by: userId,
+        metadata: {
+          rfq_id: rfqId,
+          triggered_by: 'negotiation_quote_approval'
+        },
+        txContext: t
+      });
+    } catch (arcError) {
+      // Log but don't fail - ARC creation may fail if already exists or no policy
+      console.error('Error creating ARC approval instance:', arcError.message);
+    }
+  }
 };
 
 const NegotiationController = {
@@ -94,84 +298,22 @@ const NegotiationController = {
           [rfq_id, rfq_product_id, round_number, target_price, end_date, user_id]
         );
 
-        // Find negotiation approval policy
-        const policy = await findBestMatchingPolicy({
-          entity_type: 'NEGOTIATION',
-          hospitality_company_id: rfqData.hospitality_company_id,
-          hotel_id: rfqData.hotel_id || null,
-          department_id: null
-        });
+        // Create approval instance using the centralized approval engine
+        const approvalResult = await startApprovalForNegotiation(
+          rfq_product_id,
+          round.id,
+          round_number,
+          rfq_id,
+          rfqData,
+          user_id,
+          t
+        );
 
-        if (policy) {
-          // Get policy steps to find approvers
-          const policySteps = await t.any(
-            `SELECT * FROM tbl_approval_policy_steps
-             WHERE approval_policy_id = $1
-             ORDER BY step_order ASC
-             LIMIT 1`,
-            [policy.id]
-          );
-
-          if (policySteps.length > 0) {
-            const firstStep = policySteps[0];
-
-            // Resolve approvers based on step configuration
-            const approvers = [];
-            if (firstStep.approver_source_type === 'ROLE') {
-              // Get users with this role
-              const roleUsers = await t.any(
-                `SELECT DISTINCT u.id
-                 FROM tbl_users u
-                 JOIN tbl_user_role_scopes urs ON urs.user_id = u.id
-                 JOIN tbl_hospitality_user_mappings hum ON hum.user_id = u.id
-                 WHERE urs.role_id = $1
-                   AND hum.hospitality_company_id = $2
-                   AND (hum.mapping_type = 0 OR (hum.mapping_type = 1 AND hum.hospitality_hotel_id = $3))
-                   AND u.status = 1 AND u.is_deleted = 0`,
-                [firstStep.approver_source_id, rfqData.hospitality_company_id, rfqData.hotel_id || null]
-              );
-              approvers.push(...roleUsers.map(u => u.id));
-            } else if (firstStep.approver_source_type === 'USER') {
-              approvers.push(firstStep.approver_source_id);
-            }
-
-            if (approvers.length > 0) {
-              // Create approval records
-              const approvalRows = approvers.map(approverId => ({
-                negotiation_round_id: round.id,
-                approver_user_id: approverId,
-                status: 'PENDING'
-              }));
-
-              const columnSet = new pgp.helpers.ColumnSet(
-                ['negotiation_round_id', 'approver_user_id', 'status'],
-                { table: 'tbl_negotiation_round_approvals' }
-              );
-              const query = pgp.helpers.insert(approvalRows, columnSet);
-              await t.none(query);
-            } else {
-              // No approvers found, auto-approve the round
-              await t.none(
-                `UPDATE tbl_negotiation_rounds 
-                 SET status = 'ACTIVE', published_at = NOW() 
-                 WHERE id = $1`,
-                [round.id]
-              );
-            }
-          } else {
-            // No policy steps, auto-approve the round
-            await t.none(
-              `UPDATE tbl_negotiation_rounds 
-               SET status = 'ACTIVE', published_at = NOW() 
-               WHERE id = $1`,
-              [round.id]
-            );
-          }
-        } else {
-          // No approval policy found, auto-approve the round
+        // If no policy exists or auto-approved, activate the round immediately
+        if (!approvalResult || approvalResult.autoApproved) {
           await t.none(
-            `UPDATE tbl_negotiation_rounds 
-             SET status = 'ACTIVE', published_at = NOW() 
+            `UPDATE tbl_negotiation_rounds
+             SET status = 'ACTIVE', published_at = NOW()
              WHERE id = $1`,
             [round.id]
           );
@@ -217,6 +359,7 @@ const NegotiationController = {
   /**
    * Get all rounds for an RFQ
    * GET /negotiation/rounds/:rfq_id
+   * Note: Approval details should be fetched separately via /hospitality/approval/entity/NEGOTIATION/{rfq_product_id}
    */
   getRounds: async (req, res) => {
     try {
@@ -231,20 +374,9 @@ const NegotiationController = {
 
       const rounds = await negotiationModel.getRoundsByRfqId(rfq_id);
 
-      // Get approvals for each round
-      const roundsWithApprovals = await Promise.all(
-        rounds.map(async (round) => {
-          const approvals = await negotiationModel.getRoundApprovals(round.id);
-          return {
-            ...round,
-            approvals
-          };
-        })
-      );
-
       return res.status(200).json({
         status: 1,
-        data: roundsWithApprovals
+        data: rounds
       });
     } catch (error) {
       logError(error);
@@ -255,6 +387,7 @@ const NegotiationController = {
   /**
    * Get active round for a product
    * GET /negotiation/rounds/:rfq_id/active?rfq_product_id=123
+   * Note: Approval details should be fetched separately via /hospitality/approval/entity/NEGOTIATION/{rfq_product_id}
    */
   getActiveRound: async (req, res) => {
     try {
@@ -285,17 +418,9 @@ const NegotiationController = {
         });
       }
 
-      // Get approvals
-      const approvals = await negotiationModel.getRoundApprovals(round.id);
-      const approvalStatus = await negotiationModel.areAllApprovalsComplete(round.id);
-
       return res.status(200).json({
         status: 1,
-        data: {
-          ...round,
-          approvals,
-          approvalStatus
-        }
+        data: round
       });
     } catch (error) {
       logError(error);
@@ -306,6 +431,7 @@ const NegotiationController = {
   /**
    * Get all active rounds for an RFQ (all products)
    * GET /negotiation/rounds/:rfq_id/active-all
+   * Note: Approval details should be fetched separately via /hospitality/approval/entity/NEGOTIATION/{rfq_product_id}
    */
   getActiveRounds: async (req, res) => {
     try {
@@ -320,22 +446,9 @@ const NegotiationController = {
 
       const rounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id);
 
-      // Get approvals for each round
-      const roundsWithApprovals = await Promise.all(
-        rounds.map(async (round) => {
-          const approvals = await negotiationModel.getRoundApprovals(round.id);
-          const approvalStatus = await negotiationModel.areAllApprovalsComplete(round.id);
-          return {
-            ...round,
-            approvals: approvals || [],
-            approvalStatus
-          };
-        })
-      );
-
       return res.status(200).json({
         status: 1,
-        data: roundsWithApprovals || []
+        data: rounds || []
       });
     } catch (error) {
       logError(error);
@@ -375,51 +488,37 @@ const NegotiationController = {
         });
       }
 
-      // Check if user is an approver
-      const userApproval = await negotiationModel.getUserApproval(round_id, user_id);
-      if (!userApproval) {
-        return res.status(403).json({
-          status: 2,
-          message: 'You are not an approver for this round'
-        });
-      }
+      // Get approval instance for this negotiation (entity_type: NEGOTIATION, entity_id: rfq_product_id)
+      const instances = await getApprovalInstancesByEntity('NEGOTIATION', round.rfq_product_id);
+      const pendingInstance = instances.find(i => i.status === 'PENDING');
 
-      if (userApproval.status !== 'PENDING') {
+      if (!pendingInstance) {
         return res.status(400).json({
           status: 2,
-          message: `You have already ${userApproval.status.toLowerCase()} this round`
+          message: 'No pending approval instance found for this round'
         });
       }
 
-      // Update approval
-      await negotiationModel.updateApproval(round_id, user_id, 'APPROVED', remarks || null);
-
-      // Check if all approvals are complete
-      const approvalStatus = await negotiationModel.areAllApprovalsComplete(round_id);
-
-      // Record lifecycle event
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
-      const rfqData = rfq[0];
-      await recordLifecycleEvent({
-        entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
-        entity_id: round.rfq_id,
-        stage: `NEGOTIATION_ROUND_${round.round_number}`,
-        action: 'APPROVE_ROUND',
-        performed_by: user_id,
-        metadata: {
-          round_id: round_id,
-          round_number: round.round_number,
-          all_approved: approvalStatus.allApproved
-        }
+      // Submit approval action using the centralized approval engine
+      const approvalResult = await submitApprovalAction({
+        approval_instance_id: pendingInstance.id,
+        approver_user_id: user_id,
+        action: 'APPROVE',
+        comment: remarks || null
       });
 
-      // If all approved, auto-publish
-      if (approvalStatus.allApproved) {
+      const isFullyApproved = approvalResult.instance_status === 'APPROVED';
+
+      // If fully approved, update round status to ACTIVE
+      if (isFullyApproved) {
         await negotiationModel.updateRoundStatus(round_id, 'ACTIVE', {
           approved_at: new Date(),
           published_at: new Date()
         });
 
+        // Record lifecycle event for round published
+        const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
+        const rfqData = rfq[0];
         await recordLifecycleEvent({
           entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
           entity_id: round.rfq_id,
@@ -437,10 +536,10 @@ const NegotiationController = {
         status: 1,
         data: {
           approved: true,
-          allApproved: approvalStatus.allApproved,
-          published: approvalStatus.allApproved
+          allApproved: isFullyApproved,
+          published: isFullyApproved
         },
-        message: approvalStatus.allApproved
+        message: isFullyApproved
           ? 'Round approved and published to vendors'
           : 'Round approved. Waiting for other approvers.'
       });
@@ -489,34 +588,27 @@ const NegotiationController = {
         });
       }
 
-      // Check if user is an approver
-      const userApproval = await negotiationModel.getUserApproval(round_id, user_id);
-      if (!userApproval) {
-        return res.status(403).json({
+      // Get approval instance for this negotiation (entity_type: NEGOTIATION, entity_id: rfq_product_id)
+      const instances = await getApprovalInstancesByEntity('NEGOTIATION', round.rfq_product_id);
+      const pendingInstance = instances.find(i => i.status === 'PENDING');
+
+      if (!pendingInstance) {
+        return res.status(400).json({
           status: 2,
-          message: 'You are not an approver for this round'
+          message: 'No pending approval instance found for this round'
         });
       }
 
-      // Update approval and round status
-      await negotiationModel.updateApproval(round_id, user_id, 'REJECTED', remarks);
-      await negotiationModel.updateRoundStatus(round_id, 'CANCELLED', {
-        remarks: remarks
+      // Submit rejection action using the centralized approval engine
+      await submitApprovalAction({
+        approval_instance_id: pendingInstance.id,
+        approver_user_id: user_id,
+        action: 'REJECT',
+        comment: remarks
       });
 
-      // Record lifecycle event
-      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${round.rfq_id}`);
-      const rfqData = rfq[0];
-      await recordLifecycleEvent({
-        entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
-        entity_id: round.rfq_id,
-        stage: `NEGOTIATION_ROUND_${round.round_number}`,
-        action: 'REJECT_ROUND',
-        performed_by: user_id,
-        metadata: {
-          round_id: round_id,
-          round_number: round.round_number
-        },
+      // Update round status to CANCELLED
+      await negotiationModel.updateRoundStatus(round_id, 'CANCELLED', {
         remarks: remarks
       });
 
@@ -776,6 +868,250 @@ const NegotiationController = {
       return res.status(200).json({
         status: 1,
         data: rounds
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  // ============= NEGOTIATION QUOTES APPROVAL =============
+
+  /**
+   * Submit selected negotiation quotes for approval
+   * POST /negotiation/quotes/submit-for-approval
+   */
+  submitQuotesForApproval: async (req, res) => {
+    try {
+      const { rfq_id, rfq_product_id, quote_ids, remarks } = req.body;
+      const user_id = req.user.id;
+
+      // 1. Validate required fields
+      if (!rfq_id || !rfq_product_id || !quote_ids || !Array.isArray(quote_ids) || quote_ids.length === 0) {
+        return res.status(400).json({
+          status: 2,
+          message: 'rfq_id, rfq_product_id, and quote_ids (non-empty array) are required'
+        });
+      }
+
+      // 2. Validate RFQ exists and is hospitality
+      const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${rfq_id}`);
+      if (!rfq || rfq.length === 0) {
+        return res.status(404).json({
+          status: 2,
+          message: 'RFQ not found'
+        });
+      }
+
+      const rfqData = rfq[0];
+      if (!rfqData.hospitality_company_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Quote approval is only available for hospitality RFQs/Tenders'
+        });
+      }
+
+      // 3. Validate product belongs to RFQ
+      const product = await db.oneOrNone(
+        `SELECT * FROM tbl_rfq_products WHERE id = $1 AND rfq_id = $2`,
+        [rfq_product_id, rfq_id]
+      );
+      if (!product) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Product not found in this RFQ'
+        });
+      }
+
+      // 4. Check for existing pending approval for this product
+      const existingApprovals = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfq_product_id);
+      const pendingApproval = existingApprovals.find(a => a.status === 'PENDING');
+      if (pendingApproval) {
+        return res.status(400).json({
+          status: 2,
+          message: `A pending quote approval already exists for this product. Instance ID: ${pendingApproval.id}`
+        });
+      }
+
+      // 5. Validate all quotes exist and are from completed/expired rounds
+      const quotes = await db.any(
+        `SELECT
+          nrq.*,
+          nr.status as round_status,
+          nr.round_number,
+          nr.end_date as round_end_date,
+          u.name as vendor_name,
+          u.organization_name,
+          c.company_name
+         FROM tbl_negotiation_round_quotes nrq
+         JOIN tbl_negotiation_rounds nr ON nr.id = nrq.negotiation_round_id
+         LEFT JOIN tbl_users u ON u.id = nrq.vendor_id
+         LEFT JOIN tbl_company c ON c.id = u.company_id
+         WHERE nrq.id = ANY($1)
+           AND nrq.rfq_product_id = $2`,
+        [quote_ids, rfq_product_id]
+      );
+
+      if (quotes.length !== quote_ids.length) {
+        return res.status(400).json({
+          status: 2,
+          message: 'One or more quote IDs are invalid or do not belong to this product'
+        });
+      }
+
+      // Check all rounds are either completed OR expired (end_date < now)
+      const now = new Date();
+      const invalidRounds = quotes.filter(q => {
+        const isCompleted = q.round_status === 'COMPLETED';
+        const isExpired = new Date(q.round_end_date) < now;
+        return !isCompleted && !isExpired;
+      });
+      if (invalidRounds.length > 0) {
+        return res.status(400).json({
+          status: 2,
+          message: 'All selected quotes must be from completed or expired negotiation rounds'
+        });
+      }
+
+      // 6. Execute in transaction
+      const result = await db.tx(async (t) => {
+        // Create approval instance
+        const approvalResult = await startApprovalForNegotiationQuotes(
+          rfq_product_id,
+          rfq_id,
+          quotes,
+          rfqData,
+          user_id,
+          t
+        );
+
+        // If auto-approved (no policy), directly add to finalization
+        if (!approvalResult || approvalResult.autoApproved) {
+          await addQuotesToFinalization(rfq_id, rfq_product_id, quotes, user_id, rfqData, t);
+
+          // Record lifecycle event
+          await recordLifecycleEvent({
+            entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+            entity_id: rfq_id,
+            stage: 'NEGOTIATION_QUOTES_APPROVED',
+            action: 'AUTO_APPROVE',
+            performed_by: user_id,
+            metadata: {
+              rfq_product_id: rfq_product_id,
+              quote_ids: quote_ids,
+              vendor_ids: quotes.map(q => q.vendor_id)
+            },
+            txContext: t
+          });
+
+          return {
+            autoApproved: true,
+            quotes: quotes
+          };
+        }
+
+        // Record lifecycle event for submission
+        await recordLifecycleEvent({
+          entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+          entity_id: rfq_id,
+          stage: 'NEGOTIATION_QUOTES_SUBMITTED',
+          action: 'SUBMIT_FOR_APPROVAL',
+          performed_by: user_id,
+          metadata: {
+            approval_instance_id: approvalResult.instance?.id,
+            rfq_product_id: rfq_product_id,
+            quote_ids: quote_ids
+          },
+          remarks: remarks,
+          txContext: t
+        });
+
+        return {
+          autoApproved: false,
+          approvalResult: approvalResult,
+          quotes: quotes
+        };
+      });
+
+      if (result.autoApproved) {
+        return res.status(200).json({
+          status: 1,
+          data: {
+            status: 'AUTO_APPROVED',
+            selected_quotes: result.quotes.map(q => ({
+              quote_id: q.id,
+              vendor_id: q.vendor_id,
+              vendor_name: q.vendor_name || q.organization_name,
+              quoted_price: q.quoted_price
+            })),
+            finalization_complete: true
+          },
+          message: 'Quotes auto-approved and added to finalization (no approval policy configured)'
+        });
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          approval_instance_id: result.approvalResult.instance?.id,
+          status: 'PENDING',
+          selected_quotes: result.quotes.map(q => ({
+            quote_id: q.id,
+            vendor_id: q.vendor_id,
+            vendor_name: q.vendor_name || q.organization_name,
+            quoted_price: q.quoted_price
+          })),
+          total_steps: result.approvalResult.totalSteps,
+          current_step: 1
+        },
+        message: 'Quotes submitted for approval successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * Get quote approval status for a product
+   * GET /negotiation/quotes/:rfq_product_id/approval-status
+   */
+  getQuoteApprovalStatus: async (req, res) => {
+    try {
+      const rfq_product_id = parseInt(req.params.rfq_product_id);
+
+      if (!rfq_product_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'rfq_product_id is required'
+        });
+      }
+
+      const instances = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfq_product_id);
+      const latestInstance = instances[0]; // Already ordered by created_at DESC
+
+      if (!latestInstance) {
+        return res.status(200).json({
+          status: 1,
+          data: {
+            has_pending_approval: false,
+            approval_instance: null
+          }
+        });
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          has_pending_approval: latestInstance.status === 'PENDING',
+          approval_instance: {
+            id: latestInstance.id,
+            status: latestInstance.status,
+            metadata: latestInstance.metadata,
+            created_at: latestInstance.created_at,
+            completed_at: latestInstance.completed_at
+          }
+        }
       });
     } catch (error) {
       logError(error);
