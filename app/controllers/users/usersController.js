@@ -564,10 +564,10 @@ const UsersController = {
             const fyEndDateStr = fyEnd.format('YYYY-MM-DD');
             
             const subscriptionRows = [];
-            const allCategoryIds = [...new Set([...categories, ...subcategories])];
+            const uniqueCategoryIds = [...new Set(categories)];
             
-            if (allCategoryIds.length) {
-              const dbCategories = await productModel.getCategoriesByIds(allCategoryIds);
+            if (uniqueCategoryIds.length) {
+              const dbCategories = await productModel.getCategoriesByIds(uniqueCategoryIds);
               for (const row of dbCategories) {
                 subscriptionRows.push({
                   vendor_id: user_id,
@@ -591,7 +591,8 @@ const UsersController = {
                     vendor_id: user_id,
                     item_type: 'hotel',
                     item_id: row.id,
-                    fee_amount: row.fee_amount || 500,
+                    // Hotels should not carry independent cost for registration pricing
+                    fee_amount: 0,
                     start_date: startDate.format('YYYY-MM-DD'),
                     end_date: fyEndDateStr,
                     status: 'active',
@@ -3196,18 +3197,25 @@ publish_profile_reviews: async (req, res, next) => {
       let totalAmount = 0;
       const subscriptionRows = [];
 
-      const allCategoryIds = [...new Set([...categoryIds, ...subcategoryIds])];
+      // Hospitality pricing model:
+      // - Subcategories are free (temporary)
+      // - Hotels do not have an independent hotel cost
+      // - Total price = (price per category) × (number of categories) × (number of hotels selected)
+      const uniqueCategoryIds = [...new Set(categoryIds)];
 
-      if (allCategoryIds.length) {
-        const dbCategories = await productModel.getCategoriesByIds(allCategoryIds);
+      if (uniqueCategoryIds.length) {
+        const dbCategories = await productModel.getCategoriesByIds(uniqueCategoryIds);
+        const numHotels = hotelIds.length;
+
         for (const row of dbCategories) {
-          const fee = row.fee_amount || 500;
-          totalAmount += fee;
+          const baseFee = row.fee_amount || 500;
+          const effectiveFee = numHotels > 0 ? baseFee * numHotels : baseFee;
+          totalAmount += effectiveFee;
           subscriptionRows.push({
             vendor_id: decryptedUserId,
             item_type: 'category',
             item_id: row.id,
-            fee_amount: fee,
+            fee_amount: effectiveFee,
             start_date: startDate.format('YYYY-MM-DD'),
             end_date: fyEndDateStr,
             status: 'active'
@@ -3218,13 +3226,12 @@ publish_profile_reviews: async (req, res, next) => {
       if (hotelIds.length) {
         const dbHotels = await hospitalityModel.getHotelsByIds(hotelIds);
         for (const row of dbHotels) {
-          const fee = row.fee_amount || 500;
-          totalAmount += fee;
           subscriptionRows.push({
             vendor_id: decryptedUserId,
             item_type: 'hotel',
             item_id: row.id,
-            fee_amount: fee,
+            // No independent hotel cost in the new pricing model
+            fee_amount: 0,
             start_date: startDate.format('YYYY-MM-DD'),
             end_date: fyEndDateStr,
             status: 'active'
