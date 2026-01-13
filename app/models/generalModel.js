@@ -2116,8 +2116,8 @@ export async function submitApprovalAction({
         console.error('Error recording lifecycle event:', lifecycleError);
       }
 
-      // Add approved negotiation quotes to finalization when NEGOTIATION_QUOTE approval completes
-      if (instance.entity_type === 'NEGOTIATION_QUOTE') {
+      // Add approved negotiation quotes to finalization when NEGOTIATION approval completes
+      if (instance.entity_type === 'NEGOTIATION') {
         try {
           const rfq_product_id = instance.entity_id;
           const metadata = instance.metadata || {};
