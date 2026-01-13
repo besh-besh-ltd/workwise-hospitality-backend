@@ -3226,6 +3226,99 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
 };
 
 /**
+ * Handle TECHNICAL post-approval actions (auto-accept/reject vendors)
+ * Called after TECHNICAL approval instance is fully approved
+ */
+const handleTechnicalPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
+  const t = txContext || db;
+  
+  try {
+    // Get approval instance
+    const { getApprovalInstanceById } = await import('../../models/generalModel.js');
+    const instance = await getApprovalInstanceById(approval_instance_id, 'TECHNICAL', t);
+    if (!instance || instance.status !== 'APPROVED') {
+      return; // Not approved yet or not TECHNICAL type
+    }
+
+    const rfq_product_id = instance.entity_id;
+
+    // Get tech evaluation ID for this product
+    const techEval = await t.oneOrNone(`
+      SELECT id, rfq_id, tbl_rfq_product_id, minimum_passing_score
+      FROM tbl_rfq_product_tech_evaluation
+      WHERE tbl_rfq_product_id = $1
+    `, [rfq_product_id]);
+
+    if (techEval) {
+      // Get all vendors with their pass/fail status based on scores
+      const vendorScores = await t.any(`
+        SELECT
+          vr.vendor_id,
+          COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
+          COALESCE(SUM(c.weightage), 0) AS total_weightage,
+          CASE 
+            WHEN COALESCE(SUM(c.weightage), 0) > 0 
+            THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
+            ELSE 0
+          END AS calculated_score,
+          $2::NUMERIC AS minimum_passing_score,
+          CASE 
+            WHEN COALESCE(SUM(c.weightage), 0) > 0 
+            THEN CASE 
+              WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE($2::NUMERIC, 0)
+              THEN true
+              ELSE false
+            END
+            ELSE NULL
+          END AS is_passed
+        FROM tbl_rfq_product_tech_evaluation_clauses c
+        LEFT JOIN tbl_rfq_product_tech_evaluation_vendors_response vr 
+          ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+        WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+        GROUP BY vr.vendor_id
+        HAVING vr.vendor_id IS NOT NULL
+      `, [techEval.id, techEval.minimum_passing_score || 0]);
+
+      // Auto-accept/reject vendors based on calculated pass/fail status
+      for (const vendorScore of vendorScores) {
+        if (vendorScore.is_passed !== null) {
+          const status = vendorScore.is_passed ? 1 : 0; // 1 = accepted, 0 = rejected
+          const reject_message = vendorScore.is_passed 
+            ? null 
+            : `Did not meet minimum passing score (${vendorScore.calculated_score}% < ${vendorScore.minimum_passing_score}%)`;
+
+          // Check if vendor already has a record
+          const existingRecord = await t.oneOrNone(`
+            SELECT id FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+            WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2
+          `, [techEval.id, vendorScore.vendor_id]);
+
+          if (existingRecord) {
+            // Update existing record
+            await t.none(`
+              UPDATE tbl_rfq_product_tech_evaluation_cleared_vendors
+              SET status = $1, reject_message = $2, timestamp = NOW(), created_by = $3
+              WHERE id = $4
+            `, [status, reject_message, approver_user_id, existingRecord.id]);
+          } else {
+            // Insert new record
+            await t.none(`
+              INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors
+              (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, timestamp, created_by)
+              VALUES ($1, $2, $3, $4, NOW(), $5)
+            `, [techEval.id, vendorScore.vendor_id, status, reject_message, approver_user_id]);
+          }
+        }
+      }
+      console.log(`Auto-accepted/rejected ${vendorScores.length} vendors for tech eval ${techEval.id}`);
+    }
+  } catch (techEvalError) {
+    // Log but don't fail the transaction
+    console.error('Error handling TECHNICAL post-approval:', techEvalError);
+  }
+};
+
+/**
  * startApprovalForArc
  *
  * Submits an RFQ/Tender for ARC (Award Recommendation Committee) approval by creating an approval instance.
@@ -3290,6 +3383,9 @@ const startApprovalForArc = async (rfqId, userId, txContext = null) => {
   return result;
 };
 
+
+// Export the helper function for use in general controller
+export { handleTechnicalPostApproval };
 
 const rfqController = {
   createTenderPaymentOrder: async (req, res) => {

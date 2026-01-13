@@ -20,6 +20,98 @@ const formatErrorResponse = (res, error) => {
 };
 
 /**
+ * Handle NEGOTIATION post-approval actions (add quotes to finalization)
+ * Called after NEGOTIATION approval instance is fully approved
+ */
+const handleNegotiationPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
+  const t = txContext || db;
+  
+  try {
+    // Get approval instance
+    const { getApprovalInstanceById } = await import('../../models/generalModel.js');
+    const instance = await getApprovalInstanceById(approval_instance_id, 'NEGOTIATION', t);
+    if (!instance || instance.status !== 'APPROVED') {
+      return; // Not approved yet or not NEGOTIATION type
+    }
+
+    const rfq_product_id = instance.entity_id;
+    const metadata = instance.metadata || {};
+    const rfq_id = metadata.rfq_id;
+
+    if (rfq_id && metadata.selected_quotes && metadata.selected_quotes.length > 0) {
+      // Get RFQ data
+      const rfq = await t.oneOrNone(`SELECT * FROM tbl_rfq WHERE id = $1`, [rfq_id]);
+
+      if (rfq) {
+        // Get product details
+        const product = await t.oneOrNone(`
+          SELECT rp.*, rp.product_variant_id, rp.variant
+          FROM tbl_rfq_products rp
+          WHERE rp.id = $1
+        `, [rfq_product_id]);
+
+        if (product) {
+          // Add each selected quote to finalization
+          for (const selectedQuote of metadata.selected_quotes) {
+            // Check if this vendor is already finalized for this product
+            const existingFinalization = await t.oneOrNone(`
+              SELECT id FROM tbl_quote_finalization
+              WHERE rfq_id = $1
+                AND product_variant_id = $2
+                AND variant = $3
+                AND vendor_id = $4
+            `, [rfq_id, product.product_variant_id, product.variant, selectedQuote.vendor_id]);
+
+            if (existingFinalization) {
+              // Update existing finalization
+              await t.none(`
+                UPDATE tbl_quote_finalization
+                SET quote_id = $1, created_by = $2, created_at = NOW()
+                WHERE id = $3
+              `, [selectedQuote.quote_id, approver_user_id, existingFinalization.id]);
+            } else {
+              // Insert new finalization record
+              await t.none(`
+                INSERT INTO tbl_quote_finalization
+                (rfq_id, rfq_no, product_variant_id, vendor_id, quote_id, created_by, variant, timestamp)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+              `, [
+                rfq_id,
+                rfq.rfq_no,
+                product.product_variant_id,
+                selectedQuote.vendor_id,
+                selectedQuote.quote_id,
+                approver_user_id,
+                product.variant
+              ]);
+            }
+          }
+
+          // Record lifecycle event
+          await recordLifecycleEvent({
+            entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
+            entity_id: rfq_id,
+            stage: 'NEGOTIATION_QUOTES_APPROVED',
+            action: 'APPROVE',
+            performed_by: approver_user_id,
+            metadata: {
+              approval_instance_id: approval_instance_id,
+              rfq_product_id: rfq_product_id,
+              quote_ids: metadata.selected_quotes.map(q => q.quote_id),
+              vendor_ids: metadata.selected_quotes.map(q => q.vendor_id)
+            },
+            txContext: t
+          });
+        }
+      }
+    }
+  } catch (negQuoteError) {
+    // Log but don't fail the transaction
+    console.error('Error handling NEGOTIATION post-approval:', negQuoteError);
+  }
+};
+
+/**
  * startApprovalForNegotiation
  *
  * Creates an approval instance for a negotiation round using the centralized approval engine.
@@ -174,6 +266,9 @@ const addQuotesToFinalization = async (rfqId, rfqProductId, quotes, userId, rfqD
   }
   // Note: ARC creation is now handled immediately during product finalization, not here
 };
+
+// Export the helper function for use in general controller
+export { handleNegotiationPostApproval };
 
 const NegotiationController = {
   /**
@@ -460,6 +555,11 @@ const NegotiationController = {
       });
 
       const isFullyApproved = approvalResult.instance_status === 'APPROVED';
+
+      // Handle NEGOTIATION post-approval actions (add quotes to finalization) if fully approved
+      if (isFullyApproved) {
+        await handleNegotiationPostApproval(pendingInstance.id, user_id);
+      }
 
       // If fully approved, update round status to ACTIVE
       if (isFullyApproved) {

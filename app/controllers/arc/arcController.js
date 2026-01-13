@@ -2,8 +2,90 @@ import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
 import negotiationModel from '../../models/negotiationModel.js';
-import { getLifecycleHistory, getApprovalInstancesByEntity, submitApprovalAction, cancelApprovalInstance, getApprovalInstanceById } from '../../models/generalModel.js';
+import { getLifecycleHistory, getApprovalInstancesByEntity, submitApprovalAction, cancelApprovalInstance, getApprovalInstanceById, recordLifecycleEvent, uploadToS3 } from '../../models/generalModel.js';
 import db from '../../config/dbConn.js';
+
+/**
+ * Handle ARC post-approval actions (document generation and email)
+ * Called after ARC approval instance is fully approved
+ */
+const handleArcPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
+  const t = txContext || db;
+  
+  try {
+    // Get approval instance
+    const instance = await getApprovalInstanceById(approval_instance_id, 'ARC', t);
+    if (!instance || instance.status !== 'APPROVED') {
+      return; // Not approved yet or not ARC type
+    }
+
+    const rfq_product_id = instance.entity_id;
+    const metadata = instance.metadata || {};
+    const rfq_id = metadata.rfq_id;
+    
+    // Validate RFQ is a tender
+    const rfqData = await t.oneOrNone(`
+      SELECT is_tender FROM tbl_rfq WHERE id = $1
+    `, [rfq_id]);
+    
+    if (!rfqData || rfqData.is_tender !== 1) {
+      throw new Error('ARC document generation is only applicable for tenders (is_tender = 1)');
+    }
+    
+    // Import ARC document controller
+    const { generateAwardDocument, sendAwardDocumentToVendor } = await import('./arcDocumentController.js');
+    
+    // Generate PDF document for this product
+    const pdfResult = await generateAwardDocument(rfq_product_id, t);
+    
+    if (pdfResult.ok) {
+      // Upload to S3 with arc-documents folder
+      const fileName = `arc-award-${metadata.rfq_number || rfq_id}-product-${rfq_product_id}-${Date.now()}.pdf`;
+      const s3Key = `arc-documents/${fileName}`;
+      const s3Result = await uploadToS3(pdfResult.absolutePath, s3Key);
+      
+      if (s3Result.ok) {
+        // Update approval instance metadata with document URL
+        const updatedMetadata = {
+          ...metadata,
+          award_document_url: s3Result.url,
+          award_document_generated_at: new Date().toISOString(),
+          award_document_generated_by: approver_user_id
+        };
+        
+        await t.none(`
+          UPDATE tbl_approval_instances
+          SET metadata = $1
+          WHERE id = $2
+        `, [JSON.stringify(updatedMetadata), approval_instance_id]);
+        
+        // Send email to vendor for this product
+        await sendAwardDocumentToVendor(rfq_product_id, s3Result.url, t);
+        
+        // Record lifecycle event
+        await recordLifecycleEvent({
+          entity_type: 'TENDER',
+          entity_id: rfq_id,
+          stage: 'ARC_DOCUMENT_GENERATED',
+          action: 'GENERATE_DOCUMENT',
+          performed_by: approver_user_id,
+          metadata: {
+            rfq_product_id: rfq_product_id,
+            document_url: s3Result.url,
+            approval_instance_id: approval_instance_id
+          },
+          txContext: t
+        });
+      }
+    }
+  } catch (arcDocError) {
+    // Log but don't fail the transaction
+    console.error('Error handling ARC post-approval:', arcDocError);
+  }
+};
+
+// Export the helper function for use in general controller
+export { handleArcPostApproval };
 
 const formatErrorResponse = (res, error) => {
   const message = error.message || Config.errorText.value;
@@ -249,7 +331,6 @@ const ArcController = {
         });
       }
 
-      const { recordLifecycleEvent } = await import('../../models/generalModel.js');
       let result;
 
       if (action === 'approve' || action === 'reject') {
@@ -272,6 +353,11 @@ const ArcController = {
             action: actionType,
             comment: remarks || null
           });
+
+          // Handle ARC post-approval actions (document generation) if fully approved
+          if (actionType === 'APPROVE' && result.instance_status === 'APPROVED') {
+            await handleArcPostApproval(instanceId, user_id);
+          }
 
           // Record lifecycle event
           let stage = 'ARC_APPROVED';
