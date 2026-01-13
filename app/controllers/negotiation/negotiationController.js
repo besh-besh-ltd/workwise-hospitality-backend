@@ -1020,7 +1020,7 @@ const NegotiationController = {
         });
       }
 
-      const instances = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfq_product_id);
+      const instances = await getApprovalInstancesByEntity('NEGOTIATION', rfq_product_id);
       const latestInstance = instances[0]; // Already ordered by created_at DESC
 
       if (!latestInstance) {
