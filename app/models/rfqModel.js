@@ -1394,20 +1394,17 @@ WHERE NOT EXISTS (
     const whereConditions = [
       'r.hospitality_company_id IS NOT NULL',
       'r.status IN (1, 2)',
+      'r.is_tender = 1', // ARC is only for tenders
       `EXISTS (
-        SELECT 1 FROM tbl_approval_instances ai2
-        WHERE ai2.entity_type = 'ARC' 
-        AND ai2.entity_id = r.id
-        AND ai2.status IN ('PENDING', 'APPROVED')
+        SELECT 1 FROM tbl_rfq_products rp
+        JOIN tbl_approval_instances ai2 ON ai2.entity_type = 'ARC' 
+          AND ai2.entity_id = rp.id
+          AND ai2.status IN ('PENDING', 'APPROVED')
+        WHERE rp.rfq_id = r.id
       )`
     ];
     const params = [];
     let paramIndex = 1;
-
-    if (is_tender !== undefined && is_tender !== null) {
-      whereConditions.push(`r.is_tender = $${paramIndex++}`);
-      params.push(is_tender === '1' || is_tender === 1 ? 1 : 0);
-    }
 
     if (project_id) {
       whereConditions.push(`r.project_id = $${paramIndex++}`);
@@ -1416,9 +1413,10 @@ WHERE NOT EXISTS (
 
     const whereClause = whereConditions.join(' AND ');
 
+    // Query to get RFQs with their products that have ARC approvals
     const query = `
       SELECT DISTINCT
-        r.id,
+        r.id as rfq_id,
         r.rfq_no,
         r.is_tender,
         r.company_name,
@@ -1426,8 +1424,12 @@ WHERE NOT EXISTS (
         r.bid_end_date,
         r.status,
         p.name as project_name,
+        rp.id as rfq_product_id,
+        pv.name as product_name,
+        rp.variant,
         ai.id as approval_instance_id,
         ai.status as approval_status,
+        ai.created_at as approval_created_at,
         (
           SELECT COUNT(*)
           FROM tbl_quotes q
@@ -1435,20 +1437,36 @@ WHERE NOT EXISTS (
         ) as quote_count,
         (
           SELECT COUNT(*)
-          FROM tbl_rfq_products rp
-          WHERE rp.rfq_id = r.id
-        ) as product_count
+          FROM tbl_rfq_products rp2
+          WHERE rp2.rfq_id = r.id
+        ) as product_count,
+        (
+          SELECT COUNT(*)
+          FROM tbl_rfq_products rp3
+          JOIN tbl_approval_instances ai3 ON ai3.entity_type = 'ARC' 
+            AND ai3.entity_id = rp3.id
+            AND ai3.status = 'PENDING'
+          WHERE rp3.rfq_id = r.id
+        ) as pending_arc_count
       FROM tbl_rfq r
       LEFT JOIN tbl_projects p ON p.id = r.project_id
-      LEFT JOIN tbl_approval_instances ai ON ai.entity_type = 'ARC' AND ai.entity_id = r.id AND ai.status = 'PENDING'
+      JOIN tbl_rfq_products rp ON rp.rfq_id = r.id
+      JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+      LEFT JOIN tbl_approval_instances ai ON ai.entity_type = 'ARC' 
+        AND ai.entity_id = rp.id 
+        AND ai.status IN ('PENDING', 'APPROVED')
       WHERE ${whereClause}
-      ORDER BY r.timestamp DESC
+      ORDER BY r.timestamp DESC, rp.id
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}
     `;
 
     const countQuery = `
-      SELECT COUNT(DISTINCT r.id)
+      SELECT COUNT(DISTINCT rp.id)
       FROM tbl_rfq r
+      JOIN tbl_rfq_products rp ON rp.rfq_id = r.id
+      JOIN tbl_approval_instances ai2 ON ai2.entity_type = 'ARC' 
+        AND ai2.entity_id = rp.id
+        AND ai2.status IN ('PENDING', 'APPROVED')
       WHERE ${whereClause}
     `;
 
@@ -10597,6 +10615,208 @@ ORDER BY tq.timestamp DESC;
           reject(error);
         });
     });
+  },
+
+  /**
+   * Get RFQ product by variant
+   * @param {number} rfq_id - RFQ ID
+   * @param {number} product_variant_id - Product variant ID
+   * @param {number} variant - Variant number
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - RFQ product record
+   */
+  getRfqProductByVariant: async (rfq_id, product_variant_id, variant, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.oneOrNone(
+      `SELECT id FROM tbl_rfq_products 
+       WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+      [rfq_id, product_variant_id, variant]
+    );
+  },
+
+  /**
+   * Get RFQ with hospitality details for ARC/approval flows
+   * @param {number} rfq_id - RFQ ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - RFQ with hospitality company and hotel details
+   */
+  getRfqWithHospitalityDetails: async (rfq_id, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.oneOrNone(
+      `SELECT r.*, hc.name as hospitality_company_name, h.name as hotel_name
+       FROM tbl_rfq r
+       LEFT JOIN tbl_hospitality_companies hc ON hc.id = r.hospitality_company_id
+       LEFT JOIN tbl_hospitality_company_hotels h ON h.id = r.hotel_id
+       WHERE r.id = $1`,
+      [rfq_id]
+    );
+  },
+
+  /**
+   * Get all product IDs for an RFQ
+   * @param {number} rfq_id - RFQ ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Array>} - Array of product objects with id
+   */
+  getRfqProductIds: async (rfq_id, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.any(
+      `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1`,
+      [rfq_id]
+    );
+  },
+
+  /**
+   * Get RFQ product details with RFQ and hospitality info for ARC document
+   * @param {number} rfq_product_id - RFQ Product ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Product with RFQ and hospitality details
+   */
+  getRfqProductDetailsForArc: async (rfq_product_id, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.oneOrNone(
+      `SELECT 
+        rp.id as rfq_product_id,
+        rp.rfq_id,
+        rp.product_variant_id,
+        rp.variant,
+        r.rfq_no,
+        r.company_name,
+        r.location,
+        r.bid_end_date,
+        r.is_tender,
+        r.hospitality_company_id,
+        r.hotel_id,
+        hc.name as hospitality_company_name,
+        hc.address as hospitality_company_address,
+        h.name as hotel_name,
+        h.address as hotel_address,
+        pv.name as product_name,
+        p.name as product_category_name
+      FROM tbl_rfq_products rp
+      JOIN tbl_rfq r ON r.id = rp.rfq_id
+      LEFT JOIN tbl_hospitality_companies hc ON hc.id = r.hospitality_company_id
+      LEFT JOIN tbl_hospitality_company_hotels h ON h.id = r.hotel_id
+      JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+      JOIN tbl_product p ON p.id = pv.product_id
+      WHERE rp.id = $1`,
+      [rfq_product_id]
+    );
+  },
+
+  /**
+   * Get finalized vendor for a product
+   * @param {number} rfq_id - RFQ ID
+   * @param {number} product_variant_id - Product variant ID
+   * @param {number} variant - Variant number
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Finalization record
+   */
+  getFinalizedVendorForProduct: async (rfq_id, product_variant_id, variant, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.oneOrNone(
+      `SELECT 
+        qf.vendor_id,
+        qf.quote_id,
+        qf.created_at as finalized_at
+      FROM tbl_quote_finalization qf
+      WHERE qf.rfq_id = $1
+        AND qf.product_variant_id = $2
+        AND qf.variant = $3
+      ORDER BY qf.created_at DESC
+      LIMIT 1`,
+      [rfq_id, product_variant_id, variant]
+    );
+  },
+
+  /**
+   * Get product specs for an RFQ product
+   * @param {number} rfq_id - RFQ ID
+   * @param {number} product_variant_id - Product variant ID
+   * @param {number} variant - Variant number
+   * @param {Array} titles - Optional array of spec titles to filter
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Array>} - Array of spec records
+   */
+  getRfqProductSpecs: async (rfq_id, product_variant_id, variant, titles = null, txContext = null) => {
+    const dbContext = txContext || db;
+    let query = `
+      SELECT title, value
+      FROM tbl_rfq_products_specs
+      WHERE rfq_id = $1
+        AND product_variant_id = $2
+        AND variant = $3
+    `;
+    const params = [rfq_id, product_variant_id, variant];
+    
+    if (titles && titles.length > 0) {
+      query += ` AND title = ANY($4)`;
+      params.push(titles);
+    }
+    
+    return dbContext.any(query, params);
+  },
+
+  /**
+   * Get quote item details
+   * @param {number} quote_id - Quote item ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Quote item record
+   */
+  getQuoteItemDetails: async (quote_id, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.oneOrNone(
+      `SELECT 
+        qi.unit_price,
+        qi.quantity,
+        qi.unit,
+        qi.total_price,
+        qi.charges_meta
+      FROM tbl_quote_items qi
+      WHERE qi.id = $1`,
+      [quote_id]
+    );
+  },
+
+  /**
+   * Get RFQ product by ID
+   * @param {number} rfq_product_id - RFQ Product ID
+   * @param {number} rfq_id - RFQ ID (for validation)
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - RFQ product record
+   */
+  getRfqProductById: async (rfq_product_id, rfq_id = null, txContext = null) => {
+    const dbContext = txContext || db;
+    let query = `SELECT * FROM tbl_rfq_products WHERE id = $1`;
+    const params = [rfq_product_id];
+    
+    if (rfq_id) {
+      query += ` AND rfq_id = $2`;
+      params.push(rfq_id);
+    }
+    
+    return dbContext.oneOrNone(query, params);
+  },
+
+  /**
+   * Check if vendor is already finalized for a product
+   * @param {number} rfq_id - RFQ ID
+   * @param {number} product_variant_id - Product variant ID
+   * @param {number} variant - Variant number
+   * @param {number} vendor_id - Vendor ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Finalization record if exists
+   */
+  getExistingFinalization: async (rfq_id, product_variant_id, variant, vendor_id, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.oneOrNone(
+      `SELECT id FROM tbl_quote_finalization
+       WHERE rfq_id = $1
+         AND product_variant_id = $2
+         AND variant = $3
+         AND vendor_id = $4`,
+      [rfq_id, product_variant_id, variant, vendor_id]
+    );
   },
 };
 

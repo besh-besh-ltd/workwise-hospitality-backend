@@ -55,9 +55,9 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
 
     return result;
   } catch (error) {
-    // If no policy exists, return null (will trigger auto-approval)
+    // If no policy exists, throw error (don't auto-approve)
     if (error.message && error.message.includes('No approval policy found')) {
-      return null;
+      throw new Error('No approval policy found for NEGOTIATION_QUOTE. Please configure an approval policy before submitting quotes for approval.');
     }
     throw error;
   }
@@ -80,7 +80,7 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
 const startApprovalForNegotiationQuotes = async (rfqProductId, rfqId, selectedQuotes, rfqData, userId, txContext) => {
   try {
     const result = await createApprovalInstance({
-      entity_type: 'NEGOTIATION_QUOTE',
+      entity_type: 'NEGOTIATION',
       entity_id: rfqProductId,
       hospitality_company_id: rfqData.hospitality_company_id,
       hotel_id: rfqData.hotel_id || null,
@@ -105,9 +105,9 @@ const startApprovalForNegotiationQuotes = async (rfqProductId, rfqId, selectedQu
 
     return result;
   } catch (error) {
-    // If no policy exists, return null (will trigger auto-approval)
+    // If no policy exists, throw error (don't auto-approve)
     if (error.message && error.message.includes('No approval policy found')) {
-      return null;
+      throw new Error('No approval policy found for NEGOTIATION. Please configure an approval policy before submitting quotes for approval.');
     }
     throw error;
   }
@@ -129,23 +129,21 @@ const startApprovalForNegotiationQuotes = async (rfqProductId, rfqId, selectedQu
 const addQuotesToFinalization = async (rfqId, rfqProductId, quotes, userId, rfqData, txContext) => {
   const t = txContext || db;
 
-  // Get product details for finalization
-  const product = await t.one(
-    `SELECT rp.*, rp.product_variant_id, rp.variant
-     FROM tbl_rfq_products rp
-     WHERE rp.id = $1`,
-    [rfqProductId]
-  );
+  // Get product details using model
+  const product = await rfqModel.getRfqProductById(rfqProductId, rfqId, t);
+  
+  if (!product) {
+    throw new Error('RFQ product not found');
+  }
 
   for (const quote of quotes) {
-    // Check if this vendor is already finalized for this product
-    const existingFinalization = await t.oneOrNone(
-      `SELECT id FROM tbl_quote_finalization
-       WHERE rfq_id = $1
-         AND product_variant_id = $2
-         AND variant = $3
-         AND vendor_id = $4`,
-      [rfqId, product.product_variant_id, product.variant, quote.vendor_id]
+    // Check if this vendor is already finalized using model
+    const existingFinalization = await rfqModel.getExistingFinalization(
+      rfqId, 
+      product.product_variant_id, 
+      product.variant, 
+      quote.vendor_id,
+      t
     );
 
     if (existingFinalization) {
@@ -174,49 +172,7 @@ const addQuotesToFinalization = async (rfqId, rfqProductId, quotes, userId, rfqD
       );
     }
   }
-
-  // Check if all products are finalized and trigger ARC if needed
-  const allFinalized = await rfqModel.checkAllProductsFinalizedForArc(rfqId, t);
-
-  if (allFinalized &&
-      allFinalized.total_products > 0 &&
-      allFinalized.finalized_products === allFinalized.total_products) {
-    // All products finalized - trigger ARC approval
-    try {
-      // Import startApprovalForArc from rfqController or call createApprovalInstance directly
-      await createApprovalInstance({
-        entity_type: 'ARC',
-        entity_id: rfqId,
-        hospitality_company_id: rfqData.hospitality_company_id,
-        hotel_id: rfqData.hotel_id || null,
-        initiated_by: userId,
-        metadata: {
-          rfq_id: rfqId,
-          rfq_number: rfqData.rfq_no,
-          is_tender: rfqData.is_tender,
-          company_name: rfqData.company_name
-        },
-        txContext: t
-      });
-
-      // Record lifecycle event for ARC submission
-      await recordLifecycleEvent({
-        entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
-        entity_id: rfqId,
-        stage: 'ARC_SUBMITTED',
-        action: 'SUBMIT_FOR_APPROVAL',
-        performed_by: userId,
-        metadata: {
-          rfq_id: rfqId,
-          triggered_by: 'negotiation_quote_approval'
-        },
-        txContext: t
-      });
-    } catch (arcError) {
-      // Log but don't fail - ARC creation may fail if already exists or no policy
-      console.error('Error creating ARC approval instance:', arcError.message);
-    }
-  }
+  // Note: ARC creation is now handled immediately during product finalization, not here
 };
 
 const NegotiationController = {
@@ -263,11 +219,8 @@ const NegotiationController = {
         });
       }
 
-      // Check if product exists
-      const product = await db.oneOrNone(
-        `SELECT * FROM tbl_rfq_products WHERE id = $1 AND rfq_id = $2`,
-        [rfq_product_id, rfq_id]
-      );
+      // Check if product exists using model
+      const product = await rfqModel.getRfqProductById(rfq_product_id, rfq_id);
       if (!product) {
         return res.status(404).json({
           status: 2,
@@ -289,14 +242,16 @@ const NegotiationController = {
 
       // Create round in transaction
       const result = await db.tx(async (t) => {
-        // Create the round
-        const round = await t.one(
-          `INSERT INTO tbl_negotiation_rounds
-            (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by)
-           VALUES ($1, $2, $3, $4, $5, 'PENDING_APPROVAL', $6)
-           RETURNING *`,
-          [rfq_id, rfq_product_id, round_number, target_price, end_date, user_id]
-        );
+        // Create the round via model (uses tx)
+        const round = await negotiationModel.createRound({
+          rfq_id,
+          rfq_product_id,
+          round_number,
+          target_price,
+          end_date,
+          status: 'PENDING_APPROVAL',
+          created_by: user_id
+        }, t);
 
         // Create approval instance using the centralized approval engine
         const approvalResult = await startApprovalForNegotiation(
@@ -320,10 +275,7 @@ const NegotiationController = {
         }
 
         // Get updated round status
-        const updatedRound = await t.oneOrNone(
-          `SELECT * FROM tbl_negotiation_rounds WHERE id = $1`,
-          [round.id]
-        );
+        const updatedRound = await negotiationModel.getRoundById(round.id);
 
         // Record lifecycle event
         await recordLifecycleEvent({
@@ -777,11 +729,11 @@ const NegotiationController = {
         });
       }
 
-      // Check if vendor has already submitted a quote for this round
-      const existingQuote = await db.oneOrNone(
-        `SELECT id, submitted_at FROM tbl_negotiation_round_quotes 
-         WHERE negotiation_round_id = $1 AND vendor_id = $2 AND rfq_product_id = $3`,
-        [round_id, vendor_id, round.rfq_product_id]
+      // Check if vendor has already submitted a quote using model
+      const existingQuote = await negotiationModel.getExistingRoundQuote(
+        round_id, 
+        vendor_id, 
+        round.rfq_product_id
       );
 
       if (existingQuote) {
@@ -911,11 +863,8 @@ const NegotiationController = {
         });
       }
 
-      // 3. Validate product belongs to RFQ
-      const product = await db.oneOrNone(
-        `SELECT * FROM tbl_rfq_products WHERE id = $1 AND rfq_id = $2`,
-        [rfq_product_id, rfq_id]
-      );
+      // 3. Validate product belongs to RFQ using model
+      const product = await rfqModel.getRfqProductById(rfq_product_id, rfq_id);
       if (!product) {
         return res.status(404).json({
           status: 2,
@@ -924,7 +873,7 @@ const NegotiationController = {
       }
 
       // 4. Check for existing pending approval for this product
-      const existingApprovals = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfq_product_id);
+      const existingApprovals = await getApprovalInstancesByEntity('NEGOTIATION', rfq_product_id);
       const pendingApproval = existingApprovals.find(a => a.status === 'PENDING');
       if (pendingApproval) {
         return res.status(400).json({
@@ -933,24 +882,8 @@ const NegotiationController = {
         });
       }
 
-      // 5. Validate all quotes exist and are from completed/expired rounds
-      const quotes = await db.any(
-        `SELECT
-          nrq.*,
-          nr.status as round_status,
-          nr.round_number,
-          nr.end_date as round_end_date,
-          u.name as vendor_name,
-          u.organization_name,
-          c.company_name
-         FROM tbl_negotiation_round_quotes nrq
-         JOIN tbl_negotiation_rounds nr ON nr.id = nrq.negotiation_round_id
-         LEFT JOIN tbl_users u ON u.id = nrq.vendor_id
-         LEFT JOIN tbl_company c ON c.id = u.company_id
-         WHERE nrq.id = ANY($1)
-           AND nrq.rfq_product_id = $2`,
-        [quote_ids, rfq_product_id]
-      );
+      // 5. Validate all quotes exist using model
+      const quotes = await negotiationModel.getQuotesByIds(quote_ids);
 
       if (quotes.length !== quote_ids.length) {
         return res.status(400).json({
@@ -985,8 +918,8 @@ const NegotiationController = {
           t
         );
 
-        // If auto-approved (no policy), directly add to finalization
-        if (!approvalResult || approvalResult.autoApproved) {
+        // If auto-approved (no approval required), directly add to finalization
+        if (approvalResult && approvalResult.autoApproved) {
           await addQuotesToFinalization(rfq_id, rfq_product_id, quotes, user_id, rfqData, t);
 
           // Record lifecycle event

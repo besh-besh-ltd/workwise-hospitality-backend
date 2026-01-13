@@ -25,7 +25,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity } from '../../models/generalModel.js';
 import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
@@ -7495,26 +7495,75 @@ const rfqController = {
             remarks: null
           });
 
-          // ARC Route: Check if all products are finalized and trigger ARC approval
+          // ARC Route: Create ARC approval immediately for this product (TENDER ONLY)
           if (selectedRoute === 'ARC') {
-            const allFinalized = await rfqModel.checkAllProductsFinalizedForArc(rfq_id, t);
-
-            if (allFinalized && 
-                allFinalized.total_products > 0 && 
-                allFinalized.finalized_products === allFinalized.total_products) {
-              // All products are finalized - create ARC approval instance
-              try {
-                const arcApprovalResult = await startApprovalForArc(rfq_id, req.user.id, t);
+            try {
+              // Get RFQ details using model
+              const rfqData = await rfqModel.getRfqWithHospitalityDetails(rfq_id, t);
+              
+              // VALIDATION: ARC is only applicable for tenders (is_tender = 1)
+              if (!rfqData || rfqData.is_tender !== 1) {
+                throw new Error('ARC approval is only applicable for tenders (is_tender = 1). This RFQ is not a tender.');
+              }
+              
+              // VALIDATION: Must be hospitality RFQ
+              if (!rfqData.hospitality_company_id) {
+                throw new Error('ARC approval is only available for hospitality RFQs/Tenders');
+              }
+              
+              // Get rfq_product_id using model
+              const rfqProduct = await rfqModel.getRfqProductByVariant(rfq_id, product_variant_id, variant, t);
+              
+              if (!rfqProduct) {
+                throw new Error('RFQ product not found');
+              }
+              
+              const rfqProductId = rfqProduct.id;
+              
+              // Check if ARC approval already exists for this product using model
+              const existingArcApprovals = await getApprovalInstancesByEntity('ARC', rfqProductId, t);
+              const existingArcApproval = existingArcApprovals.find(inst => 
+                inst.status === 'PENDING' || inst.status === 'APPROVED'
+              );
+              
+              if (existingArcApproval) {
+                // ARC approval already exists for this product
+                console.log(`ARC approval already exists for product ${rfqProductId}`);
+                arcApprovalCreated = true;
+              } else {
+                // Create ARC approval instance for this product
+                const arcApprovalResult = await createApprovalInstance({
+                  entity_type: 'ARC',
+                  entity_id: rfqProductId, // Product-level, not RFQ-level
+                  hospitality_company_id: rfqData.hospitality_company_id,
+                  hotel_id: rfqData.hotel_id || null,
+                  initiated_by: req.user.id,
+                  metadata: {
+                    rfq_id: rfq_id,
+                    rfq_product_id: rfqProductId,
+                    rfq_number: rfq_no,
+                    product_variant_id: product_variant_id,
+                    variant: variant,
+                    vendor_id: vendor_id,
+                    quote_id: quote_id,
+                    is_tender: rfqData.is_tender,
+                    company_name: rfqData.company_name,
+                    triggered_by: 'product_finalization'
+                  },
+                  txContext: t
+                });
+                
                 if (arcApprovalResult) {
                   arcApprovalCreated = true;
                   // Record lifecycle event for ARC submission
                   await recordLifecycleEvent({
-                    entity_type: 'RFQ',
+                    entity_type: 'TENDER', // Always TENDER for ARC
                     entity_id: rfq_id,
                     stage: 'ARC_SUBMITTED',
                     action: 'SUBMIT_ARC',
                     performed_by: req.user.id,
                     metadata: {
+                      rfq_product_id: rfqProductId,
                       approval_instance_id: arcApprovalResult.instance?.id,
                       auto_approved: arcApprovalResult.autoApproved || false
                     },
@@ -7522,23 +7571,34 @@ const rfqController = {
                     txContext: t
                   });
                 }
-              } catch (arcError) {
-                // Log error but don't fail the finalization
-                console.error('Error creating ARC approval instance:', arcError);
-                // Still record that we attempted ARC submission
-                await recordLifecycleEvent({
-                  entity_type: 'RFQ',
-                  entity_id: rfq_id,
-                  stage: 'ARC_SUBMISSION_FAILED',
-                  action: 'SUBMIT_ARC',
-                  performed_by: req.user.id,
-                  metadata: {
-                    error: arcError.message
-                  },
-                  remarks: arcError.message,
-                  txContext: t
-                });
               }
+            } catch (arcError) {
+              // Log error but don't fail the finalization
+              console.error('Error creating ARC approval instance:', arcError);
+              // Try to get rfq_product_id using model
+              let rfqProductIdForError = null;
+              try {
+                const rfqProduct = await rfqModel.getRfqProductByVariant(rfq_id, product_variant_id, variant, t);
+                rfqProductIdForError = rfqProduct?.id || null;
+              } catch (e) {
+                // Ignore error getting product ID
+              }
+              
+              await recordLifecycleEvent({
+                entity_type: 'TENDER',
+                entity_id: rfq_id,
+                stage: 'ARC_SUBMISSION_FAILED',
+                action: 'SUBMIT_ARC',
+                performed_by: req.user.id,
+                metadata: {
+                  error: arcError.message,
+                  rfq_product_id: rfqProductIdForError,
+                  product_variant_id: product_variant_id,
+                  variant: variant
+                },
+                remarks: arcError.message,
+                txContext: t
+              });
             }
           }
 

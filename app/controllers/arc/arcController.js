@@ -2,7 +2,7 @@ import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
 import negotiationModel from '../../models/negotiationModel.js';
-import { getLifecycleHistory, getApprovalInstancesByEntity, submitApprovalAction, cancelApprovalInstance } from '../../models/generalModel.js';
+import { getLifecycleHistory, getApprovalInstancesByEntity, submitApprovalAction, cancelApprovalInstance, getApprovalInstanceById } from '../../models/generalModel.js';
 import db from '../../config/dbConn.js';
 
 const formatErrorResponse = (res, error) => {
@@ -23,6 +23,7 @@ const ArcController = {
   getTenderLifecycle: async (req, res) => {
     try {
       const rfq_id = parseInt(req.params.rfq_id);
+      const rfq_product_id = req.query.rfq_product_id ? parseInt(req.query.rfq_product_id) : null;
       const user_id = req.user.id;
 
       if (!rfq_id) {
@@ -43,12 +44,38 @@ const ArcController = {
         });
       }
 
-      // Get lifecycle history
-      const lifecycleHistory = await getLifecycleHistory('RFQ', rfq_id);
+      // VALIDATION: ARC is only applicable for tenders (is_tender = 1)
+      if (!rfq.is_tender || rfq.is_tender !== 1) {
+        return res.status(400).json({
+          status: 2,
+          message: 'ARC is only applicable for tenders (is_tender = 1)'
+        });
+      }
 
-      // Get ARC approval instances
+      // Get lifecycle history
+      const lifecycleHistory = await getLifecycleHistory('TENDER', rfq_id);
+
+      // Get ARC approval instances (product-level)
       const entityType = 'ARC';
-      const arcApprovalInstances = await getApprovalInstancesByEntity(entityType, rfq_id);
+      let arcApprovalInstances = [];
+      
+      if (rfq_product_id) {
+        // Get single product ARC approval
+        arcApprovalInstances = await getApprovalInstancesByEntity(entityType, rfq_product_id);
+      } else {
+        // Get all product ARC approvals for this RFQ using model
+        const products = await rfqModel.getRfqProductIds(rfq_id);
+        
+        const allInstances = await Promise.all(
+          products.map(async (product) => {
+            const instances = await getApprovalInstancesByEntity(entityType, product.id);
+            return instances.map(inst => ({ ...inst, rfq_product_id: product.id }));
+          })
+        );
+        
+        arcApprovalInstances = allInstances.flat();
+      }
+      
       const pendingArcApproval = arcApprovalInstances.find(inst => inst.status === 'PENDING');
 
       // Get all quotes with vendor details using model
@@ -123,14 +150,14 @@ const ArcController = {
    */
   getRfqList: async (req, res) => {
     try {
-      const { page = 1, limit = 50, project_id, is_tender } = req.query;
+      const { page = 1, limit = 50, project_id } = req.query;
 
-      // Get RFQs pending ARC approval using model
+      // Get products with ARC approvals (tenders only)
       const result = await rfqModel.getRfqsPendingArcApproval({
         page: parseInt(page),
         limit: parseInt(limit),
         project_id,
-        is_tender
+        is_tender: 1 // Only tenders
       });
 
       return res.status(200).json({
@@ -153,7 +180,7 @@ const ArcController = {
   performAction: async (req, res) => {
     try {
       const rfq_id = parseInt(req.params.rfq_id);
-      const { action, target_stage, remarks, approval_instance_id, approval_instance_step_id } = req.body;
+      const { action, target_stage, remarks, approval_instance_id, approval_instance_step_id, rfq_product_id } = req.body;
       const user_id = req.user.id;
 
       if (!rfq_id || !action) {
@@ -172,7 +199,7 @@ const ArcController = {
         });
       }
 
-      // Get RFQ to determine entity type using existing model function
+      // Get RFQ to validate tender
       const rfq = await rfqModel.getRfqDetailsById(rfq_id);
 
       if (!rfq) {
@@ -182,19 +209,43 @@ const ArcController = {
         });
       }
 
+      // VALIDATION: ARC is only applicable for tenders (is_tender = 1)
+      if (!rfq.is_tender || rfq.is_tender !== 1) {
+        return res.status(400).json({
+          status: 2,
+          message: 'ARC is only applicable for tenders (is_tender = 1)'
+        });
+      }
+
       // Use 'ARC' as entity type for ARC approvals
       const entityType = 'ARC';
 
-      // Get approval instances for this RFQ
-      const approvalInstances = await getApprovalInstancesByEntity(entityType, rfq_id);
+      // Get approval instances (product-level)
+      let approvalInstances = [];
+      let pendingInstance = null;
       
-      // Find the pending approval instance
-      const pendingInstance = approvalInstances.find(inst => inst.status === 'PENDING');
+      if (rfq_product_id) {
+        // Get approval instance for specific product
+        approvalInstances = await getApprovalInstancesByEntity(entityType, rfq_product_id);
+        pendingInstance = approvalInstances.find(inst => inst.status === 'PENDING');
+      } else {
+        // Get all product ARC approvals for this RFQ using model
+        const products = await rfqModel.getRfqProductIds(rfq_id);
+        
+        const allInstances = await Promise.all(
+          products.map(async (product) => {
+            return await getApprovalInstancesByEntity(entityType, product.id);
+          })
+        );
+        
+        approvalInstances = allInstances.flat();
+        pendingInstance = approvalInstances.find(inst => inst.status === 'PENDING');
+      }
       
       if (!pendingInstance && (action === 'approve' || action === 'reject')) {
         return res.status(400).json({
           status: 2,
-          message: 'No pending ARC approval instance found for this RFQ'
+          message: 'No pending ARC approval instance found' + (rfq_product_id ? ` for product ${rfq_product_id}` : ' for this RFQ')
         });
       }
 
@@ -232,13 +283,18 @@ const ArcController = {
             stage = 'ARC_PENDING';
           }
 
+          // Get rfq_product_id from approval instance metadata
+          const instanceMetadata = pendingInstance?.metadata || {};
+          const rfq_product_id = instanceMetadata.rfq_product_id || (rfq_product_id ? rfq_product_id : null);
+          
           await recordLifecycleEvent({
-            entity_type: 'RFQ',
+            entity_type: 'TENDER', // Always TENDER for ARC
             entity_id: rfq_id,
             stage,
             action: actionType,
             performed_by: user_id,
             metadata: {
+              rfq_product_id: rfq_product_id,
               approval_instance_id: instanceId,
               step_status: result.step_status,
               instance_status: result.instance_status,
@@ -286,13 +342,17 @@ const ArcController = {
 
         // Record lifecycle event
         const stage = `SENT_TO_${target_stage.toUpperCase()}`;
+        const instanceMetadata = pendingInstance?.metadata || {};
+        const rfq_product_id = instanceMetadata.rfq_product_id || (rfq_product_id ? rfq_product_id : null);
+        
         await recordLifecycleEvent({
-          entity_type: 'RFQ',
+          entity_type: 'TENDER', // Always TENDER for ARC
           entity_id: rfq_id,
           stage,
           action: 'SEND_TO',
           performed_by: user_id,
           metadata: {
+            rfq_product_id: rfq_product_id,
             target_stage: target_stage,
             cancelled_instance_id: pendingInstance?.id || null
           },
@@ -312,6 +372,57 @@ const ArcController = {
           }
         });
       }
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * Get ARC document URL from approval instance metadata
+   * GET /arc/document/:approval_instance_id
+   */
+  getArcDocument: async (req, res) => {
+    try {
+      const approval_instance_id = parseInt(req.params.approval_instance_id);
+      
+      if (!approval_instance_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'approval_instance_id is required'
+        });
+      }
+      
+      // Get approval instance using model
+      const instance = await getApprovalInstanceById(approval_instance_id, 'ARC');
+      
+      if (!instance) {
+        return res.status(404).json({
+          status: 2,
+          message: 'ARC approval instance not found'
+        });
+      }
+      
+      const metadata = instance.metadata || {};
+      const documentUrl = metadata.award_document_url;
+      
+      if (!documentUrl) {
+        return res.status(404).json({
+          status: 2,
+          message: 'ARC document not yet generated'
+        });
+      }
+      
+      return res.status(200).json({
+        status: 1,
+        data: {
+          document_url: documentUrl,
+          generated_at: metadata.award_document_generated_at,
+          generated_by: metadata.award_document_generated_by,
+          approval_instance_id: instance.id,
+          status: instance.status
+        }
+      });
     } catch (error) {
       logError(error);
       return formatErrorResponse(res, error);

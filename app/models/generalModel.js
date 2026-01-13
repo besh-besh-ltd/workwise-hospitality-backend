@@ -2188,59 +2188,7 @@ export async function submitApprovalAction({
                   txContext: t
                 });
 
-                // Check if all products are finalized and trigger ARC if needed
-                const allFinalized = await t.oneOrNone(`
-                  SELECT
-                    (SELECT COUNT(DISTINCT rp.id) FROM tbl_rfq_products rp WHERE rp.rfq_id = $1) as total_products,
-                    (SELECT COUNT(DISTINCT qf.product_variant_id) FROM tbl_quote_finalization qf WHERE qf.rfq_id = $1) as finalized_products
-                `, [rfq_id]);
-
-                if (allFinalized &&
-                    parseInt(allFinalized.total_products) > 0 &&
-                    parseInt(allFinalized.finalized_products) >= parseInt(allFinalized.total_products)) {
-                  // All products finalized - check if ARC approval already exists
-                  const existingArcApproval = await t.oneOrNone(`
-                    SELECT id FROM tbl_approval_instances
-                    WHERE entity_type = 'ARC' AND entity_id = $1 AND status IN ('PENDING', 'APPROVED')
-                  `, [rfq_id]);
-
-                  if (!existingArcApproval) {
-                    try {
-                      // Create ARC approval instance
-                      await createApprovalInstance({
-                        entity_type: 'ARC',
-                        entity_id: rfq_id,
-                        hospitality_company_id: rfq.hospitality_company_id,
-                        hotel_id: rfq.hotel_id || null,
-                        initiated_by: approver_user_id,
-                        metadata: {
-                          rfq_id: rfq_id,
-                          rfq_number: rfq.rfq_no,
-                          is_tender: rfq.is_tender,
-                          company_name: rfq.company_name,
-                          triggered_by: 'negotiation_quote_approval'
-                        },
-                        txContext: t
-                      });
-
-                      // Record ARC submission lifecycle event
-                      await recordLifecycleEvent({
-                        entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
-                        entity_id: rfq_id,
-                        stage: 'ARC_SUBMITTED',
-                        action: 'SUBMIT_FOR_APPROVAL',
-                        performed_by: approver_user_id,
-                        metadata: {
-                          rfq_id: rfq_id,
-                          triggered_by: 'negotiation_quote_approval'
-                        },
-                        txContext: t
-                      });
-                    } catch (arcError) {
-                      console.error('Error creating ARC approval instance:', arcError.message);
-                    }
-                  }
-                }
+                // Note: ARC creation is now handled immediately during product finalization, not here
               }
             }
           }
@@ -2327,6 +2275,74 @@ export async function submitApprovalAction({
         } catch (techEvalError) {
           // Log but don't fail the transaction
           console.error('Error auto-accepting/rejecting vendors after technical evaluation approval:', techEvalError);
+        }
+      }
+
+      // Generate and send ARC document when ARC approval completes
+      if (instance.entity_type === 'ARC' && instance.status === 'APPROVED') {
+        try {
+          const rfq_product_id = instance.entity_id; // Now product-level, not RFQ-level
+          const metadata = instance.metadata || {};
+          const rfq_id = metadata.rfq_id;
+          
+          // Validate RFQ is a tender
+          const rfqData = await t.oneOrNone(`
+            SELECT is_tender FROM tbl_rfq WHERE id = $1
+          `, [rfq_id]);
+          
+          if (!rfqData || rfqData.is_tender !== 1) {
+            throw new Error('ARC document generation is only applicable for tenders (is_tender = 1)');
+          }
+          
+          // Import ARC document controller
+          const { generateAwardDocument, sendAwardDocumentToVendor } = await import('../controllers/arc/arcDocumentController.js');
+          
+          // Generate PDF document for this product
+          const pdfResult = await generateAwardDocument(rfq_product_id, t);
+          
+          if (pdfResult.ok) {
+            // Upload to S3 with arc-documents folder
+            const fileName = `arc-award-${metadata.rfq_number || rfq_id}-product-${rfq_product_id}-${Date.now()}.pdf`;
+            const s3Key = `arc-documents/${fileName}`;
+            const s3Result = await uploadToS3(pdfResult.absolutePath, s3Key);
+            
+            if (s3Result.ok) {
+              // Update approval instance metadata with document URL
+              const updatedMetadata = {
+                ...metadata,
+                award_document_url: s3Result.url,
+                award_document_generated_at: new Date().toISOString(),
+                award_document_generated_by: approver_user_id
+              };
+              
+              await t.none(`
+                UPDATE tbl_approval_instances
+                SET metadata = $1
+                WHERE id = $2
+              `, [JSON.stringify(updatedMetadata), approval_instance_id]);
+              
+              // Send email to vendor for this product
+              await sendAwardDocumentToVendor(rfq_product_id, s3Result.url, t);
+              
+              // Record lifecycle event
+              await recordLifecycleEvent({
+                entity_type: 'TENDER',
+                entity_id: rfq_id,
+                stage: 'ARC_DOCUMENT_GENERATED',
+                action: 'GENERATE_DOCUMENT',
+                performed_by: approver_user_id,
+                metadata: {
+                  rfq_product_id: rfq_product_id,
+                  document_url: s3Result.url,
+                  approval_instance_id: approval_instance_id
+                },
+                txContext: t
+              });
+            }
+          }
+        } catch (arcDocError) {
+          // Log but don't fail the transaction
+          console.error('Error generating ARC document:', arcDocError);
         }
       }
 
@@ -2568,6 +2584,32 @@ export async function getLifecycleHistory(entity_type, entity_id, txContext = nu
      ORDER BY lh.created_at ASC`,
     [entity_type, entity_id]
   );
+}
+
+/**
+ * Get approval instance by ID
+ * @param {number} instance_id - Approval instance ID
+ * @param {string} entity_type - Optional entity type filter
+ * @param {Object} txContext - Optional transaction context
+ * @returns {Promise<Object>} Approval instance record
+ */
+export async function getApprovalInstanceById(instance_id, entity_type = null, txContext = null) {
+  const dbContext = txContext || db;
+  
+  let query = `
+    SELECT id, entity_type, entity_id, metadata, status, approval_policy_id, 
+           hospitality_company_id, hotel_id, initiated_by, created_at, completed_at
+    FROM tbl_approval_instances
+    WHERE id = $1
+  `;
+  const params = [instance_id];
+  
+  if (entity_type) {
+    query += ` AND entity_type = $2`;
+    params.push(entity_type);
+  }
+  
+  return dbContext.oneOrNone(query, params);
 }
 
 export default generalModel;

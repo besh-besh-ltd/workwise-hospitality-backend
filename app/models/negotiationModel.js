@@ -500,6 +500,23 @@ const negotiationModel = {
        ORDER BY nr.round_number DESC, nrq.quoted_price ASC`,
       [rfqProductId]
     );
+  },
+
+  /**
+   * Check if quote already exists for a vendor in a round
+   * @param {number} negotiation_round_id - Negotiation round ID
+   * @param {number} vendor_id - Vendor ID
+   * @param {number} rfq_product_id - RFQ Product ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Existing quote if found
+   */
+  getExistingRoundQuote: async (negotiation_round_id, vendor_id, rfq_product_id, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.oneOrNone(
+      `SELECT id, submitted_at FROM tbl_negotiation_round_quotes 
+       WHERE negotiation_round_id = $1 AND vendor_id = $2 AND rfq_product_id = $3`,
+      [negotiation_round_id, vendor_id, rfq_product_id]
+    );
   }
 };
 

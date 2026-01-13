@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ARC Award Document - {{rfq.rfq_no}}</title>
+  <style>
+    @page { size: A4; margin: 12mm; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Times New Roman', serif; font-size: 12px; color: #000; line-height: 1.6; }
+    
+    .document { 
+      background: white; 
+      width: 100%; 
+      max-width: 210mm; 
+      margin: 0 auto; 
+      padding: 20px;
+    }
+    
+    .title { 
+      text-align: center; 
+      font-size: 18px; 
+      font-weight: bold; 
+      margin-bottom: 20px;
+      text-transform: uppercase;
+      text-decoration: underline;
+    }
+    
+    .header-info {
+      margin-bottom: 20px;
+      text-align: center;
+    }
+    
+    .parties {
+      margin: 20px 0;
+    }
+    
+    .party-section {
+      margin-bottom: 15px;
+    }
+    
+    .party-label {
+      font-weight: bold;
+      margin-bottom: 5px;
+    }
+    
+    .section {
+      margin: 20px 0;
+    }
+    
+    .section-title {
+      font-weight: bold;
+      font-size: 13px;
+      margin-bottom: 8px;
+      margin-top: 15px;
+    }
+    
+    .section-content {
+      margin-left: 15px;
+      text-align: justify;
+    }
+    
+    .subsection {
+      margin-left: 20px;
+      margin-top: 8px;
+    }
+    
+    .subsection-title {
+      font-weight: bold;
+      margin-bottom: 5px;
+    }
+    
+    .list-item {
+      margin-left: 30px;
+      margin-top: 5px;
+    }
+    
+    .signature-section {
+      margin-top: 40px;
+      page-break-inside: avoid;
+    }
+    
+    .signature-block {
+      margin-top: 60px;
+      width: 45%;
+      display: inline-block;
+      vertical-align: top;
+    }
+    
+    .signature-line {
+      border-top: 1px solid #000;
+      margin-top: 50px;
+      padding-top: 5px;
+    }
+    
+    .witness-section {
+      margin-top: 40px;
+      page-break-inside: avoid;
+    }
+    
+    .witness-block {
+      width: 45%;
+      display: inline-block;
+      vertical-align: top;
+      margin-top: 20px;
+    }
+    
+    .effective-date {
+      text-align: right;
+      margin-bottom: 20px;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <div class="document">
+    <div class="title">
+      PROCUREMENT SERVICES & PRODUCT SUPPLY AGREEMENT
+    </div>
+    
+    <div class="header-info">
+      <p>This Procurement Services & Supply of Material (products) Agreement ("Agreement") is executed on this <strong>{{effective_date}}</strong> ("Effective Date"), by and between:</p>
+    </div>
+    
+    <div class="parties">
+      <div class="party-section">
+        <div class="party-label">Phileein Hospitality Pvt. Ltd.</div>
+        <div class="section-content">
+          a company incorporated under the Companies Act, having its registered office at {{service_provider.address}}<br>
+          (hereinafter "Phileein" or the "Service Provider")
+        </div>
+      </div>
+      
+      <div style="text-align: center; margin: 15px 0; font-weight: bold;">AND</div>
+      
+      <div class="party-section">
+        <div class="party-label">{{hotel.name}}</div>
+        <div class="section-content">
+          having its registered office at {{hotel.address}}<br>
+          (hereinafter "{{hotel.name}}" or the "Hotel")
+        </div>
+      </div>
+    </div>
+    
+    <div class="section">
+      <div class="section-content">
+        The Parties hereby agree as follows:
+      </div>
+    </div>
+    
+    <!-- Section 1: SCOPE OF SERVICES -->
+    <div class="section">
+      <div class="section-title">1. SCOPE OF SERVICES</div>
+      
+      <div class="subsection">
+        <div class="subsection-title">1.1 Vendor Identification & Registration</div>
+        <div class="section-content">
+          Phileein shall identify, assess, verify, and register competent and qualified vendors across India in their procurement software, ensuring that only vendors meeting the required standards are approved for providing services or supplies.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">1.2 Rate Negotiation</div>
+        <div class="section-content">
+          Phileein shall negotiate competitive rates with empanelled vendors and present rate proposals to the authorized representative of {{hotel.name}} for approval. Final approval shall rest solely with the authorized representative.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">1.3 PAN‑India Procurement Coordination</div>
+        <div class="section-content">
+          Phileein shall coordinate the supply of materials through approved vendors to all PAN-India units of {{hotel.name}}.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">1.4 Annual Contract Management</div>
+        <div class="section-content">
+          Phileein shall facilitate yearly contracts between the Hotel and selected vendors and monitor compliance.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">1.5 Platform Access</div>
+        <div class="section-content">
+          Phileein shall provide full access to the Phileein procurement platform.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">1.6 Purchase Order Support</div>
+        <div class="section-content">
+          Phileein may only assist in placing orders by having a mutual acceptance whenever required; however, all commercial liability, including payment obligations, order accuracy, delivery follow-ups, and tracking of orders, shall remain solely with the respective Hotel.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">1.7 Procurement Categories</div>
+        <div class="section-content">
+          Phileein shall support the procurement of goods and services under the following categories:
+          <div class="list-item">i) Food & Beverage (F&B) Supplies.</div>
+          <div class="list-item">ii) Kitchen Equipment & Smallwares.</div>
+          <div class="list-item">iii) Housekeeping Supplies.</div>
+          <div class="list-item">iv) Engineering, Maintenance & Facility Management.</div>
+          <div class="list-item">v) IT & Technology.</div>
+          <div class="list-item">vi) Furniture, Fixture & Equipment (FF&E)</div>
+          <div class="list-item">vii) Operating Supplies & Equipment (OS&E).</div>
+          <div class="list-item">viii) Laundry & Linen Management.</div>
+          <div class="list-item">ix) Security & Safety Services.</div>
+          <div class="list-item">x) Manpower & Outsourced Services.</div>
+          <div class="list-item">xi) Travel, Transportation & Logistics.</div>
+          <div class="list-item">xii) Marketing, Sales & PR Services.</div>
+          <div class="list-item">xiii) Professional & Consulting Services.</div>
+          <div class="list-item">xiv) Landscaping & Horticulture.</div>
+          <div class="list-item">xv) Waste Management & Environmental Services.</div>
+          <div class="list-item">xvi) Printing & Stationery.</div>
+          <div class="list-item">xvii) General Supplies.</div>
+          <div class="list-item">xviii) Renovation, Refurbishment & Capital Projects.</div>
+          <div class="list-item">xix) Any additional categories requested by the hotel group or the individual hotel that are not covered in the above-mentioned list.</div>
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">1.8 Dual Role of Phileein Hospitality</div>
+        <div class="section-content">
+          Both Parties acknowledge and agree that Phileein Hospitality shall not be restricted to providing procurement-related services alone, but may also supply products from its own portfolio ("Vendor Kitty") as an approved vendor. The Hotel Group/Individual Hotel further acknowledges that the Service Provider may remain registered as a vendor within the procurement software platform for the purpose of offering such products. Such dual role shall not constitute a conflict of interest, provided that any purchase made by the Hotel from Phileein Hospitality in its capacity as a vendor shall strictly comply with the Hotel's standard procurement policies, internal approval processes, competitive commercial evaluations, and any other applicable guidelines prescribed by the Hotel.
+        </div>
+      </div>
+    </div>
+    
+    <!-- Section 2: REGISTRATION & FEES -->
+    <div class="section">
+      <div class="section-title">2. REGISTRATION & FEES</div>
+      
+      <div class="subsection">
+        <div class="subsection-title">2.1</div>
+        <div class="section-content">
+          {{hotel.name}} agrees to ensure that all its existing hotels, as well as any hotels added in the future, are duly registered on the Phileein procurement platform.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">2.2</div>
+        <div class="section-content">
+          {{hotel.name}} agrees to pay the one-time registration fee for each of its hotels, as reflected on the Phileein Platform. Such payment may be made either centrally by {{hotel.name}} or individually by the respective hotel, as mutually agreed.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">2.3</div>
+        <div class="section-content">
+          {{hotel.name}} agrees to pay the annual renewal fee for each of its hotels, as reflected on the Phileein Platform. Such payment may be made either centrally by {{hotel.name}} or individually by the respective hotel, as mutually decided.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">2.4</div>
+        <div class="section-content">
+          All fees are non‑refundable.
+        </div>
+      </div>
+    </div>
+    
+    <!-- Section 3: TERM & RENEWAL -->
+    <div class="section">
+      <div class="section-title">3. TERM & RENEWAL</div>
+      
+      <div class="subsection">
+        <div class="subsection-title">3.1 Term:</div>
+        <div class="section-content">36 months from Effective Date.</div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">3.2 Auto‑renewal:</div>
+        <div class="section-content">additional 12‑month terms unless 60 days' prior notice is given.</div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">3.3</div>
+        <div class="section-content">Financial terms may be revised at renewal.</div>
+      </div>
+    </div>
+    
+    <!-- Section 4: PROCUREMENT EXCLUSIVITY -->
+    <div class="section">
+      <div class="section-title">4. PROCUREMENT EXCLUSIVITY</div>
+      
+      <div class="subsection">
+        <div class="subsection-title">4.1</div>
+        <div class="section-content">
+          All procurement under Clause 1.7 shall be routed only through vendors approved under Phileein.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">4.2</div>
+        <div class="section-content">
+          Any outside procurement without approval shall attract a breach fee of 2% of procurement value.
+        </div>
+      </div>
+    </div>
+    
+    <!-- Section 5: SERVICE LEVEL STANDARDS -->
+    <div class="section">
+      <div class="section-title">5. SERVICE LEVEL STANDARDS</div>
+      
+      <div class="subsection">
+        <div class="subsection-title">5.1 Phileein Responsibilities:</div>
+        <div class="section-content">
+          <div class="list-item">a) Vendor response within 48 hours.</div>
+          <div class="list-item">b) Rate negotiation within reasonable timelines.</div>
+          <div class="list-item">c) Coordination for timely delivery.</div>
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">5.2 Vendor Obligations:</div>
+        <div class="section-content">
+          <div class="list-item">a) Maintain agreed quality standards.</div>
+          <div class="list-item">b) Deliver on time.</div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Section 6: PAYMENT TERMS -->
+    <div class="section">
+      <div class="section-title">6. PAYMENT TERMS</div>
+      
+      <div class="subsection">
+        <div class="subsection-title">6.1</div>
+        <div class="section-content">
+          All payments for purchases shall be made directly by the Hotel to the vendors.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">6.2</div>
+        <div class="section-content">
+          Phileein shall not be liable for overdue payments, vendor credit, or disputes arising from Hotel‑vendor payments.
+        </div>
+      </div>
+    </div>
+    
+    <!-- Section 7: INDEMNITY -->
+    <div class="section">
+      <div class="section-title">7. INDEMNITY</div>
+      
+      <div class="subsection">
+        <div class="subsection-title">7.1 Hotel Indemnity</div>
+        <div class="section-content">
+          The Hotel shall indemnify Phileein against:
+          <div class="list-item">a) Non‑payment to vendors;</div>
+          <div class="list-item">b) Misuse/defects arising from Hotel operations;</div>
+          <div class="list-item">c) Internal disputes of the Hotel.</div>
+          <div class="list-item">d) Any claims, liabilities, losses, or consequences arising out of the involvement of the Hotel's staff or Group staff in any commercial discussions or negotiations shall be the sole responsibility of the Hotel/Hotel Group. Phileein shall not be held liable for any commitments, representations, concessions, or commercial decisions made by such staff during the course of these interactions.</div>
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">7.2 Phileein Indemnity</div>
+        <div class="section-content">
+          Phileein shall indemnify the Hotel against:
+          <div class="list-item">a) Misrepresentation of vendor credentials;</div>
+          <div class="list-item">b) Fraudulent activities by Phileein staff.</div>
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">7.3</div>
+        <div class="section-content">
+          No Party shall be liable for indirect, incidental, or consequential damages.
+        </div>
+      </div>
+    </div>
+    
+    <!-- Section 8: LIMITATION OF LIABILITY -->
+    <div class="section">
+      <div class="section-title">8. LIMITATION OF LIABILITY</div>
+      <div class="section-content">
+        Phileein's liability shall not exceed the annual fees paid by the respective Hotel or by the Group.
+      </div>
+    </div>
+    
+    <!-- Section 9: TERMINATION -->
+    <div class="section">
+      <div class="section-title">9. TERMINATION</div>
+      
+      <div class="subsection">
+        <div class="subsection-title">9.1</div>
+        <div class="section-content">
+          Either Party may terminate with 60 days' written notice.
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">9.2</div>
+        <div class="section-content">
+          Immediate termination for:
+          <div class="list-item">a) Fraud;</div>
+          <div class="list-item">b) Misconduct;</div>
+          <div class="list-item">c) Breach not cured within 15 days.</div>
+        </div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">9.3</div>
+        <div class="section-content">
+          All outstanding vendor dues must be cleared upon termination by the respective hotel.
+        </div>
+      </div>
+    </div>
+    
+    <!-- Section 10: CONFIDENTIALITY -->
+    <div class="section">
+      <div class="section-title">10. CONFIDENTIALITY</div>
+      <div class="section-content">
+        Both Parties shall maintain strict confidentiality of all operational, vendor, pricing, and procurement‑related data.
+      </div>
+    </div>
+    
+    <!-- Section 11: DISPUTE RESOLUTION -->
+    <div class="section">
+      <div class="section-title">11. DISPUTE RESOLUTION</div>
+      
+      <div class="subsection">
+        <div class="subsection-title">11.1</div>
+        <div class="section-content">Initial resolution via mutual discussions.</div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">11.2</div>
+        <div class="section-content">If unresolved in 30 days, proceed to mediation.</div>
+      </div>
+      
+      <div class="subsection">
+        <div class="subsection-title">11.3</div>
+        <div class="section-content">
+          Failing mediation, arbitration under the Arbitration & Conciliation Act, 1996:
+          <div class="list-item">• Sole arbitrator mutually appointed</div>
+          <div class="list-item">• Venue: Mumbai</div>
+          <div class="list-item">• Language: English</div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Section 12: GOVERNING LAW -->
+    <div class="section">
+      <div class="section-title">12. GOVERNING LAW</div>
+      <div class="section-content">
+        The Agreement is governed by Indian law. Courts in Mumbai shall have exclusive jurisdiction.
+      </div>
+    </div>
+    
+    <!-- Signatures -->
+    <div class="signature-section">
+      <p style="margin-bottom: 20px; text-align: center;">
+        IN WITNESS WHEREOF, the Parties have executed this Agreement on the day, month, and year first written above.
+      </p>
+      
+      <div style="display: flex; justify-content: space-between;">
+        <div class="signature-block">
+          <div style="font-weight: bold; margin-bottom: 10px;">For Phileein Hospitality Pvt. Ltd.</div>
+          <div class="signature-line">
+            <div>Name: _________________________</div>
+            <div style="margin-top: 5px;">Designation: _________________________</div>
+            <div style="margin-top: 5px;">Signature: _________________________</div>
+            <div style="margin-top: 5px;">Date: _________________________</div>
+          </div>
+        </div>
+        
+        <div class="signature-block">
+          <div style="font-weight: bold; margin-bottom: 10px;">For {{hotel.name}}</div>
+          <div class="signature-line">
+            <div>Name: _________________________</div>
+            <div style="margin-top: 5px;">Designation: _________________________</div>
+            <div style="margin-top: 5px;">Signature: _________________________</div>
+            <div style="margin-top: 5px;">Date: _________________________</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Witnesses -->
+    <div class="witness-section">
+      <div style="font-weight: bold; margin-bottom: 10px;">WITNESSES</div>
+      <div style="display: flex; justify-content: space-between;">
+        <div class="witness-block">
+          <div style="font-weight: bold; margin-bottom: 5px;">Witness 1:</div>
+          <div>Name: _________________________</div>
+          <div style="margin-top: 5px;">Address: _________________________</div>
+          <div style="margin-top: 5px;">Signature: _________________________</div>
+        </div>
+        
+        <div class="witness-block">
+          <div style="font-weight: bold; margin-bottom: 5px;">Witness 2:</div>
+          <div>Name: _________________________</div>
+          <div style="margin-top: 5px;">Address: _________________________</div>
+          <div style="margin-top: 5px;">Signature: _________________________</div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Product Details -->
+    <div class="section" style="margin-top: 30px; border-top: 2px solid #000; padding-top: 15px;">
+      <div class="section-title">AWARDED PRODUCT DETAILS</div>
+      <div class="section-content">
+        <div><strong>RFQ Number:</strong> {{rfq.rfq_no}}</div>
+        <div style="margin-top: 5px;"><strong>Product:</strong> {{product.name}}</div>
+        <div style="margin-top: 5px;"><strong>Category:</strong> {{product.category}}</div>
+        <div style="margin-top: 5px;"><strong>Quantity:</strong> {{product.quantity}} {{product.unit}}</div>
+        <div style="margin-top: 5px;"><strong>Unit Price:</strong> ₹{{product.unit_price}}</div>
+        <div style="margin-top: 5px;"><strong>Total Value:</strong> ₹{{product.total_price}}</div>
+        <div style="margin-top: 10px;"><strong>Awarded Vendor:</strong> {{vendor.name}}</div>
+        <div style="margin-top: 5px;"><strong>Vendor Address:</strong> {{vendor.address}}</div>
+        {{#if vendor.gstin}}
+        <div style="margin-top: 5px;"><strong>Vendor GSTIN:</strong> {{vendor.gstin}}</div>
+        {{/if}}
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+

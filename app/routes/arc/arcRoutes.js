@@ -35,5 +35,14 @@ ArcRoutes.post(
   arcController.performAction
 );
 
+// Get ARC document URL
+ArcRoutes.get(
+  '/document/:approval_instance_id',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management
+  hospitalityMiddleware.checkHospitality(false),
+  arcController.getArcDocument
+);
+
 export default ArcRoutes;
 
