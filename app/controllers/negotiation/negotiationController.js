@@ -172,7 +172,7 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
 const startApprovalForNegotiationQuotes = async (rfqProductId, rfqId, selectedQuotes, rfqData, userId, txContext) => {
   try {
     const result = await createApprovalInstance({
-      entity_type: 'NEGOTIATION',
+      entity_type: 'NEGOTIATION_QUOTE',
       entity_id: rfqProductId,
       hospitality_company_id: rfqData.hospitality_company_id,
       hotel_id: rfqData.hotel_id || null,
@@ -973,7 +973,7 @@ const NegotiationController = {
       }
 
       // 4. Check for existing pending approval for this product
-      const existingApprovals = await getApprovalInstancesByEntity('NEGOTIATION', rfq_product_id);
+      const existingApprovals = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfq_product_id);
       const pendingApproval = existingApprovals.find(a => a.status === 'PENDING');
       if (pendingApproval) {
         return res.status(400).json({
@@ -1120,7 +1120,7 @@ const NegotiationController = {
         });
       }
 
-      const instances = await getApprovalInstancesByEntity('NEGOTIATION', rfq_product_id);
+      const instances = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfq_product_id);
       const latestInstance = instances[0]; // Already ordered by created_at DESC
 
       if (!latestInstance) {
