@@ -199,7 +199,7 @@ const startApprovalForNegotiationQuotes = async (rfqProductId, rfqId, selectedQu
   } catch (error) {
     // If no policy exists, throw error (don't auto-approve)
     if (error.message && error.message.includes('No approval policy found')) {
-      throw new Error('No approval policy found for NEGOTIATION. Please configure an approval policy before submitting quotes for approval.');
+      throw new Error('No approval policy found for Quotes Approval. Please configure an approval policy before submitting quotes for approval.');
     }
     throw error;
   }
@@ -1145,6 +1145,184 @@ const NegotiationController = {
             completed_at: latestInstance.completed_at
           }
         }
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * Approve negotiation quotes
+   * POST /negotiation/quotes/:rfq_product_id/approve
+   */
+  approveQuotes: async (req, res) => {
+    try {
+      const rfq_product_id = parseInt(req.params.rfq_product_id);
+      const user_id = req.user.id;
+      const { remarks } = req.body;
+
+      if (!rfq_product_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'rfq_product_id is required'
+        });
+      }
+
+      // 1. Get pending approval instance
+      const instances = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfq_product_id);
+      const pendingInstance = instances.find(i => i.status === 'PENDING');
+
+      if (!pendingInstance) {
+        return res.status(400).json({
+          status: 2,
+          message: 'No pending quote approval found for this product'
+        });
+      }
+
+      // 2. Submit approval action
+      const result = await submitApprovalAction({
+        approval_instance_id: pendingInstance.id,
+        approver_user_id: user_id,
+        action: 'APPROVE',
+        comment: remarks || null
+      });
+
+      const isFullyApproved = result.instance_status === 'APPROVED';
+
+      // 3. If fully approved, add to finalization
+      if (isFullyApproved) {
+        const { getApprovalInstanceById } = await import('../../models/generalModel.js');
+        const instance = await getApprovalInstanceById(pendingInstance.id, 'NEGOTIATION_QUOTE');
+        const metadata = instance?.metadata || {};
+
+        if (metadata.rfq_id && metadata.selected_quotes?.length > 0) {
+          const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${metadata.rfq_id}`);
+          const rfqData = rfq[0];
+
+          // Convert metadata quotes to format expected by addQuotesToFinalization
+          const quotesForFinalization = metadata.selected_quotes.map(q => ({
+            id: q.quote_id,
+            vendor_id: q.vendor_id
+          }));
+
+          await addQuotesToFinalization(
+            metadata.rfq_id,
+            rfq_product_id,
+            quotesForFinalization,
+            user_id,
+            rfqData
+          );
+
+          // Record lifecycle event
+          await recordLifecycleEvent({
+            entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+            entity_id: metadata.rfq_id,
+            stage: 'NEGOTIATION_QUOTES_APPROVED',
+            action: 'APPROVE',
+            performed_by: user_id,
+            metadata: {
+              approval_instance_id: pendingInstance.id,
+              rfq_product_id,
+              quote_ids: metadata.selected_quotes.map(q => q.quote_id),
+              vendor_ids: metadata.selected_quotes.map(q => q.vendor_id)
+            }
+          });
+        }
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          approved: true,
+          fully_approved: isFullyApproved,
+          finalized: isFullyApproved,
+          instance_status: result.instance_status,
+          next_step: result.next_step || null
+        },
+        message: isFullyApproved
+          ? 'Quotes fully approved and finalized'
+          : 'Approval recorded. Waiting for other approvers.'
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  /**
+   * Reject negotiation quotes
+   * POST /negotiation/quotes/:rfq_product_id/reject
+   */
+  rejectQuotes: async (req, res) => {
+    try {
+      const rfq_product_id = parseInt(req.params.rfq_product_id);
+      const user_id = req.user.id;
+      const { remarks } = req.body;
+
+      if (!rfq_product_id) {
+        return res.status(400).json({
+          status: 2,
+          message: 'rfq_product_id is required'
+        });
+      }
+
+      if (!remarks || remarks.trim().length === 0) {
+        return res.status(400).json({
+          status: 2,
+          message: 'Remarks are required for rejection'
+        });
+      }
+
+      // 1. Get pending approval instance
+      const instances = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfq_product_id);
+      const pendingInstance = instances.find(i => i.status === 'PENDING');
+
+      if (!pendingInstance) {
+        return res.status(400).json({
+          status: 2,
+          message: 'No pending quote approval found for this product'
+        });
+      }
+
+      // 2. Get instance metadata for lifecycle event
+      const { getApprovalInstanceById } = await import('../../models/generalModel.js');
+      const instance = await getApprovalInstanceById(pendingInstance.id, 'NEGOTIATION_QUOTE');
+      const metadata = instance?.metadata || {};
+
+      // 3. Submit rejection
+      await submitApprovalAction({
+        approval_instance_id: pendingInstance.id,
+        approver_user_id: user_id,
+        action: 'REJECT',
+        comment: remarks
+      });
+
+      // 4. Record lifecycle event
+      if (metadata.rfq_id) {
+        const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${metadata.rfq_id}`);
+        const rfqData = rfq?.[0];
+
+        await recordLifecycleEvent({
+          entity_type: rfqData?.is_tender === 1 ? 'TENDER' : 'RFQ',
+          entity_id: metadata.rfq_id,
+          stage: 'NEGOTIATION_QUOTES_REJECTED',
+          action: 'REJECT',
+          performed_by: user_id,
+          metadata: {
+            approval_instance_id: pendingInstance.id,
+            rfq_product_id,
+            quote_ids: metadata.selected_quotes?.map(q => q.quote_id) || [],
+            rejection_reason: remarks
+          },
+          remarks
+        });
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: { rejected: true },
+        message: 'Quotes rejected successfully'
       });
     } catch (error) {
       logError(error);

@@ -129,5 +129,23 @@ NegotiationRoutes.get(
   negotiationController.getQuoteApprovalStatus
 );
 
+// Approve negotiation quotes
+NegotiationRoutes.post(
+  '/quotes/:rfq_product_id/approve',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management
+  hospitalityMiddleware.requireHospitality,
+  negotiationController.approveQuotes
+);
+
+// Reject negotiation quotes
+NegotiationRoutes.post(
+  '/quotes/:rfq_product_id/reject',
+  passportSignIn,
+  acl([2, 8]), // Procurement and Top Management
+  hospitalityMiddleware.requireHospitality,
+  negotiationController.rejectQuotes
+);
+
 export default NegotiationRoutes;
 

@@ -466,6 +466,7 @@ const negotiationModel = {
         nr.status as round_status,
         nr.round_number,
         nr.rfq_id,
+        nr.end_date as round_end_date,
         u.name as vendor_name,
         u.organization_name,
         c.company_name
