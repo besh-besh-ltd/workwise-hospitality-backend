@@ -6,7 +6,8 @@ import {
   recordLifecycleEvent,
   createApprovalInstance,
   submitApprovalAction,
-  getApprovalInstancesByEntity
+  getApprovalInstancesByEntity,
+  getApprovalInstanceById
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
 
@@ -66,7 +67,7 @@ const handleNegotiationPostApproval = async (approval_instance_id, approver_user
               // Update existing finalization
               await t.none(`
                 UPDATE tbl_quote_finalization
-                SET quote_id = $1, created_by = $2, created_at = NOW()
+                SET quote_id = $1, created_by = $2, timestamp = NOW()
                 WHERE id = $3
               `, [selectedQuote.quote_id, approver_user_id, existingFinalization.id]);
             } else {
@@ -242,7 +243,7 @@ const addQuotesToFinalization = async (rfqId, rfqProductId, quotes, userId, rfqD
       // Update existing finalization with new quote info
       await t.none(
         `UPDATE tbl_quote_finalization
-         SET quote_id = $1, created_by = $2, created_at = NOW()
+         SET quote_id = $1, created_by = $2, timestamp = NOW()
          WHERE id = $3`,
         [quote.id, userId, existingFinalization.id]
       );
@@ -1189,10 +1190,10 @@ const NegotiationController = {
       });
 
       const isFullyApproved = result.instance_status === 'APPROVED';
+      let arcApprovalCreated = false;
 
-      // 3. If fully approved, add to finalization
+      // 3. If fully approved, add to finalization and create ARC
       if (isFullyApproved) {
-        const { getApprovalInstanceById } = await import('../../models/generalModel.js');
         const instance = await getApprovalInstanceById(pendingInstance.id, 'NEGOTIATION_QUOTE');
         const metadata = instance?.metadata || {};
 
@@ -1200,34 +1201,126 @@ const NegotiationController = {
           const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${metadata.rfq_id}`);
           const rfqData = rfq[0];
 
+          // Check if this is a hospitality tender (requires ARC)
+          const requiresArc = rfqData.is_tender === 1 && rfqData.hospitality_company_id;
+
           // Convert metadata quotes to format expected by addQuotesToFinalization
           const quotesForFinalization = metadata.selected_quotes.map(q => ({
             id: q.quote_id,
             vendor_id: q.vendor_id
           }));
 
-          await addQuotesToFinalization(
-            metadata.rfq_id,
-            rfq_product_id,
-            quotesForFinalization,
-            user_id,
-            rfqData
-          );
+          if (requiresArc) {
+            // For hospitality tenders: Use transaction to ensure atomicity
+            // If ARC creation fails, finalization is rolled back
+            await db.tx(async (t) => {
+              // Finalize quotes within transaction
+              await addQuotesToFinalization(
+                metadata.rfq_id,
+                rfq_product_id,
+                quotesForFinalization,
+                user_id,
+                rfqData,
+                t
+              );
 
-          // Record lifecycle event
-          await recordLifecycleEvent({
-            entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
-            entity_id: metadata.rfq_id,
-            stage: 'NEGOTIATION_QUOTES_APPROVED',
-            action: 'APPROVE',
-            performed_by: user_id,
-            metadata: {
-              approval_instance_id: pendingInstance.id,
+              // Record lifecycle event
+              await recordLifecycleEvent({
+                entity_type: 'TENDER',
+                entity_id: metadata.rfq_id,
+                stage: 'NEGOTIATION_QUOTES_APPROVED',
+                action: 'APPROVE',
+                performed_by: user_id,
+                metadata: {
+                  approval_instance_id: pendingInstance.id,
+                  rfq_product_id,
+                  quote_ids: metadata.selected_quotes.map(q => q.quote_id),
+                  vendor_ids: metadata.selected_quotes.map(q => q.vendor_id)
+                },
+                txContext: t
+              });
+
+              // Check if ARC approval already exists
+              const existingArcApprovals = await getApprovalInstancesByEntity('ARC', rfq_product_id, t);
+              const existingArcApproval = existingArcApprovals.find(inst =>
+                inst.status === 'PENDING' || inst.status === 'APPROVED'
+              );
+
+              if (!existingArcApproval) {
+                // Get product details for metadata
+                const product = await rfqModel.getRfqProductById(rfq_product_id, metadata.rfq_id, t);
+                const primaryQuote = metadata.selected_quotes[0];
+
+                // Create ARC approval instance - if this fails, transaction rolls back
+                const arcApprovalResult = await createApprovalInstance({
+                  entity_type: 'ARC',
+                  entity_id: rfq_product_id,
+                  hospitality_company_id: rfqData.hospitality_company_id,
+                  hotel_id: rfqData.hotel_id || null,
+                  initiated_by: user_id,
+                  metadata: {
+                    rfq_id: metadata.rfq_id,
+                    rfq_product_id: rfq_product_id,
+                    rfq_number: rfqData.rfq_no,
+                    product_variant_id: product?.product_variant_id,
+                    variant: product?.variant,
+                    vendor_id: primaryQuote.vendor_id,
+                    quote_id: primaryQuote.quote_id,
+                    is_tender: 1,
+                    triggered_by: 'negotiation_quotes_approval',
+                    selected_quotes: metadata.selected_quotes
+                  },
+                  txContext: t
+                });
+
+                if (arcApprovalResult) {
+                  arcApprovalCreated = true;
+
+                  // Record lifecycle event for ARC submission
+                  await recordLifecycleEvent({
+                    entity_type: 'TENDER',
+                    entity_id: metadata.rfq_id,
+                    stage: 'ARC_SUBMITTED',
+                    action: 'SUBMIT_ARC',
+                    performed_by: user_id,
+                    metadata: {
+                      rfq_product_id: rfq_product_id,
+                      approval_instance_id: arcApprovalResult.instance?.id,
+                      auto_approved: arcApprovalResult.autoApproved || false,
+                      triggered_by: 'negotiation_quotes_approval'
+                    },
+                    txContext: t
+                  });
+                }
+              } else {
+                arcApprovalCreated = true; // Already exists
+              }
+            });
+          } else {
+            // For non-hospitality or non-tender: Just finalize (no ARC required)
+            await addQuotesToFinalization(
+              metadata.rfq_id,
               rfq_product_id,
-              quote_ids: metadata.selected_quotes.map(q => q.quote_id),
-              vendor_ids: metadata.selected_quotes.map(q => q.vendor_id)
-            }
-          });
+              quotesForFinalization,
+              user_id,
+              rfqData
+            );
+
+            // Record lifecycle event
+            await recordLifecycleEvent({
+              entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+              entity_id: metadata.rfq_id,
+              stage: 'NEGOTIATION_QUOTES_APPROVED',
+              action: 'APPROVE',
+              performed_by: user_id,
+              metadata: {
+                approval_instance_id: pendingInstance.id,
+                rfq_product_id,
+                quote_ids: metadata.selected_quotes.map(q => q.quote_id),
+                vendor_ids: metadata.selected_quotes.map(q => q.vendor_id)
+              }
+            });
+          }
         }
       }
 
@@ -1238,10 +1331,13 @@ const NegotiationController = {
           fully_approved: isFullyApproved,
           finalized: isFullyApproved,
           instance_status: result.instance_status,
-          next_step: result.next_step || null
+          next_step: result.next_step || null,
+          arc_approval_created: arcApprovalCreated
         },
         message: isFullyApproved
-          ? 'Quotes fully approved and finalized'
+          ? (arcApprovalCreated
+              ? 'Quotes approved, finalized, and ARC approval submitted'
+              : 'Quotes fully approved and finalized')
           : 'Approval recorded. Waiting for other approvers.'
       });
     } catch (error) {

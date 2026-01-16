@@ -1880,8 +1880,9 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
 /**
  * Get approval instances for an entity
  */
-export async function getApprovalInstancesByEntity(entity_type, entity_id) {
-  return db.any(`
+export async function getApprovalInstancesByEntity(entity_type, entity_id, txContext = null) {
+  const t = txContext || db;
+  return t.any(`
     SELECT
       i.*,
       p.entity_type as policy_entity_type,

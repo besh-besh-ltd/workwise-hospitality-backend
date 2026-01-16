@@ -1261,7 +1261,7 @@ WHERE NOT EXISTS (
               'product_id', qi.product_variant_id,
               'product_name', qi.product_name,
               'quantity', qi.quantity,
-              'unit', qi.unit,
+              -- 'unit', qi.unit,
               'unit_price', qi.unit_price,
               'freight_price', qi.freight_price,
               'package_price', qi.package_price,
@@ -1278,7 +1278,7 @@ WHERE NOT EXISTS (
       LEFT JOIN tbl_users u ON u.id = q.created_by
       LEFT JOIN tbl_company c ON c.id = u.company_id
       WHERE q.rfq_id = $1
-      ORDER BY q.created_at DESC
+      ORDER BY q.timestamp DESC
     `;
     return db.any(query, [rfq_id]);
   },
@@ -1300,18 +1300,15 @@ WHERE NOT EXISTS (
               'vendor_id', tev.vendor_id,
               'vendor_name', u.name,
               'vendor_email', u.email,
-              'is_accepted', tev.is_accepted,
-              'score', tev.score,
-              'remarks', tev.remarks,
-              'created_at', tev.created_at
+              'created_at', tev.timestamp
             )
           )
-          FROM tbl_rfq_product_tech_evaluation_vendors tev
+          FROM tbl_rfq_product_tech_evaluation_cleared_vendors tev
           LEFT JOIN tbl_users u ON u.id = tev.vendor_id
-          WHERE tev.tech_evaluation_id = te.id
+          WHERE tev.tbl_rfq_product_tech_evaluation_id = te.id
         ) as vendor_evaluations
       FROM tbl_rfq_product_tech_evaluation te
-      JOIN tbl_rfq_products rp ON rp.id = te.rfq_product_id
+      JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
       WHERE te.rfq_id = $1
     `;
     return db.any(query, [rfq_id]);
@@ -1337,9 +1334,9 @@ WHERE NOT EXISTS (
         qi.total_price as quoted_price,
         qi.unit_price,
         qi.quantity,
-        qi.unit,
+        -- qi.unit,
         qf.id as finalization_id,
-        qf.created_at as finalized_at
+        qf.timestamp as finalized_at
       FROM tbl_rfq_products rp
       LEFT JOIN tbl_quote_items qi ON qi.product_variant_id = rp.product_variant_id AND qi.variant = rp.variant
       LEFT JOIN tbl_quotes q ON q.id = qi.quote_id AND q.rfq_id = rp.rfq_id
@@ -1388,7 +1385,7 @@ WHERE NOT EXISTS (
    * @returns {Promise<Object>} - { rfqs, total }
    */
   getRfqsPendingArcApproval: async (filters = {}) => {
-    const { page = 1, limit = 50, project_id, is_tender } = filters;
+    const { page = 1, limit = 50, project_id } = filters;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     const whereConditions = [
@@ -1397,8 +1394,8 @@ WHERE NOT EXISTS (
       'r.is_tender = 1', // ARC is only for tenders
       `EXISTS (
         SELECT 1 FROM tbl_rfq_products rp
-        JOIN tbl_approval_instances ai2 ON ai2.entity_type = 'ARC' 
-          AND ai2.entity_id = rp.id
+        JOIN tbl_approval_instances ai2 ON ai2.entity_type = 'ARC'
+          AND ai2.entity_id::INTEGER = rp.id
           AND ai2.status IN ('PENDING', 'APPROVED')
         WHERE rp.rfq_id = r.id
       )`
@@ -1406,7 +1403,7 @@ WHERE NOT EXISTS (
     const params = [];
     let paramIndex = 1;
 
-    if (project_id) {
+    if (project_id && parseInt(project_id) > 0) {
       whereConditions.push(`r.project_id = $${paramIndex++}`);
       params.push(parseInt(project_id));
     }
@@ -1443,8 +1440,8 @@ WHERE NOT EXISTS (
         (
           SELECT COUNT(*)
           FROM tbl_rfq_products rp3
-          JOIN tbl_approval_instances ai3 ON ai3.entity_type = 'ARC' 
-            AND ai3.entity_id = rp3.id
+          JOIN tbl_approval_instances ai3 ON ai3.entity_type = 'ARC'
+            AND ai3.entity_id::INTEGER = rp3.id
             AND ai3.status = 'PENDING'
           WHERE rp3.rfq_id = r.id
         ) as pending_arc_count
@@ -1452,8 +1449,8 @@ WHERE NOT EXISTS (
       LEFT JOIN tbl_projects p ON p.id = r.project_id
       JOIN tbl_rfq_products rp ON rp.rfq_id = r.id
       JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
-      LEFT JOIN tbl_approval_instances ai ON ai.entity_type = 'ARC' 
-        AND ai.entity_id = rp.id 
+      LEFT JOIN tbl_approval_instances ai ON ai.entity_type = 'ARC'
+        AND ai.entity_id::INTEGER = rp.id
         AND ai.status IN ('PENDING', 'APPROVED')
       WHERE ${whereClause}
       ORDER BY r.timestamp DESC, rp.id
@@ -1464,8 +1461,8 @@ WHERE NOT EXISTS (
       SELECT COUNT(DISTINCT rp.id)
       FROM tbl_rfq r
       JOIN tbl_rfq_products rp ON rp.rfq_id = r.id
-      JOIN tbl_approval_instances ai2 ON ai2.entity_type = 'ARC' 
-        AND ai2.entity_id = rp.id
+      JOIN tbl_approval_instances ai2 ON ai2.entity_type = 'ARC'
+        AND ai2.entity_id::INTEGER = rp.id
         AND ai2.status IN ('PENDING', 'APPROVED')
       WHERE ${whereClause}
     `;
@@ -10718,12 +10715,12 @@ ORDER BY tq.timestamp DESC;
       `SELECT 
         qf.vendor_id,
         qf.quote_id,
-        qf.created_at as finalized_at
+        qf.timestamp as finalized_at
       FROM tbl_quote_finalization qf
       WHERE qf.rfq_id = $1
         AND qf.product_variant_id = $2
         AND qf.variant = $3
-      ORDER BY qf.created_at DESC
+      ORDER BY qf.timestamp DESC
       LIMIT 1`,
       [rfq_id, product_variant_id, variant]
     );
@@ -10769,7 +10766,7 @@ ORDER BY tq.timestamp DESC;
       `SELECT 
         qi.unit_price,
         qi.quantity,
-        qi.unit,
+        -- qi.unit,
         qi.total_price,
         qi.charges_meta
       FROM tbl_quote_items qi
