@@ -1364,9 +1364,10 @@ WHERE NOT EXISTS (
         u.name as vendor_name,
         u.email as vendor_email,
         rp.id as rfq_product_id
-      FROM tbl_rfq_product_clauses c
-      LEFT JOIN tbl_users u ON u.id = c.vendor_id
-      JOIN tbl_rfq_products rp ON rp.id = c.rfq_product_id
+      FROM tbl_rfq_product_tech_evaluation_clauses c
+      JOIN tbl_rfq_product_tech_evaluation te ON te.id = c.tbl_rfq_product_tech_evaluation_id
+      LEFT JOIN tbl_users u ON u.id = te.vendor_id
+      JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
       WHERE c.rfq_id = $1 AND c.clause_type = 'sampling'
       ORDER BY c.created_at DESC
     `;
@@ -10685,9 +10686,9 @@ ORDER BY tq.timestamp DESC;
         r.hospitality_company_id,
         r.hotel_id,
         hc.name as hospitality_company_name,
-        hc.address as hospitality_company_address,
+        hc.registered_office_address as hospitality_company_address,
         h.name as hotel_name,
-        h.address as hotel_address,
+        h.full_address as hotel_address,
         pv.name as product_name,
         p.name as product_category_name
       FROM tbl_rfq_products rp
@@ -10767,8 +10768,7 @@ ORDER BY tq.timestamp DESC;
         qi.unit_price,
         qi.quantity,
         -- qi.unit,
-        qi.total_price,
-        qi.charges_meta
+        qi.total_price
       FROM tbl_quote_items qi
       WHERE qi.id = $1`,
       [quote_id]

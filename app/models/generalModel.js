@@ -2318,7 +2318,7 @@ export async function recordLifecycleEvent({
   }
 
   // Validate entity_type is in enum
-  const validTypes = ['RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL'];
+  const validTypes = ['RFQ', 'TENDER', 'NEGOTIATION', 'PO', 'INDENT', 'TECHNICAL', 'ARC'];
   if (!validTypes.includes(entity_type)) {
     throw new Error(`Invalid entity_type. Must be one of: ${validTypes.join(', ')}`);
   }

@@ -3,6 +3,7 @@ import { logError } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
 import negotiationModel from '../../models/negotiationModel.js';
 import { getLifecycleHistory, getApprovalInstancesByEntity, submitApprovalAction, cancelApprovalInstance, getApprovalInstanceById, recordLifecycleEvent, uploadToS3 } from '../../models/generalModel.js';
+import { generateAwardDocument, sendAwardDocumentToVendor } from './arcDocumentController.js';
 import db from '../../config/dbConn.js';
 
 /**
@@ -32,9 +33,6 @@ const handleArcPostApproval = async (approval_instance_id, approver_user_id, txC
       throw new Error('ARC document generation is only applicable for tenders (is_tender = 1)');
     }
     
-    // Import ARC document controller
-    const { generateAwardDocument, sendAwardDocumentToVendor } = await import('./arcDocumentController.js');
-    
     // Generate PDF document for this product
     const pdfResult = await generateAwardDocument(rfq_product_id, t);
     
@@ -43,6 +41,8 @@ const handleArcPostApproval = async (approval_instance_id, approver_user_id, txC
       const fileName = `arc-award-${metadata.rfq_number || rfq_id}-product-${rfq_product_id}-${Date.now()}.pdf`;
       const s3Key = `arc-documents/${fileName}`;
       const s3Result = await uploadToS3(pdfResult.absolutePath, s3Key);
+
+      console.log("ARC: S3 RESULT FOR AWARD DOC:", s3Result);
       
       if (s3Result.ok) {
         // Update approval instance metadata with document URL
