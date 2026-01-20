@@ -1706,6 +1706,8 @@ WHERE NOT EXISTS (
           'vendor_clarification_date', RFQ.vendor_clarification_date ,
           'tender_fees', RFQ.tender_fees,
           'is_tender', RFQ.is_tender,
+          'hotel_id', RFQ.hotel_id,
+          'department_id', RFQ.department_id,
 
           -- Selected Terms
           'terms', (
@@ -10306,6 +10308,7 @@ ORDER BY tq.timestamp DESC;
    * createClarification
    * Creates a new clarification with optional file attachments
    * Will fail if active (OPEN) clarification exists due to unique index
+   * Also creates the initial message in the messages table for the chat system
    */
   createClarification: async (
     rfq_id,
@@ -10329,7 +10332,7 @@ ORDER BY tq.timestamp DESC;
           [rfq_id, raised_by, vendor_company_id, subject, question]
         );
 
-        // Insert question files if any
+        // Insert question files if any (legacy table for backward compatibility)
         let insertedFiles = [];
         if (files && files.length > 0) {
           for (const file of files) {
@@ -10351,7 +10354,44 @@ ORDER BY tq.timestamp DESC;
           }
         }
 
-        return { ...clarification, question_files: insertedFiles };
+        // Also insert initial message into messages table for chat system
+        const initialMessage = await t.one(
+          `
+          INSERT INTO tbl_rfq_clarification_messages
+          (clarification_id, sender_id, sender_type, message, created_at)
+          VALUES ($1, $2, 'VENDOR', $3, NOW())
+          RETURNING *
+        `,
+          [clarification.id, raised_by, question]
+        );
+
+        // Insert message files if any
+        let messageFiles = [];
+        if (files && files.length > 0) {
+          for (const file of files) {
+            const insertedFile = await t.one(
+              `
+              INSERT INTO tbl_rfq_clarification_message_files
+              (message_id, file_name, file_url, file_type, uploaded_at)
+              VALUES ($1, $2, $3, $4, NOW())
+              RETURNING id, file_name, file_url
+            `,
+              [
+                initialMessage.id,
+                file.originalname,
+                file.location,
+                file.mimetype
+              ]
+            );
+            messageFiles.push(insertedFile);
+          }
+        }
+
+        return {
+          ...clarification,
+          question_files: insertedFiles,
+          initial_message: { ...initialMessage, files: messageFiles }
+        };
       });
     } catch (error) {
       logError(error);
@@ -10362,6 +10402,8 @@ ORDER BY tq.timestamp DESC;
   /**
    * resolveClarification
    * Adds response to clarification and marks as CLOSED
+   * Response is now optional - can just close without message
+   * If response provided, it's added as a message in the chat system
    */
   resolveClarification: async (
     clarification_id,
@@ -10372,7 +10414,7 @@ ORDER BY tq.timestamp DESC;
   ) => {
     try {
       return await db_con.tx(async (t) => {
-        // Update clarification with response
+        // Update clarification with response (response can be null/empty now)
         const resolved = await t.oneOrNone(
           `
           UPDATE tbl_rfq_clarifications
@@ -10380,18 +10422,19 @@ ORDER BY tq.timestamp DESC;
               responded_by = $2,
               response = $3,
               responded_at = NOW(),
-              closed_at = NOW()
+              closed_at = NOW(),
+              closed_by = $2
           WHERE id = $1 AND status = 'OPEN'
           RETURNING *
         `,
-          [clarification_id, responded_by, response]
+          [clarification_id, responded_by, response || null]
         );
 
         if (!resolved) {
           return null;
         }
 
-        // Insert response files if any
+        // Insert response files if any (legacy table for backward compatibility)
         let insertedFiles = [];
         if (response_files && response_files.length > 0) {
           for (const file of response_files) {
@@ -10413,7 +10456,48 @@ ORDER BY tq.timestamp DESC;
           }
         }
 
-        return { ...resolved, response_files: insertedFiles };
+        // If response provided, also add as a message in the chat system
+        let responseMessage = null;
+        if (response && response.trim()) {
+          responseMessage = await t.one(
+            `
+            INSERT INTO tbl_rfq_clarification_messages
+            (clarification_id, sender_id, sender_type, message, created_at)
+            VALUES ($1, $2, 'BUYER', $3, NOW())
+            RETURNING *
+          `,
+            [clarification_id, responded_by, response]
+          );
+
+          // Insert message files if any
+          let messageFiles = [];
+          if (response_files && response_files.length > 0) {
+            for (const file of response_files) {
+              const insertedFile = await t.one(
+                `
+                INSERT INTO tbl_rfq_clarification_message_files
+                (message_id, file_name, file_url, file_type, uploaded_at)
+                VALUES ($1, $2, $3, $4, NOW())
+                RETURNING id, file_name, file_url
+              `,
+                [
+                  responseMessage.id,
+                  file.originalname,
+                  file.location,
+                  file.mimetype
+                ]
+              );
+              messageFiles.push(insertedFile);
+            }
+          }
+          responseMessage.files = messageFiles;
+        }
+
+        return {
+          ...resolved,
+          response_files: insertedFiles,
+          response_message: responseMessage
+        };
       });
     } catch (error) {
       logError(error);
@@ -10483,6 +10567,243 @@ ORDER BY tq.timestamp DESC;
         WHERE c.id = $1
       `;
       return await db_con.oneOrNone(query, [clarification_id]);
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
+  },
+
+  // ============================================
+  // Chat/Ticket System Functions
+  // ============================================
+
+  /**
+   * addClarificationMessage
+   * Add a message to a clarification thread
+   */
+  addClarificationMessage: async (
+    clarification_id,
+    sender_id,
+    sender_type,
+    message,
+    files = [],
+    db_con = db
+  ) => {
+    try {
+      return await db_con.tx(async (t) => {
+        // Insert message
+        const newMessage = await t.one(
+          `
+          INSERT INTO tbl_rfq_clarification_messages
+          (clarification_id, sender_id, sender_type, message, created_at)
+          VALUES ($1, $2, $3, $4, NOW())
+          RETURNING *
+        `,
+          [clarification_id, sender_id, sender_type, message]
+        );
+
+        // Insert message files if any
+        let insertedFiles = [];
+        if (files && files.length > 0) {
+          for (const file of files) {
+            const insertedFile = await t.one(
+              `
+              INSERT INTO tbl_rfq_clarification_message_files
+              (message_id, file_name, file_url, file_type, uploaded_at)
+              VALUES ($1, $2, $3, $4, NOW())
+              RETURNING id, file_name, file_url
+            `,
+              [
+                newMessage.id,
+                file.originalname,
+                file.location,
+                file.mimetype
+              ]
+            );
+            insertedFiles.push(insertedFile);
+          }
+        }
+
+        return { ...newMessage, files: insertedFiles };
+      });
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
+  },
+
+  /**
+   * getClarificationMessages
+   * Get all messages for a clarification with files
+   */
+  getClarificationMessages: async (clarification_id, db_con = db) => {
+    try {
+      const query = `
+        SELECT
+          m.id,
+          m.clarification_id,
+          m.sender_id,
+          m.sender_type,
+          u.name as sender_name,
+          m.message,
+          m.created_at,
+          COALESCE(
+            json_agg(
+              json_build_object('file_url', f.file_url, 'file_name', f.file_name)
+            ) FILTER (WHERE f.id IS NOT NULL), '[]'
+          ) as files
+        FROM tbl_rfq_clarification_messages m
+        JOIN tbl_users u ON u.id = m.sender_id
+        LEFT JOIN tbl_rfq_clarification_message_files f ON f.message_id = m.id
+        WHERE m.clarification_id = $1
+        GROUP BY m.id, u.name
+        ORDER BY m.created_at ASC
+      `;
+      return await db_con.any(query, [clarification_id]);
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
+  },
+
+  /**
+   * closeClarification
+   * Close a clarification without requiring a response message
+   * The buyer can optionally send a final message before closing via addClarificationMessage
+   */
+  closeClarification: async (clarification_id, closed_by, db_con = db) => {
+    try {
+      const query = `
+        UPDATE tbl_rfq_clarifications
+        SET status = 'CLOSED',
+            closed_by = $2,
+            closed_at = NOW()
+        WHERE id = $1 AND status = 'OPEN'
+        RETURNING *
+      `;
+      return await db_con.oneOrNone(query, [clarification_id, closed_by]);
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
+  },
+
+  /**
+   * getClarificationsWithMessages
+   * Gets all clarifications for an RFQ with their messages
+   */
+  getClarificationsWithMessages: async (rfq_id, db_con = db) => {
+    try {
+      // Get all clarifications
+      const clarifications = await db_con.any(
+        `
+        SELECT
+          c.id,
+          c.rfq_id,
+          c.raised_by as raised_by_vendor_id,
+          u.name as raised_by_vendor_name,
+          c.subject,
+          c.status,
+          c.created_at,
+          c.closed_at,
+          c.closed_by
+        FROM tbl_rfq_clarifications c
+        JOIN tbl_users u ON u.id = c.raised_by
+        WHERE c.rfq_id = $1
+        ORDER BY c.created_at DESC
+      `,
+        [rfq_id]
+      );
+
+      // Get messages for each clarification
+      for (const clarification of clarifications) {
+        clarification.messages = await db_con.any(
+          `
+          SELECT
+            m.id,
+            m.sender_id,
+            m.sender_type,
+            u.name as sender_name,
+            m.message,
+            m.created_at,
+            COALESCE(
+              json_agg(
+                json_build_object('file_url', f.file_url, 'file_name', f.file_name)
+              ) FILTER (WHERE f.id IS NOT NULL), '[]'
+            ) as files
+          FROM tbl_rfq_clarification_messages m
+          JOIN tbl_users u ON u.id = m.sender_id
+          LEFT JOIN tbl_rfq_clarification_message_files f ON f.message_id = m.id
+          WHERE m.clarification_id = $1
+          GROUP BY m.id, u.name
+          ORDER BY m.created_at ASC
+        `,
+          [clarification.id]
+        );
+      }
+
+      return clarifications;
+    } catch (error) {
+      logError(error);
+      throw error;
+    }
+  },
+
+  /**
+   * getActiveClarificationWithMessages
+   * Get active clarification with all its messages
+   */
+  getActiveClarificationWithMessages: async (rfq_id, db_con = db) => {
+    try {
+      const clarification = await db_con.oneOrNone(
+        `
+        SELECT
+          c.id,
+          c.rfq_id,
+          c.raised_by as raised_by_vendor_id,
+          u.name as raised_by_vendor_name,
+          c.subject,
+          c.status,
+          c.created_at,
+          c.closed_at,
+          c.closed_by
+        FROM tbl_rfq_clarifications c
+        JOIN tbl_users u ON u.id = c.raised_by
+        WHERE c.rfq_id = $1 AND c.status = 'OPEN'
+      `,
+        [rfq_id]
+      );
+
+      if (!clarification) {
+        return null;
+      }
+
+      // Get messages for the clarification
+      clarification.messages = await db_con.any(
+        `
+        SELECT
+          m.id,
+          m.sender_id,
+          m.sender_type,
+          u.name as sender_name,
+          m.message,
+          m.created_at,
+          COALESCE(
+            json_agg(
+              json_build_object('file_url', f.file_url, 'file_name', f.file_name)
+            ) FILTER (WHERE f.id IS NOT NULL), '[]'
+          ) as files
+        FROM tbl_rfq_clarification_messages m
+        JOIN tbl_users u ON u.id = m.sender_id
+        LEFT JOIN tbl_rfq_clarification_message_files f ON f.message_id = m.id
+        WHERE m.clarification_id = $1
+        GROUP BY m.id, u.name
+        ORDER BY m.created_at ASC
+      `,
+        [clarification.id]
+      );
+
+      return clarification;
     } catch (error) {
       logError(error);
       throw error;

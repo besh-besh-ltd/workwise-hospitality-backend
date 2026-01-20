@@ -702,7 +702,7 @@ RfqRoutes.post(
 );
 
 // ============================================
-// One-at-a-Time Clarification System Routes
+// Clarification Chat/Ticket System Routes
 // ============================================
 
 // Vendor raises clarification (with file uploads)
@@ -715,7 +715,16 @@ RfqRoutes.post(
   rfqController.raiseClarification
 );
 
-// Buyer resolves clarification (with optional file uploads)
+// Send message in clarification thread (both vendor and buyer can send)
+RfqRoutes.post(
+  '/clarification/message',
+  noLogin.customer_auth,
+  rfqSchemas.clarificationFileUploadHandler,
+  validateBody(rfqSchemas.sendClarificationMessage),
+  rfqController.sendClarificationMessage
+);
+
+// Buyer closes clarification (with optional final response message)
 RfqRoutes.post(
   '/clarification/resolve',
   passportSignIn,
@@ -726,14 +735,14 @@ RfqRoutes.post(
   rfqController.resolveClarification
 );
 
-// List all clarifications for tender (public - all vendors can see)
+// List all clarifications for tender with messages (private - vendor sees only their own)
 RfqRoutes.get(
   '/clarifications/:rfq_id',
   noLogin.customer_auth,
   rfqController.listClarifications
 );
 
-// Check active clarification status (for quote blocking check)
+// Check active clarification status with messages (for quote blocking check)
 RfqRoutes.get(
   '/clarification/active/:rfq_id',
   noLogin.customer_auth,

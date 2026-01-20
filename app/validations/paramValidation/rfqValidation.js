@@ -246,7 +246,8 @@ export const rfqSchemas = {
     vendor_clarification_date: Joi.string().optional().allow(null).allow(''),
     hospitality_company_id: Joi.number().integer().optional().allow(null),
     hotel_id: Joi.number().integer().optional().allow(null),
-    hotel_ids: Joi.array().items(Joi.number()).optional().allow(null)
+    hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
+    department_id: Joi.number().integer().optional().allow(null)
   }),
   update: Joi.object().keys({
     rfq_id: Joi.number().required(),
@@ -324,7 +325,8 @@ export const rfqSchemas = {
     rfq_type: Joi.string().trim().optional(),
     reverse_auction: Joi.valid(0, 1).allow(''),
     location: Joi.string().optional().allow('').allow(null),
-    updatableData: Joi.object().optional()
+    updatableData: Joi.object().optional(),
+    department_id: Joi.number().integer().optional().allow(null)
   }),
   finalize: Joi.object().keys({
     rfq_id: Joi.number().required(),
@@ -566,9 +568,16 @@ export const rfqSchemas = {
     question: Joi.string().trim().min(10).max(5000).required()
   }),
 
+  // Response is now optional - buyer can close without sending a final message
   resolveClarification: Joi.object({
     clarification_id: Joi.number().integer().required(),
-    response: Joi.string().trim().min(1).max(5000).required()
+    response: Joi.string().trim().max(5000).optional().allow(null, '')
+  }),
+
+  // Send message in clarification thread (chat system)
+  sendClarificationMessage: Joi.object({
+    clarification_id: Joi.number().integer().required(),
+    message: Joi.string().trim().min(1).max(5000).required()
   }),
 
   // File upload handler for clarifications (supports up to 10 files, 100MB each)

@@ -2031,6 +2031,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       vendor_clarification_date,
       hospitality_company_id,
       hotel_id,
+      department_id,
       ra_start_date,
       ra_end_date,
       project_id,
@@ -2154,6 +2155,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       vendor_clarification_date: is_tender === 1 ? vendor_clarification_date : null,
       hospitality_company_id: hospitality_company_id || null,
       hotel_id: hotel_id || null,
+      department_id: department_id || null,
       ra_start_date: reverse_auction == 1 ? ra_start_date : null,
       ra_end_date: reverse_auction == 1 ? ra_end_date : null,
       is_published: 0,
@@ -3127,7 +3129,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
   const dbContext = txContext || db;
 
   const rfq = await dbContext.oneOrNone(
-    `SELECT id, rfq_no, hospitality_company_id, hotel_id, is_tender, company_name
+    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, is_tender, company_name
      FROM tbl_rfq WHERE id = $1`,
     [rfqId]
   );
@@ -3147,6 +3149,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     entity_id: rfqId,
     hospitality_company_id: rfq.hospitality_company_id,
     hotel_id: rfq.hotel_id,
+    department_id: rfq.department_id,
     initiated_by: userId,
     metadata: {
       rfq_number: rfq.rfq_no,
@@ -3181,7 +3184,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
 
   // Fetch RFQ details
   const rfq = await dbContext.oneOrNone(
-    `SELECT id, rfq_no, hospitality_company_id, hotel_id, is_tender, company_name
+    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, is_tender, company_name
      FROM tbl_rfq WHERE id = $1`,
     [rfqId]
   );
@@ -3210,6 +3213,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     entity_id: rfqProductId,
     hospitality_company_id: rfq.hospitality_company_id,
     hotel_id: rfq.hotel_id,
+    department_id: rfq.department_id,
     initiated_by: userId,
     metadata: {
       rfq_id: rfqId,
@@ -3337,10 +3341,10 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
  */
 const startApprovalForArc = async (rfqId, userId, txContext = null) => {
   const dbContext = txContext || db;
-  
+
   // Fetch RFQ details - use transaction context if available
   const rfq = await dbContext.oneOrNone(
-    `SELECT id, rfq_no, hospitality_company_id, hotel_id, is_tender, company_name
+    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, is_tender, company_name
      FROM tbl_rfq WHERE id = $1`,
     [rfqId]
   );
@@ -3370,6 +3374,7 @@ const startApprovalForArc = async (rfqId, userId, txContext = null) => {
     entity_id: rfqId,
     hospitality_company_id: rfq.hospitality_company_id,
     hotel_id: rfq.hotel_id,
+    department_id: rfq.department_id,
     initiated_by: userId,
     metadata: {
       rfq_id: rfqId,
@@ -7633,6 +7638,7 @@ const rfqController = {
                   entity_id: rfqProductId, // Product-level, not RFQ-level
                   hospitality_company_id: rfqData.hospitality_company_id,
                   hotel_id: rfqData.hotel_id || null,
+                  department_id: rfqData.department_id || null,
                   initiated_by: req.user.id,
                   metadata: {
                     rfq_id: rfq_id,
@@ -13052,25 +13058,31 @@ getClauses: async (req, res) => {
         [user.id]
       );
 
-      // Format response
+      // Format response with messages array (new chat system format)
       const responseData = {
         id: clarification.id,
         rfq_id: clarification.rfq_id,
         raised_by_vendor_id: clarification.raised_by,
         raised_by_vendor_name: vendorName?.name || null,
         subject: clarification.subject,
-        question: clarification.question,
-        question_files: clarification.question_files.map((f) => ({
-          file_url: f.file_url,
-          file_name: f.file_name
-        })),
-        response: null,
-        response_files: null,
-        responded_by: null,
         status: clarification.status,
         created_at: clarification.created_at,
-        responded_at: null,
-        closed_at: null
+        closed_at: null,
+        closed_by: null,
+        messages: [
+          {
+            id: clarification.initial_message.id,
+            sender_id: user.id,
+            sender_type: 'VENDOR',
+            sender_name: vendorName?.name || null,
+            message: question,
+            files: clarification.initial_message.files.map((f) => ({
+              file_url: f.file_url,
+              file_name: f.file_name
+            })),
+            created_at: clarification.initial_message.created_at
+          }
+        ]
       };
 
       return res.status(200).json({
@@ -13102,8 +13114,9 @@ getClauses: async (req, res) => {
 
   /**
    * resolveClarification
-   * Buyer responds to and closes a clarification
+   * Buyer closes a clarification with optional final response message
    * POST /rfq/clarification/resolve
+   * Response is now optional - buyer can close without sending a message
    */
   resolveClarification: async (req, res) => {
     try {
@@ -13133,15 +13146,15 @@ getClauses: async (req, res) => {
       if (clarification.rfq_created_by !== user.id) {
         return res.status(403).json({
           status: 0,
-          message: 'Only the tender creator can respond to clarifications'
+          message: 'Only the tender creator can close clarifications'
         });
       }
 
-      // Resolve clarification with response files
+      // Resolve clarification with optional response
       const resolved = await rfqModel.resolveClarification(
         clarification_id,
         user.id,
-        response,
+        response || null,
         response_files
       );
 
@@ -13152,25 +13165,21 @@ getClauses: async (req, res) => {
         });
       }
 
-      // Format response
+      // Get all messages for the clarification
+      const messages = await rfqModel.getClarificationMessages(clarification_id);
+
+      // Format response with messages array (new chat system format)
       const responseData = {
         id: resolved.id,
         rfq_id: resolved.rfq_id,
         raised_by_vendor_id: resolved.raised_by,
         raised_by_vendor_name: clarification.raised_by_vendor_name,
         subject: resolved.subject,
-        question: resolved.question,
-        question_files: [], // Would need separate query to get these
-        response: resolved.response,
-        response_files: resolved.response_files.map((f) => ({
-          file_url: f.file_url,
-          file_name: f.file_name
-        })),
-        responded_by: resolved.responded_by,
         status: resolved.status,
         created_at: resolved.created_at,
-        responded_at: resolved.responded_at,
-        closed_at: resolved.closed_at
+        closed_at: resolved.closed_at,
+        closed_by: resolved.closed_by,
+        messages: messages
       };
 
       return res.status(200).json({
@@ -13190,12 +13199,12 @@ getClauses: async (req, res) => {
 
   /**
    * listClarifications
-   * List clarifications for an RFQ (private - vendor sees only their own)
+   * List clarifications for an RFQ with messages (private - vendor sees only their own)
    * GET /rfq/clarifications/:rfq_id
    *
    * Privacy rules:
-   * - Buyer (tender creator): sees ALL clarifications
-   * - Vendor who raised clarification: sees their OWN clarifications
+   * - Buyer (tender creator): sees ALL clarifications with all messages
+   * - Vendor who raised clarification: sees their OWN clarifications with all messages
    * - Other vendors: only see has_open=true without details
    */
   listClarifications: async (req, res) => {
@@ -13233,8 +13242,8 @@ getClauses: async (req, res) => {
       // Check if current user is the buyer (tender creator)
       const isBuyer = currentUserId && rfq.created_by === currentUserId;
 
-      // Get all clarifications
-      const allClarifications = await rfqModel.getClarifications(rfq_id);
+      // Get all clarifications with messages (new chat system format)
+      const allClarifications = await rfqModel.getClarificationsWithMessages(rfq_id);
 
       // Find open clarification if any
       const openClarification = allClarifications.find(
@@ -13246,7 +13255,7 @@ getClauses: async (req, res) => {
         currentUserId &&
         openClarification.raised_by_vendor_id === currentUserId;
 
-      // Buyer sees all clarifications
+      // Buyer sees all clarifications with messages
       if (isBuyer) {
         return res.status(200).json({
           status: 1,
@@ -13287,12 +13296,12 @@ getClauses: async (req, res) => {
 
   /**
    * getActiveClarification
-   * Check if there's an open clarification for an RFQ (private visibility)
+   * Check if there's an open clarification for an RFQ with messages (private visibility)
    * GET /rfq/clarification/active/:rfq_id
    *
    * Privacy rules:
-   * - Buyer (tender creator): sees full clarification details
-   * - Vendor who raised clarification: sees full details
+   * - Buyer (tender creator): sees full clarification details with all messages
+   * - Vendor who raised clarification: sees full details with all messages
    * - Other vendors: only see has_open=true, is_own_clarification=false
    */
   getActiveClarification: async (req, res) => {
@@ -13322,8 +13331,9 @@ getClauses: async (req, res) => {
 
       const isBuyer = currentUserId && rfq.created_by === currentUserId;
 
+      // Get active clarification with messages (new chat system format)
       const openClarification =
-        await rfqModel.checkActiveClarification(rfq_id);
+        await rfqModel.getActiveClarificationWithMessages(rfq_id);
 
       // No open clarification
       if (!openClarification) {
@@ -13340,7 +13350,7 @@ getClauses: async (req, res) => {
       const isOwnClarification = currentUserId &&
         openClarification.raised_by_vendor_id === currentUserId;
 
-      // Buyer or owner sees full details
+      // Buyer or owner sees full details with messages
       if (isBuyer || isOwnClarification) {
         return res.status(200).json({
           status: 1,
@@ -13364,6 +13374,97 @@ getClauses: async (req, res) => {
       return res.status(500).json({
         status: 0,
         message: 'Error checking open clarification',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * sendClarificationMessage
+   * Send a message in an open clarification thread
+   * POST /rfq/clarification/message
+   *
+   * Both the vendor who raised the clarification and the tender creator (buyer) can send messages
+   */
+  sendClarificationMessage: async (req, res) => {
+    try {
+      const { clarification_id, message } = req.body;
+      const files = req.files || [];
+      const user = req.user;
+
+      // Fetch clarification with RFQ details
+      const clarification =
+        await rfqModel.getClarificationById(clarification_id);
+
+      if (!clarification) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Clarification not found'
+        });
+      }
+
+      if (clarification.status !== 'OPEN') {
+        return res.status(400).json({
+          status: 0,
+          message: 'This clarification has been closed'
+        });
+      }
+
+      // Determine sender type and validate authorization
+      const isVendorOwner = clarification.raised_by === user.id;
+      const isBuyer = clarification.rfq_created_by === user.id;
+
+      if (!isVendorOwner && !isBuyer) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You are not authorized to send messages in this clarification'
+        });
+      }
+
+      const senderType = isBuyer ? 'BUYER' : 'VENDOR';
+
+      // Add message to clarification thread
+      const newMessage = await rfqModel.addClarificationMessage(
+        clarification_id,
+        user.id,
+        senderType,
+        message,
+        files
+      );
+
+      // Get sender name
+      const senderName = await db.oneOrNone(
+        `SELECT name FROM tbl_users WHERE id = $1`,
+        [user.id]
+      );
+
+      // Get all messages for the clarification
+      const allMessages = await rfqModel.getClarificationMessages(clarification_id);
+
+      // Format response with full clarification data
+      const responseData = {
+        id: clarification.id,
+        rfq_id: clarification.rfq_id,
+        raised_by_vendor_id: clarification.raised_by,
+        raised_by_vendor_name: clarification.raised_by_vendor_name,
+        subject: clarification.subject,
+        status: clarification.status,
+        created_at: clarification.created_at,
+        closed_at: clarification.closed_at,
+        closed_by: clarification.closed_by,
+        messages: allMessages
+      };
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Message sent successfully',
+        data: responseData
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Error sending message',
         error: error.message
       });
     }

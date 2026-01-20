@@ -134,6 +134,7 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
       entity_id: rfqProductId,
       hospitality_company_id: rfqData.hospitality_company_id,
       hotel_id: rfqData.hotel_id || null,
+      department_id: rfqData.department_id || null,
       initiated_by: userId,
       metadata: {
         round_id: roundId,
@@ -177,6 +178,7 @@ const startApprovalForNegotiationQuotes = async (rfqProductId, rfqId, selectedQu
       entity_id: rfqProductId,
       hospitality_company_id: rfqData.hospitality_company_id,
       hotel_id: rfqData.hotel_id || null,
+      department_id: rfqData.department_id || null,
       initiated_by: userId,
       metadata: {
         rfq_id: rfqId,
@@ -1257,6 +1259,7 @@ const NegotiationController = {
                   entity_id: rfq_product_id,
                   hospitality_company_id: rfqData.hospitality_company_id,
                   hotel_id: rfqData.hotel_id || null,
+                  department_id: rfqData.department_id || null,
                   initiated_by: user_id,
                   metadata: {
                     rfq_id: metadata.rfq_id,
