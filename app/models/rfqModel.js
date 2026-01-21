@@ -9428,6 +9428,7 @@ ORDER BY m.created_at;
                   TQF.timestamp AS quote_date,
                   TQI.rfq_no,
                   TQI.unit_price,
+                  RFQ.is_tender,
                   FINALIZER.name AS created_by
                   FROM tbl_quote_items TQI
                   JOIN tbl_quote_finalization TQF ON TQI.quote_id = TQF.quote_id 
@@ -9454,6 +9455,7 @@ ORDER BY m.created_at;
                 TQI.quantity,
                 TQI.product_name,
                 TQI.rfq_no,
+                RFQ.is_tender,
                 TQ.timestamp AS quote_date,
                 U.name AS vendor_name,       -- ✅ User's name
                 U.email AS vendor_email,      -- ✅ User's email
