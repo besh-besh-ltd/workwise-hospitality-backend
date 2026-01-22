@@ -11138,6 +11138,670 @@ ORDER BY tq.timestamp DESC;
       [rfq_id, product_variant_id, variant, vendor_id]
     );
   },
+
+  // ============================================================================
+  // TECH EVALUATION ROUNDS MANAGEMENT
+  // ============================================================================
+
+  /**
+   * Create a new tech evaluation round
+   * @param {number} tech_evaluation_id - Tech evaluation ID
+   * @param {number} round_number - Round number
+   * @param {number} created_by - User ID who created the round
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Created round record
+   */
+  createTechEvalRound: async (tech_evaluation_id, round_number, created_by, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.one(
+      `INSERT INTO tbl_tech_evaluation_rounds
+       (tbl_rfq_product_tech_evaluation_id, round_number, status, created_by, created_at)
+       VALUES ($1, $2, 'PENDING', $3, NOW())
+       RETURNING *`,
+      [tech_evaluation_id, round_number, created_by]
+    );
+  },
+
+  /**
+   * Get tech evaluation round by ID
+   * @param {number} round_id - Round ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Round record
+   */
+  getTechEvalRoundById: async (round_id, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.oneOrNone(
+      `SELECT r.*, te.rfq_id, te.tbl_rfq_product_id, te.minimum_passing_score
+       FROM tbl_tech_evaluation_rounds r
+       JOIN tbl_rfq_product_tech_evaluation te ON te.id = r.tbl_rfq_product_tech_evaluation_id
+       WHERE r.id = $1`,
+      [round_id]
+    );
+  },
+
+  /**
+   * Update tech evaluation round status and metadata
+   * @param {number} round_id - Round ID
+   * @param {Object} updates - Fields to update
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Updated round record
+   */
+  updateTechEvalRound: async (round_id, updates, txContext = null) => {
+    const dbContext = txContext || db;
+    const setClauses = [];
+    const params = [];
+    let paramIndex = 1;
+
+    if (updates.status !== undefined) {
+      setClauses.push(`status = $${paramIndex++}`);
+      params.push(updates.status);
+    }
+    if (updates.approval_instance_id !== undefined) {
+      setClauses.push(`approval_instance_id = $${paramIndex++}`);
+      params.push(updates.approval_instance_id);
+    }
+    if (updates.vendors_evaluated !== undefined) {
+      setClauses.push(`vendors_evaluated = $${paramIndex++}`);
+      params.push(JSON.stringify(updates.vendors_evaluated));
+    }
+    if (updates.passed_count !== undefined) {
+      setClauses.push(`passed_count = $${paramIndex++}`);
+      params.push(updates.passed_count);
+    }
+    if (updates.failed_count !== undefined) {
+      setClauses.push(`failed_count = $${paramIndex++}`);
+      params.push(updates.failed_count);
+    }
+    if (updates.submitted_at !== undefined) {
+      setClauses.push(`submitted_at = $${paramIndex++}`);
+      params.push(updates.submitted_at);
+    }
+    if (updates.completed_at !== undefined) {
+      setClauses.push(`completed_at = $${paramIndex++}`);
+      params.push(updates.completed_at);
+    }
+
+    if (setClauses.length === 0) {
+      return dbContext.oneOrNone(`SELECT * FROM tbl_tech_evaluation_rounds WHERE id = $1`, [round_id]);
+    }
+
+    params.push(round_id);
+    return dbContext.oneOrNone(
+      `UPDATE tbl_tech_evaluation_rounds SET ${setClauses.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
+      params
+    );
+  },
+
+  /**
+   * Get current round for a tech evaluation
+   * @param {number} tech_evaluation_id - Tech evaluation ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Current round record
+   */
+  getCurrentTechEvalRound: async (tech_evaluation_id, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.oneOrNone(
+      `SELECT r.*, te.current_round
+       FROM tbl_tech_evaluation_rounds r
+       JOIN tbl_rfq_product_tech_evaluation te ON te.id = r.tbl_rfq_product_tech_evaluation_id
+       WHERE r.tbl_rfq_product_tech_evaluation_id = $1
+       ORDER BY r.round_number DESC
+       LIMIT 1`,
+      [tech_evaluation_id]
+    );
+  },
+
+  /**
+   * Get all rounds for a tech evaluation
+   * @param {number} tech_evaluation_id - Tech evaluation ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Array>} - Array of round records
+   */
+  getTechEvalRounds: async (tech_evaluation_id, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.any(
+      `SELECT r.*, ai.status as approval_status
+       FROM tbl_tech_evaluation_rounds r
+       LEFT JOIN tbl_approval_instances ai ON ai.id = r.approval_instance_id
+       WHERE r.tbl_rfq_product_tech_evaluation_id = $1
+       ORDER BY r.round_number DESC`,
+      [tech_evaluation_id]
+    );
+  },
+
+  /**
+   * Update tech evaluation completion status
+   * @param {number} tech_evaluation_id - Tech evaluation ID
+   * @param {Object} updates - Fields to update
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Updated tech evaluation record
+   */
+  updateTechEvalStatus: async (tech_evaluation_id, updates, txContext = null) => {
+    const dbContext = txContext || db;
+    const setClauses = [];
+    const params = [];
+    let paramIndex = 1;
+
+    if (updates.is_complete !== undefined) {
+      setClauses.push(`is_complete = $${paramIndex++}`);
+      params.push(updates.is_complete);
+    }
+    if (updates.current_round !== undefined) {
+      setClauses.push(`current_round = $${paramIndex++}`);
+      params.push(updates.current_round);
+    }
+    if (updates.total_passed_verified !== undefined) {
+      setClauses.push(`total_passed_verified = $${paramIndex++}`);
+      params.push(updates.total_passed_verified);
+    }
+    if (updates.blocked_insufficient_vendors !== undefined) {
+      setClauses.push(`blocked_insufficient_vendors = $${paramIndex++}`);
+      params.push(updates.blocked_insufficient_vendors);
+    }
+
+    if (setClauses.length === 0) {
+      return dbContext.oneOrNone(`SELECT * FROM tbl_rfq_product_tech_evaluation WHERE id = $1`, [tech_evaluation_id]);
+    }
+
+    params.push(tech_evaluation_id);
+    return dbContext.oneOrNone(
+      `UPDATE tbl_rfq_product_tech_evaluation SET ${setClauses.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
+      params
+    );
+  },
+
+  /**
+   * Get tech evaluation by rfq_product_id with completion info
+   * @param {number} rfq_product_id - RFQ Product ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Tech evaluation record with completion info
+   */
+  getTechEvalByProductId: async (rfq_product_id, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.oneOrNone(
+      `SELECT te.*, r.rfq_no, r.hospitality_company_id, r.hotel_id, r.department_id, r.is_tender
+       FROM tbl_rfq_product_tech_evaluation te
+       JOIN tbl_rfq r ON r.id = te.rfq_id
+       WHERE te.tbl_rfq_product_id = $1`,
+      [rfq_product_id]
+    );
+  },
+
+  /**
+   * Get vendor scores with pass/fail status for a tech evaluation
+   * @param {number} tech_evaluation_id - Tech evaluation ID
+   * @param {number} minimum_passing_score - Minimum passing score
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Array>} - Array of vendor scores
+   */
+  getVendorScoresForTechEval: async (tech_evaluation_id, minimum_passing_score = 0, txContext = null) => {
+    const dbContext = txContext || db;
+    return dbContext.any(
+      `SELECT
+        vr.vendor_id,
+        tu.name AS vendor_name,
+        tu.email AS vendor_email,
+        COALESCE(tc.company_name, tu.organization_name) AS company_name,
+        COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
+        COALESCE(SUM(c.weightage), 0) AS total_weightage,
+        CASE
+          WHEN COALESCE(SUM(c.weightage), 0) > 0
+          THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
+          ELSE 0
+        END AS calculated_score,
+        $2::NUMERIC AS minimum_passing_score,
+        CASE
+          WHEN COALESCE(SUM(c.weightage), 0) > 0
+          THEN CASE
+            WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE($2::NUMERIC, 0)
+            THEN true
+            ELSE false
+          END
+          ELSE NULL
+        END AS is_passed
+      FROM tbl_rfq_product_tech_evaluation_clauses c
+      LEFT JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
+        ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+      LEFT JOIN tbl_users tu ON tu.id = vr.vendor_id
+      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+      WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+      GROUP BY vr.vendor_id, tu.name, tu.email, tc.company_name, tu.organization_name
+      HAVING vr.vendor_id IS NOT NULL`,
+      [tech_evaluation_id, minimum_passing_score]
+    );
+  },
+
+  /**
+   * Update cleared vendor with verification and round info
+   * @param {number} cleared_vendor_id - Cleared vendor record ID
+   * @param {Object} updates - Fields to update
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Updated cleared vendor record
+   */
+  updateClearedVendor: async (cleared_vendor_id, updates, txContext = null) => {
+    const dbContext = txContext || db;
+    const setClauses = [];
+    const params = [];
+    let paramIndex = 1;
+
+    if (updates.is_verified !== undefined) {
+      setClauses.push(`is_verified = $${paramIndex++}`);
+      params.push(updates.is_verified);
+    }
+    if (updates.evaluation_round !== undefined) {
+      setClauses.push(`evaluation_round = $${paramIndex++}`);
+      params.push(updates.evaluation_round);
+    }
+    if (updates.approval_instance_id !== undefined) {
+      setClauses.push(`approval_instance_id = $${paramIndex++}`);
+      params.push(updates.approval_instance_id);
+    }
+    if (updates.calculated_score !== undefined) {
+      setClauses.push(`calculated_score = $${paramIndex++}`);
+      params.push(updates.calculated_score);
+    }
+    if (updates.replaced_by_vendor_id !== undefined) {
+      setClauses.push(`replaced_by_vendor_id = $${paramIndex++}`);
+      params.push(updates.replaced_by_vendor_id);
+    }
+    if (updates.status !== undefined) {
+      setClauses.push(`status = $${paramIndex++}`);
+      params.push(updates.status);
+    }
+    if (updates.reject_message !== undefined) {
+      setClauses.push(`reject_message = $${paramIndex++}`);
+      params.push(updates.reject_message);
+    }
+
+    if (setClauses.length === 0) {
+      return dbContext.oneOrNone(`SELECT * FROM tbl_rfq_product_tech_evaluation_cleared_vendors WHERE id = $1`, [cleared_vendor_id]);
+    }
+
+    params.push(cleared_vendor_id);
+    return dbContext.oneOrNone(
+      `UPDATE tbl_rfq_product_tech_evaluation_cleared_vendors SET ${setClauses.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
+      params
+    );
+  },
+
+  /**
+   * Get cleared vendors for a tech evaluation with optional filters
+   * @param {number} tech_evaluation_id - Tech evaluation ID
+   * @param {Object} filters - Optional filters (is_verified, status, evaluation_round)
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Array>} - Array of cleared vendor records
+   */
+  getClearedVendorsForTechEval: async (tech_evaluation_id, filters = {}, txContext = null) => {
+    const dbContext = txContext || db;
+    let query = `
+      SELECT cv.*, tu.name AS vendor_name, tu.email AS vendor_email,
+             COALESCE(tc.company_name, tu.organization_name) AS company_name,
+             ru.name AS replaced_by_vendor_name
+      FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+      JOIN tbl_users tu ON tu.id = cv.vendor_id
+      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+      LEFT JOIN tbl_users ru ON ru.id = cv.replaced_by_vendor_id
+      WHERE cv.tbl_rfq_product_tech_evaluation_id = $1
+    `;
+    const params = [tech_evaluation_id];
+    let paramIndex = 2;
+
+    if (filters.is_verified !== undefined) {
+      query += ` AND cv.is_verified = $${paramIndex++}`;
+      params.push(filters.is_verified);
+    }
+    if (filters.status !== undefined) {
+      query += ` AND cv.status = $${paramIndex++}`;
+      params.push(filters.status);
+    }
+    if (filters.evaluation_round !== undefined) {
+      query += ` AND cv.evaluation_round = $${paramIndex++}`;
+      params.push(filters.evaluation_round);
+    }
+
+    query += ` ORDER BY cv.evaluation_round ASC, cv.timestamp ASC`;
+
+    return dbContext.any(query, params);
+  },
+
+  /**
+   * Count passed verified vendors for a tech evaluation
+   * @param {number} tech_evaluation_id - Tech evaluation ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<number>} - Count of passed verified vendors
+   */
+  countPassedVerifiedVendors: async (tech_evaluation_id, txContext = null) => {
+    const dbContext = txContext || db;
+    const result = await dbContext.one(
+      `SELECT COUNT(*) AS count
+       FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+       WHERE tbl_rfq_product_tech_evaluation_id = $1
+         AND status = 1
+         AND is_verified = true`,
+      [tech_evaluation_id]
+    );
+    return parseInt(result.count, 10);
+  },
+
+  /**
+   * Get all evaluated vendor IDs for a tech evaluation (to exclude from next round)
+   * @param {number} tech_evaluation_id - Tech evaluation ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Array<number>>} - Array of vendor IDs
+   */
+  getAllEvaluatedVendorIds: async (tech_evaluation_id, txContext = null) => {
+    const dbContext = txContext || db;
+    const result = await dbContext.any(
+      `SELECT DISTINCT vendor_id
+       FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+       WHERE tbl_rfq_product_tech_evaluation_id = $1`,
+      [tech_evaluation_id]
+    );
+    return result.map(r => r.vendor_id);
+  },
+
+  /**
+   * Create empty vendor response records for replacement vendors
+   * @param {number} tech_evaluation_id - Tech evaluation ID
+   * @param {number} vendor_id - Vendor ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Array>} - Created response records
+   */
+  createEmptyVendorResponses: async (tech_evaluation_id, vendor_id, txContext = null) => {
+    const dbContext = txContext || db;
+
+    // Get all clause IDs for this tech evaluation
+    const clauses = await dbContext.any(
+      `SELECT id FROM tbl_rfq_product_tech_evaluation_clauses
+       WHERE tbl_rfq_product_tech_evaluation_id = $1`,
+      [tech_evaluation_id]
+    );
+
+    const insertedRecords = [];
+    for (const clause of clauses) {
+      // Check if response already exists
+      const exists = await dbContext.oneOrNone(
+        `SELECT id FROM tbl_rfq_product_tech_evaluation_vendors_response
+         WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 AND vendor_id = $2`,
+        [clause.id, vendor_id]
+      );
+
+      if (!exists) {
+        const record = await dbContext.one(
+          `INSERT INTO tbl_rfq_product_tech_evaluation_vendors_response
+           (tbl_rfq_product_tech_evaluation_clauses_id, vendor_id, vendor_response, timestamp)
+           VALUES ($1, $2, '', NOW())
+           RETURNING *`,
+          [clause.id, vendor_id]
+        );
+        insertedRecords.push(record);
+      }
+    }
+
+    return insertedRecords;
+  },
+
+  /**
+   * Get tech evaluation status with all details for API response
+   * @param {number} rfq_product_id - RFQ Product ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Complete status object
+   */
+  getTechEvalStatusByProductId: async (rfq_product_id, txContext = null) => {
+    const dbContext = txContext || db;
+
+    // Get tech evaluation with product info
+    const techEval = await dbContext.oneOrNone(
+      `SELECT te.*, rp.product_variant_id, pv.name AS product_name, r.rfq_no
+       FROM tbl_rfq_product_tech_evaluation te
+       JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
+       JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+       JOIN tbl_rfq r ON r.id = te.rfq_id
+       WHERE te.tbl_rfq_product_id = $1`,
+      [rfq_product_id]
+    );
+
+    if (!techEval) {
+      return null;
+    }
+
+    // Get all rounds
+    const rounds = await dbContext.any(
+      `SELECT r.*, ai.status AS approval_status
+       FROM tbl_tech_evaluation_rounds r
+       LEFT JOIN tbl_approval_instances ai ON ai.id = r.approval_instance_id
+       WHERE r.tbl_rfq_product_tech_evaluation_id = $1
+       ORDER BY r.round_number ASC`,
+      [techEval.id]
+    );
+
+    // Get passed verified vendors
+    const passedVerified = await dbContext.any(
+      `SELECT cv.*, tu.name AS vendor_name, tu.email AS vendor_email,
+              COALESCE(tc.company_name, tu.organization_name) AS company_name
+       FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+       JOIN tbl_users tu ON tu.id = cv.vendor_id
+       LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+       WHERE cv.tbl_rfq_product_tech_evaluation_id = $1
+         AND cv.status = 1
+         AND cv.is_verified = true
+       ORDER BY cv.evaluation_round ASC`,
+      [techEval.id]
+    );
+
+    // Get failed verified vendors
+    const failedVerified = await dbContext.any(
+      `SELECT cv.*, tu.name AS vendor_name, tu.email AS vendor_email,
+              COALESCE(tc.company_name, tu.organization_name) AS company_name,
+              ru.name AS replaced_by_vendor_name
+       FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+       JOIN tbl_users tu ON tu.id = cv.vendor_id
+       LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+       LEFT JOIN tbl_users ru ON ru.id = cv.replaced_by_vendor_id
+       WHERE cv.tbl_rfq_product_tech_evaluation_id = $1
+         AND cv.status = 0
+         AND cv.is_verified = true
+       ORDER BY cv.evaluation_round ASC`,
+      [techEval.id]
+    );
+
+    // Get pending evaluation vendors (those with responses but not in cleared table or not verified)
+    const pendingEvaluation = await dbContext.any(
+      `SELECT DISTINCT vr.vendor_id, tu.name AS vendor_name, tu.email AS vendor_email,
+              COALESCE(tc.company_name, tu.organization_name) AS company_name
+       FROM tbl_rfq_product_tech_evaluation_vendors_response vr
+       JOIN tbl_rfq_product_tech_evaluation_clauses c ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+       JOIN tbl_users tu ON tu.id = vr.vendor_id
+       LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+       LEFT JOIN tbl_rfq_product_tech_evaluation_cleared_vendors cv
+         ON cv.tbl_rfq_product_tech_evaluation_id = c.tbl_rfq_product_tech_evaluation_id
+         AND cv.vendor_id = vr.vendor_id
+       WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+         AND (cv.id IS NULL OR cv.is_verified = false)`,
+      [techEval.id]
+    );
+
+    return {
+      tech_evaluation_id: techEval.id,
+      rfq_product_id: techEval.tbl_rfq_product_id,
+      rfq_id: techEval.rfq_id,
+      rfq_no: techEval.rfq_no,
+      product_name: techEval.product_name,
+      is_complete: techEval.is_complete || false,
+      current_round: techEval.current_round || 1,
+      total_passed_verified: techEval.total_passed_verified || 0,
+      required_passed_vendors: techEval.required_passed_vendors || 5,
+      blocked_insufficient_vendors: techEval.blocked_insufficient_vendors || false,
+      minimum_passing_score: techEval.minimum_passing_score,
+      rounds: rounds.map(r => ({
+        round_id: r.id,
+        round_number: r.round_number,
+        status: r.status,
+        approval_instance_id: r.approval_instance_id,
+        approval_status: r.approval_status,
+        passed_count: r.passed_count,
+        failed_count: r.failed_count,
+        submitted_at: r.submitted_at,
+        completed_at: r.completed_at
+      })),
+      vendors: {
+        passed_verified: passedVerified.map(v => ({
+          vendor_id: v.vendor_id,
+          vendor_name: v.vendor_name,
+          vendor_email: v.vendor_email,
+          company_name: v.company_name,
+          calculated_score: v.calculated_score,
+          evaluation_round: v.evaluation_round,
+          is_verified: v.is_verified
+        })),
+        failed_verified: failedVerified.map(v => ({
+          vendor_id: v.vendor_id,
+          vendor_name: v.vendor_name,
+          vendor_email: v.vendor_email,
+          company_name: v.company_name,
+          calculated_score: v.calculated_score,
+          reject_message: v.reject_message,
+          evaluation_round: v.evaluation_round,
+          is_verified: v.is_verified,
+          replaced_by_vendor_id: v.replaced_by_vendor_id,
+          replaced_by_vendor_name: v.replaced_by_vendor_name
+        })),
+        pending_evaluation: pendingEvaluation.map(v => ({
+          vendor_id: v.vendor_id,
+          vendor_name: v.vendor_name,
+          vendor_email: v.vendor_email,
+          company_name: v.company_name,
+          evaluation_round: techEval.current_round || 1,
+          is_verified: false
+        }))
+      },
+      summary: {
+        passed_verified_count: passedVerified.length,
+        failed_verified_count: failedVerified.length,
+        pending_count: pendingEvaluation.length,
+        vendors_needed: Math.max(0, (techEval.required_passed_vendors || 5) - passedVerified.length)
+      }
+    };
+  },
+
+  /**
+   * Get tech evaluation history for a product
+   * @param {number} rfq_product_id - RFQ Product ID
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Array>} - Array of round history
+   */
+  getTechEvalHistoryByProductId: async (rfq_product_id, txContext = null) => {
+    const dbContext = txContext || db;
+
+    const techEval = await dbContext.oneOrNone(
+      `SELECT id FROM tbl_rfq_product_tech_evaluation WHERE tbl_rfq_product_id = $1`,
+      [rfq_product_id]
+    );
+
+    if (!techEval) {
+      return [];
+    }
+
+    // Get all rounds with vendors
+    const rounds = await dbContext.any(
+      `SELECT r.*, ai.status AS approval_status
+       FROM tbl_tech_evaluation_rounds r
+       LEFT JOIN tbl_approval_instances ai ON ai.id = r.approval_instance_id
+       WHERE r.tbl_rfq_product_tech_evaluation_id = $1
+       ORDER BY r.round_number DESC`,
+      [techEval.id]
+    );
+
+    // Get cleared vendors for each round
+    const history = [];
+    for (const round of rounds) {
+      const vendorsInRound = await dbContext.any(
+        `SELECT cv.*, tu.name AS vendor_name, tu.email AS vendor_email,
+                COALESCE(tc.company_name, tu.organization_name) AS company_name
+         FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+         JOIN tbl_users tu ON tu.id = cv.vendor_id
+         LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+         WHERE cv.tbl_rfq_product_tech_evaluation_id = $1
+           AND cv.evaluation_round = $2
+         ORDER BY cv.status DESC, cv.calculated_score DESC`,
+        [techEval.id, round.round_number]
+      );
+
+      history.push({
+        round_id: round.id,
+        round_number: round.round_number,
+        status: round.status,
+        approval_instance_id: round.approval_instance_id,
+        approval_status: round.approval_status,
+        submitted_at: round.submitted_at,
+        completed_at: round.completed_at,
+        vendors_in_round: vendorsInRound.map(v => ({
+          vendor_id: v.vendor_id,
+          vendor_name: v.vendor_name,
+          vendor_email: v.vendor_email,
+          company_name: v.company_name,
+          status: v.status,
+          is_verified: v.is_verified,
+          calculated_score: v.calculated_score,
+          reject_message: v.reject_message,
+          replaced_by_vendor_id: v.replaced_by_vendor_id
+        }))
+      });
+    }
+
+    return history;
+  },
+
+  /**
+   * Insert or update cleared vendor record
+   * @param {Object} vendorData - Vendor data to insert/update
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Object>} - Inserted/updated record
+   */
+  upsertClearedVendor: async (vendorData, txContext = null) => {
+    const dbContext = txContext || db;
+    const {
+      tech_evaluation_id,
+      vendor_id,
+      status,
+      reject_message,
+      is_verified,
+      evaluation_round,
+      approval_instance_id,
+      calculated_score,
+      created_by
+    } = vendorData;
+
+    // Check if record exists
+    const existing = await dbContext.oneOrNone(
+      `SELECT id FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+       WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2`,
+      [tech_evaluation_id, vendor_id]
+    );
+
+    if (existing) {
+      // Update existing
+      return dbContext.one(
+        `UPDATE tbl_rfq_product_tech_evaluation_cleared_vendors
+         SET status = $1, reject_message = $2, is_verified = $3, evaluation_round = $4,
+             approval_instance_id = $5, calculated_score = $6, timestamp = NOW(), created_by = $7
+         WHERE id = $8
+         RETURNING *`,
+        [status, reject_message, is_verified, evaluation_round, approval_instance_id, calculated_score, created_by, existing.id]
+      );
+    } else {
+      // Insert new
+      return dbContext.one(
+        `INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors
+         (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, is_verified,
+          evaluation_round, approval_instance_id, calculated_score, timestamp, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9)
+         RETURNING *`,
+        [tech_evaluation_id, vendor_id, status, reject_message, is_verified,
+         evaluation_round, approval_instance_id, calculated_score, created_by]
+      );
+    }
+  },
 };
 
 export default rfqModel;

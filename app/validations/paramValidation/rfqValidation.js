@@ -558,7 +558,14 @@ export const rfqSchemas = {
   techEvalSubmitForApproval: Joi.object({
     rfq_id: Joi.number().integer().required(),
     rfq_product_id: Joi.number().integer().required(),
-    is_tender: Joi.boolean().required()
+    is_tender: Joi.boolean().optional() // No longer required - fetched from database
+  }),
+
+  techEvalApprovalAction: Joi.object({
+    approval_instance_id: Joi.number().integer().required(),
+    approval_instance_step_id: Joi.number().integer().optional(),
+    action: Joi.string().valid('APPROVE', 'REJECT', 'approve', 'reject').required(),
+    comment: Joi.string().trim().max(1000).optional().allow(null, '')
   }),
 
   // One-at-a-time Clarification System schemas

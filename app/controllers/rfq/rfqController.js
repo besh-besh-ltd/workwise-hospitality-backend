@@ -25,7 +25,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, submitApprovalAction, getApprovalInstanceById } from '../../models/generalModel.js';
 import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
@@ -3167,7 +3167,14 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
  *
  * Submits a Technical Evaluation for approval by creating an approval instance.
  * Only applies to hospitality RFQs (those with hospitality_company_id).
- * Approval is at the product level - entity_id is the rfq_product_id.
+ *
+ * NEW FLOW (Round-based):
+ * 1. Get tech evaluation and check if already complete
+ * 2. Fetch all evaluated vendors with their calculated scores and pass/fail status
+ * 3. Create round record FIRST to get round_id
+ * 4. Use round_id as entity_id in approval instance (NOT rfq_product_id)
+ * 5. Include enhanced metadata with all vendors' names and status
+ * 6. Update round record with approval_instance_id
  *
  * IMPORTANT: This function throws if no approval policy exists for the scope.
  * Hospitality Technical Evaluations MUST have an approval policy configured.
@@ -3176,7 +3183,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
  * @param {number} rfqId - The RFQ ID associated with the product
  * @param {number} userId - The user ID initiating the approval
  * @param {Object} txContext - Optional transaction context for participating in outer transaction
- * @returns {Promise<Object|null>} - Approval instance result or null if not hospitality
+ * @returns {Promise<Object|null>} - Approval instance result with round_id or null if not hospitality
  * @throws {Error} - If no approval policy exists for the hospitality scope
  */
 const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext = null) => {
@@ -3207,10 +3214,61 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     throw new Error('RFQ product not found');
   }
 
-  // Create approval instance for TECHNICAL entity type at product level
+  // Get tech evaluation record
+  const techEval = await dbContext.oneOrNone(
+    `SELECT id, minimum_passing_score, is_complete, current_round, total_passed_verified, required_passed_vendors
+     FROM tbl_rfq_product_tech_evaluation
+     WHERE tbl_rfq_product_id = $1`,
+    [rfqProductId]
+  );
+
+  if (!techEval) {
+    throw new Error('Technical evaluation not found for this product');
+  }
+
+  // Check if already complete
+  if (techEval.is_complete) {
+    throw new Error('Technical evaluation is already complete with required number of passed vendors');
+  }
+
+  // Get vendor scores with pass/fail status
+  const vendorScores = await rfqModel.getVendorScoresForTechEval(
+    techEval.id,
+    techEval.minimum_passing_score || 0,
+    dbContext
+  );
+
+  if (!vendorScores || vendorScores.length === 0) {
+    throw new Error('No vendors have been evaluated for this technical evaluation');
+  }
+
+  // Prepare vendor data for metadata
+  const passedVendors = vendorScores.filter(v => v.is_passed === true);
+  const failedVendors = vendorScores.filter(v => v.is_passed === false);
+  const currentRound = techEval.current_round || 1;
+
+  // Create round record FIRST to get round_id
+  const round = await rfqModel.createTechEvalRound(
+    techEval.id,
+    currentRound,
+    userId,
+    dbContext
+  );
+
+  // Prepare vendors metadata for approval
+  const vendorsMetadata = vendorScores.map(v => ({
+    vendor_id: v.vendor_id,
+    vendor_name: v.vendor_name || v.company_name,
+    vendor_email: v.vendor_email,
+    calculated_score: parseFloat(v.calculated_score) || 0,
+    is_passed: v.is_passed,
+    status: v.is_passed ? 'PASSED' : 'FAILED'
+  }));
+
+  // Create approval instance with round_id as entity_id
   const result = await createApprovalInstance({
     entity_type: 'TECHNICAL',
-    entity_id: rfqProductId,
+    entity_id: round.id, // Use round_id as entity_id
     hospitality_company_id: rfq.hospitality_company_id,
     hotel_id: rfq.hotel_id,
     department_id: rfq.department_id,
@@ -3218,24 +3276,69 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     metadata: {
       rfq_id: rfqId,
       rfq_number: rfq.rfq_no,
+      rfq_product_id: rfqProductId,
+      tech_evaluation_id: techEval.id,
       is_tender: rfq.is_tender,
       company_name: rfq.company_name,
       product_name: product.name,
-      rfq_product_id: rfqProductId
+      evaluation_round: currentRound,
+      minimum_passing_score: techEval.minimum_passing_score || 0,
+      vendors: vendorsMetadata,
+      passed_vendors: passedVendors.map(v => ({
+        vendor_id: v.vendor_id,
+        vendor_name: v.vendor_name || v.company_name,
+        calculated_score: parseFloat(v.calculated_score) || 0
+      })),
+      failed_vendors: failedVendors.map(v => ({
+        vendor_id: v.vendor_id,
+        vendor_name: v.vendor_name || v.company_name,
+        calculated_score: parseFloat(v.calculated_score) || 0
+      })),
+      summary: {
+        total_evaluated: vendorScores.length,
+        passed_count: passedVendors.length,
+        failed_count: failedVendors.length
+      }
     },
     txContext
   });
 
-  return result;
+  // Update round record with approval_instance_id and status
+  await rfqModel.updateTechEvalRound(round.id, {
+    approval_instance_id: result.instance?.id,
+    status: 'SUBMITTED',
+    submitted_at: new Date(),
+    vendors_evaluated: vendorsMetadata,
+    passed_count: passedVendors.length,
+    failed_count: failedVendors.length
+  }, dbContext);
+
+  // Return result with round info
+  return {
+    ...result,
+    round_id: round.id,
+    round_number: currentRound
+  };
 };
 
 /**
- * Handle TECHNICAL post-approval actions (auto-accept/reject vendors)
+ * Handle TECHNICAL post-approval actions (iterative round-based flow)
  * Called after TECHNICAL approval instance is fully approved
+ *
+ * NEW FLOW:
+ * 1. Get round_id from entity_id (entity_id is now round_id)
+ * 2. Get rfq_product_id and tech_evaluation_id from metadata
+ * 3. Set is_verified=TRUE for ALL evaluated vendors (both passed and failed)
+ * 4. Store evaluation_round and approval_instance_id in cleared_vendors
+ * 5. Update round status to APPROVED
+ * 6. Count total_passed_verified and update tech eval record
+ * 7. Check completion condition (>= required passed vendors)
+ * 8. If not complete, auto-replace failed vendors with next L5+ vendors
+ * 9. If no more vendors available, set blocked_insufficient_vendors=TRUE
  */
 const handleTechnicalPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
   const t = txContext || db;
-  
+
   try {
     // Get approval instance
     const { getApprovalInstanceById } = await import('../../models/generalModel.js');
@@ -3244,78 +3347,166 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
       return; // Not approved yet or not TECHNICAL type
     }
 
-    const rfq_product_id = instance.entity_id;
+    // entity_id is now the round_id
+    const round_id = instance.entity_id;
+    const metadata = instance.metadata || {};
 
-    // Get tech evaluation ID for this product
-    const techEval = await t.oneOrNone(`
-      SELECT id, rfq_id, tbl_rfq_product_id, minimum_passing_score
-      FROM tbl_rfq_product_tech_evaluation
-      WHERE tbl_rfq_product_id = $1
-    `, [rfq_product_id]);
+    // Get rfq_product_id and tech_evaluation_id from metadata
+    const rfq_product_id = metadata.rfq_product_id;
+    const tech_evaluation_id = metadata.tech_evaluation_id;
+    const rfq_id = metadata.rfq_id;
+    const evaluation_round = metadata.evaluation_round || 1;
 
-    if (techEval) {
-      // Get all vendors with their pass/fail status based on scores
-      const vendorScores = await t.any(`
-        SELECT
-          vr.vendor_id,
-          COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
-          COALESCE(SUM(c.weightage), 0) AS total_weightage,
-          CASE 
-            WHEN COALESCE(SUM(c.weightage), 0) > 0 
-            THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
-            ELSE 0
-          END AS calculated_score,
-          $2::NUMERIC AS minimum_passing_score,
-          CASE 
-            WHEN COALESCE(SUM(c.weightage), 0) > 0 
-            THEN CASE 
-              WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE($2::NUMERIC, 0)
-              THEN true
-              ELSE false
-            END
-            ELSE NULL
-          END AS is_passed
-        FROM tbl_rfq_product_tech_evaluation_clauses c
-        LEFT JOIN tbl_rfq_product_tech_evaluation_vendors_response vr 
-          ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
-        WHERE c.tbl_rfq_product_tech_evaluation_id = $1
-        GROUP BY vr.vendor_id
-        HAVING vr.vendor_id IS NOT NULL
-      `, [techEval.id, techEval.minimum_passing_score || 0]);
-
-      // Auto-accept/reject vendors based on calculated pass/fail status
-      for (const vendorScore of vendorScores) {
-        if (vendorScore.is_passed !== null) {
-          const status = vendorScore.is_passed ? 1 : 0; // 1 = accepted, 0 = rejected
-          const reject_message = vendorScore.is_passed 
-            ? null 
-            : `Did not meet minimum passing score (${vendorScore.calculated_score}% < ${vendorScore.minimum_passing_score}%)`;
-
-          // Check if vendor already has a record
-          const existingRecord = await t.oneOrNone(`
-            SELECT id FROM tbl_rfq_product_tech_evaluation_cleared_vendors
-            WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2
-          `, [techEval.id, vendorScore.vendor_id]);
-
-          if (existingRecord) {
-            // Update existing record
-            await t.none(`
-              UPDATE tbl_rfq_product_tech_evaluation_cleared_vendors
-              SET status = $1, reject_message = $2, timestamp = NOW(), created_by = $3
-              WHERE id = $4
-            `, [status, reject_message, approver_user_id, existingRecord.id]);
-          } else {
-            // Insert new record
-            await t.none(`
-              INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors
-              (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, timestamp, created_by)
-              VALUES ($1, $2, $3, $4, NOW(), $5)
-            `, [techEval.id, vendorScore.vendor_id, status, reject_message, approver_user_id]);
-          }
-        }
-      }
-      console.log(`Auto-accepted/rejected ${vendorScores.length} vendors for tech eval ${techEval.id}`);
+    // Get round record to verify
+    const round = await rfqModel.getTechEvalRoundById(round_id, t);
+    if (!round) {
+      console.error(`Tech eval round ${round_id} not found for approval instance ${approval_instance_id}`);
+      return;
     }
+
+    // Get tech evaluation record
+    const techEval = await t.oneOrNone(`
+      SELECT id, rfq_id, tbl_rfq_product_id, minimum_passing_score, current_round,
+             total_passed_verified, required_passed_vendors, is_complete
+      FROM tbl_rfq_product_tech_evaluation
+      WHERE id = $1
+    `, [tech_evaluation_id || round.tbl_rfq_product_tech_evaluation_id]);
+
+    if (!techEval) {
+      console.error(`Tech evaluation not found for round ${round_id}`);
+      return;
+    }
+
+    const requiredPassedVendors = techEval.required_passed_vendors || 5;
+
+    // Get vendor scores for this round from metadata (or recalculate)
+    let vendorScores = metadata.vendors || [];
+
+    // If vendors not in metadata, recalculate
+    if (vendorScores.length === 0) {
+      vendorScores = await rfqModel.getVendorScoresForTechEval(
+        techEval.id,
+        techEval.minimum_passing_score || 0,
+        t
+      );
+    }
+
+    const passedVendors = vendorScores.filter(v => v.is_passed === true);
+    const failedVendors = vendorScores.filter(v => v.is_passed === false);
+
+    // Set is_verified=TRUE and store round info for ALL evaluated vendors
+    for (const vendorScore of vendorScores) {
+      if (vendorScore.is_passed !== null && vendorScore.is_passed !== undefined) {
+        const status = vendorScore.is_passed ? 1 : 0;
+        const reject_message = vendorScore.is_passed
+          ? null
+          : `Did not meet minimum passing score (${vendorScore.calculated_score}% < ${techEval.minimum_passing_score || 0}%)`;
+
+        await rfqModel.upsertClearedVendor({
+          tech_evaluation_id: techEval.id,
+          vendor_id: vendorScore.vendor_id,
+          status,
+          reject_message,
+          is_verified: true,
+          evaluation_round,
+          approval_instance_id,
+          calculated_score: vendorScore.calculated_score,
+          created_by: approver_user_id
+        }, t);
+      }
+    }
+
+    // Update round status to APPROVED
+    await rfqModel.updateTechEvalRound(round_id, {
+      status: 'APPROVED',
+      completed_at: new Date(),
+      passed_count: passedVendors.length,
+      failed_count: failedVendors.length
+    }, t);
+
+    // Count total passed verified vendors
+    const totalPassedVerified = await rfqModel.countPassedVerifiedVendors(techEval.id, t);
+
+    // Check if we've reached the required number
+    if (totalPassedVerified >= requiredPassedVendors) {
+      // Evaluation complete!
+      await rfqModel.updateTechEvalStatus(techEval.id, {
+        is_complete: true,
+        total_passed_verified: totalPassedVerified
+      }, t);
+      console.log(`Tech evaluation ${techEval.id} is complete with ${totalPassedVerified} passed vendors`);
+    } else if (failedVendors.length > 0) {
+      // Need to auto-replace failed vendors with next L5+ vendors
+      const vendorsNeeded = requiredPassedVendors - totalPassedVerified;
+      const replacementsNeeded = Math.min(failedVendors.length, vendorsNeeded);
+
+      // Get all evaluated vendor IDs to exclude
+      const evaluatedVendorIds = await rfqModel.getAllEvaluatedVendorIds(techEval.id, t);
+
+      // Get next available vendors (L6, L7, etc.)
+      const nextVendors = await rfqModel.getNextVendorsForProduct(
+        techEval.rfq_id,
+        techEval.tbl_rfq_product_id,
+        evaluatedVendorIds,
+        replacementsNeeded
+      );
+
+      if (nextVendors && nextVendors.length > 0) {
+        // Auto-replace failed vendors
+        for (let i = 0; i < Math.min(failedVendors.length, nextVendors.length); i++) {
+          const failedVendor = failedVendors[i];
+          const newVendor = nextVendors[i];
+
+          // Record replacement
+          await rfqModel.replaceTechEvalVendor(
+            techEval.rfq_id,
+            techEval.tbl_rfq_product_id,
+            failedVendor.vendor_id,
+            newVendor.vendor_id,
+            approver_user_id
+          );
+
+          // Update failed vendor's replaced_by_vendor_id
+          const clearedVendor = await t.oneOrNone(
+            `SELECT id FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+             WHERE tbl_rfq_product_tech_evaluation_id = $1 AND vendor_id = $2`,
+            [techEval.id, failedVendor.vendor_id]
+          );
+          if (clearedVendor) {
+            await rfqModel.updateClearedVendor(clearedVendor.id, {
+              replaced_by_vendor_id: newVendor.vendor_id
+            }, t);
+          }
+
+          // Create empty vendor response records for new vendor
+          await rfqModel.createEmptyVendorResponses(techEval.id, newVendor.vendor_id, t);
+
+          console.log(`Replaced failed vendor ${failedVendor.vendor_id} with ${newVendor.vendor_id}`);
+        }
+
+        // Increment current_round for next evaluation cycle
+        await rfqModel.updateTechEvalStatus(techEval.id, {
+          current_round: evaluation_round + 1,
+          total_passed_verified: totalPassedVerified
+        }, t);
+
+        console.log(`Prepared ${nextVendors.length} replacement vendors for round ${evaluation_round + 1}`);
+      } else {
+        // No more vendors available
+        await rfqModel.updateTechEvalStatus(techEval.id, {
+          blocked_insufficient_vendors: true,
+          total_passed_verified: totalPassedVerified
+        }, t);
+        console.log(`Tech evaluation ${techEval.id} blocked - insufficient vendors available`);
+      }
+    } else {
+      // All vendors passed, update status
+      await rfqModel.updateTechEvalStatus(techEval.id, {
+        total_passed_verified: totalPassedVerified
+      }, t);
+    }
+
+    console.log(`Post-approval complete for tech eval round ${round_id}: ${passedVendors.length} passed, ${failedVendors.length} failed`);
   } catch (techEvalError) {
     // Log but don't fail the transaction
     console.error('Error handling TECHNICAL post-approval:', techEvalError);
@@ -12491,8 +12682,13 @@ getClauses: async (req, res) => {
   /**
    * submitTechEvalForApproval
    *
-   * API endpoint to submit a technical evaluation for approval at the product level.
-   * Creates an approval instance for the TECHNICAL entity type with rfq_product_id as entity_id.
+   * API endpoint to submit a technical evaluation for approval.
+   * Creates an approval instance for the TECHNICAL entity type.
+   *
+   * NEW FLOW (Round-based):
+   * - Creates a round record and uses round_id as entity_id
+   * - Includes all vendor scores and pass/fail status in metadata
+   * - Returns round_id for frontend to track approval by round
    *
    * POST /rfq/tech-eval/submit-for-approval
    * Body: { rfq_id: number, rfq_product_id: number, is_tender: boolean }
@@ -12504,7 +12700,7 @@ getClauses: async (req, res) => {
 
       // Wrap in transaction for atomicity
       const result = await db.tx(async (t) => {
-        // Start approval for the technical evaluation at product level
+        // Start approval for the technical evaluation (creates round record)
         const approvalResult = await startApprovalForTechEval(
           rfq_product_id,
           rfq_id,
@@ -12520,7 +12716,7 @@ getClauses: async (req, res) => {
           };
         }
 
-        // Record lifecycle event
+        // Record lifecycle event with round info
         await recordLifecycleEvent({
           entity_type: 'TECHNICAL',
           entity_id: rfq_product_id,
@@ -12530,7 +12726,9 @@ getClauses: async (req, res) => {
           metadata: {
             approval_instance_id: approvalResult.instance?.id,
             rfq_id: rfq_id,
-            rfq_product_id: rfq_product_id
+            rfq_product_id: rfq_product_id,
+            round_id: approvalResult.round_id,
+            round_number: approvalResult.round_number
           },
           txContext: t
         });
@@ -12540,7 +12738,9 @@ getClauses: async (req, res) => {
           approval_instance_id: approvalResult.instance?.id,
           status: approvalResult.instance?.status,
           total_steps: approvalResult.totalSteps,
-          auto_approved: approvalResult.autoApproved || false
+          auto_approved: approvalResult.autoApproved || false,
+          round_id: approvalResult.round_id,
+          round_number: approvalResult.round_number
         };
       });
 
@@ -12558,6 +12758,8 @@ getClauses: async (req, res) => {
           : 'Technical evaluation submitted for approval',
         data: {
           approval_instance_id: result.approval_instance_id,
+          round_id: result.round_id,
+          round_number: result.round_number,
           status: result.status,
           total_steps: result.total_steps
         }
@@ -12584,6 +12786,27 @@ getClauses: async (req, res) => {
         return res.status(400).json({
           status: 0,
           message: 'RFQ product not found for the given RFQ'
+        });
+      }
+
+      if (error.message?.includes('Technical evaluation not found')) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Technical evaluation not found for this product'
+        });
+      }
+
+      if (error.message?.includes('already complete')) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Technical evaluation is already complete'
+        });
+      }
+
+      if (error.message?.includes('No vendors have been evaluated')) {
+        return res.status(400).json({
+          status: 0,
+          message: 'No vendors have been evaluated. Please evaluate vendors before submitting for approval.'
         });
       }
 
@@ -13465,6 +13688,210 @@ getClauses: async (req, res) => {
       return res.status(500).json({
         status: 0,
         message: 'Error sending message',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * getTechEvalStatus
+   *
+   * Get the current status of a technical evaluation including:
+   * - Completion status and round info
+   * - Passed & verified vendors
+   * - Failed & verified vendors (history)
+   * - Pending evaluation vendors
+   * - All rounds with their approval status
+   *
+   * GET /rfq/tech-eval/status/:rfq_product_id
+   */
+  getTechEvalStatus: async (req, res) => {
+    try {
+      const { rfq_product_id } = req.params;
+
+      if (!rfq_product_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'rfq_product_id is required'
+        });
+      }
+
+      const status = await rfqModel.getTechEvalStatusByProductId(parseInt(rfq_product_id));
+
+      if (!status) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Technical evaluation not found for this product'
+        });
+      }
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Technical evaluation status retrieved successfully',
+        data: status
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Error getting technical evaluation status',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * getTechEvalHistory
+   *
+   * Get the evaluation history for a technical evaluation including:
+   * - All evaluation rounds with approval status
+   * - Vendors evaluated in each round
+   * - Historical pass/fail decisions
+   *
+   * GET /rfq/tech-eval/history/:rfq_product_id
+   */
+  getTechEvalHistory: async (req, res) => {
+    try {
+      const { rfq_product_id } = req.params;
+
+      if (!rfq_product_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'rfq_product_id is required'
+        });
+      }
+
+      const history = await rfqModel.getTechEvalHistoryByProductId(parseInt(rfq_product_id));
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Technical evaluation history retrieved successfully',
+        data: history
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({
+        status: 0,
+        message: 'Error getting technical evaluation history',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * techEvalApprovalAction
+   *
+   * Custom approval action endpoint for TECHNICAL evaluations.
+   * This handles approve/reject actions and triggers post-approval processing
+   * when the evaluation is fully approved.
+   *
+   * POST /rfq/tech-eval/approval/action
+   * Body: {
+   *   approval_instance_id: number,
+   *   approval_instance_step_id?: number,
+   *   action: 'APPROVE' | 'REJECT',
+   *   comment?: string
+   * }
+   */
+  techEvalApprovalAction: async (req, res) => {
+    try {
+      const { approval_instance_id, approval_instance_step_id, action, comment } = req.body;
+      const user_id = req.user?.id;
+
+      if (!user_id) {
+        return res.status(401).json({
+          status: 0,
+          message: 'User authentication required'
+        });
+      }
+
+      if (!approval_instance_id || !action) {
+        return res.status(400).json({
+          status: 0,
+          message: 'approval_instance_id and action are required'
+        });
+      }
+
+      if (!['APPROVE', 'REJECT'].includes(action.toUpperCase())) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Action must be APPROVE or REJECT'
+        });
+      }
+
+      // Verify this is a TECHNICAL approval instance
+      const instance = await getApprovalInstanceById(approval_instance_id);
+      if (!instance) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Approval instance not found'
+        });
+      }
+
+      if (instance.entity_type !== 'TECHNICAL') {
+        return res.status(400).json({
+          status: 0,
+          message: 'This endpoint is only for TECHNICAL approval instances'
+        });
+      }
+
+      // Submit the approval action
+      const result = await submitApprovalAction({
+        approval_instance_id: parseInt(approval_instance_id),
+        approval_instance_step_id: approval_instance_step_id ? parseInt(approval_instance_step_id) : null,
+        approver_user_id: user_id,
+        action: action.toUpperCase(),
+        comment
+      });
+
+      // If fully approved, trigger post-approval processing
+      if (action.toUpperCase() === 'APPROVE' && result.instance_status === 'APPROVED') {
+        try {
+          await handleTechnicalPostApproval(approval_instance_id, user_id);
+        } catch (postApprovalError) {
+          // Log but don't fail the approval
+          console.error('Error in TECHNICAL post-approval processing:', postApprovalError);
+        }
+      }
+
+      return res.status(200).json({
+        status: 1,
+        message: result.message,
+        data: {
+          action: action.toUpperCase(),
+          instance_status: result.instance_status,
+          step_status: result.step_status,
+          next_step: result.next_step,
+          next_step_id: result.next_step_id
+        }
+      });
+    } catch (error) {
+      logError(error);
+
+      if (error.message?.includes('not an approver')) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You are not authorized to approve this step'
+        });
+      }
+
+      if (error.message?.includes('already acted')) {
+        return res.status(400).json({
+          status: 0,
+          message: 'You have already acted on this approval step'
+        });
+      }
+
+      if (error.message?.includes('Cannot act on instance')) {
+        return res.status(400).json({
+          status: 0,
+          message: error.message
+        });
+      }
+
+      return res.status(500).json({
+        status: 0,
+        message: 'Error processing approval action',
         error: error.message
       });
     }

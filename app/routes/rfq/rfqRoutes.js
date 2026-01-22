@@ -602,13 +602,16 @@ RfqRoutes.post('/get-clauses-of-product',
   rfqController.getClausesOfProduct
 )
 
-// vendor side
+// Tech evaluation vendor replacement
 RfqRoutes.post('/replace-tech-eval-vendor',
+  passportSignIn,
   acl([2, 8, 10]),
   rfqController.replaceTechEvalVendor
 );
 
+// Get next vendors for tech evaluation (L6, L7, etc.)
 RfqRoutes.get('/get-next-vendors-for-tech-eval',
+  passportSignIn,
   acl([2, 8, 10]),
   rfqController.getNextVendorsForTechEval
 );
@@ -618,6 +621,28 @@ RfqRoutes.post('/get-tech-evaluation-result',
   validateBody(rfqSchemas.getTechEvaluationResult),
   rfqController.getTechEvaluationResult
 )
+
+// Tech Evaluation Status - Get current status with rounds, passed/failed vendors
+RfqRoutes.get('/tech-eval/status/:rfq_product_id',
+  passportSignIn,
+  acl([2, 8, 10]),
+  rfqController.getTechEvalStatus
+);
+
+// Tech Evaluation History - Get evaluation history by rounds
+RfqRoutes.get('/tech-eval/history/:rfq_product_id',
+  passportSignIn,
+  acl([2, 8, 10]),
+  rfqController.getTechEvalHistory
+);
+
+// Tech Evaluation Approval Action - Custom approve/reject endpoint
+// This triggers post-approval processing (auto-replace failed vendors, etc.)
+RfqRoutes.post('/tech-eval/approval/action',
+  passportSignIn,
+  validateBody(rfqSchemas.techEvalApprovalAction),
+  rfqController.techEvalApprovalAction
+);
 
 //  product wise audit report
 RfqRoutes.get('/report/rfq-product-wise',
