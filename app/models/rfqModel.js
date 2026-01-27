@@ -8076,9 +8076,21 @@ ORDER BY m.created_at;
       SELECT EXISTS (SELECT 1 FROM tbl_users WHERE id = $1) AS vendor_exists;
     `;
 
-    const checkVendorResponseQuery = `
-      SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_vendors_response
-      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 AND vendor_id = $2) AS response_exists;
+    const getExistingResponseQuery = `
+      SELECT id FROM tbl_rfq_product_tech_evaluation_vendors_response
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1 AND vendor_id = $2;
+    `;
+
+    const updateVendorResponseQuery = `
+      UPDATE tbl_rfq_product_tech_evaluation_vendors_response
+      SET vendor_response = $1, timestamp = NOW()
+      WHERE id = $2
+      RETURNING id;
+    `;
+
+    const deleteExistingFilesQuery = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_vendors_response_files
+      WHERE tbl_rfq_product_tech_evaluation_vendors_response_id = $1;
     `;
 
     const insertVendorResponseQuery = `
@@ -8121,27 +8133,35 @@ ORDER BY m.created_at;
         }
 
         // Check if Vendor Response already exists
-        const responseResult = await db.query(checkVendorResponseQuery, [
+        const existingResponse = await db.query(getExistingResponseQuery, [
           clause_id,
           vendor_id
         ]);
-        // console.log("Vendor response validation result =", responseResult);
-        if (responseResult[0].response_exists) {
-          reject({
-            status: 0,
-            message: `Vendor response already exists for Clause ID ${clause_id}.`
-          });
-          return;
-        }
 
-        // Insert vendor response
-        const insertResponseResult = await db.query(insertVendorResponseQuery, [
-          vendor_id,
-          clause_id,
-          vendor_response
-        ]);
-        const responseId = insertResponseResult[0].id;
-        // console.log("Inserted Vendor Response ID =", responseId);
+        let responseId;
+
+        if (existingResponse.length > 0 && existingResponse[0].id) {
+          // UPDATE existing response
+          const existingId = existingResponse[0].id;
+
+          // Update the response text
+          await db.query(updateVendorResponseQuery, [vendor_response, existingId]);
+          responseId = existingId;
+
+          // Only delete existing files if new files are provided
+          // If file_url is empty/null, keep existing files unchanged
+          if (file_url && file_url.length > 0) {
+            await db.query(deleteExistingFilesQuery, [existingId]);
+          }
+        } else {
+          // INSERT new response
+          const insertResponseResult = await db.query(insertVendorResponseQuery, [
+            vendor_id,
+            clause_id,
+            vendor_response
+          ]);
+          responseId = insertResponseResult[0].id;
+        }
 
         // Insert associated files if provided
         if (file_url && file_url.length > 0) {
