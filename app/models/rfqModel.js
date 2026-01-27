@@ -2454,6 +2454,7 @@ LIMIT 1;`;
                     SELECT COUNT(*) AS total_clauses
                     FROM tbl_rfq_product_tech_evaluation_clauses TEC
                     JOIN tech_eval TE ON TEC.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                    ${user_type == 3 ? `WHERE TEC.clause_type != 'sampling' OR TEC.clause_type IS NULL` : ''}
                 ),
                 accepted_vendor AS (
                     SELECT TECV.vendor_id
@@ -2471,6 +2472,7 @@ LIMIT 1;`;
                       AND VR.vendor_response != ''
                       AND VR.vendor_response != 'N/A'
                       AND TRIM(VR.vendor_response) != ''
+                      ${user_type == 3 ? `AND (TEC.clause_type != 'sampling' OR TEC.clause_type IS NULL)` : ''}
                     GROUP BY VR.vendor_id
                     HAVING COUNT(DISTINCT VR.tbl_rfq_product_tech_evaluation_clauses_id) = (SELECT total_clauses FROM all_clauses)
                     LIMIT 1
@@ -2504,6 +2506,7 @@ LIMIT 1;`;
                     JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON VR.tbl_rfq_product_tech_evaluation_clauses_id = TEC.id
                     JOIN tech_eval TE ON TEC.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
                     WHERE VR.vendor_id = (SELECT vendor_id FROM resolved_vendor)
+                      ${user_type == 3 ? `AND (TEC.clause_type != 'sampling' OR TEC.clause_type IS NULL)` : ''}
                 ),
                 buyer_evaluation AS (
                     SELECT
