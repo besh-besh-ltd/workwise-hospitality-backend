@@ -2449,18 +2449,103 @@ LIMIT 1;`;
                     JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON TE.id = TEC.tbl_rfq_product_tech_evaluation_id
                     WHERE TE.rfq_id = RFQ_P.rfq_id AND TE.tbl_rfq_product_id = RFQ_P.id
                     LIMIT 1
+                ),
+                all_clauses AS (
+                    SELECT COUNT(*) AS total_clauses
+                    FROM tbl_rfq_product_tech_evaluation_clauses TEC
+                    JOIN tech_eval TE ON TEC.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                ),
+                accepted_vendor AS (
+                    SELECT TECV.vendor_id
+                    FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
+                    JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                    WHERE TECV.status = 1
+                    LIMIT 1
+                ),
+                completed_vendor AS (
+                    SELECT VR.vendor_id
+                    FROM tbl_rfq_product_tech_evaluation_vendors_response VR
+                    JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON VR.tbl_rfq_product_tech_evaluation_clauses_id = TEC.id
+                    JOIN tech_eval TE ON TEC.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                    WHERE VR.vendor_response IS NOT NULL
+                      AND VR.vendor_response != ''
+                      AND VR.vendor_response != 'N/A'
+                      AND TRIM(VR.vendor_response) != ''
+                    GROUP BY VR.vendor_id
+                    HAVING COUNT(DISTINCT VR.tbl_rfq_product_tech_evaluation_clauses_id) = (SELECT total_clauses FROM all_clauses)
+                    LIMIT 1
+                ),
+                product_vendor AS (
+                    SELECT TRPV.user_id AS vendor_id
+                    FROM tbl_rfq_product_vendors TRPV
+                    WHERE TRPV.rfq_id = RFQ_P.rfq_id
+                      AND TRPV.product_variant_id = RFQ_P.product_variant_id
+                      AND TRPV.variant = RFQ_P.variant
+                    LIMIT 1
+                ),
+                resolved_vendor AS (
+                    SELECT CASE
+                        WHEN ${user_type} = 3 THEN ${user_id}
+                        ELSE COALESCE(
+                            (SELECT vendor_id FROM accepted_vendor),
+                            (SELECT vendor_id FROM completed_vendor),
+                            (SELECT vendor_id FROM product_vendor)
+                        )
+                    END AS vendor_id
+                ),
+                vendor_responses AS (
+                    SELECT
+                        COUNT(*) AS responded_clauses,
+                        COUNT(CASE WHEN VR.vendor_response IS NOT NULL
+                                   AND VR.vendor_response != ''
+                                   AND VR.vendor_response != 'N/A'
+                                   AND TRIM(VR.vendor_response) != '' THEN 1 END) AS valid_responses
+                    FROM tbl_rfq_product_tech_evaluation_vendors_response VR
+                    JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON VR.tbl_rfq_product_tech_evaluation_clauses_id = TEC.id
+                    JOIN tech_eval TE ON TEC.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                    WHERE VR.vendor_id = (SELECT vendor_id FROM resolved_vendor)
+                ),
+                buyer_evaluation AS (
+                    SELECT
+                        TECV.status,
+                        TECV.reject_message
+                    FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
+                    JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
+                    WHERE TECV.vendor_id = (SELECT vendor_id FROM resolved_vendor)
+                    LIMIT 1
                 )
                 SELECT json_build_object(
                     'has_tech_eval', (SELECT COUNT(*) > 0 FROM tech_eval),
                     'is_accepted', (
                         SELECT COALESCE(
-                            (SELECT status = 1
-                              FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
-                              JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
-                              WHERE TECV.vendor_id = ${user_id}
-                              LIMIT 1),
+                            (SELECT status = 1 FROM buyer_evaluation),
                             false
                         )
+                    ),
+                    'is_rejected', (
+                        SELECT COALESCE(
+                            (SELECT status = 0 FROM buyer_evaluation),
+                            false
+                        )
+                    ),
+                    'has_response', (
+                        SELECT COALESCE((SELECT valid_responses > 0 FROM vendor_responses), false)
+                    ),
+                    'all_clauses_responded', (
+                        SELECT COALESCE(
+                            (SELECT valid_responses = total_clauses AND total_clauses > 0
+                             FROM vendor_responses, all_clauses),
+                            false
+                        )
+                    ),
+                    'responded_count', (
+                        SELECT COALESCE((SELECT valid_responses FROM vendor_responses), 0)
+                    ),
+                    'total_clauses', (
+                        SELECT COALESCE((SELECT total_clauses FROM all_clauses), 0)
+                    ),
+                    'rejection_reason', (
+                        SELECT reject_message FROM buyer_evaluation
                     )
                 )
             ) AS tech_evaluation_status
