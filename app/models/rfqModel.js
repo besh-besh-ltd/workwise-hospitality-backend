@@ -7329,7 +7329,7 @@ ORDER BY m.created_at;
       FROM tbl_rfq_product_tech_evaluation_clauses
       WHERE id = $1;
     `;
-    const queryUpdateClause = `
+    let queryUpdateClause = `
       UPDATE tbl_rfq_product_tech_evaluation_clauses
       SET clause_text = $1, timestamp = NOW()`;
     const params = [clause_text];
@@ -7375,6 +7375,26 @@ ORDER BY m.created_at;
       WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
     `;
 
+    // Cleanup queries to void evaluation data on clause update
+    const deleteVendorResponsesQuery = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_vendors_response
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
+    `;
+
+    const deleteCommentsQuery = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_comments
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
+    `;
+
+    const deleteClearedVendorsQuery = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+      WHERE tbl_rfq_product_tech_evaluation_id = (
+        SELECT tbl_rfq_product_tech_evaluation_id
+        FROM tbl_rfq_product_tech_evaluation_clauses
+        WHERE id = $1
+      );
+    `;
+
     return new Promise((resolve, reject) => {
       // Validate the clause ID
       db.query(queryCheckClauseId, [
@@ -7401,6 +7421,11 @@ ORDER BY m.created_at;
         }
 
         // console.log(`Clause updated: ${tbl_rfq_product_tech_evaluation_clauses_id}`);
+
+        // Void all related evaluation data on clause update
+        await db.query(deleteVendorResponsesQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
+        await db.query(deleteCommentsQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
+        await db.query(deleteClearedVendorsQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
 
         // Handling file URLs
         if (file_url && file_url.length > 0) {
@@ -7527,6 +7552,26 @@ ORDER BY m.created_at;
       WHERE id = $1;
     `;
 
+    // Cleanup queries to delete related evaluation data
+    const deleteVendorResponsesQuery = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_vendors_response
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
+    `;
+
+    const deleteCommentsQuery = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_comments
+      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
+    `;
+
+    const deleteClearedVendorsQuery = `
+      DELETE FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+      WHERE tbl_rfq_product_tech_evaluation_id = (
+        SELECT tbl_rfq_product_tech_evaluation_id
+        FROM tbl_rfq_product_tech_evaluation_clauses
+        WHERE id = $1
+      );
+    `;
+
     return new Promise((resolve, reject) => {
       //Checking if the clause exists
       db.query(checkClauseExistsQuery, [
@@ -7537,14 +7582,19 @@ ORDER BY m.created_at;
             return reject(new Error('Clause not found.'));
           }
 
-          //Deleting the clause (files will be deleted automatically due to ON DELETE CASCADE)
+          // Delete all related evaluation data before deleting the clause
+          await db.query(deleteVendorResponsesQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
+          await db.query(deleteCommentsQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
+          await db.query(deleteClearedVendorsQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
+
+          //Deleting the clause (clause_files will be deleted automatically due to ON DELETE CASCADE)
           db.query(deleteClauseQuery, [
             tbl_rfq_product_tech_evaluation_clauses_id
           ])
             .then(() => {
               resolve({
                 success: true,
-                message: 'Clause and associated files deleted successfully.'
+                message: 'Clause and all associated data deleted successfully.'
               });
             })
             .catch((error) => {
@@ -8476,6 +8526,8 @@ ORDER BY m.created_at;
                 clause.clause_id
             );
 
+            if(!vendorResponse) return null;
+
             return {
               clause_id: clause.clause_id,
               clause_text: clause.clause_text,
@@ -8490,7 +8542,7 @@ ORDER BY m.created_at;
                 )
                 .flat()
             };
-          });
+          }).filter(Boolean);
 
           resolve({
             status: 1,
@@ -8688,7 +8740,8 @@ ORDER BY m.created_at;
       FROM tbl_rfq_product_tech_evaluation_clauses AS c
       INNER JOIN tbl_rfq_product_tech_evaluation_vendors_response AS vr
       ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
-      WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+      WHERE c.clause_type = 'clause'
+      AND c.tbl_rfq_product_tech_evaluation_id = $1
       ${vendor_id ? `AND vr.vendor_id = $2` : ''}
       LIMIT 1;
       `;
