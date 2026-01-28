@@ -36,6 +36,8 @@ import { summaries } from '../../util/constants.js';
 import Razorpay from 'razorpay';
 import crypto from 'crypto';
 import negotiationModel from '../../models/negotiationModel.js';
+import rbacModel from '../../models/rbacModel.js';
+import { sendTechEvalCompletionNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -3435,6 +3437,36 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
         total_passed_verified: totalPassedVerified
       }, t);
       console.log(`Tech evaluation ${techEval.id} is complete with ${totalPassedVerified} passed vendors`);
+
+      // Send notifications to qualified users
+      try {
+        // Fetch RFQ details to get company_id and hotel_id
+        const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+
+        if (rfqDetails && rfqDetails.hospitality_company_id) {
+          // Get users with EITHER quote-compare (read+write) OR negotiation (read+write)
+          const qualifiedUsers = await rbacModel.getUsersWithResourcePermissionPairs(
+            rfqDetails.hospitality_company_id,
+            rfqDetails.hotel_id,
+            ['quote-compare', 'negotiation']
+          );
+
+          if (qualifiedUsers && qualifiedUsers.length > 0) {
+            // Fire-and-forget to avoid blocking transaction
+            sendTechEvalCompletionNotification(
+              rfqDetails,
+              {
+                id: techEval.id,
+                total_passed_verified: totalPassedVerified,
+                required_passed_vendors: requiredPassedVendors
+              },
+              qualifiedUsers
+            ).catch(err => console.error('Failed to send tech eval notifications:', err));
+          }
+        }
+      } catch (notificationError) {
+        console.error('Error sending tech eval completion notifications:', notificationError);
+      }
     } else if (failedVendors.length > 0) {
       // Need to auto-replace failed vendors with next L5+ vendors
       const vendorsNeeded = requiredPassedVendors - totalPassedVerified;

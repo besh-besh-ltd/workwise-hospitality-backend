@@ -289,6 +289,56 @@ const rbacModel = {
       FROM tbl_permissions
       ORDER BY resource, action
     `);
+  },
+
+  /**
+   * Get users who have BOTH read AND write permissions for ANY of the specified resources
+   * (OR logic between resources, AND logic within each resource pair)
+   * @param {number} companyId - The hospitality company ID
+   * @param {number|null} hotelId - The hotel ID
+   * @param {Array<string>} resources - e.g., ['quote-compare', 'negotiation']
+   * @returns {Promise<Array>} - Users with id, name, email
+   */
+  getUsersWithResourcePermissionPairs: async (companyId, hotelId = null, resources = []) => {
+    if (!companyId || !resources.length) {
+      return [];
+    }
+
+    // Build conditions for each resource (user needs BOTH read AND write for that resource)
+    // Example: ('quote-compare', 'read'), ('quote-compare', 'write') OR ('negotiation', 'read'), ('negotiation', 'write')
+
+    const params = hotelId ? [companyId, hotelId] : [companyId];
+    let paramIndex = params.length + 1;
+
+    const resourceConditions = resources.map(resource => {
+      const readIdx = paramIndex++;
+      const writeIdx = paramIndex++;
+      params.push(`${resource}.read`, `${resource}.write`);
+      return `(
+        SELECT COUNT(DISTINCT p2.resource || '.' || p2.action)
+        FROM tbl_user_role_scopes urs2
+        JOIN tbl_role_permissions rp2 ON rp2.role_id = urs2.role_id
+        JOIN tbl_permissions p2 ON p2.id = rp2.permission_id
+        WHERE urs2.user_id = u.id
+          AND urs2.company_id = $1
+          AND (urs2.hotel_id IS NULL ${hotelId ? 'OR urs2.hotel_id = $2' : ''})
+          AND (p2.resource || '.' || p2.action) IN ($${readIdx}, $${writeIdx})
+      ) = 2`;
+    }).join(' OR ');
+
+    return db.any(
+      `
+      SELECT DISTINCT
+        u.id,
+        u.name,
+        u.email
+      FROM tbl_users u
+      WHERE u.is_deleted = 0
+        AND u.status = 1
+        AND (${resourceConditions})
+      `,
+      params
+    );
   }
 
 };
