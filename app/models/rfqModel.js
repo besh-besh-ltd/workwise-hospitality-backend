@@ -10082,14 +10082,7 @@ ORDER BY tq.timestamp DESC;
       SELECT DISTINCT u.id, u.name, u.email
       FROM tbl_project_team pt
       JOIN tbl_users u ON u.id = pt.user_id AND u.status = 1
-      JOIN tbl_user_role_scopes urs ON urs.user_id = u.id
-      JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
-      JOIN tbl_permissions p ON p.id = rp.permission_id
       WHERE pt.project_id = $1
-        AND p.resource = 'technical'
-        AND p.action IN ('read', 'write')
-      GROUP BY u.id, u.name, u.email
-      HAVING COUNT(DISTINCT p.action) FILTER (WHERE p.action IN ('read', 'write')) >= 2
       ORDER BY u.name
     `, [project_id]);
   },
