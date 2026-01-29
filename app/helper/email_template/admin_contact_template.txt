@@ -30,7 +30,7 @@
   </tr>
   <tr>
     <td colspan="2" align='center' valign='top' style='font-family:Arial, Helvetica, sans-serif; font-size:14px; color:#fff; font-weight:500; padding:12px 5px; background: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%); line-height:18px;'>
-      <p style='margin:0;'>If you need assistance, contact us at <a href="mailto:hello@letsworkwise.com" style="color:#fff; text-decoration: underline;">hello@letsworkwise.com</a></p>
+      <p style='margin:0;'>If you need assistance, contact us at <a href="mailto:hello+phileeinhospitality@letsworkwise.com" style="color:#fff; text-decoration: underline;">hello+phileeinhospitality@letsworkwise.com</a></p>
       <p style='margin:6px 0 0;'>© WorkWise. All Rights Reserved.</p>
     </td>
   </tr>
