@@ -57,6 +57,73 @@ const VENDORS_FILTER_KEYS = [
   'subscription_type',
 ];
 
+/**
+ * Helper function to get project member emails for an RFQ
+ * @param {number} rfq_id - The RFQ ID to get project members for
+ * @returns {Promise<string[]>} - Array of project member email addresses
+ */
+const getProjectMemberEmailsForRFQ = async (rfq_id) => {
+  try {
+    // Get the RFQ details to find the project_id
+    const rfqDetails = await rfqModel.getRFQDetails(rfq_id);
+    if (!rfqDetails || rfqDetails.length === 0 || !rfqDetails[0].project_id) {
+      return [];
+    }
+
+    const project_id = rfqDetails[0].project_id;
+
+    // Get project team members
+    const teamMembers = await projectModel.getProjectTeamMembers(project_id);
+    if (!teamMembers || teamMembers.length === 0) {
+      return [];
+    }
+
+    // Extract and filter valid email addresses
+    const memberEmails = teamMembers
+      .map(member => member.email)
+      .filter(email => email && typeof email === 'string' && email.includes('@'));
+
+    return memberEmails;
+  } catch (error) {
+    console.error('Error getting project member emails for RFQ:', error);
+    return [];
+  }
+};
+
+/**
+ * Helper function to add project member emails to CC field
+ * @param {Object} mailRecipients - The mail recipients object
+ * @param {string[]} projectMemberEmails - Array of project member emails
+ * @returns {Object} - Updated mail recipients with CC
+ */
+const addProjectMembersToCC = (mailRecipients, projectMemberEmails) => {
+  if (!projectMemberEmails || projectMemberEmails.length === 0) {
+    return mailRecipients;
+  }
+
+  // Get existing CC as array
+  let existingCC = [];
+  if (mailRecipients.cc) {
+    if (Array.isArray(mailRecipients.cc)) {
+      existingCC = mailRecipients.cc;
+    } else if (typeof mailRecipients.cc === 'string' && mailRecipients.cc) {
+      existingCC = [mailRecipients.cc];
+    }
+  }
+
+  // Combine existing CC with project member emails, removing duplicates
+  const allCC = [...new Set([...existingCC, ...projectMemberEmails])];
+
+  // Filter out any emails that are already in the 'to' field to avoid duplicates
+  const toEmails = Array.isArray(mailRecipients.to)
+    ? mailRecipients.to
+    : [mailRecipients.to];
+
+  mailRecipients.cc = allCC.filter(email => !toEmails.includes(email));
+
+  return mailRecipients;
+};
+
 const getDownloadURL = (url, excelToJson = false) => {
   if(process.env.NODE_ENV == "production" && !url.includes("https")) {
     url = url.replace("http", "https");
@@ -69,7 +136,7 @@ const getDownloadURL = (url, excelToJson = false) => {
   return url;
 }
 
-export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, status, persisted_rfq_id, errors, persistence, download_url) => {
+export const notifyBuyerOnPersistenceViaEmail = async (buyer_info, previous_status, status, persisted_rfq_id, errors, persistence, download_url) => {
   try {
     const { name, email } = buyer_info;
 
@@ -204,14 +271,20 @@ export const notifyBuyerOnPersistenceViaEmail = (buyer_info, previous_status, st
 
       const html = generateEmailTemplate(headerContent, containerContent);
 
-      const mail = {
+      let mail = {
         from: Config.webmasterMail,
         to: email,
         subject,
         html
       };
 
-        sendMail(mail);
+      // Add project members to CC if RFQ ID is available
+      if (persisted_rfq_id) {
+        const projectMemberEmails = await getProjectMemberEmailsForRFQ(persisted_rfq_id);
+        addProjectMembersToCC(mail, projectMemberEmails);
+      }
+
+      sendMail(mail);
   } catch (err) {
     console.error("Error in sendRfqUpdatedMailToVendors:", err);
     throw err;
@@ -311,6 +384,10 @@ const sendMailToBuyerForRegret = async (buyer, rfqNumber, vendor, rfq_id, regret
       html: dynamicHTML
     };
 
+    // Add project members to CC
+    const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+    addProjectMembersToCC(mailRecipients, projectMemberEmails);
+
     await sendMailWithRetry(mailRecipients);
   } catch (error) {
     throw error;
@@ -350,6 +427,10 @@ const sendFollowUpEmailsService = async (payload) => {
       html: dynamicHTML
     };
 
+    // Add project members to CC
+    const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+    addProjectMembersToCC(mailRecipients, projectMemberEmails);
+
     await sendMailWithRetry(mailRecipients);
     console.log(`Follow-up email sent to buyer ${email} for RFQ ${rfqNumber}`);
   } catch (error) {
@@ -359,9 +440,9 @@ const sendFollowUpEmailsService = async (payload) => {
 
 
 /**
- * 
- * @param {*} vendor 
- * @param {*} user 
+ *
+ * @param {*} vendor
+ * @param {*} user
  * @param {*} rfqNumber 
  * @param {*} products - array 
  * @last_update by mukul on 2023-11-01, for company wise email template
@@ -489,6 +570,10 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
       } else {
         mailRecipients.to = user_details[0].email;
       }
+
+      // Add project members to CC
+      const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfqNumber);
+      addProjectMembersToCC(mailRecipients, projectMemberEmails);
 
       // Construct an array of product descriptions
       const productDescriptions = productsWithTechEval.map((product) => {
@@ -684,6 +769,10 @@ const sendMailToVendorsForTargetPrice = async (
           // mailRecipients.cc = buyerEmail;
         }
 
+        // Add project members to CC
+        const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+        addProjectMembersToCC(mailRecipients, projectMemberEmails);
+
         // Send the email
         sendMail(mailRecipients);
 
@@ -818,6 +907,10 @@ const sendQuotationMailToBuyer = async (req, rfqNumber) => {
       mailRecipients.to = email;
     }
 
+    // Add project members to CC
+    const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfqNumber);
+    addProjectMembersToCC(mailRecipients, projectMemberEmails);
+
     await sendMailWithRetry(mailRecipients);
     console.log(`Confirmation email sent successfully to buyer ${id}`);
   } catch (error) {
@@ -865,6 +958,10 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
   if (spocList && spocList.length > 0) {
     mailRecipients.to = spocList.map(spoc => spoc.email);
   }
+
+  // Add project members to CC
+  const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+  addProjectMembersToCC(mailRecipients, projectMemberEmails);
 
   // Sending the email
   sendMail(mailRecipients);
@@ -964,6 +1061,10 @@ const formattedProducts = countedProducts.length > 0
     html: dynamicHTML
   };
 
+  // Add project members to CC
+  const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+  addProjectMembersToCC(mailRecipients, projectMemberEmails);
+
   // Sending the email
   sendMail(mailRecipients);
 
@@ -1033,6 +1134,10 @@ const sendQuoteNotificationToVendor = async (req) => {
     mailRecipients.to = email;
   }
 
+  // Add project members to CC
+  const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+  addProjectMembersToCC(mailRecipients, projectMemberEmails);
+
   sendMail(mailRecipients);
 
 
@@ -1069,9 +1174,12 @@ const sendQuoteNotificationToVendor = async (req) => {
 
 };
 
-const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
+const sendRFQClosedMail = async (buyerInfo, rfqItem, vendorList) => {
   const { name, email, organization_name, company_name } = buyerInfo;
   const buyerCompanyName = company_name || organization_name || name;
+
+  // Get project members for CC
+  const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfqItem.id);
 
   // Define email content based on user role
   const headerContent = `<div>
@@ -1099,12 +1207,16 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
   );
 
   // Send email to the buyer
-  const buyerMailRecipients = {
+  let buyerMailRecipients = {
     from: Config.webmasterMail,
     to: email,
     subject: `RFQ Marked as Closed for #${rfqItem.rfq_no}`,
     html: dynamicHTML
   };
+
+  // Add project members to CC
+  addProjectMembersToCC(buyerMailRecipients, projectMemberEmails);
+
   sendMail(buyerMailRecipients);
 
   // Send email to all vendors and their SPOCs
@@ -1117,7 +1229,7 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
          The RFQ for <strong>${rfqItem.rfq_no}</strong> has been marked as closed by the buyer.<br>
          Thank you for your participation, and we look forward to more opportunities to work with you.<br>
          <br>
-         
+
          <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqItem.id}"
             style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
            Explore New RFQs
@@ -1126,7 +1238,7 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
          <p>
           Tip: Regularly check for new RFQs to stay ahead and grow your business through Workwise.
          </p>
- 
+
          </div>`;
 
     const dynamicHTMLVendor = generateEmailTemplate(
@@ -1147,6 +1259,9 @@ const sendRFQClosedMail = (buyerInfo, rfqItem, vendorList) => {
     } else {
       mailRecipients.to = vendor.user_email;
     }
+
+    // Add project members to CC
+    addProjectMembersToCC(mailRecipients, projectMemberEmails);
 
     sendMail(mailRecipients);
   }
@@ -1249,6 +1364,10 @@ const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) =>
   if (spocList.length && vendor.email && vendor.email.includes('@')) {
     mailRecipients.cc = [vendor.email];
   }
+
+  // Add project members to CC
+  const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+  addProjectMembersToCC(mailRecipients, projectMemberEmails);
 
   sendMail(mailRecipients);
 
@@ -1412,11 +1531,15 @@ const sendQuoteNotificationEmail = async (req) => {
         mailRecipients.to = buyer.email;
       }
 
+      // Add project members to CC
+      const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+      addProjectMembersToCC(mailRecipients, projectMemberEmails);
+
       // Sending the email to the buyer
       sendMail(mailRecipients);
 
       // console.log(`Quotation update email sent to buyer: ${buyer.email}`);
-    } 
+    }
   }
 
 
@@ -1468,6 +1591,10 @@ const sendQuoteNotificationEmail = async (req) => {
          mail.to = email || '';
         //  mail.bcc = 'ayush@letsworkwise.com';
        }
+
+       // Add project members to CC
+       const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+       addProjectMembersToCC(mail, projectMemberEmails);
 
        sendMail(mail);
      }
@@ -1565,6 +1692,10 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
       } else {
         mailRecipients.to = vendor.vendor_email;
       }
+
+      // Add project members to CC
+      const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+      addProjectMembersToCC(mailRecipients, projectMemberEmails);
 
       sendMail(mailRecipients);
 
@@ -1712,6 +1843,10 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
         mailRecipients.to = vendor.email;
       }
 
+      // Add project members to CC
+      const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+      addProjectMembersToCC(mailRecipients, projectMemberEmails);
+
       sendMail(mailRecipients);
 
       console.log(
@@ -1805,6 +1940,10 @@ const sendAddTechCommentMailForBuyer = async (buyer, vendor_id, product, text) =
         html: dynamicHTML
       };
 
+      // Add project members to CC
+      const projectMemberEmails = await getProjectMemberEmailsForRFQ(buyer.rfq_id);
+      addProjectMembersToCC(mailRecipients, projectMemberEmails);
+
       sendMail(mailRecipients);
 
       console.log(`Email sent successfully to buyer: ${buyer.contactName}`);
@@ -1890,6 +2029,10 @@ const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
           mailRecipients.to =  winning_vendor_email;
     }
 
+    // Add project members to CC
+    const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfQItem[0]?.id);
+    addProjectMembersToCC(mailRecipients, projectMemberEmails);
+
     sendMail(mailRecipients);
 
     // sendMail({
@@ -1964,6 +2107,10 @@ const sendFinalizationRemovalMail = async (
     } else {
       mailRecipients.to = vendor_email;
     }
+
+    // Add project members to CC
+    const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfQItem[0]?.id);
+    addProjectMembersToCC(mailRecipients, projectMemberEmails);
 
     sendMail(mailRecipients);
 
@@ -11602,6 +11749,10 @@ sendFollowUpEmails: async (req, res) => {
         } else {
           mailRecipients.to = receiverDetails.email;
         }
+
+        // Add project members to CC
+        const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+        addProjectMembersToCC(mailRecipients, projectMemberEmails);
 
         sendMail(mailRecipients);
 
