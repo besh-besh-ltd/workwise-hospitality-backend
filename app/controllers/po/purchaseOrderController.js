@@ -1,11 +1,12 @@
 import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
-import generalModel, { markPOStatusChange } from "../../models/generalModel.js";
+import generalModel, { markPOStatusChange, getApprovalInstanceById, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
 import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
+import userModel from "../../models/userModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
-import { sendApprovalNotification } from "./purchaseOrderEmails.js";
+import { sendApprovalNotification, sendPONotificationToVendor } from "./purchaseOrderEmails.js";
 
 export const getPOByRFQ = async (req, res) => {
     try {
@@ -104,23 +105,49 @@ export const initiatePO = async (req, res) => {
   try {
     const { po_id } = req.params;
     const initiator = req.user;
-  
+
     const result = await db.tx(async t => {
       return await initiatePurchaseOrder(po_id, initiator, t);
     })
+
     if(result.approval_required) {
       const purchaseOrder = await db.oneOrNone(
-        `SELECT * FROM tbl_rfq_purchase_order
-        WHERE id = $1`,
+        `SELECT * FROM tbl_rfq_purchase_order WHERE id = $1`,
         [result.po_id]
       );
-  
-      await sendApprovalNotification(purchaseOrder, result.current_approver_id);
+
+      // Handle notifications based on workflow type
+      if (result.approval_type === 'new' && result.approval_instance_id) {
+        // NEW WORKFLOW: Get pending approvers from the approval instance
+        const pendingApprovers = await db.any(`
+          SELECT DISTINCT tasa.approver_user_id AS user_id
+          FROM tbl_approval_step_approvers tasa
+          JOIN tbl_approval_instance_steps tais ON tais.id = tasa.approval_instance_step_id
+          WHERE tais.approval_instance_id = $1
+            AND tais.step_order = (
+              SELECT current_step FROM tbl_approval_instances WHERE id = $1
+            )
+            AND tais.status = 'PENDING'
+        `, [result.approval_instance_id]);
+
+        // Send notification to each pending approver
+        for (const approver of pendingApprovers) {
+          await sendApprovalNotification(purchaseOrder, approver.user_id);
+        }
+      } else if (result.current_approver_id) {
+        // OLD WORKFLOW: Single approver notification
+        await sendApprovalNotification(purchaseOrder, result.current_approver_id);
+      }
     }
-  
+
     return res.json({
       status: 1,
-      message: "Purchase order has been initiated"
+      message: "Purchase order has been initiated",
+      data: {
+        approval_required: result.approval_required,
+        approval_type: result.approval_type || 'legacy',
+        approval_instance_id: result.approval_instance_id || null
+      }
     })
   } catch (error) {
     // logError(error);
@@ -142,10 +169,63 @@ export const approvePO = async (req, res) => {
       return res.status(400).json({
         status: 2,
         message: "Missing required data, Decision is required!"
-      }); 
+      });
     }
 
     return db.tx(async t => {
+        // Check if PO uses new approval workflow (has approval_instance_id)
+        const po = await t.oneOrNone(`
+          SELECT id, approval_instance_id, status, rfq_id, finalized_vendor_id, rfq_product_id
+          FROM tbl_rfq_purchase_order WHERE id = $1
+        `, [po_id]);
+
+        if (!po) {
+          return res.status(404).json({
+            status: 2,
+            message: 'Purchase order not found.'
+          });
+        }
+
+        // NEW APPROVAL WORKFLOW
+        if (po.approval_instance_id) {
+          const actionResult = await submitApprovalAction({
+            approval_instance_id: po.approval_instance_id,
+            approver_user_id: userId,
+            action: decision === 'approved' ? 'APPROVE' : 'REJECT',
+            comment: remarks || ''
+          });
+
+          // Handle post-approval actions
+          if (actionResult.instance_status === 'APPROVED') {
+            await handlePOPostApproval(po.approval_instance_id, userId, t);
+          } else if (actionResult.instance_status === 'REJECTED') {
+            // Update PO status to rejected
+            await t.none(`
+              UPDATE tbl_rfq_purchase_order SET status = 'rejected', updated_at = NOW() WHERE id = $1
+            `, [po_id]);
+
+            // Handle rejection cleanup (move finalization to history)
+            await handlePORejection(po, userId, t);
+          }
+
+          return res.status(200).json({
+            status: 1,
+            message:
+              actionResult.instance_status === 'APPROVED'
+                ? 'Purchase order approved and finalized.'
+                : actionResult.instance_status === 'REJECTED'
+                ? 'Purchase order rejected successfully.'
+                : 'Approval action recorded, waiting for more approvers.',
+            data: {
+              instance_status: actionResult.instance_status,
+              step_status: actionResult.status,
+              next_step: actionResult.next_step,
+              approval_type: 'new'
+            }
+          });
+        }
+
+        // OLD APPROVAL WORKFLOW (backward compatibility for non-hospitality POs)
         // 1. Get the matching approval transaction by looking into the meta
         const trx = await t.oneOrNone(
           `SELECT * FROM tbl_approval_hierarchy_transactions
@@ -160,14 +240,14 @@ export const approvePO = async (req, res) => {
             AVAILABLE_HIERARCHY_TYPES.po.type,
           ]
         );
-    
+
         if (!trx) {
           return res.status(404).json({
             status: 2,
             message: 'No approval request found for this PO.'
           });
         }
-    
+
         const result = await generalModel.approveRequest({
           transactionId: trx.id,
           approvedBy: userId,
@@ -175,10 +255,10 @@ export const approvePO = async (req, res) => {
           remarks,
           t,
         });
-    
+
         const purchaseOrder = await t.oneOrNone(`
-          SELECT * FROM tbl_rfq_purchase_order trpo 
-            JOIN tbl_approval_hierarchy_transactions taht ON taht.id = $1 
+          SELECT * FROM tbl_rfq_purchase_order trpo
+            JOIN tbl_approval_hierarchy_transactions taht ON taht.id = $1
           WHERE trpo.id = taht.target_entity_id`,
         [trx.id])
 
@@ -192,7 +272,7 @@ export const approvePO = async (req, res) => {
 
           await sendApprovalNotification(purchaseOrder, result.current_approver_id);
         }
-    
+
         return res.status(200).json({
           status: 1,
           message:
@@ -201,7 +281,7 @@ export const approvePO = async (req, res) => {
               : result.approval_required
               ? 'Purchase order approved and sent to next approver.'
               : 'Purchase order approved and finalized.',
-          data: result
+          data: { ...result, approval_type: 'legacy' }
         });
     })
   } catch (error) {
@@ -224,7 +304,7 @@ export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
         SELECT TQF.* FROM tbl_quote_finalization TQF
         JOIN tbl_rfq_products TRP ON TRP.id = $2
         WHERE TQF.rfq_id = $1
-        AND TQF.product_variant_id = TRP.product_variant_id AND TQF.variant = TRP.variant 
+        AND TQF.product_variant_id = TRP.product_variant_id AND TQF.variant = TRP.variant
         LIMIT 1
       `, [purchaseOrder.rfq_id, product])
 
@@ -239,7 +319,7 @@ export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
         variant: alreadyExists.variant,
         changed_by: rejectedBy
       };
-  
+
       await rfqModel.insert(
         'tbl_quote_finalization_history',
         history_data,
@@ -254,6 +334,69 @@ export const handlePORejection = async (purchaseOrder, rejectedBy, t) => {
   } catch (error) {
     logError(error);
     return false;
+  }
+};
+
+/**
+ * Post-approval handler for PO - called when approval instance is fully approved
+ * Uses the new approval workflow (tbl_approval_instances)
+ */
+export const handlePOPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
+  const t = txContext || db;
+
+  try {
+    const instance = await getApprovalInstanceById(approval_instance_id, 'PO', t);
+
+    if (!instance || instance.status !== 'APPROVED') {
+      return;
+    }
+
+    const po_id = instance.entity_id;
+    const metadata = instance.metadata || {};
+
+    // Get PO details
+    const purchaseOrder = await t.oneOrNone(`
+      SELECT * FROM tbl_rfq_purchase_order WHERE id = $1
+    `, [po_id]);
+
+    if (!purchaseOrder) {
+      console.error(`PO ${po_id} not found for approval instance ${approval_instance_id}`);
+      return;
+    }
+
+    // Update PO status to approved
+    await t.none(`
+      UPDATE tbl_rfq_purchase_order
+      SET status = 'approved', updated_at = NOW()
+      WHERE id = $1
+    `, [po_id]);
+
+    // Send vendor notification
+    const user = await userModel.getUserById(approver_user_id);
+    if (user && user[0]) {
+      sendPONotificationToVendor(purchaseOrder, user[0]).catch(err => {
+        console.error('Failed to send PO notification to vendor:', err);
+      });
+    }
+
+    // Record lifecycle event
+    await recordLifecycleEvent({
+      entity_type: 'PO',
+      entity_id: po_id,
+      stage: 'PO_APPROVED',
+      action: 'APPROVE',
+      performed_by: approver_user_id,
+      metadata: {
+        approval_instance_id,
+        rfq_id: metadata.rfq_id,
+        po_number: metadata.po_number
+      },
+      txContext: t
+    });
+
+    console.log(`PO ${po_id} approved via new approval workflow`);
+  } catch (error) {
+    console.error('Error handling PO post-approval:', error);
   }
 };
 
