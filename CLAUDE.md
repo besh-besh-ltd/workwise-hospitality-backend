@@ -115,7 +115,7 @@ A multi-tenant hospitality procurement platform enabling companies and hotels to
 - Draft auto-save functionality
 - Quote evaluation and finalization
 
-**Key Tables:** `tbl_rfq`, `tbl_rfq_products`, `tbl_rfq_products_specs`, `tbl_quote`, `tbl_quote_items`, `tbl_quote_activity`, `tbl_quote_finalization`, `tbl_rfq_clarifications`
+**Key Tables:** `tbl_rfq`, `tbl_rfq_products`, `tbl_rfq_products_specs`, `tbl_quotes`, `tbl_quote_items`, `tbl_quote_activity`, `tbl_quote_finalization`, `tbl_rfq_clarifications`
 
 ### 2. Negotiation Module
 **Location:** `app/controllers/negotiation/`, `app/models/negotiationModel.js`

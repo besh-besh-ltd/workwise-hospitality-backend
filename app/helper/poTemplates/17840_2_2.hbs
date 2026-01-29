@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Purchase Order</title>
+
+  <style>
+    @page { size: A4; margin: 10mm; }
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 11px;
+      color: #000;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    td, th {
+      padding: 4px;
+      vertical-align: top;
+    }
+    .border {
+      border: 1px solid #000;
+    }
+    .center {
+      text-align: center;
+    }
+    .right {
+      text-align: right;
+    }
+    .bold {
+      font-weight: bold;
+    }
+    .small {
+      font-size: 10px;
+    }
+    .section-title {
+      border-bottom: 1px solid #000;
+      font-weight: bold;
+      padding-top: 6px;
+      padding-bottom: 4px;
+    }
+    .checkbox {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 1px solid #000;
+      text-align: center;
+      line-height: 10px;
+      font-size: 10px;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+    .checkbox.checked {
+      background-color: #4CAF50;
+      color: white;
+    }
+    .approval-box {
+      border: 2px solid #000;
+      margin-top: 20px;
+    }
+    .approval-box td {
+      border: 1px solid #000;
+      padding: 8px;
+    }
+    .approval-header {
+      background: #f5f5f5;
+      font-weight: bold;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- HEADER - Middle Top: PO Title, Project Name, RFQ Title -->
+  <table>
+    <tr>
+      <td class="center bold" colspan="3" style="font-size: 16px; padding-bottom: 10px;">
+        PURCHASE ORDER
+        {{#if project_name}}
+          <br/><span style="font-size: 13px;">{{project_name}}</span>
+        {{/if}}
+        {{#if rfq_title}}
+          <br/><span style="font-size: 11px; font-weight: normal;">{{rfq_title}}</span>
+        {{/if}}
+      </td>
+    </tr>
+  </table>
+
+  <br/>
+
+  <!-- VENDOR (Left) + PO META (Right) -->
+  <table>
+    <tr>
+      <!-- Vendor Details - Top Left, Stacked Vertically -->
+      <td style="width: 50%;">
+        <div class="bold" style="margin-bottom: 4px;">Vendor Details</div>
+        <strong>{{supplier.name}}</strong><br/>
+        {{supplier.address}}
+        {{#if supplier.gstin}}
+          <br/>GSTIN: {{supplier.gstin}}
+        {{/if}}
+        {{#if supplier.cin}}
+          <br/>CIN: {{supplier.cin}}
+        {{/if}}
+      </td>
+      <!-- Right Column: RFQ No, PO Number, PO Date -->
+      <td style="width: 50%;">
+        <table>
+          {{#if rfq_no}}
+          <tr>
+            <td class="bold" style="width: 40%;">RFQ No</td>
+            <td>{{rfq_no}}</td>
+          </tr>
+          {{/if}}
+          <tr>
+            <td class="bold">PO Number</td>
+            <td>{{po_number}}</td>
+          </tr>
+          <tr>
+            <td class="bold">PO Date</td>
+            <td>{{created_at}}</td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <br/>
+
+  <div class="section-title">
+    Please arrange to supply the following material/s as per the schedule given under:
+    <span style="float:right;">All Rates & Amount are in INR</span>
+  </div>
+
+  <!-- ITEMS TABLE - Updated with Size and Specification -->
+  <table class="border">
+    <thead>
+      <tr class="border bold center">
+        <th style="width: 5%;">Sl</th>
+        <th style="width: 40%;">Item Name & Description</th>
+        <th style="width: 8%;">UOM</th>
+        <th style="width: 10%;">Quantity</th>
+        <th style="width: 12%;">Rate</th>
+        <th style="width: 8%;">GST (%)</th>
+        <th style="width: 12%;">Basic</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{#each items}}
+      <tr class="border">
+        <td class="center">{{inc @index}}</td>
+        <td>
+          {{product_name}}
+          {{#if size}}
+            <br/><span class="small">Size: {{size}}</span>
+          {{/if}}
+          {{#if specification}}
+            <br/><span class="small">Spec: {{specification}}</span>
+          {{/if}}
+          {{#if item_code}}
+            <br/><span class="small">[{{item_code}}]</span>
+          {{/if}}
+          {{#if hsn_code}}
+            <br/><span class="small">[HSN/SAC: {{hsn_code}}]</span>
+          {{/if}}
+        </td>
+        <td class="center">{{unit}}</td>
+        <td class="right">{{quantity}}</td>
+        <td class="right">{{unit_price}}</td>
+        <td class="center">{{tax}}%</td>
+        <td class="right">{{basic_amount}}</td>
+      </tr>
+      {{/each}}
+    </tbody>
+  </table>
+
+  <br/>
+
+  <!-- COST BREAKUP -->
+  <table>
+    <tr>
+      <td style="width: 60%;"></td>
+      <td style="width: 40%;">
+        <table>
+          <tr>
+            <td class="bold">BASIC</td>
+            <td class="right">{{basicAmount}}</td>
+          </tr>
+          {{#if totalFreight}}
+          <tr>
+            <td>Freight</td>
+            <td class="right">{{totalFreight}}</td>
+          </tr>
+          {{/if}}
+          {{#if totalPackage}}
+          <tr>
+            <td>Packaging</td>
+            <td class="right">{{totalPackage}}</td>
+          </tr>
+          {{/if}}
+          {{#if sgstAmount}}
+          <tr>
+            <td>SGST {{sgstPercent}}%</td>
+            <td class="right">{{sgstAmount}}</td>
+          </tr>
+          {{/if}}
+          {{#if cgstAmount}}
+          <tr>
+            <td>CGST {{cgstPercent}}%</td>
+            <td class="right">{{cgstAmount}}</td>
+          </tr>
+          {{/if}}
+          {{#if igstAmount}}
+          <tr>
+            <td>IGST {{igstPercent}}%</td>
+            <td class="right">{{igstAmount}}</td>
+          </tr>
+          {{/if}}
+          <tr class="bold">
+            <td>Total PO Value :</td>
+            <td class="right">{{totalPrice}}</td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <br/>
+
+  <!-- DELIVERY & PAYMENT SECTION -->
+  <div class="section-title">DELIVERY & PAYMENT</div>
+
+  <table>
+    <tr>
+      <td style="width: 50%;">
+        <strong>Delivery Address:</strong><br/>
+        {{#if delivery_location}}
+          {{delivery_location}}
+        {{else}}
+          {{location}}
+        {{/if}}
+      </td>
+      <td style="width: 50%;">
+        <strong>Buyer Details:</strong><br/>
+        {{company_name}}<br/>
+        {{#if location}}
+          {{location}}
+        {{else}}
+          {{company.address}}
+        {{/if}}
+        {{#if gstin}}
+          <br/>GSTIN: {{gstin}}
+        {{/if}}
+      </td>
+    </tr>
+  </table>
+
+  <br/>
+
+  <!-- TERMS AND CONDITIONS - With Checkboxes -->
+  <div class="section-title">TERMS AND CONDITIONS</div>
+
+  <table class="small" style="margin-top: 8px;">
+    {{#if deliveryterms}}
+    <tr>
+      <td style="width: 20px;"><span class="checkbox checked">✓</span></td>
+      <td><strong>Delivery Terms:</strong> {{deliveryterms}} days</td>
+    </tr>
+    {{/if}}
+    {{#if paymentTermsList.length}}
+    <tr>
+      <td style="width: 20px;"><span class="checkbox checked">✓</span></td>
+      <td>
+        <strong>Payment Terms:</strong>
+        <ul style="margin: 4px 0; padding-left: 16px;">
+          {{#each paymentTermsList}}
+            <li>{{capitalize type}}: {{value}}%{{#if days}} ({{days}} days){{/if}}{{#if comment}} - {{comment}}{{/if}}</li>
+          {{/each}}
+        </ul>
+      </td>
+    </tr>
+    {{/if}}
+    {{#each rfqTerms}}
+    <tr>
+      <td style="width: 20px;"><span class="checkbox checked">✓</span></td>
+      <td><strong>{{term_content}}:</strong></td>
+    </tr>
+    {{/each}}
+  </table>
+
+  <br/>
+
+  <!-- APPROVAL BOX -->
+  <table class="approval-box">
+    <tr>
+      <td class="approval-header" colspan="4">
+        APPROVAL DETAILS
+      </td>
+    </tr>
+    <tr>
+      <td style="width: 25%;">
+        <strong>Created By:</strong><br/>
+        {{#if preparedBy}}
+          <span class="checkbox checked">✓</span> {{preparedBy}}
+        {{else}}
+          -
+        {{/if}}
+      </td>
+      <td style="width: 25%;">
+        <strong>Technical Evaluation:</strong><br/>
+        {{#if technicalEvaluatedBy}}
+          <span class="checkbox checked">✓</span> {{technicalEvaluatedBy}}
+        {{else}}
+          -
+        {{/if}}
+      </td>
+      <td style="width: 25%;">
+        <strong>Commercial Evaluation:</strong><br/>
+        {{#if commercialEvaluatedBy}}
+          <span class="checkbox checked">✓</span> {{commercialEvaluatedBy}}
+        {{else}}
+          -
+        {{/if}}
+      </td>
+      <td style="width: 25%;">
+        <strong>PO Approvers:</strong><br/>
+        {{#if poApprovers}}
+          {{#each poApprovers}}
+            <div style="margin-bottom: 6px;">
+              <span style="font-weight: 500;">{{name}}</span>
+              <br/>
+              <span style="font-size: 9px; {{#eq status 'Approved'}}color: #22c55e;{{/eq}}{{#eq status 'Rejected'}}color: #ef4444;{{/eq}}{{#eq status 'Skipped'}}color: #f59e0b;{{/eq}}{{#eq status 'Invited'}}color: #6b7280;{{/eq}}">
+                {{status}}{{#if timestamp}} | {{timestamp}}{{/if}}
+              </span>
+            </div>
+          {{/each}}
+        {{else}}
+          -
+        {{/if}}
+      </td>
+    </tr>
+  </table>
+
+</body>
+</html>
