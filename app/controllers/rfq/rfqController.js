@@ -2040,6 +2040,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
       term_and_condition_files,
       termsChanged,
       termFilesChanged,
+      title,
+      technical_evaluation_by,
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
 
@@ -2161,7 +2163,9 @@ const saveRfqDraft = async (user_id, reqBody) => {
       ra_start_date: reverse_auction == 1 ? ra_start_date : null,
       ra_end_date: reverse_auction == 1 ? ra_end_date : null,
       is_published: 0,
-      updated_by: user_id
+      updated_by: user_id,
+      title: title || null,
+      technical_evaluation_by: technical_evaluation_by || null,
   };
 
   const errorObj = { vendorNotPresent: [] };
@@ -13132,6 +13136,20 @@ getClauses: async (req, res) => {
         message: 'Error fetching sidebar RFQs',
         error: error.message
       });
+    }
+  },
+
+  getTechEvalUsers: async (req, res) => {
+    try {
+      const project_id = parseInt(req.params.project_id);
+      if (!project_id || isNaN(project_id)) {
+        return res.status(400).json({ status: 0, message: 'Valid project_id is required' });
+      }
+      const users = await rfqModel.getTechEvalUsers(project_id);
+      res.status(200).json({ status: 1, data: users });
+    } catch (error) {
+      console.error('Error in getTechEvalUsers:', error);
+      res.status(500).json({ status: 0, message: 'Error fetching tech eval users' });
     }
   },
 

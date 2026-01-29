@@ -586,6 +586,12 @@ RfqRoutes.post(
   rfqController.submitTechEvalForApproval
 )
 
+RfqRoutes.get('/tech-eval-users/:project_id',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.getTechEvalUsers
+);
+
 // New unified route for sidebar data (now GET, params in query)
 RfqRoutes.get('/get-rfqs',
   passportSignIn,

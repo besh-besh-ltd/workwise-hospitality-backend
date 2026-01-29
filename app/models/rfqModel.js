@@ -1708,6 +1708,8 @@ WHERE NOT EXISTS (
           'is_tender', RFQ.is_tender,
           'hotel_id', RFQ.hotel_id,
           'department_id', RFQ.department_id,
+          'title', RFQ.title,
+          'technical_evaluation_by', RFQ.technical_evaluation_by,
 
           -- Selected Terms
           'terms', (
@@ -2148,10 +2150,12 @@ WHERE NOT EXISTS (
       RFQ.ra_start_date, -- Select raw timestamp
       RFQ.ra_end_date,   -- Select raw timestamp
       RFQ.project_id,
+      RFQ.title,
+      RFQ.technical_evaluation_by,
+      (SELECT name FROM tbl_users WHERE id = RFQ.technical_evaluation_by) AS technical_evaluation_by_name,
       H.name AS hotel_name,
       RFQ.hotel_id,
       RFQ.hospitality_company_id,
-        -- Add here
       (
         SELECT EXISTS (
           SELECT 1
@@ -10018,6 +10022,7 @@ ORDER BY tq.timestamp DESC;
         RFQ.bid_end_date,
         RFQ.reverse_auction,
         RFQ.is_tender,
+        RFQ.title,
         H.name AS hotel_name
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
@@ -10071,6 +10076,15 @@ ORDER BY tq.timestamp DESC;
           reject(error);
         });
     });
+  },
+  getTechEvalUsers: async (project_id) => {
+    return db.any(`
+      SELECT DISTINCT u.id, u.name, u.email
+      FROM tbl_project_team pt
+      JOIN tbl_users u ON u.id = pt.user_id AND u.status = 1
+      WHERE pt.project_id = $1
+      ORDER BY u.name
+    `, [project_id]);
   },
   getPricehistory: async (rfq_product_id) => {
     return new Promise((resolve, reject) => {
