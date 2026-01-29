@@ -1,12 +1,14 @@
 import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
-import generalModel, { markPOStatusChange, getApprovalInstanceById, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
+import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
 import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
+import hospitalityModel from "../../models/hospitalityModel.js";
 import { APPROVAL_DECISIONS, AVAILABLE_HIERARCHY_TYPES } from "../../util/constants.js";
 import { sendApprovalNotification, sendPONotificationToVendor } from "./purchaseOrderEmails.js";
+import { sendPOApprovalCompletionNotification } from "../../helper/sendEmailFunctions/poEmails.js";
 
 export const getPOByRFQ = async (req, res) => {
     try {
@@ -267,9 +269,13 @@ export const approvePO = async (req, res) => {
 
           if(result.is_rejected) {
             await handlePORejection(purchaseOrder, userId, t);
+          } else {
+            // Send company-wide notification for legacy workflow
+            sendLegacyPOApprovalNotification(purchaseOrder, trx).catch(err => {
+              console.error('Failed to send legacy PO approval notifications:', err);
+            });
           }
         } else if (result && (!result.is_rejected && result.approval_required)) {
-
           await sendApprovalNotification(purchaseOrder, result.current_approver_id);
         }
 
@@ -394,9 +400,208 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
       txContext: t
     });
 
+    // Send notification to all company members
+    try {
+      // Get full approval instance details with action history
+      const instanceDetails = await getApprovalInstanceDetails(approval_instance_id, approver_user_id);
+
+      // Get RFQ details
+      const rfqDetails = await t.oneOrNone(`
+        SELECT r.id, r.rfq_no, r.title, r.timestamp, r.hospitality_company_id, r.hotel_id
+        FROM tbl_rfq r
+        WHERE r.id = $1
+      `, [purchaseOrder.rfq_id]);
+
+      // Get product names from tbl_purchase_order_product (normalized table)
+      const products = await t.any(`
+        SELECT pv.name, pop.quantity, pop.unit, pop.unit_price, pop.total_price
+        FROM tbl_purchase_order_product pop
+        JOIN tbl_rfq_products rp ON pop.rfq_product_id = rp.id
+        JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+        WHERE pop.purchase_order_id = $1
+      `, [purchaseOrder.id]);
+      const productNames = products.map(p => p.name);
+
+      // Get vendor details
+      const vendorData = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+      const vendorDetails = vendorData?.[0] || {};
+
+      // Get company details
+      const companyDetails = await t.oneOrNone(`
+        SELECT name AS company_name FROM tbl_hospitality_companies WHERE id = $1
+      `, [rfqDetails?.hospitality_company_id]);
+
+      // Get ALL users mapped to this hospitality company
+      const userMappings = await hospitalityModel.getUserMappingsForCompany(
+        rfqDetails?.hospitality_company_id
+      );
+      const usersToNotify = userMappings.map(m => ({
+        id: m.user_id,
+        name: m.name,
+        email: m.email
+      }));
+
+      // Build approval history from action_history
+      const approvalHistory = instanceDetails?.action_history?.map(action => ({
+        step_order: instanceDetails.steps?.find(s =>
+          s.approvers?.some(a => a.user_id === action.actor?.user_id)
+        )?.step_order || 1,
+        approver_name: action.actor?.name || 'Unknown',
+        action: action.action,
+        created_at: action.created_at
+      })) || [];
+
+      // Fire-and-forget notification
+      sendPOApprovalCompletionNotification({
+        rfqDetails: {
+          id: rfqDetails?.id,
+          rfq_no: rfqDetails?.rfq_no,
+          title: rfqDetails?.title,
+          created_at: rfqDetails?.created_at
+        },
+        poDetails: {
+          id: purchaseOrder.id,
+          po_number: purchaseOrder.po_number,
+          total_value: purchaseOrder.total_value,
+          quantity: purchaseOrder.quantity,
+          po_pdf_url: purchaseOrder.po_pdf_url,
+          created_at: purchaseOrder.created_at
+        },
+        vendorDetails: {
+          id: vendorDetails.id,
+          organization_name: vendorDetails.organization_name,
+          name: vendorDetails.name,
+          email: vendorDetails.email
+        },
+        productNames,
+        approvalHistory,
+        users: usersToNotify,
+        companyDetails: {
+          company_name: companyDetails?.company_name
+        }
+      }).catch(err => {
+        console.error('Failed to send PO approval completion notifications:', err);
+      });
+
+    } catch (notificationError) {
+      // Don't fail the approval if notification fails
+      console.error('Error preparing PO approval notifications:', notificationError);
+    }
+
     console.log(`PO ${po_id} approved via new approval workflow`);
   } catch (error) {
     console.error('Error handling PO post-approval:', error);
+  }
+};
+
+/**
+ * Send PO approval completion notification for legacy (non-hospitality) workflow
+ */
+const sendLegacyPOApprovalNotification = async (purchaseOrder, transaction) => {
+  try {
+    // Get RFQ details
+    const rfqDetails = await db.oneOrNone(`
+      SELECT r.id, r.rfq_no, r.title, r.timestamp, r.company_id
+      FROM tbl_rfq r WHERE r.id = $1
+    `, [purchaseOrder.rfq_id]);
+
+    // Get product names from tbl_purchase_order_product (normalized table)
+    const products = await db.any(`
+      SELECT pv.name, pop.quantity, pop.unit, pop.unit_price, pop.total_price
+      FROM tbl_purchase_order_product pop
+      JOIN tbl_rfq_products rp ON pop.rfq_product_id = rp.id
+      JOIN tbl_product_variant pv ON rp.product_variant_id = pv.id
+      WHERE pop.purchase_order_id = $1
+    `, [purchaseOrder.id]);
+    const productNames = products.map(p => p.name);
+
+    // Get vendor details
+    const vendorData = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+    const vendorDetails = vendorData?.[0] || {};
+
+    // Get company details (non-hospitality)
+    const companyDetails = await db.oneOrNone(`
+      SELECT company_name FROM tbl_company WHERE id = $1
+    `, [rfqDetails?.company_id]);
+
+    // Get approval history from legacy tables
+    const approvalHistory = await db.any(`
+      SELECT
+        tah.approval_level as step_order,
+        u.name as approver_name,
+        tahh.decision as action,
+        tahh.created_at
+      FROM tbl_approval_hierarchy_history tahh
+      JOIN tbl_approval_hierarchy tah ON tahh.approver_id = tah.user_id
+        AND tah.hierarchy_type = 'po'
+        AND tah.hierarchy_id = $2
+      JOIN tbl_users u ON tahh.approver_id = u.id
+      WHERE tahh.transaction_id = $1
+      ORDER BY tahh.created_at ASC
+    `, [transaction.id, transaction.hierarchy_id]);
+
+    // Get all users in the approval hierarchy (company members involved in PO approvals)
+    const hierarchyUsers = await db.any(`
+      SELECT DISTINCT u.id, u.name, u.email
+      FROM tbl_approval_hierarchy ah
+      JOIN tbl_users u ON ah.user_id = u.id
+      WHERE ah.company_id = $1
+        AND ah.hierarchy_type = 'po'
+        AND ah.is_active = true
+        AND u.status = 1
+        AND u.is_deleted = 0
+    `, [rfqDetails?.company_id]);
+
+    // Also get the PO initiator
+    const initiator = await userModel.getUserById(purchaseOrder.created_by);
+    if (initiator?.[0] && !hierarchyUsers.find(u => u.id === initiator[0].id)) {
+      hierarchyUsers.push({
+        id: initiator[0].id,
+        name: initiator[0].name,
+        email: initiator[0].email
+      });
+    }
+
+    // Format approval history for email
+    const formattedHistory = approvalHistory.map(h => ({
+      step_order: h.step_order,
+      approver_name: h.approver_name,
+      action: h.action?.toUpperCase() === 'APPROVED' ? 'APPROVE' : h.action?.toUpperCase(),
+      created_at: h.created_at
+    }));
+
+    // Send notification
+    await sendPOApprovalCompletionNotification({
+      rfqDetails: {
+        id: rfqDetails?.id,
+        rfq_no: rfqDetails?.rfq_no,
+        title: rfqDetails?.title,
+        created_at: rfqDetails?.created_at
+      },
+      poDetails: {
+        id: purchaseOrder.id,
+        po_number: purchaseOrder.po_number,
+        total_value: purchaseOrder.total_value,
+        quantity: purchaseOrder.quantity,
+        po_pdf_url: purchaseOrder.po_pdf_url,
+        created_at: purchaseOrder.created_at
+      },
+      vendorDetails: {
+        id: vendorDetails.id,
+        organization_name: vendorDetails.organization_name,
+        name: vendorDetails.name,
+        email: vendorDetails.email
+      },
+      productNames,
+      approvalHistory: formattedHistory,
+      users: hierarchyUsers,
+      companyDetails: {
+        company_name: companyDetails?.company_name
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in sendLegacyPOApprovalNotification:', error);
   }
 };
 
