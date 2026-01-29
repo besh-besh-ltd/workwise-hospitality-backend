@@ -5,7 +5,7 @@ import { consoleLogData, generateSignature } from "../helper/common.js";
 import { scheduleGRNReminders } from "../helper/cronManager.js";
 import { sendDispatchedEmail, sendGRNRepresentativeEmail, sendGRNUpdationEmail, sendInvoiceEmail } from "../helper/sendEmailFunctions/generalReminderEmails.js";
 import { AVAILABLE_HIERARCHY_TYPES, INVALID_PO_STATUSES_FOR_VENDOR, PO_STATUSES } from "../util/constants.js";
-import generalModel, { markPOStatusChange, uploadToS3 } from "./generalModel.js";
+import generalModel, { markPOStatusChange, uploadToS3, createApprovalInstance } from "./generalModel.js";
 import fs from 'fs';
 
 const getNextPONumber = async () => {
@@ -335,41 +335,98 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
 
     const { rfq_id, project_id, total_value, rfq_product_id, quantity, unit_price, finalized_vendor_id } = purchaseOrder;
 
-    // 3. Call Approval Logic
-    const meta = {
-      rfq_id,
-      project_id,
-      rfq_product_id,
-      quantity,
-      unit_price,
-      finalized_vendor_id,
-      total_value,
-      po_id: purchaseOrder.id
-    };
+    // Get RFQ details to check if it's a hospitality RFQ
+    const rfq = await t.oneOrNone(`
+      SELECT id, hospitality_company_id, hotel_id, department_id, rfq_no, is_tender
+      FROM tbl_rfq WHERE id = $1
+    `, [rfq_id]);
 
-    const approvalResult = await generalModel.initiateApproval(
-      AVAILABLE_HIERARCHY_TYPES.po.type,
-      purchaseOrder.id,
-      initiator.company_id,
-      initiator.id,
-      purchaseOrder.selected_hierarchy,
-      meta,
-      {
-        exist: `You cannot change the finalized vendor because an approved Purchase Order already exists for them.`
-      },
-      t,
-    );
+    let approvalResult;
+    let useNewWorkflow = false;
 
-    // 4. If no further approval required → mark PO as approved
-    if (!approvalResult.approval_required) {
-      await markPOStatusChange(purchaseOrder.id, t, false, initiator);
+    // Use new approval workflow for hospitality POs
+    if (rfq && rfq.hospitality_company_id) {
+      useNewWorkflow = true;
+
+      try {
+        approvalResult = await createApprovalInstance({
+          entity_type: 'PO',
+          entity_id: purchaseOrder.id,
+          hospitality_company_id: rfq.hospitality_company_id,
+          hotel_id: rfq.hotel_id,
+          department_id: rfq.department_id,
+          initiated_by: initiator.id,
+          metadata: {
+            po_id: purchaseOrder.id,
+            po_number: purchaseOrder.po_number,
+            rfq_id: rfq_id,
+            rfq_no: rfq.rfq_no,
+            total_value: total_value,
+            vendor_id: finalized_vendor_id,
+            is_tender: rfq.is_tender,
+            project_id: project_id,
+            rfq_product_id: rfq_product_id
+          },
+          txContext: t
+        });
+
+        // Store approval_instance_id in PO
+        if (approvalResult.instance?.id) {
+          await t.none(`
+            UPDATE tbl_rfq_purchase_order
+            SET approval_instance_id = $1, status = 'pending_approval'
+            WHERE id = $2
+          `, [approvalResult.instance.id, purchaseOrder.id]);
+        }
+
+        // Handle auto-approval (if creator is only approver or no policy)
+        if (approvalResult.autoApproved) {
+          await markPOStatusChange(purchaseOrder.id, t, false, initiator);
+          approvalResult.approval_required = false;
+        } else {
+          approvalResult.approval_required = true;
+        }
+      } catch (approvalError) {
+        // No policy found - throw error, do not auto-approve
+        throw new Error('No approval policy found for Purchase Order. Please configure an approval policy for PO entity type in the hospitality scope.');
+      }
     } else {
-      await t.oneOrNone(
-        `UPDATE tbl_rfq_purchase_order
-        SET status = 'pending_approval'
-        WHERE id = $1`,
-        [po_id]
+      // Use old approval workflow for non-hospitality POs
+      const meta = {
+        rfq_id,
+        project_id,
+        rfq_product_id,
+        quantity,
+        unit_price,
+        finalized_vendor_id,
+        total_value,
+        po_id: purchaseOrder.id
+      };
+
+      approvalResult = await generalModel.initiateApproval(
+        AVAILABLE_HIERARCHY_TYPES.po.type,
+        purchaseOrder.id,
+        initiator.company_id,
+        initiator.id,
+        purchaseOrder.selected_hierarchy,
+        meta,
+        {
+          exist: `You cannot change the finalized vendor because an approved Purchase Order already exists for them.`
+        },
+        t,
       );
+
+      // If no further approval required → mark PO as approved
+      if (!approvalResult.approval_required) {
+        await markPOStatusChange(purchaseOrder.id, t, false, initiator);
+      } else {
+        await t.oneOrNone(
+          `UPDATE tbl_rfq_purchase_order
+          SET status = 'pending_approval'
+          WHERE id = $1`,
+          [po_id]
+        );
+      }
     }
 
     const items = await getPOItemDetails(purchaseOrder, t)
@@ -393,6 +450,8 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
       po_id: purchaseOrder.id,
       approval_required: approvalResult.approval_required,
       current_approver_id: approvalResult.current_approver_id ?? null,
+      approval_instance_id: approvalResult.instance?.id ?? null,
+      approval_type: useNewWorkflow ? 'new' : 'legacy',
       poPdf: pdfSaveResult
     };
   } catch (error) {
@@ -539,7 +598,21 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                 VENDOR.organization_name AS finalized_vendor_name,
                 PRJ.name AS project_name,
                 TU.name AS initiated_by,
-                CASE WHEN trx.current_approver_id = $2 THEN TRUE ELSE FALSE END AS is_approver,
+                -- Check if user is approver (supports both old and new workflows)
+                CASE
+                  WHEN po.approval_instance_id IS NOT NULL THEN (
+                    SELECT EXISTS(
+                      SELECT 1 FROM tbl_approval_step_approvers tasa
+                      JOIN tbl_approval_instance_steps tais ON tais.id = tasa.approval_instance_step_id
+                      WHERE tais.approval_instance_id = po.approval_instance_id
+                        AND tais.step_order = tai.current_step
+                        AND tais.status = 'PENDING'
+                        AND tasa.approver_user_id = $2
+                    )
+                  )
+                  WHEN trx.current_approver_id = $2 THEN TRUE
+                  ELSE FALSE
+                END AS is_approver,
                 COALESCE(
                 (
                   SELECT JSON_AGG(
@@ -557,8 +630,21 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                 ),
                 '[]'::json
               ) AS product_details,
+                -- Approval status supports both old and new workflows
                 CASE
+                  WHEN po.approval_instance_id IS NOT NULL THEN json_build_object(
+                    'type', 'new',
+                    'id', tai.id,
+                    'status', tai.status,
+                    'current_step', tai.current_step,
+                    'total_steps', (
+                      SELECT COUNT(AIS.id)
+                      FROM tbl_approval_instance_steps AIS
+                      WHERE AIS.approval_instance_id = tai.id
+                    )
+                  )
                   WHEN trx.id IS NOT NULL THEN json_build_object(
+                    'type', 'legacy',
                     'id', trx.id,
                     'status', trx.status,
                     'initiated_by', trx.initiated_by,
@@ -586,9 +672,13 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                 ) AS upcoming_milestones
          FROM tbl_rfq_purchase_order po
          LEFT JOIN tbl_projects PRJ ON PRJ.id = PO.project_id
+         -- Old approval workflow
          LEFT JOIN tbl_approval_hierarchy_transactions trx
            ON trx.hierarchy_type = 'po'
            AND trx.target_entity_id = po.id
+         -- New approval workflow
+         LEFT JOIN tbl_approval_instances tai
+           ON tai.id = po.approval_instance_id
         JOIN tbl_users TU ON TU.id = po.initiated_by
         JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
          ${whereClause}
@@ -668,7 +758,21 @@ export const getPODetailsById = async (po_id, user_id) => {
               ) AS logged_in_user,
               TU.name AS initiated_by_name,
               TU.email AS initiated_by_email,
-              CASE WHEN trx.current_approver_id = $2 THEN TRUE ELSE FALSE END AS is_approver,
+              -- Check if user is approver (supports both old and new workflows)
+              CASE
+                WHEN po.approval_instance_id IS NOT NULL THEN (
+                  SELECT EXISTS(
+                    SELECT 1 FROM tbl_approval_step_approvers tasa
+                    JOIN tbl_approval_instance_steps tais ON tais.id = tasa.approval_instance_step_id
+                    WHERE tais.approval_instance_id = po.approval_instance_id
+                      AND tais.step_order = tai.current_step
+                      AND tais.status = 'PENDING'
+                      AND tasa.approver_user_id = $2
+                  )
+                )
+                WHEN trx.current_approver_id = $2 THEN TRUE
+                ELSE FALSE
+              END AS is_approver,
               COALESCE(
                 (
                   SELECT JSON_AGG(
@@ -736,8 +840,37 @@ export const getPODetailsById = async (po_id, user_id) => {
               ),
               '[]'::json
             ) AS hsn_codes,
+              -- Approval status supports both old and new workflows
               CASE
+                WHEN po.approval_instance_id IS NOT NULL THEN json_build_object(
+                  'type', 'new',
+                  'id', tai.id,
+                  'status', tai.status,
+                  'current_step', tai.current_step,
+                  'total_steps', (
+                    SELECT COUNT(AIS.id)
+                    FROM tbl_approval_instance_steps AIS
+                    WHERE AIS.approval_instance_id = tai.id
+                  ),
+                  'initiated_by', tai.initiated_by,
+                  'created_at', tai.created_at,
+                  'pending_approvers', (
+                    SELECT COALESCE(JSON_AGG(
+                      JSON_BUILD_OBJECT(
+                        'user_id', tasa.approver_user_id,
+                        'name', approver_user.name
+                      )
+                    ), '[]'::json)
+                    FROM tbl_approval_step_approvers tasa
+                    JOIN tbl_approval_instance_steps tais ON tais.id = tasa.approval_instance_step_id
+                    JOIN tbl_users approver_user ON approver_user.id = tasa.approver_user_id
+                    WHERE tais.approval_instance_id = tai.id
+                      AND tais.step_order = tai.current_step
+                      AND tais.status = 'PENDING'
+                  )
+                )
                 WHEN trx.id IS NOT NULL THEN json_build_object(
+                  'type', 'legacy',
                   'id', trx.id,
                   'status', trx.status,
                   'initiated_by', trx.initiated_by,
@@ -749,30 +882,54 @@ export const getPODetailsById = async (po_id, user_id) => {
                 ELSE NULL
               END AS approval_status,
 
-              COALESCE(
-                (
-                  SELECT JSON_AGG(
+              -- Approval history supports both old and new workflows
+              CASE
+                WHEN po.approval_instance_id IS NOT NULL THEN COALESCE(
+                  (
+                    SELECT JSON_AGG(
                       JSON_BUILD_OBJECT(
-                        'id', H.id,
-                        'action', H.action,
-                        'remarks', H.remarks,
-                        'created_at', H.created_at,
-                        'approved_by', H.approved_by,
-                        'approved_by_name', COALESCE(U.name, 'Site Representative')
+                        'id', taa.id,
+                        'action', taa.action,
+                        'remarks', taa.comment,
+                        'created_at', taa.created_at,
+                        'approved_by', taa.approver_user_id,
+                        'approved_by_name', COALESCE(action_user.name, 'Unknown'),
+                        'step_number', tais_action.step_order
                       )
-                      ORDER BY H.created_at,
-                      CASE
-                        WHEN H.action = 'edited' THEN 1
-                        WHEN H.action = 'approved' THEN 2
-                        ELSE 3
-                      END
-                  )
-                  FROM tbl_approval_hierarchy_history H
-                  LEFT JOIN tbl_users U ON U.id = H.approved_by
-                  WHERE H.approval_transaction_id = trx.id
-                ),
-                '[]'::json
-              ) AS approval_history,
+                      ORDER BY taa.created_at
+                    )
+                    FROM tbl_approval_actions taa
+                    JOIN tbl_approval_instance_steps tais_action ON tais_action.id = taa.approval_instance_step_id
+                    LEFT JOIN tbl_users action_user ON action_user.id = taa.approver_user_id
+                    WHERE tais_action.approval_instance_id = tai.id
+                  ),
+                  '[]'::json
+                )
+                ELSE COALESCE(
+                  (
+                    SELECT JSON_AGG(
+                        JSON_BUILD_OBJECT(
+                          'id', H.id,
+                          'action', H.action,
+                          'remarks', H.remarks,
+                          'created_at', H.created_at,
+                          'approved_by', H.approved_by,
+                          'approved_by_name', COALESCE(U.name, 'Site Representative')
+                        )
+                        ORDER BY H.created_at,
+                        CASE
+                          WHEN H.action = 'edited' THEN 1
+                          WHEN H.action = 'approved' THEN 2
+                          ELSE 3
+                        END
+                    )
+                    FROM tbl_approval_hierarchy_history H
+                    LEFT JOIN tbl_users U ON U.id = H.approved_by
+                    WHERE H.approval_transaction_id = trx.id
+                  ),
+                  '[]'::json
+                )
+              END AS approval_history,
               COALESCE(
                 (
                   SELECT JSON_AGG(
@@ -831,13 +988,21 @@ export const getPODetailsById = async (po_id, user_id) => {
               ),
               '[]'::json
             ) AS tasks,
-            TAHH.created_at AS po_approved_on,
+            -- po_approved_on supports both old and new workflows
+            CASE
+              WHEN po.approval_instance_id IS NOT NULL AND tai.status = 'APPROVED' THEN tai.completed_at
+              ELSE TAHH.created_at
+            END AS po_approved_on,
             QI.delivery_period
 
        FROM tbl_rfq_purchase_order po
+       -- Old approval workflow
        LEFT JOIN tbl_approval_hierarchy_transactions trx
          ON trx.hierarchy_type = 'po'
          AND trx.target_entity_id = po.id
+       -- New approval workflow
+       LEFT JOIN tbl_approval_instances tai
+         ON tai.id = po.approval_instance_id
        LEFT JOIN tbl_projects PD ON PD.id = po.project_id
        LEFT JOIN tbl_users trx_user ON trx_user.id = trx.current_approver_id
        JOIN tbl_users TU ON TU.id = po.initiated_by

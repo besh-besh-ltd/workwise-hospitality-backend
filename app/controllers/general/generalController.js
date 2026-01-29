@@ -1,5 +1,6 @@
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
+import userModel from '../../models/userModel.js';
 import generalModel, {
   createApprovalInstance,
   createApprovalPolicy,
@@ -137,9 +138,25 @@ const generalController = {
       const { type, project_id, currentUserOnly = false } = req.query;
       const { id, company_id } = req.user;
 
+      // Check if user's company is hospitality
+      const company = await userModel.getCompanyDetail(id);
+      const isHospitality = company && company[0] &&
+        (company[0].is_hospitality === 1 || company[0].is_hospitality === '1');
+
+      // For hospitality users, skip legacy hierarchy - use new approval workflow
+      if (isHospitality) {
+        return res.json({
+          status: 1,
+          use_legacy_hierarchy: false,
+          data: null
+        });
+      }
+
+      // For non-hospitality users, return legacy hierarchies
       const hierarchies = await generalModel.getUserHierarchies(type, company_id, id, project_id, currentUserOnly);
       return res.json({
         status: 1,
+        use_legacy_hierarchy: true,
         data: hierarchies
       });
     } catch (error) {

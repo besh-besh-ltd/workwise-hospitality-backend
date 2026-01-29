@@ -7952,7 +7952,7 @@ const rfqController = {
           }
 
           // Record lifecycle event for vendor finalization
-          const { recordLifecycleEvent } = await import('../models/generalModel.js');
+          const { recordLifecycleEvent } = await import('../../models/generalModel.js');
           await recordLifecycleEvent({
             entity_type: 'RFQ',
             entity_id: rfq_id,
@@ -8106,9 +8106,7 @@ const rfqController = {
     
         return res.status(200).json({
           status: 1,
-          message: response.reFinalized
-            ? 'Another vendor has been finalized, both vendors has been notified!'
-            : 'Vendor has been finalized and notified!',
+          message: 'A Purchase Order has been drafted successfully',
           data: response.result,
           isRefinalized: response.reFinalized
         });
