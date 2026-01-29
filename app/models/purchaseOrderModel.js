@@ -387,6 +387,7 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
           approvalResult.approval_required = true;
         }
       } catch (approvalError) {
+        console.log("APPROVAL ERROR:", approvalError);
         // No policy found - throw error, do not auto-approve
         throw new Error('No approval policy found for Purchase Order. Please configure an approval policy for PO entity type in the hospitality scope.');
       }
@@ -431,7 +432,13 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
 
     const items = await getPOItemDetails(purchaseOrder, t)
 
+    // Generate PO PDF with dynamic template selection
     const pdfSaveResult = await seoController.poPDF({
+      po_id: purchaseOrder.id,
+      company_id: purchaseOrder.company_id,
+      hospitality_company_id: rfq?.hospitality_company_id,
+      hotel_id: rfq?.hotel_id,
+      // Legacy data for backward compatibility with default template
       ...purchaseOrder,
       ...items
     });
@@ -1736,4 +1743,61 @@ export const handleAddSiteRepresentative = async (po_id, added_by, name, email, 
 
     return result;
   })
+};
+
+/**
+ * Regenerate PO PDF document with current approval state
+ * Called after each approval action to update poApprovers section
+ *
+ * @param {number} po_id - Purchase Order ID
+ * @param {Object} txContext - Optional transaction context
+ * @returns {string|null} - New PDF URL or null on failure
+ */
+export const regeneratePODocument = async (po_id, txContext = null) => {
+  const t = txContext || db;
+
+  try {
+    // Get RFQ context for template selection
+    const poData = await t.oneOrNone(`
+      SELECT
+        PO.id, PO.po_number,
+        PO.company_id, RFQ.hospitality_company_id, RFQ.hotel_id
+      FROM tbl_rfq_purchase_order PO
+      JOIN tbl_rfq RFQ ON RFQ.id = PO.rfq_id
+      WHERE PO.id = $1
+    `, [po_id]);
+
+    if (!poData) {
+      console.error(`Cannot regenerate PO document: PO ${po_id} not found`);
+      return null;
+    }
+
+    // Generate new PDF with dynamic template selection
+    const pdfResult = await seoController.poPDF({
+      po_id: poData.id,
+      company_id: poData.company_id,
+      hospitality_company_id: poData.hospitality_company_id,
+      hotel_id: poData.hotel_id
+    });
+
+    if (pdfResult.ok) {
+      // Upload to S3 and update URL
+      const s3Key = `po-${poData.po_number}-${Date.now()}.pdf`;
+      const s3Url = await uploadToS3(pdfResult.absolutePath, s3Key);
+
+      await t.none(`
+        UPDATE tbl_rfq_purchase_order
+        SET po_pdf_url = $1, updated_at = NOW()
+        WHERE id = $2
+      `, [s3Url.url || pdfResult.file, po_id]);
+
+      console.log(`Regenerated PO document for PO ${po_id}`);
+      return s3Url.url || pdfResult.file;
+    }
+
+    return null;
+  } catch (error) {
+    console.error(`Error regenerating PO document for PO ${po_id}:`, error);
+    return null;
+  }
 };

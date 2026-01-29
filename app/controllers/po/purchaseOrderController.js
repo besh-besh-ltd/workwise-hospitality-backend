@@ -2,7 +2,7 @@ import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
-import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN } from "../../models/purchaseOrderModel.js";
+import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument } from "../../models/purchaseOrderModel.js";
 import rfqModel from "../../models/rfqModel.js";
 import userModel from "../../models/userModel.js";
 import hospitalityModel from "../../models/hospitalityModel.js";
@@ -197,6 +197,13 @@ export const approvePO = async (req, res) => {
             comment: remarks || ''
           });
 
+          // Regenerate PO document to update approval section (on each APPROVE action)
+          if (decision === 'approved') {
+            regeneratePODocument(po_id, t).catch(err => {
+              console.error('Failed to regenerate PO document:', err);
+            });
+          }
+
           // Handle post-approval actions
           if (actionResult.instance_status === 'APPROVED') {
             await handlePOPostApproval(po.approval_instance_id, userId, t);
@@ -263,6 +270,13 @@ export const approvePO = async (req, res) => {
             JOIN tbl_approval_hierarchy_transactions taht ON taht.id = $1
           WHERE trpo.id = taht.target_entity_id`,
         [trx.id])
+
+        // Regenerate PO document to update approval section (on each successful approval)
+        if (decision === 'approved') {
+          regeneratePODocument(po_id, t).catch(err => {
+            console.error('Failed to regenerate PO document:', err);
+          });
+        }
 
         if (result && (!result.approval_required || result.is_rejected)) {
           await markPOStatusChange(po_id, t, result.is_rejected, req.user);

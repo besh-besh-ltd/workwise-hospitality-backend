@@ -8,6 +8,8 @@ import path from 'path';
 import Handlebars from 'handlebars';
 import puppeteer from 'puppeteer';
 import numberToWords from 'number-to-words';
+import { selectPOTemplate } from '../../helper/poTemplateSelector.js';
+import { buildPOTemplateData } from '../../helper/poTemplateDataBuilder.js';
 
 const { toWords } = numberToWords;
 import { Readable } from 'stream';
@@ -82,14 +84,35 @@ const seoController = {
       out += ' Only';
       return out;
     });
+    // capitalize helper for payment terms
+    Handlebars.registerHelper('capitalize', (str) => {
+      if (!str) return '';
+      return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
+    });
     function capitalize(s) {
       if (!s) return s;
       return s.charAt(0).toUpperCase() + s.slice(1);
     }
+    // equality helper for conditional styling
+    Handlebars.registerHelper('eq', function(a, b, options) {
+      if (a === b) {
+        return options.fn(this);
+      }
+      return options.inverse(this);
+    });
 
-    // --- Template path ---
-    // Use project root to resolve path so it works whether using __dirname or ESM
-    const templatePath = path.join(process.cwd(), 'app', 'helper', 'poTemplate.hbs');
+    // --- Dynamic Template Selection ---
+    // If po_id and company context are provided, use dynamic template selection
+    const { po_id, company_id, hospitality_company_id, hotel_id } = poData || {};
+
+    let templatePath;
+    if (company_id) {
+      // Use dynamic template selection based on company hierarchy
+      templatePath = selectPOTemplate(company_id, hospitality_company_id, hotel_id);
+    } else {
+      // Fallback to default template for backward compatibility
+      templatePath = path.join(process.cwd(), 'app', 'helper', 'poTemplate.hbs');
+    }
 
     if (!fs.existsSync(templatePath)) {
       return { ok: false, error: `Template not found at ${templatePath}` };
@@ -98,94 +121,105 @@ const seoController = {
     const templateSource = fs.readFileSync(templatePath, 'utf8');
     const template = Handlebars.compile(templateSource);
 
-    // --- Placeholder data (simple). Replace or merge with req.body as needed ---
-    const now = new Date();
-    const data = {
-      po_number: `PO-${Date.now()}`,
-      created_at: now.toLocaleDateString('en-GB'),
-      quotationRef: 'QTN-0001',
-      company_name: 'LAKSHYA POWERTECH LIMITED',
-      company: {
-        name: 'LAKSHYA POWERTECH LIMITED',
-        address: 'SECOND FLOOR, T 109, CHIRA CHAS, ...',
-        phone: '9998789770',
-        email: 'keyurshah@lakshyapowertech.com',
-        gstin: '20AACCL3031F1ZC',
-        cin: 'L74900GJ2012PLC071218',
-        logoUrl: null,
-      },
-      supplier: {
-        name: 'CORAL SALES PVT LTD',
-        address: 'FIRST FLOOR, SHATABDI TOWER, 1 SNP AREA, SAKCHI, JAMSHEDPUR ...',
-        phone: '',
-        email: 'coralsales2008@gmail.com',
-        gstin: '20AADCC3326M1ZZ'
-      },
-      shipTo: 'JHARIA BLOCK, PARBATPUR-GCS, BOKARO ASSET, JHARKHAND',
-      billTo: `
-        LAKSHYA POWERTECH LIMITED\n
-        SECOND FLOOR, T 109, CHIRA CHAS, OM\n
-        SHREE\n
-        TRYAMBAKESHWAR ENCLAVE ASHIYANA\n
-        GARDEN,\n
-        PHASE 4, Bokaro Steel City, Bokaro, Jharkhand,\n
-        827013\n
-        GSTIN : 20AACCL3031F1ZC\n
-        PAN : AACCL3031F\n
-      `,
-      items: [
-        {
-          description: 'HYDRAULIC CRANE 23 TON MAKE ACE MODEL F-230 ...',
-          hsn: '84261100',
-          uom: 'NOS',
-          quantity: 1,
-          rate: 5148514.64,
-          taxPercent: 18,
-          lineTotal: 5148514.64,
-          remark: ''
-        },
-        {
-          description: 'OTHER EXPENSE - TCS(1%)',
-          hsn: '',
-          uom: 'NOS',
-          quantity: 1,
-          rate: 51485.15,
-          taxPercent: 0,
-          lineTotal: 51485.15
-        },
-        {
-          description: 'OTHER EXPENSE - REGISTRATION & INSURANCE',
-          hsn: '',
-          uom: 'NOS',
-          quantity: 1,
-          rate: 441944.0,
-          taxPercent: 0,
-          lineTotal: 441944.0
-        }
-      ],
-      subtotal: 5148514.64,
-      taxAmount: 785366.64,
-      otherChargesTotal: 0,
-      discount: 0,
-      total: 5641943.79,
-      notes: `
-        Warranty - Offered equipment is covered under our standard Warranty of Twelve months or 1000 hrs from the date of Commissioning whichever occurs earlier.
-        Installation & Free Services - Local Dealer will provide free installation and 3 free services as per standard Customer Service schedule within Warranty period.
-      `,
-      warranty: '12 months or 1000 hrs from commissioning whichever earlier',
-      delivery: '3 WEEKS FROM PO DATE',
-      // otherExpenses: [
-      //   { title: 'TCS(1%)', amount: 51485.15 },
-      //   { title: 'Registration & Insurance', amount: 441944.0 }
-      // ]
-    };
+    // --- Build template data ---
+    let data;
 
-    // If the request provided data, shallow-merge it (keeps placeholders when request misses fields)
-    if (poData && Object.keys(poData).length) {
-      Object.assign(data, poData);
+    // If po_id is provided, use the enhanced data builder
+    if (po_id) {
+      try {
+        data = await buildPOTemplateData(po_id);
+        console.log(`Built PO template data for PO ${po_id}`);
+      } catch (buildError) {
+        console.error(`Error building PO template data for PO ${po_id}:`, buildError);
+        // Fall back to provided poData if build fails
+        data = { ...poData };
+      }
+    } else {
+      // Legacy mode: Use placeholder data merged with provided poData
+      const now = new Date();
+      data = {
+        po_number: `PO-${Date.now()}`,
+        created_at: now.toLocaleDateString('en-GB'),
+        quotationRef: 'QTN-0001',
+        company_name: 'LAKSHYA POWERTECH LIMITED',
+        company: {
+          name: 'LAKSHYA POWERTECH LIMITED',
+          address: 'SECOND FLOOR, T 109, CHIRA CHAS, ...',
+          phone: '9998789770',
+          email: 'keyurshah@lakshyapowertech.com',
+          gstin: '20AACCL3031F1ZC',
+          cin: 'L74900GJ2012PLC071218',
+          logoUrl: null,
+        },
+        supplier: {
+          name: 'CORAL SALES PVT LTD',
+          address: 'FIRST FLOOR, SHATABDI TOWER, 1 SNP AREA, SAKCHI, JAMSHEDPUR ...',
+          phone: '',
+          email: 'coralsales2008@gmail.com',
+          gstin: '20AADCC3326M1ZZ'
+        },
+        shipTo: 'JHARIA BLOCK, PARBATPUR-GCS, BOKARO ASSET, JHARKHAND',
+        billTo: `
+          LAKSHYA POWERTECH LIMITED\n
+          SECOND FLOOR, T 109, CHIRA CHAS, OM\n
+          SHREE\n
+          TRYAMBAKESHWAR ENCLAVE ASHIYANA\n
+          GARDEN,\n
+          PHASE 4, Bokaro Steel City, Bokaro, Jharkhand,\n
+          827013\n
+          GSTIN : 20AACCL3031F1ZC\n
+          PAN : AACCL3031F\n
+        `,
+        items: [
+          {
+            description: 'HYDRAULIC CRANE 23 TON MAKE ACE MODEL F-230 ...',
+            hsn: '84261100',
+            uom: 'NOS',
+            quantity: 1,
+            rate: 5148514.64,
+            taxPercent: 18,
+            lineTotal: 5148514.64,
+            remark: ''
+          },
+          {
+            description: 'OTHER EXPENSE - TCS(1%)',
+            hsn: '',
+            uom: 'NOS',
+            quantity: 1,
+            rate: 51485.15,
+            taxPercent: 0,
+            lineTotal: 51485.15
+          },
+          {
+            description: 'OTHER EXPENSE - REGISTRATION & INSURANCE',
+            hsn: '',
+            uom: 'NOS',
+            quantity: 1,
+            rate: 441944.0,
+            taxPercent: 0,
+            lineTotal: 441944.0
+          }
+        ],
+        subtotal: 5148514.64,
+        taxAmount: 785366.64,
+        otherChargesTotal: 0,
+        discount: 0,
+        total: 5641943.79,
+        notes: `
+          Warranty - Offered equipment is covered under our standard Warranty of Twelve months or 1000 hrs from the date of Commissioning whichever occurs earlier.
+          Installation & Free Services - Local Dealer will provide free installation and 3 free services as per standard Customer Service schedule within Warranty period.
+        `,
+        warranty: '12 months or 1000 hrs from commissioning whichever earlier',
+        delivery: '3 WEEKS FROM PO DATE',
+      };
+
+      // If the request provided data, shallow-merge it (keeps placeholders when request misses fields)
+      if (poData && Object.keys(poData).length) {
+        Object.assign(data, poData);
+      }
     }
 
-    if(data.company.logoUrl) {
+    if(data?.company?.logoUrl) {
       data.company.logoUrlBase64 = await getBase64FromUrl(data.company.logoUrl)
     }
 
