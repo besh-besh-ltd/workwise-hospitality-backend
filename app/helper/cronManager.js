@@ -2,9 +2,11 @@ import cron from 'node-cron';
 import db from '../config/dbConn.js';
 import { sendReminderMail } from './sendEmailFunctions/milestoneEmails.js';
 import { sendGRNEmail } from './sendEmailFunctions/generalReminderEmails.js';
+import { recordLifecycleEvent } from '../models/generalModel.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
+const rfqPublishCronRegistry = new Map();
 
 export const scheduleMilestoneReminder = async (milestone) => {
   const { id, due_date, reminder_users } = milestone;
@@ -230,4 +232,135 @@ export const scheduleGRNReminders = async (purchase_order, reminder_users = [], 
   scheduleReminderAtIndex(0);
 
   return true;
+};
+
+// ============================================
+// RFQ/Tender Auto-Publish Scheduler
+// ============================================
+
+/**
+ * publishRfq
+ *
+ * Actually publishes the RFQ by updating status and is_published.
+ *
+ * @param {Object} rfq - RFQ object with id, rfq_no, is_tender, created_by
+ */
+const publishRfq = async (rfq) => {
+  const { id, rfq_no, is_tender, created_by } = rfq;
+
+  // Update RFQ to published state
+  await db.none(`
+    UPDATE tbl_rfq
+    SET status = 1, is_published = 1
+    WHERE id = $1
+  `, [id]);
+
+  // Record lifecycle event
+  await recordLifecycleEvent({
+    entity_type: is_tender === 1 ? 'TENDER' : 'RFQ',
+    entity_id: id,
+    stage: 'PUBLISHED',
+    action: 'AUTO_PUBLISH',
+    performed_by: created_by,
+    metadata: { rfq_no, published_by: 'scheduler' }
+  });
+
+  console.log(`[RFQ Publisher] Published ${is_tender === 1 ? 'Tender' : 'RFQ'} #${rfq_no} (ID: ${id})`);
+};
+
+/**
+ * scheduleRfqPublish
+ *
+ * Schedules a cron job to publish an RFQ/Tender at its tender_publish_date.
+ * For regular RFQs (non-tenders), publishes immediately.
+ *
+ * @param {Object} rfq - RFQ object with id, rfq_no, is_tender, tender_publish_date, created_by
+ */
+export const scheduleRfqPublish = async (rfq) => {
+  const { id, rfq_no, is_tender, tender_publish_date, created_by } = rfq;
+
+  // For non-tenders or if no publish date, publish immediately
+  if (is_tender !== 1 || !tender_publish_date) {
+    await publishRfq(rfq);
+    return;
+  }
+
+  const publishAt = new Date(tender_publish_date);
+
+  // If publish date is in the past or now, publish immediately
+  if (publishAt <= new Date()) {
+    await publishRfq(rfq);
+    return;
+  }
+
+  // Remove any existing job for this RFQ
+  removeRfqPublishJob(id);
+
+  // Create cron expression for the specific date/time
+  const cronExpression = `${publishAt.getMinutes()} ${publishAt.getHours()} ${publishAt.getDate()} ${publishAt.getMonth() + 1} *`;
+
+  const job = cron.schedule(cronExpression, async () => {
+    try {
+      // Re-fetch RFQ to ensure it's still in READY_TO_PUBLISH state
+      const currentRfq = await db.oneOrNone(`
+        SELECT id, rfq_no, is_tender, created_by, status, is_published
+        FROM tbl_rfq WHERE id = $1
+      `, [id]);
+
+      if (!currentRfq || currentRfq.status !== 4 || currentRfq.is_published === 1) {
+        console.log(`[RFQ Publisher] RFQ ${id} is no longer ready to publish, skipping`);
+        return;
+      }
+
+      await publishRfq(currentRfq);
+    } catch (err) {
+      console.error(`[RFQ Publisher] Error publishing RFQ ${id}:`, err);
+    } finally {
+      job.stop();
+      rfqPublishCronRegistry.delete(id);
+    }
+  });
+
+  rfqPublishCronRegistry.set(id, job);
+  console.log(`[RFQ Publisher] Scheduled ${is_tender === 1 ? 'Tender' : 'RFQ'} #${rfq_no} (ID: ${id}) for ${publishAt.toISOString()}`);
+};
+
+/**
+ * removeRfqPublishJob
+ *
+ * Cancels and removes a scheduled RFQ publish job.
+ *
+ * @param {number} rfqId - RFQ ID
+ */
+export const removeRfqPublishJob = (rfqId) => {
+  const job = rfqPublishCronRegistry.get(rfqId);
+  if (job) {
+    job.stop();
+    rfqPublishCronRegistry.delete(rfqId);
+  }
+};
+
+/**
+ * rescheduleAllRfqPublishJobs
+ *
+ * Called on server startup to reschedule all pending RFQ publish jobs.
+ * Queries for RFQs in READY_TO_PUBLISH status (status = 4) that are not yet published.
+ */
+export const rescheduleAllRfqPublishJobs = async () => {
+  try {
+    const rfqsToSchedule = await db.any(`
+      SELECT id, rfq_no, is_tender, tender_publish_date, created_by
+      FROM tbl_rfq
+      WHERE status = 4
+        AND is_published = 0
+    `);
+
+    for (const rfq of rfqsToSchedule) {
+      await scheduleRfqPublish(rfq);
+    }
+
+    console.log(`[RFQ Publisher] Rescheduled ${rfqsToSchedule.length} RFQ publish jobs on startup`);
+  } catch (err) {
+    console.error('[RFQ Publisher] Error rescheduling RFQ publish jobs:', err);
+  }
 };
