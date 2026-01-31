@@ -9254,13 +9254,12 @@ ORDER BY m.created_at;
                         'vendor_id', v.id,
                         'vendor_name', v.name,
                         'vendor_email', v.email,
-                        'vendor_mobile', v.mobile,
-                        'vendor_address', v.address
+                        'vendor_mobile', v.mobile
                     )
                 )
                 FROM tbl_rfq_product_vendors pv
                 JOIN tbl_users v ON pv.user_id = v.id
-                WHERE pv.product_variant_id = prod.product_variant_id AND pv.rfq_id = r.id  -- Assuming a filter condition here
+                WHERE pv.product_variant_id = prod.product_variant_id AND pv.rfq_id = r.id
             )
         )
     )

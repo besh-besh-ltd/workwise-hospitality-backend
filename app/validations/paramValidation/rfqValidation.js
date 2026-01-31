@@ -148,8 +148,10 @@ export const rfqSchemas = {
 
   create: Joi.object().keys({
     rfq_id: Joi.number().optional().allow('').allow(null),
+    title: Joi.string().optional().allow('').allow(null),
     comment: Joi.string().optional().allow(''),
     company_name: Joi.string().required(),
+    technical_evaluation_by: Joi.number().integer().optional().allow(null),
     response_email: Joi.string().required(),
     contact_name: Joi.string().required(),
     contact_number: Joi.string()

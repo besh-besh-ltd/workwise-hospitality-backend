@@ -75,6 +75,14 @@ HospitalityRoutes.put(
   hospitalityController.updateHotel
 );
 
+HospitalityRoutes.get(
+  '/hotels/:hotel_id/documents',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  hospitalityController.getHotelDocuments
+);
+
 HospitalityRoutes.post(
   '/company/:company_id/map-users',
   passportSignIn,

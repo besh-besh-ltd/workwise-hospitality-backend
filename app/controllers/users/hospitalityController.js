@@ -916,8 +916,30 @@ const HospitalityController = {
         error: error
       });
     }
-  }
+  },
 
+  getHotelDocuments: async (req, res) => {
+    try {
+      const hotelId = parseInt(req.params.hotel_id, 10);
+
+      if (!hotelId) {
+        return res.status(400).json({
+          status: 0,
+          message: "Hotel ID is required"
+        });
+      }
+
+      const documents = await hospitalityModel.getHotelDocuments(hotelId);
+
+      return res.status(200).json({
+        status: 1,
+        data: documents
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  }
 
 };
 
