@@ -572,9 +572,8 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
         mailRecipients.to = user_details[0].email;
       }
 
-      // Add project members to CC
-      const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfqNumber);
-      addProjectMembersToCC(mailRecipients, projectMemberEmails);
+      // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
+      // Project members should only be CC'd on buyer emails
 
       // Construct an array of product descriptions
       const productDescriptions = productsWithTechEval.map((product) => {
@@ -770,9 +769,7 @@ const sendMailToVendorsForTargetPrice = async (
           // mailRecipients.cc = buyerEmail;
         }
 
-        // Add project members to CC
-        const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
-        addProjectMembersToCC(mailRecipients, projectMemberEmails);
+        // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
 
         // Send the email
         sendMail(mailRecipients);
@@ -960,9 +957,7 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
     mailRecipients.to = spocList.map(spoc => spoc.email);
   }
 
-  // Add project members to CC
-  const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
-  addProjectMembersToCC(mailRecipients, projectMemberEmails);
+  // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
 
   // Sending the email
   sendMail(mailRecipients);
@@ -1135,9 +1130,7 @@ const sendQuoteNotificationToVendor = async (req) => {
     mailRecipients.to = email;
   }
 
-  // Add project members to CC
-  const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
-  addProjectMembersToCC(mailRecipients, projectMemberEmails);
+  // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
 
   sendMail(mailRecipients);
 
@@ -1261,8 +1254,7 @@ const sendRFQClosedMail = async (buyerInfo, rfqItem, vendorList) => {
       mailRecipients.to = vendor.user_email;
     }
 
-    // Add project members to CC
-    addProjectMembersToCC(mailRecipients, projectMemberEmails);
+    // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
 
     sendMail(mailRecipients);
   }
@@ -1366,9 +1358,7 @@ const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) =>
     mailRecipients.cc = [vendor.email];
   }
 
-  // Add project members to CC
-  const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
-  addProjectMembersToCC(mailRecipients, projectMemberEmails);
+  // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
 
   sendMail(mailRecipients);
 
@@ -1593,9 +1583,7 @@ const sendQuoteNotificationEmail = async (req) => {
         //  mail.bcc = 'ayush@letsworkwise.com';
        }
 
-       // Add project members to CC
-       const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
-       addProjectMembersToCC(mail, projectMemberEmails);
+       // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
 
        sendMail(mail);
      }
@@ -1694,9 +1682,7 @@ const sendAddTechCommentMailForVendor = async (vendor , product, rfq_no,  sender
         mailRecipients.to = vendor.vendor_email;
       }
 
-      // Add project members to CC
-      const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
-      addProjectMembersToCC(mailRecipients, projectMemberEmails);
+      // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
 
       sendMail(mailRecipients);
 
@@ -1844,9 +1830,7 @@ const sendTechEvalAccepOrRejectMailToVendor = async (
         mailRecipients.to = vendor.email;
       }
 
-      // Add project members to CC
-      const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
-      addProjectMembersToCC(mailRecipients, projectMemberEmails);
+      // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
 
       sendMail(mailRecipients);
 
@@ -2030,9 +2014,7 @@ const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
           mailRecipients.to =  winning_vendor_email;
     }
 
-    // Add project members to CC
-    const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfQItem[0]?.id);
-    addProjectMembersToCC(mailRecipients, projectMemberEmails);
+    // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
 
     sendMail(mailRecipients);
 
@@ -2109,9 +2091,7 @@ const sendFinalizationRemovalMail = async (
       mailRecipients.to = vendor_email;
     }
 
-    // Add project members to CC
-    const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfQItem[0]?.id);
-    addProjectMembersToCC(mailRecipients, projectMemberEmails);
+    // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
 
     sendMail(mailRecipients);
 
@@ -11942,9 +11922,12 @@ sendFollowUpEmails: async (req, res) => {
           mailRecipients.to = receiverDetails.email;
         }
 
-        // Add project members to CC
-        const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
-        addProjectMembersToCC(mailRecipients, projectMemberEmails);
+        // Only add project members to CC when email is going to buyer (sender_type == 3 means vendor sending)
+        // Do NOT CC project members when email is going to vendor to prevent data leakage
+        if (sender_type == 3) {
+          const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfq_id);
+          addProjectMembersToCC(mailRecipients, projectMemberEmails);
+        }
 
         sendMail(mailRecipients);
 
