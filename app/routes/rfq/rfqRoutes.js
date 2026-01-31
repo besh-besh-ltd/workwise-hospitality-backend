@@ -650,6 +650,15 @@ RfqRoutes.post('/tech-eval/approval/action',
   rfqController.techEvalApprovalAction
 );
 
+// RFQ/Tender Approval Action - Custom approve/reject endpoint
+// This triggers post-approval processing (status update to READY_TO_PUBLISH)
+RfqRoutes.post('/:id/approve-action',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  validateBody(rfqSchemas.rfqApprovalAction),
+  rfqController.approveRFQAction
+);
+
 //  product wise audit report
 RfqRoutes.get('/report/rfq-product-wise',
   passportSignIn,

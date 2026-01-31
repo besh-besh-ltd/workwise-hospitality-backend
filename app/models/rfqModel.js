@@ -1534,6 +1534,10 @@ WHERE NOT EXISTS (
   },
 
   getAllRfqBuyer: async (limit, offset, user_id, month, year) => {
+    // Show to creator:
+    // - Published RFQs (is_published = 1, status 1 or 2)
+    // - Pending approval RFQs (is_published = 0, status 3)
+    // - Ready to publish RFQs (is_published = 0, status 4)
     const query = `SELECT RFQ.id,RFQ.rfq_no,RFQ.is_published,RFQ.created_by,RFQ.status,RFQ.timestamp,
       ARRAY(
       SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id
@@ -1543,7 +1547,9 @@ WHERE NOT EXISTS (
       SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = '${user_id}'
     ) AS "finilize"
     FROM tbl_rfq RFQ
-    WHERE RFQ.is_published = 1 AND created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC LIMIT $3 OFFSET $4 `;
+    WHERE created_by = '${user_id}'
+      AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
+      AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC LIMIT $3 OFFSET $4 `;
     return new Promise(function (resolve, reject) {
       db.query(query, [month, year, limit, offset])
         .then(function (data) {
@@ -1556,6 +1562,10 @@ WHERE NOT EXISTS (
     });
   },
   getAllRfqBuyerExport: async (user_id, month, year) => {
+    // Show to creator:
+    // - Published RFQs (is_published = 1, status 1 or 2)
+    // - Pending approval RFQs (is_published = 0, status 3)
+    // - Ready to publish RFQs (is_published = 0, status 4)
     const query = `SELECT RFQ.id,RFQ.rfq_no,RFQ.is_published,RFQ.created_by,RFQ.status,RFQ.timestamp,
       ARRAY(
       SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id
@@ -1565,7 +1575,9 @@ WHERE NOT EXISTS (
       SELECT json_build_object('id', TQF.id,'rfq_id', TQF.rfq_id,'rfq_no', TQF.rfq_no, 'timestamp', TQF.timestamp, 'created_by', TQF.created_by ) FROM tbl_quote_finalization TQF WHERE TQF.rfq_id = RFQ.id AND TQF.created_by = '${user_id}'
     ) AS "finilize"
     FROM tbl_rfq RFQ
-    WHERE RFQ.is_published = 1 AND created_by =  '${user_id}' AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC  `;
+    WHERE created_by = '${user_id}'
+      AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
+      AND EXTRACT(MONTH FROM timestamp) = '$1' AND EXTRACT(YEAR FROM timestamp) = '$2' ORDER BY id DESC  `;
     return new Promise(function (resolve, reject) {
       db.query(query, [month, year])
         .then(function (data) {
@@ -1666,7 +1678,7 @@ WHERE NOT EXISTS (
             FROM tbl_rfq_product_vendors RFQ_P_V
             WHERE RFQ.id = RFQ_P_V.rfq_id
             AND RFQ_P_V.user_id = $3
-        ) AND RFQ.is_published = 1
+        ) AND RFQ.is_published = 1 AND RFQ.status NOT IN (3, 4)
         ORDER BY RFQ.timestamp DESC
       LIMIT $2 OFFSET $1;`,
         [offset, limit, user_id]
@@ -3189,7 +3201,7 @@ LIMIT 2;
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
       WHERE (RFQ.created_by = ${user_id} OR EXISTS (
       SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
-      )) AND RFQ.is_published = 1
+      )) AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -3226,7 +3238,7 @@ LIMIT 2;
         LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
         WHERE (RFQ.created_by = ${user_id} OR EXISTS (
         SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
-        )) AND RFQ.is_published = 1
+        )) AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -3375,7 +3387,7 @@ LIMIT 2;
         AND asa.approver_user_id = ${user_id}
         AND asa.status = 'PENDING'
         AND ais.step_order = ai.current_step
-        AND RFQ.is_published = 1
+        AND (RFQ.is_published = 0 AND RFQ.status = 3)
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
@@ -9454,7 +9466,7 @@ ORDER BY m.created_at;
         OR RFQ.project_id IN (
           SELECT project_id FROM tbl_project_team WHERE user_id = ${user_id}
         )
-      ) AND RFQ.is_published = 0
+      ) AND (RFQ.is_published = 0 AND RFQ.status NOT IN (3, 4))
       ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
       ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
       ${

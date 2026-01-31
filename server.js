@@ -19,7 +19,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 import 'newrelic'; // Import after dotenv so New Relic can read environment variables
-import { rescheduleAllMilestoneReminders } from './app/helper/cronManager.js';
+import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs } from './app/helper/cronManager.js';
 
 
 // Initialize app
@@ -88,6 +88,7 @@ app.use(express.static(__dirname));
 util(app);
 
 rescheduleAllMilestoneReminders();
+rescheduleAllRfqPublishJobs();
 
 
 // The error handler must be registered before any other error middleware and after all controllers

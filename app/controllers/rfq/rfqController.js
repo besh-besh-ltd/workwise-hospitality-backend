@@ -25,10 +25,11 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, submitApprovalAction, getApprovalInstanceById } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, submitApprovalAction, getApprovalInstanceById, cancelApprovalInstance } from '../../models/generalModel.js';
 import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
+import { scheduleRfqPublish } from '../../helper/cronManager.js';
 import { draftPO } from '../po/purchaseOrderController.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
@@ -3296,6 +3297,43 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
   // Determine entity type based on is_tender flag
   const entityType = rfq.is_tender === 1 ? 'TENDER' : 'RFQ';
 
+  // Check for existing PENDING approval instances for this RFQ/Tender
+  // If found, cancel them before creating a new one (allows re-submission after edits)
+  const existingPendingInstances = await dbContext.any(
+    `SELECT id FROM tbl_approval_instances
+     WHERE entity_type = $1 AND entity_id = $2 AND status = 'PENDING'`,
+    [entityType, rfqId]
+  );
+
+  // Cancel any existing pending instances
+  for (const instance of existingPendingInstances) {
+    // Update instance status to CANCELLED
+    await dbContext.none(
+      `UPDATE tbl_approval_instances
+       SET status = 'CANCELLED', completed_at = NOW()
+       WHERE id = $1`,
+      [instance.id]
+    );
+
+    // Update all pending steps to CANCELLED
+    await dbContext.none(
+      `UPDATE tbl_approval_instance_steps
+       SET status = 'CANCELLED', completed_at = NOW()
+       WHERE approval_instance_id = $1 AND status = 'PENDING'`,
+      [instance.id]
+    );
+
+    // Log the cancellation
+    await dbContext.none(
+      `INSERT INTO tbl_approval_actions
+       (approval_instance_id, approver_user_id, action, comment)
+       VALUES ($1, $2, 'CANCELLED', $3)`,
+      [instance.id, userId, 'Cancelled due to RFQ re-submission with changes']
+    );
+
+    console.log(`Cancelled existing approval instance ${instance.id} for ${entityType} ${rfqId}`);
+  }
+
   // Let errors propagate (especially "no policy found" errors)
   const result = await createApprovalInstance({
     entity_type: entityType,
@@ -3313,6 +3351,166 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
   });
 
   return result;
+};
+
+/**
+ * handleRFQPostApproval
+ *
+ * Post-approval handler for RFQ/Tender - called when approval instance is fully approved.
+ * Updates RFQ status from PENDING_APPROVAL (3) to READY_TO_PUBLISH (4).
+ * The scheduler will then publish the RFQ when tender_publish_date is reached.
+ *
+ * @param {number} approval_instance_id - The approval instance ID
+ * @param {number} approver_user_id - The user who performed the final approval
+ * @param {Object} txContext - Optional transaction context
+ * @returns {Promise<Object|null>} - Updated RFQ or null if not found
+ */
+export const handleRFQPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
+  const t = txContext || db;
+
+  try {
+    // Get the approval instance to find the RFQ
+    const instance = await getApprovalInstanceById(approval_instance_id, null, t);
+
+    if (!instance || instance.status !== 'APPROVED') {
+      console.log(`Approval instance ${approval_instance_id} not found or not approved`);
+      return null;
+    }
+
+    // Only handle RFQ and TENDER entity types
+    if (!['RFQ', 'TENDER'].includes(instance.entity_type)) {
+      console.log(`Skipping non-RFQ entity type: ${instance.entity_type}`);
+      return null;
+    }
+
+    const rfq_id = instance.entity_id;
+
+    // Get RFQ details
+    const rfq = await t.oneOrNone(`
+      SELECT * FROM tbl_rfq WHERE id = $1
+    `, [rfq_id]);
+
+    if (!rfq) {
+      console.error(`RFQ ${rfq_id} not found for approval instance ${approval_instance_id}`);
+      return null;
+    }
+
+    // Validate current status - should be PENDING_APPROVAL (3)
+    if (rfq.status !== 3) {
+      console.log(`RFQ ${rfq_id} status is ${rfq.status}, expected 3 (PENDING_APPROVAL)`);
+      return null;
+    }
+
+    // Update RFQ status to READY_TO_PUBLISH (4)
+    // The scheduler will publish it when tender_publish_date is reached
+    await t.none(`
+      UPDATE tbl_rfq
+      SET status = 4
+      WHERE id = $1
+    `, [rfq_id]);
+
+    // Record lifecycle event for approval
+    await recordLifecycleEvent({
+      entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
+      entity_id: rfq_id,
+      stage: 'APPROVED',
+      action: 'APPROVE',
+      performed_by: approver_user_id,
+      metadata: {
+        approval_instance_id,
+        rfq_no: rfq.rfq_no
+      },
+      txContext: t
+    });
+
+    // Schedule the RFQ to be published at tender_publish_date
+    // For non-tenders, this will publish immediately
+    // For tenders with future publish date, this will schedule a cron job
+    await scheduleRfqPublish({
+      id: rfq_id,
+      rfq_no: rfq.rfq_no,
+      is_tender: rfq.is_tender,
+      tender_publish_date: rfq.tender_publish_date,
+      created_by: rfq.created_by
+    });
+
+    // TODO: Send notification to RFQ creator that approval is complete
+
+    console.log(`RFQ ${rfq_id} approved - status updated to READY_TO_PUBLISH (4)`);
+    return { rfq_id, status: 4 };
+  } catch (error) {
+    console.error('Error handling RFQ post-approval:', error);
+    throw error;
+  }
+};
+
+/**
+ * handleRFQRejection
+ *
+ * Rejection handler for RFQ/Tender - called when approval instance is rejected.
+ * Keeps RFQ status at PENDING_APPROVAL (3) to allow creator to modify and resubmit.
+ *
+ * @param {number} approval_instance_id - The approval instance ID
+ * @param {number} rejector_user_id - The user who rejected
+ * @param {string} rejection_reason - Optional rejection reason/comment
+ * @param {Object} txContext - Optional transaction context
+ * @returns {Promise<Object|null>} - RFQ info or null if not found
+ */
+export const handleRFQRejection = async (approval_instance_id, rejector_user_id, rejection_reason = null, txContext = null) => {
+  const t = txContext || db;
+
+  try {
+    // Get the approval instance to find the RFQ
+    const instance = await getApprovalInstanceById(approval_instance_id, null, t);
+
+    if (!instance || instance.status !== 'REJECTED') {
+      console.log(`Approval instance ${approval_instance_id} not found or not rejected`);
+      return null;
+    }
+
+    // Only handle RFQ and TENDER entity types
+    if (!['RFQ', 'TENDER'].includes(instance.entity_type)) {
+      console.log(`Skipping non-RFQ entity type: ${instance.entity_type}`);
+      return null;
+    }
+
+    const rfq_id = instance.entity_id;
+
+    // Get RFQ details
+    const rfq = await t.oneOrNone(`
+      SELECT * FROM tbl_rfq WHERE id = $1
+    `, [rfq_id]);
+
+    if (!rfq) {
+      console.error(`RFQ ${rfq_id} not found for approval instance ${approval_instance_id}`);
+      return null;
+    }
+
+    // Status remains at 3 (PENDING_APPROVAL) - creator can edit and resubmit
+    // Record lifecycle event for rejection
+    await recordLifecycleEvent({
+      entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
+      entity_id: rfq_id,
+      stage: 'REJECTED',
+      action: 'REJECT',
+      performed_by: rejector_user_id,
+      metadata: {
+        approval_instance_id,
+        rfq_no: rfq.rfq_no,
+        rejection_reason
+      },
+      remarks: rejection_reason,
+      txContext: t
+    });
+
+    // TODO: Send notification to RFQ creator about rejection with reason
+
+    console.log(`RFQ ${rfq_id} rejected - creator can modify and resubmit`);
+    return { rfq_id, status: 3, rejection_reason };
+  } catch (error) {
+    console.error('Error handling RFQ rejection:', error);
+    throw error;
+  }
 };
 
 /**
@@ -3993,7 +4191,7 @@ const rfqController = {
 
       // Wrap RFQ update, duplication, and approval in a single transaction
       // If any step fails (e.g., no approval policy), everything rolls back
-      const { responseUpdate, allRfqIds } = await db.tx(async (t) => {
+      const { responseUpdate, allRfqIds, isHospitalityRfq } = await db.tx(async (t) => {
         // Look up hospitality_company_id from the hotel
         let hospitality_company_id = null;
         if (hotel_id) {
@@ -4004,13 +4202,20 @@ const rfqController = {
           hospitality_company_id = hotelRecord?.hospitality_company_id || null;
         }
 
-        // Update RFQ with hotel_id, hospitality_company_id, and publish
+        // Update RFQ with hotel_id, hospitality_company_id
+        // All RFQs start in PENDING_APPROVAL state (status=3, is_published=0)
+        // After approval completes, status transitions to READY_TO_PUBLISH (4)
+        // Then scheduler publishes when tender_publish_date is reached
         const updateResult = await t.any(
           `UPDATE tbl_rfq
-           SET is_published = 1, hotel_id = $1, hospitality_company_id = $2
+           SET is_published = 0, status = 3, hotel_id = $1, hospitality_company_id = $2
            WHERE id = $3
            RETURNING *`,
-          [hotel_id || null, hospitality_company_id, rfq_id]
+          [
+            hotel_id || null,
+            hospitality_company_id,
+            rfq_id
+          ]
         );
 
         // Duplicate RFQ for other hotels (passes transaction context)
@@ -4045,35 +4250,23 @@ const rfqController = {
           })
         );
 
-        // Record lifecycle: PUBLISHED (after approval process started)
-        const publishedRfq = updateResult[0];
-        if (publishedRfq && publishedRfq.hospitality_company_id) {
-          await recordLifecycleEvent({
-            entity_type: publishedRfq.is_tender === 1 ? 'TENDER' : 'RFQ',
-            entity_id: rfq_id,
-            stage: 'PUBLISHED',
-            action: 'PUBLISH',
-            performed_by: user_id,
-            metadata: { rfq_no: publishedRfq.rfq_no },
-            txContext: t
-          });
-        }
+        // PUBLISHED lifecycle event will be recorded by the scheduler after approval completes
+        // and tender_publish_date is reached
 
         return { responseUpdate: updateResult, allRfqIds: rfqIds };
       });
 
       // -------------------
       // Email notifications happen AFTER successful transaction
-
-      await sendMailtoVendors(req, rfq_id);
-      await sendQuotationMailToBuyer(req, rfq_id);
+      // All RFQs now go through approval workflow - vendor emails will be sent when published
+      // For now, only send confirmation to buyer that RFQ is submitted for approval
 
       const buyerMsgPayload = {
         mobile: req.user.mobile,
         rfq_id: rfq_id,
         rfq_no: responseUpdate[0]?.rfq_no
       };
-
+      // Notify buyer that RFQ is submitted for approval
       whatsappNotificationAISensy.buyerCreatesRFQNotification(buyerMsgPayload);
 
       return res
@@ -4081,7 +4274,8 @@ const rfqController = {
         .json({
           status: 1,
           data: responseUpdate[0],
-          mail_sent: true
+          pending_approval: true,
+          message: 'RFQ submitted for approval. Vendors will be notified after approval and publishing.'
         })
         .end();
     } catch (error) {
@@ -14091,6 +14285,132 @@ getClauses: async (req, res) => {
       return res.status(500).json({
         status: 0,
         message: 'Error processing approval action',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * approveRFQAction
+   *
+   * Custom RFQ approval action endpoint.
+   * Handles APPROVE and REJECT actions for RFQ/Tender approval instances.
+   * After the approval action is submitted, triggers post-approval or rejection handlers.
+   *
+   * @route POST /api/v1/rfq/:id/approve-action
+   */
+  approveRFQAction: async (req, res) => {
+    try {
+      const { id } = req.params; // RFQ ID
+      const user_id = req.user.id;
+      const {
+        approval_instance_id,
+        approval_instance_step_id,
+        action,
+        comment
+      } = req.body;
+
+      if (!approval_instance_id) {
+        return res.status(400).json({
+          status: 0,
+          message: 'approval_instance_id is required'
+        });
+      }
+
+      if (!action || !['APPROVE', 'REJECT'].includes(action.toUpperCase())) {
+        return res.status(400).json({
+          status: 0,
+          message: 'action must be APPROVE or REJECT'
+        });
+      }
+
+      // Verify this is an RFQ or TENDER approval instance
+      const instance = await getApprovalInstanceById(approval_instance_id);
+      if (!instance) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Approval instance not found'
+        });
+      }
+
+      if (!['RFQ', 'TENDER'].includes(instance.entity_type)) {
+        return res.status(400).json({
+          status: 0,
+          message: 'This endpoint is only for RFQ/TENDER approval instances'
+        });
+      }
+
+      // Verify the RFQ ID matches the entity_id in the approval instance
+      if (instance.entity_id !== parseInt(id)) {
+        return res.status(400).json({
+          status: 0,
+          message: 'Approval instance does not match the RFQ ID'
+        });
+      }
+
+      // Submit the approval action
+      const result = await submitApprovalAction({
+        approval_instance_id: parseInt(approval_instance_id),
+        approval_instance_step_id: approval_instance_step_id ? parseInt(approval_instance_step_id) : null,
+        approver_user_id: user_id,
+        action: action.toUpperCase(),
+        comment
+      });
+
+      // Handle post-approval or rejection processing
+      if (result.instance_status === 'APPROVED') {
+        try {
+          await handleRFQPostApproval(approval_instance_id, user_id);
+        } catch (postApprovalError) {
+          console.error('Error in RFQ post-approval processing:', postApprovalError);
+        }
+      } else if (result.instance_status === 'REJECTED') {
+        try {
+          await handleRFQRejection(approval_instance_id, user_id, comment);
+        } catch (rejectionError) {
+          console.error('Error in RFQ rejection processing:', rejectionError);
+        }
+      }
+
+      return res.status(200).json({
+        status: 1,
+        message: result.message,
+        data: {
+          rfq_id: parseInt(id),
+          action: action.toUpperCase(),
+          instance_status: result.instance_status,
+          step_status: result.step_status,
+          next_step: result.next_step,
+          next_step_id: result.next_step_id
+        }
+      });
+    } catch (error) {
+      logError(error);
+
+      if (error.message?.includes('not an approver')) {
+        return res.status(403).json({
+          status: 0,
+          message: 'You are not authorized to approve this step'
+        });
+      }
+
+      if (error.message?.includes('already acted')) {
+        return res.status(400).json({
+          status: 0,
+          message: 'You have already acted on this approval step'
+        });
+      }
+
+      if (error.message?.includes('Cannot act on instance')) {
+        return res.status(400).json({
+          status: 0,
+          message: error.message
+        });
+      }
+
+      return res.status(500).json({
+        status: 0,
+        message: 'Error processing RFQ approval action',
         error: error.message
       });
     }
