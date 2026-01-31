@@ -175,6 +175,9 @@ const schemas = {
     image: Joi.string().optional().allow('', null),
     subscription: Joi.string().optional().allow('', null),
     is_hospitality: Joi.number().valid(0, 1).optional(),
+    employee_type: Joi.string().optional().allow('', null),
+    employee_code: Joi.string().optional().allow('', null),
+    payroll_company_id: Joi.number().integer().optional().allow(null),
     /* status: Joi.string()
       .required()
       .regex(/^[0|1]$/, 'numeric values only') */

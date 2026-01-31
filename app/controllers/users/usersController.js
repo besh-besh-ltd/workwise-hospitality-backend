@@ -1854,6 +1854,10 @@ update_user_detail: async (req, res, next) => {
     if (isAdmin && reqData.payroll_company_id !== undefined) {
       updateData.payroll_company_id = reqData.payroll_company_id;
     }
+    // Status updates: Only allowed by admins
+    if (isAdmin && reqData.status !== undefined) {
+      updateData.status = reqData.status;
+    }
 
     const whereClause =
       isAdmin && targetUserId !== loggedInUser.id

@@ -406,6 +406,9 @@ const schemas = {
         permissions: Joi.object().optional()
       })
     ).optional(),
+    employee_type: Joi.string().optional().allow('', null),
+    employee_code: Joi.string().optional().allow('', null),
+    payroll_company_id: Joi.number().integer().optional().allow(null),
   }),
 
   // mukul 09-06-2025, just saprate this from update_profile

@@ -250,8 +250,7 @@ const rbacModel = {
       `
       UPDATE tbl_roles
       SET title = $1,
-          description = $2,
-          updated_at = NOW()
+          description = $2
       WHERE id = $3
       `,
       [title.trim(), description || null, roleId]
@@ -269,9 +268,12 @@ const rbacModel = {
   assignPermissionsToRole: async (roleId, permissionIds = []) => {
     if (!permissionIds.length) return;
 
+    // Remove duplicates
+    const uniqueIds = [...new Set(permissionIds)];
+
     return db.tx(t =>
       t.batch(
-        permissionIds.map(pid =>
+        uniqueIds.map(pid =>
           t.none(
             `
             INSERT INTO tbl_role_permissions (role_id, permission_id)
