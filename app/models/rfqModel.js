@@ -2183,14 +2183,14 @@ WHERE NOT EXISTS (
      AND TQM.rfq_id = RFQ.id
      AND TQM.is_seen = false
     ) AS "unseen_query_count",
-    -- Fetching global_payment_term and global_comment from tbl_quotes
+    -- Fetching global_payment_term, global_comment and gstin from tbl_quotes (for update quote autofill)
     (
       SELECT json_build_object(
         'is_regret', TQ.is_regret,
         'regret_reason', TQ.regret_reason,
         'global_payment_term', TQ.global_payment_term,
         'global_comment', TQ.global_comment,
-        'gstin', NULL
+        'gstin', TQ.gstin
       )
       FROM tbl_quotes TQ
       WHERE TQ.rfq_id = RFQ.id

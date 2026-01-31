@@ -546,7 +546,7 @@ const sendMailEachVendor = async (vendor, user, rfqNumber, products, reverse_auc
             </tbody>
           </table>
 
-          <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqNumber}&token=${token}
+          <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfqNumber}&token=${token}
             style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
             Submit Your Quote Now
           </a>
@@ -734,7 +734,7 @@ const sendMailToVendorsForTargetPrice = async (
               </tbody>
             </table>
 
-            <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token}
+            <a href=${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfq_id}&token=${token}
               style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
               Update Your Quote
             </a>
@@ -1307,7 +1307,7 @@ const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) =>
       
         <p> <strong> Deadline: </strong> ${rfqBasicDetails?.bid_end_date || 'N/A'} </p>
       
-        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${vendor.token}"
+        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfq_id}&token=${vendor.token}"
            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
           Submit Your Quote Now
         </a>
@@ -2161,6 +2161,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       vendor_clarification_date,
       hospitality_company_id,
       hotel_id,
+      hotel_ids,
       department_id,
       ra_start_date,
       ra_end_date,
@@ -2309,6 +2310,12 @@ const saveRfqDraft = async (user_id, reqBody) => {
     rfqDetail = rfqDetail[0]
   else
     rfqDetail = {};
+
+  // Persist hotel selection (Create Tender: selected hotels must be saved)
+  const hotelIdsToSync = Array.isArray(hotel_ids) ? hotel_ids : [];
+  if (hotelIdsToSync.length > 0) {
+    await hospitalityModel.reconcileRFQHotels(rfq_id, hotelIdsToSync, user_id);
+  }
 
   // Handle terms update
   if (termsChanged && terms && terms.length > 0) {
@@ -7017,7 +7024,8 @@ const rfqController = {
             global_payment_term: globalPaymentTerms,
             global_comment: globalComment,
             regret_reason,
-            payment_id: tenderPaymentId
+            payment_id: tenderPaymentId,
+            gstin: vendorGSTIN && String(vendorGSTIN).trim() ? String(vendorGSTIN).trim() : null
           };
 
           // check quote is already exists or not
@@ -11544,10 +11552,13 @@ sendFollowUpEmails: async (req, res) => {
 
       let paymentTermAndCommentChanges = false;
 
-      // update global comment and payment term
+      // update global comment, payment term and gstin
+      const currentGstin = quoteExists[0].gstin ?? null;
+      const newGstin = vendorGSTIN && String(vendorGSTIN).trim() ? String(vendorGSTIN).trim() : null;
       if (
         globalPaymentTerms !== quoteExists[0].global_payment_term ||
-        globalComment !== quoteExists[0].global_comment
+        globalComment !== quoteExists[0].global_comment ||
+        newGstin !== currentGstin
       ) {
         const tbl_quotes_data = {
           rfq_id: quoteExists[0].rfq_id,
@@ -11558,7 +11569,8 @@ sendFollowUpEmails: async (req, res) => {
           timestamp: new Date().toISOString(),
           is_regret: 0,
           global_payment_term: globalPaymentTerms,
-          global_comment: globalComment
+          global_comment: globalComment,
+          gstin: newGstin
         };
         await rfqModel.update('tbl_quotes', tbl_quotes_data, quoteId);
 
