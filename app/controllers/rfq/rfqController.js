@@ -2272,25 +2272,36 @@ const saveRfqDraft = async (user_id, reqBody) => {
     logError(autoProjectErr);
   }
 
+  // Normalize reverse_auction to ensure consistent comparison
+  const isReverseAuction = reverse_auction === 1 || reverse_auction === '1' || reverse_auction === true;
+
+  // Helper to normalize date values - convert empty strings to null
+  const normalizeDate = (dateValue) => {
+    if (!dateValue || dateValue === '' || dateValue === 'null' || dateValue === 'undefined') {
+      return null;
+    }
+    return dateValue;
+  };
+
   const rfqData = {
       comment,
       company_name,
       response_email,
       contact_name,
       contact_number,
-      bid_end_date,
+      bid_end_date: normalizeDate(bid_end_date),
       location,
       rfq_type,
-      reverse_auction,
+      reverse_auction: isReverseAuction ? 1 : 0,
       is_tender: is_tender !== undefined ? is_tender : 0,
       tender_fees: is_tender === 1 ? (tender_fees || 0) : 0,
-      tender_publish_date: is_tender === 1 ? tender_publish_date : null,
-      vendor_clarification_date: is_tender === 1 ? vendor_clarification_date : null,
+      tender_publish_date: is_tender === 1 ? normalizeDate(tender_publish_date) : null,
+      vendor_clarification_date: is_tender === 1 ? normalizeDate(vendor_clarification_date) : null,
       hospitality_company_id: hospitality_company_id || null,
       hotel_id: hotel_id || null,
       department_id: department_id || null,
-      ra_start_date: reverse_auction == 1 ? ra_start_date : null,
-      ra_end_date: reverse_auction == 1 ? ra_end_date : null,
+      ra_start_date: isReverseAuction ? normalizeDate(ra_start_date) : null,
+      ra_end_date: isReverseAuction ? normalizeDate(ra_end_date) : null,
       is_published: 0,
       updated_by: user_id,
       title: title || null,
@@ -2916,10 +2927,13 @@ const duplicateRfqForHotels = async (rfq_id, hotel_ids, user_id, txContext = nul
     for (const hotel_id of childHotels) {
       // -------------------------  3A️ Create NEW RFQ for this hotel  -------------------------
 
+      // Generate unique rfq_no for the duplicated RFQ
+      // Using subquery to get max rfq_no + 1 ensures uniqueness within transaction
       // RETURNING id is CRITICAL because: All child tables depend on rfq_id
       const { id: newRfqId } = await t.one(
         `
 INSERT INTO tbl_rfq (
+  rfq_no,
   comment,
   company_name,
   response_email,
@@ -2929,7 +2943,7 @@ INSERT INTO tbl_rfq (
   location,
   is_published,
   created_by,
-  updated_by,              
+  updated_by,
   status,
   rfq_type,
   reverse_auction,
@@ -2946,6 +2960,7 @@ INSERT INTO tbl_rfq (
   hotel_id
 )
 SELECT
+  (SELECT COALESCE(MAX(rfq_no), 100000) + 1 FROM tbl_rfq),
   comment,
   company_name,
   response_email,
@@ -2955,7 +2970,7 @@ SELECT
   location,
   1,
   created_by,
-  created_by,            
+  created_by,
   status,
   rfq_type,
   reverse_auction,
@@ -4103,8 +4118,14 @@ const rfqController = {
     try {
       let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction, selectedSheets } = req.body;
 
+      // Normalize reverse_auction to boolean for consistent checks
+      const isReverseAuctionEnabled = reverse_auction === 1 || reverse_auction === '1' || reverse_auction === true;
 
-   
+      // Normalize date values - treat empty strings as null
+      const normalizedRaStart = ra_start_date && ra_start_date !== '' ? ra_start_date : null;
+      const normalizedRaEnd = ra_end_date && ra_end_date !== '' ? ra_end_date : null;
+      const normalizedBidEnd = bid_end_date && bid_end_date !== '' ? bid_end_date : null;
+
       const user_id = req.user.id;
       if (!rfq_id) {
         return res
@@ -4118,20 +4139,36 @@ const rfqController = {
           .end();
       }
       // check if RA is true
-      if (reverse_auction) {
-        if (!ra_start_date || !ra_end_date) {
+      if (isReverseAuctionEnabled) {
+        if (!normalizedRaStart || !normalizedRaEnd) {
           return res
             .status(400)
             .json({
               status: 3,
               errors: {
-                ra_start_date: 'RA Start Date is required',
-                ra_end_date: 'RA End Date is required'
+                ra_start_date: !normalizedRaStart ? 'RA Start Date is required' : undefined,
+                ra_end_date: !normalizedRaEnd ? 'RA End Date is required' : undefined
               }
             })
             .end();
         }
-        if (new Date(ra_start_date) >= new Date(ra_end_date)) {
+        const raStartParsed = new Date(normalizedRaStart);
+        const raEndParsed = new Date(normalizedRaEnd);
+        const bidEndParsed = normalizedBidEnd ? new Date(normalizedBidEnd) : null;
+
+        if (isNaN(raStartParsed.getTime()) || isNaN(raEndParsed.getTime())) {
+          return res
+            .status(400)
+            .json({
+              status: 3,
+              errors: {
+                ra_start_date: isNaN(raStartParsed.getTime()) ? 'Invalid RA Start Date format' : undefined,
+                ra_end_date: isNaN(raEndParsed.getTime()) ? 'Invalid RA End Date format' : undefined
+              }
+            })
+            .end();
+        }
+        if (raStartParsed >= raEndParsed) {
           return res
             .status(400)
             .json({
@@ -4142,7 +4179,7 @@ const rfqController = {
             })
             .end();
         }
-        if (new Date(ra_start_date) <= new Date(bid_end_date)) {
+        if (bidEndParsed && raStartParsed <= bidEndParsed) {
           return res
             .status(400)
             .json({
@@ -6827,15 +6864,20 @@ const rfqController = {
         }
 
         const now = new Date();
-        const bidEndDate = rfqDetails[0].bid_end_date
-          ? new Date(rfqDetails[0].bid_end_date)
-          : null;
-        const raStartDate = rfqDetails[0].ra_start_date
-          ? new Date(rfqDetails[0].ra_start_date)
-          : null;
-        const raEndDate = rfqDetails[0].ra_end_date
-          ? new Date(rfqDetails[0].ra_end_date)
-          : null;
+
+        // Helper to safely parse dates - returns null for invalid/empty values
+        const safeParseDate = (dateValue) => {
+          if (!dateValue || dateValue === '' || dateValue === 'null') {
+            return null;
+          }
+          const parsed = new Date(dateValue);
+          // Check if date is valid (Invalid Date returns NaN for getTime())
+          return isNaN(parsed.getTime()) ? null : parsed;
+        };
+
+        const bidEndDate = safeParseDate(rfqDetails[0].bid_end_date);
+        const raStartDate = safeParseDate(rfqDetails[0].ra_start_date);
+        const raEndDate = safeParseDate(rfqDetails[0].ra_end_date);
         const isReverseAuction = rfqDetails[0].reverse_auction === 1;
 
         // Create end of day date for bid end date (to match frontend logic)

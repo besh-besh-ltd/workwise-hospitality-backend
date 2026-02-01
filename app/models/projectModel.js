@@ -296,21 +296,22 @@ ORDER BY
     });
   },
   // mukul 03--06-2025 retuen project list for user team
+  // Fixed by Agnij 2026-02-01 - Use DISTINCT ON to avoid duplicates when project has multiple hospitality mappings
   getIdAndNameOfProjects: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(
-        `SELECT 
+        `SELECT DISTINCT ON (p.id)
                 p.id,
                 p.name,
                 hpm.hospitality_company_id,
                 hpm.hospitality_hotel_id as hotel_id
-            FROM 
+            FROM
                 tbl_projects p
             LEFT JOIN tbl_project_team pt ON p.id = pt.project_id
             LEFT JOIN tbl_hospitality_project_mappings hpm ON p.id = hpm.project_id
-            WHERE 
+            WHERE
                 p.user_id = $1 OR pt.user_id = $1
-            GROUP BY p.id, p.name, hpm.hospitality_company_id, hpm.hospitality_hotel_id`,
+            ORDER BY p.id, hpm.hospitality_hotel_id NULLS LAST`,
         [user_id]
       )
         .then(function (data) {
