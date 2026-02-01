@@ -7782,6 +7782,7 @@ ORDER BY m.created_at;
                                             vr.buyer_id,
                                             vr.buyer_marks,
                                             vr.buyer_remark,
+                                            vr.score_timestamp,
                                             COALESCE(vrf.files, '[]')                     AS vendor_response_files
                                       FROM tbl_rfq_product_tech_evaluation_vendors_response vr
                                               LEFT JOIN vendor_response_files vrf
@@ -7795,7 +7796,8 @@ ORDER BY m.created_at;
                                                                     'vendor_response_files', vendor_response_files,
                                                                     'buyer_id', buyer_id,
                                                                     'buyer_marks', buyer_marks,
-                                                                    'buyer_remark', buyer_remark
+                                                                    'buyer_remark', buyer_remark,
+                                                                    'score_timestamp', score_timestamp
                                                             )
                                                     ) AS vendor_responses
                                             FROM vendor_responses_raw
@@ -7808,15 +7810,19 @@ ORDER BY m.created_at;
                     vr.vendor_id,
                     COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
                     COALESCE(SUM(c.weightage), 0) AS total_weightage,
-                    CASE 
-                        WHEN COALESCE(SUM(c.weightage), 0) > 0 
+                    -- Check if buyer has actually scored (score_timestamp indicates marks were saved)
+                    BOOL_OR(vr.score_timestamp IS NOT NULL) AS has_marks,
+                    CASE
+                        WHEN COALESCE(SUM(c.weightage), 0) > 0
                         THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
                         ELSE 0
                     END AS calculated_score,
                     te.minimum_passing_score,
-                    CASE 
-                        WHEN COALESCE(SUM(c.weightage), 0) > 0 
-                        THEN CASE 
+                    -- Only calculate is_passed if marks have been given (score_timestamp exists)
+                    CASE
+                        WHEN NOT BOOL_OR(vr.score_timestamp IS NOT NULL) THEN NULL
+                        WHEN COALESCE(SUM(c.weightage), 0) > 0
+                        THEN CASE
                             WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE(te.minimum_passing_score, 0)
                             THEN true
                             ELSE false
@@ -7873,10 +7879,12 @@ ORDER BY m.created_at;
                                     'vendor_name', deduped.vendor_name,
                                     'vendor_email', deduped.vendor_email,
                                     'is_cleared', deduped.is_cleared,
+                                    'is_verified', deduped.is_verified,
                                     'evaluated_by', deduped.evaluated_by,
                                     'rfq_product_vendor_id', deduped.rfq_product_vendor_id,
                                     'calculated_score', deduped.calculated_score,
                                     'is_passed', deduped.is_passed,
+                                    'has_marks', deduped.has_marks,
                                     'quote_price', deduped.quote_price,
                                     'rank', deduped.rank,
                                     'is_replaced', (vr.new_vendor_id IS NOT NULL)
@@ -7891,10 +7899,12 @@ ORDER BY m.created_at;
                                       COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name,
                                       tu.email AS vendor_email,
                                       rc.status AS is_cleared,
+                                      rc.is_verified AS is_verified,
                                       _TU.name AS evaluated_by,
                                       rpv.id AS rfq_product_vendor_id,
                                       COALESCE(vs.calculated_score::NUMERIC, 0) AS calculated_score,
                                       vs.is_passed AS is_passed,
+                                      COALESCE(vs.has_marks, false) AS has_marks,
                               COALESCE(tqi.total_price, 999999999) AS quote_price,
                                       ROW_NUMBER() OVER (
                                           PARTITION BY te.rfq_id, te.tbl_rfq_product_id, tu.id
@@ -11339,10 +11349,13 @@ ORDER BY tq.timestamp DESC;
    */
   createTechEvalRound: async (tech_evaluation_id, round_number, created_by, txContext = null) => {
     const dbContext = txContext || db;
+    // Use ON CONFLICT to handle duplicate key - return existing record if already exists
     return dbContext.one(
       `INSERT INTO tbl_tech_evaluation_rounds
        (tbl_rfq_product_tech_evaluation_id, round_number, status, created_by, created_at)
        VALUES ($1, $2, 'PENDING', $3, NOW())
+       ON CONFLICT (tbl_rfq_product_tech_evaluation_id, round_number)
+       DO UPDATE SET updated_at = NOW()
        RETURNING *`,
       [tech_evaluation_id, round_number, created_by]
     );
@@ -11807,6 +11820,9 @@ ORDER BY tq.timestamp DESC;
       [techEval.id]
     );
 
+    // Use actual passed verified count as source of truth (more reliable than stored field)
+    const actualPassedVerifiedCount = passedVerified.length;
+
     return {
       tech_evaluation_id: techEval.id,
       rfq_product_id: techEval.tbl_rfq_product_id,
@@ -11815,7 +11831,7 @@ ORDER BY tq.timestamp DESC;
       product_name: techEval.product_name,
       is_complete: techEval.is_complete || false,
       current_round: techEval.current_round || 1,
-      total_passed_verified: techEval.total_passed_verified || 0,
+      total_passed_verified: Math.max(actualPassedVerifiedCount, techEval.total_passed_verified || 0),
       required_passed_vendors: techEval.required_passed_vendors || 5,
       blocked_insufficient_vendors: techEval.blocked_insufficient_vendors || false,
       minimum_passing_score: techEval.minimum_passing_score,

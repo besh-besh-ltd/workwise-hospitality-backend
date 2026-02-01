@@ -3584,6 +3584,18 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     throw new Error('Technical evaluation is already complete with required number of passed vendors');
   }
 
+  // Check if there's already a pending/submitted round for this evaluation
+  const existingPendingRound = await dbContext.oneOrNone(
+    `SELECT id, round_number, status FROM tbl_tech_evaluation_rounds
+     WHERE tbl_rfq_product_tech_evaluation_id = $1 AND status IN ('PENDING', 'SUBMITTED')
+     ORDER BY round_number DESC LIMIT 1`,
+    [techEval.id]
+  );
+
+  if (existingPendingRound) {
+    throw new Error(`Round ${existingPendingRound.round_number} is already ${existingPendingRound.status.toLowerCase()}. Please wait for approval before submitting again.`);
+  }
+
   // Get vendor scores with pass/fail status
   const vendorScores = await rfqModel.getVendorScoresForTechEval(
     techEval.id,
@@ -13223,6 +13235,13 @@ getClauses: async (req, res) => {
         return res.status(400).json({
           status: 0,
           message: 'No vendors have been evaluated. Please evaluate vendors before submitting for approval.'
+        });
+      }
+
+      if (error.message?.includes('already submitted') || error.message?.includes('already pending')) {
+        return res.status(400).json({
+          status: 0,
+          message: error.message
         });
       }
 
