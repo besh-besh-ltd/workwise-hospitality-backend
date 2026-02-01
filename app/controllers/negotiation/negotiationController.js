@@ -7,7 +7,8 @@ import {
   createApprovalInstance,
   submitApprovalAction,
   getApprovalInstancesByEntity,
-  getApprovalInstanceById
+  getApprovalInstanceById,
+  findBestMatchingPolicy
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
 
@@ -151,7 +152,7 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
   } catch (error) {
     // If no policy exists, throw error (don't auto-approve)
     if (error.message && error.message.includes('No approval policy found')) {
-      throw new Error('No approval policy found for NEGOTIATION_QUOTE. Please configure an approval policy before submitting quotes for approval.');
+      throw new Error('No approval workflow found for NEGOTIATION. Please configure an approval policy before creating negotiation rounds.');
     }
     throw error;
   }
@@ -332,6 +333,21 @@ const NegotiationController = {
         return res.status(400).json({
           status: 2,
           message: `Round ${activeRound.round_number} is still active for this product. Please complete or cancel it first.`
+        });
+      }
+
+      // Check if approval workflow exists for NEGOTIATION before creating the round
+      const approvalPolicy = await findBestMatchingPolicy({
+        entity_type: 'NEGOTIATION',
+        hospitality_company_id: rfqData.hospitality_company_id,
+        hotel_id: rfqData.hotel_id || null,
+        department_id: rfqData.department_id || null
+      });
+
+      if (!approvalPolicy) {
+        return res.status(400).json({
+          status: 2,
+          message: 'No approval workflow found for NEGOTIATION. Please configure an approval policy before creating negotiation rounds.'
         });
       }
 
