@@ -7,6 +7,7 @@ import generalModel, {
   deleteApprovalPolicy,
   deletePolicySteps,
   getApprovalInstanceDetails,
+  getApprovalInstanceById,
   getApprovalPolicies,
   getApprovalPolicyWithSteps,
   insertPolicySteps,
@@ -18,6 +19,7 @@ import generalModel, {
   getPendingApprovalsForUser
 } from '../../models/generalModel.js';
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
+import { handleRFQPostApproval, handleRFQRejection } from '../rfq/rfqController.js';
 
 const generalController = {
   getStates: async (req, res, next) => {
@@ -546,6 +548,26 @@ const hospitalityApprovalController = {
         action,
         comment
       });
+
+      // Handle post-approval/rejection processing based on entity type
+      if (result.instance_status === 'APPROVED' || result.instance_status === 'REJECTED') {
+        try {
+          // Get the approval instance to determine entity type
+          const instance = await getApprovalInstanceById(parseInt(approval_instance_id));
+
+          if (instance && ['RFQ', 'TENDER'].includes(instance.entity_type)) {
+            if (result.instance_status === 'APPROVED') {
+              await handleRFQPostApproval(parseInt(approval_instance_id), approver_user_id);
+            } else if (result.instance_status === 'REJECTED') {
+              await handleRFQRejection(parseInt(approval_instance_id), approver_user_id, comment);
+            }
+          }
+          // Add other entity type handlers here as needed (PO, ARC, etc.)
+        } catch (postActionError) {
+          // Log but don't fail the response - the approval action itself succeeded
+          console.error('Error in post-approval processing:', postActionError);
+        }
+      }
 
       res.json({ status: 1, data: result });
     } catch (e) {

@@ -1186,24 +1186,30 @@ await generalModel.updateMany('tbl_quote_payment_terms', rows);
 async function userHasHospitalityAccess(userId, hospitalityCompanyId, hotelId = null, t = db) {
   if (hotelId) {
     // Check for hotel-level access or company-level access (which covers all hotels)
-    const row = await t.oneOrNone(`
-      SELECT 1 FROM tbl_hospitality_user_mappings
-      WHERE user_id = $1
-        AND hospitality_company_id = $2
-        AND (
-          (mapping_type = 1 AND hospitality_hotel_id = $3)
-          OR (mapping_type = 0 AND hospitality_hotel_id IS NULL)
-        )
+    // Using EXISTS to safely handle users with both hotel-level and company-level mappings
+    const row = await t.one(`
+      SELECT EXISTS (
+        SELECT 1 FROM tbl_hospitality_user_mappings
+        WHERE user_id = $1
+          AND hospitality_company_id = $2
+          AND (
+            (mapping_type = 1 AND hospitality_hotel_id = $3)
+            OR (mapping_type = 0 AND hospitality_hotel_id IS NULL)
+          )
+      ) AS has_access
     `, [userId, hospitalityCompanyId, hotelId]);
-    return Boolean(row);
+    return row.has_access;
   } else {
     // Check for company-level access
-    const row = await t.oneOrNone(`
-      SELECT 1 FROM tbl_hospitality_user_mappings
-      WHERE user_id = $1
-        AND hospitality_company_id = $2
+    // Using EXISTS to safely handle multiple mappings
+    const row = await t.one(`
+      SELECT EXISTS (
+        SELECT 1 FROM tbl_hospitality_user_mappings
+        WHERE user_id = $1
+          AND hospitality_company_id = $2
+      ) AS has_access
     `, [userId, hospitalityCompanyId]);
-    return Boolean(row);
+    return row.has_access;
   }
 }
 
