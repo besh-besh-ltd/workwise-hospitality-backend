@@ -965,31 +965,34 @@ const sendRevisedQuotationEmailToVendor =async (buyerDetails, user, rfq_id, rfq_
   const message = `Thank you for submitting your updated quotation for #${rfq_no}`
 
 
-  // Send notification message to vendor 
+  // Send notification message to vendor
     // here we have to implement await Promise.allSettled(promises); for better perfomance
-    spocList.map(async (spoc) => {
-      if (spoc.mobile) {
+    const vendorToken = token[0]?.token || '';
+    if (vendorToken) {
+      spocList.map(async (spoc) => {
+        if (spoc.mobile) {
+        const whatsappPayload ={
+          mobile:spoc.mobile,
+          token:vendorToken,
+          rfq_id:rfq_id,
+          message:message,
+          name:vendorName
+        }
+
+        await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
+      }
+      })
+
+      // send message to vendor
       const whatsappPayload ={
-        mobile:spoc.mobile,
-        token:token[0].token,
+        mobile:user.mobile,
+        token:vendorToken,
         rfq_id:rfq_id,
         message:message,
         name:vendorName
       }
-    
       await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
     }
-    })
-  
-    // send message to vendor
-    const whatsappPayload ={
-      mobile:user.mobile,
-      token:token[0].token,
-      rfq_id:rfq_id,
-      message:message,
-      name:vendorName
-    }  
-    await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
   
   
 
@@ -1085,32 +1088,33 @@ const sendQuoteNotificationToVendor = async (req) => {
   const { name, email, id, organization_name, company_name, mobile } = req.user;
   const user = req.user
   const token = await rfqModel.getVendorRfqToken(id, rfq_id);
-  const BuyerDetails = await rfqModel.getRFQCreatedBy(rfq_id) 
-  
+  const vendorToken = token[0]?.token || '';
+  const BuyerDetails = await rfqModel.getRFQCreatedBy(rfq_id)
+
   const vendorCompanyName = company_name || organization_name || name;
   const buyerCompanyName = BuyerDetails[0]?.company_name || BuyerDetails[0]?.organization_name || '';
-  
+
   const headerContent = `<h2>Hello ${vendorCompanyName},</h2>`;
 
-  const containerContent = ` 
+  const containerContent = `
   <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
     <p>
       ${req.body.is_regret && req.body.is_regret == 1
         ? 'Your regret concern has been sent to the buyer.'
         : `<div>
-            <p>Thank you for submitting your quotation for <strong>#${rfq_no}</strong>. 
+            <p>Thank you for submitting your quotation for <strong>#${rfq_no}</strong>.
                We've shared it with <strong>${buyerCompanyName}</strong>, who will review it and get back to you soon.</p>
-              <p><strong>Next Steps:</strong> Keep an eye out for any buyer queries or updates, 
+              <p><strong>Next Steps:</strong> Keep an eye out for any buyer queries or updates,
                and be ready to discuss terms to secure the order.</p>
 
-            <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${token[0].token}" 
+            <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfq_id}&token=${vendorToken}"
                style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                View RFQ Status
             </a>
           </div>`}
     </p>
   </div>`;
-  
+
     const dynamicHTML = generateEmailTemplate(headerContent, containerContent)
 
   const spocList = await vendorModel.getSpocDetails(id , rfq_id);
@@ -1141,30 +1145,32 @@ const sendQuoteNotificationToVendor = async (req) => {
 
   // send message to spoc
   // here we have to implement await Promise.allSettled(promises); for better perfomance
-  const vendorCompanyNameForWhatsApp = user.company_name || user.organization_name || user.name;
-  spocList.map(async (spoc) => {
-    if (spoc.mobile) {
+  if (vendorToken) {
+    const vendorCompanyNameForWhatsApp = user.company_name || user.organization_name || user.name;
+    spocList.map(async (spoc) => {
+      if (spoc.mobile) {
+      const whatsappPayload ={
+        mobile:spoc.mobile,
+        token:vendorToken,
+        rfq_id:rfq_id,
+        message:message,
+        name:vendorCompanyNameForWhatsApp
+      }
+
+      await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
+    }
+    })
+
+    // send message to vendor
     const whatsappPayload ={
-      mobile:spoc.mobile,
-      token:token[0].token,
+      mobile:mobile,
+      token:vendorToken,
       rfq_id:rfq_id,
       message:message,
-      name:vendorCompanyNameForWhatsApp
+      name:vendorCompanyName
     }
-  
     await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
   }
-  })
-
-  // send message to vendor
-  const whatsappPayload ={
-    mobile:mobile,
-    token:token[0].token,
-    rfq_id:rfq_id,
-    message:message,
-    name:vendorCompanyName
-  }  
-  await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
 
 };
 
