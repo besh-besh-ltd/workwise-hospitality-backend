@@ -2183,14 +2183,14 @@ WHERE NOT EXISTS (
      AND TQM.rfq_id = RFQ.id
      AND TQM.is_seen = false
     ) AS "unseen_query_count",
-    -- Fetching global_payment_term and global_comment from tbl_quotes
+    -- Fetching global_payment_term, global_comment and gstin from tbl_quotes (for update quote autofill)
     (
       SELECT json_build_object(
         'is_regret', TQ.is_regret,
         'regret_reason', TQ.regret_reason,
         'global_payment_term', TQ.global_payment_term,
         'global_comment', TQ.global_comment,
-        'gstin', NULL
+        'gstin', TQ.gstin
       )
       FROM tbl_quotes TQ
       WHERE TQ.rfq_id = RFQ.id
@@ -7782,6 +7782,7 @@ ORDER BY m.created_at;
                                             vr.buyer_id,
                                             vr.buyer_marks,
                                             vr.buyer_remark,
+                                            vr.score_timestamp,
                                             COALESCE(vrf.files, '[]')                     AS vendor_response_files
                                       FROM tbl_rfq_product_tech_evaluation_vendors_response vr
                                               LEFT JOIN vendor_response_files vrf
@@ -7795,7 +7796,8 @@ ORDER BY m.created_at;
                                                                     'vendor_response_files', vendor_response_files,
                                                                     'buyer_id', buyer_id,
                                                                     'buyer_marks', buyer_marks,
-                                                                    'buyer_remark', buyer_remark
+                                                                    'buyer_remark', buyer_remark,
+                                                                    'score_timestamp', score_timestamp
                                                             )
                                                     ) AS vendor_responses
                                             FROM vendor_responses_raw
@@ -7808,15 +7810,19 @@ ORDER BY m.created_at;
                     vr.vendor_id,
                     COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
                     COALESCE(SUM(c.weightage), 0) AS total_weightage,
-                    CASE 
-                        WHEN COALESCE(SUM(c.weightage), 0) > 0 
+                    -- Check if buyer has actually scored (score_timestamp indicates marks were saved)
+                    BOOL_OR(vr.score_timestamp IS NOT NULL) AS has_marks,
+                    CASE
+                        WHEN COALESCE(SUM(c.weightage), 0) > 0
                         THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
                         ELSE 0
                     END AS calculated_score,
                     te.minimum_passing_score,
-                    CASE 
-                        WHEN COALESCE(SUM(c.weightage), 0) > 0 
-                        THEN CASE 
+                    -- Only calculate is_passed if marks have been given (score_timestamp exists)
+                    CASE
+                        WHEN NOT BOOL_OR(vr.score_timestamp IS NOT NULL) THEN NULL
+                        WHEN COALESCE(SUM(c.weightage), 0) > 0
+                        THEN CASE
                             WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE(te.minimum_passing_score, 0)
                             THEN true
                             ELSE false
@@ -7873,10 +7879,12 @@ ORDER BY m.created_at;
                                     'vendor_name', deduped.vendor_name,
                                     'vendor_email', deduped.vendor_email,
                                     'is_cleared', deduped.is_cleared,
+                                    'is_verified', deduped.is_verified,
                                     'evaluated_by', deduped.evaluated_by,
                                     'rfq_product_vendor_id', deduped.rfq_product_vendor_id,
                                     'calculated_score', deduped.calculated_score,
                                     'is_passed', deduped.is_passed,
+                                    'has_marks', deduped.has_marks,
                                     'quote_price', deduped.quote_price,
                                     'rank', deduped.rank,
                                     'is_replaced', (vr.new_vendor_id IS NOT NULL)
@@ -7891,10 +7899,12 @@ ORDER BY m.created_at;
                                       COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name,
                                       tu.email AS vendor_email,
                                       rc.status AS is_cleared,
+                                      rc.is_verified AS is_verified,
                                       _TU.name AS evaluated_by,
                                       rpv.id AS rfq_product_vendor_id,
                                       COALESCE(vs.calculated_score::NUMERIC, 0) AS calculated_score,
                                       vs.is_passed AS is_passed,
+                                      COALESCE(vs.has_marks, false) AS has_marks,
                               COALESCE(tqi.total_price, 999999999) AS quote_price,
                                       ROW_NUMBER() OVER (
                                           PARTITION BY te.rfq_id, te.tbl_rfq_product_id, tu.id
@@ -8378,15 +8388,16 @@ ORDER BY m.created_at;
     `;
 
     const validateRfqEvaluationQuery = `
-      SELECT id
+      SELECT id, COALESCE(current_round, 1) AS current_round
       FROM tbl_rfq_product_tech_evaluation
       WHERE id = $1;
     `;
 
+    // When status=1 (accepted), set is_verified=true so progress bar counts this vendor immediately
     const insertClearedVendorQuery = `
       INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors
-      (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, timestamp, created_by)
-      VALUES ($1, $2, $3, $4, NOW(), $5);
+      (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, is_verified, evaluation_round, timestamp, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7);
     `;
 
     return new Promise((resolve, reject) => {
@@ -8405,7 +8416,7 @@ ORDER BY m.created_at;
             return; // Stop further execution
           }
 
-          // Validate RFQ Product Technical Evaluation ID
+          // Validate RFQ Product Technical Evaluation ID and get current_round
           return db.query(validateRfqEvaluationQuery, [
             tbl_rfq_product_tech_evaluation_id
           ]);
@@ -8421,12 +8432,18 @@ ORDER BY m.created_at;
             return; // Stop further execution
           }
 
+          const currentRound = evaluationResult[0]?.current_round ?? 1;
+          // Accepted vendors (status=1) count in progress bar only when is_verified=true
+          const isVerified = status === 1;
+
           // Insert Cleared Vendor
           return db.query(insertClearedVendorQuery, [
             tbl_rfq_product_tech_evaluation_id,
             vendor_id,
             status,
             reject_message,
+            isVerified,
+            currentRound,
             user_id
           ]);
         })
@@ -8452,14 +8469,19 @@ ORDER BY m.created_at;
   getVendorNames: async (rfq_id, tbl_rfq_product_id) => {
     // console.log("Values in getVendorsDetails model:", rfq_id, tbl_rfq_product_id);
 
-    // Updated query to fetch vendor IDs
+    // Fetch vendor_id and rfq_product_vendor_id so the dropdown can show VEN-{id} (same as evaluation card)
     const fetchVendorsQuery = `
-      SELECT DISTINCT vr.vendor_id
+      SELECT DISTINCT ON (vr.vendor_id) vr.vendor_id, rpv.id AS rfq_product_vendor_id
       FROM tbl_rfq_product_tech_evaluation te
+      JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id AND rp.rfq_id = te.rfq_id
       JOIN tbl_rfq_product_tech_evaluation_clauses c
           ON te.id = c.tbl_rfq_product_tech_evaluation_id
       JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
           ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+      LEFT JOIN tbl_rfq_product_vendors rpv ON rpv.rfq_id = te.rfq_id
+        AND rpv.user_id = vr.vendor_id
+        AND rpv.product_variant_id = rp.product_variant_id
+        AND COALESCE(rpv.variant, 0) = COALESCE(rp.variant, 0)
       WHERE te.rfq_id = $1
         AND te.tbl_rfq_product_id = $2;
     `;
@@ -8479,7 +8501,7 @@ ORDER BY m.created_at;
     return new Promise((resolve, reject) => {
       // console.log("Entered getVendorsDetails model");
 
-      // Fetch vendor IDs related to the given RFQ and product
+      // Fetch vendor IDs and rfq_product_vendor_id for the given RFQ and product
       db.query(fetchVendorsQuery, [rfq_id, tbl_rfq_product_id])
         .then(async (vendorIdsResult) => {
           if (vendorIdsResult.length === 0) {
@@ -8498,6 +8520,7 @@ ORDER BY m.created_at;
           // Fetch vendor details for each unique vendor_id
           for (const vendor of vendorIdsResult) {
             const vendorId = vendor.vendor_id;
+            const rfqProductVendorId = vendor.rfq_product_vendor_id || null;
 
             // Fetch vendor details (vendor_name, company_name, organization_name)
             const vendorDetailsResult = await db.query(
@@ -8509,6 +8532,7 @@ ORDER BY m.created_at;
               const vendorData = vendorDetailsResult[0];
               vendorDetails.push({
                 vendor_id: vendorData.vendor_id,
+                rfq_product_vendor_id: rfqProductVendorId,
                 vendor_name: vendorData.vendor_name,
                 company_name: vendorData.company_name,
                 organization_name: vendorData.organization_name
@@ -11339,10 +11363,13 @@ ORDER BY tq.timestamp DESC;
    */
   createTechEvalRound: async (tech_evaluation_id, round_number, created_by, txContext = null) => {
     const dbContext = txContext || db;
+    // Use ON CONFLICT to handle duplicate key - return existing record if already exists
     return dbContext.one(
       `INSERT INTO tbl_tech_evaluation_rounds
        (tbl_rfq_product_tech_evaluation_id, round_number, status, created_by, created_at)
        VALUES ($1, $2, 'PENDING', $3, NOW())
+       ON CONFLICT (tbl_rfq_product_tech_evaluation_id, round_number)
+       DO UPDATE SET updated_at = NOW()
        RETURNING *`,
       [tech_evaluation_id, round_number, created_by]
     );
@@ -11807,6 +11834,9 @@ ORDER BY tq.timestamp DESC;
       [techEval.id]
     );
 
+    // Use actual passed verified count as source of truth (more reliable than stored field)
+    const actualPassedVerifiedCount = passedVerified.length;
+
     return {
       tech_evaluation_id: techEval.id,
       rfq_product_id: techEval.tbl_rfq_product_id,
@@ -11815,7 +11845,7 @@ ORDER BY tq.timestamp DESC;
       product_name: techEval.product_name,
       is_complete: techEval.is_complete || false,
       current_round: techEval.current_round || 1,
-      total_passed_verified: techEval.total_passed_verified || 0,
+      total_passed_verified: Math.max(actualPassedVerifiedCount, techEval.total_passed_verified || 0),
       required_passed_vendors: techEval.required_passed_vendors || 5,
       blocked_insufficient_vendors: techEval.blocked_insufficient_vendors || false,
       minimum_passing_score: techEval.minimum_passing_score,

@@ -496,12 +496,10 @@ const UsersController = {
                     }));
                     
                     // Bulk insert variant-vendor mappings
-                    const mappingResult = await productModel.bulkInsertVariantVendorMappings(mappings, user_id);
-                    console.log(`[HOSPITALITY] Bulk mapped ${mappingResult.inserted} variants to vendor ${user_id}`);
+                    await productModel.bulkInsertVariantVendorMappings(mappings, user_id);
                   }
                 }
               } catch (variantMappingError) {
-                console.error('[HOSPITALITY] Error bulk mapping variants:', variantMappingError);
                 logError(variantMappingError);
                 // Don't fail registration if variant mapping fails
               }
@@ -528,17 +526,14 @@ const UsersController = {
                     
                     if (createdBy) {
                       await userModel.mapBuyerToVendor(createdBy, user_id);
-                      console.log(`[HOSPITALITY] Mapped vendor ${user_id} to buyer company ${buyerCompanyId}`);
                     }
                   }
                 }
               } catch (mappingError) {
-                console.error('[HOSPITALITY] Error mapping vendor to buyer companies:', mappingError);
                 logError(mappingError);
               }
             }
           } catch (hospitalityError) {
-            console.error('[HOSPITALITY] Error processing hospitality vendor data:', hospitalityError);
             logError(hospitalityError);
             // Don't fail registration if hospitality processing fails
           }
@@ -604,10 +599,8 @@ const UsersController = {
             
             if (subscriptionRows.length > 0) {
               await hospitalityModel.createVendorHotelCategorySubscription(subscriptionRows);
-              console.log(`[HOSPITALITY] Created ${subscriptionRows.length} subscriptions during registration for vendor ${user_id}`);
             }
           } catch (subscriptionError) {
-            console.error('[HOSPITALITY] Error creating subscriptions during registration:', subscriptionError);
             logError(subscriptionError);
             // Don't fail registration if subscription creation fails
           }
@@ -3548,12 +3541,11 @@ publish_profile_reviews: async (req, res, next) => {
       // Ensure invoice_file column exists, then update payment record
       try {
         await db.none(
-          `ALTER TABLE tbl_vendor_payments 
+          `ALTER TABLE tbl_vendor_payments
            ADD COLUMN IF NOT EXISTS invoice_file VARCHAR(255)`
         );
       } catch (alterError) {
         // Column might already exist, ignore error
-        console.log('[INVOICE] Column check:', alterError.message);
       }
       
       // Update payment record with invoice file path
@@ -3564,13 +3556,13 @@ publish_profile_reviews: async (req, res, next) => {
         [fileName, payment.id]
       );
 
-      return {
+      const result = {
         fileName,
         filePath: outputPath,
-        downloadUrl: `${Config.download_url}/invoice_file/${fileName}`
+        downloadUrl: `${Config.download_url}/app/uploads/invoice_file/${fileName}`
       };
+      return result;
     } catch (error) {
-      console.error('[INVOICE] Error generating invoice:', error);
       logError(error);
       return null;
     }
@@ -3620,7 +3612,6 @@ publish_profile_reviews: async (req, res, next) => {
         );
 
         // Always approve hospitality vendor after successful payment
-        console.log('[HOSPITALITY] Approving vendor:', userId);
         await userModel.updateUserAccount(userId, { status: 1 });
 
         // Initialize variables for response
@@ -3633,8 +3624,9 @@ publish_profile_reviews: async (req, res, next) => {
         // Send confirmation email (same as live webhook)
         try {
           const userDetails = await userModel.userinfo(userId);
-          if (userDetails && userDetails.length > 0) {
-            const user = userDetails[0];
+          // userinfo returns a single object, not an array
+          const user = Array.isArray(userDetails) ? userDetails[0] : userDetails;
+          if (user && user.email) {
             const companyDetails = await userModel.getCompanyDetail(userId);
             const company = companyDetails && companyDetails.length > 0 ? companyDetails[0] : {};
             
@@ -3668,7 +3660,7 @@ publish_profile_reviews: async (req, res, next) => {
               company,
               subscriptions
             );
-            
+
             const emailHeader = `<h2>Dear ${user.name},</h2>`;
             const emailContent = `
               <p style="font-size: 16px; line-height: 1.6; color: #333;">
@@ -3751,11 +3743,10 @@ publish_profile_reviews: async (req, res, next) => {
                 contentType: 'application/pdf'
               }];
             }
-            
-            sendMail(emailOptions);
+
+            await sendMail(emailOptions);
           }
         } catch (emailError) {
-          console.error('[HOSPITALITY] Error sending confirmation email:', emailError);
           logError(emailError);
         }
 
@@ -3909,11 +3900,11 @@ publish_profile_reviews: async (req, res, next) => {
         receivedSignature,
         Config.razorpay.razorpay_signature
       );
-      // console.error(valid);
+
       if (valid && req.body.event == 'order.paid') {
         let paymentEntity = req.body.payload.payment.entity;
         let orderEntity = req.body.payload.order.entity;
-        
+
         // Check if this is a hospitality vendor payment
         const vendorPayment = await hospitalityModel.getVendorPaymentByOrderId(paymentEntity.order_id);
         if (vendorPayment && vendorPayment.length > 0) {
@@ -3941,18 +3932,18 @@ publish_profile_reviews: async (req, res, next) => {
           );
           
           // Always approve hospitality vendor after successful payment
-          console.log('[HOSPITALITY LIVE] Approving vendor:', userId);
           await userModel.updateUserAccount(userId, { status: 1 });
-          
+
           const userDetails = await userModel.userinfo(userId);
-          if (userDetails && userDetails.length > 0) {
-            const user = userDetails[0];
+          // userinfo returns a single object, not an array
+          const user = Array.isArray(userDetails) ? userDetails[0] : userDetails;
+          if (user && user.email) {
             const companyDetails = await userModel.getCompanyDetail(userId);
-            if (companyDetails && companyDetails.length > 0) {
-              const company = companyDetails[0];
-                  
-                  // Send confirmation email
-                  try {
+            // getCompanyDetail returns an array
+            const company = Array.isArray(companyDetails) && companyDetails.length > 0 ? companyDetails[0] : {};
+
+            // Send confirmation email with invoice
+            try {
             // Get all subscriptions for this vendor (linked to payment or not)
             const subscriptions = await db.any(
               `SELECT vhcs.*, 
@@ -4074,15 +4065,13 @@ publish_profile_reviews: async (req, res, next) => {
                         contentType: 'application/pdf'
                       }];
                     }
-                    
-                    sendMail(emailOptions);
+
+                    await sendMail(emailOptions);
                   } catch (emailError) {
-                    console.error('Error sending hospitality vendor confirmation email:', emailError);
                     logError(emailError);
                   }
-            }
           }
-          
+
           res.status(200).json({ status: 1, message: 'Payment processed successfully' }).end();
           return;
         }
@@ -4429,10 +4418,12 @@ publish_profile_reviews: async (req, res, next) => {
         }
       }
 
+      // Always acknowledge webhook receipt with 200 OK
       res
         .status(200)
         .json({
-          status: 1
+          status: 1,
+          message: 'Webhook processed'
         })
         .end();
     } catch (error) {
@@ -4464,16 +4455,6 @@ publish_profile_reviews: async (req, res, next) => {
         offset
       );
       if (notificationList && notificationList.length > 0) {
-          // Mark vendor payment as successful as well
-          await db.none(
-            `UPDATE tbl_vendor_payments
-             SET payment_status = 'success',
-                 razorpay_payment_id = $1,
-                 razorpay_signature = $2
-             WHERE razorpay_order_id = $3`,
-            [paymentEntity.id, receivedSignature, paymentEntity.order_id]
-          );
-
           res
           .status(200)
           .json({

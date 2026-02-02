@@ -247,18 +247,20 @@ const getErrorText = (err) => {
 };
 
 const sendMail = (mailOptions) => {
-  if (mailOptions.to && mailOptions.to != '') {
+  return new Promise((resolve, reject) => {
+    if (!mailOptions.to || mailOptions.to === '') {
+      return resolve(false);
+    }
+
     let transporter = nodemailer.createTransport(config.transportConfig);
     transporter.sendMail(mailOptions, function (err, info) {
       if (err) {
-        // console.error('Mail err=>', err);
-        return false;
+        return resolve(false);
       } else {
-        // console.log('Mail Info=>', info);
-        return true;
+        return resolve(true);
       }
     });
-  }
+  });
 };
 const notificationMail = (mailOptions) => {
   let dynamic_html = fs
