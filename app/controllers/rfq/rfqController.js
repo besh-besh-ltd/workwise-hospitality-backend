@@ -1856,8 +1856,12 @@ const sendAddTechCommentMailForBuyer = async (buyer, vendor_id, product, text) =
   try {
     const productName = product.name;
     const vendor_details = await userModel.user_profile_detail(vendor_id);
-    const vendorName = vendor_details[0]?.company_name || "A Vendor";
     const rfq_no = buyer.rfq_no;
+
+    // For tenders, use vendor code instead of vendor name to protect identity
+    const isTender = buyer.is_tender === 1;
+    const vendorCode = `VEN-${product.rfq_product_vendor_id || vendor_id}`;
+    const vendorName = isTender ? vendorCode : (vendor_details[0]?.company_name || "A Vendor");
 
     try {
       // Product HTML content
@@ -4367,6 +4371,67 @@ const rfqController = {
 
         prevRfqDetails = prevRfqDetails[0];
 
+        // Tender-specific validation for update restrictions
+        if (prevRfqDetails.is_tender === 1) {
+          const validationErrors = [];
+
+          // Check if tender is published - restrict certain updates
+          if (prevRfqDetails.is_published === 1) {
+            const restrictedFieldsAfterPublish = [
+              'tender_publish_date',
+              'tender_fees',
+              'hospitality_company_id',
+              'hotel_ids'
+            ];
+
+            for (const field of restrictedFieldsAfterPublish) {
+              if (data[field] !== undefined && data[field] !== prevRfqDetails[field]) {
+                validationErrors.push({
+                  field,
+                  message: `Cannot modify '${field}' after tender is published`
+                });
+              }
+            }
+          }
+
+          // Check if tender has received quotes - restrict product/vendor changes
+          const hasQuotes = await t.oneOrNone(
+            `SELECT 1 FROM tbl_quotes WHERE rfq_id = $1 LIMIT 1`,
+            [rfq_id]
+          );
+
+          if (hasQuotes) {
+            const restrictedFieldsWithQuotes = [
+              'bid_end_date'
+            ];
+
+            for (const field of restrictedFieldsWithQuotes) {
+              if (data[field] !== undefined && data[field] !== prevRfqDetails[field]) {
+                // Allow extending bid_end_date but not shortening
+                if (field === 'bid_end_date') {
+                  const newDate = new Date(data[field]);
+                  const oldDate = new Date(prevRfqDetails[field]);
+                  if (newDate < oldDate) {
+                    validationErrors.push({
+                      field,
+                      message: `Cannot shorten '${field}' after vendors have submitted quotes. You can only extend the deadline.`
+                    });
+                  }
+                }
+              }
+            }
+          }
+
+          // If there are validation errors, return them
+          if (validationErrors.length > 0) {
+            throw {
+              isValidationError: true,
+              errors: validationErrors,
+              message: 'Tender update validation failed'
+            };
+          }
+        }
+
         // List of keys to populate from prev if not already present
         const fieldsToPopulate = [
           'company_name',
@@ -5251,11 +5316,21 @@ const rfqController = {
       });
     } catch (error) {
       logError(error);
+
+      // Handle validation errors with field-level details
+      if (error.isValidationError) {
+        return res.status(400).json({
+          status: 0,
+          message: error.message || 'Validation failed',
+          validation_errors: error.errors || []
+        });
+      }
+
       res
         .status(400)
         .json({
           status: 3,
-          message: error
+          message: error.message || 'An error occurred while updating the RFQ'
         })
         .end();
     }
@@ -7053,13 +7128,15 @@ const rfqController = {
           const openClarification =
             await rfqModel.checkActiveClarification(rfq_id);
           if (openClarification) {
+            // For tenders, show vendor code instead of vendor name
+            const vendorCode = `VEN-${openClarification.raised_by_vendor_id || 'UNKNOWN'}`;
             return res.status(400).json({
               status: 3,
               message:
                 'Quote submission is blocked. There is an open clarification pending response.',
               data: {
                 clarification_id: openClarification.id,
-                raised_by_vendor_name: openClarification.raised_by_vendor_name,
+                raised_by_vendor_code: vendorCode,
                 subject: openClarification.subject,
                 created_at: openClarification.created_at
               }
@@ -7862,10 +7939,16 @@ const rfqController = {
           .end();
       }
 
-      const sanitizedVendors = (result.vendors || []).map((vendor) => ({
+      const isTender = result.rfq_details.is_tender === 1;
+
+      // For tenders, hide vendor names and show vendor codes instead
+      const sanitizedVendors = (result.vendors || []).map((vendor, index) => ({
         user_id: vendor.user_id,
-        vendor_name: vendor.vendor_name,
-        email: vendor.email,
+        // For tenders: show vendor code, for RFQs: show vendor name
+        vendor_name: isTender ? `VEN-${vendor.rfq_product_vendor_id || vendor.user_id}` : vendor.vendor_name,
+        vendor_code: `VEN-${vendor.rfq_product_vendor_id || vendor.user_id}`,
+        // Hide email for tenders
+        email: isTender ? null : vendor.email,
         remainingProducts: vendor.remainingProducts || []
       }));
 
@@ -7873,7 +7956,9 @@ const rfqController = {
         .status(200)
         .json({
           status: 1,
-          data: sanitizedVendors
+          data: sanitizedVendors,
+          is_tender: isTender,
+          vendor_count: sanitizedVendors.length
         })
         .end();
     } catch (error) {
@@ -11590,13 +11675,15 @@ sendFollowUpEmails: async (req, res) => {
           quoteExists[0].rfq_id
         );
         if (openClarification) {
+          // For tenders, show vendor code instead of vendor name
+          const vendorCode = `VEN-${openClarification.raised_by_vendor_id || 'UNKNOWN'}`;
           return res.status(400).json({
             status: 3,
             message:
               'Quote update is blocked. There is an open clarification pending response.',
             data: {
               clarification_id: openClarification.id,
-              raised_by_vendor_name: openClarification.raised_by_vendor_name,
+              raised_by_vendor_code: vendorCode,
               subject: openClarification.subject,
               created_at: openClarification.created_at
             }
@@ -13544,7 +13631,12 @@ getClauses: async (req, res) => {
       if (!project_id || isNaN(project_id)) {
         return res.status(400).json({ status: 0, message: 'Valid project_id is required' });
       }
-      const users = await rfqModel.getTechEvalUsers(project_id);
+
+      // Get company and hotel context from headers for permission filtering
+      const companyId = req.headers['x-company-id'] ? parseInt(req.headers['x-company-id']) : null;
+      const hotelId = req.headers['x-hotel-id'] ? parseInt(req.headers['x-hotel-id']) : null;
+
+      const users = await rfqModel.getTechEvalUsers(project_id, companyId, hotelId);
       res.status(200).json({ status: 1, data: users });
     } catch (error) {
       console.error('Error in getTechEvalUsers:', error);
@@ -13659,7 +13751,7 @@ getClauses: async (req, res) => {
 
       // Fetch RFQ details
       const rfq = await db.oneOrNone(
-        `SELECT id, is_tender, tender_publish_date, vendor_clarification_date, created_by, rfq_no
+        `SELECT id, is_tender, tender_publish_date, vendor_clarification_date, created_by, rfq_no, status, is_published
          FROM tbl_rfq WHERE id = $1`,
         [rfq_id]
       );
@@ -13688,7 +13780,11 @@ getClauses: async (req, res) => {
         ? new Date(rfq.vendor_clarification_date)
         : null;
 
-      if (publishDate && now < publishDate) {
+      // If tender is already published (status = 1 or is_published = 1), 
+      // only check vendor_clarification_date, not tender_publish_date
+      const isPublished = rfq.status === 1 || rfq.is_published === 1;
+
+      if (!isPublished && publishDate && now < publishDate) {
         return res.status(400).json({
           status: 0,
           message: 'Clarification period has not started yet'
@@ -13911,8 +14007,22 @@ getClauses: async (req, res) => {
         });
       }
 
-      // Check if current user is the buyer (tender creator)
-      const isBuyer = currentUserId && rfq.created_by === currentUserId;
+      // Check if current user is on the buyer side
+      // Rules:
+      // - Original rule (backwards compatible): tender creator is always treated as buyer
+      // - New rule: ANY non-vendor user (user_type != 3 and != 4) from the buyer side
+      //   should also be able to see ALL clarifications for this tender.
+      //
+      // This fixes the bug where other buyer-side users (project members, finance, etc.)
+      // could see that a clarification is open but the clarification list was empty,
+      // because only the exact RFQ creator was treated as "buyer" in this controller.
+      const userType = req.user ? req.user.user_type : null;
+      const isBuyer =
+        !!currentUserId &&
+        (
+          rfq.created_by === currentUserId || // Tender creator
+          (userType !== null && userType !== 3 && userType !== 4) // Any non-vendor internal user
+        );
 
       // Get all clarifications with messages (new chat system format)
       const allClarifications = await rfqModel.getClarificationsWithMessages(rfq_id);
@@ -13927,13 +14037,27 @@ getClauses: async (req, res) => {
         currentUserId &&
         openClarification.raised_by_vendor_id === currentUserId;
 
-      // Buyer sees all clarifications with messages
+      // Transform clarifications to use vendor codes instead of names (for tender privacy)
+      const transformedClarifications = allClarifications.map(c => ({
+        ...c,
+        raised_by_vendor_code: `VEN-${c.raised_by_vendor_id}`,
+        // Remove vendor name to protect identity in tenders
+        raised_by_vendor_name: undefined
+      }));
+
+      const transformedOpenClarification = openClarification ? {
+        ...openClarification,
+        raised_by_vendor_code: `VEN-${openClarification.raised_by_vendor_id}`,
+        raised_by_vendor_name: undefined
+      } : null;
+
+      // Buyer sees all clarifications with messages (vendor names replaced with codes)
       if (isBuyer) {
         return res.status(200).json({
           status: 1,
           data: {
-            clarifications: allClarifications,
-            open_clarification: openClarification || null,
+            clarifications: transformedClarifications,
+            open_clarification: transformedOpenClarification,
             has_open: !!openClarification,
             is_own_clarification: false, // Not applicable for buyer
             is_buyer: true
@@ -13941,16 +14065,30 @@ getClauses: async (req, res) => {
         });
       }
 
-      // Vendor: filter to only their own clarifications
+      // Vendor: filter to only their own clarifications (vendor sees their own name)
       const ownClarifications = currentUserId
         ? allClarifications.filter(c => c.raised_by_vendor_id === currentUserId)
         : [];
 
+      // Transform own clarifications to use vendor codes (for consistency)
+      const transformedOwnClarifications = ownClarifications.map(c => ({
+        ...c,
+        raised_by_vendor_code: `VEN-${c.raised_by_vendor_id}`,
+        // Remove vendor name for other vendors' clarifications
+        raised_by_vendor_name: undefined
+      }));
+
+      const ownOpenClarification = isOwnOpenClarification ? {
+        ...openClarification,
+        raised_by_vendor_code: `VEN-${openClarification.raised_by_vendor_id}`,
+        raised_by_vendor_name: undefined
+      } : null;
+
       return res.status(200).json({
         status: 1,
         data: {
-          clarifications: ownClarifications,
-          open_clarification: isOwnOpenClarification ? openClarification : null,
+          clarifications: transformedOwnClarifications,
+          open_clarification: ownOpenClarification,
           has_open: !!openClarification,
           is_own_clarification: isOwnOpenClarification,
           is_buyer: false

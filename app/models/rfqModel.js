@@ -10112,7 +10112,39 @@ ORDER BY tq.timestamp DESC;
         });
     });
   },
-  getTechEvalUsers: async (project_id) => {
+  /**
+   * Get users eligible for technical evaluation assignment
+   * Returns users from the project team who have role assignments in the hospitality context.
+   * Falls back to all project team members if no users found with matching role scopes.
+   */
+  getTechEvalUsers: async (project_id, companyId = null, hotelId = null) => {
+    // If hospitality context is provided, try to filter by role scopes
+    if (companyId) {
+      const params = [project_id, companyId];
+      let hotelCondition = '';
+
+      if (hotelId) {
+        hotelCondition = `AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)`;
+        params.push(hotelId);
+      }
+
+      // Get users who have role assignments in the hospitality context
+      const usersWithRoles = await db.any(`
+        SELECT DISTINCT u.id, u.name, u.email
+        FROM tbl_project_team pt
+        JOIN tbl_users u ON u.id = pt.user_id AND u.status = 1
+        JOIN tbl_user_role_scopes urs ON urs.user_id = u.id
+        WHERE pt.project_id = $1
+          AND urs.company_id = $2
+          ${hotelCondition}
+        ORDER BY u.name
+      `, params);
+
+      // If users with roles found, return them
+      if (usersWithRoles.length > 0) {
+        return usersWithRoles;
+      }
+    }
     return db.any(`
       SELECT DISTINCT u.id, u.name, u.email
       FROM tbl_project_team pt
