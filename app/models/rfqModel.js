@@ -8388,15 +8388,16 @@ ORDER BY m.created_at;
     `;
 
     const validateRfqEvaluationQuery = `
-      SELECT id
+      SELECT id, COALESCE(current_round, 1) AS current_round
       FROM tbl_rfq_product_tech_evaluation
       WHERE id = $1;
     `;
 
+    // When status=1 (accepted), set is_verified=true so progress bar counts this vendor immediately
     const insertClearedVendorQuery = `
       INSERT INTO tbl_rfq_product_tech_evaluation_cleared_vendors
-      (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, timestamp, created_by)
-      VALUES ($1, $2, $3, $4, NOW(), $5);
+      (tbl_rfq_product_tech_evaluation_id, vendor_id, status, reject_message, is_verified, evaluation_round, timestamp, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7);
     `;
 
     return new Promise((resolve, reject) => {
@@ -8415,7 +8416,7 @@ ORDER BY m.created_at;
             return; // Stop further execution
           }
 
-          // Validate RFQ Product Technical Evaluation ID
+          // Validate RFQ Product Technical Evaluation ID and get current_round
           return db.query(validateRfqEvaluationQuery, [
             tbl_rfq_product_tech_evaluation_id
           ]);
@@ -8431,12 +8432,18 @@ ORDER BY m.created_at;
             return; // Stop further execution
           }
 
+          const currentRound = evaluationResult[0]?.current_round ?? 1;
+          // Accepted vendors (status=1) count in progress bar only when is_verified=true
+          const isVerified = status === 1;
+
           // Insert Cleared Vendor
           return db.query(insertClearedVendorQuery, [
             tbl_rfq_product_tech_evaluation_id,
             vendor_id,
             status,
             reject_message,
+            isVerified,
+            currentRound,
             user_id
           ]);
         })
@@ -8462,14 +8469,19 @@ ORDER BY m.created_at;
   getVendorNames: async (rfq_id, tbl_rfq_product_id) => {
     // console.log("Values in getVendorsDetails model:", rfq_id, tbl_rfq_product_id);
 
-    // Updated query to fetch vendor IDs
+    // Fetch vendor_id and rfq_product_vendor_id so the dropdown can show VEN-{id} (same as evaluation card)
     const fetchVendorsQuery = `
-      SELECT DISTINCT vr.vendor_id
+      SELECT DISTINCT ON (vr.vendor_id) vr.vendor_id, rpv.id AS rfq_product_vendor_id
       FROM tbl_rfq_product_tech_evaluation te
+      JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id AND rp.rfq_id = te.rfq_id
       JOIN tbl_rfq_product_tech_evaluation_clauses c
           ON te.id = c.tbl_rfq_product_tech_evaluation_id
       JOIN tbl_rfq_product_tech_evaluation_vendors_response vr
           ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+      LEFT JOIN tbl_rfq_product_vendors rpv ON rpv.rfq_id = te.rfq_id
+        AND rpv.user_id = vr.vendor_id
+        AND rpv.product_variant_id = rp.product_variant_id
+        AND COALESCE(rpv.variant, 0) = COALESCE(rp.variant, 0)
       WHERE te.rfq_id = $1
         AND te.tbl_rfq_product_id = $2;
     `;
@@ -8489,7 +8501,7 @@ ORDER BY m.created_at;
     return new Promise((resolve, reject) => {
       // console.log("Entered getVendorsDetails model");
 
-      // Fetch vendor IDs related to the given RFQ and product
+      // Fetch vendor IDs and rfq_product_vendor_id for the given RFQ and product
       db.query(fetchVendorsQuery, [rfq_id, tbl_rfq_product_id])
         .then(async (vendorIdsResult) => {
           if (vendorIdsResult.length === 0) {
@@ -8508,6 +8520,7 @@ ORDER BY m.created_at;
           // Fetch vendor details for each unique vendor_id
           for (const vendor of vendorIdsResult) {
             const vendorId = vendor.vendor_id;
+            const rfqProductVendorId = vendor.rfq_product_vendor_id || null;
 
             // Fetch vendor details (vendor_name, company_name, organization_name)
             const vendorDetailsResult = await db.query(
@@ -8519,6 +8532,7 @@ ORDER BY m.created_at;
               const vendorData = vendorDetailsResult[0];
               vendorDetails.push({
                 vendor_id: vendorData.vendor_id,
+                rfq_product_vendor_id: rfqProductVendorId,
                 vendor_name: vendorData.vendor_name,
                 company_name: vendorData.company_name,
                 organization_name: vendorData.organization_name
