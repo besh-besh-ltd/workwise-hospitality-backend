@@ -11,6 +11,7 @@ import { acl, verifyAIWebhookBody } from '../../helper/common.js';
 import { schema_posts } from '../../validations/paramValidation/productValidation.js';
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
 import { can } from '../../middleware/auth.js';
+import verifySchedulerRequest from '../../helper/schedulerAuth.js';
 
 
 const RfqRoutes = Router();
@@ -787,6 +788,17 @@ RfqRoutes.get(
   '/clarification/active/:rfq_id',
   noLogin.customer_auth,
   rfqController.getActiveClarification
+);
+
+// ============================================
+// Internal Scheduler Endpoints
+// ============================================
+
+// Internal endpoint for EventBridge Lambda to publish scheduled RFQs
+RfqRoutes.post(
+  '/internal/publish',
+  verifySchedulerRequest,
+  rfqController.schedulerPublishRfq
 );
 
 export default RfqRoutes;

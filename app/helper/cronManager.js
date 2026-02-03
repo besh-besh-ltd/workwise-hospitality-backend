@@ -3,10 +3,10 @@ import db from '../config/dbConn.js';
 import { sendReminderMail } from './sendEmailFunctions/milestoneEmails.js';
 import { sendGRNEmail } from './sendEmailFunctions/generalReminderEmails.js';
 import { recordLifecycleEvent } from '../models/generalModel.js';
+import { createScheduleForRfqPublish, deleteRfqPublishSchedule } from './createSchedule.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
-const rfqPublishCronRegistry = new Map();
 
 export const scheduleMilestoneReminder = async (milestone) => {
   const { id, due_date, reminder_users } = milestone;
@@ -269,9 +269,34 @@ const publishRfq = async (rfq) => {
 };
 
 /**
+ * publishRfqById
+ *
+ * Publish RFQ by ID - called by the scheduler endpoint.
+ * Re-validates the RFQ state before publishing.
+ *
+ * @param {number} rfqId - RFQ ID to publish
+ * @param {string} rfq_no - RFQ number for logging
+ */
+export const publishRfqById = async (rfqId, rfq_no) => {
+  // Re-validate before publishing (same logic as original cron job)
+  const rfq = await db.oneOrNone(`
+    SELECT id, rfq_no, is_tender, created_by, status, is_published
+    FROM tbl_rfq WHERE id = $1
+  `, [rfqId]);
+
+  if (!rfq || rfq.status !== 4 || rfq.is_published === 1) {
+    console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) not in publishable state`);
+    return { skipped: true, reason: 'not_publishable' };
+  }
+
+  await publishRfq(rfq);
+  return { published: true };
+};
+
+/**
  * scheduleRfqPublish
  *
- * Schedules a cron job to publish an RFQ/Tender at its tender_publish_date.
+ * Schedules an EventBridge schedule to publish an RFQ/Tender at its tender_publish_date.
  * For regular RFQs (non-tenders), publishes immediately.
  *
  * @param {Object} rfq - RFQ object with id, rfq_no, is_tender, tender_publish_date, created_by
@@ -281,86 +306,72 @@ export const scheduleRfqPublish = async (rfq) => {
 
   // For non-tenders or if no publish date, publish immediately
   if (is_tender !== 1 || !tender_publish_date) {
+    console.log(`[RFQ Publisher] Publishing immediately: ${rfq_no}`);
     await publishRfq(rfq);
     return;
   }
 
   const publishAt = new Date(tender_publish_date);
+  const now = new Date();
 
   // If publish date is in the past or now, publish immediately
-  if (publishAt <= new Date()) {
+  if (publishAt <= now) {
+    console.log(`[RFQ Publisher] Publish date passed, publishing now: ${rfq_no}`);
     await publishRfq(rfq);
     return;
   }
 
-  // Remove any existing job for this RFQ
-  removeRfqPublishJob(id);
+  // Format the date for EventBridge (IST timezone): YYYY-MM-DDTHH:mm:ss
+  // tender_publish_date may come as "2026-02-03 16:55:00" (space) or ISO format
+  // Normalize to YYYY-MM-DDTHH:mm:ss format
+  const scheduledTimeIST = tender_publish_date
+    .replace(/\.\d{3}Z$/, '')  // Remove .000Z if present
+    .replace('Z', '')           // Remove trailing Z if present
+    .replace(' ', 'T');         // Replace space with T for DB format
 
-  // Create cron expression for the specific date/time
-  const cronExpression = `${publishAt.getMinutes()} ${publishAt.getHours()} ${publishAt.getDate()} ${publishAt.getMonth() + 1} *`;
+  console.log(`[RFQ Publisher] Scheduling publish for ${rfq_no} at ${scheduledTimeIST} IST`);
 
-  const job = cron.schedule(cronExpression, async () => {
-    try {
-      // Re-fetch RFQ to ensure it's still in READY_TO_PUBLISH state
-      const currentRfq = await db.oneOrNone(`
-        SELECT id, rfq_no, is_tender, created_by, status, is_published
-        FROM tbl_rfq WHERE id = $1
-      `, [id]);
-
-      if (!currentRfq || currentRfq.status !== 4 || currentRfq.is_published === 1) {
-        console.log(`[RFQ Publisher] RFQ ${id} is no longer ready to publish, skipping`);
-        return;
-      }
-
-      await publishRfq(currentRfq);
-    } catch (err) {
-      console.error(`[RFQ Publisher] Error publishing RFQ ${id}:`, err);
-    } finally {
-      job.stop();
-      rfqPublishCronRegistry.delete(id);
+  // Schedule via EventBridge
+  await createScheduleForRfqPublish({
+    rfqId: id,
+    scheduledTimeIST,
+    payload: {
+      rfqId: id,
+      rfq_no,
+      created_by
     }
   });
 
-  rfqPublishCronRegistry.set(id, job);
-  console.log(`[RFQ Publisher] Scheduled ${is_tender === 1 ? 'Tender' : 'RFQ'} #${rfq_no} (ID: ${id}) for ${publishAt.toISOString()}`);
+  console.log(`✅ EventBridge schedule created for RFQ: ${rfq_no} (ID: ${id})`);
 };
 
 /**
  * removeRfqPublishJob
  *
- * Cancels and removes a scheduled RFQ publish job.
+ * Cancels and removes a scheduled RFQ publish job from EventBridge.
  *
  * @param {number} rfqId - RFQ ID
  */
-export const removeRfqPublishJob = (rfqId) => {
-  const job = rfqPublishCronRegistry.get(rfqId);
-  if (job) {
-    job.stop();
-    rfqPublishCronRegistry.delete(rfqId);
+export const removeRfqPublishJob = async (rfqId) => {
+  try {
+    const result = await deleteRfqPublishSchedule(rfqId);
+    if (result.ok) {
+      console.log(`✅ Removed EventBridge schedule for RFQ: ${rfqId}`);
+    } else {
+      console.log(`ℹ️ No schedule found for RFQ: ${rfqId} (may have already executed)`);
+    }
+  } catch (error) {
+    console.error(`❌ Failed to remove schedule for RFQ ${rfqId}:`, error.message);
   }
 };
 
 /**
  * rescheduleAllRfqPublishJobs
  *
- * Called on server startup to reschedule all pending RFQ publish jobs.
- * Queries for RFQs in READY_TO_PUBLISH status (status = 4) that are not yet published.
+ * @deprecated No longer needed - EventBridge persists schedules independently.
+ * Kept for backwards compatibility during migration period.
+ * Can be removed after migration is verified working in production.
  */
 export const rescheduleAllRfqPublishJobs = async () => {
-  try {
-    const rfqsToSchedule = await db.any(`
-      SELECT id, rfq_no, is_tender, tender_publish_date, created_by
-      FROM tbl_rfq
-      WHERE status = 4
-        AND is_published = 0
-    `);
-
-    for (const rfq of rfqsToSchedule) {
-      await scheduleRfqPublish(rfq);
-    }
-
-    console.log(`[RFQ Publisher] Rescheduled ${rfqsToSchedule.length} RFQ publish jobs on startup`);
-  } catch (err) {
-    console.error('[RFQ Publisher] Error rescheduling RFQ publish jobs:', err);
-  }
+  console.log('[RFQ Publisher] Using EventBridge - no rescheduling needed on startup');
 };
