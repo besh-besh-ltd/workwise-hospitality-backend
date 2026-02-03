@@ -1,7 +1,42 @@
-import { SchedulerClient, CreateScheduleCommand, DeleteScheduleCommand, UpdateScheduleCommand } from "@aws-sdk/client-scheduler";
+import {
+  SchedulerClient,
+  CreateScheduleCommand,
+  DeleteScheduleCommand,
+  UpdateScheduleCommand,
+  CreateScheduleGroupCommand
+} from "@aws-sdk/client-scheduler";
 import { randomUUID } from "crypto";
 
 const client = new SchedulerClient({ region: "ap-south-1" });
+
+// Cache to track which groups we've already verified/created
+const verifiedGroups = new Set();
+
+/**
+ * Ensures a schedule group exists, creates it if not
+ * @param {string} groupName - The schedule group name
+ */
+const ensureScheduleGroupExists = async (groupName) => {
+  // Skip if we've already verified this group in this session
+  if (verifiedGroups.has(groupName)) {
+    return;
+  }
+
+  try {
+    const command = new CreateScheduleGroupCommand({ Name: groupName });
+    await client.send(command);
+    console.log(`✅ Created schedule group: ${groupName}`);
+    verifiedGroups.add(groupName);
+  } catch (err) {
+    if (err.name === "ConflictException") {
+      // Group already exists, that's fine
+      verifiedGroups.add(groupName);
+    } else {
+      console.error(`❌ Failed to create schedule group ${groupName}:`, err.message);
+      throw err;
+    }
+  }
+};
 
 
 
@@ -82,8 +117,9 @@ export const createSchedule = async ({
 // RFQ Publish Scheduling (Separate from Auction)
 // ============================================
 
-// Use separate group for RFQ publish schedules to avoid mixing with auction schedules
-const RFQ_PUBLISH_GROUP = process.env.RFQ_PUBLISH_GROUP_NAME || 'rfqPublishSchedules';
+// Use separate group for RFQ publish schedules if configured, otherwise use existing group
+// Schedule names are unique (rfqPublish-{id} vs auction-rfq-{id}-{vendor}) so no conflicts
+const RFQ_PUBLISH_GROUP = process.env.RFQ_PUBLISH_GROUP_NAME || process.env.GroupName;
 
 /**
  * Create schedule specifically for RFQ publishing
@@ -101,7 +137,10 @@ export const createScheduleForRfqPublish = async ({ rfqId, scheduledTimeIST, pay
     throw new Error("Invalid scheduledTimeIST format. Expected: YYYY-MM-DDTHH:mm:ss");
   }
 
-  console.log(`[RFQ Publish] Creating schedule: ${scheduleName} at ${scheduledTimeIST} IST`);
+  // Ensure the schedule group exists (creates if not)
+  await ensureScheduleGroupExists(RFQ_PUBLISH_GROUP);
+
+  console.log(`[RFQ Publish] Creating schedule: ${scheduleName} at ${scheduledTimeIST} IST (Group: ${RFQ_PUBLISH_GROUP})`);
 
   const baseParams = {
     GroupName: RFQ_PUBLISH_GROUP,
