@@ -260,6 +260,14 @@ export const rfqSchemas = {
     selectedTerms: Joi.array().items(termsItems).allow(null).allow(''),
     contact_number: Joi.string().trim().min(6).max(17).required(),
     is_tender: Joi.number().required(),
+    tender_fees: Joi.number().integer().min(0).optional().allow(null),
+    tender_publish_date: Joi.string().optional().allow(null).allow(''),
+    vendor_clarification_date: Joi.string().optional().allow(null).allow(''),
+    hospitality_company_id: Joi.number().integer().optional().allow(null),
+    hotel_id: Joi.number().integer().optional().allow(null),
+    hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
+    title: Joi.string().required(),
+    technical_evaluation_by: Joi.number().integer().required(),
     bid_end_date: Joi.string()
       .optional()
       .allow(null)
@@ -329,7 +337,7 @@ export const rfqSchemas = {
     location: Joi.string().optional().allow('').allow(null),
     updatableData: Joi.object().optional(),
     department_id: Joi.number().integer().optional().allow(null)
-  }),
+  }).unknown(false),
   finalize: Joi.object().keys({
     rfq_id: Joi.number().required(),
     rfq_no: Joi.number().required(),
