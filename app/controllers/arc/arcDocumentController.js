@@ -4,6 +4,7 @@ import path from 'path';
 import Handlebars from 'handlebars';
 import puppeteer from 'puppeteer';
 import { sendMail } from '../../helper/common.js';
+import { getLifecycleHistory } from '../../models/generalModel.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import userModel from '../../models/userModel.js';
 import vendorModel from '../../models/vendorModel.js';
@@ -65,6 +66,9 @@ export const generateAwardDocument = async (rfq_product_id, txContext = null) =>
     const quantitySpec = productSpecs.find(s => s.title === 'Quantity');
     const unitSpec = productSpecs.find(s => s.title === 'Unit');
 
+    // Get lifecycle history for this tender
+    const lifecycleHistory = await getLifecycleHistory('TENDER', productData.rfq_id, t);
+
     // Prepare data for template
     const now = new Date();
     const effectiveDate = now.toLocaleDateString('en-GB', { 
@@ -104,6 +108,14 @@ export const generateAwardDocument = async (rfq_product_id, txContext = null) =>
         bid_end_date: productData.bid_end_date ? new Date(productData.bid_end_date).toLocaleDateString('en-GB') : '',
       },
       terms_and_conditions: 'As per RFQ terms and conditions',
+      lifecycle_history: lifecycleHistory.map(event => ({
+        stage: event.stage,
+        action: event.action,
+        performed_by: event.performed_by_name || 'System',
+        performed_at: new Date(event.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+        remarks: event.remarks || '-',
+      })),
+      has_lifecycle_history: lifecycleHistory.length > 0,
     };
 
     // Load Handlebars template
