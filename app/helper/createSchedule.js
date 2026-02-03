@@ -78,6 +78,97 @@ export const createSchedule = async ({
   }
 };
 
+// ============================================
+// RFQ Publish Scheduling (Separate from Auction)
+// ============================================
+
+// Use separate group for RFQ publish schedules to avoid mixing with auction schedules
+const RFQ_PUBLISH_GROUP = process.env.RFQ_PUBLISH_GROUP_NAME || 'rfqPublishSchedules';
+
+/**
+ * Create schedule specifically for RFQ publishing
+ * Uses separate schedule group from auction schedules for better organization
+ * @param {Object} opts
+ * @param {number} opts.rfqId - RFQ ID
+ * @param {string} opts.scheduledTimeIST - Time in IST format: YYYY-MM-DDTHH:mm:ss
+ * @param {Object} opts.payload - Payload to send to the endpoint
+ */
+export const createScheduleForRfqPublish = async ({ rfqId, scheduledTimeIST, payload }) => {
+  const scheduleName = `rfqPublish-${rfqId}`;
+
+  const istTimeRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
+  if (!istTimeRegex.test(scheduledTimeIST)) {
+    throw new Error("Invalid scheduledTimeIST format. Expected: YYYY-MM-DDTHH:mm:ss");
+  }
+
+  console.log(`[RFQ Publish] Creating schedule: ${scheduleName} at ${scheduledTimeIST} IST`);
+
+  const baseParams = {
+    GroupName: RFQ_PUBLISH_GROUP,
+    Name: scheduleName,
+    ScheduleExpression: `at(${scheduledTimeIST})`,
+    ScheduleExpressionTimezone: "Asia/Kolkata",
+    FlexibleTimeWindow: { Mode: "OFF" },
+    ActionAfterCompletion: "DELETE",
+    ClientToken: randomUUID(),
+    Target: {
+      Arn: process.env.LAMBDA_ARN,
+      RoleArn: process.env.EVENTBRIDGE_ROLE_ARN,
+      Input: JSON.stringify({
+        type: 'genericTask',
+        payload: {
+          scheduleId: scheduleName,
+          endpoint: '/api/v1/rfq/internal/publish',
+          method: 'POST',
+          payload: payload
+        }
+      }),
+    },
+  };
+
+  try {
+    const command = new CreateScheduleCommand(baseParams);
+    const res = await client.send(command);
+    console.log(`✅ [RFQ Publish] Schedule created: ${scheduleName}`);
+    return { created: true, arn: res.ScheduleArn };
+  } catch (err) {
+    if (err.name === "ConflictException") {
+      const updateCmd = new UpdateScheduleCommand(baseParams);
+      const res = await client.send(updateCmd);
+      console.log(`🔄 [RFQ Publish] Schedule updated: ${scheduleName}`);
+      return { created: false, updated: true, arn: res.ScheduleArn };
+    }
+    console.error(`❌ [RFQ Publish] Schedule operation failed:`, err);
+    throw err;
+  }
+};
+
+/**
+ * Delete RFQ publish schedule
+ * @param {number} rfqId - RFQ ID
+ */
+export const deleteRfqPublishSchedule = async (rfqId) => {
+  const scheduleName = `rfqPublish-${rfqId}`;
+  const params = {
+    Name: scheduleName,
+    GroupName: RFQ_PUBLISH_GROUP,
+    ClientToken: randomUUID(),
+  };
+
+  try {
+    await client.send(new DeleteScheduleCommand(params));
+    console.log(`✅ [RFQ Publish] Schedule deleted: ${scheduleName}`);
+    return { ok: true, scheduleName };
+  } catch (err) {
+    if (err.name === "ResourceNotFoundException") {
+      console.warn(`⚠️ [RFQ Publish] Schedule not found (already executed?): ${scheduleName}`);
+      return { ok: false, reason: "not_found", scheduleName };
+    }
+    console.error(`❌ [RFQ Publish] Schedule deletion failed:`, err);
+    throw err;
+  }
+};
+
 export const deleteSchedule = async (rfq_id , type , vendor_id = "") => {
   const scheduleName = `${type}-rfq-${rfq_id}-${vendor_id}`;
   const params = {

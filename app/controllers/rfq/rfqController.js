@@ -14614,6 +14614,30 @@ getClauses: async (req, res) => {
         error: error.message
       });
     }
+  },
+
+  /**
+   * Internal endpoint for EventBridge scheduler to publish RFQ
+   * Called by Lambda via /internal/rfq/publish
+   */
+  schedulerPublishRfq: async (req, res) => {
+    try {
+      const { rfqId, rfq_no } = req.body;
+      console.log(`📢 Scheduler triggered RFQ publish for: ${rfq_no} (ID: ${rfqId})`);
+
+      const { publishRfqById } = await import('../../helper/cronManager.js');
+      const result = await publishRfqById(rfqId, rfq_no);
+
+      return res.status(200).json({
+        status: 1,
+        message: result.skipped ? 'RFQ skipped (not publishable)' : 'RFQ published successfully',
+        rfqId,
+        ...result
+      });
+    } catch (error) {
+      console.error('❌ RFQ publish failed:', error);
+      return res.status(500).json({ status: 0, message: error.message });
+    }
   }
 };
 export default rfqController;
