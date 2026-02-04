@@ -3413,14 +3413,6 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       return null;
     }
 
-    // Update RFQ status to READY_TO_PUBLISH (4)
-    // The scheduler will publish it when tender_publish_date is reached
-    await t.none(`
-      UPDATE tbl_rfq
-      SET status = 4
-      WHERE id = $1
-    `, [rfq_id]);
-
     // Record lifecycle event for approval
     await recordLifecycleEvent({
       entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
@@ -3435,9 +3427,44 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       txContext: t
     });
 
+    // Check if tender publish date has already passed - if so, publish immediately after approval
+    const publishDatePassed = rfq.is_tender === 1
+      && rfq.tender_publish_date
+      && new Date(rfq.tender_publish_date) <= new Date();
+
+    if (publishDatePassed) {
+      // Publish date already passed - publish directly within this transaction
+      await t.none(`
+        UPDATE tbl_rfq
+        SET status = 1, is_published = 1
+        WHERE id = $1
+      `, [rfq_id]);
+
+      await recordLifecycleEvent({
+        entity_type: 'TENDER',
+        entity_id: rfq_id,
+        stage: 'PUBLISHED',
+        action: 'AUTO_PUBLISH',
+        performed_by: rfq.created_by,
+        metadata: { rfq_no: rfq.rfq_no, published_by: 'post_approval_immediate' },
+        txContext: t
+      });
+
+      console.log(`RFQ ${rfq_id} approved and published immediately (publish date already passed)`);
+      return { rfq_id, status: 1, published: true };
+    }
+
+    // Update RFQ status to READY_TO_PUBLISH (4)
+    // The scheduler will publish it when tender_publish_date is reached
+    await t.none(`
+      UPDATE tbl_rfq
+      SET status = 4
+      WHERE id = $1
+    `, [rfq_id]);
+
     // Schedule the RFQ to be published at tender_publish_date
     // For non-tenders, this will publish immediately
-    // For tenders with future publish date, this will schedule a cron job
+    // For tenders with future publish date, this will schedule via EventBridge
     await scheduleRfqPublish({
       id: rfq_id,
       rfq_no: rfq.rfq_no,
@@ -14622,9 +14649,16 @@ getClauses: async (req, res) => {
       const { publishRfqById } = await import('../../helper/cronManager.js');
       const result = await publishRfqById(rfqId, rfq_no);
 
+      const skippedMessages = {
+        not_found: 'RFQ not found',
+        already_published: 'RFQ already published',
+        pending_approval: 'RFQ still pending approval, cannot publish',
+        invalid_status: 'RFQ not in publishable state'
+      };
+
       return res.status(200).json({
-        status: 1,
-        message: result.skipped ? 'RFQ skipped (not publishable)' : 'RFQ published successfully',
+        status: result.skipped ? 0 : 1,
+        message: result.skipped ? (skippedMessages[result.reason] || 'RFQ skipped') : 'RFQ published successfully',
         rfqId,
         ...result
       });
