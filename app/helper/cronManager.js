@@ -284,9 +284,24 @@ export const publishRfqById = async (rfqId, rfq_no) => {
     FROM tbl_rfq WHERE id = $1
   `, [rfqId]);
 
-  if (!rfq || rfq.status !== 4 || rfq.is_published === 1) {
-    console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) not in publishable state`);
-    return { skipped: true, reason: 'not_publishable' };
+  if (!rfq) {
+    console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) not found`);
+    return { skipped: true, reason: 'not_found' };
+  }
+
+  if (rfq.is_published === 1) {
+    console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) already published`);
+    return { skipped: true, reason: 'already_published' };
+  }
+
+  if (rfq.status === 3) {
+    console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) still pending approval, cannot publish`);
+    return { skipped: true, reason: 'pending_approval' };
+  }
+
+  if (rfq.status !== 4) {
+    console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) not in publishable state (status: ${rfq.status})`);
+    return { skipped: true, reason: 'invalid_status' };
   }
 
   await publishRfq(rfq);
