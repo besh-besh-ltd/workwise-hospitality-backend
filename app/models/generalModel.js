@@ -2163,12 +2163,13 @@ export async function cancelApprovalInstance(instance_id, cancelled_by, reason =
       WHERE approval_instance_id = $1 AND status = 'PENDING'
     `, [instance_id]);
 
-    // Log the cancellation
+    // Log the cancellation as a REJECT action (database constraint only allows APPROVE/REJECT)
+    // The actual cancellation reason is captured in the comment field
     await t.none(`
       INSERT INTO tbl_approval_actions
       (approval_instance_id, approver_user_id, action, comment)
-      VALUES ($1, $2, 'CANCELLED', $3)
-    `, [instance_id, cancelled_by, reason]);
+      VALUES ($1, $2, 'REJECT', $3)
+    `, [instance_id, cancelled_by, reason ? `[CANCELLED] ${reason}` : '[CANCELLED]']);
 
     return { status: 'CANCELLED', message: 'Approval instance cancelled' };
   });
@@ -2387,6 +2388,168 @@ export async function getApprovalInstanceById(instance_id, entity_type = null, t
   }
   
   return dbContext.oneOrNone(query, params);
+}
+
+/**
+ * Reset state when ARC is sent back to a previous stage
+ *
+ * Stage-based behavior:
+ * - QUOTES_RECEIVED, TECHNICAL, PUBLISHED, etc. (early stages):
+ *   Cancel ALL rounds + finalization + approvals - complete reset
+ *
+ * - NEGOTIATION, QUOTE_FINALIZED, etc. (mid stages):
+ *   Keep rounds intact, just cancel finalization + approvals so user can create new round
+ *
+ * @param {number} rfq_id - RFQ ID
+ * @param {number} rfq_product_id - RFQ Product ID
+ * @param {number} user_id - User performing the reset
+ * @param {string} reason - Reason for reset
+ * @param {string} target_stage - Target stage being sent back to
+ * @param {Object} txContext - Optional transaction context
+ */
+export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, user_id, reason = null, target_stage = null, txContext = null) {
+  const dbContext = txContext || db;
+
+  const normalizedStage = (target_stage || '').toUpperCase();
+
+  // Early stages = complete reset (cancel all rounds)
+  const earlyStages = ['QUOTES_RECEIVED', 'TECHNICAL_EVALUATION', 'TECHNICAL', 'PUBLISHED', 'TENDER_SUBMITTED'];
+  const isEarlyStage = earlyStages.includes(normalizedStage);
+
+  // Mid stages = keep rounds, just reset finalization (allow new round creation)
+  // NEGOTIATION, QUOTE_FINALIZED, NEGOTIATION_QUOTE, etc.
+
+  return dbContext.tx(async t => {
+    let cancelledInstances = 0;
+    let removedFinalizations = 0;
+    let cancelledRounds = 0;
+
+    // 1. Always cancel NEGOTIATION_QUOTE approval instances (pending or approved)
+    const quoteInstances = await t.any(`
+      SELECT id, status FROM tbl_approval_instances
+      WHERE entity_type = 'NEGOTIATION_QUOTE'
+        AND entity_id = $1
+        AND status IN ('PENDING', 'APPROVED')
+    `, [rfq_product_id]);
+
+    for (const instance of quoteInstances) {
+      if (instance.status === 'PENDING') {
+        await cancelApprovalInstance(instance.id, user_id, reason || 'Reset due to ARC sendback');
+      } else {
+        // For APPROVED, just mark as CANCELLED directly
+        await t.none(`
+          UPDATE tbl_approval_instances
+          SET status = 'CANCELLED', completed_at = NOW()
+          WHERE id = $1
+        `, [instance.id]);
+      }
+      cancelledInstances++;
+    }
+
+    // 2. Always remove quote finalization entries
+    const finalizations = await t.any(`
+      SELECT * FROM tbl_quote_finalization
+      WHERE rfq_id = $1 AND product_variant_id = $2
+    `, [rfq_id, rfq_product_id]);
+
+    for (const f of finalizations) {
+      await t.none(`
+        INSERT INTO tbl_quote_finalization_history
+        (rfq_id, rfq_no, quote_id, product_variant_id, vendor_id, created_by, timestamp, variant, changed_by, changed_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+      `, [f.rfq_id, f.rfq_no, f.quote_id, f.product_variant_id, f.vendor_id, f.created_by, f.timestamp, f.variant, user_id]);
+
+      await t.none(`DELETE FROM tbl_quote_finalization WHERE id = $1`, [f.id]);
+      removedFinalizations++;
+    }
+
+    // 3. Cancel NEGOTIATION approval instances
+    const negInstances = await t.any(`
+      SELECT id, status FROM tbl_approval_instances
+      WHERE entity_type = 'NEGOTIATION'
+        AND entity_id = $1
+        AND status IN ('PENDING', 'APPROVED')
+    `, [rfq_product_id]);
+
+    for (const instance of negInstances) {
+      if (instance.status === 'PENDING') {
+        await cancelApprovalInstance(instance.id, user_id, reason || 'Reset due to ARC sendback');
+      } else {
+        await t.none(`
+          UPDATE tbl_approval_instances
+          SET status = 'CANCELLED', completed_at = NOW()
+          WHERE id = $1
+        `, [instance.id]);
+      }
+      cancelledInstances++;
+    }
+
+    // 4. Handle rounds based on target stage
+    if (isEarlyStage) {
+      // Early stage: Cancel ALL rounds (complete reset to before negotiation)
+      const result = await t.result(`
+        UPDATE tbl_negotiation_rounds
+        SET status = 'CANCELLED', closed_at = NOW()
+        WHERE rfq_id = $1 AND rfq_product_id = $2 AND status != 'CANCELLED'
+      `, [rfq_id, rfq_product_id]);
+      cancelledRounds = result.rowCount;
+    } else {
+      // Mid stage (NEGOTIATION, QUOTE_FINALIZED, etc.): Keep rounds intact
+      // Just make sure any ACTIVE rounds are marked as COMPLETED so new ones can be created
+      const result = await t.result(`
+        UPDATE tbl_negotiation_rounds
+        SET status = 'COMPLETED', closed_at = COALESCE(closed_at, NOW())
+        WHERE rfq_id = $1 AND rfq_product_id = $2 AND status = 'ACTIVE'
+      `, [rfq_id, rfq_product_id]);
+      // Don't count these as "cancelled" - they're completed
+    }
+
+    // 5. Reset RFQ/Tender status for very early stages
+    let rfqStatusReset = null;
+    if (normalizedStage === 'TENDER_SUBMITTED' || normalizedStage === 'SUBMITTED') {
+      // Send back to submitted = before approval, reset to PENDING_APPROVAL (3)
+      await t.none(`
+        UPDATE tbl_rfq SET status = 3, is_published = 0 WHERE id = $1
+      `, [rfq_id]);
+
+      // Cancel any RFQ/TENDER approval instances
+      const rfqApprovalInstances = await t.any(`
+        SELECT id, status FROM tbl_approval_instances
+        WHERE entity_type IN ('RFQ', 'TENDER')
+          AND entity_id = $1
+          AND status IN ('PENDING', 'APPROVED')
+      `, [rfq_id]);
+
+      for (const instance of rfqApprovalInstances) {
+        if (instance.status === 'PENDING') {
+          await cancelApprovalInstance(instance.id, user_id, reason || 'Reset due to ARC sendback to SUBMITTED');
+        } else {
+          await t.none(`
+            UPDATE tbl_approval_instances
+            SET status = 'CANCELLED', completed_at = NOW()
+            WHERE id = $1
+          `, [instance.id]);
+        }
+        cancelledInstances++;
+      }
+      rfqStatusReset = 'PENDING_APPROVAL';
+    } else if (normalizedStage === 'PUBLISHED') {
+      // Send back to published = re-open the tender for bidding
+      await t.none(`
+        UPDATE tbl_rfq SET status = 1, is_published = 1 WHERE id = $1
+      `, [rfq_id]);
+      rfqStatusReset = 'OPEN';
+    }
+
+    return {
+      cancelled_instances: cancelledInstances,
+      removed_finalizations: removedFinalizations,
+      cancelled_rounds: cancelledRounds,
+      target_stage: normalizedStage,
+      is_early_stage: isEarlyStage,
+      rfq_status_reset: rfqStatusReset
+    };
+  });
 }
 
 export default generalModel;

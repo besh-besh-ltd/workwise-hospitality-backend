@@ -2,7 +2,7 @@ import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
 import negotiationModel from '../../models/negotiationModel.js';
-import { getLifecycleHistory, getApprovalInstancesByEntity, submitApprovalAction, cancelApprovalInstance, getApprovalInstanceById, recordLifecycleEvent, uploadToS3 } from '../../models/generalModel.js';
+import { getLifecycleHistory, getApprovalInstancesByEntity, submitApprovalAction, cancelApprovalInstance, getApprovalInstanceById, recordLifecycleEvent, uploadToS3, resetQuoteFinalizationForSendback } from '../../models/generalModel.js';
 import { generateAwardDocument, sendAwardDocumentToVendor } from './arcDocumentController.js';
 import db from '../../config/dbConn.js';
 
@@ -429,7 +429,16 @@ const ArcController = {
         // Record lifecycle event
         const stage = `SENT_TO_${target_stage.toUpperCase()}`;
         const instanceMetadata = pendingInstance?.metadata || {};
-        const rfq_product_id = instanceMetadata.rfq_product_id || (rfq_product_id ? rfq_product_id : null);
+        const productId = instanceMetadata.rfq_product_id || rfq_product_id || null;
+
+        // Reset quote finalization if sending back to stages before ARC
+        if (productId) {
+          try {
+            await resetQuoteFinalizationForSendback(rfq_id, productId, user_id, `Sent back to ${target_stage}`, target_stage);
+          } catch (resetError) {
+            console.error('Error resetting quote finalization:', resetError);
+          }
+        }
         
         await recordLifecycleEvent({
           entity_type: 'TENDER', // Always TENDER for ARC
@@ -438,7 +447,7 @@ const ArcController = {
           action: 'SEND_TO',
           performed_by: user_id,
           metadata: {
-            rfq_product_id: rfq_product_id,
+            rfq_product_id: productId,
             target_stage: target_stage,
             cancelled_instance_id: pendingInstance?.id || null
           },
