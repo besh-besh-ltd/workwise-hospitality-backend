@@ -5872,33 +5872,27 @@ const rfqController = {
           variant_id,
           hotel_ids
         );
-      } else {
-        // Non-tender: generic vendor discovery
-        vendorsList = await rfqModel.genericSearchVendors(
-          user_id,
-          product.variant_id
-        );
-      }
-      
-      // ---------------- Assign vendors in product.vendors or give error ----------------
-      if (vendorsList && vendorsList.length > 0) {
-                console.log(" vendorsListvendorsList ", vendorsList)
-        product.vendors = vendorsList.map((vendor) => ({
-          vendor_id: vendor.id || vendor.vendor_id ,
-        }));
 
-        console.log(" product.vendorsproduct.vendorsproduct.vendors", product.vendors)
-
+        // ---------------- Assign vendors for tender ----------------
+        if (vendorsList && vendorsList.length > 0) {
+          product.vendors = vendorsList.map((vendor) => ({
+            vendor_id: vendor.id || vendor.vendor_id,
+          }));
+        } else {
+          return res.status(400).json({
+            status: 2,
+            errors: {
+              vendors:
+                "No eligible vendors found for the selected product based on hotel and category subscriptions.",
+            },
+          });
+        }
       } else {
-        return res.status(400).json({
-          status: 2,
-          errors: {
-            vendors:
-              is_tender === 1
-                ? "No eligible vendors found for the selected product based on hotel and category subscriptions."
-                : "No vendors found for your selected product. Please select a different product.",
-          },
-        });
+        // Non-tender (RFQ): use vendors selected by the user from the frontend
+        // product.vendors is already set from req.body, keep as-is
+        if (!product.vendors || !Array.isArray(product.vendors)) {
+          product.vendors = [];
+        }
       }
 
       const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);

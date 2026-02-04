@@ -476,7 +476,8 @@ const NegotiationController = {
 
       const round = await negotiationModel.getActiveRound(rfq_id, rfq_product_id);
 
-      if (!round) {
+      // Vendors (user_type 3) should only see fully approved (ACTIVE) rounds
+      if (!round || (req.user.user_type == 3 && round.status !== 'ACTIVE')) {
         return res.status(200).json({
           status: 1,
           data: null,
@@ -510,7 +511,12 @@ const NegotiationController = {
         });
       }
 
-      const rounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id);
+      let rounds = await negotiationModel.getActiveRoundsByRfqId(rfq_id);
+
+      // Vendors (user_type 3) should only see fully approved (ACTIVE) rounds
+      if (req.user.user_type == 3) {
+        rounds = (rounds || []).filter(r => r.status === 'ACTIVE');
+      }
 
       return res.status(200).json({
         status: 1,
