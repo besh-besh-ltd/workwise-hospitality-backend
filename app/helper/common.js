@@ -248,15 +248,29 @@ const getErrorText = (err) => {
 
 const sendMail = (mailOptions) => {
   return new Promise((resolve, reject) => {
+    console.log('[MAIL] sendMail called');
+    console.log('[MAIL] To:', mailOptions.to);
+    console.log('[MAIL] From:', mailOptions.from);
+    console.log('[MAIL] Subject:', mailOptions.subject);
+
     if (!mailOptions.to || mailOptions.to === '') {
+      console.log('[MAIL] ERROR: No recipient email provided');
       return resolve(false);
     }
 
+    console.log('[MAIL] Creating transport...');
     let transporter = nodemailer.createTransport(config.transportConfig);
+
+    console.log('[MAIL] Sending email...');
     transporter.sendMail(mailOptions, function (err, info) {
       if (err) {
+        console.error('[MAIL] ERROR sending email:', err.message);
+        console.error('[MAIL] Full error:', err);
         return resolve(false);
       } else {
+        console.log('[MAIL] Email sent successfully!');
+        console.log('[MAIL] Message ID:', info.messageId);
+        console.log('[MAIL] Response:', info.response);
         return resolve(true);
       }
     });

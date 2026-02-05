@@ -1578,6 +1578,42 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
 }
 
 /**
+ * Check if a user is the final approver in an approval policy
+ * A user is considered the final approver if they are in the last step of the policy
+ * @param {number} userId - User ID to check
+ * @param {Object} policy - Approval policy object
+ * @param {Array} policySteps - Array of policy steps ordered by step_order
+ * @param {number} hospitality_company_id - Hospitality Company ID
+ * @param {number|null} hotel_id - Hotel ID (optional)
+ * @param {number|null} department_id - Department ID (optional)
+ * @param {Object} t - Transaction context
+ * @returns {Promise<boolean>} - True if user is final approver
+ */
+async function isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, department_id, t) {
+  if (!policySteps || policySteps.length === 0) {
+    return false;
+  }
+
+  // Get the last step (highest step_order)
+  const lastStep = policySteps[policySteps.length - 1];
+
+  // Resolve approvers for the last step WITHOUT excluding the creator
+  // Pass null as initiatedBy to include all approvers
+  const finalStepApprovers = await resolveApprovers(
+    lastStep,
+    hospitality_company_id,
+    hotel_id,
+    department_id,
+    t,
+    null // Don't exclude creator - we want to check if they're in the final step
+  );
+
+  // Check if the user is in the final step's approvers (ensure array for .includes)
+  const approverIds = Array.isArray(finalStepApprovers) ? finalStepApprovers : [];
+  return approverIds.includes(userId);
+}
+
+/**
  * Create an approval instance for an entity
  * Automatically finds the best matching policy if approval_policy_id is not provided
  *
@@ -1749,6 +1785,32 @@ async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, h
   `, [entity_type, hospitality_company_id, hotel_id, department_id]);
 
   return policies.length > 0 ? policies[0] : null;
+}
+
+// Export helper function to check if user is final approver
+export async function checkIfUserIsFinalApprover(userId, entity_type, hospitality_company_id, hotel_id, department_id, txContext = null) {
+  const t = txContext || db;
+  
+  // Find the best matching policy
+  const policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id }, t);
+  
+  if (!policy) {
+    return false;
+  }
+
+  // Get policy steps
+  const policySteps = await t.any(`
+    SELECT * FROM tbl_approval_policy_steps
+    WHERE approval_policy_id = $1
+    ORDER BY step_order ASC
+  `, [policy.id]);
+
+  if (policySteps.length === 0) {
+    return false;
+  }
+
+  // Check if user is final approver
+  return await isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, department_id, t);
 }
 
 /**
@@ -2253,42 +2315,68 @@ export const markPOStatusChange = async (po_id, t, reject = false, user) => {
   }
 };
 
-export const uploadToS3 = async (filePath, fileName) => {
+export const uploadToS3 = async (filePath, s3Key) => {
   try {
-    console.log(':file_folder: Starting upload process...');
+    console.log('='.repeat(60));
+    console.log('[S3-UPLOAD] Starting upload process...');
+    console.log('[S3-UPLOAD] File path:', filePath);
+    console.log('[S3-UPLOAD] S3 key:', s3Key);
+
     // Check file exists
     if (!fs.existsSync(filePath)) {
+      console.error('[S3-UPLOAD] ERROR: File not found:', filePath);
       throw new Error(`File not found: ${filePath}`);
     }
-    console.log(':white_check_mark: File found, reading file...');
+
+    const fileStats = fs.statSync(filePath);
+    console.log('[S3-UPLOAD] File found, size:', fileStats.size, 'bytes');
+
     const fileBuffer = fs.readFileSync(filePath);
+    console.log('[S3-UPLOAD] File read into buffer, length:', fileBuffer.length);
+
+    // Use s3Key as-is if it contains a path, otherwise prepend purchase-order for backward compatibility
+    const finalKey = s3Key.includes('/') ? s3Key : `purchase-order/${s3Key}`;
+
     const uploadParams = {
       Bucket: process.env.AWS_S3_BUCKET,
-      Key: `purchase-order/${fileName}`,
+      Key: finalKey,
       Body: fileBuffer,
       ContentType: "application/pdf",
     };
-    console.log(':rocket: Uploading to S3...');
-    console.log('Bucket:', process.env.AWS_S3_BUCKET);
-    console.log('Key:', `purchase-order/${fileName}`);
+
+    console.log('[S3-UPLOAD] Upload params:');
+    console.log('[S3-UPLOAD] - Bucket:', process.env.AWS_S3_BUCKET);
+    console.log('[S3-UPLOAD] - Key:', finalKey);
+    console.log('[S3-UPLOAD] - ContentType:', uploadParams.ContentType);
+
     const command = new PutObjectCommand(uploadParams);
+    console.log('[S3-UPLOAD] Sending upload command...');
+
     const response = await s3Client.send(command);
-    console.log(":white_check_mark: Upload success. ETag:", response.ETag);
-    const url = `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/purchase-order/${fileName}`;
+    console.log('[S3-UPLOAD] Upload success!');
+    console.log('[S3-UPLOAD] Response ETag:', response.ETag);
+
+    const url = `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${finalKey}`;
+    console.log('[S3-UPLOAD] Document URL:', url);
+    console.log('='.repeat(60));
+
     return {
       ok: true,
       url: url,
       etag: response.ETag
     };
   } catch (err) {
-    console.error(":x: Upload error details:");
-    console.error("Error name:", err.name);
-    console.error("Error message:", err.message);
-    console.error("Error code:", err.code);
+    console.log('='.repeat(60));
+    console.error('[S3-UPLOAD] Upload FAILED!');
+    console.error('[S3-UPLOAD] Error name:', err.name);
+    console.error('[S3-UPLOAD] Error message:', err.message);
+    console.error('[S3-UPLOAD] Error code:', err.code);
     if (err.$metadata) {
-      console.error("Request ID:", err.$metadata.requestId);
-      console.error("HTTP Status:", err.$metadata.httpStatusCode);
+      console.error('[S3-UPLOAD] Request ID:', err.$metadata.requestId);
+      console.error('[S3-UPLOAD] HTTP Status:', err.$metadata.httpStatusCode);
     }
+    console.error('[S3-UPLOAD] Full error:', err);
+    console.log('='.repeat(60));
     return {
       ok: false,
       error: err.message
@@ -2504,7 +2592,52 @@ export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, 
       // Don't count these as "cancelled" - they're completed
     }
 
-    // 5. Reset RFQ/Tender status for very early stages
+    // 5. Reset Tech Evaluation when sending back to TECH_EVAL/TECHNICAL stages
+    // IMPORTANT: Don't delete data - just reset is_verified=false to allow re-evaluation
+    // This preserves history while allowing another chance
+    let resetTechEval = 0;
+    if (normalizedStage === 'TECHNICAL' || normalizedStage === 'TECH_EVAL' || normalizedStage === 'TECHNICAL_EVALUATION') {
+      // Get tech evaluation for this product
+      const techEval = await t.oneOrNone(`
+        SELECT te.id
+        FROM tbl_rfq_product_tech_evaluation te
+        JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
+        WHERE te.rfq_id = $1 AND rp.id = $2
+      `, [rfq_id, rfq_product_id]);
+
+      if (techEval) {
+        // Reset is_verified=false to allow re-evaluation (preserve the old status for history)
+        const resetVendors = await t.result(`
+          UPDATE tbl_rfq_product_tech_evaluation_cleared_vendors
+          SET is_verified = false
+          WHERE tbl_rfq_product_tech_evaluation_id = $1
+        `, [techEval.id]);
+        resetTechEval = resetVendors.rowCount;
+
+        // Cancel any TECHNICAL approval instances
+        const techInstances = await t.any(`
+          SELECT id, status FROM tbl_approval_instances
+          WHERE entity_type = 'TECHNICAL'
+            AND entity_id = $1
+            AND status IN ('PENDING', 'APPROVED')
+        `, [rfq_product_id]);
+
+        for (const instance of techInstances) {
+          if (instance.status === 'PENDING') {
+            await cancelApprovalInstance(instance.id, user_id, reason || 'Reset due to ARC sendback to TECH_EVAL');
+          } else {
+            await t.none(`
+              UPDATE tbl_approval_instances
+              SET status = 'CANCELLED', completed_at = NOW()
+              WHERE id = $1
+            `, [instance.id]);
+          }
+          cancelledInstances++;
+        }
+      }
+    }
+
+    // 6. Reset RFQ/Tender status for very early stages
     let rfqStatusReset = null;
     if (normalizedStage === 'TENDER_SUBMITTED' || normalizedStage === 'SUBMITTED') {
       // Send back to submitted = before approval, reset to PENDING_APPROVAL (3)
@@ -2545,6 +2678,7 @@ export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, 
       cancelled_instances: cancelledInstances,
       removed_finalizations: removedFinalizations,
       cancelled_rounds: cancelledRounds,
+      reset_tech_eval: resetTechEval,
       target_stage: normalizedStage,
       is_early_stage: isEarlyStage,
       rfq_status_reset: rfqStatusReset

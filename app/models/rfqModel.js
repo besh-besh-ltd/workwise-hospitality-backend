@@ -1290,7 +1290,7 @@ WHERE NOT EXISTS (
    */
   getTechEvaluationData: async (rfq_id) => {
     const query = `
-      SELECT 
+      SELECT
         te.*,
         rp.id as rfq_product_id,
         rp.product_variant_id,
@@ -1300,7 +1300,12 @@ WHERE NOT EXISTS (
               'vendor_id', tev.vendor_id,
               'vendor_name', u.name,
               'vendor_email', u.email,
-              'created_at', tev.timestamp
+              'created_at', tev.timestamp,
+              'is_accepted', CASE WHEN tev.status = 1 THEN true ELSE false END,
+              'status', tev.status,
+              'remarks', tev.reject_message,
+              'is_verified', tev.is_verified,
+              'evaluation_round', tev.evaluation_round
             )
           )
           FROM tbl_rfq_product_tech_evaluation_cleared_vendors tev
@@ -1397,7 +1402,7 @@ WHERE NOT EXISTS (
         SELECT 1 FROM tbl_rfq_products rp
         JOIN tbl_approval_instances ai2 ON ai2.entity_type = 'ARC'
           AND ai2.entity_id::INTEGER = rp.id
-          AND ai2.status IN ('PENDING', 'APPROVED')
+          AND ai2.status IN ('PENDING', 'APPROVED', 'CANCELLED')
         WHERE rp.rfq_id = r.id
       )`
     ];
@@ -1452,7 +1457,7 @@ WHERE NOT EXISTS (
       JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
       LEFT JOIN tbl_approval_instances ai ON ai.entity_type = 'ARC'
         AND ai.entity_id::INTEGER = rp.id
-        AND ai.status IN ('PENDING', 'APPROVED')
+        AND ai.status IN ('PENDING', 'APPROVED', 'CANCELLED')
       WHERE ${whereClause}
       ORDER BY r.timestamp DESC, rp.id
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}
@@ -1464,7 +1469,7 @@ WHERE NOT EXISTS (
       JOIN tbl_rfq_products rp ON rp.rfq_id = r.id
       JOIN tbl_approval_instances ai2 ON ai2.entity_type = 'ARC'
         AND ai2.entity_id::INTEGER = rp.id
-        AND ai2.status IN ('PENDING', 'APPROVED')
+        AND ai2.status IN ('PENDING', 'APPROVED', 'CANCELLED')
       WHERE ${whereClause}
     `;
 
@@ -2470,7 +2475,7 @@ LIMIT 1;`;
                     SELECT COUNT(*) AS total_clauses
                     FROM tbl_rfq_product_tech_evaluation_clauses TEC
                     JOIN tech_eval TE ON TEC.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
-                    ${user_type == 3 ? `WHERE TEC.clause_type != 'sampling' OR TEC.clause_type IS NULL` : ''}
+                    WHERE TEC.clause_type != 'sampling' OR TEC.clause_type IS NULL
                 ),
                 accepted_vendor AS (
                     SELECT TECV.vendor_id
@@ -2488,7 +2493,7 @@ LIMIT 1;`;
                       AND VR.vendor_response != ''
                       AND VR.vendor_response != 'N/A'
                       AND TRIM(VR.vendor_response) != ''
-                      ${user_type == 3 ? `AND (TEC.clause_type != 'sampling' OR TEC.clause_type IS NULL)` : ''}
+                      AND (TEC.clause_type != 'sampling' OR TEC.clause_type IS NULL)
                     GROUP BY VR.vendor_id
                     HAVING COUNT(DISTINCT VR.tbl_rfq_product_tech_evaluation_clauses_id) = (SELECT total_clauses FROM all_clauses)
                     LIMIT 1
@@ -2522,7 +2527,7 @@ LIMIT 1;`;
                     JOIN tbl_rfq_product_tech_evaluation_clauses TEC ON VR.tbl_rfq_product_tech_evaluation_clauses_id = TEC.id
                     JOIN tech_eval TE ON TEC.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
                     WHERE VR.vendor_id = (SELECT vendor_id FROM resolved_vendor)
-                      ${user_type == 3 ? `AND (TEC.clause_type != 'sampling' OR TEC.clause_type IS NULL)` : ''}
+                      AND (TEC.clause_type != 'sampling' OR TEC.clause_type IS NULL)
                 ),
                 buyer_evaluation AS (
                     SELECT
@@ -3429,7 +3434,7 @@ LIMIT 2;
           AND asa.approver_user_id = ${user_id}
           AND asa.status = 'PENDING'
           AND ais.step_order = ai.current_step
-          AND RFQ.is_published = 1
+          AND (RFQ.is_published = 0 AND RFQ.status = 3)
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
@@ -9975,15 +9980,30 @@ ORDER BY tq.timestamp DESC;
         rfq_no: rfq_id
       }));
 
-      const insertQuery =
-        pgp.helpers.insert(
-          tokenRecords,
-          ['token', 'vendor_id', 'rfq_no'],
-          'tbl_vendor_rfq_tokens_non_login'
-        ) +
-        ' ON CONFLICT (vendor_id, rfq_no) DO NOTHING RETURNING vendor_id, token';
-
-      const insertedRows = await db.any(insertQuery);
+      // Insert only rows that don't already exist (works without unique constraint)
+      // rfq_no column is integer in tbl_vendor_rfq_tokens_non_login
+      const valuesClause = tokenRecords
+        .map(
+          (_, i) =>
+            `($${i * 3 + 1}::bigint, $${i * 3 + 2}::int, $${i * 3 + 3}::int)`
+        )
+        .join(', ');
+      const params = tokenRecords.flatMap((r) => [
+        r.token,
+        r.vendor_id,
+        Number(r.rfq_no) || parseInt(r.rfq_no, 10)
+      ]);
+      const insertQuery = `
+        INSERT INTO tbl_vendor_rfq_tokens_non_login (token, vendor_id, rfq_no)
+        SELECT v.token, v.vendor_id, v.rfq_no
+        FROM (VALUES ${valuesClause}) AS v(token, vendor_id, rfq_no)
+        WHERE NOT EXISTS (
+          SELECT 1 FROM tbl_vendor_rfq_tokens_non_login t
+          WHERE t.vendor_id = v.vendor_id AND t.rfq_no = v.rfq_no
+        )
+        RETURNING vendor_id, token
+      `;
+      const insertedRows = await db.any(insertQuery, params);
       insertedRows.forEach((row) => tokensMap.set(row.vendor_id, row.token));
 
       const stillMissing = missingVendorIds.filter(
@@ -11413,12 +11433,14 @@ ORDER BY tq.timestamp DESC;
   createTechEvalRound: async (tech_evaluation_id, round_number, created_by, txContext = null) => {
     const dbContext = txContext || db;
     // Use ON CONFLICT to handle duplicate key - return existing record if already exists
+    // Update created_at to itself as a no-op to make RETURNING work
     return dbContext.one(
       `INSERT INTO tbl_tech_evaluation_rounds
        (tbl_rfq_product_tech_evaluation_id, round_number, status, created_by, created_at)
        VALUES ($1, $2, 'PENDING', $3, NOW())
        ON CONFLICT (tbl_rfq_product_tech_evaluation_id, round_number)
        DO UPDATE SET status = EXCLUDED.status
+        DO UPDATE SET created_at = tbl_tech_evaluation_rounds.created_at
        RETURNING *`,
       [tech_evaluation_id, round_number, created_by]
     );

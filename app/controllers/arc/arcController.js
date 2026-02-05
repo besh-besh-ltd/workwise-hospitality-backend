@@ -12,10 +12,11 @@ import db from '../../config/dbConn.js';
  */
 const handleArcPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
   const t = txContext || db;
-  
+
   try {
     // Get approval instance
     const instance = await getApprovalInstanceById(approval_instance_id, 'ARC', t);
+
     if (!instance || instance.status !== 'APPROVED') {
       return; // Not approved yet or not ARC type
     }
@@ -23,27 +24,26 @@ const handleArcPostApproval = async (approval_instance_id, approver_user_id, txC
     const rfq_product_id = instance.entity_id;
     const metadata = instance.metadata || {};
     const rfq_id = metadata.rfq_id;
-    
+
     // Validate RFQ is a tender
     const rfqData = await t.oneOrNone(`
       SELECT is_tender FROM tbl_rfq WHERE id = $1
     `, [rfq_id]);
-    
+
     if (!rfqData || rfqData.is_tender !== 1) {
       throw new Error('ARC document generation is only applicable for tenders (is_tender = 1)');
     }
-    
+
     // Generate PDF document for this product
     const pdfResult = await generateAwardDocument(rfq_product_id, t);
-    
+
     if (pdfResult.ok) {
       // Upload to S3 with arc-documents folder
       const fileName = `arc-award-${metadata.rfq_number || rfq_id}-product-${rfq_product_id}-${Date.now()}.pdf`;
       const s3Key = `arc-documents/${fileName}`;
+
       const s3Result = await uploadToS3(pdfResult.absolutePath, s3Key);
 
-      console.log("ARC: S3 RESULT FOR AWARD DOC:", s3Result);
-      
       if (s3Result.ok) {
         // Update approval instance metadata with document URL
         const updatedMetadata = {
@@ -52,16 +52,16 @@ const handleArcPostApproval = async (approval_instance_id, approver_user_id, txC
           award_document_generated_at: new Date().toISOString(),
           award_document_generated_by: approver_user_id
         };
-        
+
         await t.none(`
           UPDATE tbl_approval_instances
           SET metadata = $1
           WHERE id = $2
         `, [JSON.stringify(updatedMetadata), approval_instance_id]);
-        
+
         // Send email to vendor for this product
         await sendAwardDocumentToVendor(rfq_product_id, s3Result.url, t);
-        
+
         // Record lifecycle event
         await recordLifecycleEvent({
           entity_type: 'TENDER',
@@ -80,7 +80,7 @@ const handleArcPostApproval = async (approval_instance_id, approver_user_id, txC
     }
   } catch (arcDocError) {
     // Log but don't fail the transaction
-    console.error('Error handling ARC post-approval:', arcDocError);
+    logError(arcDocError);
   }
 };
 
@@ -416,9 +416,24 @@ const ArcController = {
           });
         }
 
-        // Cancel pending approval instance if exists
+        // Cancel pending approval instance if exists and save target_stage in metadata
         if (pendingInstance) {
           try {
+            // First update metadata with target_stage so it's preserved after cancellation
+            const updatedMetadata = {
+              ...(pendingInstance.metadata || {}),
+              sent_back_to: target_stage.toUpperCase(),
+              sent_back_at: new Date().toISOString(),
+              sent_back_by: user_id,
+              sent_back_remarks: remarks || null
+            };
+
+            await db.none(`
+              UPDATE tbl_approval_instances
+              SET metadata = $1
+              WHERE id = $2
+            `, [JSON.stringify(updatedMetadata), pendingInstance.id]);
+
             await cancelApprovalInstance(pendingInstance.id, user_id, `Sent back to ${target_stage}: ${remarks || 'No remarks'}`);
           } catch (cancelError) {
             console.error('Error cancelling approval instance:', cancelError);
