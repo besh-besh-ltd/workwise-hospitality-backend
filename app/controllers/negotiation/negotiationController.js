@@ -1,6 +1,7 @@
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import negotiationModel from '../../models/negotiationModel.js';
+import moment from 'moment-timezone';
 import rfqModel from '../../models/rfqModel.js';
 import {
   recordLifecycleEvent,
@@ -1018,12 +1019,15 @@ const NegotiationController = {
       }
 
       // Check all rounds are either completed OR expired (end_date < now)
-      const now = new Date();
+      // Use moment.utc() for consistent timezone handling between frontend and backend
+      const now = moment.utc();
       const invalidRounds = quotes.filter(q => {
-        const isCompleted = q.round_status === 'COMPLETED' || q.round_status === 'CLOSED';
-        // Handle case where end_date might be null or invalid
-        const endDate = q.round_end_date ? new Date(q.round_end_date) : null;
-        const isExpired = endDate && endDate < now;
+        const roundStatus = (q.round_status || '').toUpperCase();
+        const isCompleted = roundStatus === 'COMPLETED' || roundStatus === 'CLOSED';
+        // For ACTIVE rounds, check if end_date has passed (round has expired)
+        // Parse end_date as UTC to match how frontend compares
+        const endDate = q.round_end_date ? moment.utc(q.round_end_date) : null;
+        const isExpired = endDate && endDate.isBefore(now);
         return !isCompleted && !isExpired;
       });
       if (invalidRounds.length > 0) {
