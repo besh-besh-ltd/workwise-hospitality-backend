@@ -39,6 +39,7 @@ import crypto from 'crypto';
 import negotiationModel from '../../models/negotiationModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { sendTechEvalCompletionNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
+import { sendTenderFeePaymentConfirmation } from '../../helper/sendEmailFunctions/tenderFeeEmails.js';
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -4141,6 +4142,52 @@ const rfqController = {
 
       if (updated.rowCount === 0) {
         return res.status(404).json({ status: 0, message: 'Payment record not found' }).end();
+      }
+
+      // Send payment confirmation email with invoice if payment was successful
+      if (isValid) {
+        try {
+          // Fetch vendor details
+          const vendorDetails = await db.oneOrNone(
+            `SELECT id, name, email, organization_name FROM tbl_users WHERE id = $1`,
+            [vendorId]
+          );
+
+          // Fetch RFQ details
+          const rfqDetails = await db.oneOrNone(
+            `SELECT r.id, r.rfq_no, r.title, r.tender_fees,
+                    u.name as buyer_name, u.email as buyer_email,
+                    hc.company_name
+             FROM tbl_rfq r
+             LEFT JOIN tbl_users u ON r.created_by = u.id
+             LEFT JOIN tbl_hospitality_companies hc ON r.hospitality_company_id = hc.id
+             WHERE r.id = $1`,
+            [rfq_id]
+          );
+
+          // Fetch payment details
+          const paymentDetails = await db.oneOrNone(
+            `SELECT id as payment_id, razorpay_payment_id, razorpay_order_id, amount, receipt
+             FROM tbl_vendor_payments
+             WHERE id = $1`,
+            [updated.rows[0].id]
+          );
+
+          // Send email with invoice
+          sendTenderFeePaymentConfirmation({
+            vendorDetails,
+            rfqDetails,
+            paymentDetails,
+            buyerDetails: {
+              company_name: rfqDetails?.company_name,
+              email: rfqDetails?.buyer_email,
+              contact_number: null
+            }
+          });
+        } catch (emailError) {
+          // Log email error but don't fail the payment verification
+          console.error('Error sending tender fee payment email:', emailError);
+        }
       }
 
       return res.status(200).json({
