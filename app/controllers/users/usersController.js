@@ -3620,6 +3620,19 @@ publish_profile_reviews: async (req, res, next) => {
         let categories = [];
         let hotels = [];
         let invoiceResult = null;
+        // Helper to build an absolute download URL (email clients hide non-absolute links)
+        const buildInvoiceDownloadUrl = (rawUrl) => {
+          if (!rawUrl) return null;
+          const hasProtocol = rawUrl.startsWith('http://') || rawUrl.startsWith('https://');
+          if (hasProtocol) return rawUrl;
+          const base =
+            (Config && Config.download_url) ||
+            process.env.FRONT_END_WEBSITE ||
+            '';
+          return base
+            ? `${base.replace(/\/$/, '')}/${rawUrl.replace(/^\//, '')}`
+            : null;
+        };
 
         // Send confirmation email (same as live webhook)
         try {
@@ -3660,6 +3673,15 @@ publish_profile_reviews: async (req, res, next) => {
               company,
               subscriptions
             );
+            const invoiceDownloadUrl =
+              buildInvoiceDownloadUrl(
+                invoiceResult && invoiceResult.downloadUrl
+              ) ||
+              buildInvoiceDownloadUrl(
+                payment && payment.invoice_file
+                  ? `${Config.download_url}/app/uploads/invoice_file/${payment.invoice_file}`
+                  : null
+              );
 
             const emailHeader = `<h2>Dear ${user.name},</h2>`;
             const emailContent = `
@@ -3701,12 +3723,12 @@ publish_profile_reviews: async (req, res, next) => {
                 </p>
               </div>
               
-              ${invoiceResult && invoiceResult.downloadUrl ? `
+              ${invoiceDownloadUrl ? `
               <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #2196f3;">
                 <p style="margin: 0 0 10px; font-weight: 600; color: #1565c0;">
                   <strong>Invoice Generated</strong>
                 </p>
-                <a href="${invoiceResult.downloadUrl}" 
+                <a href="${invoiceDownloadUrl}" 
                    style="background-color: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
                   Download Invoice
                 </a>
@@ -3718,7 +3740,7 @@ publish_profile_reviews: async (req, res, next) => {
               </p>
               
               <div style="text-align: center; margin: 30px 0;">
-                <a href="${process.env.FRONT_END_WEBSITE}/dashboard" 
+                <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor" 
                    style="background-color: #158993; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
                   Go to Dashboard
                 </a>
@@ -3762,7 +3784,7 @@ publish_profile_reviews: async (req, res, next) => {
                 expiry_date: expiryDateFormatted,
                 categories,
                 hotels,
-                invoice_url: invoiceResult && invoiceResult.downloadUrl ? invoiceResult.downloadUrl : null,
+                invoice_url: invoiceDownloadUrl,
                 order_id: order_id,
                 payment_id: razorpay_payment_id || null
               }
