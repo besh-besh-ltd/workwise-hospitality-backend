@@ -18,7 +18,7 @@ import rfqModel from '../../models/rfqModel.js';
  */
 export const generateAwardDocument = async (rfq_product_id, txContext = null) => {
   const t = txContext || db;
-  
+
   try {
     // Get RFQ product details using model
     const productData = await rfqModel.getRfqProductDetailsForArc(rfq_product_id, t);
@@ -34,9 +34,9 @@ export const generateAwardDocument = async (rfq_product_id, txContext = null) =>
 
     // Get finalized vendor using model
     const finalization = await rfqModel.getFinalizedVendorForProduct(
-      productData.rfq_id, 
-      productData.product_variant_id, 
-      productData.variant, 
+      productData.rfq_id,
+      productData.product_variant_id,
+      productData.variant,
       t
     );
 
@@ -56,9 +56,9 @@ export const generateAwardDocument = async (rfq_product_id, txContext = null) =>
 
     // Get product specs using model
     const productSpecs = await rfqModel.getRfqProductSpecs(
-      productData.rfq_id, 
-      productData.product_variant_id, 
-      productData.variant, 
+      productData.rfq_id,
+      productData.product_variant_id,
+      productData.variant,
       ['Quantity', 'Unit'],
       t
     );
@@ -120,7 +120,7 @@ export const generateAwardDocument = async (rfq_product_id, txContext = null) =>
 
     // Load Handlebars template
     const templatePath = path.join(process.cwd(), 'app', 'helper', 'arcAwardTemplate.hbs');
-    
+
     if (!fs.existsSync(templatePath)) {
       throw new Error(`ARC template not found at ${templatePath}`);
     }
@@ -148,7 +148,7 @@ export const generateAwardDocument = async (rfq_product_id, txContext = null) =>
 
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'networkidle0' });
-    
+
     await page.pdf({
       path: fullPath,
       format: 'A4',
@@ -165,10 +165,9 @@ export const generateAwardDocument = async (rfq_product_id, txContext = null) =>
       absolutePath: fullPath
     };
   } catch (error) {
-    console.error('generateAwardDocument error:', error);
-    return { 
-      ok: false, 
-      error: error.message || 'Failed to generate ARC document' 
+    return {
+      ok: false,
+      error: error.message || 'Failed to generate ARC document'
     };
   }
 };
@@ -182,7 +181,7 @@ export const generateAwardDocument = async (rfq_product_id, txContext = null) =>
  */
 export const sendAwardDocumentToVendor = async (rfq_product_id, document_url, txContext = null) => {
   const t = txContext || db;
-  
+
   try {
     // Get product details using model
     const productData = await rfqModel.getRfqProductDetailsForArc(rfq_product_id, t);
@@ -213,7 +212,7 @@ export const sendAwardDocumentToVendor = async (rfq_product_id, document_url, tx
     // Get buyer company details
     const rfqData = await rfqModel.getRfqById(productData.rfq_id, null, null, false);
     const rfq = rfqData && rfqData.length > 0 ? rfqData[0] : null;
-    
+
     let company = null;
     if (rfq && rfq.created_by) {
       const companyData = await userModel.getCompanyDetail(rfq.created_by);
@@ -265,7 +264,7 @@ export const sendAwardDocumentToVendor = async (rfq_product_id, document_url, tx
     const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
     // Get vendor SPOC list
-    const spocList = await vendorModel.getSpocDetails(finalization.vendor_id);
+    await vendorModel.getSpocDetails(finalization.vendor_id);
 
     const mailRecipients = {
       from: company ? `${company.company_name} <hello@letsworkwise.com>` : 'Workwise <hello@letsworkwise.com>',
@@ -275,10 +274,7 @@ export const sendAwardDocumentToVendor = async (rfq_product_id, document_url, tx
     };
 
     await sendMail(mailRecipients);
-
-    console.log(`ARC award document email sent to vendor ${vendor.email} for product ${rfq_product_id}`);
   } catch (error) {
-    console.error('sendAwardDocumentToVendor error:', error);
     throw error;
   }
 };

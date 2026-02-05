@@ -25,7 +25,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, submitApprovalAction, getApprovalInstanceById, cancelApprovalInstance } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, submitApprovalAction, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover } from '../../models/generalModel.js';
 import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
@@ -3347,6 +3347,122 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     console.log(`Cancelled existing approval instance ${instance.id} for ${entityType} ${rfqId}`);
   }
 
+  // Check if the creator is the final approver
+  // If yes, auto-approve and set status to READY_TO_PUBLISH immediately
+  const isFinalApprover = await checkIfUserIsFinalApprover(
+    userId,
+    entityType,
+    rfq.hospitality_company_id,
+    rfq.hotel_id,
+    rfq.department_id,
+    txContext
+  );
+
+  if (isFinalApprover) {
+    // Creator is the final approver - auto-approve immediately
+    console.log(`Tender/RFQ ${rfqId} created by final approver ${userId} - auto-approving immediately`);
+
+    // Create an approved approval instance for audit trail
+    const policy = await dbContext.oneOrNone(`
+      SELECT p.*,
+             CASE
+               WHEN $4 IS NOT NULL AND $3 IS NOT NULL THEN 3
+               WHEN $3 IS NOT NULL THEN 2
+               ELSE 1
+             END as specificity_score
+      FROM tbl_approval_policies p
+      WHERE entity_type = $1
+        AND hospitality_company_id = $2
+        AND is_active = true
+        AND (
+          ($4 = department_id AND $3 = hotel_id)
+          OR (department_id IS NULL AND $3 = hotel_id)
+          OR (department_id IS NULL AND hotel_id IS NULL)
+        )
+      ORDER BY specificity_score DESC
+      LIMIT 1
+    `, [entityType, rfq.hospitality_company_id, rfq.hotel_id, rfq.department_id]);
+
+    if (!policy) {
+      throw new Error(`No approval policy found for ${entityType} in this scope`);
+    }
+
+    // Create approved instance for audit trail
+    const approvedInstance = await dbContext.one(`
+      INSERT INTO tbl_approval_instances
+      (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, metadata, completed_at)
+      VALUES ($1, $2, $3, 'APPROVED', 0, $4, $5, $6, $7, $8, NOW()) RETURNING *
+    `, [
+      entityType,
+      rfqId,
+      policy.id,
+      userId,
+      rfq.hospitality_company_id,
+      rfq.hotel_id,
+      rfq.department_id,
+      JSON.stringify({
+        rfq_number: rfq.rfq_no,
+        is_tender: rfq.is_tender,
+        company_name: rfq.company_name,
+        auto_approved: true,
+        reason: 'Created by final approver'
+      })
+    ]);
+
+    // Log auto-approval action
+    await dbContext.none(
+      `INSERT INTO tbl_approval_actions
+       (approval_instance_id, approver_user_id, action, comment)
+       VALUES ($1, $2, 'APPROVE', $3)`,
+      [approvedInstance.id, userId, 'Auto-approved: Created by final approver']
+    );
+
+    // Record lifecycle event for auto-approval
+    await recordLifecycleEvent({
+      entity_type: entityType,
+      entity_id: rfqId,
+      stage: 'APPROVED',
+      action: 'AUTO_APPROVE',
+      performed_by: userId,
+      metadata: {
+        approval_instance_id: approvedInstance.id,
+        rfq_no: rfq.rfq_no,
+        reason: 'Created by final approver'
+      },
+      txContext: txContext
+    });
+
+    // Update RFQ status to READY_TO_PUBLISH (4) directly
+    await dbContext.none(`
+      UPDATE tbl_rfq
+      SET status = 4
+      WHERE id = $1
+    `, [rfqId]);
+
+    // Schedule the RFQ to be published at tender_publish_date
+    const rfqDetails = await dbContext.oneOrNone(`
+      SELECT tender_publish_date, created_by FROM tbl_rfq WHERE id = $1
+    `, [rfqId]);
+
+    if (rfqDetails) {
+      await scheduleRfqPublish({
+        id: rfqId,
+        rfq_no: rfq.rfq_no,
+        is_tender: rfq.is_tender,
+        tender_publish_date: rfqDetails.tender_publish_date,
+        created_by: rfqDetails.created_by
+      });
+    }
+
+    return {
+      instance: approvedInstance,
+      policy: { id: policy.id, entity_type: policy.entity_type },
+      steps: [],
+      totalSteps: 0,
+      autoApproved: true
+    };
+  }
+
   // Let errors propagate (especially "no policy found" errors)
   const result = await createApprovalInstance({
     entity_type: entityType,
@@ -4311,7 +4427,7 @@ const rfqController = {
 
       // Wrap RFQ update, duplication, and approval in a single transaction
       // If any step fails (e.g., no approval policy), everything rolls back
-      const { responseUpdate, allRfqIds, isHospitalityRfq } = await db.tx(async (t) => {
+      const { responseUpdate, allRfqIds, isHospitalityRfq, hasAutoApproved } = await db.tx(async (t) => {
         // Look up hospitality_company_id from the hotel
         let hospitality_company_id = null;
         if (hotel_id) {
@@ -4345,16 +4461,23 @@ const rfqController = {
         // IMPORTANT: For hospitality RFQs, approval policy is REQUIRED
         // If no policy exists, this will throw and rollback the entire transaction
         const rfqIds = duplicationResult?.allRfqIds || [rfq_id];
-        await Promise.all(
+        let hasAutoApproved = false;
+        const approvalResults = await Promise.all(
           rfqIds.map(async (id) => {
             const approvalResult = await startApprovalForRfq(id, user_id, t);
             
-            // Record lifecycle: SUBMITTED for approval
+            // Track if any RFQ was auto-approved
+            if (approvalResult?.autoApproved) {
+              hasAutoApproved = true;
+            }
+            
+            // Record lifecycle: SUBMITTED for approval (only if not auto-approved)
+            // Auto-approved RFQs already have APPROVED lifecycle event recorded
             const rfqData = await t.oneOrNone(
               `SELECT is_tender FROM tbl_rfq WHERE id = $1`,
               [id]
             );
-            if (rfqData && approvalResult) {
+            if (rfqData && approvalResult && !approvalResult.autoApproved) {
               await recordLifecycleEvent({
                 entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
                 entity_id: id,
@@ -4373,7 +4496,7 @@ const rfqController = {
         // PUBLISHED lifecycle event will be recorded by the scheduler after approval completes
         // and tender_publish_date is reached
 
-        return { responseUpdate: updateResult, allRfqIds: rfqIds };
+        return { responseUpdate: updateResult, allRfqIds: rfqIds, hasAutoApproved };
       });
 
       // -------------------
@@ -4386,28 +4509,46 @@ const rfqController = {
         rfq_id: rfq_id,
         rfq_no: responseUpdate[0]?.rfq_no
       };
-      // Notify buyer that RFQ is submitted for approval
-      whatsappNotificationAISensy.buyerCreatesRFQNotification(buyerMsgPayload);
-
+      
+      // Check final RFQ status to determine message
+      const finalRfqStatus = await rfqModel.getRFQDetails(rfq_id);
+      const isReadyToPublish = finalRfqStatus?.[0]?.status === 4;
+      
+      if (hasAutoApproved || isReadyToPublish) {
+        // RFQ was auto-approved (created by final approver)
+        whatsappNotificationAISensy.buyerCreatesRFQNotification(buyerMsgPayload);
+        return res
+          .status(200)
+          .json({
+            status: 1,
+            data: responseUpdate[0],
+            pending_approval: false,
+            auto_approved: true,
+            message: 'Tender created and approved instantly (created by final approver). Ready for publishing.'
+          });
+      } else {
+        // RFQ requires approval
+        whatsappNotificationAISensy.buyerCreatesRFQNotification(buyerMsgPayload);
+        return res
+          .status(200)
+          .json({
+            status: 1,
+            data: responseUpdate[0],
+            pending_approval: true,
+            message: 'RFQ submitted for approval. Vendors will be notified after approval and publishing.'
+          });
+      }
+    } catch (error) {
+      logError(error);
       return res
-        .status(200)
+        .status(400)
         .json({
-          status: 1,
-          data: responseUpdate[0],
-          pending_approval: true,
-          message: 'RFQ submitted for approval. Vendors will be notified after approval and publishing.'
+          status: 2,
+          message: error.message || 'An error occurred while creating RFQ',
+          details: error || [],
         })
         .end();
-    } catch (error) {
-     return res
-       .status(400)
-       .json({
-         status: 2,
-         message: error.message || 'An error occurred while creating RFQ',
-         details: error || [],
-       })
-       .end();
-      }
+    }
   },
 
   update: async (req, res, next) => {
