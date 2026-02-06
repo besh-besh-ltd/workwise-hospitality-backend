@@ -7875,7 +7875,7 @@ ORDER BY m.created_at;
                     deduped.rfq_product_id,
                     JSON_AGG(
                             JSON_BUILD_OBJECT(
-                                    'vendor_id', COALESCE(vr.new_vendor_id, deduped.vendor_id),
+                                    'vendor_id', deduped.vendor_id,
                                     'vendor_name', deduped.vendor_name,
                                     'vendor_email', deduped.vendor_email,
                                     'is_cleared', deduped.is_cleared,
@@ -7887,7 +7887,12 @@ ORDER BY m.created_at;
                                     'has_marks', deduped.has_marks,
                                     'quote_price', deduped.quote_price,
                                     'rank', deduped.rank,
-                                    'is_replaced', (vr.new_vendor_id IS NOT NULL)
+                                    'is_replaced', EXISTS (
+                                        SELECT 1 FROM vendor_replacements vrx
+                                        WHERE vrx.rfq_id = deduped.rfq_id
+                                          AND vrx.rfq_product_id = deduped.rfq_product_id
+                                          AND vrx.new_vendor_id = deduped.vendor_id
+                                    )
                             )
                             ORDER BY deduped.rank
                     ) AS vendors
@@ -7947,12 +7952,24 @@ ORDER BY m.created_at;
                                                   AND tqi.product_variant_id = trp.product_variant_id
                                                   AND tqi.variant = trp.variant
                       ) deduped
-                      LEFT JOIN vendor_replacements vr
-                                ON deduped.rfq_id = vr.rfq_id
-                                    AND deduped.rfq_product_id = vr.rfq_product_id
-                                    AND deduped.vendor_id = vr.old_vendor_id
-                      WHERE deduped.row_num = 1  -- ✅ This removes all duplicates
-                          AND deduped.rank <= 5  -- ✅ Only L1-L5 vendors
+                      WHERE deduped.row_num = 1
+                          AND (
+                              -- L1-L5 vendors that have NOT been replaced
+                              (deduped.rank <= 5 AND NOT EXISTS (
+                                  SELECT 1 FROM vendor_replacements vrx
+                                  WHERE vrx.rfq_id = deduped.rfq_id
+                                    AND vrx.rfq_product_id = deduped.rfq_product_id
+                                    AND vrx.old_vendor_id = deduped.vendor_id
+                              ))
+                              OR
+                              -- Replacement vendors (included regardless of rank)
+                              EXISTS (
+                                  SELECT 1 FROM vendor_replacements vrx
+                                  WHERE vrx.rfq_id = deduped.rfq_id
+                                    AND vrx.rfq_product_id = deduped.rfq_product_id
+                                    AND vrx.new_vendor_id = deduped.vendor_id
+                              )
+                          )
                 GROUP BY deduped.rfq_id, deduped.rfq_product_id
             )
 
@@ -11401,7 +11418,7 @@ ORDER BY tq.timestamp DESC;
        (tbl_rfq_product_tech_evaluation_id, round_number, status, created_by, created_at)
        VALUES ($1, $2, 'PENDING', $3, NOW())
        ON CONFLICT (tbl_rfq_product_tech_evaluation_id, round_number)
-       DO UPDATE SET updated_at = NOW()
+       DO UPDATE SET status = EXCLUDED.status
        RETURNING *`,
       [tech_evaluation_id, round_number, created_by]
     );
@@ -11587,15 +11604,18 @@ ORDER BY tq.timestamp DESC;
         tu.name AS vendor_name,
         tu.email AS vendor_email,
         COALESCE(tc.company_name, tu.organization_name) AS company_name,
+        COUNT(vr.buyer_marks) AS evaluated_clauses_count,
         COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
         COALESCE(SUM(c.weightage), 0) AS total_weightage,
         CASE
+          WHEN COUNT(vr.buyer_marks) = 0 THEN NULL
           WHEN COALESCE(SUM(c.weightage), 0) > 0
           THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
           ELSE 0
         END AS calculated_score,
         $2::NUMERIC AS minimum_passing_score,
         CASE
+          WHEN COUNT(vr.buyer_marks) = 0 THEN NULL
           WHEN COALESCE(SUM(c.weightage), 0) > 0
           THEN CASE
             WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE($2::NUMERIC, 0)
@@ -11737,9 +11757,17 @@ ORDER BY tq.timestamp DESC;
   getAllEvaluatedVendorIds: async (tech_evaluation_id, txContext = null) => {
     const dbContext = txContext || db;
     const result = await dbContext.any(
-      `SELECT DISTINCT vendor_id
-       FROM tbl_rfq_product_tech_evaluation_cleared_vendors
-       WHERE tbl_rfq_product_tech_evaluation_id = $1`,
+      `SELECT DISTINCT vendor_id FROM (
+         SELECT vendor_id
+         FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+         WHERE tbl_rfq_product_tech_evaluation_id = $1
+         UNION
+         SELECT vr.vendor_id
+         FROM tbl_rfq_product_tech_evaluation_vendors_response vr
+         JOIN tbl_rfq_product_tech_evaluation_clauses c
+           ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+         WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+       ) AS all_vendors`,
       [tech_evaluation_id]
     );
     return result.map(r => r.vendor_id);

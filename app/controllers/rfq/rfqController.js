@@ -3648,7 +3648,14 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
   // Prepare vendor data for metadata
   const passedVendors = vendorScores.filter(v => v.is_passed === true);
   const failedVendors = vendorScores.filter(v => v.is_passed === false);
+  const notEvaluatedVendors = vendorScores.filter(v => v.is_passed === null || v.is_passed === undefined);
+  const evaluatedVendors = vendorScores.filter(v => v.is_passed !== null && v.is_passed !== undefined);
   const currentRound = techEval.current_round || 1;
+
+  // Ensure at least one vendor has actually been evaluated (has buyer marks)
+  if (evaluatedVendors.length === 0) {
+    throw new Error('No vendors have been evaluated for this technical evaluation. Please score at least one vendor before submitting.');
+  }
 
   // Create round record FIRST to get round_id
   const round = await rfqModel.createTechEvalRound(
@@ -3658,14 +3665,24 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     dbContext
   );
 
-  // Prepare vendors metadata for approval
-  const vendorsMetadata = vendorScores.map(v => ({
+  // Prepare vendors metadata for approval (only include evaluated vendors)
+  const vendorsMetadata = evaluatedVendors.map(v => ({
     vendor_id: v.vendor_id,
     vendor_name: v.vendor_name || v.company_name,
     vendor_email: v.vendor_email,
     calculated_score: parseFloat(v.calculated_score) || 0,
     is_passed: v.is_passed,
-    status: v.is_passed ? 'PASSED' : 'FAILED'
+    status: v.is_passed === true ? 'PASSED' : 'FAILED'
+  }));
+
+  // Prepare not-evaluated vendors metadata (for informational purposes)
+  const notEvaluatedMetadata = notEvaluatedVendors.map(v => ({
+    vendor_id: v.vendor_id,
+    vendor_name: v.vendor_name || v.company_name,
+    vendor_email: v.vendor_email,
+    calculated_score: null,
+    is_passed: null,
+    status: 'NOT_EVALUATED'
   }));
 
   // Create approval instance with round_id as entity_id
@@ -3687,6 +3704,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
       evaluation_round: currentRound,
       minimum_passing_score: techEval.minimum_passing_score || 0,
       vendors: vendorsMetadata,
+      not_evaluated_vendors: notEvaluatedMetadata,
       passed_vendors: passedVendors.map(v => ({
         vendor_id: v.vendor_id,
         vendor_name: v.vendor_name || v.company_name,
@@ -3698,9 +3716,10 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
         calculated_score: parseFloat(v.calculated_score) || 0
       })),
       summary: {
-        total_evaluated: vendorScores.length,
+        total_evaluated: evaluatedVendors.length,
         passed_count: passedVendors.length,
-        failed_count: failedVendors.length
+        failed_count: failedVendors.length,
+        not_evaluated_count: notEvaluatedVendors.length
       }
     },
     txContext
@@ -3713,7 +3732,8 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     submitted_at: new Date(),
     vendors_evaluated: vendorsMetadata,
     passed_count: passedVendors.length,
-    failed_count: failedVendors.length
+    failed_count: failedVendors.length,
+    not_evaluated_count: notEvaluatedVendors.length
   }, dbContext);
 
   // Return result with round info
@@ -13395,7 +13415,7 @@ getClauses: async (req, res) => {
       if (error.message?.includes('No vendors have been evaluated')) {
         return res.status(400).json({
           status: 0,
-          message: 'No vendors have been evaluated. Please evaluate vendors before submitting for approval.'
+          message: error.message || 'No vendors have been evaluated. Please score at least one vendor before submitting for approval.'
         });
       }
 
