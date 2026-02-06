@@ -11440,7 +11440,7 @@ ORDER BY tq.timestamp DESC;
        VALUES ($1, $2, 'PENDING', $3, NOW())
        ON CONFLICT (tbl_rfq_product_tech_evaluation_id, round_number)
        DO UPDATE SET status = EXCLUDED.status
-        DO UPDATE SET created_at = tbl_tech_evaluation_rounds.created_at
+       DO UPDATE SET created_at = EXCLUDED.created_at
        RETURNING *`,
       [tech_evaluation_id, round_number, created_by]
     );
