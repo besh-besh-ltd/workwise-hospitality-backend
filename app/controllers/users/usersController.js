@@ -3620,6 +3620,7 @@ publish_profile_reviews: async (req, res, next) => {
         let categories = [];
         let hotels = [];
         let invoiceResult = null;
+        let invoiceDownloadUrl = null;
         // Helper to build an absolute download URL (email clients hide non-absolute links)
         const buildInvoiceDownloadUrl = (rawUrl) => {
           if (!rawUrl) return null;
@@ -3673,7 +3674,7 @@ publish_profile_reviews: async (req, res, next) => {
               company,
               subscriptions
             );
-            const invoiceDownloadUrl =
+            invoiceDownloadUrl =
               buildInvoiceDownloadUrl(
                 invoiceResult && invoiceResult.downloadUrl
               ) ||
