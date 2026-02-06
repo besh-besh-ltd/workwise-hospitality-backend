@@ -71,7 +71,7 @@ export const createSchedule = async ({
 
   // base request shared by both create & update paths
   const baseParams = {
-    GroupName: process.env.GroupName,
+    GroupName: process.env.GroupName || 'workwise-schedules',
     Name: scheduleName,
     // run exactly once at() expression
     ScheduleExpression: `at(${isoWithoutMs})`,
@@ -119,7 +119,7 @@ export const createSchedule = async ({
 
 // Use separate group for RFQ publish schedules if configured, otherwise use existing group
 // Schedule names are unique (rfqPublish-{id} vs auction-rfq-{id}-{vendor}) so no conflicts
-const RFQ_PUBLISH_GROUP = process.env.RFQ_PUBLISH_GROUP_NAME || process.env.GroupName;
+const RFQ_PUBLISH_GROUP = process.env.RFQ_PUBLISH_GROUP_NAME || process.env.GroupName || 'workwise-rfq-schedules';
 
 /**
  * Create schedule specifically for RFQ publishing
@@ -212,7 +212,7 @@ export const deleteSchedule = async (rfq_id , type , vendor_id = "") => {
   const scheduleName = `${type}-rfq-${rfq_id}-${vendor_id}`;
   const params = {
     Name: scheduleName,
-    GroupName: process.env.GroupName || "default", // same group you used at creation
+    GroupName: process.env.GroupName || "workwise-schedules", // same group you used at creation
     ClientToken: randomUUID(),                     // idempotency
   };
 
