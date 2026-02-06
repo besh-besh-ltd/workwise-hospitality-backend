@@ -2327,45 +2327,47 @@ const saveRfqDraft = async (user_id, reqBody) => {
     rfqData.project_id = null;
   }
 
-  let rfqDetail = await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id);
-  if(rfqDetail)
-    rfqDetail = rfqDetail[0]
-  else
-    rfqDetail = {};
-
-  // Persist hotel selection (Create Tender: selected hotels must be saved)
-  const hotelIdsToSync = Array.isArray(hotel_ids) ? hotel_ids : [];
-  if (hotelIdsToSync.length > 0) {
-    await hospitalityModel.reconcileRFQHotels(rfq_id, hotelIdsToSync, user_id);
-  }
-
-  // Handle terms update
-  if (termsChanged && terms && terms.length > 0) {
-      // First delete existing terms only if terms have changed
-      await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id });
-      
-      // Then insert new terms
-      const rfqTerms = terms.map(term => ({ 
-          rfq_id, 
-          terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
-      }));
-      await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map');
-  }
-
-  if (termFilesChanged && term_and_condition_files) {
-    // First delete existing term files only if term files have changed
-    await rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' })
-
-    const rfqFiles = term_and_condition_files.map(url => ({
-        rfq_id,
-        file_type: 'term_and_condition',
-        file_url: url
-    }));
-    if(term_and_condition_files.length > 0)
-      await rfqModel.insertArray(rfqFiles, ['rfq_id', 'file_type', 'file_url'], 'tbl_rfq_files');
-  }
-
+  let rfqDetail = null;
+  
   await db.tx(async (t) => {
+    rfqDetail = await rfqModel.updateWithTimestamp('tbl_rfq', rfqData, rfq_id, t);
+    if(rfqDetail)
+      rfqDetail = rfqDetail[0]
+    else
+      rfqDetail = {};
+  
+    // Persist hotel selection (Create Tender: selected hotels must be saved)
+    const hotelIdsToSync = Array.isArray(hotel_ids) ? hotel_ids : [];
+    if (hotelIdsToSync.length > 0) {
+      await hospitalityModel.reconcileRFQHotels(rfq_id, hotelIdsToSync, user_id);
+    }
+  
+    // Handle terms update
+    if (termsChanged && terms && terms.length > 0) {
+        // First delete existing terms only if terms have changed
+        await rfqModel.deleteWithReturnIds('tbl_rfq_terms_map', { rfq_id }, t);
+        
+        // Then insert new terms
+        const rfqTerms = terms.map(term => ({ 
+            rfq_id, 
+            terms_id: typeof term.id === 'number' ? term.id : parseInt(term.id)
+        }));
+        await rfqModel.insertArray(rfqTerms, ['rfq_id', 'terms_id'], 'tbl_rfq_terms_map', t);
+    }
+  
+    if (termFilesChanged && term_and_condition_files) {
+      // First delete existing term files only if term files have changed
+      await rfqModel.deleteWithReturnIds('tbl_rfq_files', { rfq_id, file_type: 'term_and_condition' }, t);
+  
+      const rfqFiles = term_and_condition_files.map(url => ({
+          rfq_id,
+          file_type: 'term_and_condition',
+          file_url: url
+      }));
+      if(term_and_condition_files.length > 0)
+        await rfqModel.insertArray(rfqFiles, ['rfq_id', 'file_type', 'file_url'], 'tbl_rfq_files', t);
+    }
+    
     const products = updatableData?.products;
     const updatableVendors = updatableData?.vendors;
 
@@ -3451,7 +3453,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
         is_tender: rfq.is_tender,
         tender_publish_date: rfqDetails.tender_publish_date,
         created_by: rfqDetails.created_by
-      });
+      }, dbContext);
     }
 
     return {
@@ -3588,7 +3590,7 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       is_tender: rfq.is_tender,
       tender_publish_date: rfq.tender_publish_date,
       created_by: rfq.created_by
-    });
+    }, t);
 
     // TODO: Send notification to RFQ creator that approval is complete
 
