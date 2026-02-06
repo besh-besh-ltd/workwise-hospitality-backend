@@ -11769,63 +11769,59 @@ ORDER BY tq.timestamp DESC;
   },
 
   /**
-   * Get reserve vendors in the tech eval who are NOT yet displayed in the grid.
-   * These are vendors with response records but WITHOUT a tbl_rfq_product_vendors record
-   * (i.e., they were set up for tech eval but are "reserve" vendors beyond the initial L1-L5).
-   * Used to fill slots when a displayed vendor fails and needs replacement.
+   * Get the next-in-line replacement vendor from the tech eval pool.
+   * Picks the HIGHEST-ranked pending vendor (highest rfq_product_vendor_id = last in L-ranking).
+   * When L1 fails from a pool of L1-L6, this returns L6 (the next in line after L5).
    * @param {number} tech_evaluation_id - Tech evaluation ID
    * @param {number} rfq_id - RFQ ID
    * @param {number} rfq_product_id - RFQ Product ID
-   * @param {Array<number>} exclude_vendor_ids - Vendor IDs to exclude (already evaluated)
+   * @param {Array<number>} exclude_vendor_ids - Vendor IDs to exclude (already evaluated/scored)
    * @param {number} limit - Max vendors to return
    * @param {Object} txContext - Optional transaction context
-   * @returns {Promise<Array>} - Array of reserve vendors (without product-vendor records)
+   * @returns {Promise<Array>} - Array of replacement vendors sorted by highest L-number first
    */
   getReserveTechEvalVendors: async (tech_evaluation_id, rfq_id, rfq_product_id, exclude_vendor_ids = [], limit = 10, txContext = null) => {
     const dbContext = txContext || db;
 
-    // Step 1: Get vendor IDs already displayed in the grid (have product-vendor records for this product)
-    const gridVendors = await dbContext.any(
-      `SELECT rpv.user_id AS vendor_id
-       FROM tbl_rfq_product_vendors rpv
-       JOIN tbl_rfq_products rp ON rp.id = $1
-       WHERE rpv.rfq_id = $2
-         AND rpv.product_variant_id = rp.product_variant_id
-         AND COALESCE(rpv.variant, 0) = COALESCE(rp.variant, 0)`,
-      [rfq_product_id, rfq_id]
-    );
-    const gridVendorIds = gridVendors.map(v => v.vendor_id);
-
-    // Step 2: Combine grid vendors + already-evaluated vendors into one exclude list
-    const allExcludeIds = [...new Set([...gridVendorIds, ...exclude_vendor_ids])];
-
-    // Step 3: Find vendors who have tech eval responses but are NOT in the exclude list
+    // Find pending vendors (have tech eval responses, not yet scored) sorted by
+    // rfq_product_vendor_id DESC so the highest-ranked (L6, L7, etc.) comes first.
+    // This ensures when L1 fails, we pick L6 (next in line) not L3 (already in top 5).
     let query = `
       SELECT DISTINCT ON (vr.vendor_id)
         vr.vendor_id,
         COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name,
         tu.email AS vendor_email,
-        NULL::integer AS rfq_product_vendor_id
+        rpv.id AS rfq_product_vendor_id
       FROM tbl_rfq_product_tech_evaluation_vendors_response vr
       JOIN tbl_rfq_product_tech_evaluation_clauses c
         ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
       JOIN tbl_users tu ON tu.id = vr.vendor_id
       LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+      JOIN tbl_rfq_products rp ON rp.id = $2
+      LEFT JOIN tbl_rfq_product_vendors rpv ON rpv.rfq_id = $3
+        AND rpv.user_id = vr.vendor_id
+        AND rpv.product_variant_id = rp.product_variant_id
+        AND COALESCE(rpv.variant, 0) = COALESCE(rp.variant, 0)
       WHERE c.tbl_rfq_product_tech_evaluation_id = $1
     `;
 
-    const params = [tech_evaluation_id];
+    const params = [tech_evaluation_id, rfq_product_id, rfq_id];
 
-    if (allExcludeIds.length > 0) {
-      const placeholders = allExcludeIds.map((_, idx) => `$${params.length + idx + 1}`).join(',');
+    if (exclude_vendor_ids.length > 0) {
+      const placeholders = exclude_vendor_ids.map((_, idx) => `$${params.length + idx + 1}`).join(',');
       query += ` AND vr.vendor_id NOT IN (${placeholders})`;
-      params.push(...allExcludeIds);
+      params.push(...exclude_vendor_ids);
     }
 
-    query += ` ORDER BY vr.vendor_id LIMIT $${params.length + 1}`;
+    // Use a subquery to first get distinct vendors, then sort by rpv.id DESC
+    const wrappedQuery = `
+      SELECT * FROM (${query} ORDER BY vr.vendor_id) sub
+      ORDER BY sub.rfq_product_vendor_id DESC NULLS LAST
+      LIMIT $${params.length + 1}
+    `;
     params.push(limit);
 
-    return dbContext.any(query, params);
+    return dbContext.any(wrappedQuery, params);
   },
 
   /**

@@ -4011,8 +4011,24 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
       const vendorsNeeded = requiredPassedVendors - totalPassedVerified;
       const replacementsNeeded = Math.min(failedVendors.length, vendorsNeeded);
 
-      // Get all evaluated vendor IDs to exclude
-      const evaluatedVendorIds = await rfqModel.getAllEvaluatedVendorIds(techEval.id, t);
+      // Build exclude list from current round's scored vendors only.
+      // Do NOT use getAllEvaluatedVendorIds (queries cleared_vendors which includes
+      // reserve vendors like L6 that were individually accepted but not yet in the grid).
+      // Only exclude vendors actively scored this round (L1-L5).
+      const currentRoundScoredIds = vendorScores
+        .filter(v => v.is_passed === true || v.is_passed === false)
+        .map(v => v.vendor_id);
+
+      // Also exclude vendors verified in previous rounds (multi-round support)
+      const previousRoundVendors = evaluation_round > 1
+        ? await t.any(
+            `SELECT DISTINCT vendor_id FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+             WHERE tbl_rfq_product_tech_evaluation_id = $1 AND is_verified = true AND evaluation_round < $2`,
+            [techEval.id, evaluation_round]
+          ).then(rows => rows.map(r => r.vendor_id))
+        : [];
+
+      const evaluatedVendorIds = [...new Set([...currentRoundScoredIds, ...previousRoundVendors])];
 
       // First: look for reserve vendors in the tech eval (have responses but NOT in the grid yet)
       let nextVendors = await rfqModel.getReserveTechEvalVendors(
@@ -4024,7 +4040,8 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
         t
       );
 
-      console.log(`[TECH-EVAL-REPLACE] evaluatedVendorIds:`, evaluatedVendorIds);
+      console.log(`[TECH-EVAL-REPLACE] currentRoundScoredIds:`, currentRoundScoredIds);
+      console.log(`[TECH-EVAL-REPLACE] evaluatedVendorIds (exclude list):`, evaluatedVendorIds);
       console.log(`[TECH-EVAL-REPLACE] Reserve vendors found:`, nextVendors?.length, nextVendors?.map(v => ({ id: v.vendor_id, name: v.vendor_name, rpvId: v.rfq_product_vendor_id })));
 
       // Fallback: look for external vendors from quotes if not enough pending vendors
@@ -7395,11 +7412,15 @@ const rfqController = {
         }
 
         // Clarification period validation for tenders:
-        // - Vendors cannot submit quotes before the clarification date ends.
+        // Use DATE-only comparison to avoid timezone mismatches.
+        // Vendors cannot submit quotes while today is on or before the vendor_clarification_date.
         if (rfqDetails[0].is_tender === 1 && rfqDetails[0].vendor_clarification_date) {
-          const clarificationEnd = new Date(rfqDetails[0].vendor_clarification_date);
-          const now = new Date();
-          if (!isNaN(clarificationEnd.getTime()) && now < clarificationEnd) {
+          const clarificationEndDateStr = String(
+            rfqDetails[0].vendor_clarification_date
+          ).slice(0, 10); // 'YYYY-MM-DD'
+          const todayDateStr = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
+
+          if (clarificationEndDateStr && todayDateStr <= clarificationEndDateStr) {
             return res.status(400).json({
               status: 3,
               message:
