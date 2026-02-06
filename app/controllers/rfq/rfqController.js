@@ -7411,16 +7411,37 @@ const rfqController = {
           tenderPaymentId = paymentRow.id;
         }
 
-        // Clarification period validation for tenders:
-        // Use DATE-only comparison to avoid timezone mismatches.
-        // Vendors cannot submit quotes while today is on or before the vendor_clarification_date.
+        // Clarification period validation for tenders (IST-based).
+        // Treat vendor_clarification_date as an IST datetime and convert to a UTC Date
+        // so that 6:30 PM IST is respected regardless of server timezone.
         if (rfqDetails[0].is_tender === 1 && rfqDetails[0].vendor_clarification_date) {
-          const clarificationEndDateStr = String(
-            rfqDetails[0].vendor_clarification_date
-          ).slice(0, 10); // 'YYYY-MM-DD'
-          const todayDateStr = new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
+          const rawClar = String(rfqDetails[0].vendor_clarification_date).trim();
+          let datePart;
+          let timePart;
 
-          if (clarificationEndDateStr && todayDateStr <= clarificationEndDateStr) {
+          if (rawClar.includes('T')) {
+            [datePart, timePart] = rawClar.split('T');
+          } else if (rawClar.includes(' ')) {
+            [datePart, timePart] = rawClar.split(' ');
+          } else {
+            datePart = rawClar;
+            timePart = '00:00:00';
+          }
+
+          const [year, month, day] = datePart.split('-').map((v) => parseInt(v, 10));
+          const [hourStr, minuteStr, secondStr] = (timePart || '00:00:00').split(':');
+          const hour = parseInt(hourStr || '0', 10);
+          const minute = parseInt(minuteStr || '0', 10);
+          const second = parseInt((secondStr || '0').split('.')[0] || '0', 10);
+
+          const IST_OFFSET_MINUTES = 330; // +05:30
+          const clarificationEnd = new Date(
+            Date.UTC(year, month - 1, day, hour, minute, second) -
+              IST_OFFSET_MINUTES * 60 * 1000
+          );
+
+          const now = new Date();
+          if (!isNaN(clarificationEnd.getTime()) && now < clarificationEnd) {
             return res.status(400).json({
               status: 3,
               message:
