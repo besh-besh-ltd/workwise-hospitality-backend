@@ -3903,12 +3903,14 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
       return;
     }
 
-    // Get tech evaluation record
+    // Get tech evaluation record with product info for vendor replacement
     const techEval = await t.oneOrNone(`
-      SELECT id, rfq_id, tbl_rfq_product_id, minimum_passing_score, current_round,
-             total_passed_verified, required_passed_vendors, is_complete
-      FROM tbl_rfq_product_tech_evaluation
-      WHERE id = $1
+      SELECT te.id, te.rfq_id, te.tbl_rfq_product_id, te.minimum_passing_score, te.current_round,
+             te.total_passed_verified, te.required_passed_vendors, te.is_complete,
+             rp.product_variant_id, rp.variant
+      FROM tbl_rfq_product_tech_evaluation te
+      JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
+      WHERE te.id = $1
     `, [tech_evaluation_id || round.tbl_rfq_product_tech_evaluation_id]);
 
     if (!techEval) {
@@ -4005,20 +4007,43 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
         console.error('Error sending tech eval completion notifications:', notificationError);
       }
     } else if (failedVendors.length > 0) {
-      // Need to auto-replace failed vendors with next L5+ vendors
+      // Need to auto-replace failed vendors
       const vendorsNeeded = requiredPassedVendors - totalPassedVerified;
       const replacementsNeeded = Math.min(failedVendors.length, vendorsNeeded);
 
       // Get all evaluated vendor IDs to exclude
       const evaluatedVendorIds = await rfqModel.getAllEvaluatedVendorIds(techEval.id, t);
 
-      // Get next available vendors (L6, L7, etc.)
-      const nextVendors = await rfqModel.getNextVendorsForProduct(
+      // First: look for reserve vendors in the tech eval (have responses but NOT in the grid yet)
+      let nextVendors = await rfqModel.getReserveTechEvalVendors(
+        techEval.id,
         techEval.rfq_id,
         techEval.tbl_rfq_product_id,
         evaluatedVendorIds,
-        replacementsNeeded
+        replacementsNeeded,
+        t
       );
+
+      console.log(`[TECH-EVAL-REPLACE] evaluatedVendorIds:`, evaluatedVendorIds);
+      console.log(`[TECH-EVAL-REPLACE] Reserve vendors found:`, nextVendors?.length, nextVendors?.map(v => ({ id: v.vendor_id, name: v.vendor_name, rpvId: v.rfq_product_vendor_id })));
+
+      // Fallback: look for external vendors from quotes if not enough pending vendors
+      if (!nextVendors || nextVendors.length < replacementsNeeded) {
+        const allExcludeIds = [
+          ...evaluatedVendorIds,
+          ...(nextVendors || []).map(v => v.vendor_id)
+        ];
+        const remaining = replacementsNeeded - (nextVendors ? nextVendors.length : 0);
+        const externalVendors = await rfqModel.getNextVendorsForProduct(
+          techEval.rfq_id,
+          techEval.tbl_rfq_product_id,
+          allExcludeIds,
+          remaining,
+          t
+        );
+        console.log(`[TECH-EVAL-REPLACE] Fallback external vendors found:`, externalVendors?.length, externalVendors?.map(v => ({ id: v.vendor_id, name: v.vendor_name })));
+        nextVendors = [...(nextVendors || []), ...(externalVendors || [])];
+      }
 
       if (nextVendors && nextVendors.length > 0) {
         // Auto-replace failed vendors
@@ -4032,7 +4057,8 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
             techEval.tbl_rfq_product_id,
             failedVendor.vendor_id,
             newVendor.vendor_id,
-            approver_user_id
+            approver_user_id,
+            t
           );
 
           // Update failed vendor's replaced_by_vendor_id
@@ -4047,7 +4073,17 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
             }, t);
           }
 
-          // Create empty vendor response records for new vendor
+          // Ensure replacement vendor has a product-vendor record (needed for UI display)
+          if (!newVendor.rfq_product_vendor_id) {
+            await t.none(
+              `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, variant, user_id)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT DO NOTHING`,
+              [techEval.rfq_id, techEval.product_variant_id, techEval.variant || 0, newVendor.vendor_id]
+            );
+          }
+
+          // Create empty vendor response records for new vendor (skips if already exist)
           await rfqModel.createEmptyVendorResponses(techEval.id, newVendor.vendor_id, t);
 
           console.log(`Replaced failed vendor ${failedVendor.vendor_id} with ${newVendor.vendor_id}`);

@@ -11100,37 +11100,26 @@ ORDER BY tq.timestamp DESC;
    * @param {number} user_id - User performing the replacement
    * @returns {Promise<Object>} - Replacement result
    */
-  replaceTechEvalVendor: async (rfq_id, rfq_product_id, old_vendor_id, new_vendor_id, user_id) => {
+  replaceTechEvalVendor: async (rfq_id, rfq_product_id, old_vendor_id, new_vendor_id, user_id, txContext = null) => {
+    const dbContext = txContext || db;
     const insertQuery = `
       INSERT INTO tbl_rfq_product_tech_eval_vendor_replacements
       (rfq_id, rfq_product_id, old_vendor_id, new_vendor_id, created_by, created_at)
       VALUES ($1, $2, $3, $4, $5, NOW())
-      ON CONFLICT (rfq_id, rfq_product_id, old_vendor_id) 
-      DO UPDATE SET 
+      ON CONFLICT (rfq_id, rfq_product_id, old_vendor_id)
+      DO UPDATE SET
         new_vendor_id = $4,
         created_by = $5,
         created_at = NOW()
       RETURNING *;
     `;
 
-    return new Promise((resolve, reject) => {
-      db.query(insertQuery, [rfq_id, rfq_product_id, old_vendor_id, new_vendor_id, user_id])
-        .then((result) => {
-          resolve({
-            status: 1,
-            message: 'Vendor replaced successfully',
-            data: result[0]
-          });
-        })
-        .catch((error) => {
-          console.error('Error replacing vendor:', error);
-          reject({
-            status: 0,
-            message: 'Error replacing vendor',
-            error: error.message
-          });
-        });
-    });
+    const result = await dbContext.one(insertQuery, [rfq_id, rfq_product_id, old_vendor_id, new_vendor_id, user_id]);
+    return {
+      status: 1,
+      message: 'Vendor replaced successfully',
+      data: result
+    };
   },
 
   /**
@@ -11166,11 +11155,13 @@ ORDER BY tq.timestamp DESC;
    * Get next vendor in line (L6, L7, etc.) for a product, sorted by quote price
    * @param {number} rfq_id - RFQ ID
    * @param {number} rfq_product_id - RFQ Product ID
-   * @param {Array<number>} exclude_vendor_ids - Vendor IDs to exclude (already in L1-L5)
+   * @param {Array<number>} exclude_vendor_ids - Vendor IDs to exclude (already evaluated)
    * @param {number} limit - Number of vendors to return
+   * @param {Object} txContext - Optional transaction context
    * @returns {Promise<Array>} - Array of vendors with quotes
    */
-  getNextVendorsForProduct: async (rfq_id, rfq_product_id, exclude_vendor_ids = [], limit = 10) => {
+  getNextVendorsForProduct: async (rfq_id, rfq_product_id, exclude_vendor_ids = [], limit = 10, txContext = null) => {
+    const dbContext = txContext || db;
     let query = `
       SELECT DISTINCT
         tu.id AS vendor_id,
@@ -11195,26 +11186,17 @@ ORDER BY tq.timestamp DESC;
     `;
 
     const params = [rfq_product_id, rfq_id];
-    
+
     if (exclude_vendor_ids.length > 0) {
       const placeholders = exclude_vendor_ids.map((_, idx) => `$${params.length + idx + 1}`).join(',');
       query += ` AND tu.id NOT IN (${placeholders})`;
       params.push(...exclude_vendor_ids);
     }
-    
-    query += ` AND tqi.total_price IS NOT NULL ORDER BY quote_price ASC LIMIT $${params.length + 1};`;
+
+    query += ` ORDER BY quote_price ASC LIMIT $${params.length + 1};`;
     params.push(limit);
 
-    return new Promise((resolve, reject) => {
-      db.query(query, params)
-        .then((result) => {
-          resolve(result);
-        })
-        .catch((error) => {
-          console.error('Error getting next vendors:', error);
-          reject(error);
-        });
-    });
+    return dbContext.any(query, params);
   },
 
   /**
@@ -11778,20 +11760,72 @@ ORDER BY tq.timestamp DESC;
   getAllEvaluatedVendorIds: async (tech_evaluation_id, txContext = null) => {
     const dbContext = txContext || db;
     const result = await dbContext.any(
-      `SELECT DISTINCT vendor_id FROM (
-         SELECT vendor_id
-         FROM tbl_rfq_product_tech_evaluation_cleared_vendors
-         WHERE tbl_rfq_product_tech_evaluation_id = $1
-         UNION
-         SELECT vr.vendor_id
-         FROM tbl_rfq_product_tech_evaluation_vendors_response vr
-         JOIN tbl_rfq_product_tech_evaluation_clauses c
-           ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
-         WHERE c.tbl_rfq_product_tech_evaluation_id = $1
-       ) AS all_vendors`,
+      `SELECT DISTINCT vendor_id
+       FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+       WHERE tbl_rfq_product_tech_evaluation_id = $1`,
       [tech_evaluation_id]
     );
     return result.map(r => r.vendor_id);
+  },
+
+  /**
+   * Get reserve vendors in the tech eval who are NOT yet displayed in the grid.
+   * These are vendors with response records but WITHOUT a tbl_rfq_product_vendors record
+   * (i.e., they were set up for tech eval but are "reserve" vendors beyond the initial L1-L5).
+   * Used to fill slots when a displayed vendor fails and needs replacement.
+   * @param {number} tech_evaluation_id - Tech evaluation ID
+   * @param {number} rfq_id - RFQ ID
+   * @param {number} rfq_product_id - RFQ Product ID
+   * @param {Array<number>} exclude_vendor_ids - Vendor IDs to exclude (already evaluated)
+   * @param {number} limit - Max vendors to return
+   * @param {Object} txContext - Optional transaction context
+   * @returns {Promise<Array>} - Array of reserve vendors (without product-vendor records)
+   */
+  getReserveTechEvalVendors: async (tech_evaluation_id, rfq_id, rfq_product_id, exclude_vendor_ids = [], limit = 10, txContext = null) => {
+    const dbContext = txContext || db;
+
+    // Step 1: Get vendor IDs already displayed in the grid (have product-vendor records for this product)
+    const gridVendors = await dbContext.any(
+      `SELECT rpv.user_id AS vendor_id
+       FROM tbl_rfq_product_vendors rpv
+       JOIN tbl_rfq_products rp ON rp.id = $1
+       WHERE rpv.rfq_id = $2
+         AND rpv.product_variant_id = rp.product_variant_id
+         AND COALESCE(rpv.variant, 0) = COALESCE(rp.variant, 0)`,
+      [rfq_product_id, rfq_id]
+    );
+    const gridVendorIds = gridVendors.map(v => v.vendor_id);
+
+    // Step 2: Combine grid vendors + already-evaluated vendors into one exclude list
+    const allExcludeIds = [...new Set([...gridVendorIds, ...exclude_vendor_ids])];
+
+    // Step 3: Find vendors who have tech eval responses but are NOT in the exclude list
+    let query = `
+      SELECT DISTINCT ON (vr.vendor_id)
+        vr.vendor_id,
+        COALESCE(tc.company_name, tu.organization_name, tu.name) AS vendor_name,
+        tu.email AS vendor_email,
+        NULL::integer AS rfq_product_vendor_id
+      FROM tbl_rfq_product_tech_evaluation_vendors_response vr
+      JOIN tbl_rfq_product_tech_evaluation_clauses c
+        ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+      JOIN tbl_users tu ON tu.id = vr.vendor_id
+      LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+      WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+    `;
+
+    const params = [tech_evaluation_id];
+
+    if (allExcludeIds.length > 0) {
+      const placeholders = allExcludeIds.map((_, idx) => `$${params.length + idx + 1}`).join(',');
+      query += ` AND vr.vendor_id NOT IN (${placeholders})`;
+      params.push(...allExcludeIds);
+    }
+
+    query += ` ORDER BY vr.vendor_id LIMIT $${params.length + 1}`;
+    params.push(limit);
+
+    return dbContext.any(query, params);
   },
 
   /**
@@ -11846,7 +11880,7 @@ ORDER BY tq.timestamp DESC;
 
     // Get tech evaluation with product info
     const techEval = await dbContext.oneOrNone(
-      `SELECT te.*, rp.product_variant_id, pv.name AS product_name, r.rfq_no
+      `SELECT te.*, rp.product_variant_id, rp.variant, pv.name AS product_name, r.rfq_no
        FROM tbl_rfq_product_tech_evaluation te
        JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
        JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
@@ -11887,16 +11921,21 @@ ORDER BY tq.timestamp DESC;
     const failedVerified = await dbContext.any(
       `SELECT cv.*, tu.name AS vendor_name, tu.email AS vendor_email,
               COALESCE(tc.company_name, tu.organization_name) AS company_name,
-              ru.name AS replaced_by_vendor_name
+              ru.name AS replaced_by_vendor_name,
+              rpv_replaced.id AS replaced_by_rfq_product_vendor_id
        FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
        JOIN tbl_users tu ON tu.id = cv.vendor_id
        LEFT JOIN tbl_company tc ON tc.id = tu.company_id
        LEFT JOIN tbl_users ru ON ru.id = cv.replaced_by_vendor_id
+       LEFT JOIN tbl_rfq_product_vendors rpv_replaced ON rpv_replaced.rfq_id = $2
+         AND rpv_replaced.user_id = cv.replaced_by_vendor_id
+         AND rpv_replaced.product_variant_id = $3
+         AND COALESCE(rpv_replaced.variant, 0) = COALESCE($4, 0)
        WHERE cv.tbl_rfq_product_tech_evaluation_id = $1
          AND cv.status = 0
          AND cv.is_verified = true
        ORDER BY cv.evaluation_round ASC`,
-      [techEval.id]
+      [techEval.id, techEval.rfq_id, techEval.product_variant_id, techEval.variant]
     );
 
     // Get pending evaluation vendors (those with responses but not in cleared table or not verified)
@@ -11961,7 +12000,8 @@ ORDER BY tq.timestamp DESC;
           evaluation_round: v.evaluation_round,
           is_verified: v.is_verified,
           replaced_by_vendor_id: v.replaced_by_vendor_id,
-          replaced_by_vendor_name: v.replaced_by_vendor_name
+          replaced_by_vendor_name: v.replaced_by_vendor_name,
+          replaced_by_rfq_product_vendor_id: v.replaced_by_rfq_product_vendor_id
         })),
         pending_evaluation: pendingEvaluation.map(v => ({
           vendor_id: v.vendor_id,

@@ -3967,40 +3967,73 @@ publish_profile_reviews: async (req, res, next) => {
 
             // Send confirmation email with invoice
             try {
-            // Get all subscriptions for this vendor (linked to payment or not)
-            const subscriptions = await db.any(
-              `SELECT vhcs.*, 
-               CASE 
-                 WHEN vhcs.item_type = 'category' THEN c.title
-                 WHEN vhcs.item_type = 'hotel' THEN h.name
-               END AS item_name
-               FROM tbl_vendor_hotel_category_subscription vhcs
-               LEFT JOIN tbl_category c ON vhcs.item_type = 'category' AND c.id = vhcs.item_id
-               LEFT JOIN tbl_hospitality_company_hotels h ON vhcs.item_type = 'hotel' AND h.id = vhcs.item_id
-               WHERE vhcs.vendor_id = $1
-                 AND (vhcs.payment_id = $2 OR vhcs.payment_id IS NULL)
-                 AND vhcs.status = 'active'`,
-              [userId, payment.id]
-            );
-                    
-                    const categories = subscriptions.filter(s => s.item_type === 'category').map(s => s.item_name);
-                    const hotels = subscriptions.filter(s => s.item_type === 'hotel').map(s => s.item_name);
-                    const expiryDate = subscriptions.length > 0 ? subscriptions[0].end_date : null;
-                    const expiryDateFormatted = expiryDate 
-                      ? Moment(expiryDate).format('MMMM DD, YYYY')
-                      : 'March 31, ' + (Moment().month() >= 2 ? Moment().year() + 1 : Moment().year());
-                    const totalAmount = subscriptions.reduce((sum, s) => sum + (s.fee_amount || 0), 0);
-                    
-                    // Generate invoice
-                    const invoiceResult = await UsersController.generateHospitalityInvoice(
-                      payment,
-                      user,
-                      company,
-                      subscriptions
-                    );
-                    
-                    const emailHeader = `<h2>Dear ${user.name},</h2>`;
-                    const emailContent = `
+              // Get all subscriptions for this vendor (linked to payment or not)
+              const subscriptions = await db.any(
+                `SELECT vhcs.*, 
+                 CASE 
+                   WHEN vhcs.item_type = 'category' THEN c.title
+                   WHEN vhcs.item_type = 'hotel' THEN h.name
+                 END AS item_name
+                 FROM tbl_vendor_hotel_category_subscription vhcs
+                 LEFT JOIN tbl_category c ON vhcs.item_type = 'category' AND c.id = vhcs.item_id
+                 LEFT JOIN tbl_hospitality_company_hotels h ON vhcs.item_type = 'hotel' AND h.id = vhcs.item_id
+                 WHERE vhcs.vendor_id = $1
+                   AND (vhcs.payment_id = $2 OR vhcs.payment_id IS NULL)
+                   AND vhcs.status = 'active'`,
+                [userId, payment.id]
+              );
+
+              const categories = subscriptions
+                .filter(s => s.item_type === 'category')
+                .map(s => s.item_name);
+              const hotels = subscriptions
+                .filter(s => s.item_type === 'hotel')
+                .map(s => s.item_name);
+              const expiryDate = subscriptions.length > 0 ? subscriptions[0].end_date : null;
+              const expiryDateFormatted =
+                expiryDate
+                  ? Moment(expiryDate).format('MMMM DD, YYYY')
+                  : 'March 31, ' + (Moment().month() >= 2 ? Moment().year() + 1 : Moment().year());
+              const totalAmount = subscriptions.reduce(
+                (sum, s) => sum + (s.fee_amount || 0),
+                0
+              );
+
+              // Generate invoice
+              const invoiceResult = await UsersController.generateHospitalityInvoice(
+                payment,
+                user,
+                company,
+                subscriptions
+              );
+
+              // Build a robust absolute download URL for the invoice
+              const buildInvoiceDownloadUrl = rawUrl => {
+                if (!rawUrl) return null;
+                const hasProtocol =
+                  rawUrl.startsWith('http://') || rawUrl.startsWith('https://');
+                if (hasProtocol) return rawUrl;
+                const base =
+                  (Config && Config.download_url) ||
+                  process.env.FRONT_END_WEBSITE ||
+                  '';
+                return base
+                  ? `${base.replace(/\/$/, '')}/${rawUrl.replace(/^\//, '')}`
+                  : null;
+              };
+
+              const invoiceDownloadUrl =
+                buildInvoiceDownloadUrl(
+                  invoiceResult && invoiceResult.downloadUrl
+                ) ||
+                buildInvoiceDownloadUrl(
+                  payment && payment.invoice_file
+                    ? `${Config.download_url}/app/uploads/invoice_file/${payment.invoice_file}`
+                    : null
+                );
+
+              const emailHeader = `<h2>Dear ${user.name},</h2>`;
+              const emailContent = `
                       <p style="font-size: 16px; line-height: 1.6; color: #333;">
                         Congratulations! Your hospitality vendor registration has been successfully completed and your payment has been processed.
                       </p>
@@ -4042,12 +4075,12 @@ publish_profile_reviews: async (req, res, next) => {
                         </p>
                       </div>
                       
-                      ${invoiceResult && invoiceResult.downloadUrl ? `
+                      ${invoiceDownloadUrl ? `
                       <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #2196f3;">
                         <p style="margin: 0 0 10px; font-weight: 600; color: #1565c0;">
                           <strong>Invoice Generated</strong>
                         </p>
-                        <a href="${invoiceResult.downloadUrl}" 
+                        <a href="${invoiceDownloadUrl}" 
                            style="background-color: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
                           Download Invoice
                         </a>
