@@ -1486,31 +1486,21 @@ WHERE NOT EXISTS (
     };
   },
 
-  updateWithTimestamp: async (table_name, data, primary_key) => {
+  updateWithTimestamp: async (table_name, data, primary_key, txContext = null) => {
+    const dbConn = txContext || db;
     const setClause = Object.keys(data)
       .map((key, index) => `${key} = $${index + 1}`)
       .join(', ');
     const values = Object.values(data);
+    const paramIndex = Object.keys(data).length + 1;
     const updateQuery = `
       UPDATE ${table_name}
       SET ${setClause}
-      , timestamp = CURRENT_TIMESTAMP
-      WHERE id = ${primary_key}
+      , "timestamp" = CURRENT_TIMESTAMP
+      WHERE id = $${paramIndex}
       RETURNING *`;
-
-    // console.log("here 1: ", updateQuery, values)
-
-    return new Promise(function (resolve, reject) {
-      db.query(updateQuery, values)
-        .then(function (data) {
-          // console.log("here 2: ", data)
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
+    values.push(primary_key);
+    return await dbConn.any(updateQuery, values);
   },
 
   getAllTerms: async () => {

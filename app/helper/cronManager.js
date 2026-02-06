@@ -244,12 +244,14 @@ export const scheduleGRNReminders = async (purchase_order, reminder_users = [], 
  * Actually publishes the RFQ by updating status and is_published.
  *
  * @param {Object} rfq - RFQ object with id, rfq_no, is_tender, created_by
+ * @param {Object} txContext - Optional transaction context to use same connection
  */
-const publishRfq = async (rfq) => {
+const publishRfq = async (rfq, txContext = null) => {
+  const dbConn = txContext || db;
   const { id, rfq_no, is_tender, created_by } = rfq;
 
   // Update RFQ to published state
-  await db.none(`
+  await dbConn.none(`
     UPDATE tbl_rfq
     SET status = 1, is_published = 1
     WHERE id = $1
@@ -262,7 +264,8 @@ const publishRfq = async (rfq) => {
     stage: 'PUBLISHED',
     action: 'AUTO_PUBLISH',
     performed_by: created_by,
-    metadata: { rfq_no, published_by: 'scheduler' }
+    metadata: { rfq_no, published_by: 'scheduler' },
+    txContext: txContext
   });
 
   console.log(`[RFQ Publisher] Published ${is_tender === 1 ? 'Tender' : 'RFQ'} #${rfq_no} (ID: ${id})`);
@@ -315,14 +318,15 @@ export const publishRfqById = async (rfqId, rfq_no) => {
  * For regular RFQs (non-tenders), publishes immediately.
  *
  * @param {Object} rfq - RFQ object with id, rfq_no, is_tender, tender_publish_date, created_by
+ * @param {Object} txContext - Optional transaction context to use same connection
  */
-export const scheduleRfqPublish = async (rfq) => {
+export const scheduleRfqPublish = async (rfq, txContext = null) => {
   const { id, rfq_no, is_tender, tender_publish_date, created_by } = rfq;
 
   // For non-tenders or if no publish date, publish immediately
   if (is_tender !== 1 || !tender_publish_date) {
     console.log(`[RFQ Publisher] Publishing immediately: ${rfq_no}`);
-    await publishRfq(rfq);
+    await publishRfq(rfq, txContext);
     return;
   }
 
@@ -332,7 +336,7 @@ export const scheduleRfqPublish = async (rfq) => {
   // If publish date is in the past or now, publish immediately
   if (publishAt <= now) {
     console.log(`[RFQ Publisher] Publish date passed, publishing now: ${rfq_no}`);
-    await publishRfq(rfq);
+    await publishRfq(rfq, txContext);
     return;
   }
 
