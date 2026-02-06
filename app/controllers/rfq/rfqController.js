@@ -4293,7 +4293,7 @@ const rfqController = {
           const rfqDetails = await db.oneOrNone(
             `SELECT r.id, r.rfq_no, r.title, r.tender_fees,
                     u.name as buyer_name, u.email as buyer_email,
-                    hc.company_name
+                    hc.name as company_name
              FROM tbl_rfq r
              LEFT JOIN tbl_users u ON r.created_by = u.id
              LEFT JOIN tbl_hospitality_companies hc ON r.hospitality_company_id = hc.id
@@ -7356,6 +7356,20 @@ const rfqController = {
               .end();
           }
           tenderPaymentId = paymentRow.id;
+        }
+
+        // Clarification period validation for tenders:
+        // - Vendors cannot submit quotes before the clarification date ends.
+        if (rfqDetails[0].is_tender === 1 && rfqDetails[0].vendor_clarification_date) {
+          const clarificationEnd = new Date(rfqDetails[0].vendor_clarification_date);
+          const now = new Date();
+          if (!isNaN(clarificationEnd.getTime()) && now < clarificationEnd) {
+            return res.status(400).json({
+              status: 3,
+              message:
+                'Quote submission is blocked until the vendor clarification period ends.',
+            });
+          }
         }
 
         // Check for open clarification - blocks all vendors from quoting (tenders only)
