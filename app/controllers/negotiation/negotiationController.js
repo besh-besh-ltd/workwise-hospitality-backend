@@ -293,10 +293,10 @@ const NegotiationController = {
         });
       }
 
-      // Validate end_date is in the future
-      const endDate = new Date(end_date);
-      const now = new Date();
-      if (endDate <= now) {
+      // Validate end_date is in the future (use moment.utc for consistent timezone handling)
+      const endDate = moment.utc(end_date);
+      const now = moment.utc();
+      if (!endDate.isAfter(now)) {
         return res.status(400).json({
           status: 2,
           message: 'End date must be in the future'
@@ -330,11 +330,32 @@ const NegotiationController = {
       }
 
       // Check if there's an active round for this product
+      // getActiveRound excludes rounds whose end_date has already passed
       const activeRound = await negotiationModel.getActiveRound(rfq_id, rfq_product_id);
       if (activeRound) {
+        // Include remaining time in the error message so frontend can display it
+        let remainingMsg = '';
+        if (activeRound.end_date) {
+          const roundEnd = moment.utc(activeRound.end_date);
+          const remaining = moment.duration(roundEnd.diff(moment.utc()));
+          if (remaining.asMinutes() < 60) {
+            remainingMsg = ` Ends in ${Math.ceil(remaining.asMinutes())} minute(s).`;
+          } else if (remaining.asHours() < 24) {
+            const hrs = Math.floor(remaining.asHours());
+            const mins = Math.ceil(remaining.minutes());
+            remainingMsg = ` Ends in ${hrs}h ${mins}m.`;
+          } else {
+            const days = Math.floor(remaining.asDays());
+            const hrs = Math.ceil(remaining.hours());
+            remainingMsg = ` Ends in ${days}d ${hrs}h.`;
+          }
+          // Also include the IST time for clarity
+          const endIST = roundEnd.clone().tz('Asia/Kolkata').format('DD/MM/YYYY, hh:mm A');
+          remainingMsg += ` (${endIST} IST)`;
+        }
         return res.status(400).json({
           status: 2,
-          message: `Round ${activeRound.round_number} is still active for this product. Please complete or cancel it first.`
+          message: `Round ${activeRound.round_number} is still active for this product. Please complete or cancel it first.${remainingMsg}`
         });
       }
 

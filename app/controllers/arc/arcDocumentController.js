@@ -236,7 +236,7 @@ export const sendAwardDocumentToVendor = async (rfq_product_id, document_url, tx
 
         <h4>Award Details</h4>
         <ul>
-          <li><strong>RFQ Number:</strong> ${productData.rfq_no}</li>
+          <li><strong>Tender Number:</strong> ${productData.rfq_no}</li>
           <li><strong>Product Name:</strong> ${productData.product_name}</li>
           ${quoteData ? `<li><strong>Total Value:</strong> ₹${quoteData.total_price || 0}</li>` : ''}
           <li><strong>Award Date:</strong> ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</li>
@@ -269,7 +269,7 @@ export const sendAwardDocumentToVendor = async (rfq_product_id, document_url, tx
     const mailRecipients = {
       from: company ? `${company.company_name} <hello@letsworkwise.com>` : 'Workwise <hello@letsworkwise.com>',
       to: vendor.email,
-      subject: `ARC Award Confirmed — RFQ #${productData.rfq_no}`,
+      subject: `ARC Award Confirmed — Tender #${productData.rfq_no}`,
       html: dynamicHTML,
     };
 
