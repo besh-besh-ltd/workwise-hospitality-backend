@@ -7320,39 +7320,38 @@ const rfqController = {
               .end();
           }
 
-          // Check if past bid end date
+          // Check if past bid end date - but allow if there are active negotiation rounds
           if (bidEndDateEndOfDay && now > bidEndDateEndOfDay) {
-            // Different messages based on reverse auction status
-            let message = 'Bidding Period has Ended';
+            // Check if any active negotiation round exists for this RFQ
+            const activeNegotiationRounds = await db.any(
+              `SELECT id FROM tbl_negotiation_rounds WHERE rfq_id = $1 AND status = 'ACTIVE' AND end_date > NOW()`,
+              [rfq_id]
+            );
 
-            if (isReverseAuction) {
-              if (raEndDate && now > raEndDate) {
-                message = 'Reverse Auction has Ended';
-              } else if (raStartDate && now < raStartDate) {
-                message = 'Bidding Period Ended (Reverse Auction Pending)';
-              } else if (!raStartDate || !raEndDate) {
-                message = 'Bidding Period Ended (RA Dates Invalid)';
+            // Only block if there are NO active negotiation rounds
+            if (!activeNegotiationRounds || activeNegotiationRounds.length === 0) {
+              // Different messages based on reverse auction status
+              let message = 'Bidding Period has Ended';
+
+              if (isReverseAuction) {
+                if (raEndDate && now > raEndDate) {
+                  message = 'Reverse Auction has Ended';
+                } else if (raStartDate && now < raStartDate) {
+                  message = 'Bidding Period Ended (Reverse Auction Pending)';
+                } else if (!raStartDate || !raEndDate) {
+                  message = 'Bidding Period Ended (RA Dates Invalid)';
+                }
               }
+
+              return res
+                .status(400)
+                .json({
+                  status: 3,
+                  message: message
+                })
+                .end();
             }
-
-            return res
-              .status(400)
-              .json({
-                status: 3,
-                message: message
-              })
-              .end();
-          }
-
-          // Check if RFQ has no bid end date
-          if (!bidEndDate) {
-            return res
-              .status(400)
-              .json({
-                status: 3,
-                message: 'RFQ Not Open for Bidding'
-              })
-              .end();
+            // Active negotiation rounds exist - allow quote submission to continue
           }
         }
 

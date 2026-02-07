@@ -76,9 +76,9 @@ const negotiationModel = {
     if (!rfqProductId) {
       throw new Error('rfq_product_id is required');
     }
-    
+
     return db.oneOrNone(
-      `SELECT 
+      `SELECT
         nr.*,
         u.name as created_by_name,
         u.email as created_by_email,
@@ -91,6 +91,7 @@ const negotiationModel = {
        WHERE nr.rfq_id = $1
          AND nr.rfq_product_id = $2
          AND nr.status IN ('PENDING_APPROVAL', 'ACTIVE')
+         AND (nr.end_date IS NULL OR nr.end_date > NOW())
        ORDER BY nr.round_number DESC
        LIMIT 1`,
       [rfqId, rfqProductId]
