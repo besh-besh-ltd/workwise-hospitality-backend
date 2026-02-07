@@ -4,6 +4,10 @@ import { sendReminderMail } from './sendEmailFunctions/milestoneEmails.js';
 import { sendGRNEmail } from './sendEmailFunctions/generalReminderEmails.js';
 import { recordLifecycleEvent } from '../models/generalModel.js';
 import { createScheduleForRfqPublish, deleteRfqPublishSchedule } from './createSchedule.js';
+import { sendRfqPublishedNotification, sendVendorRfqNotification } from './sendEmailFunctions/approvalEmails.js';
+import rfqModel from '../models/rfqModel.js';
+import projectModel from '../models/projectModel.js';
+import userModel from '../models/userModel.js';
 
 const milestoneCronRegistry = new Map();
 const generalRemindersCronRegistry = new Map();
@@ -269,6 +273,78 @@ const publishRfq = async (rfq, txContext = null) => {
   });
 
   console.log(`[RFQ Publisher] Published ${is_tender === 1 ? 'Tender' : 'RFQ'} #${rfq_no} (ID: ${id})`);
+
+  // Send publish notification emails (fire-and-forget)
+  try {
+    const rfqDetails = await db.oneOrNone(
+      'SELECT id, rfq_no, is_tender, title, project_id, created_by FROM tbl_rfq WHERE id = $1',
+      [id]
+    );
+
+    if (rfqDetails) {
+      // 1. Notify project team members
+      if (rfqDetails.project_id) {
+        const teamMembers = await projectModel.getProjectTeamMembers(rfqDetails.project_id);
+        const users = (teamMembers || [])
+          .filter(m => m.email && m.email.includes('@'))
+          .map(m => ({ name: m.name, email: m.email }));
+
+        if (users.length > 0) {
+          sendRfqPublishedNotification({
+            rfqDetails: { id, rfq_no, is_tender, title: rfqDetails.title },
+            users
+          });
+        }
+      }
+
+      // 2. Notify vendors
+      const products = await rfqModel.getProductsByRfqId(id);
+      const buyerDetails = await userModel.user_profile_detail(rfqDetails.created_by);
+      const buyerName = buyerDetails?.[0]?.company_name || buyerDetails?.[0]?.organization_name || buyerDetails?.[0]?.name || 'Buyer';
+
+      // Build unique vendor map with their products
+      const vendorMap = {};
+      for (const product of products) {
+        if (!product.vendors) continue;
+        for (const vendor of product.vendors) {
+          if (!vendorMap[vendor.user_id]) {
+            vendorMap[vendor.user_id] = { ...vendor, products: [] };
+          }
+          vendorMap[vendor.user_id].products.push(product.name);
+        }
+      }
+
+      // Generate tokens and send vendor emails
+      const vendorsWithTokens = [];
+      for (const vendorId of Object.keys(vendorMap)) {
+        const vendor = vendorMap[vendorId];
+        try {
+          const token = await rfqModel.insertVendorRfqToken(vendor.user_id, id);
+          vendorsWithTokens.push({
+            user_id: vendor.user_id,
+            name: vendor.name,
+            email: vendor.email,
+            token,
+            products: vendor.products
+          });
+        } catch (tokenErr) {
+          console.error(`Error generating token for vendor ${vendorId}:`, tokenErr);
+        }
+      }
+
+      if (vendorsWithTokens.length > 0) {
+        sendVendorRfqNotification({
+          rfq_id: id,
+          rfq_no,
+          is_tender,
+          buyerName,
+          vendors: vendorsWithTokens
+        });
+      }
+    }
+  } catch (emailError) {
+    console.error('[RFQ Publisher] Error sending publish notification emails:', emailError);
+  }
 };
 
 /**
