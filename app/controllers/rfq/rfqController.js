@@ -6178,10 +6178,20 @@ const rfqController = {
           });
         }
       } else {
-        // Non-tender (RFQ): use vendors selected by the user from the frontend
-        // product.vendors is already set from req.body, keep as-is
-        if (!product.vendors || !Array.isArray(product.vendors)) {
-          product.vendors = [];
+        // Non-tender (RFQ): auto-add all eligible vendors if none specified
+        if (!product.vendors || !Array.isArray(product.vendors) || product.vendors.length === 0) {
+          // Auto-add eligible vendors (same as tender mode)
+          vendorsList = await hospitalityModel.getEligibleVendorsForVariant(
+            variant_id,
+            hotel_ids
+          );
+          if (vendorsList && vendorsList.length > 0) {
+            product.vendors = vendorsList.map((vendor) => ({
+              vendor_id: vendor.id || vendor.vendor_id,
+            }));
+          } else {
+            product.vendors = [];
+          }
         }
       }
 

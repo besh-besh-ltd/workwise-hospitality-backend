@@ -9,7 +9,8 @@ import {
   submitApprovalAction,
   getApprovalInstancesByEntity,
   getApprovalInstanceById,
-  findBestMatchingPolicy
+  findBestMatchingPolicy,
+  resetQuoteFinalizationForSendback
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
 
@@ -1424,6 +1425,15 @@ const NegotiationController = {
         action: 'REJECT',
         comment: remarks
       });
+
+      // 3.5. Reset vendor finalization so vendors don't see it on their screen
+      if (metadata.rfq_id) {
+        try {
+          await resetQuoteFinalizationForSendback(metadata.rfq_id, rfq_product_id, user_id, `Quote approval rejected: ${remarks}`, 'NEGOTIATION');
+        } catch (resetError) {
+          console.error('Error resetting quote finalization on quote rejection:', resetError);
+        }
+      }
 
       // 4. Record lifecycle event
       if (metadata.rfq_id) {

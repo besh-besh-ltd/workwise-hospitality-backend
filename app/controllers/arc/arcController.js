@@ -359,6 +359,19 @@ const ArcController = {
             await handleArcPostApproval(instanceId, user_id);
           }
 
+          // If ARC is rejected, undo vendor finalization so vendors don't see it
+          if (actionType === 'REJECT') {
+            const instanceMetadata = pendingInstance?.metadata || {};
+            const productId = instanceMetadata.rfq_product_id || rfq_product_id || null;
+            if (productId) {
+              try {
+                await resetQuoteFinalizationForSendback(rfq_id, productId, user_id, `ARC rejected: ${remarks || 'No remarks'}`, 'NEGOTIATION');
+              } catch (resetError) {
+                console.error('Error resetting quote finalization on ARC rejection:', resetError);
+              }
+            }
+          }
+
           // Record lifecycle event
           let stage = 'ARC_APPROVED';
           if (action === 'reject') {
