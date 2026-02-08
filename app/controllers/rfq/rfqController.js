@@ -38,8 +38,9 @@ import Razorpay from 'razorpay';
 import crypto from 'crypto';
 import negotiationModel from '../../models/negotiationModel.js';
 import rbacModel from '../../models/rbacModel.js';
-import { sendTechEvalCompletionNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
+import { sendTechEvalCompletionNotification, sendVendorTechAcceptanceNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
 import { sendTenderFeePaymentConfirmation } from '../../helper/sendEmailFunctions/tenderFeeEmails.js';
+import { sendRfqCreationNotification, sendRfqReadyToPublishNotification, sendRfqPublishedNotification, sendVendorRfqNotification } from '../../helper/sendEmailFunctions/approvalEmails.js';
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -3570,6 +3571,59 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       });
 
       console.log(`RFQ ${rfq_id} approved and published immediately (publish date already passed)`);
+
+      // Send publish notifications (direct-publish path bypasses publishRfq in cronManager)
+      try {
+        const rfqFull = await t.oneOrNone('SELECT project_id, title, created_by FROM tbl_rfq WHERE id = $1', [rfq_id]);
+
+        // Notify team members
+        if (rfqFull?.project_id) {
+          const teamMembers = await projectModel.getProjectTeamMembers(rfqFull.project_id);
+          const users = (teamMembers || [])
+            .filter(m => m.email && m.email.includes('@'))
+            .map(m => ({ name: m.name, email: m.email }));
+          if (users.length > 0) {
+            sendRfqPublishedNotification({
+              rfqDetails: { id: rfq_id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender, title: rfqFull.title },
+              users
+            });
+          }
+        }
+
+        // Notify vendors
+        const products = await rfqModel.getProductsByRfqId(rfq_id);
+        const buyerDetails = await userModel.user_profile_detail(rfqFull?.created_by || rfq.created_by);
+        const buyerName = buyerDetails?.[0]?.company_name || buyerDetails?.[0]?.organization_name || buyerDetails?.[0]?.name || 'Buyer';
+
+        const vendorMap = {};
+        for (const product of products) {
+          if (!product.vendors) continue;
+          for (const vendor of product.vendors) {
+            if (!vendorMap[vendor.user_id]) {
+              vendorMap[vendor.user_id] = { ...vendor, products: [] };
+            }
+            vendorMap[vendor.user_id].products.push(product.name);
+          }
+        }
+
+        const vendorsWithTokens = [];
+        for (const vendorId of Object.keys(vendorMap)) {
+          const vendor = vendorMap[vendorId];
+          try {
+            const token = await rfqModel.insertVendorRfqToken(vendor.user_id, rfq_id);
+            vendorsWithTokens.push({ user_id: vendor.user_id, name: vendor.name, email: vendor.email, token, products: vendor.products });
+          } catch (tokenErr) {
+            console.error(`Error generating token for vendor ${vendorId}:`, tokenErr);
+          }
+        }
+
+        if (vendorsWithTokens.length > 0) {
+          sendVendorRfqNotification({ rfq_id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender, buyerName, vendors: vendorsWithTokens });
+        }
+      } catch (emailError) {
+        console.error('Error sending direct-publish notification emails:', emailError);
+      }
+
       return { rfq_id, status: 1, published: true };
     }
 
@@ -3592,7 +3646,27 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       created_by: rfq.created_by
     }, t);
 
-    // TODO: Send notification to RFQ creator that approval is complete
+    // Send "Ready to Publish" notification for tenders with future publish date
+    // Non-tenders are published immediately by scheduleRfqPublish → publishRfq (which sends its own emails)
+    if (rfq.is_tender === 1 && rfq.tender_publish_date && new Date(rfq.tender_publish_date) > new Date()) {
+      try {
+        const rfqFull = await t.oneOrNone('SELECT project_id, title FROM tbl_rfq WHERE id = $1', [rfq_id]);
+        if (rfqFull?.project_id) {
+          const teamMembers = await projectModel.getProjectTeamMembers(rfqFull.project_id);
+          const users = (teamMembers || [])
+            .filter(m => m.email && m.email.includes('@'))
+            .map(m => ({ name: m.name, email: m.email }));
+          if (users.length > 0) {
+            sendRfqReadyToPublishNotification({
+              rfqDetails: { id: rfq_id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender, title: rfqFull.title, tender_publish_date: rfq.tender_publish_date },
+              users
+            });
+          }
+        }
+      } catch (emailError) {
+        console.error('Error sending ready-to-publish notification:', emailError);
+      }
+    }
 
     console.log(`RFQ ${rfq_id} approved - status updated to READY_TO_PUBLISH (4)`);
     return { rfq_id, status: 4 };
@@ -3966,6 +4040,40 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
       passed_count: passedVendors.length,
       failed_count: failedVendors.length
     }, t);
+
+    // Notify passed vendors of their technical acceptance (fire-and-forget)
+    try {
+      if (passedVendors.length > 0) {
+        const vendorsWithTokens = [];
+        for (const v of passedVendors) {
+          let email = v.vendor_email;
+          let name = v.vendor_name;
+          if (!email) {
+            const userInfo = await t.oneOrNone('SELECT name, email FROM tbl_users WHERE id = $1', [v.vendor_id]);
+            email = userInfo?.email;
+            name = name || userInfo?.name;
+          }
+          if (email) {
+            const token = await rfqModel.insertVendorRfqToken(v.vendor_id, rfq_id);
+            vendorsWithTokens.push({ vendor_id: v.vendor_id, vendor_name: name, vendor_email: email, token });
+          }
+        }
+        if (vendorsWithTokens.length > 0) {
+          sendVendorTechAcceptanceNotification({
+            rfqDetails: {
+              id: rfq_id,
+              rfq_no: metadata.rfq_number,
+              is_tender: metadata.is_tender,
+              product_name: metadata.product_name,
+              company_name: metadata.company_name
+            },
+            vendors: vendorsWithTokens
+          }).catch(err => console.error('Failed to send vendor tech acceptance emails:', err));
+        }
+      }
+    } catch (emailError) {
+      console.error('Error sending vendor tech acceptance notifications:', emailError);
+    }
 
     // Count total passed verified vendors
     const totalPassedVerified = await rfqModel.countPassedVerifiedVendors(techEval.id, t);
@@ -4576,8 +4684,30 @@ const rfqController = {
 
       // -------------------
       // Email notifications happen AFTER successful transaction
-      // All RFQs now go through approval workflow - vendor emails will be sent when published
-      // For now, only send confirmation to buyer that RFQ is submitted for approval
+
+      // Notify project team members about RFQ/Tender creation (fire-and-forget)
+      try {
+        const rfqDetailsForEmail = await rfqModel.getRFQDetails(rfq_id);
+        const rfqForEmail = rfqDetailsForEmail?.[0];
+
+        if (rfqForEmail?.project_id) {
+          const teamMembers = await projectModel.getProjectTeamMembers(rfqForEmail.project_id);
+          const emailUsers = (teamMembers || [])
+            .filter(m => m.email && m.email.includes('@'))
+            .map(m => ({ name: m.name, email: m.email }));
+
+          if (emailUsers.length > 0) {
+            sendRfqCreationNotification({
+              rfqDetails: { id: rfq_id, rfq_no: rfqForEmail.rfq_no, is_tender: rfqForEmail.is_tender, title: rfqForEmail.title },
+              autoApproved: hasAutoApproved,
+              users: emailUsers,
+              creatorName: req.user.name
+            });
+          }
+        }
+      } catch (emailError) {
+        console.error('Error sending RFQ creation emails:', emailError);
+      }
 
       const buyerMsgPayload = {
         mobile: req.user.mobile,

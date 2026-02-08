@@ -1,6 +1,7 @@
 import db from '../config/dbConn.js';
 import { sendApprovalNotification, sendPONotificationToVendor } from '../controllers/po/purchaseOrderEmails.js';
 import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
+import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import s3Client from "../config/s3config.js";
@@ -1747,6 +1748,34 @@ export async function createApprovalInstance({
       };
     }
 
+    // Send notification to step 1 approvers (fire-and-forget)
+    try {
+      const firstStep = instanceSteps[0];
+      if (firstStep) {
+        const step1Approvers = await t.any(`
+          SELECT sa.approver_user_id as user_id, u.name as user_name, u.email as user_email
+          FROM tbl_approval_step_approvers sa
+          JOIN tbl_users u ON sa.approver_user_id = u.id
+          WHERE sa.approval_instance_step_id = $1 AND sa.status = 'PENDING'
+        `, [firstStep.id]);
+
+        const initiator = await t.oneOrNone('SELECT name FROM tbl_users WHERE id = $1', [initiated_by]);
+
+        sendApprovalStepNotification({
+          entityType: entity_type,
+          entityId: entity_id,
+          entityIdentifier: metadata?.rfq_number || metadata?.po_number || `ID-${entity_id}`,
+          stepOrder: 1,
+          totalSteps: instanceSteps.length,
+          initiatorName: initiator?.name || 'Unknown',
+          approvers: step1Approvers,
+          extraContext: { rfq_id: metadata?.rfq_id || entity_id }
+        });
+      }
+    } catch (emailError) {
+      console.error('Error sending approval step notification:', emailError);
+    }
+
     return {
       instance,
       policy: { id: policy.id, entity_type: policy.entity_type },
@@ -1990,7 +2019,7 @@ export async function submitApprovalAction({
 
   const normalizedAction = action.toUpperCase();
 
-  return db.tx(async t => {
+  const result = await db.tx(async t => {
     // 1. Get instance with FOR UPDATE lock to prevent race conditions
     const instance = await t.oneOrNone(`
       SELECT * FROM tbl_approval_instances
@@ -2193,6 +2222,48 @@ export async function submitApprovalAction({
       };
     }
   });
+
+  // After transaction committed — send email for step progression
+  if (result.instance_status === 'PENDING' && result.next_step_id) {
+    try {
+      const instance = await db.oneOrNone(
+        'SELECT entity_type, entity_id, metadata, initiated_by FROM tbl_approval_instances WHERE id = $1',
+        [approval_instance_id]
+      );
+      if (instance) {
+        const approvers = await db.any(`
+          SELECT sa.approver_user_id as user_id, u.name as user_name, u.email as user_email
+          FROM tbl_approval_step_approvers sa
+          JOIN tbl_users u ON sa.approver_user_id = u.id
+          WHERE sa.approval_instance_step_id = $1 AND sa.status = 'PENDING'
+        `, [result.next_step_id]);
+
+        const initiator = await db.oneOrNone('SELECT name FROM tbl_users WHERE id = $1', [instance.initiated_by]);
+
+        const totalSteps = await db.one(
+          'SELECT COUNT(*) as count FROM tbl_approval_instance_steps WHERE approval_instance_id = $1',
+          [approval_instance_id]
+        );
+
+        const metadata = typeof instance.metadata === 'string' ? JSON.parse(instance.metadata) : instance.metadata;
+
+        sendApprovalStepNotification({
+          entityType: instance.entity_type,
+          entityId: instance.entity_id,
+          entityIdentifier: metadata?.rfq_number || metadata?.po_number || `ID-${instance.entity_id}`,
+          stepOrder: result.next_step,
+          totalSteps: parseInt(totalSteps.count),
+          initiatorName: initiator?.name || 'Unknown',
+          approvers,
+          extraContext: { rfq_id: metadata?.rfq_id || instance.entity_id }
+        });
+      }
+    } catch (emailError) {
+      console.error('Error sending next step approval notification:', emailError);
+    }
+  }
+
+  return result;
 }
 
 /**
