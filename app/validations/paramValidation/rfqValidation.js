@@ -249,7 +249,6 @@ export const rfqSchemas = {
     hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
     department_id: Joi.number().integer().optional().allow(null),
     title: Joi.string().required(),
-    technical_evaluation_by: Joi.number().integer().required(),
   }),
   update: Joi.object().keys({
     rfq_id: Joi.number().required(),
