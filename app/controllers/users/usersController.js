@@ -756,41 +756,9 @@ create_buyer_company_users: async (req, res, next) => {
       };
     }
 
-    /* -------------------- ACCOUNT LIMIT CHECKS (UNCHANGED) -------------------- */
-    const [companyLimits, activeUsers, companyDetails] = await Promise.all([
-      rfqModel.checkIfExists(
-        "tbl_company_buyer_account_limit",
-        `company_id = ${companyID}`
-      ),
-      rfqModel.checkIfExists(
-        "tbl_users",
-        `company_id = ${companyID} AND user_type = ${user_type} AND is_deleted = 0`
-      ),
-      rfqModel.checkIfExists("tbl_company", `id = ${companyID}`)
-    ]);
-
-    if (!companyLimits.length) {
-      return res.status(400).json({
-        status: false,
-        message: "Company account limits not set."
-      });
-    }
-
-    const limits = companyLimits[0];
-    const maxMap = {
-      8: limits.max_top_management,
-      2: limits.max_procurement,
-      9: limits.max_engineering,
-      10: limits.max_finance
-    };
-
-    const maxAllowed = maxMap[user_type];
-    if (maxAllowed === undefined || activeUsers.length >= maxAllowed) {
-      return res.status(400).json({
-        status: false,
-        message: "You have reached the maximum number of allowed accounts for this role"
-      });
-    }
+    // NOTE: Account creation is no longer limited by
+    // tbl_company_buyer_account_limit. New users can be
+    // created for any role without checking max_* limits.
 
     /* -------------------- CREATE USER -------------------- */
     const insertResult = await rfqModel.insert("tbl_users", userDetails);
