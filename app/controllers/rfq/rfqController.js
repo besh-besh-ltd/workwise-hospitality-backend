@@ -25,7 +25,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, submitApprovalAction, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, submitApprovalAction, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers } from '../../models/generalModel.js';
 import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
@@ -3597,18 +3597,22 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       try {
         const rfqFull = await t.oneOrNone('SELECT project_id, title, created_by FROM tbl_rfq WHERE id = $1', [rfq_id]);
 
-        // Notify team members
+        // Notify team members / approval workflow users
+        let publishUsers = [];
         if (rfqFull?.project_id) {
           const teamMembers = await projectModel.getProjectTeamMembers(rfqFull.project_id);
-          const users = (teamMembers || [])
+          publishUsers = (teamMembers || [])
             .filter(m => m.email && m.email.includes('@'))
             .map(m => ({ name: m.name, email: m.email }));
-          if (users.length > 0) {
-            sendRfqPublishedNotification({
-              rfqDetails: { id: rfq_id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender, title: rfqFull.title },
-              users
-            });
-          }
+        } else if (rfq.is_tender === 1) {
+          const approvalUsers = await getApprovalWorkflowUsers('TENDER', rfq_id);
+          publishUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
+        }
+        if (publishUsers.length > 0) {
+          sendRfqPublishedNotification({
+            rfqDetails: { id: rfq_id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender, title: rfqFull.title },
+            users: publishUsers
+          });
         }
 
         // Notify vendors
@@ -3672,17 +3676,21 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
     if (rfq.is_tender === 1 && rfq.tender_publish_date && new Date(rfq.tender_publish_date) > new Date()) {
       try {
         const rfqFull = await t.oneOrNone('SELECT project_id, title FROM tbl_rfq WHERE id = $1', [rfq_id]);
+        let readyUsers = [];
         if (rfqFull?.project_id) {
           const teamMembers = await projectModel.getProjectTeamMembers(rfqFull.project_id);
-          const users = (teamMembers || [])
+          readyUsers = (teamMembers || [])
             .filter(m => m.email && m.email.includes('@'))
             .map(m => ({ name: m.name, email: m.email }));
-          if (users.length > 0) {
-            sendRfqReadyToPublishNotification({
-              rfqDetails: { id: rfq_id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender, title: rfqFull.title, tender_publish_date: rfq.tender_publish_date },
-              users
-            });
-          }
+        } else {
+          const approvalUsers = await getApprovalWorkflowUsers('TENDER', rfq_id);
+          readyUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
+        }
+        if (readyUsers.length > 0) {
+          sendRfqReadyToPublishNotification({
+            rfqDetails: { id: rfq_id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender, title: rfqFull.title, tender_publish_date: rfq.tender_publish_date },
+            users: readyUsers
+          });
         }
       } catch (emailError) {
         console.error('Error sending ready-to-publish notification:', emailError);
@@ -4711,20 +4719,25 @@ const rfqController = {
         const rfqDetailsForEmail = await rfqModel.getRFQDetails(rfq_id);
         const rfqForEmail = rfqDetailsForEmail?.[0];
 
+        let emailUsers = [];
+
         if (rfqForEmail?.project_id) {
           const teamMembers = await projectModel.getProjectTeamMembers(rfqForEmail.project_id);
-          const emailUsers = (teamMembers || [])
+          emailUsers = (teamMembers || [])
             .filter(m => m.email && m.email.includes('@'))
             .map(m => ({ name: m.name, email: m.email }));
+        } else if (rfqForEmail?.is_tender === 1) {
+          const approvalUsers = await getApprovalWorkflowUsers('TENDER', rfq_id);
+          emailUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
+        }
 
-          if (emailUsers.length > 0) {
-            sendRfqCreationNotification({
-              rfqDetails: { id: rfq_id, rfq_no: rfqForEmail.rfq_no, is_tender: rfqForEmail.is_tender, title: rfqForEmail.title },
-              autoApproved: hasAutoApproved,
-              users: emailUsers,
-              creatorName: req.user.name
-            });
-          }
+        if (emailUsers.length > 0) {
+          sendRfqCreationNotification({
+            rfqDetails: { id: rfq_id, rfq_no: rfqForEmail.rfq_no, is_tender: rfqForEmail.is_tender, title: rfqForEmail.title },
+            autoApproved: hasAutoApproved,
+            users: emailUsers,
+            creatorName: req.user.name
+          });
         }
       } catch (emailError) {
         console.error('Error sending RFQ creation emails:', emailError);

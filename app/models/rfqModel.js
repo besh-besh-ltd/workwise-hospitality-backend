@@ -10132,6 +10132,14 @@ ORDER BY tq.timestamp DESC;
           `
             : `
           SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+          UNION ALL
+          SELECT 1 FROM tbl_hospitality_user_mappings HUM
+          WHERE HUM.user_id = ${user_id}
+            AND (
+              HUM.hospitality_hotel_id = RFQ.hotel_id
+              OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                  AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
+            )
           `
         }
       )) AND RFQ.is_published = 1
