@@ -983,8 +983,9 @@ const NegotiationController = {
    */
   submitQuotesForApproval: async (req, res) => {
     try {
-      const { rfq_id, rfq_product_id, quote_ids, remarks } = req.body;
+      const { rfq_id, rfq_product_id, quote_ids, quote_source, remarks } = req.body;
       const user_id = req.user.id;
+      const isRegularQuotes = quote_source === 'regular';
 
       // 1. Validate required fields
       if (!rfq_id || !rfq_product_id || !quote_ids || !Array.isArray(quote_ids) || quote_ids.length === 0) {
@@ -1030,33 +1031,43 @@ const NegotiationController = {
         });
       }
 
-      // 5. Validate all quotes exist using model
-      const quotes = await negotiationModel.getQuotesByIds(quote_ids);
+      let quotes;
+      if (isRegularQuotes) {
+        // 5a. For regular quotes (from tbl_quotes), validate they exist
+        quotes = await negotiationModel.getRegularQuotesByIds(quote_ids, rfq_id, rfq_product_id);
 
-      if (quotes.length !== quote_ids.length) {
-        return res.status(400).json({
-          status: 2,
-          message: 'One or more quote IDs are invalid or do not belong to this product'
-        });
-      }
+        if (quotes.length !== quote_ids.length) {
+          return res.status(400).json({
+            status: 2,
+            message: 'One or more quote IDs are invalid or do not belong to this product'
+          });
+        }
+      } else {
+        // 5b. For negotiation round quotes (from tbl_negotiation_round_quotes)
+        quotes = await negotiationModel.getQuotesByIds(quote_ids);
 
-      // Check all rounds are either completed OR expired (end_date < now)
-      // Use moment.utc() for consistent timezone handling between frontend and backend
-      const now = moment.utc();
-      const invalidRounds = quotes.filter(q => {
-        const roundStatus = (q.round_status || '').toUpperCase();
-        const isCompleted = roundStatus === 'COMPLETED' || roundStatus === 'CLOSED';
-        // For ACTIVE rounds, check if end_date has passed (round has expired)
-        // Parse end_date as UTC to match how frontend compares
-        const endDate = q.round_end_date ? moment.utc(q.round_end_date) : null;
-        const isExpired = endDate && endDate.isBefore(now);
-        return !isCompleted && !isExpired;
-      });
-      if (invalidRounds.length > 0) {
-        return res.status(400).json({
-          status: 2,
-          message: 'All selected quotes must be from completed or expired negotiation rounds'
+        if (quotes.length !== quote_ids.length) {
+          return res.status(400).json({
+            status: 2,
+            message: 'One or more quote IDs are invalid or do not belong to this product'
+          });
+        }
+
+        // Check all rounds are either completed OR expired (end_date < now)
+        const now = moment.utc();
+        const invalidRounds = quotes.filter(q => {
+          const roundStatus = (q.round_status || '').toUpperCase();
+          const isCompleted = roundStatus === 'COMPLETED' || roundStatus === 'CLOSED';
+          const endDate = q.round_end_date ? moment.utc(q.round_end_date) : null;
+          const isExpired = endDate && endDate.isBefore(now);
+          return !isCompleted && !isExpired;
         });
+        if (invalidRounds.length > 0) {
+          return res.status(400).json({
+            status: 2,
+            message: 'All selected quotes must be from completed or expired negotiation rounds'
+          });
+        }
       }
 
       // 6. Execute in transaction

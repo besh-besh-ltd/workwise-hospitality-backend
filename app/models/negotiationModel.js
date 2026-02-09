@@ -353,24 +353,29 @@ const negotiationModel = {
    * Get vendor's negotiation quote status for a product (checks active rounds)
    */
   getVendorNegotiationStatus: async (rfqId, rfqProductId, vendorId) => {
-    // Find active negotiation round for this product
-    const activeRound = await db.oneOrNone(
-      `SELECT nr.*, 
+    // Find the latest negotiation round for this product
+    // Prioritize ACTIVE rounds, then fall back to most recent by created_at
+    const latestRound = await db.oneOrNone(
+      `SELECT nr.*,
         COALESCE(PV.name, P.name) as product_name
        FROM tbl_negotiation_rounds nr
        LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
        LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
        LEFT JOIN tbl_product P ON P.id = PV.product_id
-       WHERE nr.rfq_id = $1 
-         AND nr.rfq_product_id = $2 
-         AND nr.status = 'ACTIVE'
+       WHERE nr.rfq_id = $1
+         AND nr.rfq_product_id = $2
+       ORDER BY
+         CASE WHEN nr.status = 'ACTIVE' THEN 0 ELSE 1 END,
+         nr.round_number DESC,
+         nr.created_at DESC
        LIMIT 1`,
       [rfqId, rfqProductId]
     );
 
-    if (!activeRound) {
+    if (!latestRound) {
       return {
         hasActiveRound: false,
+        hasRound: false,
         round: null,
         vendorQuote: null,
         hasSubmittedQuote: false
@@ -381,17 +386,19 @@ const negotiationModel = {
     const vendorQuote = await db.oneOrNone(
       `SELECT * FROM tbl_negotiation_round_quotes
        WHERE negotiation_round_id = $1 AND vendor_id = $2`,
-      [activeRound.id, vendorId]
+      [latestRound.id, vendorId]
     );
 
     const now = new Date();
-    const endDate = new Date(activeRound.end_date);
+    const endDate = new Date(latestRound.end_date);
     const isExpired = now > endDate;
+    const isActive = latestRound.status === 'ACTIVE' && !isExpired;
 
     return {
-      hasActiveRound: true,
+      hasActiveRound: isActive,
+      hasRound: true,
       round: {
-        ...activeRound,
+        ...latestRound,
         isExpired
       },
       vendorQuote: vendorQuote,
@@ -400,11 +407,12 @@ const negotiationModel = {
   },
 
   /**
-   * Get all active rounds for an RFQ with vendor quote status
+   * Get latest rounds for an RFQ (per product) with vendor quote status
    */
   getActiveRoundsWithVendorStatus: async (rfqId, vendorId) => {
-    const activeRounds = await db.any(
-      `SELECT nr.*, 
+    // Get the latest round per product (prioritize ACTIVE, then most recent)
+    const latestRounds = await db.any(
+      `SELECT DISTINCT ON (nr.rfq_product_id) nr.*,
         COALESCE(PV.name, P.name) as product_name,
         nrq.id as vendor_quote_id,
         nrq.quoted_price as vendor_quoted_price,
@@ -414,18 +422,22 @@ const negotiationModel = {
        LEFT JOIN tbl_product_variant PV ON PV.id = rp.product_variant_id
        LEFT JOIN tbl_product P ON P.id = PV.product_id
        LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id AND nrq.vendor_id = $2
-       WHERE nr.rfq_id = $1 
-         AND nr.status = 'ACTIVE'
-       ORDER BY nr.rfq_product_id`,
+       WHERE nr.rfq_id = $1
+       ORDER BY nr.rfq_product_id,
+         CASE WHEN nr.status = 'ACTIVE' THEN 0 ELSE 1 END,
+         nr.round_number DESC,
+         nr.created_at DESC`,
       [rfqId, vendorId]
     );
 
-    return activeRounds.map(round => {
+    return latestRounds.map(round => {
       const now = new Date();
       const endDate = new Date(round.end_date);
+      const isExpired = now > endDate;
       return {
         ...round,
-        isExpired: now > endDate,
+        isExpired,
+        isActive: round.status === 'ACTIVE' && !isExpired,
         hasSubmittedQuote: !!round.vendor_quote_id
       };
     });
@@ -453,6 +465,38 @@ const negotiationModel = {
   },
 
   // ============= QUOTE APPROVAL FUNCTIONS =============
+
+  /**
+   * Get regular quotes (from tbl_quotes) by IDs for approval
+   */
+  getRegularQuotesByIds: async (quoteIds, rfqId, rfqProductId) => {
+    if (!quoteIds || quoteIds.length === 0) {
+      return [];
+    }
+    return db.any(
+      `SELECT
+        q.id,
+        q.id as quote_id,
+        q.rfq_id,
+        q.created_by as vendor_id,
+        qi.unit_price as quoted_price,
+        qi.total_price,
+        qi.freight_price,
+        qi.tax,
+        qi.package_price,
+        u.name as vendor_name,
+        u.organization_name,
+        c.company_name
+       FROM tbl_quotes q
+       JOIN tbl_quote_items qi ON qi.quote_id = q.id AND qi.rfq_product_id = $3
+       LEFT JOIN tbl_users u ON u.id = q.created_by
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+       WHERE q.id = ANY($1)
+         AND q.rfq_id = $2
+         AND COALESCE(q.is_regret, 0) != 1`,
+      [quoteIds, rfqId, rfqProductId]
+    );
+  },
 
   /**
    * Get quotes by IDs with vendor details
