@@ -3007,13 +3007,22 @@ RETURNING id;
       // Track created RFQ ID for approval processing
       createdRfqIds.push(newRfqId);
 
-      // -------------------------  4️ Duplicate RFQ PRODUCTS  -------------------------
+      // -------------------------  4️ Duplicate RFQ PRODUCTS (with per-hotel vendor filtering)  -------------------------
 
       // We MUST capture old → new product ID mapping
       // because child tables depend on product_id
       const productIdMap = {};
 
       for (const product of rfqProducts) {
+        // Check vendor eligibility for THIS specific hotel
+        const eligibleVendors = await hospitalityModel.getEligibleVendorsForVariant(
+          product.product_variant_id, [hotel_id]
+        );
+
+        // Skip this product entirely if no vendors are eligible for this hotel
+        // Downstream steps (files, specs, tech eval) auto-skip via productIdMap
+        if (eligibleVendors.length === 0) continue;
+
         const { id: newProductId } = await t.one(
           `
           INSERT INTO tbl_rfq_products (
@@ -3101,23 +3110,37 @@ RETURNING id;
         );
       }
 
-      // -------------------------  7 Duplicate PRODUCT VENDORS (leaf table)  -------------------------
-      
-      // Reset vendor view flags for new RFQ
-      await t.none(
-        `
-        INSERT INTO tbl_rfq_product_vendors (
-          rfq_id, product_variant_id, user_id, variant, sheet_id,
-          is_rfq_viewed, vendor_name
-        )
-        SELECT
-          $2, product_variant_id, user_id, variant, sheet_id,
-          0, vendor_name
-        FROM tbl_rfq_product_vendors
-        WHERE rfq_id = $1
-        `,
-        [rfq_id, newRfqId]
-      );
+      // -------------------------  7 Duplicate PRODUCT VENDORS (per-hotel eligible vendors only)  -------------------------
+
+      // Instead of bulk-copying all vendors, insert only eligible vendors per product
+      for (const product of rfqProducts) {
+        const newProductId = productIdMap[product.id];
+        // Skip products that were not duplicated (no eligible vendors for this hotel)
+        if (!newProductId) continue;
+
+        const eligibleVendors = await hospitalityModel.getEligibleVendorsForVariant(
+          product.product_variant_id, [hotel_id]
+        );
+
+        for (const vendor of eligibleVendors) {
+          await t.none(
+            `
+            INSERT INTO tbl_rfq_product_vendors (
+              rfq_id, product_variant_id, user_id, variant, sheet_id,
+              is_rfq_viewed
+            )
+            VALUES ($1, $2, $3, $4, $5, 0)
+            `,
+            [
+              newRfqId,
+              product.product_variant_id,
+              vendor.vendor_id,
+              product.variant,
+              product.sheet_id
+            ]
+          );
+        }
+      }
 
       // ------------------------  8 Duplicate RFQ FILES (leaf table)  --------------------------
      
@@ -9009,6 +9032,7 @@ const rfqController = {
     const search_key = req.body?.search_key || '';
     const category_id = req.body?.category_id || '';
     const approved_by_id = req.body?.approved_by_id || '';
+    const hotel_ids = req.body?.hotel_ids || [];
 
     try {
       // Skip processing for 'all'
@@ -9016,7 +9040,9 @@ const rfqController = {
         const productResult = await rfqModel.searchProduct(
           search_key,
           category_id,
-          approved_by_id
+          approved_by_id,
+          {},
+          hotel_ids
         );
         const categoryResult = await rfqModel.getCategoryList(search_key);
 
@@ -9086,7 +9112,8 @@ const rfqController = {
         productSlug,
         category_id,
         approved_by_id,
-        locationFilters
+        locationFilters,
+        hotel_ids
       );
 
      

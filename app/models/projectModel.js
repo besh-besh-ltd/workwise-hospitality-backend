@@ -262,19 +262,21 @@ ORDER BY
       db.oneOrNone(
         `UPDATE tbl_projects
             SET
-               status = $1,
-               description = $2,
-               location = $3,
-               ended_at = $4,
-               rfq_type = $7,
-               reverse_auction = $8,
-               budget = $9,
+               name = $1,
+               status = $2,
+               description = $3,
+               location = $4,
+               ended_at = $5,
+               rfq_type = $8,
+               reverse_auction = $9,
+               budget = $10,
                updated_at = NOW()
             WHERE
-               id = $5
-               AND user_id = $6
+               id = $6
+               AND user_id = $7
             RETURNING *;`,
         [
+          projectObj.name,
           projectObj.status,
           projectObj.description,
           projectObj.location,
@@ -698,18 +700,20 @@ ORDER BY
       db.oneOrNone(
         `UPDATE tbl_projects
         SET
-           status = $1,
-           description = $2,
-           location = $3,
-           ended_at = $4,
-           rfq_type = $5,
-           reverse_auction = $6,
-           budget = $7,
+           name = $1,
+           status = $2,
+           description = $3,
+           location = $4,
+           ended_at = $5,
+           rfq_type = $6,
+           reverse_auction = $7,
+           budget = $8,
            updated_at = NOW()
         WHERE
-           id = $8
+           id = $9
         RETURNING *`,
         [
+          projectObj.name,
           projectObj.status,
           projectObj.description,
           projectObj.location,

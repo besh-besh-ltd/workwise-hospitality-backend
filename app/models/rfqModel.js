@@ -4602,7 +4602,8 @@ LIMIT 2;
     search_key,
     category_id,
     approved_by_id,
-    locationFilters = {}
+    locationFilters = {},
+    hotel_ids = []
   ) => {
     // query change by mukul 28-08-2024
     // query change by mukul 08-09-2024, added one more filter for created by 1 or 111 to exclude product for them
@@ -4613,6 +4614,38 @@ LIMIT 2;
       search_key &&
       !search_key.includes(' ') &&
       (search_key.includes('-') || search_key.length > 0);
+
+    // Build parameterized query with dynamic param index tracking
+    const params = [search_key];
+    let paramIdx = 2; // $1 is search_key
+
+    const categoryParam = category_id ? `$${paramIdx++}` : null;
+    if (category_id) params.push(category_id);
+
+    const approvedByParam = approved_by_id ? `$${paramIdx++}` : null;
+    if (approved_by_id) params.push(approved_by_id);
+
+    // Hotel eligibility filter JOINs
+    let hotelFilterJoins = '';
+    let hotelIdsParam = null;
+    if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
+      hotelIdsParam = `$${paramIdx++}`;
+      params.push(hotel_ids);
+
+      hotelFilterJoins = `
+      JOIN tbl_vendor_hotel_category_subscription vhcs_cat
+        ON vhcs_cat.vendor_id = pvvm.vendor_id
+        AND vhcs_cat.item_type = 'category'
+        AND vhcs_cat.item_id = pc.category_id
+        AND vhcs_cat.status = 'active'
+        AND CURRENT_DATE BETWEEN vhcs_cat.start_date AND vhcs_cat.end_date
+      JOIN tbl_vendor_hotel_category_subscription vhcs_hotel
+        ON vhcs_hotel.vendor_id = pvvm.vendor_id
+        AND vhcs_hotel.item_type = 'hotel'
+        AND vhcs_hotel.item_id = ANY(${hotelIdsParam})
+        AND vhcs_hotel.status = 'active'
+        AND CURRENT_DATE BETWEEN vhcs_hotel.start_date AND vhcs_hotel.end_date`;
+    }
 
     let q = `
       SELECT DISTINCT p.id AS product_id,
@@ -4655,6 +4688,7 @@ LIMIT 2;
           ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id`
           : ``
       }
+      ${hotelFilterJoins}
       WHERE p.status = 1
         AND p.is_deleted = 0
         AND p.is_review = 0
@@ -4665,10 +4699,10 @@ LIMIT 2;
           OR to_tsvector('english', CONCAT(pv.name, ' - ', p.name)) @@ plainto_tsquery('english', $1)
           OR similarity(CONCAT(pv.name, ' - ', p.name), $1) > 0.1
         )
-        ${category_id ? `AND c.id = $2` : ``}
+        ${categoryParam ? `AND c.id = ${categoryParam}` : ``}
         ${
-          approved_by_id
-            ? `AND (vum.vendor_approve_id = $3 OR vum.vendor_approve_id IS NULL)`
+          approvedByParam
+            ? `AND (vum.vendor_approve_id = ${approvedByParam} OR vum.vendor_approve_id IS NULL)`
             : ``
         }
       ORDER BY rank DESC, similarity_score DESC, CONCAT(pv.name, ' - ', p.name) ASC ;
@@ -4678,19 +4712,9 @@ LIMIT 2;
     console.log(q);
     console.log(' ===============================================  ');
 
-    // Assuming db.query can handle parameterized queries:
+    // Parameterized query with explicitly built params array
     return new Promise(function (resolve, reject) {
-      db.query(
-        q,
-        [
-          search_key,
-          category_id,
-          approved_by_id,
-          locationFilters.country_id,
-          locationFilters.state_id,
-          locationFilters.city_id
-        ].filter(Boolean)
-      ) // Filters out any undefined or empty values
+      db.query(q, params)
         .then(function (data) {
           resolve(data);
         })
