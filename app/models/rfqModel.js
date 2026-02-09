@@ -7114,15 +7114,17 @@ ORDER BY m.created_at;
 
     const candidateQuery = buyerTypes.includes(viewer_type)
       ? `
-        SELECT DISTINCT
+        SELECT
           TRPV.user_id AS user_id,
           TU.name AS user_name,
-          COALESCE(TC.company_name, '') AS company_name
+          COALESCE(TC.company_name, '') AS company_name,
+          MIN(TRPV.id) AS rfq_product_vendor_id
         FROM tbl_rfq_product_vendors TRPV
         JOIN tbl_users TU ON TU.id = TRPV.user_id
         LEFT JOIN tbl_company TC ON TC.id = TU.company_id
         WHERE TRPV.rfq_id = $1
         ${searchFilter}
+        GROUP BY TRPV.user_id, TU.name, TC.company_name
       `
       : `
         SELECT
