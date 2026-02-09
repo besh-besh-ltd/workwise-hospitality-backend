@@ -249,8 +249,6 @@ export const rfqSchemas = {
     hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
     department_id: Joi.number().integer().optional().allow(null),
     title: Joi.string().required(),
-    // technical_evaluation_by is now optional and can be null/omitted
-    technical_evaluation_by: Joi.number().integer().optional().allow(null),
   }),
   update: Joi.object().keys({
     rfq_id: Joi.number().required(),
