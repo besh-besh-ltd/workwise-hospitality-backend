@@ -411,6 +411,7 @@ const projectController = {
   update: async (req, res, next) => {
     try {
       const {
+        name,
         description,
         location,
         ended_at,
@@ -429,6 +430,7 @@ const projectController = {
       if (user_type === 7 || user_type === 8 || user_type === 2) {
         // Admin can update any project
         const tbl_project_data = {
+          name,
           description,
           location,
           ended_at,
@@ -445,6 +447,7 @@ const projectController = {
       } else {
         // Regular users can only update their own projects
         const tbl_project_data = {
+          name,
           description,
           location,
           ended_at,

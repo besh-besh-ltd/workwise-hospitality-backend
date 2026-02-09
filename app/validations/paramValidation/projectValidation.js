@@ -82,6 +82,7 @@ export const projectSchemas = {
 
 
     update: Joi.object().keys({
+        name:Joi.string().optional().allow('').allow(null),
         status:Joi.number().valid(0, 1), // Status can only be 0 or 1
         description:Joi.string().optional().allow('').allow(null),
         location:Joi.string().optional().allow('').allow(null),
