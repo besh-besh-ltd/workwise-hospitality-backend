@@ -74,7 +74,7 @@ RfqRoutes.post(
   '/add-product-to-rfq',
   passportSignIn,
   acl([2, 8]),
-  validateDbBody.rfq_access_check,
+
   rfqController.addProductVendorsInEditRfq
 );
 
@@ -83,7 +83,7 @@ RfqRoutes.put(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2, 8]),
-  validateDbBody.rfq_access_check,
+
   validateBody(rfqSchemas.update),
   rfqController.update
 );
@@ -92,14 +92,14 @@ RfqRoutes.put(
 RfqRoutes.post(
   '/get-details',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check_req_body,
+
   rfqController.getRfqDetailsById
 );
 
 RfqRoutes.post(
   '/tender-payment/create-order',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check_req_body,
+
   rfqController.createTenderPaymentOrder
 );
 
@@ -166,7 +166,7 @@ RfqRoutes.post(
   '/get-vendors',
   passportSignIn,
   acl([2, 8]),
-  validateDbBody.rfq_access_check,
+
   validateDbBody.user_id_profileexists,
   rfqController.getVendors
 );
@@ -189,14 +189,14 @@ RfqRoutes.get(
 RfqRoutes.post(
   '/quote/create',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check_req_body,
+
   rfqController.createQuote
 );
 
 RfqRoutes.put(
   '/quote/update/:quoteId',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check_req_body,
+
   rfqController.updateQuoteItems
 );
 
@@ -205,7 +205,6 @@ RfqRoutes.get(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2, 8, 10]),
-  validateDbBody.rfq_access_check,
   rfqController.getQuotesByRfqById
 );
 RfqRoutes.get(
@@ -213,7 +212,7 @@ RfqRoutes.get(
   passportSignIn,
   acl([2, 8, 10]),
   validateDbBody.user_id_profileexists,
-  validateDbBody.rfq_access_check,
+
   // rfqController.downloadQuoteResults
   rfqController.downloadQuoteResultsProductWise
 );
@@ -238,7 +237,7 @@ RfqRoutes.get(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2, 8]),
-  validateDbBody.rfq_access_check,
+
   rfqController.closeRFQ
 );
 RfqRoutes.get(
@@ -246,7 +245,7 @@ RfqRoutes.get(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2, 8]),
-  validateDbBody.rfq_access_check,
+
   rfqController.sendReminder
 );
 RfqRoutes.get(
@@ -254,7 +253,7 @@ RfqRoutes.get(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2, 8]),
-  validateDbBody.rfq_access_check,
+
   rfqController.getVendorsForReminder
 );
 RfqRoutes.post(
@@ -262,7 +261,7 @@ RfqRoutes.post(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2, 8]),
-  validateDbBody.rfq_access_check,
+
   rfqController.sendSelectiveReminder
 );
 
@@ -277,7 +276,7 @@ RfqRoutes.post(
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2, 8, 10]),
-  validateDbBody.rfq_access_check,
+
   validateBody(rfqSchemas.finalize),
   rfqController.finalize
 );
@@ -428,7 +427,7 @@ RfqRoutes.post(
   '/send-query-message',
   noLogin.customer_auth,
   rfqSchemas.queryMessageFileUploadHandler, 
-  validateDbBody.rfq_access_check_req_body,
+
   validateBody(rfqSchemas.sendMessage),
   rfqController.sendQueryMessage
 );
@@ -456,14 +455,14 @@ RfqRoutes.get('/targetPrice/:rfq_product_id',
 RfqRoutes.post(
   '/list-query-messages',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check_req_body,
+
   rfqController.listQueryMessages
 );
 
 RfqRoutes.post(
   '/list-queries',
   noLogin.customer_auth,
-  validateDbBody.rfq_access_check_req_body,
+
   rfqController.listQueries
 );
 
@@ -494,7 +493,7 @@ RfqRoutes.post('/add-clause-using-file',
   passportSignIn,
   acl([2, 8]),
   schema_posts.clauseFileUpload,
-  validateDbBody.rfq_access_check,
+
   validateBody(rfqSchemas.addClauseUsingFile),
   rfqController.addClauseUsingFile
 )
@@ -502,7 +501,7 @@ RfqRoutes.post('/add-clause-using-file',
 RfqRoutes.post('/add-clause',
   passportSignIn,
   acl([2, 8]),
-  validateDbBody.rfq_access_check,
+
   validateBody(rfqSchemas.addClause),
   rfqController.addClause
 )
@@ -548,7 +547,7 @@ RfqRoutes.post('/get-summarised-deviation',
 RfqRoutes.post('/get-vendor-names',
   passportSignIn,
   validateBody(rfqSchemas.getVendorNames),
-  validateDbBody.rfq_access_check,
+
   rfqController.getVendorNames
 )
 
@@ -751,7 +750,7 @@ RfqRoutes.post(
   '/clarification/raise',
   noLogin.customer_auth,
   rfqSchemas.clarificationFileUploadHandler,
-  validateDbBody.rfq_access_check_req_body,
+
   validateBody(rfqSchemas.raiseClarification),
   rfqController.raiseClarification
 );
