@@ -4874,6 +4874,36 @@ const rfqController = {
         const updatableData = data.updatableData;
         delete data.updatableData;
 
+        // --- Hotel change detection & vendor recomputation ---
+        let vendorRecomputationResult = null;
+        const incomingHotelIds = data.hotel_ids;
+        // Clean hotel_ids from data before DB update (not a column in tbl_rfq)
+        delete data.hotel_ids;
+
+        if (Array.isArray(incomingHotelIds) && prevRfqDetails.is_published !== 1) {
+          // Get current hotel mappings
+          const currentHotelMappings = await t.any(
+            `SELECT hotel_id FROM tbl_rfq_hotel_mappings WHERE rfq_id = $1`,
+            [rfq_id]
+          );
+          const currentHotelIds = currentHotelMappings.map(h => h.hotel_id).sort();
+          const newHotelIds = [...new Set(incomingHotelIds.map(Number))].sort();
+
+          const hotelsChanged = JSON.stringify(currentHotelIds) !== JSON.stringify(newHotelIds);
+
+          if (hotelsChanged && newHotelIds.length > 0) {
+            // Reconcile hotel mappings
+            await hospitalityModel.reconcileRFQHotels(rfq_id, newHotelIds, req.user.id);
+
+            // Recompute vendor eligibility for all products
+            vendorRecomputationResult = await hospitalityModel.recomputeVendorsForRfq(
+              rfq_id,
+              newHotelIds,
+              t
+            );
+          }
+        }
+
         const products = updatableData?.products;
         const updatableVendors = updatableData?.vendors;
         const newAddedproductVendors = {}; // { [email]: { name, email, product_names: [] } }
@@ -5737,7 +5767,8 @@ const rfqController = {
           data: updatedData || {},
           vendors: vendorData,
           rfqDetails: updatedData,
-          message: 'RFQ updated successfully'
+          message: 'RFQ updated successfully',
+          vendorRecomputationResult
         });
       });
     } catch (error) {
@@ -6463,15 +6494,65 @@ const rfqController = {
       const rfq_id = product.rfq_id || product.rfqId;
       const specs = product.specs;
 
-      if (
-        !product ||
-        !product.variant_id ||
-        !Array.isArray(product.vendors) ||
-        product.vendors.length === 0
-      ) {
+      if (!product || !product.variant_id) {
         return res
           .status(400)
-          .json({ status: 2, message: 'Invalid product or vendors data' });
+          .json({ status: 2, message: 'Invalid product data' });
+      }
+
+      // Determine vendors: use explicit array if provided, otherwise auto-map
+      let vendorIds = Array.isArray(product.vendors) && product.vendors.length > 0
+        ? product.vendors
+        : [];
+      let autoMapped = false;
+      let vendor_count = vendorIds.length;
+
+      if (vendorIds.length === 0) {
+        // Auto-map vendors via hotel eligibility
+        let hotel_ids = product.hotel_ids || [];
+
+        // Fall back to tbl_rfq_hotel_mappings if hotel_ids not provided
+        if (!hotel_ids.length) {
+          const hotelMappings = await db.any(
+            `SELECT hotel_id FROM tbl_rfq_hotel_mappings WHERE rfq_id = $1`,
+            [rfq_id]
+          );
+          hotel_ids = hotelMappings.map(h => h.hotel_id);
+        }
+
+        if (hotel_ids.length > 0) {
+          const eligibleVendors = await hospitalityModel.getEligibleVendorsForVariant(
+            product.variant_id,
+            hotel_ids
+          );
+          vendorIds = eligibleVendors.map(v => v.vendor_id);
+        }
+
+        autoMapped = true;
+        vendor_count = vendorIds.length;
+
+        // For tenders, require at least one vendor
+        const is_tender = product.is_tender !== undefined
+          ? product.is_tender
+          : null;
+
+        if (is_tender === null) {
+          // Look up from DB
+          const rfqRecord = await db.oneOrNone(
+            `SELECT is_tender FROM tbl_rfq WHERE id = $1`,
+            [rfq_id]
+          );
+          if (rfqRecord) {
+            product.is_tender = rfqRecord.is_tender;
+          }
+        }
+
+        if (product.is_tender === 1 && vendorIds.length === 0) {
+          return res.status(400).json({
+            status: 2,
+            message: 'No eligible vendors found for this product variant with the selected hotels. Please check vendor subscriptions.'
+          });
+        }
       }
 
       const variant = await rfqModel.getNextVariant(rfq_id, product.variant_id);
@@ -6516,23 +6597,28 @@ const rfqController = {
         });
       }
 
-      const vendorPromises = product.vendors.map(async (vendor) => {
-        const vendorData = {
-          rfq_id,
-          product_variant_id: product.variant_id,
-          user_id: vendor,
-          variant: variant
-        };
-        return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
-      });
+      if (vendorIds.length > 0) {
+        const vendorPromises = vendorIds.map(async (vendor) => {
+          const vendorData = {
+            rfq_id,
+            product_variant_id: product.variant_id,
+            user_id: vendor,
+            variant: variant
+          };
+          return await rfqModel.insert('tbl_rfq_product_vendors', vendorData);
+        });
 
-      await Promise.all(vendorPromises);
+        await Promise.all(vendorPromises);
+      }
 
       res.status(200).json({
         status: 1,
-        message: 'Product and Vendors added successfully!',
+        message: autoMapped
+          ? `Product added with ${vendor_count} auto-mapped vendor(s)`
+          : 'Product and Vendors added successfully!',
         rfqProductId: addedRfqProduct?.id ?? -1,
-        rfq_id
+        rfq_id,
+        vendor_count
       });
     } catch (error) {
       console.log(error);
