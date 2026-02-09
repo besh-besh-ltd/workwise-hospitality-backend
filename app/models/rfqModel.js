@@ -3195,6 +3195,14 @@ LIMIT 2;
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
       WHERE (RFQ.created_by = ${user_id} OR EXISTS (
       SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+      UNION ALL
+      SELECT 1 FROM tbl_hospitality_user_mappings HUM
+      WHERE HUM.user_id = ${user_id}
+        AND (
+          HUM.hospitality_hotel_id = RFQ.hotel_id
+          OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+              AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
+        )
       )) AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
@@ -3232,6 +3240,14 @@ LIMIT 2;
         LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
         WHERE (RFQ.created_by = ${user_id} OR EXISTS (
         SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}
+        UNION ALL
+        SELECT 1 FROM tbl_hospitality_user_mappings HUM
+        WHERE HUM.user_id = ${user_id}
+          AND (
+            HUM.hospitality_hotel_id = RFQ.hotel_id
+            OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
+          )
         )) AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
