@@ -1716,7 +1716,6 @@ WHERE NOT EXISTS (
           'hotel_id', RFQ.hotel_id,
           'department_id', RFQ.department_id,
           'title', RFQ.title,
-          'technical_evaluation_by', RFQ.technical_evaluation_by,
 
           -- Selected Terms
           'terms', (

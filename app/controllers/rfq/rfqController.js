@@ -2182,7 +2182,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
       termsChanged,
       termFilesChanged,
       title,
-      technical_evaluation_by,
   } = reqBody;
   const response_email = reqBody.response_email?.toLowerCase() || '';
 
@@ -2317,7 +2316,6 @@ const saveRfqDraft = async (user_id, reqBody) => {
       is_published: 0,
       updated_by: user_id,
       title: title || null,
-      technical_evaluation_by: technical_evaluation_by || null,
   };
 
   const errorObj = { vendorNotPresent: [] };
