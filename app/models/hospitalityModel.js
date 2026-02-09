@@ -856,6 +856,96 @@ JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id;
 
 
 
+/**
+ * Recomputes vendor eligibility for all products in an RFQ when hotels change.
+ * For each product, calls getEligibleVendorsForVariant with new hotel_ids,
+ * then diffs against current vendors to add/remove mappings.
+ *
+ * @param {number} rfq_id
+ * @param {number[]} hotel_ids - The new set of hotel IDs
+ * @param {object} txContext - pg-promise transaction context (t)
+ * @returns {{ recomputed: true, products: Array, productsWithNoVendors: Array }}
+ */
+recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
+  const ctx = txContext || db;
+
+  // Get all products for this RFQ
+  const rfqProducts = await ctx.any(
+    `SELECT rp.id AS rfq_product_id, rp.product_variant_id, rp.variant,
+            COALESCE(pv.name, '') AS product_name
+     FROM tbl_rfq_products rp
+     LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+     WHERE rp.rfq_id = $1`,
+    [rfq_id]
+  );
+
+  const results = [];
+  const productsWithNoVendors = [];
+
+  for (const product of rfqProducts) {
+    // Get eligible vendors for this variant + new hotels
+    const eligibleRows = await hospitalityModel.getEligibleVendorsForVariant(
+      product.product_variant_id,
+      hotel_ids
+    );
+    const eligibleVendorIds = new Set(eligibleRows.map(r => r.vendor_id));
+
+    // Get current vendors for this product
+    const currentVendors = await ctx.any(
+      `SELECT user_id FROM tbl_rfq_product_vendors
+       WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+      [rfq_id, product.product_variant_id, product.variant]
+    );
+    const currentVendorIds = new Set(currentVendors.map(v => v.user_id));
+
+    // Compute diff
+    const toAdd = [...eligibleVendorIds].filter(id => !currentVendorIds.has(id));
+    const toRemove = [...currentVendorIds].filter(id => !eligibleVendorIds.has(id));
+
+    // Insert new vendor mappings
+    for (const vendorId of toAdd) {
+      await ctx.none(
+        `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT DO NOTHING`,
+        [rfq_id, product.product_variant_id, vendorId, product.variant]
+      );
+    }
+
+    // Remove stale vendor mappings
+    if (toRemove.length > 0) {
+      await ctx.none(
+        `DELETE FROM tbl_rfq_product_vendors
+         WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
+           AND user_id IN ($4:csv)`,
+        [rfq_id, product.product_variant_id, product.variant, toRemove]
+      );
+    }
+
+    const remaining = eligibleVendorIds.size;
+
+    results.push({
+      rfq_product_id: product.rfq_product_id,
+      product_name: product.product_name,
+      added: toAdd.length,
+      removed: toRemove.length,
+      remaining
+    });
+
+    if (remaining === 0) {
+      productsWithNoVendors.push({
+        rfq_product_id: product.rfq_product_id,
+        product_name: product.product_name
+      });
+    }
+  }
+
+  return {
+    recomputed: true,
+    products: results,
+    productsWithNoVendors
+  };
+},
 
 };
 
