@@ -467,6 +467,38 @@ const negotiationModel = {
   // ============= QUOTE APPROVAL FUNCTIONS =============
 
   /**
+   * Get regular quotes (from tbl_quotes) by IDs for approval
+   */
+  getRegularQuotesByIds: async (quoteIds, rfqId, rfqProductId) => {
+    if (!quoteIds || quoteIds.length === 0) {
+      return [];
+    }
+    return db.any(
+      `SELECT
+        q.id,
+        q.id as quote_id,
+        q.rfq_id,
+        q.created_by as vendor_id,
+        qi.unit_price as quoted_price,
+        qi.total_price,
+        qi.freight_price,
+        qi.tax,
+        qi.package_price,
+        u.name as vendor_name,
+        u.organization_name,
+        c.company_name
+       FROM tbl_quotes q
+       JOIN tbl_quote_items qi ON qi.quote_id = q.id AND qi.rfq_product_id = $3
+       LEFT JOIN tbl_users u ON u.id = q.created_by
+       LEFT JOIN tbl_company c ON c.id = u.company_id
+       WHERE q.id = ANY($1)
+         AND q.rfq_id = $2
+         AND COALESCE(q.is_regret, 0) != 1`,
+      [quoteIds, rfqId, rfqProductId]
+    );
+  },
+
+  /**
    * Get quotes by IDs with vendor details
    */
   getQuotesByIds: async (quoteIds) => {
