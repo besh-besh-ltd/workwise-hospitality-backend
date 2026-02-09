@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import db from '../config/dbConn.js';
 import { sendReminderMail } from './sendEmailFunctions/milestoneEmails.js';
 import { sendGRNEmail } from './sendEmailFunctions/generalReminderEmails.js';
-import { recordLifecycleEvent } from '../models/generalModel.js';
+import { recordLifecycleEvent, getApprovalWorkflowUsers } from '../models/generalModel.js';
 import { createScheduleForRfqPublish, deleteRfqPublishSchedule } from './createSchedule.js';
 import { sendRfqPublishedNotification, sendVendorRfqNotification } from './sendEmailFunctions/approvalEmails.js';
 import rfqModel from '../models/rfqModel.js';
@@ -282,19 +282,22 @@ const publishRfq = async (rfq, txContext = null) => {
     );
 
     if (rfqDetails) {
-      // 1. Notify project team members
+      // 1. Notify project team members / approval workflow users
+      let publishUsers = [];
       if (rfqDetails.project_id) {
         const teamMembers = await projectModel.getProjectTeamMembers(rfqDetails.project_id);
-        const users = (teamMembers || [])
+        publishUsers = (teamMembers || [])
           .filter(m => m.email && m.email.includes('@'))
           .map(m => ({ name: m.name, email: m.email }));
-
-        if (users.length > 0) {
-          sendRfqPublishedNotification({
-            rfqDetails: { id, rfq_no, is_tender, title: rfqDetails.title },
-            users
-          });
-        }
+      } else if (rfqDetails.is_tender === 1) {
+        const approvalUsers = await getApprovalWorkflowUsers('TENDER', id);
+        publishUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
+      }
+      if (publishUsers.length > 0) {
+        sendRfqPublishedNotification({
+          rfqDetails: { id, rfq_no, is_tender, title: rfqDetails.title },
+          users: publishUsers
+        });
       }
 
       // 2. Notify vendors
