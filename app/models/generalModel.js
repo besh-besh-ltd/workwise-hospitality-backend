@@ -2628,10 +2628,15 @@ export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, 
     }
 
     // 2. Always remove quote finalization entries
-    const finalizations = await t.any(`
+    // rfq_product_id is tbl_rfq_products.id, but tbl_quote_finalization stores the actual product_variant_id
+    const rfqProduct = await t.oneOrNone(`
+      SELECT product_variant_id, variant FROM tbl_rfq_products WHERE id = $1
+    `, [rfq_product_id]);
+
+    const finalizations = rfqProduct ? await t.any(`
       SELECT * FROM tbl_quote_finalization
-      WHERE rfq_id = $1 AND product_variant_id = $2
-    `, [rfq_id, rfq_product_id]);
+      WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3
+    `, [rfq_id, rfqProduct.product_variant_id, rfqProduct.variant]) : [];
 
     for (const f of finalizations) {
       await t.none(`
