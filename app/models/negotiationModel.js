@@ -488,7 +488,8 @@ const negotiationModel = {
         u.organization_name,
         c.company_name
        FROM tbl_quotes q
-       JOIN tbl_quote_items qi ON qi.quote_id = q.id AND qi.rfq_product_id = $3
+       JOIN tbl_rfq_products rp ON rp.id = $3
+       JOIN tbl_quote_items qi ON qi.quote_id = q.id AND qi.product_variant_id = rp.product_variant_id AND qi.variant = rp.variant
        LEFT JOIN tbl_users u ON u.id = q.created_by
        LEFT JOIN tbl_company c ON c.id = u.company_id
        WHERE q.id = ANY($1)
