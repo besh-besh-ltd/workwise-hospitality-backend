@@ -3747,7 +3747,9 @@ export const handleRFQRejection = async (approval_instance_id, rejector_user_id,
       return null;
     }
 
-    // Status remains at 3 (PENDING_APPROVAL) - creator can edit and resubmit
+    // Reset status to 1 (draft) so the RFQ moves back to the drafts list
+    await t.none(`UPDATE tbl_rfq SET status = 1 WHERE id = $1`, [rfq_id]);
+
     // Record lifecycle event for rejection
     await recordLifecycleEvent({
       entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
@@ -3766,8 +3768,7 @@ export const handleRFQRejection = async (approval_instance_id, rejector_user_id,
 
     // TODO: Send notification to RFQ creator about rejection with reason
 
-    console.log(`RFQ ${rfq_id} rejected - creator can modify and resubmit`);
-    return { rfq_id, status: 3, rejection_reason };
+    return { rfq_id, status: 1, rejection_reason };
   } catch (error) {
     console.error('Error handling RFQ rejection:', error);
     throw error;

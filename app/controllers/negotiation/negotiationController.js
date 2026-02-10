@@ -1101,9 +1101,76 @@ const NegotiationController = {
             txContext: t
           });
 
+          // For hospitality tenders, also create ARC approval instance
+          const requiresArc = rfqData.is_tender === 1 && rfqData.hospitality_company_id;
+          let arcApprovalCreated = false;
+
+          if (requiresArc) {
+            const existingArcApprovals = await getApprovalInstancesByEntity('ARC', rfq_product_id, t);
+            const existingArcApproval = existingArcApprovals.find(inst =>
+              inst.status === 'PENDING' || inst.status === 'APPROVED'
+            );
+
+            if (!existingArcApproval) {
+              const product = await rfqModel.getRfqProductById(rfq_product_id, rfq_id, t);
+              const primaryQuote = quotes[0];
+
+              try {
+                const arcApprovalResult = await createApprovalInstance({
+                  entity_type: 'ARC',
+                  entity_id: rfq_product_id,
+                  hospitality_company_id: rfqData.hospitality_company_id,
+                  hotel_id: rfqData.hotel_id || null,
+                  department_id: rfqData.department_id || null,
+                  initiated_by: user_id,
+                  metadata: {
+                    rfq_id: rfq_id,
+                    rfq_product_id: rfq_product_id,
+                    rfq_number: rfqData.rfq_no,
+                    product_variant_id: product?.product_variant_id,
+                    variant: product?.variant,
+                    vendor_id: primaryQuote.vendor_id,
+                    quote_id: primaryQuote.id,
+                    is_tender: 1,
+                    triggered_by: 'negotiation_quotes_auto_approval',
+                    selected_quotes: quotes.map(q => ({
+                      quote_id: q.id,
+                      vendor_id: q.vendor_id,
+                      vendor_name: q.vendor_name || q.organization_name,
+                      quoted_price: q.quoted_price
+                    }))
+                  },
+                  txContext: t
+                });
+
+                if (arcApprovalResult) {
+                  arcApprovalCreated = true;
+                  await recordLifecycleEvent({
+                    entity_type: 'TENDER',
+                    entity_id: rfq_id,
+                    stage: 'ARC_SUBMITTED',
+                    action: 'SUBMIT_ARC',
+                    performed_by: user_id,
+                    metadata: {
+                      rfq_product_id: rfq_product_id,
+                      approval_instance_id: arcApprovalResult.instance?.id,
+                      auto_approved: arcApprovalResult.autoApproved || false,
+                      triggered_by: 'negotiation_quotes_auto_approval'
+                    },
+                    txContext: t
+                  });
+                }
+              } catch (arcError) {
+                // Log but don't fail finalization if ARC policy not found
+                console.error('ARC approval creation failed during auto-approval:', arcError.message);
+              }
+            }
+          }
+
           return {
             autoApproved: true,
-            quotes: quotes
+            quotes: quotes,
+            arcApprovalCreated
           };
         }
 
@@ -1141,9 +1208,12 @@ const NegotiationController = {
               vendor_name: q.vendor_name || q.organization_name,
               quoted_price: q.quoted_price
             })),
-            finalization_complete: true
+            finalization_complete: true,
+            arc_approval_created: result.arcApprovalCreated || false
           },
-          message: 'Quotes auto-approved and added to finalization (no approval policy configured)'
+          message: result.arcApprovalCreated
+            ? 'Quotes auto-approved, finalized, and ARC approval submitted'
+            : 'Quotes auto-approved and added to finalization'
         });
       }
 
