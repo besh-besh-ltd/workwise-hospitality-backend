@@ -2712,25 +2712,39 @@ export async function resetQuoteFinalizationForSendback(rfq_id, rfq_product_id, 
         `, [techEval.id]);
         resetTechEval = resetVendors.rowCount;
 
-        // Cancel any TECHNICAL approval instances
-        const techInstances = await t.any(`
-          SELECT id, status FROM tbl_approval_instances
-          WHERE entity_type = 'TECHNICAL'
-            AND entity_id = $1
-            AND status IN ('PENDING', 'APPROVED')
-        `, [rfq_product_id]);
+        // Reset tech eval rounds so evaluator can resubmit
+        // Also collect round IDs to cancel their TECHNICAL approval instances
+        const activeRounds = await t.any(`
+          SELECT id, status FROM tbl_tech_evaluation_rounds
+          WHERE tbl_rfq_product_tech_evaluation_id = $1 AND status IN ('PENDING', 'SUBMITTED')
+        `, [techEval.id]);
 
-        for (const instance of techInstances) {
-          if (instance.status === 'PENDING') {
-            await cancelApprovalInstance(instance.id, user_id, reason || 'Reset due to ARC sendback to TECH_EVAL');
-          } else {
-            await t.none(`
-              UPDATE tbl_approval_instances
-              SET status = 'CANCELLED', completed_at = NOW()
-              WHERE id = $1
-            `, [instance.id]);
+        for (const round of activeRounds) {
+          await t.none(`
+            UPDATE tbl_tech_evaluation_rounds SET status = 'CANCELLED', completed_at = NOW()
+            WHERE id = $1
+          `, [round.id]);
+
+          // Cancel TECHNICAL approval instances (entity_id = round.id for TECHNICAL type)
+          const techInstances = await t.any(`
+            SELECT id, status FROM tbl_approval_instances
+            WHERE entity_type = 'TECHNICAL'
+              AND entity_id = $1
+              AND status IN ('PENDING', 'APPROVED')
+          `, [round.id]);
+
+          for (const instance of techInstances) {
+            if (instance.status === 'PENDING') {
+              await cancelApprovalInstance(instance.id, user_id, reason || 'Reset due to ARC sendback to TECH_EVAL');
+            } else {
+              await t.none(`
+                UPDATE tbl_approval_instances
+                SET status = 'CANCELLED', completed_at = NOW()
+                WHERE id = $1
+              `, [instance.id]);
+            }
+            cancelledInstances++;
           }
-          cancelledInstances++;
         }
       }
     }

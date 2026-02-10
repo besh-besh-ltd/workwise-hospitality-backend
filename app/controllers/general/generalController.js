@@ -20,6 +20,7 @@ import generalModel, {
 } from '../../models/generalModel.js';
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { handleRFQPostApproval, handleRFQRejection } from '../rfq/rfqController.js';
+import rfqModel from '../../models/rfqModel.js';
 
 const generalController = {
   getStates: async (req, res, next) => {
@@ -562,7 +563,17 @@ const hospitalityApprovalController = {
               await handleRFQRejection(parseInt(approval_instance_id), approver_user_id, comment);
             }
           }
-          // Add other entity type handlers here as needed (PO, ARC, etc.)
+          // Handle TECHNICAL rejection - update round status so evaluator can resubmit
+          if (instance && instance.entity_type === 'TECHNICAL' && result.instance_status === 'REJECTED') {
+            try {
+              await rfqModel.updateTechEvalRound(instance.entity_id, {
+                status: 'REJECTED',
+                completed_at: new Date()
+              });
+            } catch (techRejErr) {
+              console.error('Error updating tech eval round on rejection:', techRejErr);
+            }
+          }
         } catch (postActionError) {
           // Log but don't fail the response - the approval action itself succeeded
           console.error('Error in post-approval processing:', postActionError);
