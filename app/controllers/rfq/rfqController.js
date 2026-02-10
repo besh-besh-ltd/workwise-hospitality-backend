@@ -15034,6 +15034,21 @@ getClauses: async (req, res) => {
         }
       }
 
+      // If rejected, update the round status so evaluator can resubmit
+      if (action.toUpperCase() === 'REJECT' && result.instance_status === 'REJECTED') {
+        try {
+          const rejectedInstance = await getApprovalInstanceById(approval_instance_id);
+          if (rejectedInstance && rejectedInstance.entity_id) {
+            await rfqModel.updateTechEvalRound(rejectedInstance.entity_id, {
+              status: 'REJECTED',
+              completed_at: new Date()
+            });
+          }
+        } catch (postRejectionError) {
+          console.error('Error in TECHNICAL post-rejection processing:', postRejectionError);
+        }
+      }
+
       return res.status(200).json({
         status: 1,
         message: result.message,
