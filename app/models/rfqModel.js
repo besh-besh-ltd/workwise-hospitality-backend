@@ -7917,6 +7917,7 @@ ORDER BY m.created_at;
                                     'is_cleared', deduped.is_cleared,
                                     'is_verified', deduped.is_verified,
                                     'evaluated_by', deduped.evaluated_by,
+                                    'approved_by', deduped.approved_by,
                                     'rfq_product_vendor_id', deduped.rfq_product_vendor_id,
                                     'calculated_score', deduped.calculated_score,
                                     'is_passed', deduped.is_passed,
@@ -7942,6 +7943,7 @@ ORDER BY m.created_at;
                                       rc.status AS is_cleared,
                                       rc.is_verified AS is_verified,
                                       _TU.name AS evaluated_by,
+                                      _APPROVER.name AS approved_by,
                                       rpv.id AS rfq_product_vendor_id,
                                       COALESCE(vs.calculated_score::NUMERIC, 0) AS calculated_score,
                                       vs.is_passed AS is_passed,
@@ -7974,7 +7976,11 @@ ORDER BY m.created_at;
                                             LEFT JOIN tbl_rfq_product_tech_evaluation_cleared_vendors rc
                                                       ON rc.tbl_rfq_product_tech_evaluation_id = te.id
                                                           AND rc.vendor_id = tu.id
-                                            LEFT JOIN tbl_users _TU ON _TU.id = rc.created_by
+                                            LEFT JOIN tbl_tech_evaluation_rounds _TER
+                                                      ON _TER.tbl_rfq_product_tech_evaluation_id = te.id
+                                            LEFT JOIN tbl_approval_instances _AI ON _AI.id = _TER.approval_instance_id
+                                            LEFT JOIN tbl_users _TU ON _TU.id = _AI.initiated_by
+                                            LEFT JOIN tbl_users _APPROVER ON _APPROVER.id = _AI.final_decision_by
                                             LEFT JOIN vendor_scores vs
                                                       ON vs.rfq_id = te.rfq_id
                                                           AND vs.rfq_product_id = te.tbl_rfq_product_id
@@ -9023,14 +9029,19 @@ ORDER BY m.created_at;
   `;
 
     const fetchClearedVendorDetailsQuery = `
-  SELECT 
-    RC.id, 
-    RC.status, 
+  SELECT
+    RC.id,
+    RC.status,
     RC.reject_message,
-    U.name AS evaluated_by
+    _INITIATOR.name AS evaluated_by,
+    _APPROVER.name AS approved_by
   FROM tbl_rfq_product_tech_evaluation_cleared_vendors RC
-  LEFT JOIN tbl_users U ON RC.created_by = U.id
-  WHERE RC.tbl_rfq_product_tech_evaluation_id = $1 
+  LEFT JOIN tbl_tech_evaluation_rounds _TER
+    ON _TER.tbl_rfq_product_tech_evaluation_id = RC.tbl_rfq_product_tech_evaluation_id
+  LEFT JOIN tbl_approval_instances _AI ON _AI.id = _TER.approval_instance_id
+  LEFT JOIN tbl_users _INITIATOR ON _INITIATOR.id = _AI.initiated_by
+  LEFT JOIN tbl_users _APPROVER ON _APPROVER.id = _AI.final_decision_by
+  WHERE RC.tbl_rfq_product_tech_evaluation_id = $1
     AND RC.vendor_id = $2;
 `;
 
