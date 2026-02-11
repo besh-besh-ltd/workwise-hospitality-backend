@@ -1042,15 +1042,24 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
     [poId]
   );
 
-  const isUserInHierarchy = await db.oneOrNone(
-    `SELECT 1 FROM tbl_approval_hierarchy
-    WHERE company_id = $1
-    AND hierarchy_id = $2
-    AND user_id = $3`,
-    [po.company_id, po.hierarchy_id, current_user.id]
-  );
+  // Authorization: allow edit if user is the creator or is in the PO's approval hierarchy
+  const isCreator = po.initiated_by === current_user.id;
 
-  if(!isUserInHierarchy) throw new Error("Edit failed! Logged in user is not in the PO selected hierarchy")
+  if (!isCreator) {
+    if (po.selected_hierarchy) {
+      // Old approval system: check hierarchy membership
+      const isUserInHierarchy = await db.oneOrNone(
+        `SELECT 1 FROM tbl_approval_hierarchy
+        WHERE company_id = $1
+        AND hierarchy_id = $2
+        AND user_id = $3`,
+        [po.company_id, po.selected_hierarchy, current_user.id]
+      );
+      if (!isUserInHierarchy) throw new Error("Edit failed! Logged in user is not in the PO selected hierarchy");
+    } else {
+      throw new Error("Edit failed! Only the PO creator can edit this PO");
+    }
+  }
 
   return db.tx(async (t) => {
     // --- Buckets for updates ---
@@ -1234,17 +1243,50 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
       }
     }
 
-    const txn = await t.one(
+    // Log edit in old hierarchy history if it exists (non-hospitality POs)
+    const txn = await t.oneOrNone(
       `SELECT * FROM tbl_approval_hierarchy_transactions WHERE hierarchy_type = 'po' AND target_entity_id = $1`,
       [po_id]
-    )
+    );
 
-    await t.none(
-      `INSERT INTO tbl_approval_hierarchy_history 
-      (approval_transaction_id, approved_by, action, meta)
-      VALUES ($1, $2, $3, $4)`,
-      [txn.id, current_user.id, 'edited', { ...poUpdates, ...productUpdates, ...hsnUpdates }]
-    )
+    if (txn) {
+      await t.none(
+        `INSERT INTO tbl_approval_hierarchy_history
+        (approval_transaction_id, approved_by, action, meta)
+        VALUES ($1, $2, $3, $4)`,
+        [txn.id, current_user.id, 'edited', { ...poUpdates, ...productUpdates, ...hsnUpdates }]
+      );
+    }
+
+    // Cancel existing approval instance before re-initiating (PO was edited, needs fresh approval)
+    const existingInstance = await t.oneOrNone(
+      `SELECT id, status FROM tbl_approval_instances
+      WHERE entity_type = 'PO' AND entity_id = $1 AND status = 'PENDING'
+      ORDER BY created_at DESC LIMIT 1`,
+      [po_id]
+    );
+
+    if (existingInstance) {
+      await t.none(
+        `UPDATE tbl_approval_instances SET status = 'CANCELLED', completed_at = NOW() WHERE id = $1`,
+        [existingInstance.id]
+      );
+      await t.none(
+        `UPDATE tbl_approval_instance_steps SET status = 'CANCELLED', completed_at = NOW()
+        WHERE approval_instance_id = $1 AND status = 'PENDING'`,
+        [existingInstance.id]
+      );
+      await t.none(
+        `INSERT INTO tbl_approval_actions (approval_instance_id, approver_user_id, action, comment)
+        VALUES ($1, $2, 'REJECT', $3)`,
+        [existingInstance.id, current_user.id, '[CANCELLED] PO edited, re-initiating approval']
+      );
+      // Clear the old instance reference from PO
+      await t.none(
+        `UPDATE tbl_rfq_purchase_order SET approval_instance_id = NULL, status = 'draft' WHERE id = $1`,
+        [po_id]
+      );
+    }
 
     const result = await initiatePurchaseOrder(po_id, current_user, t);
     if(result.approval_required) {
@@ -1253,8 +1295,10 @@ export const handleUpdatePO = async (po_id, changes, current_user) => {
         WHERE id = $1`,
         [result.po_id]
       );
-  
-      await sendApprovalNotification(purchaseOrder, result.current_approver_id);
+
+      if (purchaseOrder && result.current_approver_id) {
+        await sendApprovalNotification(purchaseOrder, result.current_approver_id);
+      }
     }
 
     return { success: true };
@@ -1509,30 +1553,32 @@ export const handleRaiseInvoice = async (po_id, invoice_url, vendor_id) => {
       [po_id]
     );
 
-    const reminderUsers = await t.one(
+    const reminderUsers = await t.oneOrNone(
       `SELECT ARRAY_AGG(user_id) AS users_list
       FROM tbl_approval_hierarchy
       WHERE company_id = $1
       AND hierarchy_type = 'po'
       AND hierarchy_id = $2`,
-      [po.company_id, (po.selected_hierarchy ?? 1)]
+      [po.company_id, po.selected_hierarchy]
     );
 
-    const txn = await t.one(
+    const txn = await t.oneOrNone(
       `SELECT id FROM tbl_approval_hierarchy_transactions
       WHERE hierarchy_type = 'po'
       AND target_entity_id = $1`,
       [po_id]
     );
 
-    await t.none(
-      `INSERT INTO tbl_approval_hierarchy_history 
-      (approval_transaction_id, approved_by, action)
-      VALUES ($1, $2, $3)`,
-      [txn.id, vendor_id, 'invoice']
-    )
+    if (txn) {
+      await t.none(
+        `INSERT INTO tbl_approval_hierarchy_history
+        (approval_transaction_id, approved_by, action)
+        VALUES ($1, $2, $3)`,
+        [txn.id, vendor_id, 'invoice']
+      );
+    }
 
-    await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers.users_list);
+    await sendInvoiceEmail(formattedPOData, invoice_url, reminderUsers?.users_list);
 
     return result;
   })
@@ -1589,7 +1635,7 @@ export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks) =
       [po_id]
     );
 
-    const reminderUsers = await t.one(
+    const reminderUsers = await t.oneOrNone(
       `SELECT ARRAY_AGG(user_id) AS users_list
       FROM tbl_approval_hierarchy
       WHERE company_id = $1
@@ -1598,21 +1644,23 @@ export const handleMarkGRN = async (po_id, grn_document_url, user_id, remarks) =
       [po.company_id, po.selected_hierarchy]
     );
 
-    const txn = await t.one(
+    const txn = await t.oneOrNone(
       `SELECT id FROM tbl_approval_hierarchy_transactions
       WHERE hierarchy_type = 'po'
       AND target_entity_id = $1`,
       [po_id]
     );
 
-    await t.none(
-      `INSERT INTO tbl_approval_hierarchy_history 
-      (approval_transaction_id, approved_by, action, remarks)
-      VALUES ($1, $2, $3, $4)`,
-      [txn.id, user_id, 'grn', remarks]
-    );
+    if (txn) {
+      await t.none(
+        `INSERT INTO tbl_approval_hierarchy_history
+        (approval_transaction_id, approved_by, action, remarks)
+        VALUES ($1, $2, $3, $4)`,
+        [txn.id, user_id, 'grn', remarks]
+      );
+    }
 
-    await sendGRNUpdationEmail(formattedPOData, grn_document_url, reminderUsers.users_list);
+    await sendGRNUpdationEmail(formattedPOData, grn_document_url, reminderUsers?.users_list);
 
     return result;
   });
@@ -1641,14 +1689,15 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
       `SELECT PO.*,
       TU.name AS finalized_vendor_name,
       TU.email AS finalized_vendor_email,
-      TAHH.created_at AS po_approved_on,
+      COALESCE(TAHH.created_at, TAI.completed_at) AS po_approved_on,
       QI.delivery_period
 
       FROM tbl_rfq_purchase_order PO
       JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
       JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
-      JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND target_entity_id = PO.id
+      LEFT JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND TAHT.target_entity_id = PO.id
       LEFT JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
+      LEFT JOIN tbl_approval_instances TAI ON TAI.id = PO.approval_instance_id AND TAI.status = 'APPROVED'
       JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
       JOIN tbl_company TC ON TU.company_id = TC.id
 
@@ -1656,7 +1705,7 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
       [po_id]
     );
 
-    const reminderUsers = await t.one(
+    const reminderUsers = await t.oneOrNone(
       `SELECT ARRAY_AGG(user_id) AS users_list
       FROM tbl_approval_hierarchy
       WHERE company_id = $1
@@ -1673,8 +1722,8 @@ export const handleMarkDispatched = async (po_id, vendor_id) => {
       [po_id]
     );
     
-    await scheduleGRNReminders(formattedPOData, reminderUsers.users_list, grnRepData);
-    await sendDispatchedEmail(formattedPOData, reminderUsers.users_list);
+    await scheduleGRNReminders(formattedPOData, reminderUsers?.users_list, grnRepData);
+    await sendDispatchedEmail(formattedPOData, reminderUsers?.users_list);
 
     return true;
   })
@@ -1724,14 +1773,15 @@ export const handleAddSiteRepresentative = async (po_id, added_by, name, email, 
       `SELECT PO.*,
       TU.name AS finalized_vendor_name,
       TU.email AS finalized_vendor_email,
-      TAHH.created_at AS po_approved_on,
+      COALESCE(TAHH.created_at, TAI.completed_at) AS po_approved_on,
       QI.delivery_period
 
       FROM tbl_rfq_purchase_order PO
       JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = PO.id
       JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
-      JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND target_entity_id = PO.id
+      LEFT JOIN tbl_approval_hierarchy_transactions TAHT ON TAHT.hierarchy_type = 'po' AND TAHT.target_entity_id = PO.id
       LEFT JOIN tbl_approval_hierarchy_history TAHH ON TAHT.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
+      LEFT JOIN tbl_approval_instances TAI ON TAI.id = PO.approval_instance_id AND TAI.status = 'APPROVED'
       JOIN tbl_users TU ON PO.finalized_vendor_id = TU.id
       JOIN tbl_company TC ON TU.company_id = TC.id
 
