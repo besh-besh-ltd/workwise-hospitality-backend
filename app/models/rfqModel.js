@@ -4641,27 +4641,37 @@ LIMIT 2;
     const approvedByParam = approved_by_id ? `$${paramIdx++}` : null;
     if (approved_by_id) params.push(approved_by_id);
 
-    // Hotel eligibility filter JOINs
-    let hotelFilterJoins = '';
+    // Hotel eligibility filter JOINs (used inside vendor_count subquery)
     let hotelIdsParam = null;
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
       hotelIdsParam = `$${paramIdx++}`;
       params.push(hotel_ids);
-
-      hotelFilterJoins = `
-      JOIN tbl_vendor_hotel_category_subscription vhcs_cat
-        ON vhcs_cat.vendor_id = pvvm.vendor_id
-        AND vhcs_cat.item_type = 'category'
-        AND vhcs_cat.item_id = pc.category_id
-        AND vhcs_cat.status = 'active'
-        AND CURRENT_DATE BETWEEN vhcs_cat.start_date AND vhcs_cat.end_date
-      JOIN tbl_vendor_hotel_category_subscription vhcs_hotel
-        ON vhcs_hotel.vendor_id = pvvm.vendor_id
-        AND vhcs_hotel.item_type = 'hotel'
-        AND vhcs_hotel.item_id = ANY(${hotelIdsParam})
-        AND vhcs_hotel.status = 'active'
-        AND CURRENT_DATE BETWEEN vhcs_hotel.start_date AND vhcs_hotel.end_date`;
     }
+
+    // Vendor count subquery - counts eligible vendors per variant
+    const vendorCountSubquery = hotelIdsParam
+      ? `(SELECT COUNT(DISTINCT pvvm_vc.vendor_id)
+          FROM tbl_product_variant_vendor_mapping pvvm_vc
+          JOIN tbl_vendor_hotel_category_subscription vhcs_cat
+            ON vhcs_cat.vendor_id = pvvm_vc.vendor_id
+            AND vhcs_cat.item_type = 'category'
+            AND vhcs_cat.item_id = pc.category_id
+            AND vhcs_cat.status = 'active'
+            AND CURRENT_DATE BETWEEN vhcs_cat.start_date AND vhcs_cat.end_date
+          JOIN tbl_vendor_hotel_category_subscription vhcs_hotel
+            ON vhcs_hotel.vendor_id = pvvm_vc.vendor_id
+            AND vhcs_hotel.item_type = 'hotel'
+            AND vhcs_hotel.item_id = ANY(${hotelIdsParam})
+            AND vhcs_hotel.status = 'active'
+            AND CURRENT_DATE BETWEEN vhcs_hotel.start_date AND vhcs_hotel.end_date
+          WHERE pvvm_vc.product_variant_id = pv.id
+            AND pvvm_vc.status = TRUE
+            AND pvvm_vc.is_approved = TRUE)`
+      : `(SELECT COUNT(DISTINCT pvvm_vc.vendor_id)
+          FROM tbl_product_variant_vendor_mapping pvvm_vc
+          WHERE pvvm_vc.product_variant_id = pv.id
+            AND pvvm_vc.status = TRUE
+            AND pvvm_vc.is_approved = TRUE)`;
 
     let q = `
       SELECT DISTINCT p.id AS product_id,
@@ -4675,26 +4685,10 @@ LIMIT 2;
                       c.id AS category_id,
                       c.parent_id AS parent_category_id,
                       img.new_image_name AS image_url,
+                      ${vendorCountSubquery} AS vendor_count,
                       similarity(CONCAT(pv.name, ' - ', p.name), $1) AS similarity_score,
                       ts_rank_cd(to_tsvector('english', CONCAT(pv.name, ' - ', p.name)), plainto_tsquery('english', $1)) AS rank
       FROM tbl_product_variant pv
-      JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = pv.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
-      JOIN tbl_users u ON u.id = pvvm.vendor_id
-        ${
-          locationFilters.country_id
-            ? `AND u.country::int = ${locationFilters.country_id}`
-            : ''
-        }
-        ${
-          locationFilters.state_id
-            ? `AND u.state::int = ${locationFilters.state_id}`
-            : ''
-        }
-        ${
-          locationFilters.city_id
-            ? `AND u.city::int = ${locationFilters.city_id}`
-            : ''
-        }
       JOIN tbl_product p ON pv.product_id = p.id
       JOIN tbl_product_categories pc ON p.id = pc.product_id
       JOIN tbl_category c ON pc.category_id = c.id
@@ -4704,7 +4698,6 @@ LIMIT 2;
           ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id`
           : ``
       }
-      ${hotelFilterJoins}
       WHERE p.status = 1
         AND p.is_deleted = 0
         AND p.is_review = 0
@@ -7980,7 +7973,12 @@ ORDER BY m.created_at;
                                                       ON _TER.tbl_rfq_product_tech_evaluation_id = te.id
                                             LEFT JOIN tbl_approval_instances _AI ON _AI.id = _TER.approval_instance_id
                                             LEFT JOIN tbl_users _TU ON _TU.id = _AI.initiated_by
-                                            LEFT JOIN tbl_users _APPROVER ON _APPROVER.id = _AI.final_decision_by
+                                            LEFT JOIN LATERAL (
+                                                SELECT approver_user_id FROM tbl_approval_actions
+                                                WHERE approval_instance_id = _AI.id AND action = 'APPROVE'
+                                                ORDER BY created_at DESC LIMIT 1
+                                            ) _LAST_ACTION ON true
+                                            LEFT JOIN tbl_users _APPROVER ON _APPROVER.id = _LAST_ACTION.approver_user_id
                                             LEFT JOIN vendor_scores vs
                                                       ON vs.rfq_id = te.rfq_id
                                                           AND vs.rfq_product_id = te.tbl_rfq_product_id
@@ -9040,7 +9038,12 @@ ORDER BY m.created_at;
     ON _TER.tbl_rfq_product_tech_evaluation_id = RC.tbl_rfq_product_tech_evaluation_id
   LEFT JOIN tbl_approval_instances _AI ON _AI.id = _TER.approval_instance_id
   LEFT JOIN tbl_users _INITIATOR ON _INITIATOR.id = _AI.initiated_by
-  LEFT JOIN tbl_users _APPROVER ON _APPROVER.id = _AI.final_decision_by
+  LEFT JOIN LATERAL (
+      SELECT approver_user_id FROM tbl_approval_actions
+      WHERE approval_instance_id = _AI.id AND action = 'APPROVE'
+      ORDER BY created_at DESC LIMIT 1
+  ) _LAST_ACTION ON true
+  LEFT JOIN tbl_users _APPROVER ON _APPROVER.id = _LAST_ACTION.approver_user_id
   WHERE RC.tbl_rfq_product_tech_evaluation_id = $1
     AND RC.vendor_id = $2;
 `;
@@ -11657,18 +11660,19 @@ ORDER BY tq.timestamp DESC;
         tu.name AS vendor_name,
         tu.email AS vendor_email,
         COALESCE(tc.company_name, tu.organization_name) AS company_name,
-        COUNT(vr.buyer_marks) AS evaluated_clauses_count,
+        COUNT(CASE WHEN vr.score_timestamp IS NOT NULL THEN 1 END) AS evaluated_clauses_count,
+        BOOL_OR(vr.score_timestamp IS NOT NULL) AS has_marks,
         COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
         COALESCE(SUM(c.weightage), 0) AS total_weightage,
         CASE
-          WHEN COUNT(vr.buyer_marks) = 0 THEN NULL
+          WHEN NOT BOOL_OR(vr.score_timestamp IS NOT NULL) THEN NULL
           WHEN COALESCE(SUM(c.weightage), 0) > 0
           THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
           ELSE 0
         END AS calculated_score,
         $2::NUMERIC AS minimum_passing_score,
         CASE
-          WHEN COUNT(vr.buyer_marks) = 0 THEN NULL
+          WHEN NOT BOOL_OR(vr.score_timestamp IS NOT NULL) THEN NULL
           WHEN COALESCE(SUM(c.weightage), 0) > 0
           THEN CASE
             WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE($2::NUMERIC, 0)

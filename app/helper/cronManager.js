@@ -355,46 +355,120 @@ const publishRfq = async (rfq, txContext = null) => {
  *
  * Publish RFQ by ID - called by the scheduler endpoint.
  * Re-validates the RFQ state before publishing.
+ * Auto-approves RFQs that are still pending approval at publish time.
  *
  * @param {number} rfqId - RFQ ID to publish
  * @param {string} rfq_no - RFQ number for logging
  */
 export const publishRfqById = async (rfqId, rfq_no) => {
-  // Re-validate before publishing (same logic as original cron job)
-  const rfq = await db.oneOrNone(`
-    SELECT id, rfq_no, is_tender, created_by, status, is_published
-    FROM tbl_rfq WHERE id = $1
-  `, [rfqId]);
+  return await db.tx(async t => {
+    // Re-validate before publishing
+    const rfq = await t.oneOrNone(`
+      SELECT id, rfq_no, is_tender, created_by, status, is_published
+      FROM tbl_rfq WHERE id = $1
+    `, [rfqId]);
 
-  if (!rfq) {
-    console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) not found`);
-    return { skipped: true, reason: 'not_found' };
-  }
+    if (!rfq) {
+      console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) not found`);
+      return { skipped: true, reason: 'not_found' };
+    }
 
-  if (rfq.is_published === 1) {
-    console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) already published`);
-    return { skipped: true, reason: 'already_published' };
-  }
+    if (rfq.is_published === 1) {
+      console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) already published`);
+      return { skipped: true, reason: 'already_published' };
+    }
 
-  if (rfq.status === 3) {
-    console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) still pending approval, cannot publish`);
-    return { skipped: true, reason: 'pending_approval' };
-  }
+    // Track if we auto-approved
+    let wasAutoApproved = false;
 
-  if (rfq.status !== 4) {
-    console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) not in publishable state (status: ${rfq.status})`);
-    return { skipped: true, reason: 'invalid_status' };
-  }
+    // If still pending approval (status = 3), auto-approve it since publish date has arrived
+    if (rfq.status === 3) {
+      wasAutoApproved = true;
+      console.log(`[RFQ Publisher] Auto-approving RFQ ${rfq_no} (ID: ${rfqId}) - publish date arrived, no approver action taken`);
 
-  await publishRfq(rfq);
-  return { published: true };
+      // Mark all pending approval instances as auto-approved
+      await t.none(`
+        UPDATE tbl_approval_instances
+        SET status = 'APPROVED',
+            completed_at = NOW(),
+            metadata = jsonb_set(
+              COALESCE(metadata, '{}'::jsonb),
+              '{auto_approved_reason}',
+              '"Publish date arrived - no approver action"'::jsonb
+            )
+        WHERE entity_type = $1
+          AND entity_id = $2
+          AND status = 'PENDING'
+      `, [rfq.is_tender === 1 ? 'TENDER' : 'RFQ', rfqId]);
+
+      // Mark all pending approval steps as auto-approved
+      await t.none(`
+        UPDATE tbl_approval_instance_steps
+        SET status = 'APPROVED', completed_at = NOW()
+        WHERE approval_instance_id IN (
+          SELECT id FROM tbl_approval_instances
+          WHERE entity_type = $1 AND entity_id = $2
+        )
+        AND status = 'PENDING'
+      `, [rfq.is_tender === 1 ? 'TENDER' : 'RFQ', rfqId]);
+
+      // Mark all pending step approvers as auto-approved
+      await t.none(`
+        UPDATE tbl_approval_step_approvers
+        SET status = 'APPROVED', approved_at = NOW()
+        WHERE approval_instance_step_id IN (
+          SELECT ais.id FROM tbl_approval_instance_steps ais
+          JOIN tbl_approval_instances ai ON ai.id = ais.approval_instance_id
+          WHERE ai.entity_type = $1 AND ai.entity_id = $2
+        )
+        AND status = 'PENDING'
+      `, [rfq.is_tender === 1 ? 'TENDER' : 'RFQ', rfqId]);
+
+      // Update RFQ status to ready to publish (4)
+      await t.none(`
+        UPDATE tbl_rfq
+        SET status = 4
+        WHERE id = $1
+      `, [rfqId]);
+
+      // Record lifecycle event for auto-approval
+      await recordLifecycleEvent({
+        entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
+        entity_id: rfqId,
+        stage: 'APPROVED',
+        action: 'AUTO_APPROVED',
+        performed_by: rfq.created_by,
+        metadata: {
+          rfq_no: rfq.rfq_no,
+          reason: 'Publish date arrived - no approver action taken',
+          auto_approved_by: 'scheduler'
+        },
+        txContext: t
+      });
+
+      console.log(`[RFQ Publisher] Auto-approval completed for RFQ ${rfq_no} (ID: ${rfqId})`);
+
+      // Refresh rfq object with new status
+      rfq.status = 4;
+    }
+
+    // Now validate status is ready to publish
+    if (rfq.status !== 4 && rfq.status !== 1) {
+      console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) not in publishable state (status: ${rfq.status})`);
+      return { skipped: true, reason: 'invalid_status' };
+    }
+
+    // Publish the RFQ
+    await publishRfq(rfq, t);
+    return { published: true, autoApproved: wasAutoApproved };
+  });
 };
 
 /**
  * scheduleRfqPublish
  *
  * Schedules an EventBridge schedule to publish an RFQ/Tender at its tender_publish_date.
- * For regular RFQs (non-tenders), publishes immediately.
+ * If no publish date is set, publishes immediately.
  *
  * @param {Object} rfq - RFQ object with id, rfq_no, is_tender, tender_publish_date, created_by
  * @param {Object} txContext - Optional transaction context to use same connection
@@ -402,9 +476,9 @@ export const publishRfqById = async (rfqId, rfq_no) => {
 export const scheduleRfqPublish = async (rfq, txContext = null) => {
   const { id, rfq_no, is_tender, tender_publish_date, created_by } = rfq;
 
-  // For non-tenders or if no publish date, publish immediately
-  if (is_tender !== 1 || !tender_publish_date) {
-    console.log(`[RFQ Publisher] Publishing immediately: ${rfq_no}`);
+  // If no publish date set, publish immediately
+  if (!tender_publish_date) {
+    console.log(`[RFQ Publisher] Publishing immediately (no publish date): ${rfq_no}`);
     await publishRfq(rfq, txContext);
     return;
   }

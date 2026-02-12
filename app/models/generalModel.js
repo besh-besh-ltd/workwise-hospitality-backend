@@ -1858,7 +1858,8 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
       hh.name as hotel_name,
       d.title as department_name,
       initiator.name as initiated_by_name,
-      initiator.email as initiated_by_email
+      initiator.email as initiated_by_email,
+      initiator.designation as initiated_by_designation
     FROM tbl_approval_instances i
     JOIN tbl_approval_policies p ON i.approval_policy_id = p.id
     LEFT JOIN tbl_hospitality_companies hc ON i.hospitality_company_id = hc.id
@@ -1889,8 +1890,15 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
         sa.*,
         u.name as user_name,
         u.email as user_email,
-        u.employee_code,
-        u.designation
+        u.designation as user_designation,
+        (
+          SELECT d.title
+          FROM tbl_user_department ud
+          JOIN tbl_department d ON d.id = ud.department_id
+          WHERE ud.user_id = u.id
+          ORDER BY ud.created_at DESC
+          LIMIT 1
+        ) AS user_department
       FROM tbl_approval_step_approvers sa
       JOIN tbl_users u ON sa.approver_user_id = u.id
       WHERE sa.approval_instance_step_id = $1
@@ -1900,8 +1908,9 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
       user_id: ap.approver_user_id,
       user_name: ap.user_name,
       user_email: ap.user_email,
+      user_designation: ap.user_designation,
+      user_department: ap.user_department,
       employee_code: ap.employee_code,
-      designation: ap.designation,
       status: ap.status,
       acted_at: ap.acted_at,
       comment: ap.comment
@@ -1939,7 +1948,9 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
     initiated_by: {
       user_id: instance.initiated_by,
       name: instance.initiated_by_name,
-      email: instance.initiated_by_email
+      email: instance.initiated_by_email,
+      designation: instance.initiated_by_designation,
+      department: instance.department_name
     },
     policy: {
       id: instance.approval_policy_id,
@@ -2055,7 +2066,12 @@ export async function submitApprovalAction({
 
     if (!instance) throw new Error('Approval instance not found');
     if (instance.status !== 'PENDING') {
-      throw new Error(`Cannot act on instance with status: ${instance.status}`);
+      return {
+        status: instance.status,
+        instance_status: instance.status,
+        message: `Instance already ${instance.status.toLowerCase()}, no action taken`,
+        already_completed: true
+      };
     }
 
     // 2. Get the current step
