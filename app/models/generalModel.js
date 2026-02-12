@@ -2051,7 +2051,12 @@ export async function submitApprovalAction({
 
     if (!instance) throw new Error('Approval instance not found');
     if (instance.status !== 'PENDING') {
-      throw new Error(`Cannot act on instance with status: ${instance.status}`);
+      return {
+        status: instance.status,
+        instance_status: instance.status,
+        message: `Instance already ${instance.status.toLowerCase()}, no action taken`,
+        already_completed: true
+      };
     }
 
     // 2. Get the current step

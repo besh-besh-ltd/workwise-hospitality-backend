@@ -394,7 +394,7 @@ export const publishRfqById = async (rfqId, rfq_no) => {
  * scheduleRfqPublish
  *
  * Schedules an EventBridge schedule to publish an RFQ/Tender at its tender_publish_date.
- * For regular RFQs (non-tenders), publishes immediately.
+ * If no publish date is set, publishes immediately.
  *
  * @param {Object} rfq - RFQ object with id, rfq_no, is_tender, tender_publish_date, created_by
  * @param {Object} txContext - Optional transaction context to use same connection
@@ -402,9 +402,9 @@ export const publishRfqById = async (rfqId, rfq_no) => {
 export const scheduleRfqPublish = async (rfq, txContext = null) => {
   const { id, rfq_no, is_tender, tender_publish_date, created_by } = rfq;
 
-  // For non-tenders or if no publish date, publish immediately
-  if (is_tender !== 1 || !tender_publish_date) {
-    console.log(`[RFQ Publisher] Publishing immediately: ${rfq_no}`);
+  // If no publish date set, publish immediately
+  if (!tender_publish_date) {
+    console.log(`[RFQ Publisher] Publishing immediately (no publish date): ${rfq_no}`);
     await publishRfq(rfq, txContext);
     return;
   }

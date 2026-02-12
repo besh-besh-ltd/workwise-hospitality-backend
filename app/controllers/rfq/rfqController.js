@@ -2306,8 +2306,8 @@ const saveRfqDraft = async (user_id, reqBody) => {
       reverse_auction: isReverseAuction ? 1 : 0,
       is_tender: is_tender !== undefined ? is_tender : 0,
       tender_fees: is_tender === 1 ? (tender_fees || 0) : 0,
-      tender_publish_date: is_tender === 1 ? normalizeDate(tender_publish_date) : null,
-      vendor_clarification_date: is_tender === 1 ? normalizeDate(vendor_clarification_date) : null,
+      tender_publish_date: normalizeDate(tender_publish_date) || null,
+      vendor_clarification_date: normalizeDate(vendor_clarification_date) || null,
       hospitality_company_id: hospitality_company_id || null,
       hotel_id: hotel_id || null,
       department_id: department_id || null,
@@ -3325,9 +3325,31 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     [rfqId]
   );
 
-  // Skip non-hospitality RFQs - they don't require approval
-  if (!rfq || !rfq.hospitality_company_id) {
+  if (!rfq) {
     return null;
+  }
+
+  // Non-hospitality RFQs - skip approval, go straight to publish
+  if (!rfq.hospitality_company_id) {
+    await dbContext.none(`
+      UPDATE tbl_rfq SET status = 4 WHERE id = $1
+    `, [rfqId]);
+
+    const rfqDetails = await dbContext.oneOrNone(`
+      SELECT tender_publish_date, created_by FROM tbl_rfq WHERE id = $1
+    `, [rfqId]);
+
+    if (rfqDetails) {
+      await scheduleRfqPublish({
+        id: rfqId,
+        rfq_no: rfq.rfq_no,
+        is_tender: rfq.is_tender,
+        tender_publish_date: rfqDetails.tender_publish_date,
+        created_by: rfqDetails.created_by
+      }, dbContext);
+    }
+
+    return { autoApproved: true, noApprovalRequired: true };
   }
 
   // For hospitality RFQs/Tenders, approval is REQUIRED
@@ -3487,23 +3509,73 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     };
   }
 
-  // Let errors propagate (especially "no policy found" errors)
-  const result = await createApprovalInstance({
+  // Create the approval instance for tracking (approval still proceeds in background)
+  let result;
+  try {
+    result = await createApprovalInstance({
+      entity_type: entityType,
+      entity_id: rfqId,
+      hospitality_company_id: rfq.hospitality_company_id,
+      hotel_id: rfq.hotel_id,
+      department_id: rfq.department_id,
+      initiated_by: userId,
+      metadata: {
+        rfq_number: rfq.rfq_no,
+        is_tender: rfq.is_tender,
+        company_name: rfq.company_name
+      },
+      txContext  // Pass transaction context to createApprovalInstance
+    });
+  } catch (approvalError) {
+    console.warn(`[Approval] Could not create approval instance for ${entityType} ${rfqId}: ${approvalError.message}. Proceeding to publish anyway.`);
+    result = null;
+  }
+
+  // Regardless of approval status, proceed to publish (approval runs in background)
+  // Set status to READY_TO_PUBLISH (4) and schedule publish
+  await dbContext.none(`
+    UPDATE tbl_rfq
+    SET status = 4
+    WHERE id = $1
+  `, [rfqId]);
+
+  // Record lifecycle event noting publish proceeded with pending approval
+  await recordLifecycleEvent({
     entity_type: entityType,
     entity_id: rfqId,
-    hospitality_company_id: rfq.hospitality_company_id,
-    hotel_id: rfq.hotel_id,
-    department_id: rfq.department_id,
-    initiated_by: userId,
+    stage: 'READY_TO_PUBLISH',
+    action: 'PUBLISH_WITHOUT_APPROVAL',
+    performed_by: userId,
     metadata: {
-      rfq_number: rfq.rfq_no,
-      is_tender: rfq.is_tender,
-      company_name: rfq.company_name
+      rfq_no: rfq.rfq_no,
+      approval_instance_id: result?.instance?.id || null,
+      approval_status: 'PENDING',
+      note: 'Publishing proceeded without waiting for approval completion'
     },
-    txContext  // Pass transaction context to createApprovalInstance
+    txContext
   });
 
-  return result;
+  // Schedule the RFQ to be published
+  const rfqDetails = await dbContext.oneOrNone(`
+    SELECT tender_publish_date, created_by FROM tbl_rfq WHERE id = $1
+  `, [rfqId]);
+
+  if (rfqDetails) {
+    await scheduleRfqPublish({
+      id: rfqId,
+      rfq_no: rfq.rfq_no,
+      is_tender: rfq.is_tender,
+      tender_publish_date: rfqDetails.tender_publish_date,
+      created_by: rfqDetails.created_by
+    }, dbContext);
+  }
+
+  console.log(`[Approval] ${entityType} ${rfqId} proceeding to publish. Approval instance: ${result?.instance?.id || 'none'} (status: PENDING)`);
+
+  return {
+    ...(result || {}),
+    publishedWithPendingApproval: true
+  };
 };
 
 /**
@@ -3548,9 +3620,29 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       return null;
     }
 
-    // Validate current status - should be PENDING_APPROVAL (3)
+    // If RFQ is already published (status 1) or ready to publish (status 4),
+    // just record the approval event - publishing already proceeded
+    if (rfq.status === 1 || rfq.status === 4) {
+      console.log(`RFQ ${rfq_id} already at status ${rfq.status} - recording late approval`);
+      await recordLifecycleEvent({
+        entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
+        entity_id: rfq_id,
+        stage: 'APPROVED',
+        action: 'LATE_APPROVE',
+        performed_by: approver_user_id,
+        metadata: {
+          approval_instance_id,
+          rfq_no: rfq.rfq_no,
+          note: 'Approval completed after publishing had already proceeded'
+        },
+        txContext: t
+      });
+      return { rfq_id, status: rfq.status, lateApproval: true };
+    }
+
+    // For status 3 (PENDING_APPROVAL) - normal flow
     if (rfq.status !== 3) {
-      console.log(`RFQ ${rfq_id} status is ${rfq.status}, expected 3 (PENDING_APPROVAL)`);
+      console.log(`RFQ ${rfq_id} status is ${rfq.status}, unexpected state`);
       return null;
     }
 
@@ -3568,9 +3660,8 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       txContext: t
     });
 
-    // Check if tender publish date has already passed - if so, publish immediately after approval
-    const publishDatePassed = rfq.is_tender === 1
-      && rfq.tender_publish_date
+    // Check if publish date has already passed - if so, publish immediately after approval
+    const publishDatePassed = rfq.tender_publish_date
       && new Date(rfq.tender_publish_date) <= new Date();
 
     if (publishDatePassed) {
@@ -3582,7 +3673,7 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       `, [rfq_id]);
 
       await recordLifecycleEvent({
-        entity_type: 'TENDER',
+        entity_type: rfq.is_tender === 1 ? 'TENDER' : 'RFQ',
         entity_id: rfq_id,
         stage: 'PUBLISHED',
         action: 'AUTO_PUBLISH',
@@ -3604,8 +3695,9 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
           publishUsers = (teamMembers || [])
             .filter(m => m.email && m.email.includes('@'))
             .map(m => ({ name: m.name, email: m.email }));
-        } else if (rfq.is_tender === 1) {
-          const approvalUsers = await getApprovalWorkflowUsers('TENDER', rfq_id);
+        } else {
+          const entityType = rfq.is_tender === 1 ? 'TENDER' : 'RFQ';
+          const approvalUsers = await getApprovalWorkflowUsers(entityType, rfq_id);
           publishUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
         }
         if (publishUsers.length > 0) {
@@ -3661,8 +3753,8 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
     `, [rfq_id]);
 
     // Schedule the RFQ to be published at tender_publish_date
-    // For non-tenders, this will publish immediately
-    // For tenders with future publish date, this will schedule via EventBridge
+    // If no publish date is set, publishes immediately
+    // If publish date is in the future, schedules via EventBridge
     await scheduleRfqPublish({
       id: rfq_id,
       rfq_no: rfq.rfq_no,
@@ -3671,11 +3763,12 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
       created_by: rfq.created_by
     }, t);
 
-    // Send "Ready to Publish" notification for tenders with future publish date
-    // Non-tenders are published immediately by scheduleRfqPublish → publishRfq (which sends its own emails)
-    if (rfq.is_tender === 1 && rfq.tender_publish_date && new Date(rfq.tender_publish_date) > new Date()) {
+    // Send "Ready to Publish" notification for RFQs/tenders with future publish date
+    // RFQs without a publish date are published immediately by scheduleRfqPublish → publishRfq (which sends its own emails)
+    if (rfq.tender_publish_date && new Date(rfq.tender_publish_date) > new Date()) {
       try {
         const rfqFull = await t.oneOrNone('SELECT project_id, title FROM tbl_rfq WHERE id = $1', [rfq_id]);
+        const entityType = rfq.is_tender === 1 ? 'TENDER' : 'RFQ';
         let readyUsers = [];
         if (rfqFull?.project_id) {
           const teamMembers = await projectModel.getProjectTeamMembers(rfqFull.project_id);
@@ -3683,7 +3776,7 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
             .filter(m => m.email && m.email.includes('@'))
             .map(m => ({ name: m.name, email: m.email }));
         } else {
-          const approvalUsers = await getApprovalWorkflowUsers('TENDER', rfq_id);
+          const approvalUsers = await getApprovalWorkflowUsers(entityType, rfq_id);
           readyUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
         }
         if (readyUsers.length > 0) {
@@ -3867,11 +3960,11 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     throw new Error('No vendors have been evaluated for this technical evaluation');
   }
 
-  // Prepare vendor data for metadata
-  const passedVendors = vendorScores.filter(v => v.is_passed === true);
-  const failedVendors = vendorScores.filter(v => v.is_passed === false);
-  const notEvaluatedVendors = vendorScores.filter(v => v.is_passed === null || v.is_passed === undefined);
-  const evaluatedVendors = vendorScores.filter(v => v.is_passed !== null && v.is_passed !== undefined);
+  // Prepare vendor data for metadata - use has_marks (based on score_timestamp) to distinguish evaluated from not-evaluated
+  const evaluatedVendors = vendorScores.filter(v => v.has_marks === true);
+  const notEvaluatedVendors = vendorScores.filter(v => !v.has_marks);
+  const passedVendors = evaluatedVendors.filter(v => v.is_passed === true);
+  const failedVendors = evaluatedVendors.filter(v => v.is_passed === false);
   const currentRound = techEval.current_round || 1;
 
   // Ensure at least one vendor has actually been evaluated (has buyer marks)
@@ -5489,6 +5582,12 @@ const rfqController = {
         if ('bid_end_date' in data && data.bid_end_date === '') {
           data.bid_end_date = null;
         }
+        if ('tender_publish_date' in data && data.tender_publish_date === '') {
+          data.tender_publish_date = null;
+        }
+        if ('vendor_clarification_date' in data && data.vendor_clarification_date === '') {
+          data.vendor_clarification_date = null;
+        }
         // Ensure reverse_auction is boolean/integer if present
         if ('reverse_auction' in data) {
           data.reverse_auction = data.reverse_auction ? 1 : 0;
@@ -6352,42 +6451,19 @@ const rfqController = {
 
       let vendorsList = [];
       // ---------------- Determine vendor source ----------------
-      if (is_tender === 1) {
-        // Tender: strict eligibility (variant + category + hotel)
+      // Auto-add all eligible vendors for both tenders and RFQs
+      // Products without vendors are allowed (will be flagged in the UI)
+      if (!product.vendors || !Array.isArray(product.vendors) || product.vendors.length === 0) {
         vendorsList = await hospitalityModel.getEligibleVendorsForVariant(
           variant_id,
           hotel_ids
         );
-
-        // ---------------- Assign vendors for tender ----------------
         if (vendorsList && vendorsList.length > 0) {
           product.vendors = vendorsList.map((vendor) => ({
             vendor_id: vendor.id || vendor.vendor_id,
           }));
         } else {
-          return res.status(400).json({
-            status: 2,
-            errors: {
-              vendors:
-                "No eligible vendors found for the selected product based on hotel and category subscriptions.",
-            },
-          });
-        }
-      } else {
-        // Non-tender (RFQ): auto-add all eligible vendors if none specified
-        if (!product.vendors || !Array.isArray(product.vendors) || product.vendors.length === 0) {
-          // Auto-add eligible vendors (same as tender mode)
-          vendorsList = await hospitalityModel.getEligibleVendorsForVariant(
-            variant_id,
-            hotel_ids
-          );
-          if (vendorsList && vendorsList.length > 0) {
-            product.vendors = vendorsList.map((vendor) => ({
-              vendor_id: vendor.id || vendor.vendor_id,
-            }));
-          } else {
-            product.vendors = [];
-          }
+          product.vendors = [];
         }
       }
 
@@ -7673,10 +7749,10 @@ const rfqController = {
           tenderPaymentId = paymentRow.id;
         }
 
-        // Clarification period validation for tenders (IST-based).
+        // Clarification period validation (IST-based).
         // Treat vendor_clarification_date as an IST datetime and convert to a UTC Date
         // so that 6:30 PM IST is respected regardless of server timezone.
-        if (rfqDetails[0].is_tender === 1 && rfqDetails[0].vendor_clarification_date) {
+        if (rfqDetails[0].vendor_clarification_date) {
           const rawClar = String(rfqDetails[0].vendor_clarification_date).trim();
           let datePart;
           let timePart;
@@ -7712,8 +7788,8 @@ const rfqController = {
           }
         }
 
-        // Check for open clarification - blocks all vendors from quoting (tenders only)
-        if (rfqDetails[0].is_tender === 1) {
+        // Check for open clarification - blocks all vendors from quoting
+        {
           const openClarification =
             await rfqModel.checkActiveClarification(rfq_id);
           if (openClarification) {
@@ -14353,14 +14429,6 @@ getClauses: async (req, res) => {
         return res.status(400).json({
           status: 0,
           message: 'RFQ not found'
-        });
-      }
-
-      // Only allow clarifications for tenders
-      if (rfq.is_tender !== 1) {
-        return res.status(400).json({
-          status: 0,
-          message: 'Clarifications are only allowed for tenders'
         });
       }
 
