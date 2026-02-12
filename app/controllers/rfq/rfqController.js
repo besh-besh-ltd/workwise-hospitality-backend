@@ -25,7 +25,7 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, submitApprovalAction, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, submitApprovalAction, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
 import moment from 'moment-timezone';
 import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
@@ -14168,7 +14168,8 @@ getClauses: async (req, res) => {
         project_id,
         rfq_no,
         sort = 'DESC',
-        is_tender
+        is_tender,
+        module_keys
       } = req.query;
 
       // Convert string query parameters to proper types
@@ -14180,6 +14181,12 @@ getClauses: async (req, res) => {
       project_id = project_id ? parseInt(project_id) : null;
       rfq_no = rfq_no ? parseInt(rfq_no) : null;
       is_tender = is_tender !== undefined && is_tender !== null ? (is_tender === 'true' || is_tender === true || is_tender === '1' || is_tender === 1) : null;
+
+      // Parse module_keys into array of uppercase entity types
+      let parsedModuleKeys = [];
+      if (module_keys && typeof module_keys === 'string' && module_keys.trim() !== '') {
+        parsedModuleKeys = module_keys.split(',').map(k => k.trim().toUpperCase()).filter(k => k.length > 0);
+      }
 
       // Calculate offset
       const offset = (page - 1) * limit;
@@ -14202,6 +14209,20 @@ getClauses: async (req, res) => {
         sort,
         is_tender
       );
+
+      // Enrich each RFQ with approval_required flag
+      if (parsedModuleKeys.length > 0 && rfqs.length > 0) {
+        const rfqIds = rfqs.map(r => parseInt(r.id));
+        const rfqIdsWithApprovals = await getRfqIdsWithPendingApprovals(user_id, parsedModuleKeys, rfqIds);
+        const approvalSet = new Set(rfqIdsWithApprovals);
+        for (const rfq of rfqs) {
+          rfq.approval_required = approvalSet.has(parseInt(rfq.id));
+        }
+      } else {
+        for (const rfq of rfqs) {
+          rfq.approval_required = false;
+        }
+      }
 
       res.status(200).json({
         status: 1,

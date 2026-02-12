@@ -50,11 +50,18 @@ passport.use(
   new LocalStrategy(
     {
       usernameField: 'email',
-      passwordField: 'password'
+      passwordField: 'password',
+      passReqToCallback: true
     },
-    async (username, password, done) => {
+    async (req, username, password, done) => {
       try {
-        let user = await userModel.getUserAuthEmail(username?.toLowerCase());
+        const employeeCode = req.body.employee_code;
+        let user;
+        if (employeeCode) {
+          user = await userModel.getUserAuthByEmployeeCode(employeeCode);
+        } else {
+          user = await userModel.getUserAuthEmail(username?.toLowerCase());
+        }
         // console.log('username--', username);
         // console.log('user_passport--', user);
         let user_dtls = Object.assign({}, ...user);

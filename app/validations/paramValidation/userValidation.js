@@ -361,9 +361,10 @@ const schemas = {
     description: Joi.string().optional().allow(null).allow('')
   }),
   user_login: Joi.object().keys({
-    email: Joi.string().required().email().max(100),
+    email: Joi.string().optional().email().max(100),
+    employee_code: Joi.string().optional().max(50),
     password: Joi.string().min(3).max(15).required().label('Password')
-  }),
+  }).or('email', 'employee_code'),
   change_password: Joi.object().keys({
     password: Joi.string().min(3).max(15).required().label('Password'),
     confirm_password: Joi.any().valid(Joi.ref('password')).required().messages({

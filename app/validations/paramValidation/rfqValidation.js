@@ -661,7 +661,7 @@ export function validateGetRfqsQuery(req, res, next) {
     project_id: Joi.number().optional(),
     sort: Joi.string().valid('ASC', 'DESC').optional(),
     rfq_no: Joi.number().optional().allow(null),
-    // add any other filters you want to support
+    module_keys: Joi.string().optional().allow('', null),
   }).unknown(true); // allow extra params
 
   const { error, value } = schema.validate(req.query);
