@@ -1910,6 +1910,7 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
       user_email: ap.user_email,
       user_designation: ap.user_designation,
       user_department: ap.user_department,
+      employee_code: ap.employee_code,
       status: ap.status,
       acted_at: ap.acted_at,
       comment: ap.comment
@@ -2401,6 +2402,36 @@ export async function getPendingApprovalsForUser(user_id, { hospitality_company_
     WHERE ${conditions.join(' AND ')}
     ORDER BY i.created_at ASC
   `, params);
+}
+
+/**
+ * Given a user_id, entity types (module_keys), and rfq_ids,
+ * returns the subset of rfq_ids where the user is a current pending approver.
+ * All entity types store rfq_id in metadata->>'rfq_id'.
+ */
+export async function getRfqIdsWithPendingApprovals(user_id, entityTypes, rfqIds) {
+  if (!user_id || !entityTypes || entityTypes.length === 0 || !rfqIds || rfqIds.length === 0) {
+    return [];
+  }
+
+  const intRfqIds = rfqIds.map(id => parseInt(id));
+
+  const rows = await db.any(`
+    SELECT DISTINCT (i.metadata->>'rfq_id')::INTEGER AS rfq_id
+    FROM tbl_approval_instances i
+    JOIN tbl_approval_instance_steps s
+      ON s.approval_instance_id = i.id
+    JOIN tbl_approval_step_approvers sa
+      ON sa.approval_instance_step_id = s.id
+    WHERE i.status = 'PENDING'
+      AND sa.approver_user_id = $1
+      AND sa.status = 'PENDING'
+      AND s.step_order = i.current_step
+      AND i.entity_type IN ($2:csv)
+      AND (i.metadata->>'rfq_id')::INTEGER IN ($3:csv)
+  `, [user_id, entityTypes, intRfqIds]);
+
+  return rows.map(r => parseInt(r.rfq_id));
 }
 
 // --- Hospitality Approval Engine: End ---

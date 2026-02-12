@@ -100,7 +100,24 @@ UsersRoutes.post(
 );
 UsersRoutes.post(
   '/login',
+  (req, res, next) => {
+    // If employee_code is provided without email, set a placeholder
+    // so passport-local doesn't reject with "Missing credentials"
+    if (req.body.employee_code && !req.body.email) {
+      req.body._loginViaEmployeeCode = true;
+      req.body.email = req.body.employee_code;
+    }
+    next();
+  },
   passportLogIn,
+  (req, res, next) => {
+    // Restore original body before Joi validation
+    if (req.body._loginViaEmployeeCode) {
+      delete req.body.email;
+      delete req.body._loginViaEmployeeCode;
+    }
+    next();
+  },
   validateBody(schemas.user_login),
   UsersController.user_login
 );
