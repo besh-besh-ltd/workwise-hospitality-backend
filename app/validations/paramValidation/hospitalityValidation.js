@@ -136,6 +136,8 @@ const schemas = {
     account_holder_name: Joi.string().trim().allow('', null),
     msme: Joi.string().trim().allow('', null),
     delivery_address: Joi.string().trim().allow('', null),
+    email: Joi.string().trim().email({ tlds: { allow: false } }).allow('', null),
+    fee_amount: Joi.number().integer().min(0).optional(),
   }),
   hospitalityMapUsers: Joi.object().keys({
     mapping_type: Joi.number().valid(0, 1).required(),

@@ -775,7 +775,7 @@ RfqRoutes.post(
   rfqController.resolveClarification
 );
 
-// List all clarifications for tender with messages (private - vendor sees only their own)
+// List all clarifications for RFQ/Tender with messages (private - vendor sees only their own)
 RfqRoutes.get(
   '/clarifications/:rfq_id',
   noLogin.customer_auth,

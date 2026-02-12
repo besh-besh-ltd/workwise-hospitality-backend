@@ -12338,26 +12338,24 @@ sendFollowUpEmails: async (req, res) => {
         }
       }
 
-      // Check for open clarification - blocks all vendors from quoting (tenders only)
-      if (rfqDetails[0].is_tender === 1) {
-        const openClarification = await rfqModel.checkActiveClarification(
-          quoteExists[0].rfq_id
-        );
-        if (openClarification) {
-          // For tenders, show vendor code instead of vendor name
-          const vendorCode = `VEN-${openClarification.raised_by_vendor_id || 'UNKNOWN'}`;
-          return res.status(400).json({
-            status: 3,
-            message:
-              'Quote update is blocked. There is an open clarification pending response.',
-            data: {
-              clarification_id: openClarification.id,
-              raised_by_vendor_code: vendorCode,
-              subject: openClarification.subject,
-              created_at: openClarification.created_at
-            }
-          });
-        }
+      // Check for open clarification - blocks all vendors from quoting
+      const openClarification = await rfqModel.checkActiveClarification(
+        quoteExists[0].rfq_id
+      );
+      if (openClarification) {
+        // For emails/UX we sometimes need vendor code; keep same structure
+        const vendorCode = `VEN-${openClarification.raised_by_vendor_id || 'UNKNOWN'}`;
+        return res.status(400).json({
+          status: 3,
+          message:
+            'Quote update is blocked. There is an open clarification pending response.',
+          data: {
+            clarification_id: openClarification.id,
+            raised_by_vendor_code: vendorCode,
+            subject: openClarification.subject,
+            created_at: openClarification.created_at
+          }
+        });
       }
 
       let paymentTermAndCommentChanges = false;
@@ -13588,11 +13586,72 @@ getClauses: async (req, res) => {
       // console.log("API Input: ", req.body);
 
       // Validate input
-      if (!data) {
+      if (!data || !Array.isArray(data) || data.length === 0) {
         return res.status(400).json({
           status: 0,
-          message: 'Invalid input. Please provide vendor responses'
+          message: 'Invalid input. Please provide at least one vendor response'
         });
+      }
+
+      // Enforce: Tech evaluation responses cannot be updated after quote submission deadline.
+      try {
+        // We only need to compute the RFQ & deadline once; use the first response's clause_id
+        const first = data[0];
+        if (first?.clause_id) {
+          const clauseId = parseInt(first.clause_id, 10);
+          if (!Number.isNaN(clauseId)) {
+            const deadlineRow = await db.oneOrNone(
+              `
+              SELECT r.id AS rfq_id,
+                     r.rfq_no,
+                     r.bid_end_date
+              FROM tbl_rfq_product_tech_evaluation te
+              JOIN tbl_rfq_products rp
+                ON rp.id = te.tbl_rfq_product_id
+              JOIN tbl_rfq r
+                ON r.id = te.rfq_id
+              JOIN tbl_rfq_product_tech_evaluation_clauses c
+                ON c.tbl_rfq_product_tech_evaluation_id = te.id
+              WHERE c.id = $1
+              `,
+              [clauseId]
+            );
+
+            if (deadlineRow?.bid_end_date) {
+              const bidEnd = new Date(deadlineRow.bid_end_date);
+              // Treat as end of that day in server timezone
+              const endOfDay = new Date(
+                bidEnd.getFullYear(),
+                bidEnd.getMonth(),
+                bidEnd.getDate(),
+                23,
+                59,
+                59,
+                999
+              );
+              const now = new Date();
+
+              if (!Number.isNaN(endOfDay.getTime()) && now > endOfDay) {
+                return res.status(400).json({
+                  status: 3,
+                  message:
+                    'Technical evaluation responses are locked. The quote submission deadline has passed.',
+                  data: {
+                    rfq_id: deadlineRow.rfq_id,
+                    rfq_no: deadlineRow.rfq_no,
+                    bid_end_date: deadlineRow.bid_end_date
+                  }
+                });
+              }
+            }
+          }
+        }
+      } catch (deadlineErr) {
+        console.error(
+          'Warning: failed to enforce tech eval deadline before saving vendor response:',
+          deadlineErr.message
+        );
+        // Do not block the request solely due to a failed deadline lookup; continue to process.
       }
 
       const response = await rfqModel.addVendorResponse(data);
@@ -14409,7 +14468,7 @@ getClauses: async (req, res) => {
 
   /**
    * raiseClarification
-   * Vendor raises a clarification for a tender
+   * Vendor raises a clarification for an RFQ/Tender
    * POST /rfq/clarification/raise
    */
   raiseClarification: async (req, res) => {
@@ -14575,7 +14634,7 @@ getClauses: async (req, res) => {
       if (clarification.rfq_created_by !== user.id) {
         return res.status(403).json({
           status: 0,
-          message: 'Only the tender creator can close clarifications'
+          message: 'Only the RFQ creator can close clarifications'
         });
       }
 
@@ -14632,7 +14691,7 @@ getClauses: async (req, res) => {
    * GET /rfq/clarifications/:rfq_id
    *
    * Privacy rules:
-   * - Buyer (tender creator): sees ALL clarifications with all messages
+   * - Buyer (RFQ creator): sees ALL clarifications with all messages
    * - Vendor who raised clarification: sees their OWN clarifications with all messages
    * - Other vendors: only see has_open=true without details
    */
@@ -14661,18 +14720,11 @@ getClauses: async (req, res) => {
         });
       }
 
-      if (rfq.is_tender !== 1) {
-        return res.status(400).json({
-          status: 0,
-          message: 'Clarifications are only available for tenders'
-        });
-      }
-
       // Check if current user is on the buyer side
       // Rules:
-      // - Original rule (backwards compatible): tender creator is always treated as buyer
+      // - Original rule (backwards compatible): RFQ creator is always treated as buyer
       // - New rule: ANY non-vendor user (user_type != 3 and != 4) from the buyer side
-      //   should also be able to see ALL clarifications for this tender.
+      //   should also be able to see ALL clarifications for this RFQ.
       //
       // This fixes the bug where other buyer-side users (project members, finance, etc.)
       // could see that a clarification is open but the clarification list was empty,
@@ -14681,7 +14733,7 @@ getClauses: async (req, res) => {
       const isBuyer =
         !!currentUserId &&
         (
-          rfq.created_by === currentUserId || // Tender creator
+          rfq.created_by === currentUserId || // RFQ creator
           (userType !== null && userType !== 3 && userType !== 4) // Any non-vendor internal user
         );
 
@@ -14771,7 +14823,7 @@ getClauses: async (req, res) => {
    * GET /rfq/clarification/active/:rfq_id
    *
    * Privacy rules:
-   * - Buyer (tender creator): sees full clarification details with all messages
+   * - Buyer (RFQ creator): sees full clarification details with all messages
    * - Vendor who raised clarification: sees full details with all messages
    * - Other vendors: only see has_open=true, is_own_clarification=false
    */
@@ -14855,7 +14907,7 @@ getClauses: async (req, res) => {
    * Send a message in an open clarification thread
    * POST /rfq/clarification/message
    *
-   * Both the vendor who raised the clarification and the tender creator (buyer) can send messages
+   * Both the vendor who raised the clarification and the RFQ creator (buyer) can send messages
    */
   sendClarificationMessage: async (req, res) => {
     try {
@@ -15301,13 +15353,19 @@ getClauses: async (req, res) => {
       const skippedMessages = {
         not_found: 'RFQ not found',
         already_published: 'RFQ already published',
-        pending_approval: 'RFQ still pending approval, cannot publish',
         invalid_status: 'RFQ not in publishable state'
       };
 
+      let message = 'RFQ published successfully';
+      if (result.published && result.autoApproved) {
+        message = 'RFQ auto-approved and published successfully (publish date arrived)';
+      } else if (result.skipped) {
+        message = skippedMessages[result.reason] || 'RFQ skipped';
+      }
+
       return res.status(200).json({
         status: result.skipped ? 0 : 1,
-        message: result.skipped ? (skippedMessages[result.reason] || 'RFQ skipped') : 'RFQ published successfully',
+        message,
         rfqId,
         ...result
       });

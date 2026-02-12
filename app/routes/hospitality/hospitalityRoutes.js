@@ -193,6 +193,31 @@ HospitalityRoutes.post(
 
 HospitalityRoutes.get('/entities', passportSignIn, acl([7]), UsersController.getListedEntities);
 
+// Send payment link to business unit email (admin action)
+HospitalityRoutes.post(
+  '/company/:company_id/hotels/:hotel_id/send-payment-link',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  hospitalityController.sendPaymentLink
+);
+
+// Public endpoints for hotel payment (accessed via email link, no auth)
+HospitalityRoutes.get(
+  '/hotel-payment/:hotel_id',
+  hospitalityController.getHotelPaymentInfo
+);
+
+HospitalityRoutes.post(
+  '/hotel-payment/create-order',
+  hospitalityController.createHotelPaymentOrder
+);
+
+HospitalityRoutes.post(
+  '/hotel-payment/verify',
+  hospitalityController.verifyHotelPayment
+);
+
 export default HospitalityRoutes;
 
 

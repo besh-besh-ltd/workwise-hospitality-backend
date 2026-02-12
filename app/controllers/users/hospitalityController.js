@@ -258,7 +258,8 @@ const HospitalityController = {
         name: req.body.name?.trim(),
         city: req.body.city?.trim() || null,
         keys: req.body.keys ? parseInt(req.body.keys, 10) : 0,
-        status: req.body.status?.trim() || 'Active',
+        // Status is now driven entirely by payment lifecycle
+        status: 'Pending Onboarding',
         full_address: req.body.full_address?.trim() || null,
         state: req.body.state?.trim() || null,
         gst: req.body.gst?.trim() || null,
@@ -272,7 +273,9 @@ const HospitalityController = {
         created_by: req.user.id,
         fee_amount: req.body.fee_amount
           ? parseInt(req.body.fee_amount, 10)
-          : 500
+          : 500,
+        email: req.body.email?.trim() || null,
+        payment_status: 'onboarding'
       };
 
       const created = await hospitalityModel.createHotel(payload);
@@ -365,7 +368,8 @@ const HospitalityController = {
         name: req.body.name?.trim(),
         city: req.body.city?.trim() || null,
         keys: req.body.keys ? parseInt(req.body.keys, 10) : 0,
-        status: req.body.status?.trim() || 'Active',
+        // Allow manual override of status on edit; fall back to existing value
+        status: req.body.status?.trim() || hotelRecord.status,
         full_address: req.body.full_address?.trim() || null,
         state: req.body.state?.trim() || null,
         gst: req.body.gst?.trim() || null,
@@ -376,7 +380,9 @@ const HospitalityController = {
         account_holder_name: req.body.account_holder_name?.trim() || null,
         msme: req.body.msme?.trim() || null,
         delivery_address: req.body.delivery_address?.trim() || null,
-        updated_by: req.user.id
+        updated_by: req.user.id,
+        email: req.body.email?.trim() || null,
+        fee_amount: req.body.fee_amount ? parseInt(req.body.fee_amount, 10) : null
       };
 
       const updated = await hospitalityModel.updateHotel(hotelId, payload, record.id);
@@ -934,6 +940,286 @@ const HospitalityController = {
       return res.status(200).json({
         status: 1,
         data: documents
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  // Send payment link email to the business unit email
+  sendPaymentLink: async (req, res) => {
+    try {
+      const hotelId = parseInt(req.params.hotel_id, 10);
+      const hotel = await hospitalityModel.getHotelPaymentDetails(hotelId);
+
+      if (!hotel) {
+        return res.status(404).json({ status: 0, message: 'Business unit not found' });
+      }
+
+      if (!hotel.email) {
+        return res.status(400).json({ status: 0, message: 'No email configured for this business unit' });
+      }
+
+      if (!hotel.fee_amount || hotel.fee_amount <= 0) {
+        return res.status(400).json({ status: 0, message: 'Fee amount not configured for this business unit' });
+      }
+
+      // Generate a payment link URL
+      // Prefer configured FRONT_END_WEBSITE, fall back to FRONTEND_URL, then localhost
+      const frontendUrl =
+        process.env.FRONT_END_WEBSITE ||
+        process.env.FRONTEND_URL ||
+        'http://localhost:3000';
+      const paymentLink = `${frontendUrl}/hotel-payment?hotel_id=${hotelId}`;
+
+      // Send email using the standard WorkWise template
+      const { sendMail } = await import('../../helper/common.js');
+      const { generateEmailTemplate } = await import('../../helper/notificationEmailLayout.js');
+
+      const headerContent = `<h2 style=\"margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #111827;\">Welcome, ${hotel.name}!</h2>`;
+      const containerContent = `
+        <p style=\"font-size: 15px; color: #4b5563; margin: 0 0 16px;\">
+          You have been added as a business unit under <strong>${hotel.company_name}</strong> on the WorkWise platform.
+          To activate your business unit, please complete the onboarding payment.
+        </p>
+        <div style=\"background: #f9fafb; border-radius: 12px; padding: 16px 20px; margin: 16px 0;\">
+          <p style=\"margin: 0 0 6px; font-size: 13px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.06em;\">Payment Details</p>
+          <p style=\"margin: 0; font-size: 26px; font-weight: 700; color: #158993;\">₹ ${hotel.fee_amount}</p>
+        </div>
+        <div style=\"text-align: center; margin: 24px 0 12px;\">
+          <a href=\"${paymentLink}\"
+             style=\"background-color: #158993; color: #ffffff; padding: 12px 32px; border-radius: 9999px; text-decoration: none; font-weight: 600; font-size: 15px; display: inline-block;\">
+            Complete Payment
+          </a>
+        </div>
+        <p style=\"font-size: 12px; color: #9ca3af; margin: 0; text-align: center;\">
+          If the button doesn't work, copy and paste this link into your browser:<br/>
+          <a href=\"${paymentLink}\" style=\"color: #158993; word-break: break-all;\">${paymentLink}</a>
+        </p>
+      `;
+
+      const html = generateEmailTemplate(headerContent, containerContent, null);
+
+      await sendMail({
+        from: Config.webmasterMail,
+        to: hotel.email,
+        subject: `WorkWise - Complete Payment for ${hotel.name}`,
+        html
+      });
+
+      // Update payment status to onboarding (mail sent)
+      await hospitalityModel.updateHotelPaymentStatus(hotelId, 'onboarding');
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Payment link sent successfully',
+        data: { email: hotel.email }
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  // Create Razorpay payment order for hotel onboarding (public endpoint - no auth required)
+  createHotelPaymentOrder: async (req, res) => {
+    try {
+      const { hotel_id } = req.body;
+
+      if (!hotel_id) {
+        return res.status(400).json({ status: 0, message: 'hotel_id is required' });
+      }
+
+      const hotel = await hospitalityModel.getHotelPaymentDetails(hotel_id);
+      if (!hotel) {
+        return res.status(404).json({ status: 0, message: 'Business unit not found' });
+      }
+
+      if (!hotel.fee_amount || hotel.fee_amount <= 0) {
+        return res.status(400).json({ status: 0, message: 'Fee amount not configured' });
+      }
+
+      // Check for existing successful payment
+      const existingPayment = await hospitalityModel.getHotelPayment(hotel_id);
+      if (existingPayment && existingPayment.payment_status === 'success') {
+        return res.status(200).json({
+          status: 1,
+          data: { already_paid: true, payment_id: existingPayment.id }
+        });
+      }
+
+      const { default: Razorpay } = await import('razorpay');
+      const razorpay = new Razorpay({
+        key_id: Config.razorpay.razorpay_key,
+        key_secret: Config.razorpay.razorpay_secret
+      });
+
+      const amountInPaise = hotel.fee_amount * 100;
+      const receipt = `HOTEL-${hotel_id}-${Date.now()}`;
+
+      const order = await razorpay.orders.create({
+        amount: amountInPaise,
+        currency: 'INR',
+        receipt,
+        payment_capture: 1
+      });
+
+      const beforePayload = JSON.stringify(order);
+
+      const paymentRow = await hospitalityModel.createHotelPayment({
+        user_id: hotel.created_by,
+        amount: amountInPaise,
+        currency: 'INR',
+        payment_status: 'created',
+        razorpay_order_id: order.id,
+        receipt,
+        before_payment_response: beforePayload
+      });
+
+      // Update hotel payment_status to pending (payment attempt made)
+      await hospitalityModel.updateHotelPaymentStatus(hotel_id, 'pending');
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          order,
+          payment_id: paymentRow.id,
+          hotel_name: hotel.name,
+          company_name: hotel.company_name,
+          amount: hotel.fee_amount,
+          razorpay_key: Config.razorpay.razorpay_key
+        }
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: error.message });
+    }
+  },
+
+  // Verify Razorpay payment for hotel onboarding (public endpoint)
+  verifyHotelPayment: async (req, res) => {
+    try {
+      const { hotel_id, razorpay_order_id, razorpay_payment_id, razorpay_signature, payment_id } = req.body;
+
+      if (!hotel_id || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+        return res.status(400).json({ status: 0, message: 'Missing required payment verification fields' });
+      }
+
+      // Verify signature
+      const { createHmac } = await import('crypto');
+      const sign = `${razorpay_order_id}|${razorpay_payment_id}`;
+      const expectedSign = createHmac('sha256', Config.razorpay.razorpay_secret)
+        .update(sign)
+        .digest('hex');
+
+      const isValid = expectedSign === razorpay_signature;
+
+      const afterPayload = JSON.stringify({
+        razorpay_order_id,
+        razorpay_payment_id,
+        razorpay_signature,
+        verified: isValid
+      });
+
+      // Update payment record
+      await hospitalityModel.updateHotelPayment(payment_id, {
+        razorpay_payment_id,
+        razorpay_signature,
+        payment_status: isValid ? 'success' : 'failed',
+        after_payment_response: afterPayload
+      });
+
+      if (isValid) {
+        // Update hotel status to active
+        await hospitalityModel.updateHotelPaymentStatus(hotel_id, 'active');
+
+        // Send confirmation email using the standard WorkWise template (don't fail if email fails)
+        try {
+          const hotel = await hospitalityModel.getHotelPaymentDetails(hotel_id);
+          if (hotel?.email) {
+            const { sendMail } = await import('../../helper/common.js');
+            const { generateEmailTemplate } = await import('../../helper/notificationEmailLayout.js');
+
+            const headerContent = `<h2 style=\"margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #111827;\">Payment Successful</h2>`;
+            const containerContent = `
+              <p style=\"font-size: 15px; color: #4b5563; margin: 0 0 16px;\">
+                Your business unit <strong>${hotel.name}</strong> has been successfully activated on the WorkWise platform.
+              </p>
+              <div style=\"background: #f0fdf4; padding: 14px 18px; border-radius: 10px; border: 1px solid #bbf7d0; margin: 16px 0 8px;\">
+                <p style=\"margin: 0; color: #166534; font-size: 14px;\">
+                  <strong>Amount Paid:</strong> ₹ ${hotel.fee_amount?.toLocaleString('en-IN') || hotel.fee_amount}<br/>
+                  <strong>Payment ID:</strong> ${razorpay_payment_id}
+                </p>
+              </div>
+              <p style=\"font-size: 13px; color: #6b7280; margin: 12px 0 0;\">
+                You can now start using your WorkWise business unit or contact your administrator for any assistance.
+              </p>
+            `;
+
+            const html = generateEmailTemplate(headerContent, containerContent, null);
+
+            await sendMail({
+              from: Config.webmasterMail,
+              to: hotel.email,
+              subject: `WorkWise - Payment Confirmed for ${hotel.name}`,
+              html
+            });
+          }
+        } catch (emailError) {
+          logError('Email failed but payment verified:', emailError);
+        }
+
+        return res.status(200).json({
+          status: 1,
+          message: 'Payment verified successfully. Business unit is now active.',
+          data: { verified: true }
+        });
+      } else {
+        return res.status(400).json({
+          status: 0,
+          message: 'Payment verification failed. Invalid signature.',
+          data: { verified: false }
+        });
+      }
+    } catch (error) {
+      logError('Payment verification error:', error);
+      console.error('Full error details:', error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message || 'Payment verification failed',
+        error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
+    }
+  },
+
+  // Get hotel payment info (public endpoint for payment page)
+  getHotelPaymentInfo: async (req, res) => {
+    try {
+      const hotelId = parseInt(req.params.hotel_id, 10);
+      if (!hotelId) {
+        return res.status(400).json({ status: 0, message: 'hotel_id is required' });
+      }
+
+      const hotel = await hospitalityModel.getHotelPaymentDetails(hotelId);
+      if (!hotel) {
+        return res.status(404).json({ status: 0, message: 'Business unit not found' });
+      }
+
+      const existingPayment = await hospitalityModel.getHotelPayment(hotelId);
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          id: hotel.id,
+          name: hotel.name,
+          company_name: hotel.company_name,
+          fee_amount: hotel.fee_amount,
+          payment_status: hotel.payment_status,
+          email: hotel.email,
+          already_paid: existingPayment?.payment_status === 'success',
+          razorpay_key: Config.razorpay.razorpay_key
+        }
       });
     } catch (error) {
       logError(error);

@@ -99,8 +99,8 @@ const hospitalityModel = {
       `INSERT INTO tbl_hospitality_company_hotels
         (hospitality_company_id, name, city, keys, status, full_address, state,
          gst, pan, bank_account_number, bank_name, ifsc_code, account_holder_name,
-         msme, delivery_address, created_by, updated_by, fee_amount)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17)
+         msme, delivery_address, created_by, updated_by, fee_amount, email, payment_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17, $18, $19)
        RETURNING *`,
       [
         hotelObj.hospitality_company_id,
@@ -119,7 +119,9 @@ const hospitalityModel = {
         hotelObj.msme || null,
         hotelObj.delivery_address || null,
         hotelObj.created_by,
-        hotelObj.fee_amount
+        hotelObj.fee_amount,
+        hotelObj.email || null,
+        hotelObj.payment_status || 'onboarding'
       ]
     );
   },
@@ -160,6 +162,8 @@ const hospitalityModel = {
            msme = $13,
            delivery_address = $14,
            updated_by = $15,
+           email = $18,
+           fee_amount = COALESCE($19, fee_amount),
            updated_at = NOW()
        WHERE id = $16 AND hospitality_company_id = $17 AND is_deleted = 0
        RETURNING *`,
@@ -180,7 +184,86 @@ const hospitalityModel = {
         hotelObj.delivery_address || null,
         hotelObj.updated_by,
         hotelId,
-        companyId
+        companyId,
+        hotelObj.email || null,
+        hotelObj.fee_amount || null
+      ]
+    );
+  },
+
+  updateHotelPaymentStatus: async (hotelId, paymentStatus) => {
+    return db.oneOrNone(
+      `UPDATE tbl_hospitality_company_hotels
+       SET payment_status = $1,
+           status = CASE
+                      WHEN $1 = 'active' THEN 'Active'
+                      WHEN $1 = 'pending' THEN 'Pending Payment'
+                      WHEN $1 = 'onboarding' THEN 'Pending Onboarding'
+                      ELSE status
+                    END,
+           updated_at = NOW()
+       WHERE id = $2 AND is_deleted = 0
+       RETURNING *`,
+      [paymentStatus, hotelId]
+    );
+  },
+
+  getHotelPaymentDetails: async (hotelId) => {
+    return db.oneOrNone(
+      `SELECT h.id, h.name, h.email, h.fee_amount, h.payment_status, h.status,
+              c.name as company_name, c.id as company_id, h.created_by
+       FROM tbl_hospitality_company_hotels h
+       JOIN tbl_hospitality_companies c ON c.id = h.hospitality_company_id
+       WHERE h.id = $1 AND h.is_deleted = 0`,
+      [hotelId]
+    );
+  },
+
+  createHotelPayment: async (paymentObj) => {
+    return db.one(
+      `INSERT INTO tbl_vendor_payments
+         (vendor_id, amount, currency, payment_status, razorpay_order_id, payment_type, receipt, before_payment_response)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [
+        paymentObj.user_id,
+        paymentObj.amount,
+        paymentObj.currency || 'INR',
+        paymentObj.payment_status || 'created',
+        paymentObj.razorpay_order_id,
+        'hospitality',
+        paymentObj.receipt,
+        paymentObj.before_payment_response || null
+      ]
+    );
+  },
+
+  getHotelPayment: async (hotelId) => {
+    return db.oneOrNone(
+      `SELECT id, payment_status, razorpay_order_id, razorpay_payment_id, amount
+       FROM tbl_vendor_payments
+       WHERE payment_type = 'hospitality'
+         AND receipt LIKE $1
+       ORDER BY id DESC LIMIT 1`,
+      [`HOTEL-${hotelId}-%`]
+    );
+  },
+
+  updateHotelPayment: async (paymentId, updateObj) => {
+    return db.oneOrNone(
+      `UPDATE tbl_vendor_payments
+       SET razorpay_payment_id = COALESCE($1, razorpay_payment_id),
+           razorpay_signature = COALESCE($2, razorpay_signature),
+           payment_status = COALESCE($3, payment_status),
+           after_payment_response = COALESCE($4, after_payment_response)
+       WHERE id = $5
+       RETURNING *`,
+      [
+        updateObj.razorpay_payment_id || null,
+        updateObj.razorpay_signature || null,
+        updateObj.payment_status || null,
+        updateObj.after_payment_response || null,
+        paymentId
       ]
     );
   },
