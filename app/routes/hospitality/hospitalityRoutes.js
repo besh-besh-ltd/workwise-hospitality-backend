@@ -193,6 +193,18 @@ HospitalityRoutes.post(
 
 HospitalityRoutes.get('/entities', passportSignIn, acl([7]), UsersController.getListedEntities);
 
+/**
+ * @route GET /api/v1/hospitality/vendor/my-mappings
+ * @description Get all active hotel and category subscriptions for the authenticated vendor
+ * @access Private (Vendors only - authenticated via JWT)
+ * @returns {Object} Hotels array and categorized categories object
+ */
+HospitalityRoutes.get(
+  '/vendor/my-mappings',
+  passportSignIn,
+  hospitalityController.getVendorMappings
+);
+
 export default HospitalityRoutes;
 
 

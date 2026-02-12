@@ -947,6 +947,92 @@ recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
   };
 },
 
+/**
+ * Get all active hotel and category subscriptions for a vendor
+ * Returns both hotels and categories the vendor is mapped to
+ *
+ * @param {number} vendorId - The vendor's user ID
+ * @returns {Promise<Object>} Object with hotels and categories arrays
+ */
+getVendorHotelCategoryMappings: async (vendorId) => {
+  const result = await db.any(
+    `
+    SELECT
+      s.id AS subscription_id,
+      s.item_type,
+      s.item_id,
+      s.start_date,
+      s.end_date,
+      s.fee_amount,
+      CASE
+        WHEN s.item_type = 'hotel' THEN h.name
+        WHEN s.item_type = 'category' THEN c.title
+      END AS item_name,
+      CASE
+        WHEN s.item_type = 'hotel' THEN h.city
+        ELSE NULL
+      END AS city,
+      CASE
+        WHEN s.item_type = 'hotel' THEN h.full_address
+        ELSE NULL
+      END AS full_address,
+      CASE
+        WHEN s.item_type = 'category' THEN c.parent_id
+        ELSE NULL
+      END AS parent_id,
+      CASE
+        WHEN s.item_type = 'category' THEN parent.title
+        ELSE NULL
+      END AS parent_category_name
+    FROM tbl_vendor_hotel_category_subscription s
+    LEFT JOIN tbl_hospitality_company_hotels h
+      ON h.id = s.item_id AND s.item_type = 'hotel' AND h.is_deleted = 0
+    LEFT JOIN tbl_category c
+      ON c.id = s.item_id AND s.item_type = 'category' AND c.is_deleted = 0
+    LEFT JOIN tbl_category parent
+      ON parent.id = c.parent_id AND parent.is_deleted = 0
+    WHERE s.vendor_id = $1
+      AND s.status = 'active'
+      AND CURRENT_DATE BETWEEN s.start_date AND s.end_date
+      AND (
+        (s.item_type = 'hotel' AND h.id IS NOT NULL) OR
+        (s.item_type = 'category' AND c.id IS NOT NULL)
+      )
+    ORDER BY s.item_type, item_name
+    `,
+    [vendorId]
+  );
+
+  // Separate hotels and categories
+  const hotels = result
+    .filter(row => row.item_type === 'hotel')
+    .map(row => ({
+      subscription_id: row.subscription_id,
+      hotel_id: row.item_id,
+      hotel_name: row.item_name,
+      city: row.city,
+      full_address: row.full_address,
+      start_date: row.start_date,
+      end_date: row.end_date,
+      fee_amount: row.fee_amount
+    }));
+
+  const categories = result
+    .filter(row => row.item_type === 'category')
+    .map(row => ({
+      subscription_id: row.subscription_id,
+      category_id: row.item_id,
+      category_name: row.item_name,
+      parent_id: row.parent_id,
+      parent_category_name: row.parent_category_name,
+      start_date: row.start_date,
+      end_date: row.end_date,
+      fee_amount: row.fee_amount
+    }));
+
+  return { hotels, categories };
+},
+
 };
 
 export default hospitalityModel;

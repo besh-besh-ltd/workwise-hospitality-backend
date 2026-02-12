@@ -939,6 +939,94 @@ const HospitalityController = {
       logError(error);
       return formatErrorResponse(res, error);
     }
+  },
+
+  /**
+   * Get vendor's hotel and category mappings
+   * Returns all active subscriptions for the authenticated vendor
+   * Organizes categories into hierarchical structure (main categories with sub-categories)
+   *
+   * @route GET /api/v1/hospitality/vendor/my-mappings
+   * @access Private (Vendors only)
+   */
+  getVendorMappings: async (req, res) => {
+    try {
+      const vendorId = req.user.id;
+
+      // Get all active subscriptions from model
+      const { hotels, categories } = await hospitalityModel.getVendorHotelCategoryMappings(vendorId);
+
+      // Process categories into hierarchical structure
+      // Group by parent_id to identify main categories and their sub-categories
+      const mainCategoryMap = new Map();
+      const standaloneSubs = [];
+
+      // First pass: Build main categories map
+      categories.forEach(cat => {
+        if (!cat.parent_id || cat.parent_id === 0) {
+          // This is a main category
+          if (!mainCategoryMap.has(cat.category_id)) {
+            mainCategoryMap.set(cat.category_id, {
+              subscription_id: cat.subscription_id,
+              category_id: cat.category_id,
+              category_name: cat.category_name,
+              parent_id: cat.parent_id,
+              start_date: cat.start_date,
+              end_date: cat.end_date,
+              fee_amount: cat.fee_amount,
+              sub_categories: []
+            });
+          }
+        }
+      });
+
+      // Second pass: Attach sub-categories to their parents or mark as standalone
+      categories.forEach(cat => {
+        if (cat.parent_id && cat.parent_id !== 0) {
+          // This is a sub-category
+          if (mainCategoryMap.has(cat.parent_id)) {
+            // Parent exists in vendor's subscriptions
+            const parent = mainCategoryMap.get(cat.parent_id);
+            parent.sub_categories.push({
+              subscription_id: cat.subscription_id,
+              category_id: cat.category_id,
+              category_name: cat.category_name,
+              parent_id: cat.parent_id,
+              parent_category_name: cat.parent_category_name,
+              start_date: cat.start_date,
+              end_date: cat.end_date,
+              fee_amount: cat.fee_amount
+            });
+          } else {
+            // Vendor has sub-category but not the parent
+            standaloneSubs.push({
+              subscription_id: cat.subscription_id,
+              category_id: cat.category_id,
+              category_name: cat.category_name,
+              parent_id: cat.parent_id,
+              parent_category_name: cat.parent_category_name,
+              start_date: cat.start_date,
+              end_date: cat.end_date,
+              fee_amount: cat.fee_amount
+            });
+          }
+        }
+      });
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          hotels,
+          categories: {
+            main_categories: Array.from(mainCategoryMap.values()),
+            standalone_subcategories: standaloneSubs
+          }
+        }
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
   }
 
 };

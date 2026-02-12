@@ -295,6 +295,28 @@ user_book_demo: async (mobile) => {
         });
     });
   },
+  getUserAuthByEmployeeCode: async (employeeCode) => {
+    return new Promise(function (resolve, reject) {
+      db.any(
+        `SELECT
+            tbl_users.*,
+            COALESCE(tbl_company.is_hospitality, 0) AS is_hospitality
+          FROM tbl_users
+          LEFT JOIN tbl_company ON tbl_users.company_id = tbl_company.id
+          WHERE tbl_users.employee_code = $1
+            AND tbl_users.user_type != '1'
+            AND tbl_users.is_deleted = '0'`,
+        [employeeCode]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
   getCompanyDetail: async (user_id) => {
     return new Promise(function (resolve, reject) {
       db.any(`SELECT c.*
