@@ -305,12 +305,14 @@ const config = {
   )}.txt`,
 
   transportConfig: {
-    // host: "smtp.gmail.com",
-    host: "smtp-relay.brevo.com",
-    port: 587,
+    // Configure SMTP to use Gmail by default.
+    // For production, set SMTP_HOST / SMTP_PORT if needed, otherwise this will use:
+    // host = smtp.gmail.com, port = 587
+    host: process.env.SMTP_HOST || "smtp.gmail.com",
+    port: process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : 587,
     auth: {
-      user: process.env.SMTP_EMAIL || "test b2bportal2023@gmail.com",
-      pass: process.env.SMTP_USER_PASSWORD || "xsmtpsib-3b42f9886e4f809b920bfec2a77b5daa71c65fdcdf3e71d0c247d25261f4446e-J7znQEFTHW45M9Sw",
+      user: process.env.SMTP_EMAIL,
+      pass: process.env.SMTP_USER_PASSWORD,
     },
   },
   developers: [

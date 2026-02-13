@@ -195,6 +195,7 @@ export const buildPOTemplateData = async (po_id) => {
     company: {
       address: poData.buyer_address
     },
+    buyer_business_unit_name: poData.hotel_name,
     gstin: poData.hotel_gstin || poData.buyer_gstin,
 
     // Terms

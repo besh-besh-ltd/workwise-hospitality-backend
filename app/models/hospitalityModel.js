@@ -163,7 +163,7 @@ const hospitalityModel = {
            delivery_address = $14,
            updated_by = $15,
            email = $18,
-           fee_amount = COALESCE($19, fee_amount),
+           fee_amount = $19,
            updated_at = NOW()
        WHERE id = $16 AND hospitality_company_id = $17 AND is_deleted = 0
        RETURNING *`,
@@ -186,7 +186,7 @@ const hospitalityModel = {
         hotelId,
         companyId,
         hotelObj.email || null,
-        hotelObj.fee_amount || null
+        hotelObj.fee_amount
       ]
     );
   },
@@ -216,6 +216,19 @@ const hospitalityModel = {
        JOIN tbl_hospitality_companies c ON c.id = h.hospitality_company_id
        WHERE h.id = $1 AND h.is_deleted = 0`,
       [hotelId]
+    );
+  },
+
+  getHotelsByIds: async (hotelIds) => {
+    return db.any(
+      `SELECT h.*,
+              c.name as company_name,
+              c.contact_email as company_email
+       FROM tbl_hospitality_company_hotels h
+       JOIN tbl_hospitality_companies c ON c.id = h.hospitality_company_id
+       WHERE h.id = ANY($1::int[]) AND h.is_deleted = 0
+       ORDER BY h.name`,
+      [hotelIds]
     );
   },
 
@@ -488,7 +501,7 @@ const hospitalityModel = {
 
   getUserMappings: async (userId) => {
     return db.any(
-      `SELECT 
+      `SELECT
         hum.*,
         hc.name AS company_name,
         hh.name AS hotel_name
@@ -499,17 +512,6 @@ const hospitalityModel = {
          AND hc.is_deleted = 0
          AND (hh.id IS NULL OR hh.is_deleted = 0)`,
       [userId]
-    );
-  },
-  getHotelsByIds: async (ids = []) => {
-    if (!ids || !ids.length) {
-      return [];
-    }
-    return db.any(
-      `SELECT id, fee_amount
-       FROM tbl_hospitality_company_hotels
-       WHERE id IN ($1:csv) AND is_deleted = 0`,
-      [ids]
     );
   },
   createVendorPayment: async (paymentObj) => {

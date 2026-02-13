@@ -233,13 +233,15 @@ const ArcController = {
   getRfqList: async (req, res) => {
     try {
       const { page = 1, limit = 50, project_id } = req.query;
+      const user_id = req.user?.id;
 
       // Get products with ARC approvals (tenders only)
       const result = await rfqModel.getRfqsPendingArcApproval({
         page: parseInt(page),
         limit: parseInt(limit),
         project_id,
-        is_tender: 1 // Only tenders
+        is_tender: 1, // Only tenders
+        user_id
       });
 
       return res.status(200).json({

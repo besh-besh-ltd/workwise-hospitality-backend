@@ -382,7 +382,9 @@ const HospitalityController = {
         delivery_address: req.body.delivery_address?.trim() || null,
         updated_by: req.user.id,
         email: req.body.email?.trim() || null,
-        fee_amount: req.body.fee_amount ? parseInt(req.body.fee_amount, 10) : null
+        fee_amount: req.body.fee_amount !== undefined && req.body.fee_amount !== null && req.body.fee_amount !== ''
+          ? parseInt(req.body.fee_amount, 10)
+          : hotelRecord.fee_amount
       };
 
       const updated = await hospitalityModel.updateHotel(hotelId, payload, record.id);
@@ -1016,6 +1018,180 @@ const HospitalityController = {
         message: 'Payment link sent successfully',
         data: { email: hotel.email }
       });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  // Send batch payment links (company-level or BU-level)
+  sendBatchPaymentLinks: async (req, res) => {
+    try {
+      const { company_id, payment_mode, hotel_ids } = req.body;
+
+      // Validate input
+      if (!company_id) {
+        return res.status(400).json({ status: 0, message: 'company_id is required' });
+      }
+
+      if (!payment_mode || !['bu', 'company'].includes(payment_mode)) {
+        return res.status(400).json({ status: 0, message: 'payment_mode must be "bu" or "company"' });
+      }
+
+      if (!hotel_ids || !Array.isArray(hotel_ids) || hotel_ids.length === 0) {
+        return res.status(400).json({ status: 0, message: 'hotel_ids array is required and must not be empty' });
+      }
+
+      // Fetch all selected hotels with company information
+      const hotels = await hospitalityModel.getHotelsByIds(hotel_ids);
+
+      if (!hotels || hotels.length === 0) {
+        return res.status(404).json({ status: 0, message: 'No valid business units found' });
+      }
+
+      const { sendMail } = await import('../../helper/common.js');
+      const { generateEmailTemplate } = await import('../../helper/notificationEmailLayout.js');
+
+      const frontendUrl =
+        process.env.FRONT_END_WEBSITE ||
+        process.env.FRONTEND_URL ||
+        'http://localhost:3000';
+
+      const companyName = hotels[0]?.company_name || 'Your Company';
+
+      if (payment_mode === 'bu') {
+        // BU Mode: Validate all hotels have emails
+        const hotelsWithoutEmail = hotels.filter(h => !h.email);
+        if (hotelsWithoutEmail.length > 0) {
+          const hotelNames = hotelsWithoutEmail.map(h => h.name || `ID: ${h.id}`).join(', ');
+          return res.status(400).json({
+            status: 0,
+            message: `Some business units missing email: ${hotelNames}`
+          });
+        }
+
+        // Send individual payment links to each BU
+        const emailPromises = hotels.map(async (hotel) => {
+          const paymentLink = `${frontendUrl}/hotel-payment?hotel_id=${hotel.id}`;
+
+          const headerContent = `<h2 style="margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #111827;">Welcome, ${hotel.name}!</h2>`;
+          const containerContent = `
+            <p style="font-size: 15px; color: #4b5563; margin: 0 0 16px;">
+              You have been added as a business unit under <strong>${companyName}</strong> on the WorkWise platform.
+              To activate your business unit, please complete the onboarding payment.
+            </p>
+            <div style="background: #f9fafb; border-radius: 12px; padding: 16px 20px; margin: 16px 0;">
+              <p style="margin: 0 0 6px; font-size: 13px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.06em;">Payment Details</p>
+              <p style="margin: 0; font-size: 26px; font-weight: 700; color: #158993;">₹ ${hotel.fee_amount}</p>
+            </div>
+            <div style="text-align: center; margin: 24px 0 12px;">
+              <a href="${paymentLink}"
+                 style="background-color: #158993; color: #ffffff; padding: 12px 32px; border-radius: 9999px; text-decoration: none; font-weight: 600; font-size: 15px; display: inline-block;">
+                Complete Payment
+              </a>
+            </div>
+            <p style="font-size: 12px; color: #9ca3af; margin: 0; text-align: center;">
+              If the button doesn't work, copy and paste this link into your browser:<br/>
+              <a href="${paymentLink}" style="color: #158993; word-break: break-all;">${paymentLink}</a>
+            </p>
+          `;
+
+          const html = generateEmailTemplate(headerContent, containerContent, null);
+
+          await sendMail({
+            from: Config.webmasterMail,
+            to: hotel.email,
+            subject: `WorkWise - Complete Payment for ${hotel.name}`,
+            html
+          });
+
+          await hospitalityModel.updateHotelPaymentStatus(hotel.id, 'onboarding');
+        });
+
+        await Promise.all(emailPromises);
+
+        return res.status(200).json({
+          status: 1,
+          message: `Payment links sent to ${hotels.length} business unit(s)`,
+          data: {
+            mode: 'bu',
+            hotels_count: hotels.length,
+            emails: hotels.map(h => h.email)
+          }
+        });
+
+      } else {
+        // Company Mode: Send consolidated payment link
+        const companyEmail = hotels[0]?.company_email;
+
+        if (!companyEmail) {
+          return res.status(400).json({
+            status: 0,
+            message: 'Company contact email not configured. Please update company email before sending payment links.'
+          });
+        }
+
+        const totalAmount = hotels.reduce((sum, h) => sum + parseFloat(h.fee_amount || 0), 0);
+        const hotelIdsParam = hotel_ids.join(',');
+        const paymentLink = `${frontendUrl}/hotel-payment?company_id=${company_id}&hotel_ids=${hotelIdsParam}`;
+
+        const headerContent = `<h2 style="margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #111827;">Welcome, ${companyName}!</h2>`;
+
+        const hotelsList = hotels.map(h =>
+          `<li style="margin: 8px 0; font-size: 14px; color: #4b5563;">
+            <strong>${h.name}</strong> - ₹${h.fee_amount}
+          </li>`
+        ).join('');
+
+        const containerContent = `
+          <p style="font-size: 15px; color: #4b5563; margin: 0 0 16px;">
+            Your business units have been added to the WorkWise platform.
+            To activate all business units, please complete the consolidated onboarding payment.
+          </p>
+          <div style="background: #f9fafb; border-radius: 12px; padding: 16px 20px; margin: 16px 0;">
+            <p style="margin: 0 0 12px; font-size: 13px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.06em;">Business Units</p>
+            <ul style="list-style: none; padding: 0; margin: 0;">${hotelsList}</ul>
+            <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 16px 0;" />
+            <p style="margin: 0 0 6px; font-size: 13px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.06em;">Total Payment</p>
+            <p style="margin: 0; font-size: 26px; font-weight: 700; color: #158993;">₹ ${totalAmount.toFixed(2)}</p>
+          </div>
+          <div style="text-align: center; margin: 24px 0 12px;">
+            <a href="${paymentLink}"
+               style="background-color: #158993; color: #ffffff; padding: 12px 32px; border-radius: 9999px; text-decoration: none; font-weight: 600; font-size: 15px; display: inline-block;">
+              Complete Payment
+            </a>
+          </div>
+          <p style="font-size: 12px; color: #9ca3af; margin: 0; text-align: center;">
+            If the button doesn't work, copy and paste this link into your browser:<br/>
+            <a href="${paymentLink}" style="color: #158993; word-break: break-all;">${paymentLink}</a>
+          </p>
+        `;
+
+        const html = generateEmailTemplate(headerContent, containerContent, null);
+
+        await sendMail({
+          from: Config.webmasterMail,
+          to: companyEmail,
+          subject: `WorkWise - Complete Payment for ${companyName}`,
+          html
+        });
+
+        // Update all hotels to onboarding status
+        await Promise.all(hotel_ids.map(hotelId =>
+          hospitalityModel.updateHotelPaymentStatus(hotelId, 'onboarding')
+        ));
+
+        return res.status(200).json({
+          status: 1,
+          message: 'Consolidated payment link sent successfully',
+          data: {
+            mode: 'company',
+            hotels_count: hotels.length,
+            total_amount: totalAmount,
+            email: companyEmail
+          }
+        });
+      }
     } catch (error) {
       logError(error);
       return formatErrorResponse(res, error);

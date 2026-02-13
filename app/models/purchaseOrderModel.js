@@ -758,6 +758,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                 ELSE NULL END AS project_details,
               COALESCE(VENDOR.organization_name, VENDOR.name) AS finalized_vendor_name,
               VENDOR.email AS finalized_vendor_email,
+              VENDOR.mobile AS finalized_vendor_phone,
               JSON_BUILD_OBJECT(
                   'id', LOGGED_IN_USER.id,
                   'name', LOGGED_IN_USER.name,
