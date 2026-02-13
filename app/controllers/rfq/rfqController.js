@@ -2175,6 +2175,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       hotel_id,
       hotel_ids,
       department_id,
+      process_id,
       ra_start_date,
       ra_end_date,
       project_id,
@@ -2196,6 +2197,36 @@ const saveRfqDraft = async (user_id, reqBody) => {
       throw new Error(JSON.stringify({
         message: 'You do not have access to the selected hospitality company or hotel',
         status: 2
+      }));
+    }
+  }
+
+  // Validate process_id if provided
+  if (process_id && hospitality_company_id) {
+    // Get parent company from hospitality company
+    const hospCompany = await db.oneOrNone(
+      `SELECT buyer_company_id AS company_id FROM tbl_hospitality_companies WHERE id = $1`,
+      [hospitality_company_id]
+    );
+
+    if (!hospCompany) {
+      throw new Error(JSON.stringify({
+        message: 'Invalid hospitality company',
+        status: 3
+      }));
+    }
+
+    // Validate process belongs to parent company
+    const processExists = await db.oneOrNone(
+      `SELECT id FROM tbl_approval_processes
+       WHERE id = $1 AND company_id = $2 AND is_active = true`,
+      [process_id, hospCompany.company_id]
+    );
+
+    if (!processExists) {
+      throw new Error(JSON.stringify({
+        message: 'Invalid process for this company or process is inactive',
+        status: 3
       }));
     }
   }
@@ -2311,6 +2342,7 @@ const saveRfqDraft = async (user_id, reqBody) => {
       hospitality_company_id: hospitality_company_id || null,
       hotel_id: hotel_id || null,
       department_id: department_id || null,
+      process_id: process_id || null,
       ra_start_date: isReverseAuction ? normalizeDate(ra_start_date) : null,
       ra_end_date: isReverseAuction ? normalizeDate(ra_end_date) : null,
       is_published: 0,
@@ -3320,7 +3352,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
   const dbContext = txContext || db;
 
   const rfq = await dbContext.oneOrNone(
-    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, is_tender, company_name
+    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, process_id, is_tender, company_name
      FROM tbl_rfq WHERE id = $1`,
     [rfqId]
   );
@@ -3436,8 +3468,8 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
     // Create approved instance for audit trail
     const approvedInstance = await dbContext.one(`
       INSERT INTO tbl_approval_instances
-      (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, metadata, completed_at)
-      VALUES ($1, $2, $3, 'APPROVED', 0, $4, $5, $6, $7, $8, NOW()) RETURNING *
+      (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, metadata, completed_at)
+      VALUES ($1, $2, $3, 'APPROVED', 0, $4, $5, $6, $7, $8, $9, NOW()) RETURNING *
     `, [
       entityType,
       rfqId,
@@ -3446,6 +3478,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
       rfq.hospitality_company_id,
       rfq.hotel_id,
       rfq.department_id,
+      rfq.process_id,
       JSON.stringify({
         rfq_number: rfq.rfq_no,
         is_tender: rfq.is_tender,
@@ -3518,6 +3551,7 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
       hospitality_company_id: rfq.hospitality_company_id,
       hotel_id: rfq.hotel_id,
       department_id: rfq.department_id,
+      process_id: rfq.process_id,
       initiated_by: userId,
       metadata: {
         rfq_number: rfq.rfq_no,
@@ -3897,7 +3931,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
 
   // Fetch RFQ details
   const rfq = await dbContext.oneOrNone(
-    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, is_tender, company_name
+    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, process_id, is_tender, company_name
      FROM tbl_rfq WHERE id = $1`,
     [rfqId]
   );
@@ -4007,6 +4041,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     hospitality_company_id: rfq.hospitality_company_id,
     hotel_id: rfq.hotel_id,
     department_id: rfq.department_id,
+    process_id: rfq.process_id,
     initiated_by: userId,
     metadata: {
       rfq_id: rfqId,
@@ -4390,7 +4425,7 @@ const startApprovalForArc = async (rfqId, userId, txContext = null) => {
 
   // Fetch RFQ details - use transaction context if available
   const rfq = await dbContext.oneOrNone(
-    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, is_tender, company_name
+    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, process_id, is_tender, company_name
      FROM tbl_rfq WHERE id = $1`,
     [rfqId]
   );
@@ -4421,6 +4456,7 @@ const startApprovalForArc = async (rfqId, userId, txContext = null) => {
     hospitality_company_id: rfq.hospitality_company_id,
     hotel_id: rfq.hotel_id,
     department_id: rfq.department_id,
+    process_id: rfq.process_id,
     initiated_by: userId,
     metadata: {
       rfq_id: rfqId,
@@ -8999,6 +9035,7 @@ const rfqController = {
                   hospitality_company_id: rfqData.hospitality_company_id,
                   hotel_id: rfqData.hotel_id || null,
                   department_id: rfqData.department_id || null,
+                  process_id: rfqData.process_id || null,
                   initiated_by: req.user.id,
                   metadata: {
                     rfq_id: rfq_id,

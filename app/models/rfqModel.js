@@ -1737,6 +1737,7 @@ WHERE NOT EXISTS (
           'is_tender', RFQ.is_tender,
           'hotel_id', RFQ.hotel_id,
           'department_id', RFQ.department_id,
+          'process_id', RFQ.process_id,
           'title', RFQ.title,
 
           -- Selected Terms
@@ -3460,7 +3461,6 @@ LIMIT 2;
           AND asa.approver_user_id = ${user_id}
           AND asa.status = 'PENDING'
           AND ais.step_order = ai.current_step
-          AND (RFQ.is_published = 0 AND RFQ.status = 3)
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)

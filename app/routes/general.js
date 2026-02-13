@@ -5,7 +5,7 @@ import generalController from '../controllers/general/generalController.js';
 import { acl, noAcl } from '../helper/common.js';
 import { validateBody, validateParam } from '../validations/paramValidation/userValidation.js';
 import { hierarchySchema } from '../validations/hierarchyValidation.js';
-import { hospitalityApprovalController } from '../controllers/general/generalController.js';
+import { hospitalityApprovalController, processController } from '../controllers/general/generalController.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -84,6 +84,32 @@ GeneralRoutes.get(
 );
 
 // --- Hospitality Approval Engine Routes ---
+
+// Process Management (Universal Business Domains)
+GeneralRoutes.post(
+  '/hospitality/approval/processes',
+  passportSignIn,
+  acl([7]),
+  processController.createProcess
+);
+GeneralRoutes.get(
+  '/hospitality/approval/processes',
+  passportSignIn,
+  acl([7, 2]),
+  processController.getProcesses
+);
+GeneralRoutes.put(
+  '/hospitality/approval/processes/:id',
+  passportSignIn,
+  acl([7]),
+  processController.updateProcess
+);
+GeneralRoutes.delete(
+  '/hospitality/approval/processes/:id',
+  passportSignIn,
+  acl([7]),
+  processController.deleteProcess
+);
 
 // Policy Management
 GeneralRoutes.post(
