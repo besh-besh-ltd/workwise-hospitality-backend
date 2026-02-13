@@ -202,6 +202,15 @@ HospitalityRoutes.post(
   hospitalityController.sendPaymentLink
 );
 
+// Send batch payment links (company-level or BU-level)
+HospitalityRoutes.post(
+  '/company/send-batch-payment-links',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  hospitalityController.sendBatchPaymentLinks
+);
+
 // Public endpoints for hotel payment (accessed via email link, no auth)
 HospitalityRoutes.get(
   '/hotel-payment/:hotel_id',

@@ -1391,7 +1391,7 @@ WHERE NOT EXISTS (
    * @returns {Promise<Object>} - { rfqs, total }
    */
   getRfqsPendingArcApproval: async (filters = {}) => {
-    const { page = 1, limit = 50, project_id } = filters;
+    const { page = 1, limit = 50, project_id, user_id } = filters;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     const whereConditions = [
@@ -1412,6 +1412,28 @@ WHERE NOT EXISTS (
     if (project_id && parseInt(project_id) > 0) {
       whereConditions.push(`r.project_id = $${paramIndex++}`);
       params.push(parseInt(project_id));
+    }
+
+    // Restrict RFQs to hospitality business units (hotels) where the current user
+    // actually has a mapping. This ensures we don't show RFQs from BUs that the
+    // user is not part of (even if they have generic procurement access).
+    if (user_id) {
+      whereConditions.push(`
+        EXISTS (
+          SELECT 1
+          FROM tbl_hospitality_user_mappings hum
+          WHERE hum.user_id = $${paramIndex++}
+            AND hum.hospitality_company_id = r.hospitality_company_id
+            AND hum.is_deleted = 0
+            AND (
+              -- Hotel-level mapping
+              (hum.mapping_type = 1 AND hum.hospitality_hotel_id = r.hotel_id)
+              -- Or company-level mapping (covers all hotels under the company)
+              OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
+            )
+        )
+      `);
+      params.push(parseInt(user_id));
     }
 
     const whereClause = whereConditions.join(' AND ');

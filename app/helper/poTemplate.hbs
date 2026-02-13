@@ -78,6 +78,9 @@
     <tr>
       <td class="center bold" colspan="3" style="font-size: 16px; padding-bottom: 10px;">
         PURCHASE ORDER
+        {{#if supplier.name}}
+          <br/><span style="font-size: 13px;">{{supplier.name}}</span>
+        {{/if}}
         {{#if project_name}}
           <br/><span style="font-size: 13px;">{{project_name}}</span>
         {{/if}}
@@ -103,6 +106,12 @@
         {{/if}}
         {{#if supplier.cin}}
           <br/>CIN: {{supplier.cin}}
+        {{/if}}
+        {{#if supplier.phone}}
+          <br/>Phone: {{supplier.phone}}
+        {{/if}}
+        {{#if supplier.email}}
+          <br/>Email: {{supplier.email}}
         {{/if}}
       </td>
       <!-- Right Column: RFQ No, PO Number, PO Date -->
@@ -245,6 +254,9 @@
       <td style="width: 50%;">
         <strong>Buyer Details:</strong><br/>
         {{company_name}}<br/>
+        {{#if buyer_business_unit_name}}
+          <span class="small">Business Unit: {{buyer_business_unit_name}}</span><br/>
+        {{/if}}
         {{#if location}}
           {{location}}
         {{else}}
@@ -259,6 +271,23 @@
 
   <br/>
 
+  <!-- PAYMENT TERMS - Dedicated Section Before Terms & Conditions -->
+  {{#if paymentTermsList.length}}
+  <div class="section-title">PAYMENT TERMS</div>
+  <table class="small" style="margin-top: 8px;">
+    <tr>
+      <td>
+        <ul style="margin: 4px 0; padding-left: 16px;">
+          {{#each paymentTermsList}}
+            <li>{{capitalize type}}: {{value}}%{{#if days}} ({{days}} days){{/if}}{{#if comment}} - {{comment}}{{/if}}</li>
+          {{/each}}
+        </ul>
+      </td>
+    </tr>
+  </table>
+  <br/>
+  {{/if}}
+
   <!-- TERMS AND CONDITIONS - With Checkboxes -->
   <div class="section-title">TERMS AND CONDITIONS</div>
 
@@ -267,19 +296,6 @@
     <tr>
       <td style="width: 20px;"><span class="checkbox checked">✓</span></td>
       <td><strong>Delivery Terms:</strong> {{deliveryterms}} days</td>
-    </tr>
-    {{/if}}
-    {{#if paymentTermsList.length}}
-    <tr>
-      <td style="width: 20px;"><span class="checkbox checked">✓</span></td>
-      <td>
-        <strong>Payment Terms:</strong>
-        <ul style="margin: 4px 0; padding-left: 16px;">
-          {{#each paymentTermsList}}
-            <li>{{capitalize type}}: {{value}}%{{#if days}} ({{days}} days){{/if}}{{#if comment}} - {{comment}}{{/if}}</li>
-          {{/each}}
-        </ul>
-      </td>
     </tr>
     {{/if}}
     {{#each rfqTerms}}
