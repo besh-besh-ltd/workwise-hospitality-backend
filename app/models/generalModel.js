@@ -1237,6 +1237,182 @@ async function userHasFullScopeAccess(userId, hospitalityCompanyId, hotelId = nu
   const belongsToDept = await userBelongsToDepartment(userId, departmentId, t);
   return belongsToDept;
 }
+// ============= APPROVAL PROCESSES =============
+
+/**
+ * Create a new approval process (universal business domain)
+ * Processes are defined at parent company level and apply to all entity types
+ * @param {Object} params - Process parameters
+ * @param {number} params.company_id - Parent Company ID (required)
+ * @param {string} params.name - Process name (e.g., 'Renovation', 'Day-to-Day')
+ * @param {string|null} params.description - Process description
+ * @param {number} params.created_by - User ID who created the process
+ * @param {boolean} params.is_active - Whether process is active
+ */
+export async function createApprovalProcess({
+  company_id,
+  name,
+  description = null,
+  created_by,
+  is_active = true
+}) {
+  if (!company_id || !name || !created_by) {
+    throw new Error('company_id, name, and created_by are required');
+  }
+
+  // Validate company exists
+  const companyExists = await db.oneOrNone(
+    `SELECT id FROM tbl_company WHERE id = $1`,
+    [company_id]
+  );
+
+  if (!companyExists) {
+    throw new Error(`Company with ID ${company_id} does not exist`);
+  }
+
+  // Check for duplicate process name in company
+  const existing = await db.oneOrNone(
+    `SELECT id FROM tbl_approval_processes
+     WHERE company_id = $1 AND name = $2`,
+    [company_id, name]
+  );
+
+  if (existing) {
+    throw new Error(`Process with name "${name}" already exists for this company`);
+  }
+
+  return db.one(
+    `INSERT INTO tbl_approval_processes
+     (company_id, name, description, created_by, is_active)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [company_id, name, description, created_by, is_active]
+  );
+}
+
+/**
+ * Get approval processes with optional filtering
+ * @param {Object} params - Filter parameters
+ * @param {number|null} params.company_id - Filter by parent company
+ * @param {boolean} params.include_inactive - Include inactive processes
+ */
+export async function getApprovalProcesses({
+  company_id,
+  include_inactive = false
+}) {
+  const conditions = [];
+  const vals = [];
+  let paramIdx = 1;
+
+  if (company_id) {
+    conditions.push(`p.company_id = $${paramIdx++}`);
+    vals.push(company_id);
+  }
+
+  if (!include_inactive) {
+    conditions.push('p.is_active = true');
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  return db.any(`
+    SELECT
+      p.*,
+      u.name as created_by_name,
+      c.company_name
+    FROM tbl_approval_processes p
+    LEFT JOIN tbl_users u ON p.created_by = u.id
+    LEFT JOIN tbl_company c ON p.company_id = c.id
+    ${whereClause}
+    ORDER BY p.name ASC
+  `, vals);
+}
+
+/**
+ * Update an approval process
+ * @param {number} id - Process ID
+ * @param {Object} patch - Fields to update
+ */
+export async function updateApprovalProcess(id, patch) {
+  if (!id) throw new Error('Process ID is required');
+
+  const allowedFields = ['name', 'description', 'is_active'];
+  const sets = [];
+  const vals = [];
+  let idx = 1;
+
+  for (const key of allowedFields) {
+    if (patch.hasOwnProperty(key)) {
+      sets.push(`${key} = $${idx++}`);
+      vals.push(patch[key]);
+    }
+  }
+
+  if (sets.length === 0) {
+    throw new Error('No valid fields to update');
+  }
+
+  // If updating name, check for duplicates
+  if (patch.name) {
+    const process = await db.oneOrNone(
+      `SELECT company_id FROM tbl_approval_processes WHERE id = $1`,
+      [id]
+    );
+
+    if (process) {
+      const duplicate = await db.oneOrNone(
+        `SELECT id FROM tbl_approval_processes
+         WHERE company_id = $1 AND name = $2 AND id != $3`,
+        [process.company_id, patch.name, id]
+      );
+
+      if (duplicate) {
+        throw new Error(`Process with name "${patch.name}" already exists for this company`);
+      }
+    }
+  }
+
+  vals.push(id);
+  return db.oneOrNone(
+    `UPDATE tbl_approval_processes SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${idx} RETURNING *`,
+    vals
+  );
+}
+
+/**
+ * Soft delete a process (mark as inactive)
+ * Validates that no active policies or pending approvals reference it
+ * @param {number} id - Process ID
+ */
+export async function deleteApprovalProcess(id) {
+  if (!id) throw new Error('Process ID is required');
+
+  // Check if there are active policies using this process
+  const activePolicies = await db.oneOrNone(`
+    SELECT COUNT(*) as count
+    FROM tbl_approval_policies
+    WHERE process_id = $1 AND is_active = true
+  `, [id]);
+
+  if (activePolicies && parseInt(activePolicies.count) > 0) {
+    throw new Error(`Cannot delete process: ${activePolicies.count} active policies are using it`);
+  }
+
+  // Check if there are pending instances using this process
+  const pendingInstances = await db.oneOrNone(`
+    SELECT COUNT(*) as count
+    FROM tbl_approval_instances
+    WHERE process_id = $1 AND status = 'PENDING'
+  `, [id]);
+
+  if (pendingInstances && parseInt(pendingInstances.count) > 0) {
+    throw new Error(`Cannot delete process: ${pendingInstances.count} pending approvals exist`);
+  }
+
+  return db.none(
+    'UPDATE tbl_approval_processes SET is_active = false, updated_at = NOW() WHERE id = $1',
+    [id]
+  );
+}
 
 // ============= APPROVAL POLICIES =============
 
@@ -1247,6 +1423,7 @@ async function userHasFullScopeAccess(userId, hospitalityCompanyId, hotelId = nu
  * @param {number} params.hospitality_company_id - Hospitality Company ID (required)
  * @param {number|null} params.hotel_id - Hotel ID (optional, for hotel-specific policies)
  * @param {number|null} params.department_id - Department ID (optional, for dept-specific policies)
+ * @param {number|null} params.process_id - Process ID (optional, for process-specific policies)
  * @param {number} params.created_by - User ID who created the policy
  * @param {boolean} params.is_active - Whether policy is active
  */
@@ -1255,6 +1432,7 @@ export async function createApprovalPolicy({
   hospitality_company_id,
   hotel_id = null,
   department_id = null,
+  process_id = null,
   created_by,
   is_active = true
 }) {
@@ -1262,15 +1440,38 @@ export async function createApprovalPolicy({
     throw new Error('entity_type, hospitality_company_id, and created_by are required');
   }
 
-  // Check for duplicate policy with same scope
+  // If process_id provided, validate it belongs to the parent company
+  if (process_id) {
+    const hospCompany = await db.oneOrNone(
+      `SELECT buyer_company_id AS company_id FROM tbl_hospitality_companies WHERE id = $1`,
+      [hospitality_company_id]
+    );
+
+    if (!hospCompany) {
+      throw new Error(`Hospitality company with ID ${hospitality_company_id} does not exist`);
+    }
+
+    const process = await db.oneOrNone(
+      `SELECT id FROM tbl_approval_processes
+       WHERE id = $1 AND company_id = $2 AND is_active = true`,
+      [process_id, hospCompany.company_id]
+    );
+
+    if (!process) {
+      throw new Error('Process does not belong to this company or is inactive');
+    }
+  }
+
+  // Check for duplicate policy with same scope (including process_id)
   const existing = await db.oneOrNone(
     `SELECT id FROM tbl_approval_policies
      WHERE entity_type = $1
        AND hospitality_company_id = $2
        AND COALESCE(hotel_id, 0) = COALESCE($3, 0)
        AND COALESCE(department_id, 0) = COALESCE($4, 0)
+       AND COALESCE(process_id, 0) = COALESCE($5, 0)
        AND is_active = true`,
-    [entity_type, hospitality_company_id, hotel_id, department_id]
+    [entity_type, hospitality_company_id, hotel_id, department_id, process_id]
   );
 
   if (existing) {
@@ -1279,9 +1480,9 @@ export async function createApprovalPolicy({
 
   return db.one(
     `INSERT INTO tbl_approval_policies
-     (entity_type, hospitality_company_id, hotel_id, department_id, created_by, is_active)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [entity_type, hospitality_company_id, hotel_id, department_id, created_by, is_active]
+     (entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+    [entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active]
   );
 }
 
@@ -1291,10 +1492,37 @@ export async function createApprovalPolicy({
 export async function updateApprovalPolicy(id, patch) {
   if (!id) throw new Error('Policy ID is required');
 
-  const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'is_active'];
+  const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'process_id', 'is_active'];
   const sets = [];
   const vals = [];
   let idx = 1;
+
+  // If process_id is being updated, validate it
+  if (patch.hasOwnProperty('process_id') && patch.process_id !== null) {
+    const policy = await db.oneOrNone(
+      `SELECT hospitality_company_id FROM tbl_approval_policies WHERE id = $1`,
+      [id]
+    );
+
+    if (policy) {
+      const hospCompany = await db.oneOrNone(
+        `SELECT buyer_company_id AS company_id FROM tbl_hospitality_companies WHERE id = $1`,
+        [policy.hospitality_company_id]
+      );
+
+      if (hospCompany) {
+        const process = await db.oneOrNone(
+          `SELECT id FROM tbl_approval_processes
+           WHERE id = $1 AND company_id = $2 AND is_active = true`,
+          [patch.process_id, hospCompany.company_id]
+        );
+
+        if (!process) {
+          throw new Error('Process does not belong to this company or is inactive');
+        }
+      }
+    }
+  }
 
   for (const key of allowedFields) {
     if (patch.hasOwnProperty(key)) {
@@ -1318,7 +1546,7 @@ export async function updateApprovalPolicy(id, patch) {
  * Get approval policies with optional filtering
  * Returns policies ordered by specificity (most specific first)
  */
-export async function getApprovalPolicies({ hospitality_company_id, hotel_id, department_id, entity_type, include_inactive = false }) {
+export async function getApprovalPolicies({ hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive = false }) {
   const conditions = ['TRUE'];
   const vals = [];
   let paramIdx = 1;
@@ -1339,26 +1567,39 @@ export async function getApprovalPolicies({ hospitality_company_id, hotel_id, de
     conditions.push(`p.entity_type = $${paramIdx++}`);
     vals.push(entity_type);
   }
+  if (process_id !== undefined) {
+    conditions.push(`(p.process_id IS NULL OR p.process_id = $${paramIdx++})`);
+    vals.push(process_id);
+  }
   if (!include_inactive) {
     conditions.push('p.is_active = true');
   }
 
-  // Order by specificity: dept > hotel > company only
+  // Order by specificity: process-specific policies rank higher than generic
+  // Within each level, dept > hotel > company
   const query = `
     SELECT p.*,
            hc.name as company_name,
            hh.name as hotel_name,
            d.title as department_name,
+           proc.name as process_name,
            CASE
-             WHEN p.department_id IS NOT NULL THEN 3
-             WHEN p.hotel_id IS NOT NULL THEN 2
-             ELSE 1
+             -- Process-specific policies (higher priority)
+             WHEN p.process_id IS NOT NULL AND p.department_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 8
+             WHEN p.process_id IS NOT NULL AND p.department_id IS NULL AND p.hotel_id IS NOT NULL THEN 7
+             WHEN p.process_id IS NOT NULL AND p.department_id IS NULL AND p.hotel_id IS NULL THEN 6
+             -- Generic policies (fallback, lower priority)
+             WHEN p.process_id IS NULL AND p.department_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 5
+             WHEN p.process_id IS NULL AND p.department_id IS NULL AND p.hotel_id IS NOT NULL THEN 4
+             WHEN p.process_id IS NULL AND p.department_id IS NULL AND p.hotel_id IS NULL THEN 3
+             ELSE 0
            END as specificity_score,
            u.name as created_by_name
     FROM tbl_approval_policies p
     LEFT JOIN tbl_hospitality_companies hc ON p.hospitality_company_id = hc.id
     LEFT JOIN tbl_hospitality_company_hotels hh ON p.hotel_id = hh.id
     LEFT JOIN tbl_department d ON p.department_id = d.id
+    LEFT JOIN tbl_approval_processes proc ON p.process_id = proc.id
     LEFT JOIN tbl_users u ON p.created_by = u.id
     WHERE ${conditions.join(' AND ')}
     ORDER BY specificity_score DESC, p.created_at DESC
@@ -1368,37 +1609,54 @@ export async function getApprovalPolicies({ hospitality_company_id, hotel_id, de
 
 /**
  * Find the best matching policy for a given scope (deepest match wins)
+ * Process-specific policies always rank higher than generic policies
  * @param {Object} params - Scope parameters
+ * @param {string} params.entity_type - Entity type (RFQ, PO, etc.)
+ * @param {number} params.hospitality_company_id - Hospitality company ID
+ * @param {number|null} params.hotel_id - Hotel ID (optional)
+ * @param {number|null} params.department_id - Department ID (optional)
+ * @param {number|null} params.process_id - Process ID (optional)
  * @returns {Object|null} The most specific matching policy or null
  */
-export async function findBestMatchingPolicy({ entity_type, hospitality_company_id, hotel_id = null, department_id = null }) {
+export async function findBestMatchingPolicy({ entity_type, hospitality_company_id, hotel_id = null, department_id = null, process_id = null }) {
   if (!entity_type || !hospitality_company_id) {
     throw new Error('entity_type and hospitality_company_id are required');
   }
 
-  // Query policies matching the scope, ordered by specificity (most specific first)
+  // Query policies matching the scope, ordered by 8-level specificity (most specific first)
+  // Process-specific policies (scores 8-6) rank higher than generic policies (scores 5-3)
   const policies = await db.any(`
     SELECT p.*,
            CASE
-             WHEN department_id IS NOT NULL AND hotel_id IS NOT NULL THEN 3
-             WHEN hotel_id IS NOT NULL THEN 2
-             ELSE 1
+             -- Process-specific policies (higher priority)
+             WHEN p.process_id IS NOT NULL AND p.department_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 8
+             WHEN p.process_id IS NOT NULL AND p.department_id IS NULL AND p.hotel_id IS NOT NULL THEN 7
+             WHEN p.process_id IS NOT NULL AND p.department_id IS NULL AND p.hotel_id IS NULL THEN 6
+             -- Generic policies (fallback, lower priority)
+             WHEN p.process_id IS NULL AND p.department_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 5
+             WHEN p.process_id IS NULL AND p.department_id IS NULL AND p.hotel_id IS NOT NULL THEN 4
+             WHEN p.process_id IS NULL AND p.department_id IS NULL AND p.hotel_id IS NULL THEN 3
+             ELSE 0
            END as specificity_score
     FROM tbl_approval_policies p
-    WHERE entity_type = $1
-      AND hospitality_company_id = $2
-      AND is_active = true
+    WHERE p.entity_type = $1
+      AND p.hospitality_company_id = $2
+      AND p.is_active = true
+      AND (
+        -- Match exact process OR generic policy (process_id IS NULL)
+        (p.process_id = $5 OR p.process_id IS NULL)
+      )
       AND (
         -- Match company + hotel + department (most specific)
-        (department_id = $4 AND hotel_id = $3)
+        (p.department_id = $4 AND p.hotel_id = $3)
         -- OR Match company + hotel
-        OR (department_id IS NULL AND hotel_id = $3)
+        OR (p.department_id IS NULL AND p.hotel_id = $3)
         -- OR Match company only (fallback)
-        OR (department_id IS NULL AND hotel_id IS NULL)
+        OR (p.department_id IS NULL AND p.hotel_id IS NULL)
       )
-    ORDER BY specificity_score DESC
+    ORDER BY specificity_score DESC, p.created_at DESC
     LIMIT 1
-  `, [entity_type, hospitality_company_id, hotel_id, department_id]);
+  `, [entity_type, hospitality_company_id, hotel_id, department_id, process_id]);
 
   return policies.length > 0 ? policies[0] : null;
 }
@@ -1624,6 +1882,7 @@ async function isUserFinalApprover(userId, policy, policySteps, hospitality_comp
  * @param {number} params.hospitality_company_id - Hospitality Company ID
  * @param {number|null} params.hotel_id - Hotel ID (optional)
  * @param {number|null} params.department_id - Department ID (optional)
+ * @param {number|null} params.process_id - Process ID (optional, for process-specific policies)
  * @param {number|null} params.approval_policy_id - Specific policy to use (optional, auto-detected if not provided)
  * @param {number} params.initiated_by - User ID who initiated the approval
  * @param {Object} params.metadata - Additional metadata to store with the instance
@@ -1634,6 +1893,7 @@ export async function createApprovalInstance({
   hospitality_company_id,
   hotel_id = null,
   department_id = null,
+  process_id = null,
   approval_policy_id = null,
   initiated_by,
   metadata = {},
@@ -1673,7 +1933,7 @@ export async function createApprovalInstance({
         throw new Error('Policy company does not match request company');
       }
     } else {
-      policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id }, t);
+      policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
       console.log("FOUND POLICY:", policy)
       if (!policy) {
         throw new Error(`No approval policy found for ${entity_type} in this scope`);
@@ -1694,9 +1954,9 @@ export async function createApprovalInstance({
     // 4. Create the approval instance
     const instance = await t.one(`
       INSERT INTO tbl_approval_instances
-      (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, metadata)
-      VALUES ($1, $2, $3, 'PENDING', 1, $4, $5, $6, $7, $8) RETURNING *
-    `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, JSON.stringify(metadata)]);
+      (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, metadata)
+      VALUES ($1, $2, $3, 'PENDING', 1, $4, $5, $6, $7, $8, $9) RETURNING *
+    `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, JSON.stringify(metadata)]);
 
     // 5. Create instance steps and resolve approvers
     const instanceSteps = [];
@@ -1792,26 +2052,36 @@ export async function createApprovalInstance({
 }
 
 // Transaction-safe version of findBestMatchingPolicy
-async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id }, t) {
+async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id = null }, t) {
   const policies = await t.any(`
     SELECT p.*,
            CASE
-             WHEN department_id IS NOT NULL AND hotel_id IS NOT NULL THEN 3
-             WHEN hotel_id IS NOT NULL THEN 2
-             ELSE 1
+             -- Process-specific policies (higher priority)
+             WHEN p.process_id IS NOT NULL AND p.department_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 8
+             WHEN p.process_id IS NOT NULL AND p.department_id IS NULL AND p.hotel_id IS NOT NULL THEN 7
+             WHEN p.process_id IS NOT NULL AND p.department_id IS NULL AND p.hotel_id IS NULL THEN 6
+             -- Generic policies (fallback, lower priority)
+             WHEN p.process_id IS NULL AND p.department_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 5
+             WHEN p.process_id IS NULL AND p.department_id IS NULL AND p.hotel_id IS NOT NULL THEN 4
+             WHEN p.process_id IS NULL AND p.department_id IS NULL AND p.hotel_id IS NULL THEN 3
+             ELSE 0
            END as specificity_score
     FROM tbl_approval_policies p
-    WHERE entity_type = $1
-      AND hospitality_company_id = $2
-      AND is_active = true
+    WHERE p.entity_type = $1
+      AND p.hospitality_company_id = $2
+      AND p.is_active = true
       AND (
-        (department_id = $4 AND hotel_id = $3)
-        OR (department_id IS NULL AND hotel_id = $3)
-        OR (department_id IS NULL AND hotel_id IS NULL)
+        -- Match exact process OR generic policy (process_id IS NULL)
+        (p.process_id = $5 OR p.process_id IS NULL)
       )
-    ORDER BY specificity_score DESC
+      AND (
+        (p.department_id = $4 AND p.hotel_id = $3)
+        OR (p.department_id IS NULL AND p.hotel_id = $3)
+        OR (p.department_id IS NULL AND p.hotel_id IS NULL)
+      )
+    ORDER BY specificity_score DESC, p.created_at DESC
     LIMIT 1
-  `, [entity_type, hospitality_company_id, hotel_id, department_id]);
+  `, [entity_type, hospitality_company_id, hotel_id, department_id, process_id]);
 
   return policies.length > 0 ? policies[0] : null;
 }

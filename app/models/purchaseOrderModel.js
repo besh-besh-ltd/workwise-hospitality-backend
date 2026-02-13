@@ -337,7 +337,7 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
 
     // Get RFQ details to check if it's a hospitality RFQ
     const rfq = await t.oneOrNone(`
-      SELECT id, hospitality_company_id, hotel_id, department_id, rfq_no, is_tender
+      SELECT id, hospitality_company_id, hotel_id, department_id, process_id, rfq_no, is_tender
       FROM tbl_rfq WHERE id = $1
     `, [rfq_id]);
 
@@ -355,6 +355,7 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
           hospitality_company_id: rfq.hospitality_company_id,
           hotel_id: rfq.hotel_id,
           department_id: rfq.department_id,
+          process_id: rfq.process_id,
           initiated_by: initiator.id,
           metadata: {
             po_id: purchaseOrder.id,

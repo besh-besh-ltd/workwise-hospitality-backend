@@ -16,7 +16,11 @@ import generalModel, {
   findBestMatchingPolicy,
   getApprovalInstancesByEntity,
   cancelApprovalInstance,
-  getPendingApprovalsForUser
+  getPendingApprovalsForUser,
+  createApprovalProcess,
+  getApprovalProcesses,
+  updateApprovalProcess,
+  deleteApprovalProcess
 } from '../../models/generalModel.js';
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { handleRFQPostApproval, handleRFQRejection } from '../rfq/rfqController.js';
@@ -347,6 +351,7 @@ const hospitalityApprovalController = {
         hospitality_company_id,
         hotel_id,
         department_id,
+        process_id,
         is_active,
         steps,
         id
@@ -365,6 +370,7 @@ const hospitalityApprovalController = {
           hospitality_company_id,
           hotel_id,
           department_id,
+          process_id,
           is_active
         });
         if (steps && steps.length > 0) {
@@ -393,6 +399,7 @@ const hospitalityApprovalController = {
           hospitality_company_id,
           hotel_id,
           department_id,
+          process_id: process_id ? parseInt(process_id) : null,
           created_by,
           is_active
         });
@@ -415,12 +422,13 @@ const hospitalityApprovalController = {
    */
   async getApprovalPolicies(req, res) {
     try {
-      const { hospitality_company_id, hotel_id, department_id, entity_type, include_inactive } = req.query;
+      const { hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive } = req.query;
       const data = await getApprovalPolicies({
         hospitality_company_id: hospitality_company_id ? parseInt(hospitality_company_id) : undefined,
         hotel_id: hotel_id ? parseInt(hotel_id) : undefined,
         department_id: department_id ? parseInt(department_id) : undefined,
         entity_type,
+        process_id: process_id ? parseInt(process_id) : undefined,
         include_inactive: include_inactive === 'true'
       });
       res.json({ status: 1, data });
@@ -659,7 +667,7 @@ const hospitalityApprovalController = {
    */
   async findMatchingPolicy(req, res) {
     try {
-      const { entity_type, hospitality_company_id, hotel_id, department_id } = req.query;
+      const { entity_type, hospitality_company_id, hotel_id, department_id, process_id } = req.query;
 
       if (!entity_type || !hospitality_company_id) {
         return res.status(400).json({
@@ -672,7 +680,8 @@ const hospitalityApprovalController = {
         entity_type,
         hospitality_company_id: parseInt(hospitality_company_id),
         hotel_id: hotel_id ? parseInt(hotel_id) : null,
-        department_id: department_id ? parseInt(department_id) : null
+        department_id: department_id ? parseInt(department_id) : null,
+        process_id: process_id ? parseInt(process_id) : null
       });
 
       if (!policy) {
@@ -688,6 +697,106 @@ const hospitalityApprovalController = {
   }
 };
 
-export { hospitalityApprovalController };
+/**
+ * Process Management Controller
+ * Handles CRUD operations for approval processes (universal business domains)
+ */
+const processController = {
+  /**
+   * Create a new approval process
+   * POST /api/v1/general/hospitality/approval/processes
+   */
+  async createProcess(req, res) {
+    try {
+      const { name, description } = req.body;
+      const created_by = req.user?.id;
+      const company_id = req.user.company_id;
+
+      if (!company_id || !name || !created_by) {
+        return res.status(400).json({
+          status: 3,
+          message: 'company_id and name are required'
+        });
+      }
+
+      const process = await createApprovalProcess({
+        company_id: parseInt(company_id),
+        name,
+        description,
+        created_by
+      });
+
+      res.status(201).json({ status: 1, data: process });
+    } catch (e) {
+      logError(e);
+      res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+
+  /**
+   * Get all processes with optional filtering
+   * GET /api/v1/general/hospitality/approval/processes
+   */
+  async getProcesses(req, res) {
+    try {
+      const { include_inactive } = req.query;
+      const { company_id } = req.user;
+
+      const data = await getApprovalProcesses({
+        company_id: company_id ? parseInt(company_id) : undefined,
+        include_inactive: include_inactive === 'true'
+      });
+
+      res.json({ status: 1, data });
+    } catch (e) {
+      logError(e);
+      res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+
+  /**
+   * Update a process
+   * PUT /api/v1/general/hospitality/approval/processes/:id
+   */
+  async updateProcess(req, res) {
+    try {
+      const { id } = req.params;
+      const { name, description, is_active } = req.body;
+
+      const patch = {};
+      if (name !== undefined) patch.name = name;
+      if (description !== undefined) patch.description = description;
+      if (is_active !== undefined) patch.is_active = is_active;
+
+      const data = await updateApprovalProcess(parseInt(id), patch);
+
+      if (!data) {
+        return res.status(404).json({ status: 2, message: 'Process not found' });
+      }
+
+      res.json({ status: 1, data });
+    } catch (e) {
+      logError(e);
+      res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+
+  /**
+   * Delete (soft delete) a process
+   * DELETE /api/v1/general/hospitality/approval/processes/:id
+   */
+  async deleteProcess(req, res) {
+    try {
+      const { id } = req.params;
+      await deleteApprovalProcess(parseInt(id));
+      res.json({ status: 1, message: 'Process deactivated successfully' });
+    } catch (e) {
+      logError(e);
+      res.status(400).json({ status: 3, message: e.message });
+    }
+  }
+};
+
+export { hospitalityApprovalController, processController };
 export default generalController;
 
