@@ -1896,7 +1896,7 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
           FROM tbl_user_department ud
           JOIN tbl_department d ON d.id = ud.department_id
           WHERE ud.user_id = u.id
-          ORDER BY ud.created_at DESC
+          ORDER BY ud.id DESC
           LIMIT 1
         ) AS user_department
       FROM tbl_approval_step_approvers sa
