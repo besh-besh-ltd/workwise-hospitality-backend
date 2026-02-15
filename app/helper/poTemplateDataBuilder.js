@@ -204,9 +204,13 @@ export const buildPOTemplateData = async (po_id) => {
     rfqTerms,
 
     // Approval Section
-    preparedBy: poData.prepared_by_name,
-    technicalEvaluatedBy: approvalData.technicalEvaluatedBy,
-    commercialEvaluatedBy: approvalData.commercialEvaluatedBy,
+    isAutoPublished: approvalData.isAutoPublished,
+    rfqCreatorName: approvalData.rfqCreatorName,
+    rfqApproverName: approvalData.rfqApproverName,
+    techEvaluatorName: approvalData.techEvaluatorName,
+    techApproverName: approvalData.techApproverName,
+    commercialEvaluatorName: approvalData.commercialEvaluatorName,
+    commercialApproverName: approvalData.commercialApproverName,
     poApprovers: approvalData.poApprovers
   };
 };
@@ -311,46 +315,131 @@ const calculatePricingBreakdown = (items, buyerState, supplierState) => {
  */
 const getApprovalDataForPO = async (po_id, poData) => {
   const result = {
-    technicalEvaluatedBy: null,
-    commercialEvaluatedBy: null,
+    // Created By section: RFQ creator + RFQ publishing approver
+    rfqCreatorName: null,
+    rfqApproverName: null,
+    isAutoPublished: false,
+    // Technical Evaluation section: evaluator + approval approver
+    techEvaluatorName: null,
+    techApproverName: null,
+    // Commercial Evaluation section: negotiation handler + approval approver
+    commercialEvaluatorName: null,
+    commercialApproverName: null,
     poApprovers: []
   };
 
-  // 1. Get Technical Evaluation approver (from TECHNICAL approval instance for this RFQ)
-  const techApprover = await db.oneOrNone(`
-    SELECT U.name, AA.created_at AS approved_at
+  // 1. Get RFQ creator
+  const rfqCreator = await db.oneOrNone(`
+    SELECT U.name, R.created_by
+    FROM tbl_rfq R
+    JOIN tbl_users U ON U.id = R.created_by
+    WHERE R.id = $1
+  `, [poData.rfq_id]);
+  if (rfqCreator) {
+    result.rfqCreatorName = rfqCreator.name;
+  }
+
+  // 2. Check if RFQ was auto-published or has an approval flow
+  const rfqApproval = await db.oneOrNone(`
+    SELECT AI.id, AI.status
     FROM tbl_approval_instances AI
-    JOIN tbl_approval_actions AA ON AA.approval_instance_id = AI.id
-    JOIN tbl_users U ON U.id = AA.approver_user_id
+    WHERE AI.entity_type IN ('RFQ', 'TENDER')
+      AND AI.entity_id = $1
+    ORDER BY AI.created_at DESC
+    LIMIT 1
+  `, [poData.rfq_id]);
+
+  if (!rfqApproval) {
+    // No approval instance = auto-published
+    result.isAutoPublished = true;
+  } else {
+    // Get the final approver for RFQ publishing
+    const rfqFinalApprover = await db.oneOrNone(`
+      SELECT U.name
+      FROM tbl_approval_actions AA
+      JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
+      JOIN tbl_users U ON U.id = AA.approver_user_id
+      WHERE AIS.approval_instance_id = $1
+        AND AA.action = 'APPROVE'
+      ORDER BY AA.created_at DESC
+      LIMIT 1
+    `, [rfqApproval.id]);
+    if (rfqFinalApprover) {
+      result.rfqApproverName = rfqFinalApprover.name;
+    }
+  }
+
+  // 3. Get Technical Evaluation - evaluator (who initiated the tech eval approval) + final approver
+  const techApprovalInstance = await db.oneOrNone(`
+    SELECT AI.id, AI.initiated_by
+    FROM tbl_approval_instances AI
     WHERE AI.entity_type = 'TECHNICAL'
       AND AI.entity_id = $1
-      AND AA.action = 'APPROVE'
-    ORDER BY AA.created_at DESC
+    ORDER BY AI.created_at DESC
     LIMIT 1
   `, [poData.rfq_id]);
 
-  if (techApprover) {
-    result.technicalEvaluatedBy = techApprover.name;
+  if (techApprovalInstance) {
+    // Get the evaluator (who initiated the tech eval)
+    const techEvaluator = await db.oneOrNone(`
+      SELECT name FROM tbl_users WHERE id = $1
+    `, [techApprovalInstance.initiated_by]);
+    if (techEvaluator) {
+      result.techEvaluatorName = techEvaluator.name;
+    }
+
+    // Get the final tech eval approver
+    const techApprover = await db.oneOrNone(`
+      SELECT U.name
+      FROM tbl_approval_actions AA
+      JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
+      JOIN tbl_users U ON U.id = AA.approver_user_id
+      WHERE AIS.approval_instance_id = $1
+        AND AA.action = 'APPROVE'
+      ORDER BY AA.created_at DESC
+      LIMIT 1
+    `, [techApprovalInstance.id]);
+    if (techApprover) {
+      result.techApproverName = techApprover.name;
+    }
   }
 
-  // 2. Get Commercial/Negotiation approver
-  const commercialApprover = await db.oneOrNone(`
-    SELECT U.name, AA.created_at AS approved_at
+  // 4. Get Commercial/Negotiation - handler (who initiated) + final approver
+  const commercialApprovalInstance = await db.oneOrNone(`
+    SELECT AI.id, AI.initiated_by
     FROM tbl_approval_instances AI
-    JOIN tbl_approval_actions AA ON AA.approval_instance_id = AI.id
-    JOIN tbl_users U ON U.id = AA.approver_user_id
     WHERE AI.entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
       AND AI.metadata->>'rfq_id' = $1::text
-      AND AA.action = 'APPROVE'
-    ORDER BY AA.created_at DESC
+    ORDER BY AI.created_at DESC
     LIMIT 1
   `, [poData.rfq_id]);
 
-  if (commercialApprover) {
-    result.commercialEvaluatedBy = commercialApprover.name;
+  if (commercialApprovalInstance) {
+    // Get the negotiation handler
+    const commercialEvaluator = await db.oneOrNone(`
+      SELECT name FROM tbl_users WHERE id = $1
+    `, [commercialApprovalInstance.initiated_by]);
+    if (commercialEvaluator) {
+      result.commercialEvaluatorName = commercialEvaluator.name;
+    }
+
+    // Get the final commercial approver
+    const commercialApprover = await db.oneOrNone(`
+      SELECT U.name
+      FROM tbl_approval_actions AA
+      JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
+      JOIN tbl_users U ON U.id = AA.approver_user_id
+      WHERE AIS.approval_instance_id = $1
+        AND AA.action = 'APPROVE'
+      ORDER BY AA.created_at DESC
+      LIMIT 1
+    `, [commercialApprovalInstance.id]);
+    if (commercialApprover) {
+      result.commercialApproverName = commercialApprover.name;
+    }
   }
 
-  // 3. Get PO Approvers - ALL approvers with their status
+  // 5. Get PO Approvers - ALL approvers with their status
   if (poData.approval_instance_id) {
     // New approval workflow - get all steps with their approvers
     const stepsWithApprovers = await db.any(`

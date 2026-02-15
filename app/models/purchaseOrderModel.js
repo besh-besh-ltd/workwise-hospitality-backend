@@ -760,6 +760,14 @@ export const getPODetailsById = async (po_id, user_id) => {
               COALESCE(VENDOR.organization_name, VENDOR.name) AS finalized_vendor_name,
               VENDOR.email AS finalized_vendor_email,
               VENDOR.mobile AS finalized_vendor_phone,
+              -- Buyer company details
+              COALESCE(THC.name, TC.company_name) AS buyer_company_name,
+              THCH.name AS buyer_business_unit,
+              TC.gstin AS buyer_gstin,
+              (SELECT address FROM tbl_company_location WHERE company_id = po.company_id ORDER BY created_at DESC LIMIT 1) AS buyer_address,
+              TU.mobile AS initiated_by_phone,
+              RFQ.rfq_no,
+              RFQ.title AS rfq_title,
               JSON_BUILD_OBJECT(
                   'id', LOGGED_IN_USER.id,
                   'name', LOGGED_IN_USER.name,
@@ -1020,6 +1028,10 @@ export const getPODetailsById = async (po_id, user_id) => {
        JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = po.id
        JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
        LEFT JOIN tbl_approval_hierarchy_history TAHH ON trx.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
+       LEFT JOIN tbl_company TC ON TC.id = po.company_id
+       JOIN tbl_rfq RFQ ON RFQ.id = po.rfq_id
+       LEFT JOIN tbl_hospitality_companies THC ON THC.id = RFQ.hospitality_company_id
+       LEFT JOIN tbl_hospitality_company_hotels THCH ON THCH.id = RFQ.hotel_id
        WHERE po.id = $1`,
       [po_id, user_id]
     );

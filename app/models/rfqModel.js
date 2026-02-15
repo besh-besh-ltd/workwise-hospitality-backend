@@ -1391,21 +1391,25 @@ WHERE NOT EXISTS (
    * @returns {Promise<Object>} - { rfqs, total }
    */
   getRfqsPendingArcApproval: async (filters = {}) => {
-    const { page = 1, limit = 50, project_id, user_id } = filters;
+    const { page = 1, limit = 50, project_id, user_id, includeAll = false } = filters;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     const whereConditions = [
       'r.hospitality_company_id IS NOT NULL',
       'r.status IN (1, 2)',
       'r.is_tender = 1', // ARC is only for tenders
-      `EXISTS (
+    ];
+
+    // Only filter to tenders with ARC approval instances when not showing all
+    if (!includeAll) {
+      whereConditions.push(`EXISTS (
         SELECT 1 FROM tbl_rfq_products rp
         JOIN tbl_approval_instances ai2 ON ai2.entity_type = 'ARC'
           AND ai2.entity_id::INTEGER = rp.id
           AND ai2.status IN ('PENDING', 'APPROVED', 'CANCELLED')
         WHERE rp.rfq_id = r.id
-      )`
-    ];
+      )`);
+    }
     const params = [];
     let paramIndex = 1;
 
@@ -1424,7 +1428,6 @@ WHERE NOT EXISTS (
           FROM tbl_hospitality_user_mappings hum
           WHERE hum.user_id = $${paramIndex++}
             AND hum.hospitality_company_id = r.hospitality_company_id
-            AND hum.is_deleted = 0
             AND (
               -- Hotel-level mapping
               (hum.mapping_type = 1 AND hum.hospitality_hotel_id = r.hotel_id)
@@ -1485,15 +1488,17 @@ WHERE NOT EXISTS (
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}
     `;
 
-    const countQuery = `
-      SELECT COUNT(DISTINCT rp.id)
-      FROM tbl_rfq r
-      JOIN tbl_rfq_products rp ON rp.rfq_id = r.id
-      JOIN tbl_approval_instances ai2 ON ai2.entity_type = 'ARC'
-        AND ai2.entity_id::INTEGER = rp.id
-        AND ai2.status IN ('PENDING', 'APPROVED', 'CANCELLED')
-      WHERE ${whereClause}
-    `;
+    const countQuery = includeAll
+      ? `SELECT COUNT(DISTINCT r.id)
+         FROM tbl_rfq r
+         WHERE ${whereClause}`
+      : `SELECT COUNT(DISTINCT rp.id)
+         FROM tbl_rfq r
+         JOIN tbl_rfq_products rp ON rp.rfq_id = r.id
+         JOIN tbl_approval_instances ai2 ON ai2.entity_type = 'ARC'
+           AND ai2.entity_id::INTEGER = rp.id
+           AND ai2.status IN ('PENDING', 'APPROVED', 'CANCELLED')
+         WHERE ${whereClause}`;
 
     params.push(parseInt(limit), offset);
 

@@ -300,31 +300,62 @@
       </td>
     </tr>
     <tr>
-      <td style="width: 25%;">
+      <td style="width: 25%; vertical-align: top;">
         <strong>Created By:</strong><br/>
-        {{#if preparedBy}}
-          <span class="checkbox checked">✓</span> {{preparedBy}}
-        {{else}}
-          -
-        {{/if}}
+        {{#unless isAutoPublished}}
+          {{#if rfqCreatorName}}
+            <div style="margin-bottom: 2px;">
+              <span class="small" style="color: #6b7280;">Creator:</span><br/>
+              <span style="font-weight: 500;">{{rfqCreatorName}}</span>
+            </div>
+          {{/if}}
+          {{#if rfqApproverName}}
+            <div>
+              <span class="small" style="color: #6b7280;">Approver:</span><br/>
+              <span style="font-weight: 500;">{{rfqApproverName}}</span>
+            </div>
+          {{/if}}
+          {{#unless rfqCreatorName}}-{{/unless}}
+        {{/unless}}
+        {{#if isAutoPublished}}-{{/if}}
       </td>
-      <td style="width: 25%;">
+      <td style="width: 25%; vertical-align: top;">
         <strong>Technical Evaluation:</strong><br/>
-        {{#if technicalEvaluatedBy}}
-          <span class="checkbox checked">✓</span> {{technicalEvaluatedBy}}
-        {{else}}
-          -
+        {{#if techEvaluatorName}}
+          <div style="margin-bottom: 2px;">
+            <span class="small" style="color: #6b7280;">Evaluator:</span><br/>
+            <span style="font-weight: 500;">{{techEvaluatorName}}</span>
+          </div>
         {{/if}}
+        {{#if techApproverName}}
+          <div>
+            <span class="small" style="color: #6b7280;">Approver:</span><br/>
+            <span style="font-weight: 500;">{{techApproverName}}</span>
+          </div>
+        {{/if}}
+        {{#unless techEvaluatorName}}
+          {{#unless techApproverName}}-{{/unless}}
+        {{/unless}}
       </td>
-      <td style="width: 25%;">
+      <td style="width: 25%; vertical-align: top;">
         <strong>Commercial Evaluation:</strong><br/>
-        {{#if commercialEvaluatedBy}}
-          <span class="checkbox checked">✓</span> {{commercialEvaluatedBy}}
-        {{else}}
-          -
+        {{#if commercialEvaluatorName}}
+          <div style="margin-bottom: 2px;">
+            <span class="small" style="color: #6b7280;">Evaluator:</span><br/>
+            <span style="font-weight: 500;">{{commercialEvaluatorName}}</span>
+          </div>
         {{/if}}
+        {{#if commercialApproverName}}
+          <div>
+            <span class="small" style="color: #6b7280;">Approver:</span><br/>
+            <span style="font-weight: 500;">{{commercialApproverName}}</span>
+          </div>
+        {{/if}}
+        {{#unless commercialEvaluatorName}}
+          {{#unless commercialApproverName}}-{{/unless}}
+        {{/unless}}
       </td>
-      <td style="width: 25%;">
+      <td style="width: 25%; vertical-align: top;">
         <strong>PO Approvers:</strong><br/>
         {{#if poApprovers}}
           {{#each poApprovers}}
