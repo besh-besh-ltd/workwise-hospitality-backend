@@ -232,7 +232,7 @@ const ArcController = {
    */
   getRfqList: async (req, res) => {
     try {
-      const { page = 1, limit = 50, project_id } = req.query;
+      const { page = 1, limit = 50, project_id, show_all } = req.query;
       const user_id = req.user?.id;
 
       // Get products with ARC approvals (tenders only)
@@ -241,7 +241,8 @@ const ArcController = {
         limit: parseInt(limit),
         project_id,
         is_tender: 1, // Only tenders
-        user_id
+        user_id,
+        includeAll: show_all === '1' || show_all === 1
       });
 
       return res.status(200).json({
