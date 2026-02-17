@@ -510,7 +510,14 @@ const hospitalityModel = {
   getUserMappings: async (userId) => {
     return db.any(
       `SELECT
-        hum.*,
+        hum.id,
+        hum.user_id,
+        hum.mapping_type,
+        hum.hospitality_company_id,
+        hum.hospitality_hotel_id,
+        hum.auto_map_projects,
+        hum.created_by,
+        hum.created_at,
         hc.name AS company_name,
         hh.name AS hotel_name
        FROM tbl_hospitality_user_mappings hum
@@ -518,7 +525,39 @@ const hospitalityModel = {
        LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = hum.hospitality_hotel_id
        WHERE hum.user_id = $1
          AND hc.is_deleted = 0
-         AND (hh.id IS NULL OR hh.is_deleted = 0)`,
+         AND (hh.id IS NULL OR hh.is_deleted = 0)
+
+       UNION ALL
+
+       SELECT
+        (SELECT MIN(hum.id) FROM tbl_hospitality_user_mappings hum
+         WHERE hum.user_id = $1 AND hum.hospitality_company_id = hc.id AND hum.mapping_type = 0) AS id,
+        $1::int AS user_id,
+        1 AS mapping_type,
+        hc.id AS hospitality_company_id,
+        hh.id AS hospitality_hotel_id,
+        false AS auto_map_projects,
+        NULL::int AS created_by,
+        NOW() AS created_at,
+        hc.name AS company_name,
+        hh.name AS hotel_name
+       FROM tbl_hospitality_companies hc
+       JOIN tbl_hospitality_company_hotels hh
+         ON hh.hospitality_company_id = hc.id AND hh.is_deleted = 0
+       WHERE hc.is_deleted = 0
+         AND EXISTS (
+           SELECT 1 FROM tbl_hospitality_user_mappings hum
+           WHERE hum.user_id = $1
+             AND hum.hospitality_company_id = hc.id
+             AND hum.mapping_type = 0
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM tbl_hospitality_user_mappings hum2
+           WHERE hum2.user_id = $1
+             AND hum2.hospitality_company_id = hc.id
+             AND hum2.hospitality_hotel_id = hh.id
+             AND hum2.mapping_type = 1
+         )`,
       [userId]
     );
   },

@@ -879,10 +879,54 @@ const HospitalityController = {
 
   getMyContexts: async (req, res) => {
     try {
-      const contexts = await hospitalityModel.getUserContexts(req.user.id);
+      const mappings = await hospitalityModel.getUserContexts(req.user.id);
+
+      // Group flat mappings into companies with nested hotels
+      const companyMap = {};
+
+      for (const mapping of mappings) {
+        const companyId = mapping.hospitality_company_id;
+
+        if (!companyMap[companyId]) {
+          companyMap[companyId] = {
+            id: companyId,
+            name: mapping.company_name,
+            isCompanyLevel: false,
+            hotels: []
+          };
+        }
+
+        if (mapping.mapping_type === 0) {
+          companyMap[companyId].isCompanyLevel = true;
+        }
+
+        if (mapping.mapping_type === 1 && mapping.hospitality_hotel_id) {
+          companyMap[companyId].hotels.push({
+            id: mapping.hospitality_hotel_id,
+            name: mapping.hotel_name
+          });
+        }
+      }
+
+      // For company-level mappings, fetch ALL hotels in those companies
+      for (const companyId of Object.keys(companyMap)) {
+        if (companyMap[companyId].isCompanyLevel) {
+          const allHotels = await hospitalityModel.getHotelsByCompany(
+            parseInt(companyId, 10)
+          );
+          companyMap[companyId].hotels = allHotels.map((h) => ({
+            id: h.id,
+            name: h.name
+          }));
+        }
+      }
+
+      // Clean up internal flag before sending
+      const grouped = Object.values(companyMap).map(({ isCompanyLevel, ...rest }) => rest);
+
       return res.status(200).json({
         status: 1,
-        data: contexts
+        data: grouped
       });
     } catch (error) {
       logError(error);
