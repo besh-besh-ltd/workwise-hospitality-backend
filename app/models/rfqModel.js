@@ -8225,17 +8225,16 @@ ORDER BY m.created_at;
       let commentsResult;
 
       if (hasAccess && user_type != '3') {
-        // User has access to RFQ (creator or team member), show all comments
+        // Buyer/internal user: show all comments involving the specified vendor (receiver_id)
         commentsResult = await db.query(fetchAllCommentsQuery, [
           clause_id,
           receiver_id
         ]);
       } else {
-        // User doesn't have general access, use original restricted logic
-        commentsResult = await db.query(fetchCommentsQuery, [
+        // Vendor: show all comments where vendor is sender or receiver
+        commentsResult = await db.query(fetchAllCommentsQuery, [
           clause_id,
-          sender_id,
-          receiver_id
+          sender_id
         ]);
       }
 
