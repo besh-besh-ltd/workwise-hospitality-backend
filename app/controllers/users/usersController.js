@@ -786,71 +786,79 @@ create_buyer_company_users: async (req, res, next) => {
       await rbacModel.assignUserRoleScopes(roleScopes);
     }
 
-    /* -------------------- SUBSCRIPTION LOGIC (UNCHANGED) -------------------- */
-    let checkFreeSubscription = await subscriptionModel.checkFreeSubscription();
-    const startDate = Moment();
-    const billingCycleMonths = checkFreeSubscription[0].duration;
+    /* -------------------- SUBSCRIPTION LOGIC (non-critical) -------------------- */
+    try {
+      let checkFreeSubscription = await subscriptionModel.checkFreeSubscription();
+      const startDate = Moment();
+      const billingCycleMonths = checkFreeSubscription[0].duration;
 
-    const endDate = startDate
-      .clone()
-      .add(billingCycleMonths, "months")
-      .subtract(1, "day");
+      const endDate = startDate
+        .clone()
+        .add(billingCycleMonths, "months")
+        .subtract(1, "day");
 
-    const renewDate = startDate.clone().add(billingCycleMonths, "months");
+      const renewDate = startDate.clone().add(billingCycleMonths, "months");
 
-    const userSubscriptionObj = {
-      user_id: createdUser.id,
-      plan_id: checkFreeSubscription[0].id,
-      status: 1,
-      start_date: startDate.format("YYYY-MM-DD"),
-      end_date: endDate.format("YYYY-MM-DD"),
-      renew_date: renewDate.format("YYYY-MM-DD")
-    };
+      const userSubscriptionObj = {
+        user_id: createdUser.id,
+        plan_id: checkFreeSubscription[0].id,
+        status: 1,
+        start_date: startDate.format("YYYY-MM-DD"),
+        end_date: endDate.format("YYYY-MM-DD"),
+        renew_date: renewDate.format("YYYY-MM-DD")
+      };
 
-    const createUserSubscription =
-      await subscriptionModel.createUserSubscription(userSubscriptionObj);
+      const createUserSubscription =
+        await subscriptionModel.createUserSubscription(userSubscriptionObj);
 
-    await subscriptionModel.updateUserSubscriptionId(
-      checkFreeSubscription[0].id,
-      createdUser.id
-    );
-
-    const subscriptionMappingDetails =
-      await subscriptionModel.getSubscriptionMappingDetails(
-        checkFreeSubscription[0].id
+      await subscriptionModel.updateUserSubscriptionId(
+        checkFreeSubscription[0].id,
+        createdUser.id
       );
 
-    for await (const { allocated_feature, feature_id } of subscriptionMappingDetails) {
-      await subscriptionModel.createUserSubscriptionFeature({
-        user_subscriptions_id: createUserSubscription.id,
-        feature_id,
-        plan_id: checkFreeSubscription[0].id,
-        used_feature_count: 0,
-        allocated_feature,
-        user_id: createdUser.id
-      });
+      const subscriptionMappingDetails =
+        await subscriptionModel.getSubscriptionMappingDetails(
+          checkFreeSubscription[0].id
+        );
+
+      for await (const { allocated_feature, feature_id } of subscriptionMappingDetails) {
+        await subscriptionModel.createUserSubscriptionFeature({
+          user_subscriptions_id: createUserSubscription.id,
+          feature_id,
+          plan_id: checkFreeSubscription[0].id,
+          used_feature_count: 0,
+          allocated_feature,
+          user_id: createdUser.id
+        });
+      }
+    } catch (subErr) {
+      console.error("Subscription setup failed (user was created):", subErr.message);
     }
 
-    /* -------------------- EMAIL (UNCHANGED) -------------------- */
-    const companyName =
-      companyDetails?.[0]?.company_name || null;
+    /* -------------------- EMAIL (non-critical) -------------------- */
+    try {
+      const companyName =
+        companyDetails?.[0]?.company_name || null;
 
-    const emailHTML = generateEmailTemplate(
-      `<h2>Hello ${name},</h2>`,
-      `
-      <p>Welcome to WorkWise${companyName ? ` - ${companyName}` : ""}</p>
-      <p><strong>Email:</strong> ${email}</p>
-      <p><strong>Password:</strong> ${password}</p>
-      <p><a href="https://letsworkwise.com/?user_registered=1">Login Here</a></p>
-      `
-    );
+      const emailHTML = generateEmailTemplate(
+        `<h2>Hello ${name},</h2>`,
+        `
+        <p>Welcome to WorkWise${companyName ? ` - ${companyName}` : ""}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <p><strong>Password:</strong> ${password}</p>
+        <p><a href="https://letsworkwise.com/?user_registered=1">Login Here</a></p>
+        `
+      );
 
-    sendMail({
-      from: Config.webmasterMail,
-      to: email,
-      subject: "Welcome to WorkWise - Account Created",
-      html: emailHTML
-    });
+      sendMail({
+        from: Config.webmasterMail,
+        to: email,
+        subject: "Welcome to WorkWise - Account Created",
+        html: emailHTML
+      });
+    } catch (emailErr) {
+      console.error("Email sending failed (user was created):", emailErr.message);
+    }
 
     return res.status(200).json({
       status: true,

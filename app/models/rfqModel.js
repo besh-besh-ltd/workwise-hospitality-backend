@@ -8165,7 +8165,7 @@ ORDER BY m.created_at;
     `;
 
     const fetchCommentsQuery = `
-      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by
+      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by, timestamp AS created_at
       FROM tbl_rfq_product_tech_evaluation_comments
       WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
         AND (
@@ -8176,7 +8176,7 @@ ORDER BY m.created_at;
     `;
 
     const fetchAllCommentsQuery = `
-      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by
+      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by, timestamp AS created_at
       FROM tbl_rfq_product_tech_evaluation_comments
       WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
       AND (
@@ -8311,6 +8311,38 @@ ORDER BY m.created_at;
         });
       }
     });
+  },
+
+  getDeviationPreviews: async (rfq_product_id, user_id) => {
+    const query = `
+      WITH ranked_comments AS (
+        SELECT
+          c.tbl_rfq_product_tech_evaluation_clauses_id AS clause_id,
+          c.sender_id,
+          c.receiver_id,
+          c.text,
+          c.timestamp,
+          ROW_NUMBER() OVER (
+            PARTITION BY c.tbl_rfq_product_tech_evaluation_clauses_id,
+              LEAST(c.sender_id, c.receiver_id),
+              GREATEST(c.sender_id, c.receiver_id)
+            ORDER BY c.timestamp DESC
+          ) AS rn
+        FROM tbl_rfq_product_tech_evaluation_comments c
+        JOIN tbl_rfq_product_tech_evaluation_clauses cl
+          ON c.tbl_rfq_product_tech_evaluation_clauses_id = cl.id
+        JOIN tbl_rfq_product_tech_evaluation te
+          ON cl.tbl_rfq_product_tech_evaluation_id = te.id
+        WHERE te.tbl_rfq_product_id = $1
+        ${user_id ? 'AND (c.sender_id = $2 OR c.receiver_id = $2)' : ''}
+      )
+      SELECT clause_id, sender_id, receiver_id, text, timestamp
+      FROM ranked_comments
+      WHERE rn <= 4
+      ORDER BY clause_id, timestamp ASC
+    `;
+    const params = user_id ? [rfq_product_id, user_id] : [rfq_product_id];
+    return await db.any(query, params);
   },
 
   addVendorResponse: async (responses) => {
@@ -10167,7 +10199,13 @@ ORDER BY tq.timestamp DESC;
         RFQ.reverse_auction,
         RFQ.is_tender,
         RFQ.title,
-        H.name AS hotel_name
+        H.name AS hotel_name,
+        (
+          SELECT COUNT(*)
+          FROM tbl_quotes _tq_active
+          WHERE _tq_active.rfq_id = RFQ.id
+            AND (_tq_active.is_regret IS NULL OR _tq_active.is_regret != 1)
+        ) AS active_quote_count
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
       LEFT JOIN tbl_hospitality_company_hotels H

@@ -13617,6 +13617,20 @@ getClauses: async (req, res) => {
     }
   },
 
+  getDeviationPreviews: async (req, res) => {
+    try {
+      const { rfq_product_id, user_id } = req.body;
+      if (!rfq_product_id) {
+        return res.status(400).json({ status: 0, message: 'rfq_product_id is required' });
+      }
+      const result = await rfqModel.getDeviationPreviews(rfq_product_id, user_id || null);
+      res.status(200).json({ status: 1, data: result });
+    } catch (error) {
+      console.error('Error in getDeviationPreviews:', error.message);
+      res.status(500).json({ status: 0, message: 'Error fetching deviation previews' });
+    }
+  },
+
   addVendorResponse: async (req, res) => {
     try {
       const data = req.body;

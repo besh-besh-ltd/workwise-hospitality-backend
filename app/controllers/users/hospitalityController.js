@@ -1226,7 +1226,7 @@ const HospitalityController = {
           return res.status(400).json({ status: 0, message: 'All business units must belong to the specified company' });
         }
 
-        // Check if all hotels are already paid
+        // Check if all hotels are already paid or have in-progress payments
         const paymentChecks = await Promise.all(
           hotelIds.map(hotelId => hospitalityModel.getHotelPayment(hotelId))
         );
@@ -1235,6 +1235,19 @@ const HospitalityController = {
           return res.status(200).json({
             status: 1,
             data: { already_paid: true }
+          });
+        }
+        // If any hotel has an in-progress payment, return existing order details
+        const inProgressPayment = paymentChecks.find(p => p && ['created', 'pending'].includes(p.payment_status) && p.razorpay_order_id);
+        if (inProgressPayment) {
+          return res.status(200).json({
+            status: 1,
+            data: {
+              order: { id: inProgressPayment.razorpay_order_id, amount: inProgressPayment.amount, currency: 'INR' },
+              payment_id: inProgressPayment.id,
+              amount: inProgressPayment.amount / 100,
+              razorpay_key: Config.razorpay.razorpay_key
+            }
           });
         }
 
@@ -1309,12 +1322,26 @@ const HospitalityController = {
         return res.status(400).json({ status: 0, message: 'Fee amount not configured' });
       }
 
-      // Check for existing successful payment
+      // Check for existing payment (success, created, or pending)
       const existingPayment = await hospitalityModel.getHotelPayment(hotel_id);
       if (existingPayment && existingPayment.payment_status === 'success') {
         return res.status(200).json({
           status: 1,
           data: { already_paid: true, payment_id: existingPayment.id }
+        });
+      }
+      // If a payment order already exists (created/pending), return the existing order
+      if (existingPayment && ['created', 'pending'].includes(existingPayment.payment_status) && existingPayment.razorpay_order_id) {
+        return res.status(200).json({
+          status: 1,
+          data: {
+            order: { id: existingPayment.razorpay_order_id, amount: existingPayment.amount, currency: 'INR' },
+            payment_id: existingPayment.id,
+            hotel_name: hotel.name,
+            company_name: hotel.company_name,
+            amount: hotel.fee_amount,
+            razorpay_key: Config.razorpay.razorpay_key
+          }
         });
       }
 
