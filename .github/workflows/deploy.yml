@@ -47,5 +47,4 @@ jobs:
             cat > .env <<'EOF'      # replace .env.production from GitHub secret
             ${{ secrets.ENV_PRODUCTION }}
             EOF
-            npm run build:prod                 # run build
             pm2 restart backend --update-env   # restart pm2 with updated env
