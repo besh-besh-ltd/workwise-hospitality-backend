@@ -1440,7 +1440,7 @@ getNestedCategoryList: async (parentId, slug, vendorRequired = false) => {
     }
 
     // PARAMS
-    const params = [categoryId];
+    const params = [parseInt(categoryId)];
 
     // ---------------------------------------
     // STEP 2: SUBCATEGORIES
@@ -1453,30 +1453,6 @@ getNestedCategoryList: async (parentId, slug, vendorRequired = false) => {
       `,
       params
     );
-
-    // If vendorRequired → filter subcategories where *ANY* variant has vendors
-    if (vendorRequired && subCategories.length > 0) {
-      const filtered = await db.any(
-        `
-        SELECT c.id, c.title, c.parent_id, c.slug
-        FROM tbl_category c
-        WHERE c.parent_id = $1
-        AND EXISTS (
-          SELECT 1
-          FROM tbl_product_categories pc
-          JOIN tbl_product_variant v ON v.product_id = pc.product_id
-          JOIN tbl_product_variant_vendor_mapping vm 
-                ON vm.product_variant_id = v.id
-          WHERE pc.category_id = c.id
-            AND v.is_approve = 1
-            AND vm.is_approved = true
-        )
-        `,
-        params
-      );
-
-      subCategories = filtered;
-    }
 
     if (subCategories.length > 0) {
       return { type: "category", data: subCategories };
