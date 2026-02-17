@@ -253,12 +253,20 @@ const hospitalityModel = {
 
   getHotelPayment: async (hotelId) => {
     return db.oneOrNone(
-      `SELECT id, payment_status, razorpay_order_id, razorpay_payment_id, amount
+      `SELECT id, payment_status, razorpay_order_id, razorpay_payment_id, amount, receipt
        FROM tbl_vendor_payments
        WHERE payment_type = 'hospitality'
          AND receipt LIKE $1
        ORDER BY id DESC LIMIT 1`,
       [`HOTEL-${hotelId}-%`]
+    );
+  },
+
+  getPaymentById: async (paymentId) => {
+    return db.oneOrNone(
+      `SELECT id, amount, receipt, razorpay_order_id, razorpay_payment_id
+       FROM tbl_vendor_payments WHERE id = $1`,
+      [paymentId]
     );
   },
 

@@ -24,6 +24,7 @@ import Razorpay from 'razorpay';
 import Moment from 'moment';
 import puppeteer from 'puppeteer';
 import fs from 'fs';
+import { generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import { v4 } from 'uuid';
 import JWT from 'jsonwebtoken';
 import xlsx from 'xlsx';
@@ -3692,17 +3693,15 @@ publish_profile_reviews: async (req, res, next) => {
                 </p>
               </div>
               
-              ${invoiceDownloadUrl ? `
               <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #2196f3;">
                 <p style="margin: 0 0 10px; font-weight: 600; color: #1565c0;">
-                  <strong>Invoice Generated</strong>
+                  <strong>Tax invoice and payment received</strong> documents are attached to this email.
                 </p>
-                <a href="${invoiceDownloadUrl}" 
+                ${invoiceDownloadUrl ? `<a href="${invoiceDownloadUrl}" 
                    style="background-color: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
                   Download Invoice
-                </a>
+                </a>` : ''}
               </div>
-              ` : ''}
               
               <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
                 Your account has been approved and you can now start using the Workwise platform.
@@ -3726,14 +3725,34 @@ publish_profile_reviews: async (req, res, next) => {
               html: dynamicHTML
             };
             
-            // Attach invoice PDF if generated
+            // Attach tax invoice and payment received PDFs
+            const attachments = [];
             if (invoiceResult && invoiceResult.filePath && fs.existsSync(invoiceResult.filePath)) {
-              emailOptions.attachments = [{
+              attachments.push({
                 filename: invoiceResult.fileName,
                 path: invoiceResult.filePath,
                 contentType: 'application/pdf'
-              }];
+              });
             }
+            try {
+              const paymentReceivedPdf = await generatePaymentReceivedPdf({
+                recipientName: company?.organization_name || company?.name || user?.name,
+                amount: totalAmount,
+                paymentId: razorpay_payment_id,
+                orderId: order_id,
+                description: 'Hospitality Vendor Registration'
+              });
+              if (paymentReceivedPdf?.filePath && fs.existsSync(paymentReceivedPdf.filePath)) {
+                attachments.push({
+                  filename: paymentReceivedPdf.fileName,
+                  path: paymentReceivedPdf.filePath,
+                  contentType: 'application/pdf'
+                });
+              }
+            } catch (docErr) {
+              logError('Vendor payment received doc generation failed:', docErr);
+            }
+            if (attachments.length) emailOptions.attachments = attachments;
 
             await sendMail(emailOptions);
           }
@@ -4043,17 +4062,15 @@ publish_profile_reviews: async (req, res, next) => {
                         </p>
                       </div>
                       
-                      ${invoiceDownloadUrl ? `
                       <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #2196f3;">
                         <p style="margin: 0 0 10px; font-weight: 600; color: #1565c0;">
-                          <strong>Invoice Generated</strong>
+                          <strong>Tax invoice and payment received</strong> documents are attached to this email.
                         </p>
-                        <a href="${invoiceDownloadUrl}" 
+                        ${invoiceDownloadUrl ? `<a href="${invoiceDownloadUrl}" 
                            style="background-color: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
                           Download Invoice
-                        </a>
+                        </a>` : ''}
                       </div>
-                      ` : ''}
                       
                       <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
                         Your account has been approved and you can now start using the Workwise platform. Log in to your dashboard to begin exploring opportunities.
@@ -4081,14 +4098,34 @@ publish_profile_reviews: async (req, res, next) => {
                       html: dynamicHTML
                     };
                     
-                    // Attach invoice PDF if generated
+                    // Attach tax invoice and payment received PDFs
+                    const attachments = [];
                     if (invoiceResult && invoiceResult.filePath && fs.existsSync(invoiceResult.filePath)) {
-                      emailOptions.attachments = [{
+                      attachments.push({
                         filename: invoiceResult.fileName,
                         path: invoiceResult.filePath,
                         contentType: 'application/pdf'
-                      }];
+                      });
                     }
+                    try {
+                      const paymentReceivedPdf = await generatePaymentReceivedPdf({
+                        recipientName: company?.organization_name || company?.name || user?.name,
+                        amount: totalAmount,
+                        paymentId: paymentEntity?.razorpay_payment_id || paymentEntity?.id,
+                        orderId: paymentEntity?.order_id,
+                        description: 'Hospitality Vendor Registration'
+                      });
+                      if (paymentReceivedPdf?.filePath && fs.existsSync(paymentReceivedPdf.filePath)) {
+                        attachments.push({
+                          filename: paymentReceivedPdf.fileName,
+                          path: paymentReceivedPdf.filePath,
+                          contentType: 'application/pdf'
+                        });
+                      }
+                    } catch (docErr) {
+                      logError('Vendor payment received doc generation failed:', docErr);
+                    }
+                    if (attachments.length) emailOptions.attachments = attachments;
 
                     await sendMail(emailOptions);
                   } catch (emailError) {

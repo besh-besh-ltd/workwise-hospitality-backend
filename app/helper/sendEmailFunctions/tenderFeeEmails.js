@@ -1,6 +1,8 @@
+import fs from "fs";
 import config from "../../config/app.config.js";
 import { sendMail } from "../common.js";
 import { generateEmailTemplate } from "../notificationEmailLayout.js";
+import { generateTaxInvoicePdf, generatePaymentReceivedPdf } from "../paymentDocuments.js";
 
 /**
  * Send tender fee payment confirmation email with invoice to vendor
@@ -103,6 +105,9 @@ export const sendTenderFeePaymentConfirmation = async ({
         </div>
 
         <p style="margin-top:24px;">
+          Tax invoice and payment received documents are attached to this email.
+        </p>
+        <p style="margin-top:12px;">
           You are now eligible to submit your quote for this tender. Please ensure you submit your quote before the bid end date.
         </p>
 
@@ -132,12 +137,47 @@ export const sendTenderFeePaymentConfirmation = async ({
 
     const htmlContent = generateEmailTemplate(headerContent, containerContent);
 
-    await sendMail({
+    const mailOpts = {
       from: config.webmasterMail,
       to: vendorDetails.email,
       subject: `Payment Confirmed — Tender Fee for ${rfqDetails?.rfq_no || 'Tender'}`,
       html: htmlContent
-    });
+    };
+
+    try {
+      const receipt = paymentDetails?.receipt || `TENDER-${paymentDetails?.payment_id}-${Date.now()}`;
+      const taxInvoicePdf = await generateTaxInvoicePdf({
+        type: 'Tender Participation Fee',
+        recipientName: vendorName,
+        amount: amountInRupees,
+        paymentId: paymentDetails?.razorpay_payment_id,
+        orderId: paymentDetails?.razorpay_order_id,
+        receipt,
+        date: paymentDate,
+        lineItems: [{ name: `Tender Fee - ${rfqDetails?.rfq_no || 'Tender'}`, amount: amountInRupees }]
+      });
+      const paymentReceivedPdf = await generatePaymentReceivedPdf({
+        recipientName: vendorName,
+        amount: amountInRupees,
+        paymentId: paymentDetails?.razorpay_payment_id,
+        orderId: paymentDetails?.razorpay_order_id,
+        date: paymentDate,
+        description: `Tender Participation Fee - ${rfqDetails?.rfq_no || 'Tender'}`
+      });
+
+      const attachments = [];
+      if (taxInvoicePdf?.filePath && fs.existsSync(taxInvoicePdf.filePath)) {
+        attachments.push({ filename: taxInvoicePdf.fileName, path: taxInvoicePdf.filePath, contentType: 'application/pdf' });
+      }
+      if (paymentReceivedPdf?.filePath && fs.existsSync(paymentReceivedPdf.filePath)) {
+        attachments.push({ filename: paymentReceivedPdf.fileName, path: paymentReceivedPdf.filePath, contentType: 'application/pdf' });
+      }
+      if (attachments.length) mailOpts.attachments = attachments;
+    } catch (docErr) {
+      console.error('Tender fee doc generation failed:', docErr);
+    }
+
+    await sendMail(mailOpts);
 
     console.log(`Sent tender fee payment confirmation to ${vendorDetails.email} for RFQ ${rfqDetails?.rfq_no}`);
     return true;

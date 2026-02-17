@@ -10108,7 +10108,8 @@ ORDER BY tq.timestamp DESC;
     project_id,
     rfq_no,
     sort,
-    is_tender
+    is_tender,
+    rfq_id
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicJoins = '';
@@ -10213,12 +10214,13 @@ ORDER BY tq.timestamp DESC;
       }
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
+      AND (RFQ.id = $5 OR $5 IS NULL)
       ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender ? 1 : 0}` : ''}
       ${dynamicConditions}
       ORDER BY RFQ.timestamp ${sort || 'DESC'}
       LIMIT $3 OFFSET $2;`;
 
-      db.any(q, [project_id, offset, limit, rfq_no])
+      db.any(q, [project_id, offset, limit, rfq_no, rfq_id])
         .then(function (data) {
           resolve(data);
         })
