@@ -4647,19 +4647,13 @@ LIMIT 2;
     locationFilters = {},
     hotel_ids = []
   ) => {
-    // query change by mukul 28-08-2024
-    // query change by mukul 08-09-2024, added one more filter for created by 1 or 111 to exclude product for them
-    // Changes by Agnij: Modified to support slug-based search for better SEO and URL structure
+    const normalizedSearchKey = (search_key || '').trim();
+    const isSearchAll = normalizedSearchKey.toLowerCase() === 'all';
+    // Keep this arg for compatibility with the controller contract.
+    void locationFilters;
 
-    // Check if search_key looks like a slug (no spaces and either contains hyphens or is a single word)
-    const isSlugSearch =
-      search_key &&
-      !search_key.includes(' ') &&
-      (search_key.includes('-') || search_key.length > 0);
-
-    // Build parameterized query with dynamic param index tracking
-    const params = [search_key];
-    let paramIdx = 2; // $1 is search_key
+    const params = [normalizedSearchKey];
+    let paramIdx = 2;
 
     const categoryParam = category_id ? `$${paramIdx++}` : null;
     if (category_id) params.push(category_id);
@@ -4667,87 +4661,154 @@ LIMIT 2;
     const approvedByParam = approved_by_id ? `$${paramIdx++}` : null;
     if (approved_by_id) params.push(approved_by_id);
 
-    // Hotel eligibility filter JOINs (used inside vendor_count subquery)
     let hotelIdsParam = null;
     if (Array.isArray(hotel_ids) && hotel_ids.length > 0) {
       hotelIdsParam = `$${paramIdx++}`;
       params.push(hotel_ids);
     }
 
-    // Vendor count subquery - counts eligible vendors per variant
-    const vendorCountSubquery = hotelIdsParam
-      ? `(SELECT COUNT(DISTINCT pvvm_vc.vendor_id)
-          FROM tbl_product_variant_vendor_mapping pvvm_vc
-          JOIN tbl_vendor_hotel_category_subscription vhcs_cat
-            ON vhcs_cat.vendor_id = pvvm_vc.vendor_id
-            AND vhcs_cat.item_type = 'category'
-            AND vhcs_cat.item_id = pc.category_id
-            AND vhcs_cat.status = 'active'
-            AND CURRENT_DATE BETWEEN vhcs_cat.start_date AND vhcs_cat.end_date
-          JOIN tbl_vendor_hotel_category_subscription vhcs_hotel
-            ON vhcs_hotel.vendor_id = pvvm_vc.vendor_id
-            AND vhcs_hotel.item_type = 'hotel'
-            AND vhcs_hotel.item_id = ANY(${hotelIdsParam})
-            AND vhcs_hotel.status = 'active'
-            AND CURRENT_DATE BETWEEN vhcs_hotel.start_date AND vhcs_hotel.end_date
-          WHERE pvvm_vc.product_variant_id = pv.id
-            AND pvvm_vc.status = TRUE
-            AND pvvm_vc.is_approved = TRUE)`
-      : `(SELECT COUNT(DISTINCT pvvm_vc.vendor_id)
-          FROM tbl_product_variant_vendor_mapping pvvm_vc
-          WHERE pvvm_vc.product_variant_id = pv.id
-            AND pvvm_vc.status = TRUE
-            AND pvvm_vc.is_approved = TRUE)`;
+    const candidateLimitParam = `$${paramIdx++}`;
+    params.push(isSearchAll ? 500 : 200);
 
-    let q = `
-      SELECT DISTINCT p.id AS product_id,
-                      p.name AS product_name,
-                      CONCAT(pv.name, ' - ', p.name) AS unified_name,
-                      pv.id AS variant_id,
-                      pv.name AS variant_name,
-                      p.description,
-                      pv.slug AS slug,
-                      c.title AS category_name,
-                      c.id AS category_id,
-                      c.parent_id AS parent_category_id,
-                      img.new_image_name AS image_url,
-                      ${vendorCountSubquery} AS vendor_count,
-                      similarity(CONCAT(pv.name, ' - ', p.name), $1) AS similarity_score,
-                      ts_rank_cd(to_tsvector('english', CONCAT(pv.name, ' - ', p.name)), plainto_tsquery('english', $1)) AS rank
-      FROM tbl_product_variant pv
-      JOIN tbl_product p ON pv.product_id = p.id
-      JOIN tbl_product_categories pc ON p.id = pc.product_id
-      JOIN tbl_category c ON pc.category_id = c.id
-      LEFT JOIN tbl_product_images img ON p.id = img.product_id
-      ${
-        approved_by_id
-          ? `JOIN tbl_vendorapprove_product_mapping vum ON p.id = vum.product_id`
-          : ``
-      }
-      WHERE p.status = 1
-        AND p.is_deleted = 0
-        AND p.is_review = 0
-        AND p.is_approve = 1
-        AND pv.is_approve = 1
-        AND (
+    const searchCondition = isSearchAll
+      ? 'TRUE'
+      : `(
           pv.slug = $1
-          OR to_tsvector('english', CONCAT(pv.name, ' - ', p.name)) @@ plainto_tsquery('english', $1)
-          OR similarity(CONCAT(pv.name, ' - ', p.name), $1) > 0.1
-        )
-        ${categoryParam ? `AND c.id = ${categoryParam}` : ``}
+          OR to_tsvector('english', pv.name) @@ plainto_tsquery('english', $1)
+          OR to_tsvector('english', p.name) @@ plainto_tsquery('english', $1)
+          OR similarity(pv.name, $1) > 0.1
+          OR similarity(p.name, $1) > 0.1
+        )`;
+
+    const vendorCountCte = hotelIdsParam
+      ? `
+      vendor_counts AS (
+        SELECT pvvm.product_variant_id AS variant_id,
+               pc.category_id,
+               COUNT(DISTINCT pvvm.vendor_id)::int AS vendor_count
+        FROM tbl_product_variant_vendor_mapping pvvm
+        JOIN matched_variants mv ON mv.variant_id = pvvm.product_variant_id
+        JOIN product_categories pc ON pc.product_id = mv.product_id
+        JOIN tbl_vendor_hotel_category_subscription vhcs_cat
+          ON vhcs_cat.vendor_id = pvvm.vendor_id
+          AND vhcs_cat.item_type = 'category'
+          AND vhcs_cat.item_id = pc.category_id
+          AND vhcs_cat.status = 'active'
+          AND CURRENT_DATE BETWEEN vhcs_cat.start_date AND vhcs_cat.end_date
+        JOIN tbl_vendor_hotel_category_subscription vhcs_hotel
+          ON vhcs_hotel.vendor_id = pvvm.vendor_id
+          AND vhcs_hotel.item_type = 'hotel'
+          AND vhcs_hotel.item_id = ANY(${hotelIdsParam})
+          AND vhcs_hotel.status = 'active'
+          AND CURRENT_DATE BETWEEN vhcs_hotel.start_date AND vhcs_hotel.end_date
+        WHERE pvvm.status = TRUE
+          AND pvvm.is_approved = TRUE
+        GROUP BY pvvm.product_variant_id, pc.category_id
+      )`
+      : `
+      vendor_counts AS (
+        SELECT pvvm.product_variant_id AS variant_id,
+               NULL::bigint AS category_id,
+               COUNT(DISTINCT pvvm.vendor_id)::int AS vendor_count
+        FROM tbl_product_variant_vendor_mapping pvvm
+        JOIN matched_variants mv ON mv.variant_id = pvvm.product_variant_id
+        WHERE pvvm.status = TRUE
+          AND pvvm.is_approved = TRUE
+        GROUP BY pvvm.product_variant_id
+      )`;
+
+    const q = `
+      WITH matched_variants AS (
+        SELECT pv.id AS variant_id,
+               pv.product_id,
+               pv.name AS variant_name,
+               pv.slug,
+               p.name AS product_name,
+               p.description,
+               CONCAT(pv.name, ' - ', p.name) AS unified_name,
+               ${
+                 isSearchAll
+                   ? '0::float AS similarity_score, 0::float AS rank'
+                   : `GREATEST(
+                        similarity(pv.name, $1),
+                        similarity(p.name, $1)
+                      ) AS similarity_score,
+                      GREATEST(
+                        ts_rank_cd(to_tsvector('english', pv.name), plainto_tsquery('english', $1)),
+                        ts_rank_cd(to_tsvector('english', p.name), plainto_tsquery('english', $1))
+                      ) AS rank`
+               }
+        FROM tbl_product_variant pv
+        JOIN tbl_product p ON pv.product_id = p.id
+        WHERE p.status = 1
+          AND p.is_deleted = 0
+          AND p.is_review = 0
+          AND p.is_approve = 1
+          AND pv.is_approve = 1
+          AND ${searchCondition}
+        ORDER BY
+          CASE WHEN pv.slug = $1 THEN 0 ELSE 1 END,
+          rank DESC,
+          similarity_score DESC,
+          pv.id ASC
+        LIMIT ${candidateLimitParam}
+      ),
+      product_categories AS (
+        SELECT pc.product_id,
+               c.id AS category_id,
+               c.title AS category_name,
+               c.parent_id
+        FROM tbl_product_categories pc
+        JOIN tbl_category c ON c.id = pc.category_id
+        ${categoryParam ? `WHERE c.id = ${categoryParam}` : ''}
+      ),
+      ${vendorCountCte}
+      SELECT *
+      FROM (
+        SELECT DISTINCT
+               mv.product_id,
+               mv.product_name,
+               mv.unified_name,
+               mv.variant_id,
+               mv.variant_name,
+               mv.description,
+               mv.slug,
+               pc.category_name,
+               pc.category_id,
+               pc.parent_id AS parent_category_id,
+               img.new_image_name AS image_url,
+               COALESCE(vc.vendor_count, 0) AS vendor_count,
+               mv.similarity_score,
+               mv.rank
+        FROM matched_variants mv
+        JOIN product_categories pc ON pc.product_id = mv.product_id
+        LEFT JOIN LATERAL (
+          SELECT tpi.new_image_name
+          FROM tbl_product_images tpi
+          WHERE tpi.product_id = mv.product_id
+          LIMIT 1
+        ) img ON TRUE
+        LEFT JOIN vendor_counts vc
+          ON vc.variant_id = mv.variant_id
+         ${hotelIdsParam ? 'AND vc.category_id = pc.category_id' : ''}
         ${
           approvedByParam
-            ? `AND (vum.vendor_approve_id = ${approvedByParam} OR vum.vendor_approve_id IS NULL)`
-            : ``
+            ? `WHERE EXISTS (
+                SELECT 1
+                FROM tbl_vendorapprove_product_mapping vum
+                WHERE vum.product_id = mv.product_id
+                  AND (vum.vendor_approve_id = ${approvedByParam} OR vum.vendor_approve_id IS NULL)
+              )`
+            : ''
         }
-      ORDER BY rank DESC, similarity_score DESC, CONCAT(pv.name, ' - ', p.name) ASC ;
+      ) ranked_results
+      ORDER BY
+        CASE WHEN ranked_results.slug = $1 THEN 0 ELSE 1 END,
+        ranked_results.rank DESC,
+        ranked_results.similarity_score DESC,
+        ranked_results.unified_name ASC;
     `;
 
-    console.log(' ===============================================  ');
-    console.log(q);
-    console.log(' ===============================================  ');
-
-    // Parameterized query with explicitly built params array
     return new Promise(function (resolve, reject) {
       db.query(q, params)
         .then(function (data) {
@@ -4780,27 +4841,33 @@ LIMIT 2;
     //   ORDER BY rank DESC, similarity_score DESC, c.title ASC;`;
 
     const q = `
-    SELECT DISTINCT c.id AS category_id,
-                    c.title AS category_name,
-                    c.parent_id AS parent_category_id,
-                    pc.title AS parent_category_name,
-                    similarity(c.title, $1) AS similarity_score,
-                    ts_rank_cd(to_tsvector('english', c.title), plainto_tsquery('english', $1)) AS rank
+    SELECT c.id AS category_id,
+           c.title AS category_name,
+           c.parent_id AS parent_category_id,
+           pc.title AS parent_category_name,
+           similarity(c.title, $1) AS similarity_score,
+           ts_rank_cd(to_tsvector('english', c.title), plainto_tsquery('english', $1)) AS rank
     FROM tbl_category c
     LEFT JOIN tbl_category pc ON c.parent_id = pc.id
-    INNER JOIN tbl_product_categories pcats ON c.id = pcats.category_id
-    INNER JOIN tbl_product p ON pcats.product_id = p.id
     WHERE c.status = 1
       AND c.is_deleted = 0
-      AND p.status = 1
-      AND p.is_deleted = 0
-      AND p.is_review = 0
-      AND p.is_approve = 1
-      AND p.created_by NOT IN (1, 111)
-      -- Only apply search filtering when searchTerm is provided (not null or empty)
-      AND (to_tsvector('english', c.title) @@ plainto_tsquery('english', $1)
-          OR similarity(c.title, $1) > 0.1)
-    ORDER BY rank DESC, similarity_score DESC, c.title ASC;
+      AND EXISTS (
+        SELECT 1
+        FROM tbl_product_categories pcats
+        JOIN tbl_product p ON p.id = pcats.product_id
+        WHERE pcats.category_id = c.id
+          AND p.status = 1
+          AND p.is_deleted = 0
+          AND p.is_review = 0
+          AND p.is_approve = 1
+          AND p.created_by NOT IN (1, 111)
+      )
+      AND (
+        to_tsvector('english', c.title) @@ plainto_tsquery('english', $1)
+        OR similarity(c.title, $1) > 0.1
+      )
+    ORDER BY rank DESC, similarity_score DESC, c.title ASC
+    LIMIT 50;
 `;
 
     return new Promise(async function (resolve, reject) {
