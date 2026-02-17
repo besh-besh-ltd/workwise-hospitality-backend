@@ -24,6 +24,7 @@ import Razorpay from 'razorpay';
 import Moment from 'moment';
 import puppeteer from 'puppeteer';
 import fs from 'fs';
+import { generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import { v4 } from 'uuid';
 import JWT from 'jsonwebtoken';
 import xlsx from 'xlsx';
@@ -785,71 +786,79 @@ create_buyer_company_users: async (req, res, next) => {
       await rbacModel.assignUserRoleScopes(roleScopes);
     }
 
-    /* -------------------- SUBSCRIPTION LOGIC (UNCHANGED) -------------------- */
-    let checkFreeSubscription = await subscriptionModel.checkFreeSubscription();
-    const startDate = Moment();
-    const billingCycleMonths = checkFreeSubscription[0].duration;
+    /* -------------------- SUBSCRIPTION LOGIC (non-critical) -------------------- */
+    try {
+      let checkFreeSubscription = await subscriptionModel.checkFreeSubscription();
+      const startDate = Moment();
+      const billingCycleMonths = checkFreeSubscription[0].duration;
 
-    const endDate = startDate
-      .clone()
-      .add(billingCycleMonths, "months")
-      .subtract(1, "day");
+      const endDate = startDate
+        .clone()
+        .add(billingCycleMonths, "months")
+        .subtract(1, "day");
 
-    const renewDate = startDate.clone().add(billingCycleMonths, "months");
+      const renewDate = startDate.clone().add(billingCycleMonths, "months");
 
-    const userSubscriptionObj = {
-      user_id: createdUser.id,
-      plan_id: checkFreeSubscription[0].id,
-      status: 1,
-      start_date: startDate.format("YYYY-MM-DD"),
-      end_date: endDate.format("YYYY-MM-DD"),
-      renew_date: renewDate.format("YYYY-MM-DD")
-    };
+      const userSubscriptionObj = {
+        user_id: createdUser.id,
+        plan_id: checkFreeSubscription[0].id,
+        status: 1,
+        start_date: startDate.format("YYYY-MM-DD"),
+        end_date: endDate.format("YYYY-MM-DD"),
+        renew_date: renewDate.format("YYYY-MM-DD")
+      };
 
-    const createUserSubscription =
-      await subscriptionModel.createUserSubscription(userSubscriptionObj);
+      const createUserSubscription =
+        await subscriptionModel.createUserSubscription(userSubscriptionObj);
 
-    await subscriptionModel.updateUserSubscriptionId(
-      checkFreeSubscription[0].id,
-      createdUser.id
-    );
-
-    const subscriptionMappingDetails =
-      await subscriptionModel.getSubscriptionMappingDetails(
-        checkFreeSubscription[0].id
+      await subscriptionModel.updateUserSubscriptionId(
+        checkFreeSubscription[0].id,
+        createdUser.id
       );
 
-    for await (const { allocated_feature, feature_id } of subscriptionMappingDetails) {
-      await subscriptionModel.createUserSubscriptionFeature({
-        user_subscriptions_id: createUserSubscription.id,
-        feature_id,
-        plan_id: checkFreeSubscription[0].id,
-        used_feature_count: 0,
-        allocated_feature,
-        user_id: createdUser.id
-      });
+      const subscriptionMappingDetails =
+        await subscriptionModel.getSubscriptionMappingDetails(
+          checkFreeSubscription[0].id
+        );
+
+      for await (const { allocated_feature, feature_id } of subscriptionMappingDetails) {
+        await subscriptionModel.createUserSubscriptionFeature({
+          user_subscriptions_id: createUserSubscription.id,
+          feature_id,
+          plan_id: checkFreeSubscription[0].id,
+          used_feature_count: 0,
+          allocated_feature,
+          user_id: createdUser.id
+        });
+      }
+    } catch (subErr) {
+      console.error("Subscription setup failed (user was created):", subErr.message);
     }
 
-    /* -------------------- EMAIL (UNCHANGED) -------------------- */
-    const companyName =
-      companyDetails?.[0]?.company_name || null;
+    /* -------------------- EMAIL (non-critical) -------------------- */
+    try {
+      const companyName =
+        companyDetails?.[0]?.company_name || null;
 
-    const emailHTML = generateEmailTemplate(
-      `<h2>Hello ${name},</h2>`,
-      `
-      <p>Welcome to WorkWise${companyName ? ` - ${companyName}` : ""}</p>
-      <p><strong>Email:</strong> ${email}</p>
-      <p><strong>Password:</strong> ${password}</p>
-      <p><a href="https://letsworkwise.com/?user_registered=1">Login Here</a></p>
-      `
-    );
+      const emailHTML = generateEmailTemplate(
+        `<h2>Hello ${name},</h2>`,
+        `
+        <p>Welcome to WorkWise${companyName ? ` - ${companyName}` : ""}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <p><strong>Password:</strong> ${password}</p>
+        <p><a href="https://letsworkwise.com/?user_registered=1">Login Here</a></p>
+        `
+      );
 
-    sendMail({
-      from: Config.webmasterMail,
-      to: email,
-      subject: "Welcome to WorkWise - Account Created",
-      html: emailHTML
-    });
+      sendMail({
+        from: Config.webmasterMail,
+        to: email,
+        subject: "Welcome to WorkWise - Account Created",
+        html: emailHTML
+      });
+    } catch (emailErr) {
+      console.error("Email sending failed (user was created):", emailErr.message);
+    }
 
     return res.status(200).json({
       status: true,
@@ -3692,17 +3701,15 @@ publish_profile_reviews: async (req, res, next) => {
                 </p>
               </div>
               
-              ${invoiceDownloadUrl ? `
               <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #2196f3;">
                 <p style="margin: 0 0 10px; font-weight: 600; color: #1565c0;">
-                  <strong>Invoice Generated</strong>
+                  <strong>Tax invoice and payment received</strong> documents are attached to this email.
                 </p>
-                <a href="${invoiceDownloadUrl}" 
+                ${invoiceDownloadUrl ? `<a href="${invoiceDownloadUrl}" 
                    style="background-color: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
                   Download Invoice
-                </a>
+                </a>` : ''}
               </div>
-              ` : ''}
               
               <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
                 Your account has been approved and you can now start using the Workwise platform.
@@ -3726,14 +3733,34 @@ publish_profile_reviews: async (req, res, next) => {
               html: dynamicHTML
             };
             
-            // Attach invoice PDF if generated
+            // Attach tax invoice and payment received PDFs
+            const attachments = [];
             if (invoiceResult && invoiceResult.filePath && fs.existsSync(invoiceResult.filePath)) {
-              emailOptions.attachments = [{
+              attachments.push({
                 filename: invoiceResult.fileName,
                 path: invoiceResult.filePath,
                 contentType: 'application/pdf'
-              }];
+              });
             }
+            try {
+              const paymentReceivedPdf = await generatePaymentReceivedPdf({
+                recipientName: company?.organization_name || company?.name || user?.name,
+                amount: totalAmount,
+                paymentId: razorpay_payment_id,
+                orderId: order_id,
+                description: 'Hospitality Vendor Registration'
+              });
+              if (paymentReceivedPdf?.filePath && fs.existsSync(paymentReceivedPdf.filePath)) {
+                attachments.push({
+                  filename: paymentReceivedPdf.fileName,
+                  path: paymentReceivedPdf.filePath,
+                  contentType: 'application/pdf'
+                });
+              }
+            } catch (docErr) {
+              logError('Vendor payment received doc generation failed:', docErr);
+            }
+            if (attachments.length) emailOptions.attachments = attachments;
 
             await sendMail(emailOptions);
           }
@@ -4043,17 +4070,15 @@ publish_profile_reviews: async (req, res, next) => {
                         </p>
                       </div>
                       
-                      ${invoiceDownloadUrl ? `
                       <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #2196f3;">
                         <p style="margin: 0 0 10px; font-weight: 600; color: #1565c0;">
-                          <strong>Invoice Generated</strong>
+                          <strong>Tax invoice and payment received</strong> documents are attached to this email.
                         </p>
-                        <a href="${invoiceDownloadUrl}" 
+                        ${invoiceDownloadUrl ? `<a href="${invoiceDownloadUrl}" 
                            style="background-color: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
                           Download Invoice
-                        </a>
+                        </a>` : ''}
                       </div>
-                      ` : ''}
                       
                       <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
                         Your account has been approved and you can now start using the Workwise platform. Log in to your dashboard to begin exploring opportunities.
@@ -4081,14 +4106,34 @@ publish_profile_reviews: async (req, res, next) => {
                       html: dynamicHTML
                     };
                     
-                    // Attach invoice PDF if generated
+                    // Attach tax invoice and payment received PDFs
+                    const attachments = [];
                     if (invoiceResult && invoiceResult.filePath && fs.existsSync(invoiceResult.filePath)) {
-                      emailOptions.attachments = [{
+                      attachments.push({
                         filename: invoiceResult.fileName,
                         path: invoiceResult.filePath,
                         contentType: 'application/pdf'
-                      }];
+                      });
                     }
+                    try {
+                      const paymentReceivedPdf = await generatePaymentReceivedPdf({
+                        recipientName: company?.organization_name || company?.name || user?.name,
+                        amount: totalAmount,
+                        paymentId: paymentEntity?.razorpay_payment_id || paymentEntity?.id,
+                        orderId: paymentEntity?.order_id,
+                        description: 'Hospitality Vendor Registration'
+                      });
+                      if (paymentReceivedPdf?.filePath && fs.existsSync(paymentReceivedPdf.filePath)) {
+                        attachments.push({
+                          filename: paymentReceivedPdf.fileName,
+                          path: paymentReceivedPdf.filePath,
+                          contentType: 'application/pdf'
+                        });
+                      }
+                    } catch (docErr) {
+                      logError('Vendor payment received doc generation failed:', docErr);
+                    }
+                    if (attachments.length) emailOptions.attachments = attachments;
 
                     await sendMail(emailOptions);
                   } catch (emailError) {

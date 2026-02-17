@@ -8165,7 +8165,7 @@ ORDER BY m.created_at;
     `;
 
     const fetchCommentsQuery = `
-      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by
+      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by, timestamp AS created_at
       FROM tbl_rfq_product_tech_evaluation_comments
       WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
         AND (
@@ -8176,7 +8176,7 @@ ORDER BY m.created_at;
     `;
 
     const fetchAllCommentsQuery = `
-      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by
+      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by, timestamp AS created_at
       FROM tbl_rfq_product_tech_evaluation_comments
       WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
       AND (
@@ -8225,17 +8225,16 @@ ORDER BY m.created_at;
       let commentsResult;
 
       if (hasAccess && user_type != '3') {
-        // User has access to RFQ (creator or team member), show all comments
+        // Buyer/internal user: show all comments involving the specified vendor (receiver_id)
         commentsResult = await db.query(fetchAllCommentsQuery, [
           clause_id,
           receiver_id
         ]);
       } else {
-        // User doesn't have general access, use original restricted logic
-        commentsResult = await db.query(fetchCommentsQuery, [
+        // Vendor: show all comments where vendor is sender or receiver
+        commentsResult = await db.query(fetchAllCommentsQuery, [
           clause_id,
-          sender_id,
-          receiver_id
+          sender_id
         ]);
       }
 
@@ -8311,6 +8310,38 @@ ORDER BY m.created_at;
         });
       }
     });
+  },
+
+  getDeviationPreviews: async (rfq_product_id, user_id) => {
+    const query = `
+      WITH ranked_comments AS (
+        SELECT
+          c.tbl_rfq_product_tech_evaluation_clauses_id AS clause_id,
+          c.sender_id,
+          c.receiver_id,
+          c.text,
+          c.timestamp,
+          ROW_NUMBER() OVER (
+            PARTITION BY c.tbl_rfq_product_tech_evaluation_clauses_id,
+              LEAST(c.sender_id, c.receiver_id),
+              GREATEST(c.sender_id, c.receiver_id)
+            ORDER BY c.timestamp DESC
+          ) AS rn
+        FROM tbl_rfq_product_tech_evaluation_comments c
+        JOIN tbl_rfq_product_tech_evaluation_clauses cl
+          ON c.tbl_rfq_product_tech_evaluation_clauses_id = cl.id
+        JOIN tbl_rfq_product_tech_evaluation te
+          ON cl.tbl_rfq_product_tech_evaluation_id = te.id
+        WHERE te.tbl_rfq_product_id = $1
+        ${user_id ? 'AND (c.sender_id = $2 OR c.receiver_id = $2)' : ''}
+      )
+      SELECT clause_id, sender_id, receiver_id, text, timestamp
+      FROM ranked_comments
+      WHERE rn <= 4
+      ORDER BY clause_id, timestamp ASC
+    `;
+    const params = user_id ? [rfq_product_id, user_id] : [rfq_product_id];
+    return await db.any(query, params);
   },
 
   addVendorResponse: async (responses) => {
@@ -10108,7 +10139,8 @@ ORDER BY tq.timestamp DESC;
     project_id,
     rfq_no,
     sort,
-    is_tender
+    is_tender,
+    rfq_id
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicJoins = '';
@@ -10166,7 +10198,13 @@ ORDER BY tq.timestamp DESC;
         RFQ.reverse_auction,
         RFQ.is_tender,
         RFQ.title,
-        H.name AS hotel_name
+        H.name AS hotel_name,
+        (
+          SELECT COUNT(*)
+          FROM tbl_quotes _tq_active
+          WHERE _tq_active.rfq_id = RFQ.id
+            AND (_tq_active.is_regret IS NULL OR _tq_active.is_regret != 1)
+        ) AS active_quote_count
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
       LEFT JOIN tbl_hospitality_company_hotels H
@@ -10213,12 +10251,13 @@ ORDER BY tq.timestamp DESC;
       }
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
+      AND (RFQ.id = $5 OR $5 IS NULL)
       ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender ? 1 : 0}` : ''}
       ${dynamicConditions}
       ORDER BY RFQ.timestamp ${sort || 'DESC'}
       LIMIT $3 OFFSET $2;`;
 
-      db.any(q, [project_id, offset, limit, rfq_no])
+      db.any(q, [project_id, offset, limit, rfq_no, rfq_id])
         .then(function (data) {
           resolve(data);
         })

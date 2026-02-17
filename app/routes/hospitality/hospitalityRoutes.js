@@ -217,6 +217,12 @@ HospitalityRoutes.get(
   hospitalityController.getHotelPaymentInfo
 );
 
+// Public endpoint for company-level consolidated payment info
+HospitalityRoutes.get(
+  '/hotel-payment/company/info',
+  hospitalityController.getCompanyPaymentInfo
+);
+
 HospitalityRoutes.post(
   '/hotel-payment/create-order',
   hospitalityController.createHotelPaymentOrder

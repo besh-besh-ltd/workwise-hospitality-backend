@@ -1,5 +1,7 @@
+import fs from 'fs';
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
+import { generateTaxInvoicePdf, generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import generalModel from '../../models/generalModel.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 import projectModel from '../../models/projectModel.js';
@@ -1199,12 +1201,116 @@ const HospitalityController = {
   },
 
   // Create Razorpay payment order for hotel onboarding (public endpoint - no auth required)
+  // Supports both single hotel and consolidated company payments
   createHotelPaymentOrder: async (req, res) => {
     try {
-      const { hotel_id } = req.body;
+      const { hotel_id, company_id, hotel_ids } = req.body;
 
+      // Handle consolidated company payment
+      if (company_id && hotel_ids && Array.isArray(hotel_ids) && hotel_ids.length > 0) {
+        const hotelIds = hotel_ids.map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+
+        if (hotelIds.length === 0) {
+          return res.status(400).json({ status: 0, message: 'Invalid hotel_ids array' });
+        }
+
+        const hotels = await hospitalityModel.getHotelsByIds(hotelIds);
+
+        if (!hotels || hotels.length === 0) {
+          return res.status(404).json({ status: 0, message: 'No valid business units found' });
+        }
+
+        // Verify all hotels belong to the same company
+        const companyIds = [...new Set(hotels.map(h => h.hospitality_company_id))];
+        if (companyIds.length > 1 || companyIds[0] !== company_id) {
+          return res.status(400).json({ status: 0, message: 'All business units must belong to the specified company' });
+        }
+
+        // Check if all hotels are already paid or have in-progress payments
+        const paymentChecks = await Promise.all(
+          hotelIds.map(hotelId => hospitalityModel.getHotelPayment(hotelId))
+        );
+        const allPaid = paymentChecks.every(payment => payment?.payment_status === 'success');
+        if (allPaid) {
+          return res.status(200).json({
+            status: 1,
+            data: { already_paid: true }
+          });
+        }
+        // If any hotel has an in-progress payment, return existing order details
+        const inProgressPayment = paymentChecks.find(p => p && ['created', 'pending'].includes(p.payment_status) && p.razorpay_order_id);
+        if (inProgressPayment) {
+          return res.status(200).json({
+            status: 1,
+            data: {
+              order: { id: inProgressPayment.razorpay_order_id, amount: inProgressPayment.amount, currency: 'INR' },
+              payment_id: inProgressPayment.id,
+              amount: inProgressPayment.amount / 100,
+              razorpay_key: Config.razorpay.razorpay_key
+            }
+          });
+        }
+
+        const totalAmount = hotels.reduce((sum, h) => sum + parseFloat(h.fee_amount || 0), 0);
+
+        if (totalAmount <= 0) {
+          return res.status(400).json({ status: 0, message: 'Total fee amount must be greater than 0' });
+        }
+
+        const { default: Razorpay } = await import('razorpay');
+        const razorpay = new Razorpay({
+          key_id: Config.razorpay.razorpay_key,
+          key_secret: Config.razorpay.razorpay_secret
+        });
+
+        const amountInPaise = Math.round(totalAmount * 100);
+        const receipt = `COMPANY-${company_id}-${Date.now()}`;
+
+        const order = await razorpay.orders.create({
+          amount: amountInPaise,
+          currency: 'INR',
+          receipt,
+          payment_capture: 1
+        });
+
+        const beforePayload = JSON.stringify(order);
+
+        // Use the first hotel's created_by as the user_id (or 0 if not available)
+        const userId = hotels[0]?.created_by || 0;
+
+        const paymentRow = await hospitalityModel.createHotelPayment({
+          user_id: userId,
+          amount: amountInPaise,
+          currency: 'INR',
+          payment_status: 'created',
+          razorpay_order_id: order.id,
+          receipt,
+          before_payment_response: beforePayload
+        });
+
+        // Update all hotels payment_status to pending
+        await Promise.all(hotelIds.map(hotelId =>
+          hospitalityModel.updateHotelPaymentStatus(hotelId, 'pending')
+        ));
+
+        return res.status(200).json({
+          status: 1,
+          data: {
+            order,
+            payment_id: paymentRow.id,
+            company_name: hotels[0]?.company_name,
+            company_id: company_id,
+            hotel_ids: hotelIds,
+            hotels: hotels.map(h => ({ id: h.id, name: h.name, fee_amount: h.fee_amount })),
+            total_amount: totalAmount,
+            razorpay_key: Config.razorpay.razorpay_key
+          }
+        });
+      }
+
+      // Handle single hotel payment (existing logic)
       if (!hotel_id) {
-        return res.status(400).json({ status: 0, message: 'hotel_id is required' });
+        return res.status(400).json({ status: 0, message: 'hotel_id is required for single hotel payment, or company_id and hotel_ids for consolidated payment' });
       }
 
       const hotel = await hospitalityModel.getHotelPaymentDetails(hotel_id);
@@ -1216,12 +1322,26 @@ const HospitalityController = {
         return res.status(400).json({ status: 0, message: 'Fee amount not configured' });
       }
 
-      // Check for existing successful payment
+      // Check for existing payment (success, created, or pending)
       const existingPayment = await hospitalityModel.getHotelPayment(hotel_id);
       if (existingPayment && existingPayment.payment_status === 'success') {
         return res.status(200).json({
           status: 1,
           data: { already_paid: true, payment_id: existingPayment.id }
+        });
+      }
+      // If a payment order already exists (created/pending), return the existing order
+      if (existingPayment && ['created', 'pending'].includes(existingPayment.payment_status) && existingPayment.razorpay_order_id) {
+        return res.status(200).json({
+          status: 1,
+          data: {
+            order: { id: existingPayment.razorpay_order_id, amount: existingPayment.amount, currency: 'INR' },
+            payment_id: existingPayment.id,
+            hotel_name: hotel.name,
+            company_name: hotel.company_name,
+            amount: hotel.fee_amount,
+            razorpay_key: Config.razorpay.razorpay_key
+          }
         });
       }
 
@@ -1274,11 +1394,12 @@ const HospitalityController = {
   },
 
   // Verify Razorpay payment for hotel onboarding (public endpoint)
+  // Supports both single hotel and consolidated company payments
   verifyHotelPayment: async (req, res) => {
     try {
-      const { hotel_id, razorpay_order_id, razorpay_payment_id, razorpay_signature, payment_id } = req.body;
+      const { hotel_id, company_id, hotel_ids, razorpay_order_id, razorpay_payment_id, razorpay_signature, payment_id } = req.body;
 
-      if (!hotel_id || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
         return res.status(400).json({ status: 0, message: 'Missing required payment verification fields' });
       }
 
@@ -1307,10 +1428,122 @@ const HospitalityController = {
       });
 
       if (isValid) {
+        // Handle consolidated company payment
+        if (company_id && hotel_ids && Array.isArray(hotel_ids) && hotel_ids.length > 0) {
+          const hotelIds = hotel_ids.map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+
+          // Update all hotels status to active
+          await Promise.all(hotelIds.map(hotelId =>
+            hospitalityModel.updateHotelPaymentStatus(hotelId, 'active')
+          ));
+
+          // Send confirmation email to company email
+          try {
+            const hotels = await hospitalityModel.getHotelsByIds(hotelIds);
+            if (hotels && hotels.length > 0) {
+              const companyEmail = hotels[0]?.company_email;
+              const companyName = hotels[0]?.company_name || 'Your Company';
+              const totalAmount = hotels.reduce((sum, h) => sum + parseFloat(h.fee_amount || 0), 0);
+
+              if (companyEmail) {
+                const { sendMail } = await import('../../helper/common.js');
+                const { generateEmailTemplate } = await import('../../helper/notificationEmailLayout.js');
+
+                const hotelsList = hotels.map(h =>
+                  `<li style="margin: 8px 0; font-size: 14px; color: #4b5563;">
+                    <strong>${h.name}</strong> - ₹${h.fee_amount}
+                  </li>`
+                ).join('');
+
+                const headerContent = `<h2 style="margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #111827;">Payment Successful</h2>`;
+                const containerContent = `
+                  <p style="font-size: 15px; color: #4b5563; margin: 0 0 16px;">
+                    All business units for <strong>${companyName}</strong> have been successfully activated on the Phileein Hospitality Procurement Platform, WorkWise.
+                  </p>
+                  <div style="background: #f0fdf4; padding: 14px 18px; border-radius: 10px; border: 1px solid #bbf7d0; margin: 16px 0 8px;">
+                    <p style="margin: 0 0 12px; color: #166534; font-size: 14px; font-weight: 600;">Business Units Activated:</p>
+                    <ul style="list-style: none; padding: 0; margin: 0;">${hotelsList}</ul>
+                    <hr style="border: none; border-top: 1px solid #bbf7d0; margin: 12px 0;" />
+                    <p style="margin: 0; color: #166534; font-size: 14px;">
+                      <strong>Total Amount Paid:</strong> ₹ ${totalAmount.toFixed(2)}<br/>
+                      <strong>Payment ID:</strong> ${razorpay_payment_id}
+                    </p>
+                  </div>
+                  <p style="font-size: 13px; color: #6b7280; margin: 12px 0 0;">
+                    Tax invoice and payment received documents are attached to this email.
+                  </p>
+                  <p style="font-size: 13px; color: #6b7280; margin: 12px 0 0;">
+                    You can now start using your business units or contact your administrator for any assistance.
+                  </p>
+                `;
+
+                const html = generateEmailTemplate(headerContent, containerContent, null);
+
+                const mailOpts = {
+                  from: Config.webmasterMail,
+                  to: companyEmail,
+                  subject: `Phileein Hospitality Procurement Platform WorkWise - Payment Confirmed for ${companyName}`,
+                  html
+                };
+
+                try {
+                  const paymentRecord = await hospitalityModel.getPaymentById(payment_id);
+                  const receipt = paymentRecord?.receipt || `COMPANY-${company_id}-${Date.now()}`;
+                  const amountInRupees = paymentRecord?.amount ? paymentRecord.amount / 100 : totalAmount;
+                  const lineItems = hotels.map(h => ({ name: `Business Unit: ${h.name}`, amount: h.fee_amount }));
+
+                  const taxInvoicePdf = await generateTaxInvoicePdf({
+                    type: 'Business Unit Onboarding',
+                    recipientName: companyName,
+                    amount: amountInRupees,
+                    paymentId: razorpay_payment_id,
+                    orderId: razorpay_order_id,
+                    receipt,
+                    lineItems
+                  });
+                  const paymentReceivedPdf = await generatePaymentReceivedPdf({
+                    recipientName: companyName,
+                    amount: amountInRupees,
+                    paymentId: razorpay_payment_id,
+                    orderId: razorpay_order_id,
+                    description: `Business Units Onboarding - ${companyName}`
+                  });
+
+                  const attachments = [];
+                  if (taxInvoicePdf?.filePath && fs.existsSync(taxInvoicePdf.filePath)) {
+                    attachments.push({ filename: taxInvoicePdf.fileName, path: taxInvoicePdf.filePath, contentType: 'application/pdf' });
+                  }
+                  if (paymentReceivedPdf?.filePath && fs.existsSync(paymentReceivedPdf.filePath)) {
+                    attachments.push({ filename: paymentReceivedPdf.fileName, path: paymentReceivedPdf.filePath, contentType: 'application/pdf' });
+                  }
+                  if (attachments.length) mailOpts.attachments = attachments;
+                } catch (docErr) {
+                  logError('BU payment doc generation failed:', docErr);
+                }
+
+                await sendMail(mailOpts);
+              }
+            }
+          } catch (emailError) {
+            logError('Email failed but payment verified:', emailError);
+          }
+
+          return res.status(200).json({
+            status: 1,
+            message: 'Payment verified successfully. All business units are now active.',
+            data: { verified: true, hotel_ids: hotelIds }
+          });
+        }
+
+        // Handle single hotel payment (existing logic)
+        if (!hotel_id) {
+          return res.status(400).json({ status: 0, message: 'hotel_id is required for single hotel payment, or company_id and hotel_ids for consolidated payment' });
+        }
+
         // Update hotel status to active
         await hospitalityModel.updateHotelPaymentStatus(hotel_id, 'active');
 
-        // Send confirmation email using the standard WorkWise template (don't fail if email fails)
+        // Send confirmation email with tax invoice and payment received attachments
         try {
           const hotel = await hospitalityModel.getHotelPaymentDetails(hotel_id);
           if (hotel?.email) {
@@ -1329,18 +1562,57 @@ const HospitalityController = {
                 </p>
               </div>
               <p style=\"font-size: 13px; color: #6b7280; margin: 12px 0 0;\">
+                Tax invoice and payment received documents are attached to this email.
+              </p>
+              <p style=\"font-size: 13px; color: #6b7280; margin: 12px 0 0;\">
                 You can now start using your business unit or contact your administrator for any assistance.
               </p>
             `;
 
             const html = generateEmailTemplate(headerContent, containerContent, null);
 
-            await sendMail({
+            const mailOpts = {
               from: Config.webmasterMail,
               to: hotel.email,
               subject: `Phileein Hospitality Procurement Platform WorkWise - Payment Confirmed for ${hotel.name}`,
               html
-            });
+            };
+
+            try {
+              const paymentRecord = await hospitalityModel.getPaymentById(payment_id);
+              const receipt = paymentRecord?.receipt || `HOTEL-${hotel_id}-${Date.now()}`;
+              const amountInRupees = paymentRecord?.amount ? paymentRecord.amount / 100 : hotel.fee_amount;
+
+              const taxInvoicePdf = await generateTaxInvoicePdf({
+                type: 'Business Unit Onboarding',
+                recipientName: hotel.company_name || hotel.name,
+                amount: amountInRupees,
+                paymentId: razorpay_payment_id,
+                orderId: razorpay_order_id,
+                receipt,
+                lineItems: [{ name: `Business Unit: ${hotel.name}`, amount: hotel.fee_amount }]
+              });
+              const paymentReceivedPdf = await generatePaymentReceivedPdf({
+                recipientName: hotel.company_name || hotel.name,
+                amount: amountInRupees,
+                paymentId: razorpay_payment_id,
+                orderId: razorpay_order_id,
+                description: `Business Unit Onboarding - ${hotel.name}`
+              });
+
+              const attachments = [];
+              if (taxInvoicePdf?.filePath && fs.existsSync(taxInvoicePdf.filePath)) {
+                attachments.push({ filename: taxInvoicePdf.fileName, path: taxInvoicePdf.filePath, contentType: 'application/pdf' });
+              }
+              if (paymentReceivedPdf?.filePath && fs.existsSync(paymentReceivedPdf.filePath)) {
+                attachments.push({ filename: paymentReceivedPdf.fileName, path: paymentReceivedPdf.filePath, contentType: 'application/pdf' });
+              }
+              if (attachments.length) mailOpts.attachments = attachments;
+            } catch (docErr) {
+              logError('BU payment doc generation failed:', docErr);
+            }
+
+            await sendMail(mailOpts);
           }
         } catch (emailError) {
           logError('Email failed but payment verified:', emailError);
@@ -1394,6 +1666,65 @@ const HospitalityController = {
           payment_status: hotel.payment_status,
           email: hotel.email,
           already_paid: existingPayment?.payment_status === 'success',
+          razorpay_key: Config.razorpay.razorpay_key
+        }
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  // Get company-level payment info (consolidated payment for multiple hotels)
+  getCompanyPaymentInfo: async (req, res) => {
+    try {
+      const companyId = parseInt(req.query.company_id, 10);
+      const hotelIdsParam = req.query.hotel_ids;
+
+      if (!companyId || !hotelIdsParam) {
+        return res.status(400).json({ status: 0, message: 'company_id and hotel_ids are required' });
+      }
+
+      const hotelIds = hotelIdsParam.split(',').map(id => parseInt(id.trim(), 10)).filter(id => !isNaN(id));
+
+      if (hotelIds.length === 0) {
+        return res.status(400).json({ status: 0, message: 'Invalid hotel_ids parameter' });
+      }
+
+      const hotels = await hospitalityModel.getHotelsByIds(hotelIds);
+
+      if (!hotels || hotels.length === 0) {
+        return res.status(404).json({ status: 0, message: 'No valid business units found' });
+      }
+
+      // Verify all hotels belong to the same company
+      const companyIds = [...new Set(hotels.map(h => h.hospitality_company_id))];
+      if (companyIds.length > 1 || companyIds[0] !== companyId) {
+        return res.status(400).json({ status: 0, message: 'All business units must belong to the specified company' });
+      }
+
+      const totalAmount = hotels.reduce((sum, h) => sum + parseFloat(h.fee_amount || 0), 0);
+      const companyName = hotels[0]?.company_name || 'Company';
+
+      // Check if all hotels are already paid by checking their payment_status field
+      // (when payment is verified, hotels are updated to 'active' status)
+      const allPaid = hotels.every(hotel => hotel.payment_status === 'active');
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          company_id: companyId,
+          company_name: companyName,
+          company_email: hotels[0]?.company_email,
+          hotels: hotels.map(h => ({
+            id: h.id,
+            name: h.name,
+            fee_amount: h.fee_amount,
+            payment_status: h.payment_status
+          })),
+          total_amount: totalAmount,
+          hotel_ids: hotelIds,
+          already_paid: allPaid,
           razorpay_key: Config.razorpay.razorpay_key
         }
       });

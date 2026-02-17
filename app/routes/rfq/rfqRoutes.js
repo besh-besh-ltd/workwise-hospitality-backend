@@ -544,6 +544,11 @@ RfqRoutes.post('/get-summarised-deviation',
   rfqController.getSummarisedDeviation
 )
 
+RfqRoutes.post('/get-deviation-previews',
+  passportSignIn,
+  rfqController.getDeviationPreviews
+)
+
 RfqRoutes.post('/get-vendor-names',
   passportSignIn,
   validateBody(rfqSchemas.getVendorNames),

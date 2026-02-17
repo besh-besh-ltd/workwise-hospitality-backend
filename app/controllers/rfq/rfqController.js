@@ -13617,6 +13617,20 @@ getClauses: async (req, res) => {
     }
   },
 
+  getDeviationPreviews: async (req, res) => {
+    try {
+      const { rfq_product_id, user_id } = req.body;
+      if (!rfq_product_id) {
+        return res.status(400).json({ status: 0, message: 'rfq_product_id is required' });
+      }
+      const result = await rfqModel.getDeviationPreviews(rfq_product_id, user_id || null);
+      res.status(200).json({ status: 1, data: result });
+    } catch (error) {
+      console.error('Error in getDeviationPreviews:', error.message);
+      res.status(500).json({ status: 0, message: 'Error fetching deviation previews' });
+    }
+  },
+
   addVendorResponse: async (req, res) => {
     try {
       const data = req.body;
@@ -14339,6 +14353,7 @@ getClauses: async (req, res) => {
         limit = 10,
         project_id,
         rfq_no,
+        rfq_id,
         sort = 'DESC',
         is_tender,
         module_keys
@@ -14352,6 +14367,7 @@ getClauses: async (req, res) => {
       limit = parseInt(limit) || 10;
       project_id = project_id ? parseInt(project_id) : null;
       rfq_no = rfq_no ? parseInt(rfq_no) : null;
+      rfq_id = rfq_id ? parseInt(rfq_id) : null;
       is_tender = is_tender !== undefined && is_tender !== null ? (is_tender === 'true' || is_tender === true || is_tender === '1' || is_tender === 1) : null;
 
       // Parse module_keys into array of uppercase entity types
@@ -14379,7 +14395,8 @@ getClauses: async (req, res) => {
         project_id,
         rfq_no,
         sort,
-        is_tender
+        is_tender,
+        rfq_id
       );
 
       // Enrich each RFQ with approval_required flag
