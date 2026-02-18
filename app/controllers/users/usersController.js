@@ -342,13 +342,18 @@ const UsersController = {
         pan,
         fssai,
         msme,
+        pan_doc,
+        gst_doc,
+        msme_doc,
+        fssai_doc,
+        cancelled_cheque_doc,
         bank_account_number,
         bank_name,
         ifsc_code,
         account_holder_name
       } = req.body;
 
-      // Parse JSON strings for arrays sent via multipart/form-data
+      // Parse JSON strings for arrays (in case sent as strings)
       const parseMaybeJsonArray = (val) => {
         if (Array.isArray(val)) return val;
         if (typeof val === 'string') {
@@ -431,37 +436,37 @@ const UsersController = {
             const documentPromises = [];
             
             // PAN document (mandatory)
-            if (req.files?.pan && req.files.pan[0]?.location) {
+            if (pan_doc) {
               documentPromises.push(
-                userModel.saveVendorDocument(user_id, 'pan', req.files.pan[0].location, pan || null)
+                userModel.saveVendorDocument(user_id, 'pan', pan_doc, pan || null)
               );
             }
-            
+
             // GST document (if GST number provided)
-            if (gstin && req.files?.gst && req.files.gst[0]?.location) {
+            if (gstin && gst_doc) {
               documentPromises.push(
-                userModel.saveVendorDocument(user_id, 'gst', req.files.gst[0].location, gstin)
+                userModel.saveVendorDocument(user_id, 'gst', gst_doc, gstin)
               );
             }
-            
+
             // MSME document (if MSME number provided)
-            if (msme && req.files?.msme && req.files.msme[0]?.location) {
+            if (msme && msme_doc) {
               documentPromises.push(
-                userModel.saveVendorDocument(user_id, 'msme', req.files.msme[0].location, msme)
+                userModel.saveVendorDocument(user_id, 'msme', msme_doc, msme)
               );
             }
-            
+
             // FSSAI document (if FSSAI number provided)
-            if (fssai && req.files?.fssai && req.files.fssai[0]?.location) {
+            if (fssai && fssai_doc) {
               documentPromises.push(
-                userModel.saveVendorDocument(user_id, 'fssai', req.files.fssai[0].location, fssai)
+                userModel.saveVendorDocument(user_id, 'fssai', fssai_doc, fssai)
               );
             }
-            
+
             // Cancelled cheque (mandatory)
-            if (req.files?.cancelled_cheque && req.files.cancelled_cheque[0]?.location) {
+            if (cancelled_cheque_doc) {
               documentPromises.push(
-                userModel.saveVendorDocument(user_id, 'cancelled_cheque', req.files.cancelled_cheque[0].location, null)
+                userModel.saveVendorDocument(user_id, 'cancelled_cheque', cancelled_cheque_doc, null)
               );
             }
             
@@ -2513,6 +2518,24 @@ update_user_detail: async (req, res, next) => {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+
+  registration_upload: async (req, res) => {
+    try {
+      if (!req.files || !req.files.file || req.files.file.length === 0) {
+        return res.status(400).json({ status: 0, message: 'Please select a file!' });
+      }
+
+      const result = await userModel.uploadFiles(req.files.file, -1, req.body.doc_type || 'registration');
+
+      return res.status(200).json({
+        status: 1,
+        data: result
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({ status: 3, message: Config.errorText.value });
     }
   },
 
