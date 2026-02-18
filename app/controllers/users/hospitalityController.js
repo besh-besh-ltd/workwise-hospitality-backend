@@ -344,6 +344,49 @@ const HospitalityController = {
     }
   },
 
+  createHO: async (req, res) => {
+    try {
+      const company = req.companyDetails;
+      const hospitalityCompanyId = parseInt(req.params.company_id, 10);
+
+      const record = await hospitalityModel.getCompanyById(hospitalityCompanyId);
+      if (!record || record.buyer_company_id !== company.id) {
+        return res.status(404).json({
+          status: 2,
+          message: 'Hospitality company not found'
+        });
+      }
+
+      const created = await hospitalityModel.createHOFromCompany(
+        hospitalityCompanyId,
+        req.user.id
+      );
+
+      // Copy company documents to the new HO hotel
+      const companyDocs = await hospitalityModel.getCompanyDocuments(hospitalityCompanyId);
+      if (companyDocs && companyDocs.length > 0) {
+        const docPromises = companyDocs.map(doc =>
+          hospitalityModel.saveHotelDocument(
+            created.id,
+            doc.document_type,
+            doc.document_url,
+            doc.document_number
+          )
+        );
+        await Promise.all(docPromises);
+      }
+
+      return res.status(200).json({
+        status: 1,
+        data: created,
+        message: 'Head Office business unit created successfully'
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
   updateHotel: async (req, res) => {
     try {
       const company = req.companyDetails;

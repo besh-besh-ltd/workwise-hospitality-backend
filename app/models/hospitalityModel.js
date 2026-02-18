@@ -126,6 +126,25 @@ const hospitalityModel = {
     );
   },
 
+  createHOFromCompany: async (companyId, createdBy) => {
+    return db.one(
+      `INSERT INTO tbl_hospitality_company_hotels
+        (hospitality_company_id, name, full_address, state, gst, pan,
+         bank_account_number, bank_name, ifsc_code, account_holder_name,
+         msme, email, delivery_address, status, payment_status, keys,
+         fee_amount, created_by, updated_by)
+       SELECT
+         c.id, c.name, c.registered_office_address, NULL, c.gst, c.pan,
+         c.bank_account_number, c.bank_name, c.ifsc_code, c.account_holder_name,
+         c.msme, c.contact_email, c.corporate_office_address, 'Active', 'active', 0,
+         0, $2, $2
+       FROM tbl_hospitality_companies c
+       WHERE c.id = $1 AND c.is_deleted = 0
+       RETURNING *`,
+      [companyId, createdBy]
+    );
+  },
+
   getHotelsByCompany: async (companyId) => {
     return db.any(
       `SELECT * FROM tbl_hospitality_company_hotels
@@ -424,8 +443,16 @@ const hospitalityModel = {
       idx += 1;
     }
 
+    // When no mapping_type filter is set, deduplicate by user_id
+    // so users with both company-level and hotel-level access appear only once
+    const distinctClause = mappingType === null
+      ? 'DISTINCT ON (hum.user_id)' : '';
+    const orderClause = mappingType === null
+      ? 'ORDER BY hum.user_id, hum.mapping_type ASC, hum.created_at DESC'
+      : 'ORDER BY hum.created_at DESC';
+
     return db.any(
-      `SELECT 
+      `SELECT ${distinctClause}
         hum.*,
         u.name,
         u.email,
@@ -436,7 +463,7 @@ const hospitalityModel = {
        LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = hum.hospitality_hotel_id
        WHERE hum.hospitality_company_id = $1
          ${whereClause}
-       ORDER BY hum.created_at DESC`,
+       ${orderClause}`,
       params
     );
   },
