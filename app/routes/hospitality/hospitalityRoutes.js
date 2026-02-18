@@ -64,6 +64,15 @@ HospitalityRoutes.post(
   hospitalityController.createHotel
 );
 
+HospitalityRoutes.post(
+  '/company/:company_id/create-ho',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  validateParam(schemas.companyIdParam),
+  hospitalityController.createHO
+);
+
 HospitalityRoutes.put(
   '/company/:company_id/hotels/:hotel_id',
   passportSignIn,
