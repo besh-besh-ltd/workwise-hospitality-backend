@@ -3899,7 +3899,7 @@ publishProfileReviews: async (reviewObj) => {
     return new Promise(function (resolve, reject) {
       db.any(
         `SELECT tu.id, tu.name, tu.email, tu.mobile, tu.user_type, tu.status, tu.created_at,
-                tu.employee_type, tu.employee_code, tu.payroll_company_id
+                tu.employee_type, tu.employee_code, tu.designation, tu.payroll_company_id
          FROM tbl_users tu
          WHERE tu.company_id = $1 AND tu.is_deleted = 0
          ORDER BY tu.created_at DESC`,
