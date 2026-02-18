@@ -909,6 +909,7 @@ get_company_users: async (req, res, next) => {
         created_at: user.created_at,
         employee_type: user.employee_type,
         employee_code: user.employee_code,
+        designation: user.designation,
         payroll_company_id: user.payroll_company_id
       }));
 
