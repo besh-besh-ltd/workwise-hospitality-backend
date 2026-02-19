@@ -1,6 +1,6 @@
 import db from '../config/dbConn.js';
 import { sendApprovalNotification, sendPONotificationToVendor } from '../controllers/po/purchaseOrderEmails.js';
-import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
+import { APPROVAL_DECISIONS, PO_STATUSES, DEPARTMENT_SCOPED_ENTITY_TYPES } from '../util/constants.js';
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 
 import { PutObjectCommand } from "@aws-sdk/client-s3";
@@ -1228,6 +1228,23 @@ async function userBelongsToDepartment(userId, departmentId, t = db) {
 }
 
 /**
+ * Check if user belongs to the target department OR any department with access_type = 'ALL'.
+ * Used for INDIVIDUAL dept sub-graphs so that admin/ALL-access dept users are included.
+ */
+async function userBelongsToDepartmentOrAllAccess(userId, departmentId, t = db) {
+  if (!departmentId) return true;
+  const row = await t.oneOrNone(`
+    SELECT 1 FROM tbl_user_department ud
+    WHERE ud.user_id = $1
+      AND (
+        ud.department_id = $2
+        OR ud.department_id IN (SELECT id FROM tbl_department WHERE access_type = 'ALL')
+      )
+  `, [userId, departmentId]);
+  return Boolean(row);
+}
+
+/**
  * Full scope validation: company/hotel + department
  */
 async function userHasFullScopeAccess(userId, hospitalityCompanyId, hotelId = null, departmentId = null, t = db) {
@@ -1782,10 +1799,10 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
   if (step.approver_source_type === 'USER') {
     // For USER type: check if user belongs to the department based on access type
     if (departmentAccessType === 'INDIVIDUAL' && department_id) {
-      // INDIVIDUAL: user must belong to the specific department
+      // INDIVIDUAL: user must belong to the specific department OR any ALL-access department
       const hasCompanyAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
-      const belongsToDept = await userBelongsToDepartment(step.approver_source_id, department_id, t);
-      if (hasCompanyAccess && belongsToDept) {
+      const belongsToDeptOrAll = await userBelongsToDepartmentOrAllAccess(step.approver_source_id, department_id, t);
+      if (hasCompanyAccess && belongsToDeptOrAll) {
         const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
         if (user) userIds.push(user.id);
       }
@@ -1799,13 +1816,14 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
     }
   } else if (step.approver_source_type === 'ROLE') {
     if (departmentAccessType === 'INDIVIDUAL' && department_id) {
-      // INDIVIDUAL: only users with this role who ALSO belong to the specific department
+      // INDIVIDUAL: users with this role who belong to the specific department OR any ALL-access department
       const users = await t.any(`
         SELECT DISTINCT u.id
         FROM tbl_users u
         JOIN tbl_user_role_scopes urs ON u.id = urs.user_id AND urs.role_id = $1
         JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
-        JOIN tbl_user_department ud ON u.id = ud.user_id AND ud.department_id = $5
+        JOIN tbl_user_department ud ON u.id = ud.user_id
+          AND (ud.department_id = $5 OR ud.department_id IN (SELECT id FROM tbl_department WHERE access_type = 'ALL'))
         WHERE u.status = 1
           AND hum.hospitality_company_id = $2
           AND (
@@ -1980,16 +1998,22 @@ export async function createApprovalInstance({
     const instanceSteps = [];
     let stepNumber = 0; // Track sequential step numbering
 
+    // For commercial entity types (NEGOTIATION, NEGOTIATION_QUOTE, PO, ARC),
+    // skip department filtering — all company/hotel users with the role should be approvers.
+    // The original department_id is still stored in the instance row for audit.
+    const isDeptScoped = DEPARTMENT_SCOPED_ENTITY_TYPES.includes(entity_type);
+    const resolveDeptId = isDeptScoped ? department_id : null;
+
     // Look up department access type for department-aware approver resolution
     let departmentAccessType = null;
-    if (department_id) {
-      const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [department_id]);
+    if (resolveDeptId) {
+      const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [resolveDeptId]);
       departmentAccessType = deptRow?.access_type || 'INDIVIDUAL';
     }
 
     for (const policyStep of policySteps) {
       // Resolve approvers for this step with department access type awareness
-      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, department_id, departmentAccessType, t, initiated_by);
+      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, departmentAccessType, t, initiated_by);
 
       // Skip step if no approvers remain after excluding creator
       if (approverUserIds.length === 0) {
@@ -2123,15 +2147,19 @@ export async function checkIfUserIsFinalApprover(userId, entity_type, hospitalit
     return false;
   }
 
+  // For commercial entity types, skip department filtering
+  const isDeptScoped = DEPARTMENT_SCOPED_ENTITY_TYPES.includes(entity_type);
+  const resolveDeptId = isDeptScoped ? department_id : null;
+
   // Look up department access type
   let departmentAccessType = null;
-  if (department_id) {
-    const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [department_id]);
+  if (resolveDeptId) {
+    const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [resolveDeptId]);
     departmentAccessType = deptRow?.access_type || 'INDIVIDUAL';
   }
 
   // Check if user is final approver with department access type awareness
-  return await isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, department_id, departmentAccessType, t);
+  return await isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, resolveDeptId, departmentAccessType, t);
 }
 
 /**
@@ -2170,9 +2198,14 @@ export async function getDepartmentSubGraphPreview(policyId, hospitality_company
     ORDER BY d.access_type DESC, d.title ASC
   `, [effectiveCompanyId, effectiveHotelId || null]);
 
+  // Split departments: ALL-access depts are shown as an info banner, not as separate cards.
+  // Their users are automatically included in each INDIVIDUAL dept card via resolveApprovers.
+  const allAccessDepts = departments.filter(d => (d.access_type || '').toUpperCase() === 'ALL');
+  const individualDepts = departments.filter(d => (d.access_type || '').toUpperCase() !== 'ALL');
+
   const subgraphs = [];
 
-  for (const dept of departments) {
+  for (const dept of individualDepts) {
     const deptSteps = [];
     for (const step of steps) {
       const approvers = await resolveApprovers(
@@ -2185,11 +2218,16 @@ export async function getDepartmentSubGraphPreview(policyId, hospitality_company
         null
       );
 
-      // Get approver details
+      // Get approver details with their department
       let approverDetails = [];
       if (approvers.length > 0) {
         approverDetails = await db.any(`
-          SELECT id, name, email FROM tbl_users WHERE id IN ($1:csv) AND status = 1
+          SELECT u.id, u.name, u.email,
+            (SELECT d.title FROM tbl_user_department ud
+             JOIN tbl_department d ON d.id = ud.department_id
+             WHERE ud.user_id = u.id ORDER BY ud.id DESC LIMIT 1
+            ) AS department_name
+          FROM tbl_users u WHERE u.id IN ($1:csv) AND u.status = 1
         `, [approvers]);
       }
 
@@ -2214,7 +2252,8 @@ export async function getDepartmentSubGraphPreview(policyId, hospitality_company
 
   return {
     master_policy: { ...policy, steps },
-    department_subgraphs: subgraphs
+    department_subgraphs: subgraphs,
+    all_access_departments: allAccessDepts.map(d => ({ id: d.id, title: d.title }))
   };
 }
 
@@ -2481,22 +2520,25 @@ export async function submitApprovalAction({
     }
 
     // 4. Validate user belongs to the policy scope
-    // Check hospitality access; only check department membership for INDIVIDUAL access departments
+    // Check hospitality access; skip department check for commercial entity types
     const hasHospAccess = await userHasHospitalityAccess(approver_user_id, instance.hospitality_company_id, instance.hotel_id, t);
     if (!hasHospAccess) {
       throw new Error('User does not belong to the approval policy scope');
     }
-    if (instance.department_id) {
+    const isDeptScopedEntity = DEPARTMENT_SCOPED_ENTITY_TYPES.includes(instance.entity_type);
+    if (isDeptScopedEntity && instance.department_id) {
       const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [instance.department_id]);
       const deptAccessType = deptRow?.access_type || 'INDIVIDUAL';
       if (deptAccessType === 'INDIVIDUAL') {
-        const belongsToDept = await userBelongsToDepartment(approver_user_id, instance.department_id, t);
-        if (!belongsToDept) {
+        // For INDIVIDUAL: user must belong to the target dept OR any ALL-access dept
+        const belongsToDeptOrAll = await userBelongsToDepartmentOrAllAccess(approver_user_id, instance.department_id, t);
+        if (!belongsToDeptOrAll) {
           throw new Error('User does not belong to the approval policy scope');
         }
       }
       // For ALL access_type: skip department check — approver was validly resolved at instance creation
     }
+    // For commercial entity types (NEGOTIATION, NEGOTIATION_QUOTE, PO, ARC): skip dept check entirely
 
     // 5. Record the action in audit log
     await t.none(`

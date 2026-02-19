@@ -8,17 +8,6 @@ import hospitalityModel from "../../models/hospitalityModel.js";
 
 const projectController = {
   create: async (req, res, next) => {
-    // Skip subscription check for admin users
-    if (req.user.user_type !== 7 && !req.user.subscription_plan_id) {
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: 'You need to purchase subscription to create RFQ'
-        })
-        .end();
-      return;
-    }
     try {
       const {
         name,
