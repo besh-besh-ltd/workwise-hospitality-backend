@@ -4659,16 +4659,6 @@ const rfqController = {
     }
   },
   create: async (req, res, next) => {
-    if (!req.user.subscription_plan_id) {
-      return res
-        .status(400)
-        .json({
-          status: 3,
-          message: 'You need to purchase subscription to create RFQ'
-        })
-        .end();
-    }
-
     try {
       let { rfq_id , ra_start_date , ra_end_date , bid_end_date , reverse_auction, selectedSheets } = req.body;
 
@@ -4921,17 +4911,6 @@ const rfqController = {
   },
 
   update: async (req, res, next) => {
-    if (!req.user.subscription_plan_id) {
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: 'You need to purchase subscription to create RFQ'
-        })
-        .end();
-      return;
-    }
-
     try {
       await db.tx(async (t) => {
         const data = req.body;
@@ -9340,7 +9319,6 @@ const rfqController = {
       }
 
       const user_id = req.is_verified ? req.user?.id : null;
-      const hasSubscription = req.is_verified && req.user?.subscription_plan_id;
 
       const result = await rfqModel.bulkSearchVendorsByCategory(
         category_id,
@@ -9360,32 +9338,6 @@ const rfqController = {
         user_id
       );
 
-      if (!req.is_verified) {
-        return res.status(200).json({
-          status: 1,
-          data: result.data.slice(0, 2),
-          total: result.total,
-          page: result.page,
-          limit: result.limit,
-          totalPages: result.totalPages,
-          logged_In: false,
-          subscription: false
-        });
-      }
-
-      if (!hasSubscription) {
-        return res.status(200).json({
-          status: 1,
-          data: result.data.slice(0, 1),
-          total: result.total,
-          page: result.page,
-          limit: result.limit,
-          totalPages: result.totalPages,
-          logged_In: true,
-          subscription: false
-        });
-      }
-
       return res.status(200).json({
         status: 1,
         data: result.data,
@@ -9393,7 +9345,7 @@ const rfqController = {
         page: result.page,
         limit: result.limit,
         totalPages: result.totalPages,
-        logged_In: true,
+        logged_In: !!req.is_verified,
         subscription: true
       });
 
@@ -12620,17 +12572,6 @@ sendFollowUpEmails: async (req, res) => {
           message: 'you are not login'
         })
         .end();
-    }
-
-    if (!req.user.subscription_plan_id) {
-      res
-        .status(400)
-        .json({
-          status: 3,
-          message: 'You need to purchase subscription to create RFQ'
-        })
-        .end();
-      return;
     }
 
     try {

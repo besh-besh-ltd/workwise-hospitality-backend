@@ -36,6 +36,11 @@ export const RFQ_STATUSES = {
 
 export const INVALID_PO_STATUSES_FOR_VENDOR = ['draft', 'pending_approval', 'cancelled', 'rejected']
 
+// Entity types that are filtered by department membership during approval resolution.
+// Commercial entity types (NEGOTIATION, NEGOTIATION_QUOTE, PO, ARC) are NOT dept-scoped
+// and should include all company/hotel users regardless of department.
+export const DEPARTMENT_SCOPED_ENTITY_TYPES = ['RFQ', 'TENDER', 'TECHNICAL']
+
 // For Now Hard Coded Tender Summaries
 export const summaries = [
   {

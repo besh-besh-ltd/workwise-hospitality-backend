@@ -667,18 +667,6 @@ const validateDbBody = {
   },
   project_access_check: async (req, res, next) => {
     try {
-
-      if (!req.user.subscription_plan_id) {
-        res
-          .status(400)
-          .json({
-            status: 3,
-            message: 'You need to purchase subscription to create RFQ'
-          })
-          .end();
-        return;
-      }
-
       let errors = {};
       let err = 0;
       let { project_id } = req.body;

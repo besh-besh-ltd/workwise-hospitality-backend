@@ -6,10 +6,30 @@ const rbacModel = {
 
   getDepartments: () => {
     return db.any(`
-      SELECT id, title
+      SELECT id, title, access_type
       FROM tbl_department
       ORDER BY title
     `);
+  },
+
+  updateDepartmentAccessTypes: (updates = []) => {
+    if (!updates.length) return Promise.resolve();
+    return db.tx(t =>
+      t.batch(
+        updates.map(u =>
+          t.none(
+            `UPDATE tbl_department SET access_type = $1 WHERE id = $2`,
+            [u.access_type, u.id]
+          )
+        )
+      )
+    );
+  },
+
+  getDepartmentAccessType: (departmentId) => {
+    return db.oneOrNone(`
+      SELECT access_type FROM tbl_department WHERE id = $1
+    `, [departmentId]);
   },
 
   assignUserDepartments: (userId, departmentIds = []) => {

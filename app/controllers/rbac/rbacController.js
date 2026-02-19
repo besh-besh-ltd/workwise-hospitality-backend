@@ -12,6 +12,54 @@ const rbacController = {
     }
   },
 
+  getDepartmentAccessMatrix: async (req, res) => {
+    try {
+      const rows = await rbacModel.getDepartments();
+      // Group: ALL departments first, then INDIVIDUAL
+      const allDepts = rows.filter(d => d.access_type === 'ALL');
+      const individualDepts = rows.filter(d => d.access_type === 'INDIVIDUAL');
+      return res.json({
+        status: true,
+        data: {
+          departments: [...allDepts, ...individualDepts],
+          summary: {
+            all_count: allDepts.length,
+            individual_count: individualDepts.length
+          }
+        }
+      });
+    } catch (err) {
+      return res.status(500).json({ status: false, message: err.message });
+    }
+  },
+
+  updateDepartmentAccessMatrix: async (req, res) => {
+    try {
+      const { departments } = req.body;
+      if (!Array.isArray(departments) || departments.length === 0) {
+        return res.status(400).json({ status: false, message: 'departments array is required' });
+      }
+      const valid = departments.every(d => d.id && ['ALL', 'INDIVIDUAL'].includes(d.access_type));
+      if (!valid) {
+        return res.status(400).json({ status: false, message: 'Each entry must have id and access_type (ALL or INDIVIDUAL)' });
+      }
+      await rbacModel.updateDepartmentAccessTypes(departments);
+      const rows = await rbacModel.getDepartments();
+      const allDepts = rows.filter(d => d.access_type === 'ALL');
+      const individualDepts = rows.filter(d => d.access_type === 'INDIVIDUAL');
+      return res.json({
+        status: true,
+        message: 'Department access matrix updated',
+        data: {
+          departments: [...allDepts, ...individualDepts],
+          summary: { all_count: allDepts.length, individual_count: individualDepts.length }
+        }
+      });
+    } catch (err) {
+      return res.status(500).json({ status: false, message: err.message });
+    }
+  },
+
   /* -------------------- ROLES -------------------- */
   getRoles: async (req, res) => {
     try {
