@@ -1254,7 +1254,8 @@ export async function createApprovalProcess({
   name,
   description = null,
   created_by,
-  is_active = true
+  is_active = true,
+  process_type: process_type_param = 'RFQ'
 }) {
   if (!company_id || !name || !created_by) {
     throw new Error('company_id, name, and created_by are required');
@@ -1281,11 +1282,12 @@ export async function createApprovalProcess({
     throw new Error(`Process with name "${name}" already exists for this company`);
   }
 
+  const process_type = process_type_param || 'RFQ';
   return db.one(
     `INSERT INTO tbl_approval_processes
-     (company_id, name, description, created_by, is_active)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    [company_id, name, description, created_by, is_active]
+     (company_id, name, description, created_by, is_active, process_type)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [company_id, name, description, created_by, is_active, process_type]
   );
 }
 
@@ -1294,10 +1296,12 @@ export async function createApprovalProcess({
  * @param {Object} params - Filter parameters
  * @param {number|null} params.company_id - Filter by parent company
  * @param {boolean} params.include_inactive - Include inactive processes
+ * @param {string|null} params.process_type - Filter by process_type ('RFQ', 'TENDER', 'ARC'); e.g. 'RFQ' for wizard (Tender/ARC excluded)
  */
 export async function getApprovalProcesses({
   company_id,
-  include_inactive = false
+  include_inactive = false,
+  process_type = null
 }) {
   const conditions = [];
   const vals = [];
@@ -1310,6 +1314,11 @@ export async function getApprovalProcesses({
 
   if (!include_inactive) {
     conditions.push('p.is_active = true');
+  }
+
+  if (process_type) {
+    conditions.push(`p.process_type = $${paramIdx++}`);
+    vals.push(process_type);
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -1335,7 +1344,7 @@ export async function getApprovalProcesses({
 export async function updateApprovalProcess(id, patch) {
   if (!id) throw new Error('Process ID is required');
 
-  const allowedFields = ['name', 'description', 'is_active'];
+  const allowedFields = ['name', 'description', 'is_active', 'process_type'];
   const sets = [];
   const vals = [];
   let idx = 1;
@@ -1434,7 +1443,8 @@ export async function createApprovalPolicy({
   department_id = null,
   process_id = null,
   created_by,
-  is_active = true
+  is_active = true,
+  is_master = false
 }) {
   if (!entity_type || !hospitality_company_id || !created_by) {
     throw new Error('entity_type, hospitality_company_id, and created_by are required');
@@ -1480,9 +1490,9 @@ export async function createApprovalPolicy({
 
   return db.one(
     `INSERT INTO tbl_approval_policies
-     (entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-    [entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active]
+     (entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active, is_master)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+    [entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active, is_master]
   );
 }
 
@@ -1492,7 +1502,7 @@ export async function createApprovalPolicy({
 export async function updateApprovalPolicy(id, patch) {
   if (!id) throw new Error('Policy ID is required');
 
-  const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'process_id', 'is_active'];
+  const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'process_id', 'is_active', 'is_master'];
   const sets = [];
   const vals = [];
   let idx = 1;
@@ -1623,40 +1633,27 @@ export async function findBestMatchingPolicy({ entity_type, hospitality_company_
     throw new Error('entity_type and hospitality_company_id are required');
   }
 
-  // Query policies matching the scope, ordered by 8-level specificity (most specific first)
-  // Process-specific policies (scores 8-6) rank higher than generic policies (scores 5-3)
+  // Master policy lookup: only find policies with department_id IS NULL (master policies)
+  // Simplified 4-level specificity (department dimension removed)
   const policies = await db.any(`
     SELECT p.*,
            CASE
-             -- Process-specific policies (higher priority)
-             WHEN p.process_id IS NOT NULL AND p.department_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 8
-             WHEN p.process_id IS NOT NULL AND p.department_id IS NULL AND p.hotel_id IS NOT NULL THEN 7
-             WHEN p.process_id IS NOT NULL AND p.department_id IS NULL AND p.hotel_id IS NULL THEN 6
-             -- Generic policies (fallback, lower priority)
-             WHEN p.process_id IS NULL AND p.department_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 5
-             WHEN p.process_id IS NULL AND p.department_id IS NULL AND p.hotel_id IS NOT NULL THEN 4
-             WHEN p.process_id IS NULL AND p.department_id IS NULL AND p.hotel_id IS NULL THEN 3
+             WHEN p.process_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 4
+             WHEN p.process_id IS NOT NULL AND p.hotel_id IS NULL THEN 3
+             WHEN p.process_id IS NULL AND p.hotel_id IS NOT NULL THEN 2
+             WHEN p.process_id IS NULL AND p.hotel_id IS NULL THEN 1
              ELSE 0
            END as specificity_score
     FROM tbl_approval_policies p
     WHERE p.entity_type = $1
       AND p.hospitality_company_id = $2
       AND p.is_active = true
-      AND (
-        -- Match exact process OR generic policy (process_id IS NULL)
-        (p.process_id = $5 OR p.process_id IS NULL)
-      )
-      AND (
-        -- Match company + hotel + department (most specific)
-        (p.department_id = $4 AND p.hotel_id = $3)
-        -- OR Match company + hotel
-        OR (p.department_id IS NULL AND p.hotel_id = $3)
-        -- OR Match company only (fallback)
-        OR (p.department_id IS NULL AND p.hotel_id IS NULL)
-      )
+      AND p.department_id IS NULL
+      AND (p.process_id = $4 OR p.process_id IS NULL)
+      AND (p.hotel_id = $3 OR p.hotel_id IS NULL)
     ORDER BY specificity_score DESC, p.created_at DESC
     LIMIT 1
-  `, [entity_type, hospitality_company_id, hotel_id, department_id, process_id]);
+  `, [entity_type, hospitality_company_id, hotel_id, process_id]);
 
   return policies.length > 0 ? policies[0] : null;
 }
@@ -1779,39 +1776,64 @@ export async function deletePolicySteps(approval_policy_id) {
  * @param {number|null} department_id - Department ID for filtering (optional)
  * @returns {Array<number>} Array of user IDs
  */
-async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, t = db, initiatedBy = null) {
+async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, departmentAccessType = null, t = db, initiatedBy = null) {
   const userIds = [];
 
   if (step.approver_source_type === 'USER') {
-    // Direct user assignment - verify user has access to this scope
-    const hasAccess = await userHasFullScopeAccess(step.approver_source_id, hospitality_company_id, hotel_id, department_id, t);
-    if (hasAccess) {
-      const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
-      if (user) userIds.push(user.id);
+    // For USER type: check if user belongs to the department based on access type
+    if (departmentAccessType === 'INDIVIDUAL' && department_id) {
+      // INDIVIDUAL: user must belong to the specific department
+      const hasCompanyAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
+      const belongsToDept = await userBelongsToDepartment(step.approver_source_id, department_id, t);
+      if (hasCompanyAccess && belongsToDept) {
+        const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
+        if (user) userIds.push(user.id);
+      }
+    } else {
+      // ALL or no department: just validate company/hotel access (no department filter)
+      const hasAccess = await userHasHospitalityAccess(step.approver_source_id, hospitality_company_id, hotel_id, t);
+      if (hasAccess) {
+        const user = await t.oneOrNone('SELECT id FROM tbl_users WHERE id = $1 AND status = 1', [step.approver_source_id]);
+        if (user) userIds.push(user.id);
+      }
     }
   } else if (step.approver_source_type === 'ROLE') {
-    // Find all active users with this role who have access to this hospitality context
-    // and belong to the department if specified
-    const users = await t.any(`
-      SELECT DISTINCT u.id
-      FROM tbl_users u
-      JOIN tbl_user_role_scopes urs ON u.id = urs.user_id AND urs.role_id = $1
-      JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
-      ${department_id ? 'JOIN tbl_user_department ud ON u.id = ud.user_id AND ud.department_id = $5' : ''}
-      WHERE u.status = 1
-        AND hum.hospitality_company_id = $2
-        AND (
-          ($3::int IS NULL AND hum.mapping_type = 0)
-          OR (hum.hospitality_hotel_id = $3)
-          OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
-        )
-    `, department_id
-      ? [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id, department_id]
-      : [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id]
-    );
-    userIds.push(...users.map(u => u.id));
+    if (departmentAccessType === 'INDIVIDUAL' && department_id) {
+      // INDIVIDUAL: only users with this role who ALSO belong to the specific department
+      const users = await t.any(`
+        SELECT DISTINCT u.id
+        FROM tbl_users u
+        JOIN tbl_user_role_scopes urs ON u.id = urs.user_id AND urs.role_id = $1
+        JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
+        JOIN tbl_user_department ud ON u.id = ud.user_id AND ud.department_id = $5
+        WHERE u.status = 1
+          AND hum.hospitality_company_id = $2
+          AND (
+            ($3::int IS NULL AND hum.mapping_type = 0)
+            OR (hum.hospitality_hotel_id = $3)
+            OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
+          )
+      `, [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id, department_id]);
+      userIds.push(...users.map(u => u.id));
+    } else {
+      // ALL or no department: get ALL users with this role in company/hotel (no department filter)
+      const users = await t.any(`
+        SELECT DISTINCT u.id
+        FROM tbl_users u
+        JOIN tbl_user_role_scopes urs ON u.id = urs.user_id AND urs.role_id = $1
+        JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
+        WHERE u.status = 1
+          AND hum.hospitality_company_id = $2
+          AND (
+            ($3::int IS NULL AND hum.mapping_type = 0)
+            OR (hum.hospitality_hotel_id = $3)
+            OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL)
+          )
+      `, [step.approver_source_id, hospitality_company_id, hotel_id, hotel_id]);
+      userIds.push(...users.map(u => u.id));
+    }
   } else if (step.approver_source_type === 'DEPARTMENT') {
-    // Find all active users in this department who have access to this hospitality context
+    // DEPARTMENT type: always resolve to users in the specified department (unchanged)
     const users = await t.any(`
       SELECT DISTINCT u.id
       FROM tbl_users u
@@ -1848,26 +1870,23 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
  * @param {Object} t - Transaction context
  * @returns {Promise<boolean>} - True if user is final approver
  */
-async function isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, department_id, t) {
+async function isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, department_id, departmentAccessType, t) {
   if (!policySteps || policySteps.length === 0) {
     return false;
   }
 
-  // Get the last step (highest step_order)
   const lastStep = policySteps[policySteps.length - 1];
 
-  // Resolve approvers for the last step WITHOUT excluding the creator
-  // Pass null as initiatedBy to include all approvers
   const finalStepApprovers = await resolveApprovers(
     lastStep,
     hospitality_company_id,
     hotel_id,
     department_id,
+    departmentAccessType,
     t,
-    null // Don't exclude creator - we want to check if they're in the final step
+    null
   );
 
-  // Check if the user is in the final step's approvers (ensure array for .includes)
   const approverIds = Array.isArray(finalStepApprovers) ? finalStepApprovers : [];
   return approverIds.includes(userId);
 }
@@ -1934,7 +1953,6 @@ export async function createApprovalInstance({
       }
     } else {
       policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id, process_id }, t);
-      console.log("FOUND POLICY:", policy)
       if (!policy) {
         throw new Error(`No approval policy found for ${entity_type} in this scope`);
       }
@@ -1962,9 +1980,16 @@ export async function createApprovalInstance({
     const instanceSteps = [];
     let stepNumber = 0; // Track sequential step numbering
 
+    // Look up department access type for department-aware approver resolution
+    let departmentAccessType = null;
+    if (department_id) {
+      const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [department_id]);
+      departmentAccessType = deptRow?.access_type || 'INDIVIDUAL';
+    }
+
     for (const policyStep of policySteps) {
-      // Resolve approvers for this step (pass initiated_by to exclude creator)
-      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, department_id, t, initiated_by);
+      // Resolve approvers for this step with department access type awareness
+      const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, department_id, departmentAccessType, t, initiated_by);
 
       // Skip step if no approvers remain after excluding creator
       if (approverUserIds.length === 0) {
@@ -2056,32 +2081,22 @@ async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, h
   const policies = await t.any(`
     SELECT p.*,
            CASE
-             -- Process-specific policies (higher priority)
-             WHEN p.process_id IS NOT NULL AND p.department_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 8
-             WHEN p.process_id IS NOT NULL AND p.department_id IS NULL AND p.hotel_id IS NOT NULL THEN 7
-             WHEN p.process_id IS NOT NULL AND p.department_id IS NULL AND p.hotel_id IS NULL THEN 6
-             -- Generic policies (fallback, lower priority)
-             WHEN p.process_id IS NULL AND p.department_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 5
-             WHEN p.process_id IS NULL AND p.department_id IS NULL AND p.hotel_id IS NOT NULL THEN 4
-             WHEN p.process_id IS NULL AND p.department_id IS NULL AND p.hotel_id IS NULL THEN 3
+             WHEN p.process_id IS NOT NULL AND p.hotel_id IS NOT NULL THEN 4
+             WHEN p.process_id IS NOT NULL AND p.hotel_id IS NULL THEN 3
+             WHEN p.process_id IS NULL AND p.hotel_id IS NOT NULL THEN 2
+             WHEN p.process_id IS NULL AND p.hotel_id IS NULL THEN 1
              ELSE 0
            END as specificity_score
     FROM tbl_approval_policies p
     WHERE p.entity_type = $1
       AND p.hospitality_company_id = $2
       AND p.is_active = true
-      AND (
-        -- Match exact process OR generic policy (process_id IS NULL)
-        (p.process_id = $5 OR p.process_id IS NULL)
-      )
-      AND (
-        (p.department_id = $4 AND p.hotel_id = $3)
-        OR (p.department_id IS NULL AND p.hotel_id = $3)
-        OR (p.department_id IS NULL AND p.hotel_id IS NULL)
-      )
+      AND p.department_id IS NULL
+      AND (p.process_id = $4 OR p.process_id IS NULL)
+      AND (p.hotel_id = $3 OR p.hotel_id IS NULL)
     ORDER BY specificity_score DESC, p.created_at DESC
     LIMIT 1
-  `, [entity_type, hospitality_company_id, hotel_id, department_id, process_id]);
+  `, [entity_type, hospitality_company_id, hotel_id, process_id]);
 
   return policies.length > 0 ? policies[0] : null;
 }
@@ -2089,10 +2104,10 @@ async function findBestMatchingPolicyTx({ entity_type, hospitality_company_id, h
 // Export helper function to check if user is final approver
 export async function checkIfUserIsFinalApprover(userId, entity_type, hospitality_company_id, hotel_id, department_id, txContext = null) {
   const t = txContext || db;
-  
-  // Find the best matching policy
+
+  // Find the best matching master policy
   const policy = await findBestMatchingPolicyTx({ entity_type, hospitality_company_id, hotel_id, department_id }, t);
-  
+
   if (!policy) {
     return false;
   }
@@ -2108,8 +2123,99 @@ export async function checkIfUserIsFinalApprover(userId, entity_type, hospitalit
     return false;
   }
 
-  // Check if user is final approver
-  return await isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, department_id, t);
+  // Look up department access type
+  let departmentAccessType = null;
+  if (department_id) {
+    const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [department_id]);
+    departmentAccessType = deptRow?.access_type || 'INDIVIDUAL';
+  }
+
+  // Check if user is final approver with department access type awareness
+  return await isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, department_id, departmentAccessType, t);
+}
+
+/**
+ * Get department sub-graph preview for a master policy
+ * Shows how the master policy maps to each department based on access type
+ */
+export async function getDepartmentSubGraphPreview(policyId, hospitality_company_id, hotel_id) {
+  // Get the policy with steps
+  const policy = await db.oneOrNone('SELECT * FROM tbl_approval_policies WHERE id = $1 AND is_active = true', [policyId]);
+  if (!policy) throw new Error('Policy not found or inactive');
+
+  const steps = await db.any(`
+    SELECT s.*,
+           CASE
+             WHEN s.approver_source_type = 'USER' THEN (SELECT name FROM tbl_users WHERE id = s.approver_source_id)
+             WHEN s.approver_source_type = 'ROLE' THEN (SELECT title FROM tbl_roles WHERE id = s.approver_source_id)
+             WHEN s.approver_source_type = 'DEPARTMENT' THEN (SELECT title FROM tbl_department WHERE id = s.approver_source_id)
+             ELSE NULL
+           END as approver_source_name
+    FROM tbl_approval_policy_steps s
+    WHERE approval_policy_id = $1
+    ORDER BY step_order ASC
+  `, [policyId]);
+
+  // Get departments scoped to the company/hotel (only departments that have at least one user mapped to this company/hotel)
+  const effectiveCompanyId = hospitality_company_id || policy.hospitality_company_id;
+  const effectiveHotelId = hotel_id || policy.hotel_id;
+
+  const departments = await db.any(`
+    SELECT DISTINCT d.id, d.title, d.access_type
+    FROM tbl_department d
+    JOIN tbl_user_department ud ON d.id = ud.department_id
+    JOIN tbl_hospitality_user_mappings hum ON ud.user_id = hum.user_id
+    WHERE hum.hospitality_company_id = $1
+      AND ($2::int IS NULL OR hum.mapping_type = 0 OR hum.hospitality_hotel_id = $2)
+    ORDER BY d.access_type DESC, d.title ASC
+  `, [effectiveCompanyId, effectiveHotelId || null]);
+
+  const subgraphs = [];
+
+  for (const dept of departments) {
+    const deptSteps = [];
+    for (const step of steps) {
+      const approvers = await resolveApprovers(
+        step,
+        hospitality_company_id || policy.hospitality_company_id,
+        hotel_id || policy.hotel_id,
+        dept.id,
+        dept.access_type,
+        db,
+        null
+      );
+
+      // Get approver details
+      let approverDetails = [];
+      if (approvers.length > 0) {
+        approverDetails = await db.any(`
+          SELECT id, name, email FROM tbl_users WHERE id IN ($1:csv) AND status = 1
+        `, [approvers]);
+      }
+
+      deptSteps.push({
+        step_order: step.step_order,
+        approver_source_type: step.approver_source_type,
+        approver_source_name: step.approver_source_name,
+        decision_rule: step.decision_rule,
+        approvers: approverDetails,
+        approver_count: approverDetails.length,
+        will_skip: approverDetails.length === 0
+      });
+    }
+
+    subgraphs.push({
+      department: { id: dept.id, title: dept.title, access_type: dept.access_type },
+      steps: deptSteps,
+      active_steps: deptSteps.filter(s => !s.will_skip).length,
+      will_auto_approve: deptSteps.every(s => s.will_skip)
+    });
+  }
+
+  return {
+    master_policy: { ...policy, steps },
+    department_subgraphs: subgraphs
+  };
 }
 
 /**
@@ -2375,17 +2481,21 @@ export async function submitApprovalAction({
     }
 
     // 4. Validate user belongs to the policy scope
-    // Check hospitality access + department membership
-    const hasAccess = await userHasFullScopeAccess(
-      approver_user_id,
-      instance.hospitality_company_id,
-      instance.hotel_id,
-      instance.department_id,
-      t
-    );
-
-    if (!hasAccess) {
+    // Check hospitality access; only check department membership for INDIVIDUAL access departments
+    const hasHospAccess = await userHasHospitalityAccess(approver_user_id, instance.hospitality_company_id, instance.hotel_id, t);
+    if (!hasHospAccess) {
       throw new Error('User does not belong to the approval policy scope');
+    }
+    if (instance.department_id) {
+      const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [instance.department_id]);
+      const deptAccessType = deptRow?.access_type || 'INDIVIDUAL';
+      if (deptAccessType === 'INDIVIDUAL') {
+        const belongsToDept = await userBelongsToDepartment(approver_user_id, instance.department_id, t);
+        if (!belongsToDept) {
+          throw new Error('User does not belong to the approval policy scope');
+        }
+      }
+      // For ALL access_type: skip department check — approver was validly resolved at instance creation
     }
 
     // 5. Record the action in audit log

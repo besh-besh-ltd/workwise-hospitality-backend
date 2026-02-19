@@ -20,7 +20,8 @@ import generalModel, {
   createApprovalProcess,
   getApprovalProcesses,
   updateApprovalProcess,
-  deleteApprovalProcess
+  deleteApprovalProcess,
+  getDepartmentSubGraphPreview
 } from '../../models/generalModel.js';
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { handleRFQPostApproval, handleRFQRejection } from '../rfq/rfqController.js';
@@ -353,6 +354,7 @@ const hospitalityApprovalController = {
         department_id,
         process_id,
         is_active,
+        is_master,
         steps,
         id
       } = req.body;
@@ -371,7 +373,8 @@ const hospitalityApprovalController = {
           hotel_id,
           department_id,
           process_id,
-          is_active
+          is_active,
+          is_master
         });
         if (steps && steps.length > 0) {
           await deletePolicySteps(id);
@@ -401,7 +404,8 @@ const hospitalityApprovalController = {
           department_id,
           process_id: process_id ? parseInt(process_id) : null,
           created_by,
-          is_active
+          is_active,
+          is_master: is_master || false
         });
         if (steps && steps.length > 0) {
           await insertPolicySteps(steps, policy.id);
@@ -412,7 +416,7 @@ const hospitalityApprovalController = {
       res.status(id ? 200 : 201).json({ status: 1, data: fullPolicy });
     } catch (e) {
       logError(e);
-      res.status(400).json({ status: 3, message: e.message });
+      res.status(400).json({ status: 3, message: e.message || e?.detail || 'Failed to save approval policy' });
     }
   },
 
@@ -480,6 +484,7 @@ const hospitalityApprovalController = {
         hospitality_company_id,
         hotel_id,
         department_id,
+        process_id,
         approval_policy_id,
         metadata
       } = req.body;
@@ -502,6 +507,7 @@ const hospitalityApprovalController = {
         hospitality_company_id: parseInt(hospitality_company_id),
         hotel_id: hotel_id ? parseInt(hotel_id) : null,
         department_id: department_id ? parseInt(department_id) : null,
+        process_id: process_id ? parseInt(process_id) : null,
         approval_policy_id: approval_policy_id ? parseInt(approval_policy_id) : null,
         initiated_by,
         metadata: metadata || {}
@@ -694,7 +700,28 @@ const hospitalityApprovalController = {
       logError(e);
       res.status(400).json({ status: 3, message: e.message });
     }
-  }
+  },
+
+  getDepartmentPreview: async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { hospitality_company_id, hotel_id } = req.query;
+
+      const result = await getDepartmentSubGraphPreview(
+        parseInt(id),
+        hospitality_company_id ? parseInt(hospitality_company_id) : null,
+        hotel_id ? parseInt(hotel_id) : null
+      );
+
+      return res.json({ status: true, data: result });
+    } catch (err) {
+      console.error('getDepartmentPreview error:', err);
+      return res.status(err.message.includes('not found') ? 404 : 500).json({
+        status: false,
+        message: err.message
+      });
+    }
+  },
 };
 
 /**
@@ -708,7 +735,7 @@ const processController = {
    */
   async createProcess(req, res) {
     try {
-      const { name, description } = req.body;
+      const { name, description, process_type } = req.body;
       const created_by = req.user?.id;
       const company_id = req.user.company_id;
 
@@ -723,7 +750,8 @@ const processController = {
         company_id: parseInt(company_id),
         name,
         description,
-        created_by
+        created_by,
+        process_type: process_type || 'RFQ'
       });
 
       res.status(201).json({ status: 1, data: process });
@@ -739,12 +767,13 @@ const processController = {
    */
   async getProcesses(req, res) {
     try {
-      const { include_inactive } = req.query;
+      const { include_inactive, process_type } = req.query;
       const { company_id } = req.user;
 
       const data = await getApprovalProcesses({
         company_id: company_id ? parseInt(company_id) : undefined,
-        include_inactive: include_inactive === 'true'
+        include_inactive: include_inactive === 'true',
+        process_type: process_type || null
       });
 
       res.json({ status: 1, data });
@@ -761,12 +790,13 @@ const processController = {
   async updateProcess(req, res) {
     try {
       const { id } = req.params;
-      const { name, description, is_active } = req.body;
+      const { name, description, is_active, process_type } = req.body;
 
       const patch = {};
       if (name !== undefined) patch.name = name;
       if (description !== undefined) patch.description = description;
       if (is_active !== undefined) patch.is_active = is_active;
+      if (process_type !== undefined) patch.process_type = process_type;
 
       const data = await updateApprovalProcess(parseInt(id), patch);
 

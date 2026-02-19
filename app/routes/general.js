@@ -129,6 +129,7 @@ GeneralRoutes.get(
   acl([7, 2]),
   hospitalityApprovalController.getApprovalPolicies
 );
+GeneralRoutes.get('/hospitality/approval/policies/:id/department-preview', passportSignIn, acl([7, 2]), hospitalityApprovalController.getDepartmentPreview);
 GeneralRoutes.get(
   '/hospitality/approval/policies/:id',
   passportSignIn,

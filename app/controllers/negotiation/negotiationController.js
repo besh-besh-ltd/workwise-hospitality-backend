@@ -1124,6 +1124,7 @@ const NegotiationController = {
                   hospitality_company_id: rfqData.hospitality_company_id,
                   hotel_id: rfqData.hotel_id || null,
                   department_id: rfqData.department_id || null,
+                  process_id: rfqData.process_id || null,
                   initiated_by: user_id,
                   metadata: {
                     rfq_id: rfq_id,
@@ -1393,6 +1394,7 @@ const NegotiationController = {
                   hospitality_company_id: rfqData.hospitality_company_id,
                   hotel_id: rfqData.hotel_id || null,
                   department_id: rfqData.department_id || null,
+                  process_id: rfqData.process_id || null,
                   initiated_by: user_id,
                   metadata: {
                     rfq_id: metadata.rfq_id,
