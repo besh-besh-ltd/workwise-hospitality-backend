@@ -667,7 +667,7 @@ const hospitalityApprovalController = {
                                 },
                                 finalized_vendor_id: selectedQuote.vendor_id
                               }
-                            }, { id: approver_user_id, company_id: rfqData.company_id }, t);
+                            }, { id: approver_user_id, company_id: req.user.company_id }, t);
                           }
                         } catch (poError) {
                           console.error(`Error creating PO for vendor ${selectedQuote.vendor_id}:`, poError);
