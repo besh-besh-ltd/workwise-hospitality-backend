@@ -208,7 +208,7 @@ export const draftPurchaseOrder = async (rfq_id, project_id, quote_item_id, tota
           `INSERT INTO tbl_purchase_order_product
           (purchase_order_id, rfq_product_id, quote_id, quantity, unit, unit_price, charges_meta, total_price)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [existing_po_id, rfq_product_id, quote_item_id, quantity, unit, charges_meta, total_value]
+          [existing_po_id, rfq_product_id, quote_item_id, quantity, unit, unit_price, charges_meta, total_value]
         )
       } else {
         // 2. Insert new PO record
