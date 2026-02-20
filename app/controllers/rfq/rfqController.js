@@ -8915,11 +8915,86 @@ const rfqController = {
           
           let result = null;
           let arcApprovalCreated = false;
-          
+          let negotiationQuoteApprovalPending = false;
+
           // Route-based logic: PO route creates PO draft, ARC route skips PO
           if (selectedRoute === 'PO') {
-            // PO Route: Create PO draft
-            result = await draftPO({...req.body, quote_id: quote_item_id}, req.user, t);
+            // Check if NEGOTIATION_QUOTE approval policy exists for this RFQ
+            let approvalTriggered = false;
+            try {
+              const rfqData = await rfqModel.getRfqWithHospitalityDetails(rfq_id, t);
+              if (rfqData && rfqData.hospitality_company_id) {
+                const rfqProduct = await rfqModel.getRfqProductByVariant(rfq_id, product_variant_id, variant, t);
+                if (rfqProduct) {
+                  // Check for existing pending NEGOTIATION_QUOTE approval
+                  const existingApprovals = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfqProduct.id, t);
+                  const existingPending = existingApprovals.find(inst => inst.status === 'PENDING');
+
+                  if (!existingPending) {
+                    // Try to create NEGOTIATION_QUOTE approval instance
+                    const approvalResult = await createApprovalInstance({
+                      entity_type: 'NEGOTIATION_QUOTE',
+                      entity_id: rfqProduct.id,
+                      hospitality_company_id: rfqData.hospitality_company_id,
+                      hotel_id: rfqData.hotel_id || null,
+                      department_id: rfqData.department_id || null,
+                      process_id: rfqData.process_id || null,
+                      initiated_by: req.user.id,
+                      metadata: {
+                        rfq_id,
+                        rfq_no,
+                        rfq_product_id: rfqProduct.id,
+                        is_tender: rfqData.is_tender || 0,
+                        product_variant_id,
+                        variant,
+                        vendor_id,
+                        quote_id,
+                        quote_item_id,
+                        po_payload: { ...req.body, quote_id: quote_item_id },
+                        po_user: { id: req.user.id, company_id: req.user.company_id }
+                      },
+                      txContext: t
+                    });
+
+                    if (approvalResult && !approvalResult.autoApproved) {
+                      // Approval is pending - do NOT create PO yet
+                      approvalTriggered = true;
+                      negotiationQuoteApprovalPending = true;
+
+                      await recordLifecycleEvent({
+                        entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+                        entity_id: rfq_id,
+                        stage: 'NEGOTIATION_QUOTES_SUBMITTED',
+                        action: 'SUBMIT_FOR_APPROVAL',
+                        performed_by: req.user.id,
+                        metadata: {
+                          rfq_product_id: rfqProduct.id,
+                          approval_instance_id: approvalResult.instance?.id,
+                          vendor_id,
+                          quote_id
+                        },
+                        remarks: null,
+                        txContext: t
+                      });
+                    } else if (approvalResult && approvalResult.autoApproved) {
+                      // Auto-approved (no approvers or creator-only) - create PO immediately
+                      result = await draftPO({...req.body, quote_id: quote_item_id}, req.user, t);
+                      approvalTriggered = true;
+                    }
+                  }
+                }
+              }
+            } catch (approvalError) {
+              // If no policy found or error, fall through to direct PO creation
+              if (!approvalError.message?.includes('No approval policy found')) {
+                console.error('Error checking NEGOTIATION_QUOTE approval:', approvalError);
+              }
+            }
+
+            // Fallback: if no approval was triggered, create PO directly
+            if (!approvalTriggered) {
+              result = await draftPO({...req.body, quote_id: quote_item_id}, req.user, t);
+            }
           }
           
           await sendWinningNotificaion(
@@ -9084,11 +9159,12 @@ const rfqController = {
             reFinalized,
             result,
             arcApprovalCreated,
+            negotiationQuoteApprovalPending,
             route_type: selectedRoute
           };
         });
-      
-      // 👇 Check if an entry already exists 
+
+      // 👇 Check if an entry already exists
       //Record the finalization activity with status 'FIN'
       const existingActivity = await rfqModel.checkIfExists(
         'tbl_quote_activity',
@@ -9105,7 +9181,18 @@ const rfqController = {
       } else {
         console.log(`Skipped insert - already exists for rfq_id ${rfq_id} and user ${req.user.id}`);
       }
-    
+
+        // If NEGOTIATION_QUOTE approval is pending, return appropriate message
+        if (response.negotiationQuoteApprovalPending) {
+          return res.status(200).json({
+            status: 1,
+            message: 'Vendor finalized! Approval is required before Purchase Order can be created.',
+            data: response.result,
+            isRefinalized: response.reFinalized,
+            approvalPending: true
+          });
+        }
+
         return res.status(200).json({
           status: 1,
           message: 'A Purchase Order has been drafted successfully',
