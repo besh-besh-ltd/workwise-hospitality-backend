@@ -366,7 +366,8 @@ const NegotiationController = {
         entity_type: 'NEGOTIATION',
         hospitality_company_id: rfqData.hospitality_company_id,
         hotel_id: rfqData.hotel_id || null,
-        department_id: rfqData.department_id || null
+        department_id: rfqData.department_id || null,
+        process_id: rfqData.process_id || null
       });
 
       if (!approvalPolicy) {
