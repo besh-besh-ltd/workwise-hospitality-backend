@@ -21,11 +21,15 @@ import generalModel, {
   getApprovalProcesses,
   updateApprovalProcess,
   deleteApprovalProcess,
-  getDepartmentSubGraphPreview
+  getDepartmentSubGraphPreview,
+  recordLifecycleEvent
 } from '../../models/generalModel.js';
 import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { handleRFQPostApproval, handleRFQRejection } from '../rfq/rfqController.js';
+import { handleNegotiationPostApproval } from '../negotiation/negotiationController.js';
+import { draftPO } from '../po/purchaseOrderController.js';
 import rfqModel from '../../models/rfqModel.js';
+import db from '../../config/dbConn.js';
 
 const generalController = {
   getStates: async (req, res, next) => {
@@ -577,6 +581,51 @@ const hospitalityApprovalController = {
               await handleRFQRejection(parseInt(approval_instance_id), approver_user_id, comment);
             }
           }
+
+          // Handle NEGOTIATION post-approval
+          if (instance && instance.entity_type === 'NEGOTIATION' && result.instance_status === 'APPROVED') {
+            try {
+              await handleNegotiationPostApproval(parseInt(approval_instance_id), approver_user_id);
+            } catch (negError) {
+              console.error('Error in NEGOTIATION post-approval:', negError);
+            }
+          }
+
+          // Handle NEGOTIATION_QUOTE post-approval — create PO after commercial approval
+          if (instance && instance.entity_type === 'NEGOTIATION_QUOTE' && result.instance_status === 'APPROVED') {
+            try {
+              const metadata = typeof instance.metadata === 'string'
+                ? JSON.parse(instance.metadata)
+                : (instance.metadata || {});
+
+              // If PO payload was stored in metadata, create PO now
+              if (metadata.po_payload && metadata.po_user) {
+                await db.tx(async (t) => {
+                  await draftPO(metadata.po_payload, metadata.po_user, t);
+
+                  const entityType = metadata.is_tender === 1 ? 'TENDER' : 'RFQ';
+                  await recordLifecycleEvent({
+                    entity_type: entityType,
+                    entity_id: metadata.rfq_id,
+                    stage: 'NEGOTIATION_QUOTES_APPROVED',
+                    action: 'APPROVE',
+                    performed_by: approver_user_id,
+                    metadata: {
+                      approval_instance_id: parseInt(approval_instance_id),
+                      rfq_product_id: metadata.rfq_product_id,
+                      vendor_id: metadata.vendor_id,
+                      quote_id: metadata.quote_id
+                    },
+                    remarks: comment,
+                    txContext: t
+                  });
+                });
+              }
+            } catch (negQuoteError) {
+              console.error('Error in NEGOTIATION_QUOTE post-approval (PO creation):', negQuoteError);
+            }
+          }
+
           // Handle TECHNICAL rejection - update round status so evaluator can resubmit
           if (instance && instance.entity_type === 'TECHNICAL' && result.instance_status === 'REJECTED') {
             try {
