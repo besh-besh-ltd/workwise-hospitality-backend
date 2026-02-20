@@ -13,6 +13,7 @@ import {
   resetQuoteFinalizationForSendback
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
+import { draftPO } from '../po/purchaseOrderController.js';
 
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
@@ -1436,27 +1437,80 @@ const NegotiationController = {
               }
             });
           } else {
-            // For non-hospitality or non-tender: Just finalize (no ARC required)
-            await addQuotesToFinalization(
-              metadata.rfq_id,
-              rfq_product_id,
-              quotesForFinalization,
-              user_id,
-              rfqData
-            );
-
-            // Record lifecycle event
-            await recordLifecycleEvent({
-              entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
-              entity_id: metadata.rfq_id,
-              stage: 'NEGOTIATION_QUOTES_APPROVED',
-              action: 'APPROVE',
-              performed_by: user_id,
-              metadata: {
-                approval_instance_id: pendingInstance.id,
+            // For non-hospitality or non-tender: Finalize and create PO drafts
+            await db.tx(async (t) => {
+              await addQuotesToFinalization(
+                metadata.rfq_id,
                 rfq_product_id,
-                quote_ids: metadata.selected_quotes.map(q => q.quote_id),
-                vendor_ids: metadata.selected_quotes.map(q => q.vendor_id)
+                quotesForFinalization,
+                user_id,
+                rfqData,
+                t
+              );
+
+              // Record lifecycle event
+              await recordLifecycleEvent({
+                entity_type: rfqData.is_tender === 1 ? 'TENDER' : 'RFQ',
+                entity_id: metadata.rfq_id,
+                stage: 'NEGOTIATION_QUOTES_APPROVED',
+                action: 'APPROVE',
+                performed_by: user_id,
+                metadata: {
+                  approval_instance_id: pendingInstance.id,
+                  rfq_product_id,
+                  quote_ids: metadata.selected_quotes.map(q => q.quote_id),
+                  vendor_ids: metadata.selected_quotes.map(q => q.vendor_id)
+                },
+                txContext: t
+              });
+
+              // Create PO drafts for each finalized vendor (RFQ flow)
+              const product = await rfqModel.getRfqProductById(rfq_product_id, metadata.rfq_id, t);
+              if (product) {
+                for (const selectedQuote of metadata.selected_quotes) {
+                  try {
+                    // Get vendor's original quote item for quantity/unit
+                    const vendorQuoteItem = await t.oneOrNone(
+                      `SELECT qi.quantity, qi.unit, qi.unit_price, qi.id as quote_item_id,
+                              qi.freight_price, qi.freight_mode, qi.package_price, qi.package_mode, qi.tax, qi.tax_mode
+                       FROM tbl_quote_items qi
+                       JOIN tbl_quotes q ON q.id = qi.quote_id
+                       WHERE q.rfq_id = $1 AND qi.product_variant_id = $2 AND qi.variant = $3 AND q.created_by = $4
+                       ORDER BY q.timestamp DESC LIMIT 1`,
+                      [metadata.rfq_id, product.product_variant_id, product.variant, selectedQuote.vendor_id]
+                    );
+
+                    if (vendorQuoteItem) {
+                      const negotiationPrice = parseFloat(selectedQuote.quoted_price);
+                      const quantity = parseFloat(vendorQuoteItem.quantity) || 1;
+                      const totalValue = quantity * negotiationPrice;
+
+                      await draftPO({
+                        rfq_id: metadata.rfq_id,
+                        project_id: rfqData.project_id,
+                        total_value: totalValue,
+                        quote_item_id: vendorQuoteItem.quote_item_id,
+                        product_info: {
+                          rfq_product_id,
+                          quantity: vendorQuoteItem.quantity,
+                          unit: vendorQuoteItem.unit || 'N/A',
+                          unit_price: negotiationPrice,
+                          charges_meta: {
+                            freight_price: vendorQuoteItem.freight_price,
+                            freight_mode: vendorQuoteItem.freight_mode,
+                            package_price: vendorQuoteItem.package_price,
+                            package_mode: vendorQuoteItem.package_mode,
+                            tax: vendorQuoteItem.tax,
+                            tax_mode: vendorQuoteItem.tax_mode
+                          },
+                          finalized_vendor_id: selectedQuote.vendor_id
+                        }
+                      }, { id: user_id, company_id: req.user.company_id }, t);
+                    }
+                  } catch (poError) {
+                    console.error(`Error creating PO for vendor ${selectedQuote.vendor_id}:`, poError);
+                  }
+                }
               }
             });
           }

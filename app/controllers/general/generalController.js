@@ -598,8 +598,8 @@ const hospitalityApprovalController = {
                 ? JSON.parse(instance.metadata)
                 : (instance.metadata || {});
 
-              // If PO payload was stored in metadata, create PO now
               if (metadata.po_payload && metadata.po_user) {
+                // Path A: PO payload stored by rfqController.finalize
                 await db.tx(async (t) => {
                   await draftPO(metadata.po_payload, metadata.po_user, t);
 
@@ -620,6 +620,78 @@ const hospitalityApprovalController = {
                     txContext: t
                   });
                 });
+              } else if (metadata.rfq_id && metadata.selected_quotes?.length > 0 && metadata.is_tender !== 1) {
+                // Path B: Negotiation flow — construct PO from selected quotes
+                const rfqProductId = metadata.rfq_product_id || instance.entity_id;
+                const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${metadata.rfq_id}`);
+                const rfqData = rfq[0];
+
+                if (rfqData) {
+                  await db.tx(async (t) => {
+                    const product = await rfqModel.getRfqProductById(rfqProductId, metadata.rfq_id, t);
+                    if (product) {
+                      for (const selectedQuote of metadata.selected_quotes) {
+                        try {
+                          const vendorQuoteItem = await t.oneOrNone(
+                            `SELECT qi.quantity, qi.unit, qi.unit_price, qi.id as quote_item_id,
+                                    qi.freight_price, qi.freight_mode, qi.package_price, qi.package_mode, qi.tax, qi.tax_mode
+                             FROM tbl_quote_items qi
+                             JOIN tbl_quotes q ON q.id = qi.quote_id
+                             WHERE q.rfq_id = $1 AND qi.product_variant_id = $2 AND qi.variant = $3 AND q.created_by = $4
+                             ORDER BY q.timestamp DESC LIMIT 1`,
+                            [metadata.rfq_id, product.product_variant_id, product.variant, selectedQuote.vendor_id]
+                          );
+
+                          if (vendorQuoteItem) {
+                            const negotiationPrice = parseFloat(selectedQuote.quoted_price);
+                            const quantity = parseFloat(vendorQuoteItem.quantity) || 1;
+                            const totalValue = quantity * negotiationPrice;
+
+                            await draftPO({
+                              rfq_id: metadata.rfq_id,
+                              project_id: rfqData.project_id,
+                              total_value: totalValue,
+                              quote_item_id: vendorQuoteItem.quote_item_id,
+                              product_info: {
+                                rfq_product_id: rfqProductId,
+                                quantity: vendorQuoteItem.quantity,
+                                unit: vendorQuoteItem.unit || 'N/A',
+                                unit_price: negotiationPrice,
+                                charges_meta: {
+                                  freight_price: vendorQuoteItem.freight_price,
+                                  freight_mode: vendorQuoteItem.freight_mode,
+                                  package_price: vendorQuoteItem.package_price,
+                                  package_mode: vendorQuoteItem.package_mode,
+                                  tax: vendorQuoteItem.tax,
+                                  tax_mode: vendorQuoteItem.tax_mode
+                                },
+                                finalized_vendor_id: selectedQuote.vendor_id
+                              }
+                            }, { id: approver_user_id, company_id: rfqData.company_id }, t);
+                          }
+                        } catch (poError) {
+                          console.error(`Error creating PO for vendor ${selectedQuote.vendor_id}:`, poError);
+                        }
+                      }
+                    }
+
+                    await recordLifecycleEvent({
+                      entity_type: 'RFQ',
+                      entity_id: metadata.rfq_id,
+                      stage: 'NEGOTIATION_QUOTES_APPROVED',
+                      action: 'APPROVE',
+                      performed_by: approver_user_id,
+                      metadata: {
+                        approval_instance_id: parseInt(approval_instance_id),
+                        rfq_product_id: rfqProductId,
+                        quote_ids: metadata.selected_quotes.map(q => q.quote_id),
+                        vendor_ids: metadata.selected_quotes.map(q => q.vendor_id)
+                      },
+                      remarks: comment,
+                      txContext: t
+                    });
+                  });
+                }
               }
             } catch (negQuoteError) {
               console.error('Error in NEGOTIATION_QUOTE post-approval (PO creation):', negQuoteError);
