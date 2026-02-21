@@ -14073,6 +14073,15 @@ getClauses: async (req, res) => {
         });
       }
 
+      // If auto-approved, trigger post-approval processing (mark vendors, update round, send notifications)
+      if (result.auto_approved && result.approval_instance_id) {
+        try {
+          await handleTechnicalPostApproval(result.approval_instance_id, userId);
+        } catch (postApprovalError) {
+          console.error('Error in TECHNICAL auto-approve post-approval processing:', postApprovalError);
+        }
+      }
+
       return res.status(200).json({
         status: 1,
         message: result.auto_approved
