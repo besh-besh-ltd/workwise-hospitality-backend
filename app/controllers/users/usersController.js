@@ -1513,7 +1513,8 @@ get_company_users: async (req, res, next) => {
         from: Config.webmasterMail,
         to: email,
         subject: 'Workwise - Email Verification OTP',
-        html: dynamicHtml
+        html: dynamicHtml,
+        is_otp: true
       };
 
       // Send email using existing helper (fire-and-forget) and log for debugging
@@ -1654,7 +1655,8 @@ get_company_users: async (req, res, next) => {
         let mailRecipients = {
           from: Config.webmasterMail,
           subject: `Work wise | Forgot Password OTP`,
-          html: dynamic_html
+          html: dynamic_html,
+          is_otp: true
         };
 
         if (spocList && spocList.length > 0) {

@@ -248,6 +248,12 @@ const getErrorText = (err) => {
 
 const sendMail = (mailOptions) => {
   return new Promise((resolve, reject) => {
+    // Only allow OTP emails through; all other emails are blocked for now
+    if (!mailOptions.is_otp) {
+      console.log('[MAIL] Blocked non-OTP email to:', mailOptions.to, '| Subject:', mailOptions.subject);
+      return resolve(false);
+    }
+
     console.log('[MAIL] sendMail called');
     console.log('[MAIL] To:', mailOptions.to);
     console.log('[MAIL] From:', mailOptions.from);
