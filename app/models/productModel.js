@@ -3188,7 +3188,7 @@ getProductTechSpecByID: async (productId) => {
             pv.updated_by,
             pv.is_deleted,
             p.name as product_name,
-            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+            ARRAY_AGG(c.title ORDER BY CASE WHEN c.parent_id = 0 OR c.parent_id IS NULL THEN 0 ELSE 1 END, c.id) FILTER (WHERE c.title IS NOT NULL) as category_names
           FROM 
             tbl_product_variant pv
           LEFT JOIN 
@@ -3337,7 +3337,7 @@ getProductTechSpecByID: async (productId) => {
             pv.reject_reason_id,
             trr.reject_reason,
             p.name as product_name,
-            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+            ARRAY_AGG(c.title ORDER BY CASE WHEN c.parent_id = 0 OR c.parent_id IS NULL THEN 0 ELSE 1 END, c.id) FILTER (WHERE c.title IS NOT NULL) as category_names
           FROM 
             tbl_product_variant pv
           LEFT JOIN tbl_product_variant_vendor_mapping PVM ON PVM.product_variant_id = PV.id
@@ -4679,7 +4679,7 @@ WHERE m.id = $1;
             END AS partial_word_match,`
                 : ''
             }
-            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
+            ARRAY_AGG(c.title ORDER BY CASE WHEN c.parent_id = 0 OR c.parent_id IS NULL THEN 0 ELSE 1 END, c.id) FILTER (WHERE c.title IS NOT NULL) as category_names
           FROM 
             tbl_product_variant pv
           JOIN 
