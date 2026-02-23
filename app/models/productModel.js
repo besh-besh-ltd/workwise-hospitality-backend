@@ -4679,23 +4679,25 @@ WHERE m.id = $1;
             END AS partial_word_match,`
                 : ''
             }
-            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names
-          FROM 
+            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL) as category_names,
+            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL AND (c.parent_id = 0 OR c.parent_id IS NULL)) as parent_category_names,
+            ARRAY_AGG(DISTINCT c.title) FILTER (WHERE c.title IS NOT NULL AND c.parent_id > 0) as sub_category_names
+          FROM
             tbl_product_variant pv
-          JOIN 
+          JOIN
             tbl_product p ON pv.product_id = p.id
           LEFT JOIN tbl_users TC ON pv.created_by = TC.id
           LEFT JOIN tbl_users TU ON pv.updated_by = TU.id
           LEFT JOIN tbl_users TA ON pv.approved_by = TA.id
-          LEFT JOIN 
+          LEFT JOIN
             tbl_product_categories pc ON p.id = pc.product_id
-          LEFT JOIN 
+          LEFT JOIN
             tbl_category c ON pc.category_id = c.id
 
           ${whereClause}
-          GROUP BY 
+          GROUP BY
             pv.id, pv.product_id, pv.name, pv.status, pv.is_approve,
-            pv.created_at, pv.updated_at, pv.created_by, pv.updated_by, 
+            pv.created_at, pv.updated_at, pv.created_by, pv.updated_by,
             pv.is_deleted, pv.reject_reason_id, p.name, TC.name, TU.name, TA.name
 
           ORDER BY ${
