@@ -1727,7 +1727,13 @@ WHERE NOT EXISTS (
           'response_email', RFQ.response_email,
           'contact_name', RFQ.contact_name,
           'contact_number', RFQ.contact_number,
-          'company_name', RFQ.company_name,
+          'company_name', (
+              SELECT STRING_AGG(DISTINCT hc.name, ', ')
+              FROM tbl_rfq_hotel_mappings rhm
+              JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+              JOIN tbl_hospitality_companies hc ON hc.id = hch.hospitality_company_id
+              WHERE rhm.rfq_id = RFQ.id
+          ),
           'bid_end_date', RFQ.bid_end_date,
           'rfq_type', RFQ.rfq_type,
           'reverse_auction', RFQ.reverse_auction,
