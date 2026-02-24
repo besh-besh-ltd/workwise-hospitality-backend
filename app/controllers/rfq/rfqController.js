@@ -3006,7 +3006,9 @@ INSERT INTO tbl_rfq (
 SELECT
   (SELECT COALESCE(MAX(rfq_no), 100000) + 1 FROM tbl_rfq),
   comment,
-  company_name,
+  (SELECT hc.name FROM tbl_hospitality_company_hotels hch
+   JOIN tbl_hospitality_companies hc ON hc.id = hch.hospitality_company_id
+   WHERE hch.id = $2),
   response_email,
   contact_name,
   contact_number,
@@ -3026,7 +3028,7 @@ SELECT
   is_tender,
   tender_publish_date,
   vendor_clarification_date,
-  hospitality_company_id,
+  (SELECT hch.hospitality_company_id FROM tbl_hospitality_company_hotels hch WHERE hch.id = $2),
   tender_fees,
   $2
 FROM tbl_rfq
@@ -4762,12 +4764,14 @@ const rfqController = {
       const { responseUpdate, allRfqIds, isHospitalityRfq, hasAutoApproved } = await db.tx(async (t) => {
         // Look up hospitality_company_id from the hotel
         let hospitality_company_id = null;
+        let hospitality_company_name = null;
         if (hotel_id) {
           const hotelRecord = await t.oneOrNone(
-            `SELECT hospitality_company_id FROM tbl_hospitality_company_hotels WHERE id = $1 AND is_deleted = 0`,
+            `SELECT HCH.hospitality_company_id, HC.name AS hospitality_company_name FROM tbl_hospitality_company_hotels HCH JOIN tbl_hospitality_companies HC ON HC.id = HCH.hospitality_company_id WHERE HCH.id = $1 AND HCH.is_deleted = 0`,
             [hotel_id]
           );
           hospitality_company_id = hotelRecord?.hospitality_company_id || null;
+          hospitality_company_name = hotelRecord?.hospitality_company_name || null
         }
 
         // Update RFQ with hotel_id, hospitality_company_id
@@ -4776,13 +4780,14 @@ const rfqController = {
         // Then scheduler publishes when tender_publish_date is reached
         const updateResult = await t.any(
           `UPDATE tbl_rfq
-           SET is_published = 0, status = 3, hotel_id = $1, hospitality_company_id = $2
-           WHERE id = $3
+           SET is_published = 0, status = 3, hotel_id = $1, hospitality_company_id = $2, company_name = $3
+           WHERE id = $4
            RETURNING *`,
           [
             hotel_id || null,
             hospitality_company_id,
-            rfq_id
+            hospitality_company_name,
+            rfq_id,
           ]
         );
 
