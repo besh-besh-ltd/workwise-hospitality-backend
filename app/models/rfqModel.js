@@ -3317,6 +3317,21 @@ LIMIT 2;
         SELECT
           RFQ.*,
           P.name AS project_name,
+          (SELECT ai_type.entity_type
+           FROM tbl_approval_instances ai_type
+           JOIN tbl_approval_instance_steps ais_type ON ais_type.approval_instance_id = ai_type.id
+           JOIN tbl_approval_step_approvers asa_type ON asa_type.approval_instance_step_id = ais_type.id
+           WHERE ai_type.status = 'PENDING'
+             AND asa_type.approver_user_id = ${user_id}
+             AND asa_type.status = 'PENDING'
+             AND ais_type.step_order = ai_type.current_step
+             AND (
+               (ai_type.entity_type IN ('RFQ', 'TENDER') AND ai_type.entity_id = RFQ.id)
+               OR (ai_type.entity_type = 'NEGOTIATION_QUOTE' AND ai_type.entity_id IN (SELECT rp.id FROM tbl_rfq_products rp WHERE rp.rfq_id = RFQ.id))
+             )
+           ORDER BY CASE WHEN ai_type.entity_type = 'NEGOTIATION_QUOTE' THEN 0 ELSE 1 END
+           LIMIT 1
+          ) AS pending_approval_type,
           (SELECT COUNT(*)
           FROM tbl_query_messages TQM
           WHERE TQM.receiver_id = ${user_id}
@@ -3424,13 +3439,20 @@ LIMIT 2;
           ) AS "products"
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
-      JOIN tbl_approval_instances ai ON (ai.entity_type = 'RFQ' OR ai.entity_type = 'TENDER') AND ai.entity_id = RFQ.id
-      JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
-      JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
-      WHERE ai.status = 'PENDING'
-        AND asa.approver_user_id = ${user_id}
-        AND asa.status = 'PENDING'
-        AND ais.step_order = ai.current_step
+      WHERE EXISTS (
+        SELECT 1
+        FROM tbl_approval_instances ai
+        JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+        JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
+        WHERE ai.status = 'PENDING'
+          AND asa.approver_user_id = ${user_id}
+          AND asa.status = 'PENDING'
+          AND ais.step_order = ai.current_step
+          AND (
+            (ai.entity_type IN ('RFQ', 'TENDER') AND ai.entity_id = RFQ.id)
+            OR (ai.entity_type = 'NEGOTIATION_QUOTE' AND ai.entity_id IN (SELECT rp.id FROM tbl_rfq_products rp WHERE rp.rfq_id = RFQ.id))
+          )
+      )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
@@ -3465,13 +3487,20 @@ LIMIT 2;
       db.any(
         `SELECT COUNT(*) from tbl_rfq RFQ
         LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
-        JOIN tbl_approval_instances ai ON (ai.entity_type = 'RFQ' OR ai.entity_type = 'TENDER') AND ai.entity_id = RFQ.id
-        JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
-        JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
-        WHERE ai.status = 'PENDING'
-          AND asa.approver_user_id = ${user_id}
-          AND asa.status = 'PENDING'
-          AND ais.step_order = ai.current_step
+        WHERE EXISTS (
+          SELECT 1
+          FROM tbl_approval_instances ai
+          JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+          JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id
+          WHERE ai.status = 'PENDING'
+            AND asa.approver_user_id = ${user_id}
+            AND asa.status = 'PENDING'
+            AND ais.step_order = ai.current_step
+            AND (
+              (ai.entity_type IN ('RFQ', 'TENDER') AND ai.entity_id = RFQ.id)
+              OR (ai.entity_type = 'NEGOTIATION_QUOTE' AND ai.entity_id IN (SELECT rp.id FROM tbl_rfq_products rp WHERE rp.rfq_id = RFQ.id))
+            )
+        )
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)
