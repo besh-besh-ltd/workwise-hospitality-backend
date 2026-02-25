@@ -28,6 +28,7 @@ import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
 import { handleRFQPostApproval, handleRFQRejection } from '../rfq/rfqController.js';
 import { handleNegotiationPostApproval } from '../negotiation/negotiationController.js';
 import { draftPO } from '../po/purchaseOrderController.js';
+import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import db from '../../config/dbConn.js';
 
@@ -601,7 +602,19 @@ const hospitalityApprovalController = {
               if (metadata.po_payload && metadata.po_user) {
                 // Path A: PO payload stored by rfqController.finalize
                 await db.tx(async (t) => {
-                  await draftPO(metadata.po_payload, metadata.po_user, t);
+                  const poResult = await draftPO(metadata.po_payload, metadata.po_user, t);
+
+                  // Auto-initiate PO (creates PO approval instance, generates PDF)
+                  if (poResult?.po_id) {
+                    try {
+                      await t.none('SAVEPOINT po_init');
+                      await initiatePurchaseOrder(poResult.po_id, { id: approver_user_id, company_id: req.user.company_id }, t);
+                      await t.none('RELEASE SAVEPOINT po_init');
+                    } catch (initError) {
+                      await t.none('ROLLBACK TO SAVEPOINT po_init');
+                      console.error(`Error auto-initiating PO ${poResult.po_id}:`, initError);
+                    }
+                  }
 
                   const entityType = metadata.is_tender === 1 ? 'TENDER' : 'RFQ';
                   await recordLifecycleEvent({
@@ -647,7 +660,7 @@ const hospitalityApprovalController = {
                             const quantity = parseFloat(vendorQuoteItem.quantity) || 1;
                             const totalValue = quantity * negotiationPrice;
 
-                            await draftPO({
+                            const poResult = await draftPO({
                               rfq_id: metadata.rfq_id,
                               project_id: rfqData.project_id,
                               total_value: totalValue,
@@ -668,6 +681,18 @@ const hospitalityApprovalController = {
                                 finalized_vendor_id: selectedQuote.vendor_id
                               }
                             }, { id: approver_user_id, company_id: req.user.company_id }, t);
+
+                            // Auto-initiate PO (creates PO approval instance, generates PDF)
+                            if (poResult?.po_id) {
+                              try {
+                                await t.none('SAVEPOINT po_init');
+                                await initiatePurchaseOrder(poResult.po_id, { id: approver_user_id, company_id: req.user.company_id }, t);
+                                await t.none('RELEASE SAVEPOINT po_init');
+                              } catch (initError) {
+                                await t.none('ROLLBACK TO SAVEPOINT po_init');
+                                console.error(`Error auto-initiating PO ${poResult.po_id}:`, initError);
+                              }
+                            }
                           }
                         } catch (poError) {
                           console.error(`Error creating PO for vendor ${selectedQuote.vendor_id}:`, poError);

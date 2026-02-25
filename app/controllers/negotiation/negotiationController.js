@@ -14,6 +14,7 @@ import {
 } from '../../models/generalModel.js';
 import db, { pgp } from '../../config/dbConn.js';
 import { draftPO } from '../po/purchaseOrderController.js';
+import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 
 const formatErrorResponse = (res, error) => {
   const statusCode = error.statusCode || 400;
@@ -1485,7 +1486,7 @@ const NegotiationController = {
                       const quantity = parseFloat(vendorQuoteItem.quantity) || 1;
                       const totalValue = quantity * negotiationPrice;
 
-                      await draftPO({
+                      const poResult = await draftPO({
                         rfq_id: metadata.rfq_id,
                         project_id: rfqData.project_id,
                         total_value: totalValue,
@@ -1506,6 +1507,18 @@ const NegotiationController = {
                           finalized_vendor_id: selectedQuote.vendor_id
                         }
                       }, { id: user_id, company_id: req.user.company_id }, t);
+
+                      // Auto-initiate PO (creates PO approval instance, generates PDF)
+                      if (poResult?.po_id) {
+                        try {
+                          await t.none('SAVEPOINT po_init');
+                          await initiatePurchaseOrder(poResult.po_id, { id: user_id, company_id: req.user.company_id }, t);
+                          await t.none('RELEASE SAVEPOINT po_init');
+                        } catch (initError) {
+                          await t.none('ROLLBACK TO SAVEPOINT po_init');
+                          console.error(`Error auto-initiating PO ${poResult.po_id}:`, initError);
+                        }
+                      }
                     }
                   } catch (poError) {
                     console.error(`Error creating PO for vendor ${selectedQuote.vendor_id}:`, poError);
