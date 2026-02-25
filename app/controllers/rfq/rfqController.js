@@ -2152,7 +2152,7 @@ const shuffleArray = (array) => {
 };
 
 
-const saveRfqDraft = async (user_id, reqBody) => {
+const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   const {
       rfq_id,
       sheet_id = null,
@@ -2826,11 +2826,11 @@ const saveRfqDraft = async (user_id, reqBody) => {
           }
         }
 
-        // ✅ After loop: Throw combined error
-        if (errorObj.vendorNotPresent.length > 0) {
+        // ✅ After loop: Throw combined error (only when publishing, not when saving draft)
+        if (!isDraft && errorObj.vendorNotPresent.length > 0) {
          throw new Error(
            JSON.stringify({
-             message: "Some products have no vendors. Please remove product oradd vendors for these products.",
+             message: "Some products have no vendors. Please remove product or add vendors for these products.",
              details: errorObj.vendorNotPresent,
            })
          );
@@ -5949,7 +5949,7 @@ const rfqController = {
 
   saveDraft: async (req, res) => {
     try {
-      const response = await saveRfqDraft(req.user.id, req.body);
+      const response = await saveRfqDraft(req.user.id, req.body, { isDraft: true });
 
       res.status(200).json({
         status: 1,
