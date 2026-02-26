@@ -982,7 +982,7 @@ get_company_users: async (req, res, next) => {
           const emailHeaderContent = `<h2>Hello ${name || ''},</h2>`
           const emailContainerContent = `
           <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
-           <p> Welcome to WorkWise! Your admin account has been created successfully. </p>
+           <p> Welcome to WorkWise! Your account has been created successfully. </p>
             <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
             <ul>
             <li> <strong> Email: </strong> ${email} </li>
@@ -4118,7 +4118,7 @@ publish_profile_reviews: async (req, res, next) => {
                       </div>
                       
                       <p style="font-size: 14px; color: #666; margin-top: 30px;">
-                        If you have any questions or need assistance, please contact us at <a href="mailto:hello@letsworkwise.com" style="color: #158993;">hello@letsworkwise.com</a>
+                        If you have any questions or need assistance, please contact us at <a href="mailto:support@phileeinhospitality.com" style="color: #158993;">support@phileeinhospitality.com</a>
                       </p>
                     `;
                     
