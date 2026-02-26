@@ -2430,8 +2430,9 @@ export async function getApprovalInstancesByEntity(entity_type, entity_id, txCon
  * Get all unique users involved in an approval workflow (approvers from all steps + initiator)
  * Useful for sending informational notifications to everyone in the approval hierarchy
  */
-export async function getApprovalWorkflowUsers(entity_type, entity_id) {
-  return db.any(`
+export async function getApprovalWorkflowUsers(entity_type, entity_id, txContext = null) {
+  const dbContext = txContext || db;
+  return dbContext.any(`
     SELECT DISTINCT u.id AS user_id, u.name, u.email
     FROM tbl_approval_instances ai
     JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
