@@ -1192,6 +1192,27 @@ getVendorHotelCategoryMappings: async (vendorId) => {
   return { hotels, categories };
 },
 
+  getUsersForHotelWithPassword: async (companyId, hotelId) => {
+    return db.any(
+      `SELECT DISTINCT ON (u.id)
+        u.id AS user_id,
+        u.name,
+        u.email,
+        u.employee_code,
+        u.password,
+        hum.mapping_type
+       FROM tbl_hospitality_user_mappings hum
+       JOIN tbl_users u ON u.id = hum.user_id
+       WHERE hum.hospitality_company_id = $1
+         AND (
+           (hum.mapping_type = 1 AND hum.hospitality_hotel_id = $2)
+           OR hum.mapping_type = 0
+         )
+       ORDER BY u.id, hum.mapping_type DESC`,
+      [companyId, hotelId]
+    );
+  },
+
 };
 
 export default hospitalityModel;

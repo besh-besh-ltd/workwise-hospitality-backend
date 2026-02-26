@@ -202,6 +202,15 @@ HospitalityRoutes.post(
 
 HospitalityRoutes.get('/entities', passportSignIn, acl([7]), UsersController.getListedEntities);
 
+// Send BU login credentials to mapped users
+HospitalityRoutes.post(
+  '/company/:company_id/hotels/:hotel_id/send-credentials',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  hospitalityController.sendBUCredentials
+);
+
 // Send payment link to business unit email (admin action)
 HospitalityRoutes.post(
   '/company/:company_id/hotels/:hotel_id/send-payment-link',

@@ -86,7 +86,7 @@ function generateEmailTemplate(headerContent, containerContent, userID = null) {
 
         <hr style="border-color: ${seconderyColor}" />
         <div style="text-align: center; padding: 8px 0 0;">
-          <p style="font-size: 16px; color: #ffffff; margin: 0; font-weight: 500;">If you need assistance, contact us at <a href="mailto:hello+phileeinhospitality@letsworkwise.com" style="color: #ffffff; text-decoration: underline;">hello+phileeinhospitality@letsworkwise.com</a></p>
+          <p style="font-size: 16px; color: #ffffff; margin: 0; font-weight: 500;">If you need assistance, contact us at <a href="mailto:support@phileeinhospitality.com" style="color: #ffffff; text-decoration: underline;">support@phileeinhospitality.com</a></p>
           <p style="font-size: 14px; color: #ffffff; margin: 6px 0 0; font-weight: 500;">© Phileein Hospitality Procurement Platform WorkWise. All Rights Reserved.</p>
         </div>
     </div>

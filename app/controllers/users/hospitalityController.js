@@ -1,6 +1,8 @@
 import fs from 'fs';
+import bcrypt from 'bcryptjs';
 import Config from '../../config/app.config.js';
-import { logError } from '../../helper/common.js';
+import { logError, sendMail } from '../../helper/common.js';
+import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import { generateTaxInvoicePdf, generatePaymentReceivedPdf } from '../../helper/paymentDocuments.js';
 import generalModel from '../../models/generalModel.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
@@ -1902,6 +1904,108 @@ const HospitalityController = {
             standalone_subcategories: standaloneSubs
           }
         }
+      });
+    } catch (error) {
+      logError(error);
+      return formatErrorResponse(res, error);
+    }
+  },
+
+  sendBUCredentials: async (req, res) => {
+    try {
+      const company = req.companyDetails;
+      const hospitalityCompanyId = parseInt(req.params.company_id, 10);
+      const hotelId = parseInt(req.params.hotel_id, 10);
+
+      const record = await hospitalityModel.getCompanyById(hospitalityCompanyId);
+      if (!record || record.buyer_company_id !== company.id) {
+        return res.status(404).json({ status: 2, message: 'Hospitality company not found' });
+      }
+
+      const hotel = await hospitalityModel.getHotelById(hotelId);
+      if (!hotel || hotel.hospitality_company_id !== hospitalityCompanyId) {
+        return res.status(404).json({ status: 2, message: 'Hotel not found in selected company' });
+      }
+
+      const users = await hospitalityModel.getUsersForHotelWithPassword(hospitalityCompanyId, hotelId);
+
+      if (!users || users.length === 0) {
+        return res.status(200).json({ status: 2, message: 'No users mapped to this business unit' });
+      }
+
+      const DEFAULT_PASSWORD = 'Workwise@123';
+      const loginUrl = 'https://phileeinhospitality.com';
+      let emailsSent = 0;
+
+      for (const user of users) {
+        const isDefaultPassword = user.password
+          ? await bcrypt.compare(DEFAULT_PASSWORD, user.password)
+          : false;
+
+        const employeeCodeLine = user.employee_code
+          ? `<li style="padding:4px 0;"><strong>Employee Code:</strong> ${user.employee_code}</li>`
+          : '';
+
+        let credentialsBlock;
+        if (isDefaultPassword) {
+          credentialsBlock = `
+            <div style="background-color:#EFF6FF; border-left:4px solid #3B82F6; padding:16px; margin:16px 0; border-radius:4px;">
+              <p style="margin:0 0 8px 0; font-weight:600; color:#1E40AF;">Your Login Credentials:</p>
+              <ul style="list-style:none; padding:0; margin:0;">
+                ${employeeCodeLine}
+                <li style="padding:4px 0;"><strong>Email:</strong> ${user.email}</li>
+                <li style="padding:4px 0;"><strong>Password:</strong> ${DEFAULT_PASSWORD}</li>
+              </ul>
+            </div>
+            <p style="font-size:13px; color:#777; margin-top:8px;"><em>For security reasons, we recommend changing your password after your first login.</em></p>`;
+        } else {
+          credentialsBlock = `
+            <div style="background-color:#FFF7ED; border-left:4px solid #F59E0B; padding:16px; margin:16px 0; border-radius:4px;">
+              <p style="margin:0; color:#92400E;">Kindly login with the credentials already provided to you.</p>
+              <ul style="list-style:none; padding:0; margin:8px 0 0 0;">
+                ${employeeCodeLine}
+                <li style="padding:4px 0;"><strong>Email:</strong> ${user.email}</li>
+              </ul>
+            </div>`;
+        }
+
+        const headerContent = `<h2>Hello ${user.name || 'User'},</h2>`;
+        const containerContent = `
+          <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
+            <p>Your account has been made active for <strong>${hotel.name}</strong>.</p>
+            ${credentialsBlock}
+            <div style="text-align:center; margin-top:24px;">
+              <a href="${loginUrl}"
+                 style="background-color:#3B82F6; color:white; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; font-weight:600;">
+                Login Now
+              </a>
+            </div>
+          </div>`;
+
+        const htmlContent = generateEmailTemplate(headerContent, containerContent);
+
+        console.log(`\n========== [BU CREDENTIALS EMAIL] ==========`);
+        console.log(`To: ${user.email}`);
+        console.log(`User: ${user.name}`);
+        console.log(`Hotel: ${hotel.name}`);
+        console.log(`Default Password: ${isDefaultPassword ? 'YES' : 'NO (changed)'}`);
+        console.log(`\n--- FULL HTML ---\n`);
+        console.log(htmlContent);
+        console.log(`\n========== [END EMAIL] ==========\n`);
+
+        sendMail({
+          from: Config.webmasterMail,
+          to: user.email,
+          subject: `Your Account is Active — ${hotel.name}`,
+          html: htmlContent
+        });
+
+        emailsSent++;
+      }
+
+      return res.status(200).json({
+        status: 1,
+        message: `Credentials email sent to ${emailsSent} user(s) for ${hotel.name}`
       });
     } catch (error) {
       logError(error);
