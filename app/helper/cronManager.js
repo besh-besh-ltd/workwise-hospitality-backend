@@ -6,7 +6,6 @@ import { recordLifecycleEvent, getApprovalWorkflowUsers } from '../models/genera
 import { createScheduleForRfqPublish, deleteRfqPublishSchedule } from './createSchedule.js';
 import { sendRfqPublishedNotification, sendVendorRfqNotification } from './sendEmailFunctions/approvalEmails.js';
 import rfqModel from '../models/rfqModel.js';
-import projectModel from '../models/projectModel.js';
 import userModel from '../models/userModel.js';
 
 const milestoneCronRegistry = new Map();
@@ -274,30 +273,42 @@ const publishRfq = async (rfq, txContext = null) => {
 
   console.log(`[RFQ Publisher] Published ${is_tender === 1 ? 'Tender' : 'RFQ'} #${rfq_no} (ID: ${id})`);
 
-  // Send publish notification emails (fire-and-forget)
+  // Send publish notification emails
   try {
-    const rfqDetails = await db.oneOrNone(
-      'SELECT id, rfq_no, is_tender, title, project_id, created_by FROM tbl_rfq WHERE id = $1',
+    const rfqDetails = await dbConn.oneOrNone(
+      'SELECT id, rfq_no, is_tender, title, created_by FROM tbl_rfq WHERE id = $1',
       [id]
     );
 
+    console.log(`[RFQ Publisher] Email section - rfqDetails found: ${!!rfqDetails}, is_tender: ${rfqDetails?.is_tender}, created_by: ${rfqDetails?.created_by}`);
+
     if (rfqDetails) {
-      // 1. Notify project team members / approval workflow users
-      let publishUsers = [];
-      if (rfqDetails.project_id) {
-        const teamMembers = await projectModel.getProjectTeamMembers(rfqDetails.project_id);
-        publishUsers = (teamMembers || [])
-          .filter(m => m.email && m.email.includes('@'))
-          .map(m => ({ name: m.name, email: m.email }));
-      } else if (rfqDetails.is_tender === 1) {
-        const approvalUsers = await getApprovalWorkflowUsers('TENDER', id);
-        publishUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
+      // 1. Notify approval workflow users + RFQ creator
+      const entityType = rfqDetails.is_tender === 1 ? 'TENDER' : 'RFQ';
+      const approvalUsers = await getApprovalWorkflowUsers(entityType, id, dbConn);
+      console.log(`[RFQ Publisher] Approval users for ${entityType} #${id}: ${approvalUsers.length} users`, approvalUsers.map(u => ({ user_id: u.user_id, email: u.email })));
+
+      const creatorAlreadyIncluded = approvalUsers.some(u => u.user_id === rfqDetails.created_by);
+      let publishUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
+
+      if (!creatorAlreadyIncluded && rfqDetails.created_by) {
+        const creatorDetails = await userModel.user_profile_detail(rfqDetails.created_by);
+        const creator = creatorDetails?.[0];
+        console.log(`[RFQ Publisher] Creator not in approval users. Creator lookup: ${creator?.email}`);
+        if (creator?.email && creator.email.includes('@')) {
+          publishUsers.push({ name: creator.name, email: creator.email });
+        }
       }
+
+      console.log(`[RFQ Publisher] Final publishUsers (${publishUsers.length}):`, publishUsers.map(u => u.email));
+
       if (publishUsers.length > 0) {
-        sendRfqPublishedNotification({
+        await sendRfqPublishedNotification({
           rfqDetails: { id, rfq_no, is_tender, title: rfqDetails.title },
           users: publishUsers
         });
+      } else {
+        console.warn(`[RFQ Publisher] No publish users found for ${entityType} #${rfq_no} (ID: ${id}) - skipping published email`);
       }
 
       // 2. Notify vendors

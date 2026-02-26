@@ -127,6 +127,32 @@ const addProjectMembersToCC = (mailRecipients, projectMemberEmails) => {
   return mailRecipients;
 };
 
+/**
+ * Get all users who should receive RFQ/Tender notification emails:
+ * approval workflow users (approvers + initiator) + the RFQ creator.
+ * Deduplicates by user_id.
+ * @param {string} entityType - 'RFQ' or 'TENDER'
+ * @param {number} rfqId - The RFQ/Tender ID
+ * @param {number} createdByUserId - The user ID of the RFQ/Tender creator
+ * @returns {Promise<Array<{name: string, email: string}>>}
+ */
+const getRfqNotificationRecipients = async (entityType, rfqId, createdByUserId) => {
+  const approvalUsers = await getApprovalWorkflowUsers(entityType, rfqId);
+
+  const creatorAlreadyIncluded = approvalUsers.some(u => u.user_id === createdByUserId);
+  const recipients = approvalUsers.map(u => ({ name: u.name, email: u.email }));
+
+  if (!creatorAlreadyIncluded && createdByUserId) {
+    const creatorDetails = await userModel.user_profile_detail(createdByUserId);
+    const creator = creatorDetails?.[0];
+    if (creator?.email && creator.email.includes('@')) {
+      recipients.push({ name: creator.name, email: creator.email });
+    }
+  }
+
+  return recipients;
+};
+
 const getDownloadURL = (url, excelToJson = false) => {
   if(process.env.NODE_ENV == "production" && !url.includes("https")) {
     url = url.replace("http", "https");
@@ -3722,22 +3748,14 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
 
       // Send publish notifications (direct-publish path bypasses publishRfq in cronManager)
       try {
-        const rfqFull = await t.oneOrNone('SELECT project_id, title, created_by FROM tbl_rfq WHERE id = $1', [rfq_id]);
+        const rfqFull = await t.oneOrNone('SELECT title, created_by FROM tbl_rfq WHERE id = $1', [rfq_id]);
 
-        // Notify team members / approval workflow users
-        let publishUsers = [];
-        if (rfqFull?.project_id) {
-          const teamMembers = await projectModel.getProjectTeamMembers(rfqFull.project_id);
-          publishUsers = (teamMembers || [])
-            .filter(m => m.email && m.email.includes('@'))
-            .map(m => ({ name: m.name, email: m.email }));
-        } else {
-          const entityType = rfq.is_tender === 1 ? 'TENDER' : 'RFQ';
-          const approvalUsers = await getApprovalWorkflowUsers(entityType, rfq_id);
-          publishUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
-        }
+        // Notify approval workflow users + RFQ creator
+        const entityType = rfq.is_tender === 1 ? 'TENDER' : 'RFQ';
+        const publishUsers = await getRfqNotificationRecipients(entityType, rfq_id, rfqFull?.created_by || rfq.created_by);
+        console.log(`[RFQ PostApproval] Direct publish email - ${entityType} #${rfq.rfq_no}: ${publishUsers.length} recipients`, publishUsers.map(u => u.email));
         if (publishUsers.length > 0) {
-          sendRfqPublishedNotification({
+          await sendRfqPublishedNotification({
             rfqDetails: { id: rfq_id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender, title: rfqFull.title },
             users: publishUsers
           });
@@ -3803,18 +3821,9 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
     // RFQs without a publish date are published immediately by scheduleRfqPublish → publishRfq (which sends its own emails)
     if (rfq.tender_publish_date && new Date(rfq.tender_publish_date) > new Date()) {
       try {
-        const rfqFull = await t.oneOrNone('SELECT project_id, title FROM tbl_rfq WHERE id = $1', [rfq_id]);
+        const rfqFull = await t.oneOrNone('SELECT title FROM tbl_rfq WHERE id = $1', [rfq_id]);
         const entityType = rfq.is_tender === 1 ? 'TENDER' : 'RFQ';
-        let readyUsers = [];
-        if (rfqFull?.project_id) {
-          const teamMembers = await projectModel.getProjectTeamMembers(rfqFull.project_id);
-          readyUsers = (teamMembers || [])
-            .filter(m => m.email && m.email.includes('@'))
-            .map(m => ({ name: m.name, email: m.email }));
-        } else {
-          const approvalUsers = await getApprovalWorkflowUsers(entityType, rfq_id);
-          readyUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
-        }
+        const readyUsers = await getRfqNotificationRecipients(entityType, rfq_id, rfq.created_by);
         if (readyUsers.length > 0) {
           sendRfqReadyToPublishNotification({
             rfqDetails: { id: rfq_id, rfq_no: rfq.rfq_no, is_tender: rfq.is_tender, title: rfqFull.title, tender_publish_date: rfq.tender_publish_date },
@@ -4839,22 +4848,13 @@ const rfqController = {
       // -------------------
       // Email notifications happen AFTER successful transaction
 
-      // Notify project team members about RFQ/Tender creation (fire-and-forget)
+      // Notify approval workflow users + RFQ creator about RFQ/Tender creation (fire-and-forget)
       try {
         const rfqDetailsForEmail = await rfqModel.getRFQDetails(rfq_id);
         const rfqForEmail = rfqDetailsForEmail?.[0];
 
-        let emailUsers = [];
-
-        if (rfqForEmail?.project_id) {
-          const teamMembers = await projectModel.getProjectTeamMembers(rfqForEmail.project_id);
-          emailUsers = (teamMembers || [])
-            .filter(m => m.email && m.email.includes('@'))
-            .map(m => ({ name: m.name, email: m.email }));
-        } else if (rfqForEmail?.is_tender === 1) {
-          const approvalUsers = await getApprovalWorkflowUsers('TENDER', rfq_id);
-          emailUsers = approvalUsers.map(u => ({ name: u.name, email: u.email }));
-        }
+        const creationEntityType = rfqForEmail?.is_tender === 1 ? 'TENDER' : 'RFQ';
+        const emailUsers = await getRfqNotificationRecipients(creationEntityType, rfq_id, rfqForEmail?.created_by);
 
         if (emailUsers.length > 0) {
           sendRfqCreationNotification({

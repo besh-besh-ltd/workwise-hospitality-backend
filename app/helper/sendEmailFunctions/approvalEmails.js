@@ -272,13 +272,17 @@ export const sendRfqReadyToPublishNotification = async ({ rfqDetails, users }) =
  */
 export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
   try {
-    if (!users || users.length === 0) return false;
+    if (!users || users.length === 0) {
+      console.log('[Published Email] No users provided, skipping');
+      return false;
+    }
 
     const { id: rfq_id, rfq_no, is_tender, title } = rfqDetails || {};
     const entityLabel = is_tender === 1 ? 'Tender' : 'RFQ';
     const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?type=buyer-view&id=${rfq_id}`;
 
     const subject = `${entityLabel} #${rfq_no} — Now Published`;
+    console.log(`[Published Email] Sending to ${users.length} users for ${entityLabel} #${rfq_no}. Recipients:`, users.map(u => u.email));
 
     for (const user of users) {
       const headerContent = `<h2>Hello ${user.name || 'User'},</h2>`;
@@ -312,18 +316,19 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
 
       const htmlContent = generateEmailTemplate(headerContent, containerContent);
 
-      sendMail({
+      const result = await sendMail({
         from: config.webmasterMail,
         to: user.email,
         subject,
         html: htmlContent
       });
+      console.log(`[Published Email] sendMail result for ${user.email}: ${result}`);
     }
 
-    console.log(`Sent published notifications to ${users.length} users for ${entityLabel} #${rfq_no}`);
+    console.log(`[Published Email] Completed sending to ${users.length} users for ${entityLabel} #${rfq_no}`);
     return true;
   } catch (err) {
-    console.error("Error sending published notification emails:", err);
+    console.error("[Published Email] Error sending published notification emails:", err);
     return false;
   }
 };
