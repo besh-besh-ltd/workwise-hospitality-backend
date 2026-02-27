@@ -71,6 +71,13 @@ RfqRoutes.post(
 );
 
 RfqRoutes.post(
+  '/refresh-vendors',
+  passportSignIn,
+  acl([2, 8]),
+  rfqController.refreshVendors
+);
+
+RfqRoutes.post(
   '/add-product-to-rfq',
   passportSignIn,
   acl([2, 8]),

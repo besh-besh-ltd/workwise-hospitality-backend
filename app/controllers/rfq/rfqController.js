@@ -6810,6 +6810,49 @@ const rfqController = {
     }
   },
 
+  refreshVendors: async (req, res) => {
+    try {
+      const rfq_id = req.body.rfq_id;
+      if (!rfq_id) {
+        return res.status(400).json({ status: 0, message: 'rfq_id is required' });
+      }
+
+      const rfqRecord = await db.oneOrNone(
+        `SELECT id, is_published FROM tbl_rfq WHERE id = $1`,
+        [rfq_id]
+      );
+      if (!rfqRecord) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found' });
+      }
+      if (rfqRecord.is_published === 1) {
+        return res.status(400).json({ status: 0, message: 'Cannot refresh vendors for a published RFQ/Tender' });
+      }
+
+      const hotelMappings = await db.any(
+        `SELECT hotel_id FROM tbl_rfq_hotel_mappings WHERE rfq_id = $1`,
+        [rfq_id]
+      );
+      const hotel_ids = hotelMappings.map(h => h.hotel_id);
+
+      if (hotel_ids.length === 0) {
+        return res.status(400).json({ status: 0, message: 'No business units mapped to this RFQ. Please select business units first.' });
+      }
+
+      const result = await hospitalityModel.addMissingVendorsForRfq(rfq_id, hotel_ids);
+
+      return res.status(200).json({
+        status: 1,
+        message: result.totalAdded > 0
+          ? `Added ${result.totalAdded} missing vendor(s) across products`
+          : 'All products already have all eligible vendors',
+        data: result
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(500).json({ status: 3, message: 'Failed to refresh vendors' });
+    }
+  },
+
   getRfqDetailsById: async (req, res) => {
     try {
       const { rfq_id } = req.body;

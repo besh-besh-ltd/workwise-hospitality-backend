@@ -1107,6 +1107,70 @@ recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
 },
 
 /**
+ * Non-destructive vendor refresh for an RFQ.
+ * Adds any missing eligible vendors to each product but never removes existing ones.
+ */
+addMissingVendorsForRfq: async (rfq_id, hotel_ids) => {
+  const rfqProducts = await db.any(
+    `SELECT rp.id AS rfq_product_id, rp.product_variant_id, rp.variant,
+            COALESCE(pv.name, '') AS product_name
+     FROM tbl_rfq_products rp
+     LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+     WHERE rp.rfq_id = $1`,
+    [rfq_id]
+  );
+
+  const results = [];
+  const productsWithNoVendors = [];
+  let totalAdded = 0;
+
+  for (const product of rfqProducts) {
+    const eligibleRows = await hospitalityModel.getEligibleVendorsForVariant(
+      product.product_variant_id,
+      hotel_ids
+    );
+    const eligibleVendorIds = new Set(eligibleRows.map(r => r.vendor_id));
+
+    const currentVendors = await db.any(
+      `SELECT user_id FROM tbl_rfq_product_vendors
+       WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+      [rfq_id, product.product_variant_id, product.variant]
+    );
+    const currentVendorIds = new Set(currentVendors.map(v => v.user_id));
+
+    const toAdd = [...eligibleVendorIds].filter(id => !currentVendorIds.has(id));
+
+    for (const vendorId of toAdd) {
+      await db.none(
+        `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT DO NOTHING`,
+        [rfq_id, product.product_variant_id, vendorId, product.variant]
+      );
+    }
+
+    totalAdded += toAdd.length;
+    const remaining = currentVendorIds.size + toAdd.length;
+
+    results.push({
+      rfq_product_id: product.rfq_product_id,
+      product_name: product.product_name,
+      added: toAdd.length,
+      remaining
+    });
+
+    if (remaining === 0) {
+      productsWithNoVendors.push({
+        rfq_product_id: product.rfq_product_id,
+        product_name: product.product_name
+      });
+    }
+  }
+
+  return { refreshed: true, products: results, productsWithNoVendors, totalAdded };
+},
+
+/**
  * Get all active hotel and category subscriptions for a vendor
  * Returns both hotels and categories the vendor is mapped to
  *
