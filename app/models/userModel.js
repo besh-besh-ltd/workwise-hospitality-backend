@@ -4080,6 +4080,13 @@ getBuyerAccountLimits: async (company_id) => {
     });
   },
 
+  getVendorDocuments: async (vendorId) => {
+    return db.any(
+      `SELECT * FROM tbl_vendor_documents WHERE vendor_id = $1 ORDER BY created_at DESC`,
+      [vendorId]
+    );
+  },
+
 };
 
 export default userModel;

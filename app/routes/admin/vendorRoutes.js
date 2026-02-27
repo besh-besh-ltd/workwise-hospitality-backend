@@ -178,4 +178,36 @@ vendorRoutes.get(
   vendorController.spocList
 );
 
+// Vendor Subscription Management
+vendorRoutes.get(
+  '/vendor-subscriptions/:id',
+  passportSignIn,
+  vendorController.getVendorSubscriptions
+);
+vendorRoutes.post(
+  '/vendor-subscriptions/:id',
+  passportSignIn,
+  vendorController.upsertVendorSubscriptions
+);
+vendorRoutes.put(
+  '/vendor-subscriptions/:id/status/:sub_id',
+  passportSignIn,
+  vendorController.updateSubscriptionStatus
+);
+vendorRoutes.delete(
+  '/vendor-subscriptions/:id/delete/:sub_id',
+  passportSignIn,
+  vendorController.deleteSubscription
+);
+vendorRoutes.get(
+  '/hotels-dropdown',
+  passportSignIn,
+  vendorController.getHotelsDropdown
+);
+vendorRoutes.get(
+  '/categories-dropdown',
+  passportSignIn,
+  vendorController.getCategoriesDropdown
+);
+
 export default vendorRoutes;

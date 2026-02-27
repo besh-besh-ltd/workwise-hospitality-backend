@@ -4766,7 +4766,28 @@ WHERE m.id = $1;
         reject(error);
       });
   });
-}
+},
+
+  autoApproveVariantMappings: async (vendorId, variantIds) => {
+    if (!variantIds || !variantIds.length) return;
+    return db.none(
+      `UPDATE tbl_product_variant_vendor_mapping
+       SET is_approved = TRUE
+       WHERE vendor_id = $1
+         AND product_variant_id = ANY($2::int[])`,
+      [vendorId, variantIds]
+    );
+  },
+
+  removeVariantMappingsForVendor: async (vendorId, variantIds) => {
+    if (!variantIds || !variantIds.length) return;
+    return db.none(
+      `DELETE FROM tbl_product_variant_vendor_mapping
+       WHERE vendor_id = $1
+         AND product_variant_id = ANY($2::int[])`,
+      [vendorId, variantIds]
+    );
+  }
 };
 
 export default productModel;

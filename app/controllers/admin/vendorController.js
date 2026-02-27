@@ -6,6 +6,7 @@ import vendorModel from '../../models/vendorModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import notificationModel from '../../models/notificationModel.js';
 import productModel from '../../models/productModel.js';
+import hospitalityModel from '../../models/hospitalityModel.js';
 
 import Config from '../../config/app.config.js';
 import {
@@ -142,6 +143,20 @@ const vendorController = {
         is_private,
         mobile
       );
+
+      // Enrich vendor list with subscription counts
+      if (vendorList && vendorList.length > 0) {
+        const vendorIds = vendorList.map(v => v.id);
+        const subCounts = await hospitalityModel.getVendorSubscriptionCounts(vendorIds);
+        const countMap = {};
+        subCounts.forEach(sc => { countMap[sc.vendor_id] = sc; });
+        vendorList = vendorList.map(v => ({
+          ...v,
+          active_categories: parseInt(countMap[v.id]?.active_categories || 0),
+          active_hotels: parseInt(countMap[v.id]?.active_hotels || 0),
+          subscription_status: countMap[v.id]?.subscription_status || 'none'
+        }));
+      }
 
       res
         .status(200)
@@ -451,13 +466,29 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       let vendorDetails = await vendorModel.getVendorDetails(vendorId);
       const companyDetails = await userModel.getCompanyDetail(vendorId);
       const spocDetails = await vendorModel.getSpocDetails(vendorId);
+      const subscriptionMappings = await hospitalityModel.getVendorSubscriptionMappingsAdmin(vendorId);
+      const mappedCompanies = await vendorModel.getVendorCompanyMappings(vendorId);
+      const vendorDocuments = await userModel.getVendorDocuments(vendorId);
+
+      let companyLocations = [];
+      if (vendorDetails?.[0]?.company_id) {
+        companyLocations = await rfqModel.findAll(
+          'tbl_company_location',
+          { company_id: vendorDetails[0].company_id }
+        );
+      }
+
       res
         .status(200)
         .json({
           status: 1,
           data: vendorDetails,
           companyDetails: companyDetails || [],
-          spocDetails: spocDetails || []
+          spocDetails: spocDetails || [],
+          subscriptionMappings,
+          mappedCompanies: mappedCompanies || [],
+          companyLocations: companyLocations || [],
+          vendorDocuments: vendorDocuments || []
         })
         .end();
     } catch (error) {
@@ -487,11 +518,14 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       let files = await vendorModel.getFiles(vendorId);
       let spocDetails = await vendorModel.getSpocDetails(vendorId, false); // Show all SPOCs regardless of status
       let mappedCompanies = await vendorModel.getVendorCompanyMappings(vendorId);
+      let vendorDocuments = await userModel.getVendorDocuments(vendorId);
       resObj.spocDetails = spocDetails;
       resObj.vendorDetails = vendorDetails[0];
       resObj.companyDetails = companyDetails[0];
       resObj.files = files || [];
       resObj.companyLocations = companyLocations || [];
+      resObj.vendorDocuments = vendorDocuments || [];
+      resObj.mappedCompanies = mappedCompanies || [];
       const companyIsPrivate =
         companyDetails &&
         companyDetails[0] &&
@@ -504,6 +538,7 @@ if (Array.isArray(spocs) && spocs.length > 0) {
           companyDetails[0].is_hospitality === '1');
       resObj.vendorAccessType = companyIsPrivate ? 'private' : 'public';
       resObj.isHospitality = companyIsHospitality ? 1 : 0;
+      resObj.subscriptionMappings = await hospitalityModel.getVendorSubscriptionMappingsAdmin(vendorId);
       res
         .status(200)
         .json({
@@ -739,6 +774,12 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         gstin,
         import_export_code,
         cin,
+        pan,
+        msme,
+        bank_name,
+        bank_account_number,
+        ifsc_code,
+        account_holder_name,
         turn_over,
         total_employees,
         about_vendor_company,
@@ -847,6 +888,22 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       };
 
       const result = await userModel.update_companyDetails(vendorObj, companyObj);
+
+      // Save PAN, MSME, bank details to tbl_vendor_documents (not tbl_company)
+      if (pan) {
+        await userModel.saveVendorDocument(vendorId, 'pan', null, pan);
+      }
+      if (msme) {
+        await userModel.saveVendorDocument(vendorId, 'msme', null, msme);
+      }
+      if (bank_name || bank_account_number || ifsc_code || account_holder_name) {
+        await userModel.saveVendorDocument(vendorId, 'bank_account', null, null, {
+          bank_name: bank_name || null,
+          bank_account_number: bank_account_number || null,
+          ifsc_code: ifsc_code || null,
+          account_holder_name: account_holder_name || null
+        });
+      }
 
       if (subscription) {
         const condition = `user_id = ${parseInt(
@@ -1510,6 +1567,170 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         status: 3,
         message: Config.errorText.value
       });
+    }
+  },
+
+  // ── Vendor Subscription Management ──────────────────────────
+
+  getVendorSubscriptions: async (req, res) => {
+    try {
+      const vendorId = req.params.id;
+      const data = await hospitalityModel.getVendorSubscriptionMappingsAdmin(vendorId);
+      res.status(200).json({ status: 1, data });
+    } catch (error) {
+      logError(error);
+      res.status(400).json({ status: 3, message: Config.errorText.value });
+    }
+  },
+
+  upsertVendorSubscriptions: async (req, res) => {
+    try {
+      const vendorId = parseInt(req.params.id);
+      const { subscriptions } = req.body;
+      if (!subscriptions || !subscriptions.length) {
+        return res.status(400).json({ status: 0, message: 'No subscriptions provided' });
+      }
+      const rows = subscriptions.map(s => ({
+        vendor_id: vendorId,
+        item_type: s.item_type,
+        item_id: parseInt(s.item_id),
+        fee_amount: parseFloat(s.fee_amount) || 0,
+        start_date: s.start_date,
+        end_date: s.end_date,
+        status: s.status || 'active',
+        payment_id: s.payment_id || null
+      }));
+      const result = await hospitalityModel.createVendorHotelCategorySubscription(rows);
+
+      // Auto-map variants for category subscriptions (same as registration flow)
+      const categoryIds = rows
+        .filter(r => r.item_type === 'category')
+        .map(r => r.item_id);
+
+      if (categoryIds.length > 0) {
+        try {
+          const variants = await rfqModel.getProductsByCategories(
+            categoryIds.map(id => ({ id }))
+          );
+          if (variants && variants.length > 0) {
+            const mappings = variants.map(v => ({
+              variant_id: v.variant_id,
+              vendor_id: vendorId,
+              approved_by: [],
+              make_list: []
+            }));
+            await productModel.bulkInsertVariantVendorMappings(mappings, vendorId);
+
+            // Auto-approve the new mappings
+            const variantIds = [...new Set(
+              variants.map(v => parseInt(v.variant_id)).filter(Boolean)
+            )];
+            if (variantIds.length) {
+              await productModel.autoApproveVariantMappings(vendorId, variantIds);
+            }
+          }
+        } catch (mappingError) {
+          logError(mappingError);
+          // Don't fail subscription save if variant mapping fails
+        }
+      }
+
+      res.status(200).json({ status: 1, data: result, message: 'Subscriptions saved successfully' });
+    } catch (error) {
+      logError(error);
+      res.status(400).json({ status: 3, message: Config.errorText.value });
+    }
+  },
+
+  updateSubscriptionStatus: async (req, res) => {
+    try {
+      const { sub_id } = req.params;
+      const { status } = req.body;
+      if (!['active', 'inactive'].includes(status)) {
+        return res.status(400).json({ status: 0, message: 'Invalid status. Must be active or inactive.' });
+      }
+      const updated = await hospitalityModel.updateVendorSubscriptionStatus(sub_id, status);
+      res.status(200).json({ status: 1, data: updated, message: 'Status updated' });
+    } catch (error) {
+      logError(error);
+      res.status(400).json({ status: 3, message: Config.errorText.value });
+    }
+  },
+
+  deleteSubscription: async (req, res) => {
+    try {
+      const vendorId = parseInt(req.params.id);
+      const { sub_id } = req.params;
+
+      // Get subscription details before deleting to know what to unmap
+      const subscription = await hospitalityModel.getSubscriptionById(sub_id);
+
+      const rowCount = await hospitalityModel.deleteVendorSubscription(sub_id);
+      if (rowCount === 0) {
+        return res.status(404).json({ status: 2, message: 'Subscription not found' });
+      }
+
+      // If it was a category subscription, clean up variant mappings
+      if (subscription && subscription.item_type === 'category') {
+        try {
+          const categoryId = subscription.item_id;
+          const variants = await rfqModel.getProductsByCategories([{ id: categoryId }]);
+
+          if (variants && variants.length > 0) {
+            const variantIds = variants.map(v => parseInt(v.variant_id)).filter(Boolean);
+
+            // Check which variants are covered by OTHER active category subscriptions
+            const otherActiveCategories = await hospitalityModel.getActiveCategorySubscriptions(vendorId, categoryId);
+
+            if (otherActiveCategories.length > 0) {
+              const otherCategoryIds = otherActiveCategories.map(c => c.item_id);
+              const coveredVariants = await rfqModel.getProductsByCategories(
+                otherCategoryIds.map(id => ({ id }))
+              );
+              const coveredVariantIds = new Set(
+                coveredVariants.map(v => parseInt(v.variant_id))
+              );
+              // Only remove variants NOT covered by other active categories
+              const uncoveredVariantIds = variantIds.filter(id => !coveredVariantIds.has(id));
+
+              if (uncoveredVariantIds.length > 0) {
+                await productModel.removeVariantMappingsForVendor(vendorId, uncoveredVariantIds);
+              }
+            } else {
+              // No other active categories covering these variants - remove all
+              await productModel.removeVariantMappingsForVendor(vendorId, variantIds);
+            }
+          }
+        } catch (mappingError) {
+          logError(mappingError);
+          // Don't fail deletion if variant cleanup fails
+        }
+      }
+
+      res.status(200).json({ status: 1, message: 'Subscription deleted' });
+    } catch (error) {
+      logError(error);
+      res.status(400).json({ status: 3, message: Config.errorText.value });
+    }
+  },
+
+  getHotelsDropdown: async (req, res) => {
+    try {
+      const hotels = await hospitalityModel.getAllHotelsForAdmin();
+      res.status(200).json({ status: 1, data: hotels });
+    } catch (error) {
+      logError(error);
+      res.status(400).json({ status: 3, message: Config.errorText.value });
+    }
+  },
+
+  getCategoriesDropdown: async (req, res) => {
+    try {
+      const categories = await productModel.getCategoryDropdown(500, 0);
+      res.status(200).json({ status: 1, data: categories });
+    } catch (error) {
+      logError(error);
+      res.status(400).json({ status: 3, message: Config.errorText.value });
     }
   },
 };
