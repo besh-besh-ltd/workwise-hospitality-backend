@@ -1073,7 +1073,7 @@ const HospitalityController = {
       const headerContent = `<h2 style=\"margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #111827;\">Welcome, ${hotel.name}!</h2>`;
       const containerContent = `
         <p style=\"font-size: 15px; color: #4b5563; margin: 0 0 16px;\">
-          You have been added as a business unit under <strong>${hotel.company_name}</strong> on the Phileein Hospitality Procurement Platform WorkWise.
+          You have been added as a business unit under <strong>${hotel.company_name}</strong> on the Phileein Hospitality Procurement Platform.
           To activate your business unit, please complete the onboarding payment.
         </p>
         <div style=\"background: #f9fafb; border-radius: 12px; padding: 16px 20px; margin: 16px 0;\">
@@ -1097,7 +1097,7 @@ const HospitalityController = {
       await sendMail({
         from: Config.webmasterMail,
         to: hotel.email,
-        subject: `Phileein Hospitality Procurement Platform WorkWise - Complete Payment for ${hotel.name}`,
+        subject: `Phileein Hospitality Procurement Platform - Complete Payment for ${hotel.name}`,
         html
       });
 
@@ -1168,7 +1168,7 @@ const HospitalityController = {
           const headerContent = `<h2 style="margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #111827;">Welcome, ${hotel.name}!</h2>`;
           const containerContent = `
             <p style="font-size: 15px; color: #4b5563; margin: 0 0 16px;">
-              You have been added as a business unit under <strong>${companyName}</strong> on the Phileein Hospitality Procurement Platform, WorkWise.
+              You have been added as a business unit under <strong>${companyName}</strong> on the Phileein Hospitality Procurement Platform.
               To activate your business unit, please complete the onboarding payment.
             </p>
             <div style="background: #f9fafb; border-radius: 12px; padding: 16px 20px; margin: 16px 0;">
@@ -1236,7 +1236,7 @@ const HospitalityController = {
 
         const containerContent = `
           <p style="font-size: 15px; color: #4b5563; margin: 0 0 16px;">
-            Your business units have been added to the Phileein Hospitality Procurement Platform, WorkWise.
+            Your business units have been added to the Phileein Hospitality Procurement Platform.
             To activate all business units, please complete the consolidated onboarding payment.
           </p>
           <div style="background: #f9fafb; border-radius: 12px; padding: 16px 20px; margin: 16px 0;">
@@ -1547,7 +1547,7 @@ const HospitalityController = {
                 const headerContent = `<h2 style="margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #111827;">Payment Successful</h2>`;
                 const containerContent = `
                   <p style="font-size: 15px; color: #4b5563; margin: 0 0 16px;">
-                    All business units for <strong>${companyName}</strong> have been successfully activated on the Phileein Hospitality Procurement Platform, WorkWise.
+                    All business units for <strong>${companyName}</strong> have been successfully activated on the Phileein Hospitality Procurement Platform.
                   </p>
                   <div style="background: #f0fdf4; padding: 14px 18px; border-radius: 10px; border: 1px solid #bbf7d0; margin: 16px 0 8px;">
                     <p style="margin: 0 0 12px; color: #166534; font-size: 14px; font-weight: 600;">Business Units Activated:</p>
@@ -1571,7 +1571,7 @@ const HospitalityController = {
                 const mailOpts = {
                   from: Config.webmasterMail,
                   to: companyEmail,
-                  subject: `Phileein Hospitality Procurement Platform WorkWise - Payment Confirmed for ${companyName}`,
+                  subject: `Phileein Hospitality Procurement Platform - Payment Confirmed for ${companyName}`,
                   html
                 };
 
@@ -1642,7 +1642,7 @@ const HospitalityController = {
             const headerContent = `<h2 style=\"margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #111827;\">Payment Successful</h2>`;
             const containerContent = `
               <p style=\"font-size: 15px; color: #4b5563; margin: 0 0 16px;\">
-                Your business unit <strong>${hotel.name}</strong> has been successfully activated on the Phileein Hospitality Procurement Platform, WorkWise.
+                Your business unit <strong>${hotel.name}</strong> has been successfully activated on the Phileein Hospitality Procurement Platform.
               </p>
               <div style=\"background: #f0fdf4; padding: 14px 18px; border-radius: 10px; border: 1px solid #bbf7d0; margin: 16px 0 8px;\">
                 <p style=\"margin: 0; color: #166534; font-size: 14px;\">
@@ -1663,7 +1663,7 @@ const HospitalityController = {
             const mailOpts = {
               from: Config.webmasterMail,
               to: hotel.email,
-              subject: `Phileein Hospitality Procurement Platform WorkWise - Payment Confirmed for ${hotel.name}`,
+              subject: `Phileein Hospitality Procurement Platform - Payment Confirmed for ${hotel.name}`,
               html
             };
 

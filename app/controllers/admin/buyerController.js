@@ -569,8 +569,8 @@ const buyerController = {
               const containerContent = `
                 <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
                   <p>
-                    We are pleased to inform you that <strong>${companyNames}</strong> has added you as a preferred vendor on the Workwise platform.
-                    Going forward, <strong>${companyNames}</strong> will manage their procurement activities through Workwise.
+                    We are pleased to inform you that <strong>${companyNames}</strong> has added you as a preferred vendor on the Phileein Hospitality platform.
+                    Going forward, <strong>${companyNames}</strong> will manage their procurement activities through Phileein Hospitality.
                   </p>
                   <p>
                     To ensure you receive all enquiries promptly, Login to your account.
@@ -580,10 +580,10 @@ const buyerController = {
                   <p>
                     We recommend changing your password after your first login for security reasons.
                   </p>
-                  <a href="https://letsworkwise.com"
+                  <a href="https://hospitality.letsworkwise.com"
                     style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                      Login
-                  </a>    
+                  </a>
                   <p style="margin-top:20px; text-align:center;">
                     We look forward to supporting your business growth.
                   </p>
@@ -595,7 +595,7 @@ const buyerController = {
                 from: `${companyNames} ${Config.masterEmail}`,
                 to: spocList?.length ? spocList.map(spoc => spoc.email) : vendorEmail,
                 cc: spocList?.length ? vendorEmail : '',
-                subject: `${companyNames} Added You on Workwise`,
+                subject: `${companyNames} Added You on Phileein Hospitality`,
                 html: dynamicHTML
               });
             }
