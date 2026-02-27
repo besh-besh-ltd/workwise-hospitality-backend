@@ -1602,15 +1602,15 @@ if (Array.isArray(spocs) && spocs.length > 0) {
       }));
       const result = await hospitalityModel.createVendorHotelCategorySubscription(rows);
 
-      // Auto-map variants for category subscriptions (same as registration flow)
-      const categoryIds = rows
-        .filter(r => r.item_type === 'category')
+      // Auto-map variants for category and subcategory subscriptions (same as registration flow)
+      const allCategoryIds = rows
+        .filter(r => r.item_type === 'category' || r.item_type === 'subcategory')
         .map(r => r.item_id);
 
-      if (categoryIds.length > 0) {
+      if (allCategoryIds.length > 0) {
         try {
           const variants = await rfqModel.getProductsByCategories(
-            categoryIds.map(id => ({ id }))
+            allCategoryIds.map(id => ({ id }))
           );
           if (variants && variants.length > 0) {
             const mappings = variants.map(v => ({
@@ -1670,8 +1670,8 @@ if (Array.isArray(spocs) && spocs.length > 0) {
         return res.status(404).json({ status: 2, message: 'Subscription not found' });
       }
 
-      // If it was a category subscription, clean up variant mappings
-      if (subscription && subscription.item_type === 'category') {
+      // If it was a category or subcategory subscription, clean up variant mappings
+      if (subscription && (subscription.item_type === 'category' || subscription.item_type === 'subcategory')) {
         try {
           const categoryId = subscription.item_id;
           const variants = await rfqModel.getProductsByCategories([{ id: categoryId }]);

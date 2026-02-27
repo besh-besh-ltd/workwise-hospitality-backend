@@ -583,6 +583,24 @@ const UsersController = {
               }
             }
             
+            // Store subcategory subscriptions
+            const uniqueSubcategoryIds = [...new Set(subcategories)];
+            if (uniqueSubcategoryIds.length) {
+              const dbSubcategories = await productModel.getCategoriesByIds(uniqueSubcategoryIds);
+              for (const row of dbSubcategories) {
+                subscriptionRows.push({
+                  vendor_id: user_id,
+                  item_type: 'subcategory',
+                  item_id: row.id,
+                  fee_amount: 0,
+                  start_date: startDate.format('YYYY-MM-DD'),
+                  end_date: fyEndDateStr,
+                  status: 'active',
+                  payment_id: null
+                });
+              }
+            }
+
             if (hotels.length) {
               const hotelIds = hotels.filter(id => id && !isNaN(parseInt(id, 10))).map(id => parseInt(id, 10));
               if (hotelIds.length > 0) {
