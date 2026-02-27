@@ -1192,6 +1192,157 @@ getVendorHotelCategoryMappings: async (vendorId) => {
   return { hotels, categories };
 },
 
+  // ── Admin Vendor Subscription Management ──────────────────────────
+
+  getVendorSubscriptionMappingsAdmin: async (vendorId) => {
+    const result = await db.any(
+      `SELECT
+        s.id AS subscription_id,
+        s.item_type,
+        s.item_id,
+        s.start_date,
+        s.end_date,
+        s.fee_amount,
+        s.status,
+        s.payment_id,
+        CASE
+          WHEN s.item_type = 'hotel' THEN h.name
+          WHEN s.item_type = 'category' THEN c.title
+        END AS item_name,
+        CASE
+          WHEN s.item_type = 'hotel' THEN h.city
+          ELSE NULL
+        END AS city,
+        CASE
+          WHEN s.item_type = 'hotel' THEN hc.name
+          ELSE NULL
+        END AS company_name,
+        CASE
+          WHEN s.item_type = 'category' THEN parent.id
+          ELSE NULL
+        END AS parent_id,
+        CASE
+          WHEN s.item_type = 'category' THEN parent.title
+          ELSE NULL
+        END AS parent_category_name,
+        vp.payment_status
+       FROM tbl_vendor_hotel_category_subscription s
+       LEFT JOIN tbl_hospitality_company_hotels h
+         ON h.id = s.item_id AND s.item_type = 'hotel'
+       LEFT JOIN tbl_hospitality_companies hc
+         ON hc.id = h.hospitality_company_id
+       LEFT JOIN tbl_category c
+         ON c.id = s.item_id AND s.item_type = 'category' AND c.is_deleted = 0
+       LEFT JOIN tbl_category parent
+         ON parent.id = c.parent_id AND parent.is_deleted = 0
+       LEFT JOIN tbl_vendor_payments vp
+         ON vp.id = s.payment_id
+       WHERE s.vendor_id = $1
+       ORDER BY s.item_type, s.status, item_name`,
+      [vendorId]
+    );
+
+    const hotels = result
+      .filter(row => row.item_type === 'hotel')
+      .map(row => ({
+        subscription_id: row.subscription_id,
+        hotel_id: row.item_id,
+        hotel_name: row.item_name,
+        city: row.city,
+        company_name: row.company_name,
+        start_date: row.start_date,
+        end_date: row.end_date,
+        fee_amount: row.fee_amount,
+        status: row.status,
+        payment_status: row.payment_status
+      }));
+
+    const categories = result
+      .filter(row => row.item_type === 'category')
+      .map(row => ({
+        subscription_id: row.subscription_id,
+        category_id: row.item_id,
+        category_name: row.item_name,
+        parent_id: row.parent_id,
+        parent_category_name: row.parent_category_name,
+        start_date: row.start_date,
+        end_date: row.end_date,
+        fee_amount: row.fee_amount,
+        status: row.status,
+        payment_status: row.payment_status
+      }));
+
+    return { hotels, categories };
+  },
+
+  updateVendorSubscriptionStatus: async (subscriptionId, status) => {
+    return db.one(
+      `UPDATE tbl_vendor_hotel_category_subscription
+       SET status = $2
+       WHERE id = $1
+       RETURNING *`,
+      [subscriptionId, status]
+    );
+  },
+
+  getSubscriptionById: async (subscriptionId) => {
+    return db.oneOrNone(
+      `SELECT * FROM tbl_vendor_hotel_category_subscription WHERE id = $1`,
+      [subscriptionId]
+    );
+  },
+
+  getActiveCategorySubscriptions: async (vendorId, excludeCategoryId) => {
+    return db.any(
+      `SELECT * FROM tbl_vendor_hotel_category_subscription
+       WHERE vendor_id = $1 AND item_type = 'category' AND status = 'active' AND item_id != $2`,
+      [vendorId, excludeCategoryId]
+    );
+  },
+
+  deleteVendorSubscription: async (subscriptionId) => {
+    const result = await db.result(
+      `DELETE FROM tbl_vendor_hotel_category_subscription WHERE id = $1`,
+      [subscriptionId]
+    );
+    return result.rowCount;
+  },
+
+  getAllHotelsForAdmin: async () => {
+    return db.any(
+      `SELECT
+        h.id,
+        h.name,
+        h.city,
+        hc.id AS company_id,
+        hc.name AS company_name
+       FROM tbl_hospitality_company_hotels h
+       JOIN tbl_hospitality_companies hc ON hc.id = h.hospitality_company_id
+       WHERE h.is_deleted = 0
+       ORDER BY hc.name, h.name`
+    );
+  },
+
+  getVendorSubscriptionCounts: async (vendorIds) => {
+    if (!vendorIds?.length) return [];
+    return db.any(
+      `SELECT
+        s.vendor_id,
+        COUNT(*) FILTER (WHERE s.item_type = 'category' AND s.status = 'active' AND CURRENT_DATE BETWEEN s.start_date AND s.end_date) AS active_categories,
+        COUNT(*) FILTER (WHERE s.item_type = 'hotel' AND s.status = 'active' AND CURRENT_DATE BETWEEN s.start_date AND s.end_date) AS active_hotels,
+        CASE
+          WHEN COUNT(*) FILTER (WHERE s.status = 'active' AND CURRENT_DATE BETWEEN s.start_date AND s.end_date) > 0 THEN 'active'
+          WHEN COUNT(*) FILTER (WHERE s.status = 'pending') > 0 THEN 'pending'
+          WHEN COUNT(*) FILTER (WHERE s.end_date < CURRENT_DATE) > 0 THEN 'expired'
+          ELSE 'none'
+        END AS subscription_status
+       FROM tbl_vendor_hotel_category_subscription s
+       WHERE s.vendor_id = ANY($1)
+       GROUP BY s.vendor_id`,
+      [vendorIds]
+    );
+  },
+
   getUsersForHotelWithPassword: async (companyId, hotelId) => {
     return db.any(
       `SELECT DISTINCT ON (u.id)
