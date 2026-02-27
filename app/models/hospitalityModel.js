@@ -1208,6 +1208,7 @@ getVendorHotelCategoryMappings: async (vendorId) => {
         CASE
           WHEN s.item_type = 'hotel' THEN h.name
           WHEN s.item_type = 'category' THEN c.title
+          WHEN s.item_type = 'subcategory' THEN sc.title
         END AS item_name,
         CASE
           WHEN s.item_type = 'hotel' THEN h.city
@@ -1225,6 +1226,14 @@ getVendorHotelCategoryMappings: async (vendorId) => {
           WHEN s.item_type = 'category' THEN parent.title
           ELSE NULL
         END AS parent_category_name,
+        CASE
+          WHEN s.item_type = 'subcategory' THEN sc_parent.id
+          ELSE NULL
+        END AS subcategory_parent_id,
+        CASE
+          WHEN s.item_type = 'subcategory' THEN sc_parent.title
+          ELSE NULL
+        END AS subcategory_parent_name,
         vp.payment_status
        FROM tbl_vendor_hotel_category_subscription s
        LEFT JOIN tbl_hospitality_company_hotels h
@@ -1235,6 +1244,10 @@ getVendorHotelCategoryMappings: async (vendorId) => {
          ON c.id = s.item_id AND s.item_type = 'category' AND c.is_deleted = 0
        LEFT JOIN tbl_category parent
          ON parent.id = c.parent_id AND parent.is_deleted = 0
+       LEFT JOIN tbl_category sc
+         ON sc.id = s.item_id AND s.item_type = 'subcategory' AND sc.is_deleted = 0
+       LEFT JOIN tbl_category sc_parent
+         ON sc_parent.id = sc.parent_id AND sc_parent.is_deleted = 0
        LEFT JOIN tbl_vendor_payments vp
          ON vp.id = s.payment_id
        WHERE s.vendor_id = $1
@@ -1272,7 +1285,22 @@ getVendorHotelCategoryMappings: async (vendorId) => {
         payment_status: row.payment_status
       }));
 
-    return { hotels, categories };
+    const subcategories = result
+      .filter(row => row.item_type === 'subcategory')
+      .map(row => ({
+        subscription_id: row.subscription_id,
+        subcategory_id: row.item_id,
+        subcategory_name: row.item_name,
+        parent_id: row.subcategory_parent_id,
+        parent_category_name: row.subcategory_parent_name,
+        start_date: row.start_date,
+        end_date: row.end_date,
+        fee_amount: row.fee_amount,
+        status: row.status,
+        payment_status: row.payment_status
+      }));
+
+    return { hotels, categories, subcategories };
   },
 
   updateVendorSubscriptionStatus: async (subscriptionId, status) => {
@@ -1295,7 +1323,7 @@ getVendorHotelCategoryMappings: async (vendorId) => {
   getActiveCategorySubscriptions: async (vendorId, excludeCategoryId) => {
     return db.any(
       `SELECT * FROM tbl_vendor_hotel_category_subscription
-       WHERE vendor_id = $1 AND item_type = 'category' AND status = 'active' AND item_id != $2`,
+       WHERE vendor_id = $1 AND item_type IN ('category', 'subcategory') AND status = 'active' AND item_id != $2`,
       [vendorId, excludeCategoryId]
     );
   },
@@ -1329,6 +1357,7 @@ getVendorHotelCategoryMappings: async (vendorId) => {
       `SELECT
         s.vendor_id,
         COUNT(*) FILTER (WHERE s.item_type = 'category' AND s.status = 'active' AND CURRENT_DATE BETWEEN s.start_date AND s.end_date) AS active_categories,
+        COUNT(*) FILTER (WHERE s.item_type = 'subcategory' AND s.status = 'active' AND CURRENT_DATE BETWEEN s.start_date AND s.end_date) AS active_subcategories,
         COUNT(*) FILTER (WHERE s.item_type = 'hotel' AND s.status = 'active' AND CURRENT_DATE BETWEEN s.start_date AND s.end_date) AS active_hotels,
         CASE
           WHEN COUNT(*) FILTER (WHERE s.status = 'active' AND CURRENT_DATE BETWEEN s.start_date AND s.end_date) > 0 THEN 'active'
