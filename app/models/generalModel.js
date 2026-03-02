@@ -3,6 +3,17 @@ import { sendApprovalNotification, sendPONotificationToVendor } from '../control
 import { APPROVAL_DECISIONS, PO_STATUSES, DEPARTMENT_SCOPED_ENTITY_TYPES } from '../util/constants.js';
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 
+// Maps entity_type to the permission resource used in tbl_permissions
+const ENTITY_APPROVE_RESOURCE_MAP = {
+  'RFQ': 'rfq',
+  'TENDER': 'tender',
+  'TECHNICAL': 'te',
+  'NEGOTIATION': 'negotiation',
+  'NEGOTIATION_QUOTE': 'quote-compare',
+  'PO': 'awarding',
+  'ARC': 'arc',
+};
+
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import s3Client from "../config/s3config.js";
 import fs from "fs";
@@ -1888,12 +1899,33 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
  * @param {Object} t - Transaction context
  * @returns {Promise<boolean>} - True if user is final approver
  */
-async function isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, department_id, departmentAccessType, t) {
+async function isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, department_id, departmentAccessType, t, entity_type = null) {
   if (!policySteps || policySteps.length === 0) {
     return false;
   }
 
-  const lastStep = policySteps[policySteps.length - 1];
+  // Filter to only steps with approve permission (same logic as createApprovalInstance)
+  let approverSteps = policySteps;
+  if (entity_type) {
+    approverSteps = [];
+    for (const step of policySteps) {
+      if (step.approver_source_type === 'ROLE') {
+        const hasApprovePermission = await t.oneOrNone(`
+          SELECT 1 FROM tbl_role_permissions rp
+          JOIN tbl_permissions p ON rp.permission_id = p.id
+          WHERE rp.role_id = $1 AND p.resource = $2 AND p.action = 'approve'
+        `, [step.approver_source_id, ENTITY_APPROVE_RESOURCE_MAP[entity_type] || entity_type.toLowerCase()]);
+        if (!hasApprovePermission) continue;
+      }
+      approverSteps.push(step);
+    }
+  }
+
+  if (approverSteps.length === 0) {
+    return false;
+  }
+
+  const lastStep = approverSteps[approverSteps.length - 1];
 
   const finalStepApprovers = await resolveApprovers(
     lastStep,
@@ -2012,6 +2044,16 @@ export async function createApprovalInstance({
     }
 
     for (const policyStep of policySteps) {
+      // For ROLE-based steps, skip if the role lacks approve permission for this entity type
+      if (policyStep.approver_source_type === 'ROLE') {
+        const hasApprovePermission = await t.oneOrNone(`
+          SELECT 1 FROM tbl_role_permissions rp
+          JOIN tbl_permissions p ON rp.permission_id = p.id
+          WHERE rp.role_id = $1 AND p.resource = $2 AND p.action = 'approve'
+        `, [policyStep.approver_source_id, ENTITY_APPROVE_RESOURCE_MAP[entity_type] || entity_type.toLowerCase()]);
+        if (!hasApprovePermission) continue;
+      }
+
       // Resolve approvers for this step with department access type awareness
       const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, departmentAccessType, t, initiated_by);
 
@@ -2159,7 +2201,7 @@ export async function checkIfUserIsFinalApprover(userId, entity_type, hospitalit
   }
 
   // Check if user is final approver with department access type awareness
-  return await isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, resolveDeptId, departmentAccessType, t);
+  return await isUserFinalApprover(userId, policy, policySteps, hospitality_company_id, hotel_id, resolveDeptId, departmentAccessType, t, entity_type);
 }
 
 /**
@@ -2208,6 +2250,16 @@ export async function getDepartmentSubGraphPreview(policyId, hospitality_company
   for (const dept of individualDepts) {
     const deptSteps = [];
     for (const step of steps) {
+      // For ROLE-based steps, skip if the role lacks approve permission for this entity type
+      if (step.approver_source_type === 'ROLE') {
+        const hasApprovePermission = await db.oneOrNone(`
+          SELECT 1 FROM tbl_role_permissions rp
+          JOIN tbl_permissions p ON rp.permission_id = p.id
+          WHERE rp.role_id = $1 AND p.resource = $2 AND p.action = 'approve'
+        `, [step.approver_source_id, ENTITY_APPROVE_RESOURCE_MAP[policy.entity_type] || policy.entity_type.toLowerCase()]);
+        if (!hasApprovePermission) continue;
+      }
+
       const approvers = await resolveApprovers(
         step,
         hospitality_company_id || policy.hospitality_company_id,
