@@ -3746,13 +3746,9 @@ publish_profile_reviews: async (req, res, next) => {
               </div>
               
               <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #2196f3;">
-                <p style="margin: 0 0 10px; font-weight: 600; color: #1565c0;">
+                <p style="margin: 0; font-weight: 600; color: #1565c0;">
                   <strong>Tax invoice and payment received</strong> documents are attached to this email.
                 </p>
-                ${invoiceDownloadUrl ? `<a href="${invoiceDownloadUrl}" 
-                   style="background-color: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
-                  Download Invoice
-                </a>` : ''}
               </div>
               
               <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
@@ -4115,13 +4111,9 @@ publish_profile_reviews: async (req, res, next) => {
                       </div>
                       
                       <div style="background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #2196f3;">
-                        <p style="margin: 0 0 10px; font-weight: 600; color: #1565c0;">
+                        <p style="margin: 0; font-weight: 600; color: #1565c0;">
                           <strong>Tax invoice and payment received</strong> documents are attached to this email.
                         </p>
-                        ${invoiceDownloadUrl ? `<a href="${invoiceDownloadUrl}" 
-                           style="background-color: #2196f3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
-                          Download Invoice
-                        </a>` : ''}
                       </div>
                       
                       <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
