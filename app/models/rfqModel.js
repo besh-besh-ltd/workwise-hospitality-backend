@@ -10291,6 +10291,11 @@ ORDER BY tq.timestamp DESC;
           FROM tbl_quotes tq
           WHERE tq.rfq_id = RFQ.id
         ) AS is_finalized,
+        (
+          SELECT COUNT(*) > 0
+          FROM tbl_quote_finalization _tqf_any
+          WHERE _tqf_any.rfq_id = RFQ.id
+        ) AS has_finalization,
         P.name AS project_name,
         RFQ.company_name,
         RFQ.contact_name,
