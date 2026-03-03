@@ -12,6 +12,7 @@ import subscriptionRoutes from './subscriptionRoutes.js';
 import couponRoutes from './couponRoutes.js';
 import rolesRoutes from './rolesRoutes.js';
 import rfqRoutes from './rfqRoutes.js';
+import maintenanceRoutes from './maintenanceRoutes.js';
 // import userRoutes from './userRoutes.js';
 
 // import userRoutes from './userRoutes.js';
@@ -30,6 +31,7 @@ admin.use('/subscription', subscriptionRoutes);
 admin.use('/coupon', couponRoutes);
 admin.use('/roles', rolesRoutes);
 admin.use('/rfq', rfqRoutes);
+admin.use('/maintenance', maintenanceRoutes);
 
 // admin.use('/user', userRoutes);
 
