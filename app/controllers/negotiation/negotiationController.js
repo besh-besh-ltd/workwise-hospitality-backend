@@ -1336,7 +1336,39 @@ const NegotiationController = {
         const instance = await getApprovalInstanceById(pendingInstance.id, 'NEGOTIATION_QUOTE');
         const metadata = instance?.metadata || {};
 
-        if (metadata.rfq_id && metadata.selected_quotes?.length > 0) {
+        // Path A: PO payload stored by rfqController.finalize (direct vendor finalization)
+        if (metadata.po_payload && metadata.po_user) {
+          await db.tx(async (t) => {
+            const poResult = await draftPO(metadata.po_payload, metadata.po_user, t);
+
+            // Auto-initiate PO
+            if (poResult?.po_id) {
+              try {
+                await t.none('SAVEPOINT po_init');
+                await initiatePurchaseOrder(poResult.po_id, { id: user_id, company_id: req.user.company_id }, t);
+                await t.none('RELEASE SAVEPOINT po_init');
+              } catch (initError) {
+                await t.none('ROLLBACK TO SAVEPOINT po_init');
+                console.error(`Error auto-initiating PO ${poResult.po_id}:`, initError);
+              }
+            }
+
+            await recordLifecycleEvent({
+              entity_type: metadata.is_tender === 1 ? 'TENDER' : 'RFQ',
+              entity_id: metadata.rfq_id,
+              stage: 'NEGOTIATION_QUOTES_APPROVED',
+              action: 'APPROVE',
+              performed_by: user_id,
+              metadata: {
+                approval_instance_id: pendingInstance.id,
+                rfq_product_id: metadata.rfq_product_id,
+                vendor_id: metadata.vendor_id,
+                quote_id: metadata.quote_id
+              },
+              txContext: t
+            });
+          });
+        } else if (metadata.rfq_id && metadata.selected_quotes?.length > 0) {
           const rfq = await rfqModel.checkIfExists('tbl_rfq', `id = ${metadata.rfq_id}`);
           const rfqData = rfq[0];
 

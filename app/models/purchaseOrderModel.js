@@ -319,7 +319,11 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
 
         FROM tbl_rfq_purchase_order PO
         JOIN tbl_rfq RFQ ON RFQ.id = PO.rfq_id
-        LEFT JOIN tbl_quotes TQ ON TQ.rfq_id = PO.rfq_id AND TQ.created_by = PO.finalized_vendor_id
+        LEFT JOIN LATERAL (
+          SELECT * FROM tbl_quotes
+          WHERE rfq_id = PO.rfq_id AND created_by = PO.finalized_vendor_id
+          ORDER BY timestamp DESC LIMIT 1
+        ) TQ ON TRUE
         JOIN tbl_users SUP ON SUP.id = PO.finalized_vendor_id
         JOIN tbl_users FIN ON FIN.id = PO.initiated_by
         JOIN tbl_company TCSUP ON TCSUP.id = SUP.company_id
