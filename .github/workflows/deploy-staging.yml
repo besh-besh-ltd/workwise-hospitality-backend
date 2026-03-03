@@ -1,0 +1,50 @@
+name: Deploy Backend (staging)
+
+on:
+  push:
+    branches:
+      - qa
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-backend-qa
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to staging EC2
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.WORKWISE_SSH_USER }}
+          key: ${{ secrets.WORKWISE_SSH_KEY }}
+          port: 22
+          script_stop: true
+          command_timeout: 35m
+          script: |
+            set -euo pipefail
+
+            APP_DIR="$HOME/workwise-backend"
+            DEPLOY_BRANCH="qa"
+
+            cd "$APP_DIR"
+            git fetch --prune origin "$DEPLOY_BRANCH"
+            git checkout "$DEPLOY_BRANCH"
+            git reset --hard "origin/$DEPLOY_BRANCH"
+
+            npm i --no-audit --no-fund
+            cat > .env << 'EOF'
+            ${{ secrets.ENV_STAGING }}
+            EOF
+            pm2 restart workwise-backend --update-env
