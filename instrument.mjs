@@ -24,7 +24,7 @@ const sentryConfig = {
   beforeSend(event, hint) {
     console.log('Sentry beforeSend called:', event.type, event.event_id);
     // Filter out health check requests from performance monitoring
-    if (event.request?.url?.includes('/health')) {
+    if (event.request?.url?.includes('/health') || event.request?.url?.includes('/api/health')) {
       return null;
     }
     return event;
@@ -32,7 +32,7 @@ const sentryConfig = {
   // Error filtering
   beforeSendTransaction(event) {
     // Filter out health check transactions
-    if (event.transaction?.includes('/health')) {
+    if (event.transaction?.includes('/health') || event.transaction?.includes('/api/health')) {
       return null;
     }
     return event;

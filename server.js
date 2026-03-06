@@ -11,6 +11,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { SocketConfig } from './app/util/socket.js';
 import * as Sentry from '@sentry/node';
+import db, { pgp } from './app/config/dbConn.js';
 const __filename = fileURLToPath(import.meta.url);
 
 const __dirname = path.dirname(__filename);
@@ -25,16 +26,26 @@ import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs } from './
 // Initialize app
 const app = express();
 
-// Add this near the top
+// Basic health check
 app.get('/health', (req, res) => {
   res.status(200).send('OK');
+});
+
+// Deep health check — verifies DB connectivity
+app.get('/api/health', async (req, res) => {
+  try {
+    await db.one('SELECT 1 AS alive');
+    res.status(200).json({ status: 'ok' });
+  } catch (err) {
+    res.status(503).json({ status: 'error', message: 'Database connection failed' });
+  }
 });
 
 
 // Capture any 5xx responses that were handled locally (no thrown error)
 app.use((req, res, next) => {
   const startHr = process.hrtime.bigint();
-  const noisyPathPatterns = [/^\/favicon\.ico$/, /^\/robots\.txt$/, /^\/health$/, /^\/static\//, /^\/assets\//];
+  const noisyPathPatterns = [/^\/favicon\.ico$/, /^\/robots\.txt$/, /^\/health$/, /^\/api\/health$/, /^\/static\//, /^\/assets\//];
   const botUaPatterns = [/bot/i, /crawler/i, /spider/i, /curl/i];
   res.on('finish', () => {
     try {
@@ -148,3 +159,32 @@ function onListening() {
   var bind = typeof addr === 'string' ? 'pipe ' + addr : 'port ' + addr.port;
   consoleLogData('Listening on :: ' + bind);
 }
+
+// ── Graceful shutdown ────────────────────────────────────────
+function gracefulShutdown(signal) {
+  console.log(`\n${signal} received — starting graceful shutdown`);
+
+  // Stop accepting new connections, drain in-flight requests
+  server.close(() => {
+    console.log('HTTP server closed');
+
+    // Close DB connection pool
+    pgp.end();
+    console.log('Database pool closed');
+
+    // Flush pending Sentry events
+    Sentry.flush(2000).finally(() => {
+      console.log('Shutdown complete');
+      process.exit(0);
+    });
+  });
+
+  // Force exit after 15s if draining hangs
+  setTimeout(() => {
+    console.error('Forced shutdown after 15s timeout');
+    process.exit(1);
+  }, 15000).unref();
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
