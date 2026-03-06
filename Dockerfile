@@ -9,7 +9,7 @@ FROM node:18-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV PORT=3200
+ENV PORT=8002
 
 # Install Chromium system dependencies for Puppeteer
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -54,9 +54,9 @@ RUN mkdir -p app/storage/logs app/storage/internal app/storage/invoices app/uplo
 
 USER appuser
 
-EXPOSE 3200
+EXPOSE 8002
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=45s --retries=3 \
-  CMD curl -sf http://localhost:3200/api/health || exit 1
+  CMD curl -sf http://localhost:8002/api/health || exit 1
 
 CMD ["node", "server.js"]
