@@ -43,7 +43,7 @@ export const sendReminderMail = async (milestone, userList) => {
 
         <p style="text-align:center; margin-top: 30px;">
           Thank you for staying proactive.<br/>
-          <strong>— Workwise Team</strong>
+          <strong>— Phileein Hospitality Team</strong>
         </p>
       </div>`;
 

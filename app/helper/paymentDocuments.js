@@ -3,7 +3,7 @@ import puppeteer from 'puppeteer';
 import Config from '../config/app.config.js';
 
 const INVOICE_DIR = Config.upload?.invoice_file || 'app/uploads/invoice_file';
-const WORKWISE_ADDRESS = '1st Floor, 271 Business Park, Model Industrial Estate, near Virwani Industrial Estate, off Western Express Highway, Vishveshwar Nagar, Goregaon, Mumbai, Maharashtra 400063';
+const COMPANY_ADDRESS = '1st Floor, 271 Business Park, Model Industrial Estate, near Virwani Industrial Estate, off Western Express Highway, Vishveshwar Nagar, Goregaon, Mumbai, Maharashtra 400063';
 const GSTIN = 'IN GST 19AABCD1743K1ZM';
 
 /**
@@ -51,8 +51,8 @@ export async function generateTaxInvoicePdf(opts) {
 <head><meta charset="utf-8"><style>body{ font-family: Tahoma, Arial, sans-serif; font-size: 12px; color: #111; margin: 24px; } table { width: 100%; border-collapse: collapse; }</style></head>
 <body>
   <div style="margin-bottom: 24px;">
-    <div style="font-size: 20px; font-weight: bold; color: #158993;">WorkWise</div>
-    <div style="font-size: 11px; color: #6b7280; margin-top: 4px;">${WORKWISE_ADDRESS}</div>
+    <div style="font-size: 20px; font-weight: bold; color: #158993;">Phileein Hospitality</div>
+    <div style="font-size: 11px; color: #6b7280; margin-top: 4px;">${COMPANY_ADDRESS}</div>
     <div style="font-size: 11px; color: #6b7280;">${GSTIN}</div>
   </div>
   <h2 style="margin: 0 0 20px; font-size: 18px;">TAX INVOICE</h2>
@@ -109,8 +109,8 @@ export async function generatePaymentReceivedPdf(opts) {
 <head><meta charset="utf-8"><style>body{ font-family: Tahoma, Arial, sans-serif; font-size: 12px; color: #111; margin: 24px; }</style></head>
 <body>
   <div style="margin-bottom: 24px;">
-    <div style="font-size: 20px; font-weight: bold; color: #158993;">WorkWise</div>
-    <div style="font-size: 11px; color: #6b7280; margin-top: 4px;">${WORKWISE_ADDRESS}</div>
+    <div style="font-size: 20px; font-weight: bold; color: #158993;">Phileein Hospitality</div>
+    <div style="font-size: 11px; color: #6b7280; margin-top: 4px;">${COMPANY_ADDRESS}</div>
   </div>
   <h2 style="margin: 0 0 20px; font-size: 18px;">PAYMENT RECEIVED</h2>
   <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; background: #fafafa;">

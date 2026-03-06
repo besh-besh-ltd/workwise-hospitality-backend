@@ -58,7 +58,7 @@ export const sendTechEvalCompletionNotification = async (rfqDetails, techEvalDet
 
           <p style="text-align:center; margin-top: 30px;">
             Thank you for your continued attention to this procurement.<br/>
-            <strong>— Workwise Team</strong>
+            <strong>— Phileein Hospitality Team</strong>
           </p>
         </div>`;
 
@@ -123,7 +123,7 @@ export const sendVendorTechAcceptanceNotification = async ({ rfqDetails, vendors
           </div>
 
           <p style="text-align:center; margin-top:30px;">
-            <strong>— Workwise Team</strong>
+            <strong>— Phileein Hospitality Team</strong>
           </p>
         </div>`;
 
