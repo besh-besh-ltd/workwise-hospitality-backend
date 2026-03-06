@@ -80,9 +80,7 @@ jobs:
             ENV_FILE="$HOME/.env.backend-staging"
 
             # Write env file from secret
-            cat > "$ENV_FILE" << 'ENVEOF'
-            ${{ secrets.ENV_STAGING }}
-            ENVEOF
+            printf '%s\n' '${{ secrets.ENV_STAGING }}' > "$ENV_FILE"
 
             # ECR login
             aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
