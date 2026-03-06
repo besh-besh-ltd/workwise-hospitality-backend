@@ -45,11 +45,15 @@ const generatePassword = (password) => {
   return hash;
 };
 
-webpush.setVapidDetails(
-  process.env.WEB_PUSH_CONTACT,
-  process.env.PUBLIC_VAPID_KEY,
-  process.env.PRIVATE_VAPID_KEY
-);
+try {
+  webpush.setVapidDetails(
+    process.env.WEB_PUSH_CONTACT,
+    process.env.PUBLIC_VAPID_KEY,
+    process.env.PRIVATE_VAPID_KEY
+  );
+} catch (err) {
+  console.error('Failed to set VAPID details — push notifications will not work:', err.message);
+}
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
