@@ -2407,10 +2407,52 @@ const productController = {
           }
         }
         
+        // Fire-and-forget: map all category-subscribed vendors to this new variant
+        (async () => {
+          try {
+            const categoryRows = await db.any(
+              `SELECT category_id FROM tbl_product_categories WHERE product_id = $1`,
+              [product_id]
+            );
+            const categoryIds = categoryRows.map(r => r.category_id).filter(Boolean);
+            if (!categoryIds.length) return;
+
+            const vendors = await db.any(
+              `SELECT DISTINCT vendor_id
+               FROM tbl_vendor_hotel_category_subscription
+               WHERE item_type IN ('category', 'subcategory')
+                 AND item_id = ANY($1::int[])
+                 AND status = 'active'`,
+              [categoryIds]
+            );
+            if (!vendors.length) return;
+
+            const mappings = vendors.map(v => ({
+              variant_id: result.id,
+              vendor_id: v.vendor_id,
+              approved_by: [],
+              make_list: []
+            }));
+
+            await productModel.bulkInsertVariantVendorMappings(mappings, req.user?.id || null);
+
+            // Auto-approve the new mappings (same as vendor registration flow)
+            await db.none(
+              `UPDATE tbl_product_variant_vendor_mapping
+               SET is_approved = TRUE
+               WHERE product_variant_id = $1
+                 AND vendor_id = ANY($2::int[])`,
+              [result.id, vendors.map(v => v.vendor_id)]
+            );
+          } catch (mapErr) {
+            console.error('[ADD_VARIANT] Auto vendor-variant mapping failed:', mapErr);
+          }
+        })();
+
         return res.status(201).json({
           status: 1,
           message: 'Product variant added successfully',
-          data: { 
+          data: {
             id: result.id,
             product_id: product_id,
             variant_name: variantNameValue
