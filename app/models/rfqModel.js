@@ -4679,13 +4679,11 @@ LIMIT 2;
     search_key,
     category_id,
     approved_by_id,
-    locationFilters = {},
+    _locationFilters = {},
     hotel_ids = []
   ) => {
     const normalizedSearchKey = (search_key || '').trim();
     const isSearchAll = normalizedSearchKey.toLowerCase() === 'all';
-    // Keep this arg for compatibility with the controller contract.
-    void locationFilters;
 
     const params = [normalizedSearchKey];
     let paramIdx = 2;

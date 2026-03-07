@@ -27,7 +27,6 @@ import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
 import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, submitApprovalAction, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
 import moment from 'moment-timezone';
-import cmsModel from '../../models/cmsModel.js';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
 import { draftPO } from '../po/purchaseOrderController.js';
@@ -2160,7 +2159,7 @@ const removeDuplicates = (products) => {
   const productList = products.filter(item => item.parent_category_id === 0);
 
   const filteredData = productList.filter((item) => {
-    const key = `${item.product_name}_${item.category_id}`;
+    const key = `${item.variant_id}_${item.category_id}`;
     if (!uniqueItems[key]) {
       uniqueItems[key] = true;
       return true;
@@ -9276,100 +9275,24 @@ const rfqController = {
     const hotel_ids = req.body?.hotel_ids || [];
 
     try {
-      // Skip processing for 'all'
-      if (search_key === 'all') {
-        const productResult = await rfqModel.searchProduct(
-          search_key,
-          category_id,
-          approved_by_id,
-          {},
-          hotel_ids
-        );
-        const categoryResult = await rfqModel.getCategoryList(search_key);
-
-        return res.status(200).json({
-          status: 1,
-          data: removeDuplicates(productResult),
-          categoryData: categoryResult
-        });
-      }
-
-      // Parse slug for location filters
-      let productSlug = search_key;
-      let locationFilters = {};
-
-      if (search_key.includes('-')) {
-        const segments = search_key.split('-');
-
-        if (segments.length >= 2) {
-          const lastSegment = segments[segments.length - 1];
-          const stateResult = await cmsModel.findStateByName(lastSegment);
-
-          if (stateResult) {
-            locationFilters.state_id = stateResult.id;
-            locationFilters.country_id = stateResult.country_id;
-
-            if (segments.length >= 3) {
-              const secondLastSegment = segments[segments.length - 2];
-              const cityResult = await cmsModel.findCityByNameAndState(
-                stateResult.id,
-                secondLastSegment
-              );
-
-              if (cityResult) {
-                locationFilters.city_id = cityResult.id;
-                productSlug = segments.slice(0, -2).join('-');
-              } else {
-                productSlug = segments.slice(0, -1).join('-');
-              }
-            } else {
-              productSlug = segments.slice(0, -1).join('-');
-            }
-          } else {
-            const cityResult = await cmsModel.findCityByNameAndState(
-              null,
-              lastSegment
-            );
-
-            if (cityResult) {
-              locationFilters.city_id = cityResult.id;
-              locationFilters.state_id = cityResult.state_id;
-              locationFilters.country_id = cityResult.country_id;
-              productSlug = segments.slice(0, -1).join('-');
-            }
-          }
-        }
-      }
-
-      // // Default to India
-      // if (!locationFilters.country_id) {
-      //   const indiaResult = await cmsModel.findCountryByName('India');
-      //   if (indiaResult) {
-      //     locationFilters.country_id = indiaResult.id;
-      //   }
-      // }
-
       const productResult = await rfqModel.searchProduct(
-        productSlug,
+        search_key,
         category_id,
         approved_by_id,
-        locationFilters,
+        {},
         hotel_ids
       );
+      const categoryResult = await rfqModel.getCategoryList(search_key);
 
-     
-     const categoryResult = await rfqModel.getCategoryList(productSlug);
-
-
-    // record product search
-    try {
-      const searchedData = [
-        { product_slug: productSlug, user_id: null }
-      ];
-      await generalModel.insertMany('product_search_record', searchedData);
-    } catch (error) {
-      console.log('Product search record table not available:', error.message);
-    }
+      // record product search
+      try {
+        const searchedData = [
+          { product_slug: search_key, user_id: null }
+        ];
+        await generalModel.insertMany('product_search_record', searchedData);
+      } catch (error) {
+        console.log('Product search record table not available:', error.message);
+      }
 
       res.status(200).json({
         status: 1,
