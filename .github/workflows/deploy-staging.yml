@@ -76,10 +76,7 @@ jobs:
           script: |
             set -euo pipefail
 
-            DEPLOY_SCRIPT="$HOME/deploy-backend/deploy.sh"
             ENV_FILE="$HOME/.env.backend-staging"
-
-            # Write env file from secret
             printf '%s\n' '${{ secrets.ENV_STAGING }}' > "$ENV_FILE"
 
             # ECR login
@@ -87,11 +84,6 @@ jobs:
               docker login --username AWS --password-stdin \
               ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
 
-            # Pull the new image
+            # Pull and deploy
             docker pull "${IMAGE_URI}"
-
-            # Run blue-green deployment
-            bash "${DEPLOY_SCRIPT}" "${IMAGE_URI}" "${ENV_FILE}"
-
-            # Clean up env file (contains secrets)
-            rm -f "$ENV_FILE"
+            bash "$HOME/deploy.sh" backend "${IMAGE_URI}"
