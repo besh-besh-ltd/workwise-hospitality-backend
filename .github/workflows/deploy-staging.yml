@@ -61,6 +61,18 @@ jobs:
     needs: build-and-push
     timeout-minutes: 15
     steps:
+      - name: Write env file
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          ENV_CONTENT: ${{ secrets.ENV_STAGING }}
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.WORKWISE_SSH_USER }}
+          key: ${{ secrets.WORKWISE_SSH_KEY }}
+          port: 22
+          envs: ENV_CONTENT
+          script: printf '%s\n' "$ENV_CONTENT" > "$HOME/.env.backend-staging"
+
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         env:
@@ -75,9 +87,6 @@ jobs:
           envs: IMAGE_URI
           script: |
             set -euo pipefail
-
-            ENV_FILE="$HOME/.env.backend-staging"
-            printf '%s\n' '${{ secrets.ENV_STAGING }}' > "$ENV_FILE"
 
             # ECR login
             aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
