@@ -395,6 +395,17 @@ const NegotiationController = {
           created_by: user_id
         }, t);
 
+        // Cancel any stale approval instances from previous expired/completed rounds
+        // Safe because getActiveRound already confirmed no active round exists for this product
+        await t.none(
+          `UPDATE tbl_approval_instances
+           SET status = 'CANCELLED'
+           WHERE entity_type = 'NEGOTIATION'
+             AND entity_id = $1
+             AND status IN ('PENDING', 'APPROVED')`,
+          [rfq_product_id]
+        );
+
         // Create approval instance using the centralized approval engine
         const approvalResult = await startApprovalForNegotiation(
           rfq_product_id,
@@ -416,8 +427,11 @@ const NegotiationController = {
           );
         }
 
-        // Get updated round status
-        const updatedRound = await negotiationModel.getRoundById(round.id);
+        // Get updated round status (must use t since round was created within this transaction)
+        const updatedRound = await t.oneOrNone(
+          `SELECT * FROM tbl_negotiation_rounds WHERE id = $1`,
+          [round.id]
+        );
 
         // Record lifecycle event
         await recordLifecycleEvent({
@@ -427,11 +441,11 @@ const NegotiationController = {
           action: 'CREATE_ROUND',
           performed_by: user_id,
           metadata: {
-            round_id: updatedRound.id,
+            round_id: (updatedRound || round).id,
             round_number: round_number,
             rfq_product_id: rfq_product_id,
             target_price: target_price,
-            status: updatedRound.status
+            status: (updatedRound || round).status
           },
           txContext: t
         });
