@@ -7,9 +7,10 @@ import db from '../config/dbConn.js';
  * @param {number} po_id - Purchase Order ID
  * @returns {Object} - Complete data object for template rendering
  */
-export const buildPOTemplateData = async (po_id) => {
+export const buildPOTemplateData = async (po_id, txContext = null) => {
+  const conn = txContext || db;
   // 1. Get PO with all related data
-  const poData = await db.oneOrNone(`
+  const poData = await conn.oneOrNone(`
     SELECT
       PO.*,
       PO.initiated_by,
@@ -64,7 +65,7 @@ export const buildPOTemplateData = async (po_id) => {
   }
 
   // 2. Get Supplier/Vendor details (including state for tax calculation)
-  const supplier = await db.oneOrNone(`
+  const supplier = await conn.oneOrNone(`
     SELECT
       U.id, U.name, U.email, U.mobile AS phone,
       TC.company_name AS organization_name,
@@ -81,9 +82,9 @@ export const buildPOTemplateData = async (po_id) => {
   `, [poData.finalized_vendor_id]);
 
   // Get buyer state for tax calculation
-  const buyerLocation = await db.oneOrNone(`
+  const buyerLocation = await conn.oneOrNone(`
     SELECT TLS.state_name AS state FROM tbl_company_location TCL
-    JOIN tbl_location_states TLS ON TCL.state_id = TCL.id
+    JOIN tbl_location_states TLS ON TCL.state_id = TLS.id
     WHERE TCL.company_id = $1
     ORDER BY TCL.created_at DESC LIMIT 1
   `, [poData.company_id]);
@@ -92,7 +93,7 @@ export const buildPOTemplateData = async (po_id) => {
   // Note: tax, freight_price, package_price are stored in charges_meta JSONB column
   // Size and Spec come from tbl_rfq_products_specs filtered by title
   // HSN code comes from tbl_purchase_order_hsn_mapping
-  const items = await db.any(`
+  const items = await conn.any(`
     SELECT
       POP.quantity,
       POP.unit,
@@ -139,7 +140,7 @@ export const buildPOTemplateData = async (po_id) => {
   const pricing = calculatePricingBreakdown(items, buyerState, supplierState);
 
   // 5. Get Payment Terms from Quote
-  const paymentTermsList = await db.any(`
+  const paymentTermsList = await conn.any(`
     SELECT type, value, days, comment
     FROM tbl_quotes_payment_terms
     WHERE quote_id = $1
@@ -147,7 +148,7 @@ export const buildPOTemplateData = async (po_id) => {
   `, [poData.quote_id]);
 
   // 6. Get RFQ Terms (via junction table tbl_rfq_terms_map)
-  const rfqTerms = await db.any(`
+  const rfqTerms = await conn.any(`
     SELECT RT.id, RT.term_content
     FROM tbl_rfq_terms_map RTM
     JOIN tbl_rfq_terms RT ON RT.id = RTM.terms_id
@@ -156,7 +157,7 @@ export const buildPOTemplateData = async (po_id) => {
   `, [poData.rfq_id]);
 
   // 7. Get Approval Data
-  const approvalData = await getApprovalDataForPO(po_id, poData);
+  const approvalData = await getApprovalDataForPO(po_id, poData, conn);
 
   // 8. Build final template data
   return {
@@ -207,10 +208,8 @@ export const buildPOTemplateData = async (po_id) => {
     isAutoPublished: approvalData.isAutoPublished,
     rfqCreatorName: approvalData.rfqCreatorName,
     rfqApproverName: approvalData.rfqApproverName,
-    techEvaluatorName: approvalData.techEvaluatorName,
-    techApproverName: approvalData.techApproverName,
-    commercialEvaluatorName: approvalData.commercialEvaluatorName,
-    commercialApproverName: approvalData.commercialApproverName,
+    techEvaluations: approvalData.techEvaluations,
+    commercialEvaluations: approvalData.commercialEvaluations,
     poApprovers: approvalData.poApprovers
   };
 };
@@ -306,6 +305,28 @@ const calculatePricingBreakdown = (items, buyerState, supplierState) => {
 };
 
 /**
+ * Deduplicate evaluation entries by product name.
+ * Merges evaluators and approvers when the same product appears in multiple instances.
+ */
+const deduplicateByProduct = (evaluations) => {
+  const byProduct = new Map();
+  for (const e of evaluations) {
+    const key = e.productName || 'Unknown';
+    if (!byProduct.has(key)) {
+      byProduct.set(key, { productName: key, evaluators: new Set(), approvers: new Set() });
+    }
+    const entry = byProduct.get(key);
+    if (e.evaluatorName) entry.evaluators.add(e.evaluatorName);
+    for (const a of e.approvers) entry.approvers.add(a.name);
+  }
+  return Array.from(byProduct.values()).map(e => ({
+    productName: e.productName,
+    evaluators: Array.from(e.evaluators),
+    approvers: Array.from(e.approvers)
+  }));
+};
+
+/**
  * Get approval data for PO template
  * Fetches technical evaluator, commercial evaluator, and PO approvers
  *
@@ -313,23 +334,21 @@ const calculatePricingBreakdown = (items, buyerState, supplierState) => {
  * @param {Object} poData - PO data object
  * @returns {Object} - Approval data object
  */
-const getApprovalDataForPO = async (po_id, poData) => {
+const getApprovalDataForPO = async (po_id, poData, conn = db) => {
   const result = {
     // Created By section: RFQ creator + RFQ publishing approver
     rfqCreatorName: null,
     rfqApproverName: null,
     isAutoPublished: false,
-    // Technical Evaluation section: evaluator + approval approver
-    techEvaluatorName: null,
-    techApproverName: null,
-    // Commercial Evaluation section: negotiation handler + approval approver
-    commercialEvaluatorName: null,
-    commercialApproverName: null,
+    // Technical Evaluation section: per-product evaluators + approvers
+    techEvaluations: [],
+    // Commercial Evaluation section: per-product evaluators + approvers
+    commercialEvaluations: [],
     poApprovers: []
   };
 
   // 1. Get RFQ creator
-  const rfqCreator = await db.oneOrNone(`
+  const rfqCreator = await conn.oneOrNone(`
     SELECT U.name, R.created_by
     FROM tbl_rfq R
     JOIN tbl_users U ON U.id = R.created_by
@@ -340,7 +359,7 @@ const getApprovalDataForPO = async (po_id, poData) => {
   }
 
   // 2. Check if RFQ was auto-published or has an approval flow
-  const rfqApproval = await db.oneOrNone(`
+  const rfqApproval = await conn.oneOrNone(`
     SELECT AI.id, AI.status
     FROM tbl_approval_instances AI
     WHERE AI.entity_type IN ('RFQ', 'TENDER')
@@ -354,7 +373,7 @@ const getApprovalDataForPO = async (po_id, poData) => {
     result.isAutoPublished = true;
   } else {
     // Get the final approver for RFQ publishing
-    const rfqFinalApprover = await db.oneOrNone(`
+    const rfqFinalApprover = await conn.oneOrNone(`
       SELECT U.name
       FROM tbl_approval_actions AA
       JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
@@ -369,80 +388,98 @@ const getApprovalDataForPO = async (po_id, poData) => {
     }
   }
 
-  // 3. Get Technical Evaluation - evaluator (who initiated the tech eval approval) + final approver
-  const techApprovalInstance = await db.oneOrNone(`
-    SELECT AI.id, AI.initiated_by
-    FROM tbl_approval_instances AI
-    WHERE AI.entity_type = 'TECHNICAL'
-      AND AI.entity_id = $1
-    ORDER BY AI.created_at DESC
-    LIMIT 1
-  `, [poData.rfq_id]);
+  // 3. Get Technical Evaluations - all approved TECHNICAL instances for this RFQ
+  // Note: TECHNICAL instances store entity_id = round.id, not rfq_id.
+  // The rfq_id is in metadata->>'rfq_id'.
+  if (poData.rfq_id) {
+    const techInstances = await conn.any(`
+      SELECT AI.id, AI.initiated_by,
+             AI.metadata->>'product_name' AS product_name,
+             U.name AS evaluator_name
+      FROM tbl_approval_instances AI
+      JOIN tbl_users U ON U.id = AI.initiated_by
+      WHERE AI.entity_type = 'TECHNICAL'
+        AND AI.metadata->>'rfq_id' = $1::text
+        AND AI.status = 'APPROVED'
+      ORDER BY AI.created_at
+    `, [poData.rfq_id]);
 
-  if (techApprovalInstance) {
-    // Get the evaluator (who initiated the tech eval)
-    const techEvaluator = await db.oneOrNone(`
-      SELECT name FROM tbl_users WHERE id = $1
-    `, [techApprovalInstance.initiated_by]);
-    if (techEvaluator) {
-      result.techEvaluatorName = techEvaluator.name;
-    }
+    for (const inst of techInstances) {
+      const approvers = await conn.any(`
+        SELECT U.name
+        FROM tbl_approval_actions AA
+        JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
+        JOIN tbl_users U ON U.id = AA.approver_user_id
+        WHERE AIS.approval_instance_id = $1
+          AND AA.action = 'APPROVE'
+        ORDER BY AIS.step_order, AA.created_at
+      `, [inst.id]);
 
-    // Get the final tech eval approver
-    const techApprover = await db.oneOrNone(`
-      SELECT U.name
-      FROM tbl_approval_actions AA
-      JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
-      JOIN tbl_users U ON U.id = AA.approver_user_id
-      WHERE AIS.approval_instance_id = $1
-        AND AA.action = 'APPROVE'
-      ORDER BY AA.created_at DESC
-      LIMIT 1
-    `, [techApprovalInstance.id]);
-    if (techApprover) {
-      result.techApproverName = techApprover.name;
+      result.techEvaluations.push({
+        productName: inst.product_name || 'Unknown',
+        evaluatorName: inst.evaluator_name,
+        approvers: approvers.map(a => ({ name: a.name }))
+      });
     }
   }
 
-  // 4. Get Commercial/Negotiation - handler (who initiated) + final approver
-  const commercialApprovalInstance = await db.oneOrNone(`
-    SELECT AI.id, AI.initiated_by
-    FROM tbl_approval_instances AI
-    WHERE AI.entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
-      AND AI.metadata->>'rfq_id' = $1::text
-    ORDER BY AI.created_at DESC
-    LIMIT 1
-  `, [poData.rfq_id]);
+  // 4. Get Commercial/Negotiation - all approved instances for this RFQ
+  if (poData.rfq_id) {
+    const commercialInstances = await conn.any(`
+      SELECT AI.id, AI.initiated_by, AI.entity_type,
+             AI.metadata->>'rfq_product_id' AS rfq_product_id,
+             U.name AS evaluator_name
+      FROM tbl_approval_instances AI
+      JOIN tbl_users U ON U.id = AI.initiated_by
+      WHERE AI.entity_type IN ('NEGOTIATION', 'NEGOTIATION_QUOTE')
+        AND AI.metadata->>'rfq_id' = $1::text
+        AND AI.status = 'APPROVED'
+      ORDER BY AI.created_at
+    `, [poData.rfq_id]);
 
-  if (commercialApprovalInstance) {
-    // Get the negotiation handler
-    const commercialEvaluator = await db.oneOrNone(`
-      SELECT name FROM tbl_users WHERE id = $1
-    `, [commercialApprovalInstance.initiated_by]);
-    if (commercialEvaluator) {
-      result.commercialEvaluatorName = commercialEvaluator.name;
+    const rawCommercial = [];
+    for (const inst of commercialInstances) {
+      // Resolve product name from rfq_product_id in metadata
+      let productName = 'Unknown';
+      if (inst.rfq_product_id) {
+        const product = await conn.oneOrNone(`
+          SELECT PV.name AS product_name
+          FROM tbl_rfq_products RP
+          JOIN tbl_product_variant PV ON PV.id = RP.product_variant_id
+          WHERE RP.id = $1
+        `, [inst.rfq_product_id]);
+        if (product) productName = product.product_name;
+      }
+
+      const approvers = await conn.any(`
+        SELECT U.name
+        FROM tbl_approval_actions AA
+        JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
+        JOIN tbl_users U ON U.id = AA.approver_user_id
+        WHERE AIS.approval_instance_id = $1
+          AND AA.action = 'APPROVE'
+        ORDER BY AIS.step_order, AA.created_at
+      `, [inst.id]);
+
+      rawCommercial.push({
+        productName,
+        evaluatorName: inst.evaluator_name,
+        approvers: approvers.map(a => ({ name: a.name }))
+      });
     }
 
-    // Get the final commercial approver
-    const commercialApprover = await db.oneOrNone(`
-      SELECT U.name
-      FROM tbl_approval_actions AA
-      JOIN tbl_approval_instance_steps AIS ON AIS.id = AA.approval_instance_step_id
-      JOIN tbl_users U ON U.id = AA.approver_user_id
-      WHERE AIS.approval_instance_id = $1
-        AND AA.action = 'APPROVE'
-      ORDER BY AA.created_at DESC
-      LIMIT 1
-    `, [commercialApprovalInstance.id]);
-    if (commercialApprover) {
-      result.commercialApproverName = commercialApprover.name;
-    }
+    result.commercialEvaluations = deduplicateByProduct(rawCommercial);
+  }
+
+  // Also deduplicate tech evaluations
+  if (result.techEvaluations.length > 0) {
+    result.techEvaluations = deduplicateByProduct(result.techEvaluations);
   }
 
   // 5. Get PO Approvers - ALL approvers with their status
   if (poData.approval_instance_id) {
     // New approval workflow - get all steps with their approvers
-    const stepsWithApprovers = await db.any(`
+    const stepsWithApprovers = await conn.any(`
       SELECT
         AIS.id AS step_id,
         AIS.step_order,
@@ -494,7 +531,7 @@ const getApprovalDataForPO = async (po_id, poData) => {
     });
   } else {
     // Legacy approval workflow - get all approvers from hierarchy
-    const txn = await db.oneOrNone(`
+    const txn = await conn.oneOrNone(`
       SELECT id, hierarchy_id, status AS txn_status
       FROM tbl_approval_hierarchy_transactions
       WHERE hierarchy_type = 'po' AND target_entity_id = $1
@@ -502,7 +539,7 @@ const getApprovalDataForPO = async (po_id, poData) => {
 
     if (txn) {
       // Get all approvers in the hierarchy with their action status
-      const hierarchyApprovers = await db.any(`
+      const hierarchyApprovers = await conn.any(`
         SELECT
           AH.approval_level AS step_order,
           AH.user_id,
