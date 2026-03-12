@@ -321,39 +321,49 @@
       </td>
       <td style="width: 25%; vertical-align: top;">
         <strong>Technical Evaluation:</strong><br/>
-        {{#if techEvaluatorName}}
-          <div style="margin-bottom: 2px;">
-            <span class="small" style="color: #6b7280;">Evaluator:</span><br/>
-            <span style="font-weight: 500;">{{techEvaluatorName}}</span>
-          </div>
+        {{#if techEvaluations.length}}
+          {{#each techEvaluations}}
+            <div style="margin-bottom: 4px;">
+              <span style="font-weight: 600; font-size: 9px; color: #374151;">{{productName}}:</span><br/>
+              <span class="small" style="color: #6b7280;">Evaluator:</span>
+              {{#each evaluators}}
+                <span style="font-weight: 500;">{{this}}</span>{{#unless @last}}, {{/unless}}
+              {{/each}}
+              {{#if approvers.length}}
+                <br/>
+                <span class="small" style="color: #6b7280;">Approver:</span>
+                {{#each approvers}}
+                  <span style="font-weight: 500;">{{this}}</span>{{#unless @last}}, {{/unless}}
+                {{/each}}
+              {{/if}}
+            </div>
+          {{/each}}
+        {{else}}
+          -
         {{/if}}
-        {{#if techApproverName}}
-          <div>
-            <span class="small" style="color: #6b7280;">Approver:</span><br/>
-            <span style="font-weight: 500;">{{techApproverName}}</span>
-          </div>
-        {{/if}}
-        {{#unless techEvaluatorName}}
-          {{#unless techApproverName}}-{{/unless}}
-        {{/unless}}
       </td>
       <td style="width: 25%; vertical-align: top;">
         <strong>Commercial Evaluation:</strong><br/>
-        {{#if commercialEvaluatorName}}
-          <div style="margin-bottom: 2px;">
-            <span class="small" style="color: #6b7280;">Evaluator:</span><br/>
-            <span style="font-weight: 500;">{{commercialEvaluatorName}}</span>
-          </div>
+        {{#if commercialEvaluations.length}}
+          {{#each commercialEvaluations}}
+            <div style="margin-bottom: 4px;">
+              <span style="font-weight: 600; font-size: 9px; color: #374151;">{{productName}}:</span><br/>
+              <span class="small" style="color: #6b7280;">Evaluator:</span>
+              {{#each evaluators}}
+                <span style="font-weight: 500;">{{this}}</span>{{#unless @last}}, {{/unless}}
+              {{/each}}
+              {{#if approvers.length}}
+                <br/>
+                <span class="small" style="color: #6b7280;">Approver:</span>
+                {{#each approvers}}
+                  <span style="font-weight: 500;">{{this}}</span>{{#unless @last}}, {{/unless}}
+                {{/each}}
+              {{/if}}
+            </div>
+          {{/each}}
+        {{else}}
+          -
         {{/if}}
-        {{#if commercialApproverName}}
-          <div>
-            <span class="small" style="color: #6b7280;">Approver:</span><br/>
-            <span style="font-weight: 500;">{{commercialApproverName}}</span>
-          </div>
-        {{/if}}
-        {{#unless commercialEvaluatorName}}
-          {{#unless commercialApproverName}}-{{/unless}}
-        {{/unless}}
       </td>
       <td style="width: 25%; vertical-align: top;">
         <strong>PO Approvers:</strong><br/>

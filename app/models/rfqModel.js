@@ -4994,10 +4994,8 @@ WITH RankedProducts AS (
     WHERE pc.category_id IN ($1:csv)  -- Dynamically insert the list of category IDs
       AND p.status = 1 
       AND pv.status = 1
-      AND p.is_deleted = 0 
-      AND p.is_review = 0 
-      AND p.is_approve = 1
-      AND pv.is_approve = 1
+      AND p.is_deleted = 0
+      AND p.is_review = 0
 )
 SELECT 
     product_id, product_name, variant_id, variant_name, description, category_name, category_id, slug

@@ -446,7 +446,7 @@ export const initiatePurchaseOrder = async (po_id, initiator, t) => {
       // Legacy data for backward compatibility with default template
       ...purchaseOrder,
       ...items
-    });
+    }, t);
 
     const s3Url = await uploadToS3(pdfSaveResult.absolutePath, `po-${purchaseOrder.po_number}-${Date.now().toString()}.pdf`)
     // await fs.promises.unlink(pdfSaveResult.absolutePath);
@@ -1014,7 +1014,13 @@ export const getPODetailsById = async (po_id, user_id) => {
               WHEN po.approval_instance_id IS NOT NULL AND tai.status = 'APPROVED' THEN tai.completed_at
               ELSE TAHH.created_at
             END AS po_approved_on,
-            QI.delivery_period
+            (
+              SELECT QI.delivery_period
+              FROM tbl_purchase_order_product TPOP
+              JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
+              WHERE TPOP.purchase_order_id = po.id
+              LIMIT 1
+            ) AS delivery_period
 
        FROM tbl_rfq_purchase_order po
        -- Old approval workflow
@@ -1029,8 +1035,6 @@ export const getPODetailsById = async (po_id, user_id) => {
        JOIN tbl_users TU ON TU.id = po.initiated_by
        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2
-       JOIN tbl_purchase_order_product TPOP ON TPOP.purchase_order_id = po.id
-       JOIN tbl_quote_items QI ON QI.id = TPOP.quote_id
        LEFT JOIN tbl_approval_hierarchy_history TAHH ON trx.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
        LEFT JOIN tbl_company TC ON TC.id = po.company_id
        JOIN tbl_rfq RFQ ON RFQ.id = po.rfq_id
@@ -1846,7 +1850,7 @@ export const regeneratePODocument = async (po_id, txContext = null) => {
       company_id: poData.company_id,
       hospitality_company_id: poData.hospitality_company_id,
       hotel_id: poData.hotel_id
-    });
+    }, t);
 
     if (pdfResult.ok) {
       // Upload to S3 and update URL

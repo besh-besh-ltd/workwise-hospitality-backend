@@ -604,18 +604,6 @@ const hospitalityApprovalController = {
                 await db.tx(async (t) => {
                   const poResult = await draftPO(metadata.po_payload, metadata.po_user, t);
 
-                  // Auto-initiate PO (creates PO approval instance, generates PDF)
-                  if (poResult?.po_id) {
-                    try {
-                      await t.none('SAVEPOINT po_init');
-                      await initiatePurchaseOrder(poResult.po_id, { id: approver_user_id, company_id: req.user.company_id }, t);
-                      await t.none('RELEASE SAVEPOINT po_init');
-                    } catch (initError) {
-                      await t.none('ROLLBACK TO SAVEPOINT po_init');
-                      console.error(`Error auto-initiating PO ${poResult.po_id}:`, initError);
-                    }
-                  }
-
                   const entityType = metadata.is_tender === 1 ? 'TENDER' : 'RFQ';
                   await recordLifecycleEvent({
                     entity_type: entityType,
@@ -641,6 +629,12 @@ const hospitalityApprovalController = {
 
                 if (rfqData) {
                   await db.tx(async (t) => {
+                    // Get the finalization submitter (who initiated the NEGOTIATION_QUOTE approval)
+                    const poCreator = await t.oneOrNone('SELECT id, company_id FROM tbl_users WHERE id = $1', [instance.initiated_by]);
+                    const poUser = poCreator
+                      ? { id: poCreator.id, company_id: poCreator.company_id }
+                      : { id: req.user.id, company_id: req.user.company_id };
+
                     const product = await rfqModel.getRfqProductById(rfqProductId, metadata.rfq_id, t);
                     if (product) {
                       for (const selectedQuote of metadata.selected_quotes) {
@@ -680,19 +674,7 @@ const hospitalityApprovalController = {
                                 },
                                 finalized_vendor_id: selectedQuote.vendor_id
                               }
-                            }, { id: approver_user_id, company_id: req.user.company_id }, t);
-
-                            // Auto-initiate PO (creates PO approval instance, generates PDF)
-                            if (poResult?.po_id) {
-                              try {
-                                await t.none('SAVEPOINT po_init');
-                                await initiatePurchaseOrder(poResult.po_id, { id: approver_user_id, company_id: req.user.company_id }, t);
-                                await t.none('RELEASE SAVEPOINT po_init');
-                              } catch (initError) {
-                                await t.none('ROLLBACK TO SAVEPOINT po_init');
-                                console.error(`Error auto-initiating PO ${poResult.po_id}:`, initError);
-                              }
-                            }
+                            }, poUser, t);
                           }
                         } catch (poError) {
                           console.error(`Error creating PO for vendor ${selectedQuote.vendor_id}:`, poError);

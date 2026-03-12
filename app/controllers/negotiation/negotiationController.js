@@ -1355,18 +1355,6 @@ const NegotiationController = {
           await db.tx(async (t) => {
             const poResult = await draftPO(metadata.po_payload, metadata.po_user, t);
 
-            // Auto-initiate PO
-            if (poResult?.po_id) {
-              try {
-                await t.none('SAVEPOINT po_init');
-                await initiatePurchaseOrder(poResult.po_id, { id: user_id, company_id: req.user.company_id }, t);
-                await t.none('RELEASE SAVEPOINT po_init');
-              } catch (initError) {
-                await t.none('ROLLBACK TO SAVEPOINT po_init');
-                console.error(`Error auto-initiating PO ${poResult.po_id}:`, initError);
-              }
-            }
-
             await recordLifecycleEvent({
               entity_type: metadata.is_tender === 1 ? 'TENDER' : 'RFQ',
               entity_id: metadata.rfq_id,
@@ -1552,19 +1540,7 @@ const NegotiationController = {
                           },
                           finalized_vendor_id: selectedQuote.vendor_id
                         }
-                      }, { id: user_id, company_id: req.user.company_id }, t);
-
-                      // Auto-initiate PO (creates PO approval instance, generates PDF)
-                      if (poResult?.po_id) {
-                        try {
-                          await t.none('SAVEPOINT po_init');
-                          await initiatePurchaseOrder(poResult.po_id, { id: user_id, company_id: req.user.company_id }, t);
-                          await t.none('RELEASE SAVEPOINT po_init');
-                        } catch (initError) {
-                          await t.none('ROLLBACK TO SAVEPOINT po_init');
-                          console.error(`Error auto-initiating PO ${poResult.po_id}:`, initError);
-                        }
-                      }
+                      }, { id: instance.initiated_by || user_id, company_id: req.user.company_id }, t);
                     }
                   } catch (poError) {
                     console.error(`Error creating PO for vendor ${selectedQuote.vendor_id}:`, poError);
