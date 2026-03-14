@@ -2019,15 +2019,9 @@ export async function createApprovalInstance({
       throw new Error('Policy has no approval steps configured');
     }
 
-    // 4. Create the approval instance
-    const instance = await t.one(`
-      INSERT INTO tbl_approval_instances
-      (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, metadata)
-      VALUES ($1, $2, $3, 'PENDING', 1, $4, $5, $6, $7, $8, $9) RETURNING *
-    `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, JSON.stringify(metadata)]);
-
-    // 5. Create instance steps and resolve approvers
-    const instanceSteps = [];
+    // 4. Resolve approvers before writing instance data so approval creation
+    // never leaves a half-built pending instance behind.
+    const resolvedSteps = [];
     let stepNumber = 0; // Track sequential step numbering
 
     // For commercial entity types (NEGOTIATION, NEGOTIATION_QUOTE, PO, ARC),
@@ -2050,6 +2044,7 @@ export async function createApprovalInstance({
           SELECT 1 FROM tbl_role_permissions rp
           JOIN tbl_permissions p ON rp.permission_id = p.id
           WHERE rp.role_id = $1 AND p.resource = $2 AND p.action = 'approve'
+          LIMIT 1
         `, [policyStep.approver_source_id, ENTITY_APPROVE_RESOURCE_MAP[entity_type] || entity_type.toLowerCase()]);
         if (!hasApprovePermission) continue;
       }
@@ -2064,26 +2059,22 @@ export async function createApprovalInstance({
 
       stepNumber++; // Increment sequential step number
 
-      const instanceStep = await t.one(`
-        INSERT INTO tbl_approval_instance_steps
-        (approval_instance_id, step_order, decision_rule, status, policy_step_id)
-        VALUES ($1, $2, $3, 'PENDING', $4) RETURNING *
-      `, [instance.id, stepNumber, policyStep.decision_rule, policyStep.id]);
-
-      // Insert approvers for this step
-      for (const userId of approverUserIds) {
-        await t.none(`
-          INSERT INTO tbl_approval_step_approvers
-          (approval_instance_step_id, approver_user_id, status)
-          VALUES ($1, $2, 'PENDING')
-        `, [instanceStep.id, userId]);
-      }
-
-      instanceSteps.push({ ...instanceStep, approverCount: approverUserIds.length });
+      resolvedSteps.push({
+        policyStep,
+        approverUserIds,
+        stepOrder: stepNumber
+      });
     }
 
-    // Handle case where all steps were skipped (creator was only approver for all steps)
-    if (instanceSteps.length === 0) {
+    // 5. Create the approval instance only after all approvers are known
+    const instance = await t.one(`
+      INSERT INTO tbl_approval_instances
+      (entity_type, entity_id, approval_policy_id, status, current_step, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, metadata)
+      VALUES ($1, $2, $3, 'PENDING', 1, $4, $5, $6, $7, $8, $9) RETURNING *
+    `, [entity_type, entity_id, policy.id, initiated_by, hospitality_company_id, hotel_id, department_id, process_id, JSON.stringify(metadata)]);
+
+    // 6. Handle case where all steps were skipped (creator was only approver for all steps)
+    if (resolvedSteps.length === 0) {
       await t.none(`
         UPDATE tbl_approval_instances
         SET status = 'APPROVED', current_step = 0, completed_at = NOW()
@@ -2097,6 +2088,30 @@ export async function createApprovalInstance({
         totalSteps: 0,
         autoApproved: true
       };
+    }
+
+    // 7. Create instance steps and approvers
+    const instanceSteps = [];
+
+    for (const resolvedStep of resolvedSteps) {
+      const { policyStep, approverUserIds, stepOrder } = resolvedStep;
+
+      const instanceStep = await t.one(`
+        INSERT INTO tbl_approval_instance_steps
+        (approval_instance_id, step_order, decision_rule, status, policy_step_id)
+        VALUES ($1, $2, $3, 'PENDING', $4) RETURNING *
+      `, [instance.id, stepOrder, policyStep.decision_rule, policyStep.id]);
+
+      // Insert approvers for this step
+      for (const userId of approverUserIds) {
+        await t.none(`
+          INSERT INTO tbl_approval_step_approvers
+          (approval_instance_step_id, approver_user_id, status)
+          VALUES ($1, $2, 'PENDING')
+        `, [instanceStep.id, userId]);
+      }
+
+      instanceSteps.push({ ...instanceStep, approverCount: approverUserIds.length });
     }
 
     // Send notification to step 1 approvers (fire-and-forget)
@@ -2137,7 +2152,9 @@ export async function createApprovalInstance({
 
   // If transaction context provided, use it; otherwise create new transaction
   if (txContext) {
-    return executor(txContext);
+    return typeof txContext.tx === 'function'
+      ? txContext.tx(executor)
+      : executor(txContext);
   }
   return db.tx(executor);
 }

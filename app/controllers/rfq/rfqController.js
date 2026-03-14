@@ -8977,7 +8977,24 @@ const rfqController = {
                   const existingApprovals = await getApprovalInstancesByEntity('NEGOTIATION_QUOTE', rfqProduct.id, t);
                   const existingPending = existingApprovals.find(inst => inst.status === 'PENDING');
 
-                  if (!existingPending) {
+                  if (existingPending) {
+                    const existingPendingState = await t.one(`
+                      SELECT COUNT(sa.id)::int AS approver_count
+                      FROM tbl_approval_instances ai
+                      LEFT JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id
+                      LEFT JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = ais.id
+                      WHERE ai.id = $1
+                    `, [existingPending.id]);
+
+                    if (existingPendingState.approver_count === 0) {
+                      throw new Error('A pending quote approval exists in an invalid state with no approvers. Purchase Order draft has been aborted.');
+                    }
+
+                    // An approval is already in flight for this product, so do not
+                    // draft a PO or attempt to create another approval instance.
+                    approvalTriggered = true;
+                    negotiationQuoteApprovalPending = true;
+                  } else {
                     // Try to create NEGOTIATION_QUOTE approval instance
                     const approvalResult = await createApprovalInstance({
                       entity_type: 'NEGOTIATION_QUOTE',
@@ -9032,9 +9049,14 @@ const rfqController = {
                 }
               }
             } catch (approvalError) {
-              // If no policy found or error, fall through to direct PO creation
-              if (!approvalError.message?.includes('No approval policy found')) {
+              // If no policy is configured, direct PO creation is allowed.
+              // Any other approval error must abort the transaction to avoid
+              // committing a PO alongside a partial approval record.
+              if (approvalError.message?.includes('No approval policy found')) {
+                approvalTriggered = false;
+              } else {
                 console.error('Error checking NEGOTIATION_QUOTE approval:', approvalError);
+                throw approvalError;
               }
             }
 
@@ -9075,7 +9097,6 @@ const rfqController = {
           }
 
           // Record lifecycle event for vendor finalization
-          const { recordLifecycleEvent } = await import('../../models/generalModel.js');
           await recordLifecycleEvent({
             entity_type: 'RFQ',
             entity_id: rfq_id,

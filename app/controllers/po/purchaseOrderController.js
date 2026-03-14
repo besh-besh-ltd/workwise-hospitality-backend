@@ -197,13 +197,6 @@ export const approvePO = async (req, res) => {
             comment: remarks || ''
           });
 
-          // Regenerate PO document to update approval section (on each APPROVE action)
-          if (decision === 'approved') {
-            regeneratePODocument(po_id, t).catch(err => {
-              console.error('Failed to regenerate PO document:', err);
-            });
-          }
-
           // Handle post-approval actions
           if (actionResult.instance_status === 'APPROVED') {
             await handlePOPostApproval(po.approval_instance_id, userId, t);
@@ -215,6 +208,15 @@ export const approvePO = async (req, res) => {
 
             // Handle rejection cleanup (move finalization to history)
             await handlePORejection(po, userId, t);
+          }
+
+          // Regenerate PO document on every approval step to update approver statuses
+          if (decision === 'approved') {
+            try {
+              await regeneratePODocument(po_id, t);
+            } catch (err) {
+              console.error('Failed to regenerate PO document:', err);
+            }
           }
 
           return res.status(200).json({
@@ -273,9 +275,11 @@ export const approvePO = async (req, res) => {
 
         // Regenerate PO document to update approval section (on each successful approval)
         if (decision === 'approved') {
-          regeneratePODocument(po_id, t).catch(err => {
+          try {
+            await regeneratePODocument(po_id, t);
+          } catch (err) {
             console.error('Failed to regenerate PO document:', err);
-          });
+          }
         }
 
         if (result && (!result.approval_required || result.is_rejected)) {

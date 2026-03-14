@@ -6,7 +6,7 @@ const negotiationModel = {
   /**
    * Create a new negotiation round (product-specific)
    */
-  createRound: async (roundData) => {
+  createRound: async (roundData, txContext = null) => {
     const {
       rfq_id,
       rfq_product_id,
@@ -22,7 +22,7 @@ const negotiationModel = {
       throw new Error('rfq_product_id is required for product-specific negotiation rounds');
     }
 
-    return db.one(
+    return (txContext || db).one(
       `INSERT INTO tbl_negotiation_rounds
         (rfq_id, rfq_product_id, round_number, target_price, end_date, status, created_by, remarks)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

@@ -3746,26 +3746,24 @@ LIMIT 2;
     }
 
     return new Promise(function (resolve, reject) {
-      // Filter for technically accepted vendors only
-      // If product has tech eval, only show vendors with status = 1
-      // If product has no tech eval, show all vendors (no filtering needed)
+      // Filter for technically accepted vendors only (RFQ-level)
+      // If ANY product in the RFQ has tech eval, vendor must have passed at least one product's tech eval
+      // If NO product in the RFQ has tech eval, show all vendors
       const vendorCondition = `
         AND (
-          -- Product has no technical evaluation, so all vendors are allowed
+          -- No tech evaluation exists for ANY product in this RFQ, so all vendors are allowed
           NOT EXISTS (
             SELECT 1
             FROM tbl_rfq_product_tech_evaluation TEC
             WHERE TEC.rfq_id = $1
-              AND TEC.tbl_rfq_product_id = TRP.id
           )
           OR
-          -- Product has tech eval, vendor must be technically accepted (status = 1)
+          -- RFQ has tech eval, vendor must have passed in at least one product
           EXISTS (
             SELECT 1
             FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
             JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
             WHERE TEC.rfq_id = $1
-              AND TEC.tbl_rfq_product_id = TRP.id
               AND TECV.vendor_id = TQ.created_by
               AND TECV.status = 1
           )
@@ -4120,27 +4118,25 @@ LIMIT 2;
     }
 
     return new Promise(function (resolve, reject) {
-      // Filter for technically accepted vendors only
-      // If product has tech eval, only show vendors with status = 1
-      // If product has no tech eval, show all vendors (no filtering needed)
+      // Filter for technically accepted vendors only (RFQ-level)
+      // If ANY product in the RFQ has tech eval, vendor must have passed at least one product's tech eval
+      // If NO product in the RFQ has tech eval, show all vendors
       const vendorCondition = `
       AND (
-        -- Product has no technical evaluation, so all vendors are allowed
+        -- No tech evaluation exists for ANY product in this RFQ, so all vendors are allowed
         NOT EXISTS (
           SELECT 1
           FROM tbl_rfq_product_tech_evaluation TEC
           WHERE TEC.rfq_id = $1
-            AND TEC.tbl_rfq_product_id = TRF.id
         )
         OR
-        -- Product has tech eval, vendor must be technically accepted (status = 1)
+        -- RFQ has tech eval, vendor must have passed in at least one product
         EXISTS (
           SELECT 1
           FROM tbl_quotes TQ
           JOIN tbl_rfq_product_tech_evaluation_cleared_vendors TECV ON TQ.created_by = TECV.vendor_id
           JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
           WHERE TEC.rfq_id = $1
-            AND TEC.tbl_rfq_product_id = TRF.id
             AND TQ.id = TQI.quote_id
             AND TECV.status = 1
         )
@@ -4998,10 +4994,8 @@ WITH RankedProducts AS (
     WHERE pc.category_id IN ($1:csv)  -- Dynamically insert the list of category IDs
       AND p.status = 1 
       AND pv.status = 1
-      AND p.is_deleted = 0 
-      AND p.is_review = 0 
-      AND p.is_approve = 1
-      AND pv.is_approve = 1
+      AND p.is_deleted = 0
+      AND p.is_review = 0
 )
 SELECT 
     product_id, product_name, variant_id, variant_name, description, category_name, category_id, slug

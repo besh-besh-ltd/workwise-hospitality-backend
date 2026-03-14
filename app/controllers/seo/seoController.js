@@ -56,7 +56,7 @@ const seoController = {
           .end();
     }
   },
-  poPDF : async (poData)=>{
+  poPDF : async (poData, txContext = null)=>{
     try {
     // --- Helpers ---
     // format currency INR style (2 decimals)
@@ -127,7 +127,7 @@ const seoController = {
     // If po_id is provided, use the enhanced data builder
     if (po_id) {
       try {
-        data = await buildPOTemplateData(po_id);
+        data = await buildPOTemplateData(po_id, txContext);
         console.log(`Built PO template data for PO ${po_id}`);
       } catch (buildError) {
         console.error(`Error building PO template data for PO ${po_id}:`, buildError);

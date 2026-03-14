@@ -395,6 +395,17 @@ const NegotiationController = {
           created_by: user_id
         }, t);
 
+        // Cancel any stale approval instances from previous expired/completed rounds
+        // Safe because getActiveRound already confirmed no active round exists for this product
+        await t.none(
+          `UPDATE tbl_approval_instances
+           SET status = 'CANCELLED'
+           WHERE entity_type = 'NEGOTIATION'
+             AND entity_id = $1
+             AND status IN ('PENDING', 'APPROVED')`,
+          [rfq_product_id]
+        );
+
         // Create approval instance using the centralized approval engine
         const approvalResult = await startApprovalForNegotiation(
           rfq_product_id,
@@ -416,8 +427,11 @@ const NegotiationController = {
           );
         }
 
-        // Get updated round status
-        const updatedRound = await negotiationModel.getRoundById(round.id);
+        // Get updated round status (must use t since round was created within this transaction)
+        const updatedRound = await t.oneOrNone(
+          `SELECT * FROM tbl_negotiation_rounds WHERE id = $1`,
+          [round.id]
+        );
 
         // Record lifecycle event
         await recordLifecycleEvent({
@@ -427,11 +441,11 @@ const NegotiationController = {
           action: 'CREATE_ROUND',
           performed_by: user_id,
           metadata: {
-            round_id: updatedRound.id,
+            round_id: (updatedRound || round).id,
             round_number: round_number,
             rfq_product_id: rfq_product_id,
             target_price: target_price,
-            status: updatedRound.status
+            status: (updatedRound || round).status
           },
           txContext: t
         });
@@ -1341,18 +1355,6 @@ const NegotiationController = {
           await db.tx(async (t) => {
             const poResult = await draftPO(metadata.po_payload, metadata.po_user, t);
 
-            // Auto-initiate PO
-            if (poResult?.po_id) {
-              try {
-                await t.none('SAVEPOINT po_init');
-                await initiatePurchaseOrder(poResult.po_id, { id: user_id, company_id: req.user.company_id }, t);
-                await t.none('RELEASE SAVEPOINT po_init');
-              } catch (initError) {
-                await t.none('ROLLBACK TO SAVEPOINT po_init');
-                console.error(`Error auto-initiating PO ${poResult.po_id}:`, initError);
-              }
-            }
-
             await recordLifecycleEvent({
               entity_type: metadata.is_tender === 1 ? 'TENDER' : 'RFQ',
               entity_id: metadata.rfq_id,
@@ -1538,19 +1540,7 @@ const NegotiationController = {
                           },
                           finalized_vendor_id: selectedQuote.vendor_id
                         }
-                      }, { id: user_id, company_id: req.user.company_id }, t);
-
-                      // Auto-initiate PO (creates PO approval instance, generates PDF)
-                      if (poResult?.po_id) {
-                        try {
-                          await t.none('SAVEPOINT po_init');
-                          await initiatePurchaseOrder(poResult.po_id, { id: user_id, company_id: req.user.company_id }, t);
-                          await t.none('RELEASE SAVEPOINT po_init');
-                        } catch (initError) {
-                          await t.none('ROLLBACK TO SAVEPOINT po_init');
-                          console.error(`Error auto-initiating PO ${poResult.po_id}:`, initError);
-                        }
-                      }
+                      }, { id: instance.initiated_by || user_id, company_id: req.user.company_id }, t);
                     }
                   } catch (poError) {
                     console.error(`Error creating PO for vendor ${selectedQuote.vendor_id}:`, poError);
