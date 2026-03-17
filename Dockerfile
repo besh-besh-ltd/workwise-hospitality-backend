@@ -1,11 +1,11 @@
 # ── Stage 1: Install dependencies ─────────────────────────────
-FROM node:18-slim AS deps
+FROM node:22-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
 # ── Stage 2: Production image ────────────────────────────────
-FROM node:18-slim AS runner
+FROM node:22-slim AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
