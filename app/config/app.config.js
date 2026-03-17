@@ -46,8 +46,6 @@ const recaptchaSecret = process.env.RECAPTCHA_SECRET_KEY || "";
 const recaptchaMinScore =
   Number(process.env.RECAPTCHA_MIN_SCORE || 0.5) || 0.5;
 
-// Sentry configuration
-const sentryDsn = process.env.SENTRY_DSN || "";
 const base_url =
   // process.env.BASE_URL || 'https://panacheapi.indusnettechnologies.com';
   process.env.BASE_URL || "http://api.localhost:3001";
@@ -343,10 +341,6 @@ const config = {
   recaptcha: {
     secretKey: recaptchaSecret,
     minScore: recaptchaMinScore,
-  },
-  sentry: {
-    dsn: sentryDsn,
-    environment: env,
   },
 };
 export default config;
