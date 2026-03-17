@@ -13,38 +13,86 @@ concurrency:
   group: deploy-backend-qa
   cancel-in-progress: true
 
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.BACKEND_ECR_REPOSITORY }}
+
 jobs:
+  build-and-push:
+    name: Build Docker image & push to ECR
+    runs-on: ubuntu-latest
+    outputs:
+      image_uri: ${{ steps.build.outputs.image_uri }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+
+          docker build \
+            -t "${IMAGE_URI}" \
+            -t "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest" \
+            .
+
+          docker push "${IMAGE_URI}"
+          docker push "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+
   deploy:
     name: Deploy to staging EC2
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-
+    needs: build-and-push
+    timeout-minutes: 15
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Write env file
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          ENV_CONTENT: ${{ secrets.ENV_STAGING }}
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.WORKWISE_SSH_USER }}
+          key: ${{ secrets.WORKWISE_SSH_KEY }}
+          port: 22
+          envs: ENV_CONTENT
+          script: printf '%s\n' "$ENV_CONTENT" > "$HOME/.env.backend-staging"
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
+        env:
+          IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.BACKEND_ECR_REPOSITORY }}:${{ github.sha }}
         with:
           host: ${{ secrets.STAGING_SSH_HOST }}
           username: ${{ secrets.WORKWISE_SSH_USER }}
           key: ${{ secrets.WORKWISE_SSH_KEY }}
           port: 22
           script_stop: true
-          command_timeout: 35m
+          command_timeout: 10m
+          envs: IMAGE_URI
           script: |
             set -euo pipefail
 
-            APP_DIR="$HOME/workwise-backend"
-            DEPLOY_BRANCH="qa"
+            # ECR login
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+              docker login --username AWS --password-stdin \
+              ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
 
-            cd "$APP_DIR"
-            git fetch --prune origin "$DEPLOY_BRANCH"
-            git checkout "$DEPLOY_BRANCH"
-            git reset --hard "origin/$DEPLOY_BRANCH"
-
-            npm i --no-audit --no-fund
-            cat > .env << 'EOF'
-            ${{ secrets.ENV_STAGING }}
-            EOF
-            pm2 restart workwise-backend --update-env
+            # Pull and deploy
+            docker pull "${IMAGE_URI}"
+            bash "$HOME/deploy.sh" backend "${IMAGE_URI}"

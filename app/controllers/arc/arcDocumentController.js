@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import Handlebars from 'handlebars';
 import puppeteer from 'puppeteer';
+import config from '../../config/app.config.js';
 import { sendMail } from '../../helper/common.js';
 import { getLifecycleHistory } from '../../models/generalModel.js';
 import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
@@ -255,7 +256,7 @@ export const sendAwardDocumentToVendor = async (rfq_product_id, document_url, tx
 
         <p style="text-align:center; margin-top: 30px;">
           Thank you for your continued partnership.<br/>
-          <strong>— Team Workwise</strong>
+          <strong>— Phileein Hospitality Team</strong>
         </p>
       </div>
     `;
@@ -267,7 +268,7 @@ export const sendAwardDocumentToVendor = async (rfq_product_id, document_url, tx
     await vendorModel.getSpocDetails(finalization.vendor_id);
 
     const mailRecipients = {
-      from: company ? `${company.company_name} <hello@letsworkwise.com>` : 'Workwise <hello@letsworkwise.com>',
+      from: company ? `${company.company_name} ${config.masterEmail}` : config.webmasterMail,
       to: vendor.email,
       subject: `ARC Award Confirmed — Tender #${productData.rfq_no}`,
       html: dynamicHTML,

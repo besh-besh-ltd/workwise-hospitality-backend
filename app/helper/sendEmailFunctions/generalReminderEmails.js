@@ -47,7 +47,7 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
         subjectSuffix = "Scheduled delivery today";
         reminderTagLine = `Today is the scheduled delivery date for PO #${po_number}.`;
         sequenceNote = `
-          If the material has already been received at site, please update the PO status to <strong>GRN</strong> in Workwise.
+          If the material has already been received at site, please update the PO status to <strong>GRN</strong> in Phileein Hospitality.
           You will receive one more reminder 3 days from today if the PO remains in <strong>Dispatched</strong> status.
         `;
       } else if (day === 3) {
@@ -55,14 +55,14 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
         reminderTagLine = `This is a follow-up reminder, 3 days after the scheduled delivery date for PO #${po_number}.`;
         sequenceNote = `
           If the material has been received at site, please update the PO status to <strong>GRN</strong> as soon as possible.
-          If the shipment is delayed or partially delivered, kindly update the status/remarks accordingly in Workwise.
+          If the shipment is delayed or partially delivered, kindly update the status/remarks accordingly in Phileein Hospitality.
         `;
       } else {
         // Fallback / generic
         subjectSuffix = "GRN reminder";
         reminderTagLine = `This is a reminder related to Goods Received Note (GRN) for PO #${po_number}.`;
         sequenceNote = `
-          If the shipment has been delivered, please update the PO status to <strong>GRN</strong> in Workwise.
+          If the shipment has been delivered, please update the PO status to <strong>GRN</strong> in Phileein Hospitality.
         `;
       }
 
@@ -84,7 +84,7 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
 
         <p style="margin-top:16px;">
           This reminder is for you to verify whether the shipment has been delivered at site 
-          and, if so, to update the PO status to <strong>GRN</strong> in the system.
+          and, if so, to update the PO status to <strong>GRN</strong> in Phileein Hospitality.
         </p>
 
         <p style="margin-top:10px;">
@@ -100,7 +100,7 @@ export const sendGRNEmail = async (purchase_order, userList, grnRepData, day = 0
 
         <p style="text-align:center; margin-top: 30px;">
           Thank you for keeping your GRNs up to date.<br/>
-          <strong>— Workwise Team</strong>
+          <strong>— Phileein Hospitality Team</strong>
         </p>
       </div>`;
 
@@ -193,7 +193,7 @@ export const sendInvoiceEmail = async (purchase_order, invoice_url, userList = [
 
         <p style="text-align:center; margin-top: 30px;">
           Thank you for keeping your Purchase Orders and invoices up to date.<br/>
-          <strong>— Workwise Team</strong>
+          <strong>— Phileein Hospitality Team</strong>
         </p>
       </div>`;
 
@@ -281,7 +281,7 @@ export const sendGRNUpdationEmail = async (purchase_order, grn_document_url, use
 
         <p style="text-align:center; margin-top: 30px;">
           Thank you for keeping your Purchase Orders and invoices up to date.<br/>
-          <strong>— Workwise Team</strong>
+          <strong>— Phileein Hospitality Team</strong>
         </p>
       </div>`;
 
@@ -385,7 +385,7 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
 
         <p style="margin-top:10px;">
           On receiving the material at site, please ensure that the PO status is updated to 
-          <strong>GRN</strong> in Workwise so that records and downstream processes (like payments) remain accurate.
+          <strong>GRN</strong> in Phileein Hospitality so that records and downstream processes (like payments) remain accurate.
         </p>
 
         <div style="text-align:center; margin-top:24px;">
@@ -397,7 +397,7 @@ export const sendDispatchedEmail = async (purchase_order, userList) => {
 
         <p style="text-align:center; margin-top: 30px;">
           Thank you for coordinating a smooth delivery and GRN posting.<br/>
-          <strong>— Workwise Team</strong>
+          <strong>— Phileein Hospitality Team</strong>
         </p>
       </div>`;
 
@@ -517,7 +517,7 @@ export const sendGRNRepresentativeEmail = async (purchase_order, siteRepEmail, t
 
             <p style="text-align:center; margin-top: 30px;">
                 Thank you for helping keep delivery records accurate.<br/>
-                <strong>— Workwise Team</strong>
+                <strong>— Phileein Hospitality Team</strong>
             </p>
         </div>`;
 

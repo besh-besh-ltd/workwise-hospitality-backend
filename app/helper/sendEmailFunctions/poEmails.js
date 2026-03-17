@@ -115,7 +115,7 @@ export const sendPOApprovalCompletionNotification = async ({
 
           <p style="text-align:center; margin-top: 30px;">
             Thank you for your continued attention to this procurement.<br/>
-            <strong>— ${companyDetails?.company_name || 'Workwise'} Team</strong>
+            <strong>— ${companyDetails?.company_name || 'Phileein Hospitality'} Team</strong>
           </p>
         </div>`;
 

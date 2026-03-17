@@ -45,11 +45,15 @@ const generatePassword = (password) => {
   return hash;
 };
 
-webpush.setVapidDetails(
-  process.env.WEB_PUSH_CONTACT,
-  process.env.PUBLIC_VAPID_KEY,
-  process.env.PRIVATE_VAPID_KEY
-);
+try {
+  webpush.setVapidDetails(
+    process.env.WEB_PUSH_CONTACT,
+    process.env.PUBLIC_VAPID_KEY,
+    process.env.PRIVATE_VAPID_KEY
+  );
+} catch (err) {
+  console.error('Failed to set VAPID details — push notifications will not work:', err.message);
+}
 
 const cryptr = new Cryptr(Config.cryptR.secret);
 
@@ -74,15 +78,15 @@ const continueBuyerCompanyRegistration = async (inputData, company_id)=>{
 
           const emailHeaderContent = `<h2>Hello ${inputData.name || ''},</h2>`
           const emailContainerContent = `
-          <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
-           <p>Welcome to WorkWise! Your admin account has been created successfully. </p>
+          <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
+           <p>Welcome to Phileein Hospitality! Your account has been created successfully. </p>
             <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
             <ul>
             <li> <strong> Email: </strong> ${inputData.email} </li>
             <li> <strong>Password: </strong> ${inputData.password} </li>
             </ul>
-            <p>You can log in to your account using this link: <a href="https://letsworkwise.com/?user_registered=1" >Click Here</a></p>
-            <p style="font-size: 14px; color: #777;"><em>For security reasons, we recommend changing your password after your first login.</em></p>    
+            <p>You can log in to your account using this link: <a href="https://hospitality.letsworkwise.com/?user_registered=1" >Click Here</a></p>
+            <p style="font-size: 14px; color: #777;"><em>For security reasons, we recommend changing your password after your first login.</em></p>
           </div>`
 
         const dynamic_html = generateEmailTemplate(emailHeaderContent, emailContainerContent)
@@ -90,7 +94,7 @@ const continueBuyerCompanyRegistration = async (inputData, company_id)=>{
         const mailRecipients = {
           from: Config.webmasterMail,
           to: inputData.email,
-          subject: `Welcome to WorkWise - Account Created`,
+          subject: `Welcome to Phileein Hospitality - Account Created`,
           html: dynamic_html
         };
 
@@ -860,23 +864,22 @@ create_buyer_company_users: async (req, res, next) => {
 
     /* -------------------- EMAIL (non-critical) -------------------- */
     try {
-      const companyName =
-        companyDetails?.[0]?.company_name || null;
+      const companyName = company?.company_name || null;
 
       const emailHTML = generateEmailTemplate(
         `<h2>Hello ${name},</h2>`,
         `
-        <p>Welcome to WorkWise${companyName ? ` - ${companyName}` : ""}</p>
+        <p>Welcome to Phileein Hospitality${companyName ? ` - ${companyName}` : ""}</p>
         <p><strong>Email:</strong> ${email}</p>
         <p><strong>Password:</strong> ${password}</p>
-        <p><a href="https://letsworkwise.com/?user_registered=1">Login Here</a></p>
+        <p><a href="https://hospitality.letsworkwise.com/?user_registered=1">Login Here</a></p>
         `
       );
 
       sendMail({
         from: Config.webmasterMail,
         to: email,
-        subject: "Welcome to WorkWise - Account Created",
+        subject: "Welcome to Phileein Hospitality - Account Created",
         html: emailHTML
       });
     } catch (emailErr) {
@@ -1000,14 +1003,14 @@ get_company_users: async (req, res, next) => {
           const emailHeaderContent = `<h2>Hello ${name || ''},</h2>`
           const emailContainerContent = `
           <div style="font-size:16px; font-family: 'Roboto', sans-serif;"> 
-           <p> Welcome to WorkWise! Your account has been created successfully. </p>
+           <p> Welcome to Phileein Hospitality! Your account has been created successfully. </p>
             <p style="margin-bottom:0px;"><strong>Login Details:</strong></p>
             <ul>
             <li> <strong> Email: </strong> ${email} </li>
             <li> <strong>Password: </strong> ${password} </li>
             </ul>
-            <p>You can log in to your account using this link: <a href="https://letsworkwise.com/?user_registered=1" >Click Here</a></p>
-            <p style="font-size: 14px; color: #777;"><em>For security reasons, we recommend changing your password after your first login.</em></p>    
+            <p>You can log in to your account using this link: <a href="https://hospitality.letsworkwise.com/?user_registered=1" >Click Here</a></p>
+            <p style="font-size: 14px; color: #777;"><em>For security reasons, we recommend changing your password after your first login.</em></p>
           </div>`
 
           dynamic_html = generateEmailTemplate(emailHeaderContent, emailContainerContent)
@@ -1530,7 +1533,7 @@ get_company_users: async (req, res, next) => {
       const mailRecipients = {
         from: Config.webmasterMail,
         to: email,
-        subject: 'Workwise - Email Verification OTP',
+        subject: 'Phileein Hospitality - Email Verification OTP',
         html: dynamicHtml,
         is_otp: true
       };
@@ -1641,7 +1644,7 @@ get_company_users: async (req, res, next) => {
 
         // return false;
         // const verificationLink = `${process.env.FRONT_BASE_URL}/forgot-password/${verificationToken}/${otpseq}`;
-        const verificationLink = `${process.env.FRONT_BASE_URL || "http://letsworkwise.com"}/validate-otp?otp=${otpseq}`;
+        const verificationLink = `${process.env.FRONT_BASE_URL || "https://hospitality.letsworkwise.com"}/validate-otp?otp=${otpseq}`;
 
         // console.log('verificationLink-->', verificationLink);
         // return false;
@@ -3416,7 +3419,7 @@ publish_profile_reviews: async (req, res, next) => {
       </td>
       <td>&nbsp;</td>
       <td width="100px">
-        <div style="width: 80px;max-width: 100%;margin:0;font-size: 20px;font-weight: bold;color:#158993;">Workwise</div>
+        <div style="width: 80px;max-width: 100%;margin:0;font-size: 20px;font-weight: bold;color:#158993;">Phileein</div>
       </td>
     </tr>
   </tbody>
@@ -3437,7 +3440,7 @@ publish_profile_reviews: async (req, res, next) => {
             </tr>
             <tr>
               <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">
-                <a style="text-decoration: none;color: #000000;" href="mailto:support@workwise.com">support@workwise.com</a>
+                <a style="text-decoration: none;color: #000000;" href="mailto:support@phileeinhospitality.com">support@phileeinhospitality.com</a>
               </td>
             </tr>
             <tr>
@@ -3752,24 +3755,24 @@ publish_profile_reviews: async (req, res, next) => {
               </div>
               
               <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
-                Your account has been approved and you can now start using the Workwise platform.
+                Your account has been approved and you can now start using the Phileein Hospitality platform.
               </p>
-              
+
               <div style="text-align: center; margin: 30px 0;">
-                <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor" 
+                <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor"
                    style="background-color: #158993; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
                   Go to Dashboard
                 </a>
               </div>
             `;
-            
+
             const dynamicHTML = generateEmailTemplate(emailHeader, emailContent);
-            
+
             // Prepare email with invoice attachment if available
             const emailOptions = {
               from: Config.webmasterMail,
               to: user.email,
-              subject: 'Workwise - Hospitality Vendor Registration Confirmation',
+              subject: 'Phileein Hospitality - Vendor Registration Confirmation',
               html: dynamicHTML
             };
             
@@ -4117,28 +4120,28 @@ publish_profile_reviews: async (req, res, next) => {
                       </div>
                       
                       <p style="font-size: 16px; line-height: 1.6; color: #333; margin-top: 30px;">
-                        Your account has been approved and you can now start using the Workwise platform. Log in to your dashboard to begin exploring opportunities.
+                        Your account has been approved and you can now start using the Phileein Hospitality platform. Log in to your dashboard to begin exploring opportunities.
                       </p>
-                      
+
                       <div style="text-align: center; margin: 30px 0;">
-                        <a href="${process.env.FRONT_END_WEBSITE}/dashboard" 
+                        <a href="${process.env.FRONT_END_WEBSITE}/dashboard"
                            style="background-color: #158993; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
                           Go to Dashboard
                         </a>
                       </div>
-                      
+
                       <p style="font-size: 14px; color: #666; margin-top: 30px;">
                         If you have any questions or need assistance, please contact us at <a href="mailto:support@phileeinhospitality.com" style="color: #158993;">support@phileeinhospitality.com</a>
                       </p>
                     `;
-                    
+
                     const dynamicHTML = generateEmailTemplate(emailHeader, emailContent);
-                    
+
                     // Prepare email with invoice attachment if available
                     const emailOptions = {
                       from: Config.webmasterMail,
                       to: user.email,
-                      subject: 'Workwise - Hospitality Vendor Registration Confirmation',
+                      subject: 'Phileein Hospitality - Vendor Registration Confirmation',
                       html: dynamicHTML
                     };
                     
@@ -4312,7 +4315,7 @@ publish_profile_reviews: async (req, res, next) => {
             </tr>
             <tr>
               <td style="padding: 0 0 10px;font-size: 12px;font-family:Tahoma,Arial,sans-serif;color:#000000;">
-                <a style="text-decoration: none;color: #000000;" href="mailto:ar@openai.com">support@workwise.com</a>
+                <a style="text-decoration: none;color: #000000;" href="mailto:support@phileeinhospitality.com">support@phileeinhospitality.com</a>
               </td>
             </tr>
             <tr>
@@ -5307,8 +5310,8 @@ publish_profile_reviews: async (req, res, next) => {
                const containerContent = `
                <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
                  <p>
-                   We are pleased to inform you that <strong>${buyerName}</strong> has added you as a preferred vendor on the Workwise platform.
-                   Going forward, <strong>${buyerName}</strong> will manage their procurement activities through Workwise.
+                   We are pleased to inform you that <strong>${buyerName}</strong> has added you as a preferred vendor on the Phileein Hospitality platform.
+                   Going forward, <strong>${buyerName}</strong> will manage their procurement activities through Phileein Hospitality.
                  </p>
                  <p>
                    To ensure you receive all enquiries promptly, Login to your account.
@@ -5319,17 +5322,16 @@ publish_profile_reviews: async (req, res, next) => {
                  <p>
                    We recommend changing your password after your first login for security reasons.
                  </p>
-                 <a href="https://letsworkwise.com"
+                 <a href="https://hospitality.letsworkwise.com"
                    style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
                     Login
-                 </a>    
+                 </a>
                  <p style="margin-top:20px; text-align:center;">
                    We look forward to supporting your business growth.
                  </p>
-             
-                
+
                </div>`;
-             
+
             // Generate final email layout
             const dynamicHTML = generateEmailTemplate(headerContent, containerContent);
 
@@ -5337,7 +5339,7 @@ publish_profile_reviews: async (req, res, next) => {
             from: `${buyerName}  ${Config.masterEmail}`,
             to: spocList?.length ? spocList.map(spoc => spoc.email) : userDetails[0].email,
             cc: spocList?.length ? userDetails[0].email : '',
-            subject: `${buyerName} Added You on Workwise`,
+            subject: `${buyerName} Added You on Phileein Hospitality`,
             html: dynamicHTML
           });
         }

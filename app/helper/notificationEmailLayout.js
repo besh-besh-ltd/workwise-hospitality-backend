@@ -28,14 +28,11 @@ const companyObj = [
 ];
 
 const defaultEmailTemplate = {
-  // Use WorkWise logo to avoid company-specific overrides
-  logo: 'https://letsworkwise.com/assets/images/logo.png',
+  logo: 'https://test-workwise-bucket.s3.ap-south-1.amazonaws.com/logo.png',
   address: `1st Floor, 271 Business Park, Model Industrial Estate, near Virwani Industrial Estate <br/>
       off Western Express Highway, Vishveshwar Nagar, Goregaon, Mumbai, Maharashtra 400063`,
   displayAddress: false,
-  // Bluish-green gradient to match website theming. Using 'background' later keeps
-  // company-specific solid colors working without any change to their objects.
-  primaryColor: 'linear-gradient(135deg, #0ea5e9 0%, #06b6d4 50%, #10b981 100%)',
+  primaryColor: '#2D2D2D',
   primaryTextColor: '#000000',
   seconderyColor: '#ffffff',
   seconderyTextColor: '#000000'
@@ -67,15 +64,14 @@ function generateEmailTemplate(headerContent, containerContent, userID = null) {
 
   const headerBackground = userID && (companyObj.find((c) => c.userID === userID))
     ? primaryColor
-    : 'linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%)';
+    : '#3A3A3A';
 
   const isCompanySpecific = Boolean(userID && companyObj.find((c) => c.userID === userID));
 
   return `
     <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background: ${primaryColor}; color: ${primaryTextColor}; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
         <div style="background: ${headerBackground}; padding: 32px 28px; border-radius: 16px; text-align: center; margin-bottom: 16px;">
-            <img style="width: 190px; max-width: 100%; height: auto; display: inline-block; margin: 0 auto;" src="${logo}" alt="Company Logo" />
-            ${isCompanySpecific ? '' : '<div style="margin-top: 0; font-size: 16px; font-weight: 600; color: #ffffff; letter-spacing: 0.4px;">Procurement Se Profit Banao</div>'}
+            <img style="width: 190px; max-width: 100%; height: auto; display: inline-block; margin: 0 auto;" src="${logo}" alt="Phileein Hospitality" />
         </div>
         <hr style="border-color: ${seconderyColor}" />
         <div style="border-radius: 24px; padding: 32px 16px; margin-bottom: 24px; background-color: #ffffff; color: #333333; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
@@ -86,8 +82,8 @@ function generateEmailTemplate(headerContent, containerContent, userID = null) {
 
         <hr style="border-color: ${seconderyColor}" />
         <div style="text-align: center; padding: 8px 0 0;">
-          <p style="font-size: 16px; color: #ffffff; margin: 0; font-weight: 500;">If you need assistance, contact us at <a href="mailto:support@phileeinhospitality.com" style="color: #ffffff; text-decoration: underline;">support@phileeinhospitality.com</a></p>
-          <p style="font-size: 14px; color: #ffffff; margin: 6px 0 0; font-weight: 500;">© Phileein Hospitality Procurement Platform WorkWise. All Rights Reserved.</p>
+          <p style="font-size: 16px; color: #D1D5DB; margin: 0; font-weight: 500;">If you need assistance, contact us at <a href="mailto:support@phileeinhospitality.com" style="color: #D1D5DB; text-decoration: underline;">support@phileeinhospitality.com</a></p>
+          <p style="font-size: 14px; color: #D1D5DB; margin: 6px 0 0; font-weight: 500;">© Phileein Hospitality Procurement Platform. All Rights Reserved.</p>
         </div>
     </div>
     `;

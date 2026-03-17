@@ -131,7 +131,7 @@ export const sendTenderFeePaymentConfirmation = async ({
 
         <p style="text-align:center; margin-top: 30px;">
           Thank you for your participation.<br/>
-          <strong>— Workwise Team</strong>
+          <strong>— Phileein Hospitality Team</strong>
         </p>
       </div>`;
 
