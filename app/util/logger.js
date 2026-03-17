@@ -1,6 +1,7 @@
 import { createLogger, format, transports } from 'winston';
 import expressWinston from 'express-winston';
 import 'winston-daily-rotate-file';
+import { OpenTelemetryTransportV3 } from '@opentelemetry/winston-transport';
 
 const logger = createLogger({
   transports: [
@@ -16,7 +17,8 @@ const logger = createLogger({
       level: 'error',
       filename: './app/storage/logs/logsErrors.log',
       maxFiles: 10
-    })
+    }),
+    new OpenTelemetryTransportV3(),
   ],
   format: format.combine(
     format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
