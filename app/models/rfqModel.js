@@ -2195,6 +2195,8 @@ WHERE NOT EXISTS (
       (SELECT name FROM tbl_users WHERE id = RFQ.technical_evaluation_by) AS technical_evaluation_by_name,
       H.name AS hotel_name,
       RFQ.hotel_id,
+      RFQ.department_id,
+      D_DEPT.title AS department_name,
       RFQ.hospitality_company_id,
       (
         SELECT EXISTS (
@@ -2315,6 +2317,8 @@ FROM tbl_rfq RFQ
 LEFT JOIN tbl_hospitality_company_hotels H
   ON H.id = RFQ.hotel_id
  AND H.is_deleted = 0
+LEFT JOIN tbl_department D_DEPT
+  ON D_DEPT.id = RFQ.department_id
 WHERE RFQ.id = $1
 
 
@@ -11442,10 +11446,11 @@ ORDER BY tq.timestamp DESC;
   getRfqWithHospitalityDetails: async (rfq_id, txContext = null) => {
     const dbContext = txContext || db;
     return dbContext.oneOrNone(
-      `SELECT r.*, hc.name as hospitality_company_name, h.name as hotel_name
+      `SELECT r.*, hc.name as hospitality_company_name, h.name as hotel_name, d.title as department_name
        FROM tbl_rfq r
        LEFT JOIN tbl_hospitality_companies hc ON hc.id = r.hospitality_company_id
        LEFT JOIN tbl_hospitality_company_hotels h ON h.id = r.hotel_id
+       LEFT JOIN tbl_department d ON d.id = r.department_id
        WHERE r.id = $1`,
       [rfq_id]
     );
