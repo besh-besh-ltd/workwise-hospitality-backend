@@ -767,6 +767,7 @@ export const getPODetailsById = async (po_id, user_id) => {
               -- Buyer company details
               COALESCE(THC.name, TC.company_name) AS buyer_company_name,
               THCH.name AS buyer_business_unit,
+              D_DEPT.title AS department_name,
               TC.gstin AS buyer_gstin,
               (SELECT address FROM tbl_company_location WHERE company_id = po.company_id ORDER BY created_at DESC LIMIT 1) AS buyer_address,
               TU.mobile AS initiated_by_phone,
@@ -1040,6 +1041,7 @@ export const getPODetailsById = async (po_id, user_id) => {
        JOIN tbl_rfq RFQ ON RFQ.id = po.rfq_id
        LEFT JOIN tbl_hospitality_companies THC ON THC.id = RFQ.hospitality_company_id
        LEFT JOIN tbl_hospitality_company_hotels THCH ON THCH.id = RFQ.hotel_id
+       LEFT JOIN tbl_department D_DEPT ON D_DEPT.id = RFQ.department_id
        WHERE po.id = $1`,
       [po_id, user_id]
     );
