@@ -98,7 +98,6 @@ function onError(error) {
 function onListening() {
   var addr = server.address();
   var bind = typeof addr === 'string' ? 'pipe ' + addr : 'port ' + addr.port;
-  consoleLogData('Listening on :: ' + bind);
 }
 
 // ── Graceful shutdown ────────────────────────────────────────

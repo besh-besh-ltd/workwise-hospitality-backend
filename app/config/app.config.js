@@ -1,5 +1,4 @@
 import dotenv from "dotenv";
-import dateFormat from "dateformat";
 
 // env config
 dotenv.config();
@@ -297,12 +296,6 @@ const config = {
   errorText: {
     value: "An internal error has occurred. Please try again later.",
   },
-  errorFileName: `./app/storage/internal/error_log_${dateFormat(
-    new Date(),
-    "mm_yyyy"
-
-  )}.txt`,
-
   transportConfig: {
     // Configure SMTP to use Gmail by default.
     // For production, set SMTP_HOST / SMTP_PORT if needed, otherwise this will use:

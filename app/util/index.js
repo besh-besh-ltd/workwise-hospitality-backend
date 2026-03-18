@@ -12,8 +12,8 @@ import v1Router from '../routes/index.js';
 import origin from './origin.js';
 import { errors } from 'celebrate';
 import error from './error.js';
-import { winstonInternalErrorLogger, winstonLogger } from './logger.js';
 import otelMiddleware from '../middleware/otelMiddleware.js';
+import { httpLogger } from './logger.js';
 
 const util = (app) => {
   app.use(helmet());
@@ -22,7 +22,7 @@ const util = (app) => {
   app.use(compression());
 
   // loggers
-  app.use(winstonLogger);
+  app.use(httpLogger);
 
   // OpenTelemetry custom span attributes
   app.use(otelMiddleware);

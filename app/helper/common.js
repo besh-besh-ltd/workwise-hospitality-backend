@@ -10,6 +10,7 @@ import userModel from '../models/userModel.js';
 import { URL } from 'url';
 import { DeleteObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import crypto from 'crypto';
+import { logger } from '../util/logger.js';
 
 // Persistence Statuses
 export const PERSISTENCE_STATUSES = {
@@ -140,42 +141,27 @@ const logError = (...args) => {
   let msg = null;
 
   if (args.length === 1) {
-    err = args[0] instanceof Error ? args[0] : null;
-    msg = err ? null : args[0];
-  } else if (args.length >= 2) {
-    msg = args[0];
-    err = args[1] instanceof Error ? args[1] : null;
-  }
-
-  console.error('Error from common ==>', msg || err, err || msg);
-
-  if (!err || !err.stack) {
-    return;
-  }
-
-  let matches = err.stack.split('\n');
-  let regex1 = /\((.*):(\d+):(\d+)\)$/;
-  let regex2 = /(.*):(\d+):(\d+)$/;
-  let errorArr1 = regex1.exec(matches[1]);
-  let errorArr2 = regex2.exec(matches[1]);
-  if (errorArr1 !== null || errorArr2 !== null) {
-    let errorText = matches[0];
-    if (errorArr1 !== null) {
-      var errorFile = errorArr1[1];
-      var errorLine = errorArr1[2];
-    } else if (errorArr2 !== null) {
-      var errorFile = errorArr2[1];
-      var errorLine = errorArr2[2];
+    if (args[0] instanceof Error) {
+      err = args[0];
+    } else if (args[0] && typeof args[0] === 'object') {
+      msg = JSON.stringify(args[0]);
+    } else {
+      msg = args[0] != null ? String(args[0]) : 'Unknown error';
     }
+  } else if (args.length >= 2) {
+    msg = args[0] != null ? String(args[0]) : '';
+    err = args[1] instanceof Error ? args[1] : null;
+    if (!err && args[1] != null) {
+      msg += ` ${typeof args[1] === 'object' ? JSON.stringify(args[1]) : String(args[1])}`;
+    }
+  }
 
-    let now = calcTime();
-    let date_format = dateFormat(now, 'yyyy-mm-dd HH:MM:ss');
+  const logMessage = msg || (err && err.message) || 'Unknown error';
 
-    let errMsg = `\n DateTime: ${date_format} \n ${errorText} \n Line No : ${errorLine} \n File Path: ${errorFile} \n`;
-    fs.appendFile(config.errorFileName, errMsg, (err) => {
-      if (err) throw err;
-      //console.log('The file has been saved!');
-    });
+  if (err) {
+    logger.error({ err }, logMessage);
+  } else {
+    logger.error(logMessage);
   }
 };
 const currentDateTime = () => {
