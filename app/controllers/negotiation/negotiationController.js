@@ -1314,7 +1314,7 @@ const NegotiationController = {
     try {
       const rfq_product_id = parseInt(req.params.rfq_product_id);
       const user_id = req.user.id;
-      const { remarks } = req.body;
+      const { remarks, existing_po_id } = req.body;
 
       if (!rfq_product_id) {
         return res.status(400).json({
@@ -1352,8 +1352,14 @@ const NegotiationController = {
 
         // Path A: PO payload stored by rfqController.finalize (direct vendor finalization)
         if (metadata.po_payload && metadata.po_user) {
+          // Final approver can choose to merge into an existing PO
+          const poPayload = { ...metadata.po_payload };
+          if (existing_po_id) {
+            poPayload.existing_po_id = existing_po_id;
+          }
+
           await db.tx(async (t) => {
-            const poResult = await draftPO(metadata.po_payload, metadata.po_user, t);
+            const poResult = await draftPO(poPayload, metadata.po_user, t);
 
             await recordLifecycleEvent({
               entity_type: metadata.is_tender === 1 ? 'TENDER' : 'RFQ',
