@@ -19,6 +19,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 import { rescheduleAllMilestoneReminders, rescheduleAllRfqPublishJobs } from './app/helper/cronManager.js';
+import { logger } from './app/util/logger.js';
 
 
 // Initialize app
@@ -102,21 +103,15 @@ function onListening() {
 
 // ── Graceful shutdown ────────────────────────────────────────
 function gracefulShutdown(signal) {
-  console.log(`\n${signal} received — starting graceful shutdown`);
+  logger.info(`\n${signal} received — starting graceful shutdown`);
 
   // Stop accepting new connections, drain in-flight requests
   server.close(() => {
-    console.log('HTTP server closed');
+    logger.info('HTTP server closed');
 
     // Close DB connection pool
     pgp.end();
-    console.log('Database pool closed');
-
-    // Flush pending Sentry events
-    Sentry.flush(2000).finally(() => {
-      console.log('Shutdown complete');
-      process.exit(0);
-    });
+    logger.info('Database pool closed');
   });
 
   // Force exit after 15s if draining hangs
