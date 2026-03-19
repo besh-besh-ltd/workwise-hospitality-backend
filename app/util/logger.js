@@ -16,14 +16,6 @@ const getPath = (req) => {
 const logger = pino({
   level: process.env.LOG_LEVEL || (isDev ? 'debug' : 'info'),
   timestamp: pino.stdTimeFunctions.isoTime,
-  transport: isDev ? {
-    target: 'pino-pretty',
-    options: {
-      colorize: true,
-      translateTime: 'yyyy-mm-dd HH:MM:ss',
-      ignore: 'pid,hostname,trace_id,span_id,trace_flags',
-    }
-  } : undefined,
 });
 
 const httpLogger = pinoHttp({

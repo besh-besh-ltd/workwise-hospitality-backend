@@ -11,7 +11,7 @@
   "scripts": {
     "pretify": "prettier --config .prettierrc.json '**' --write",
     "lint": "eslint",
-    "dev": "nodemon --experimental-json-modules --import ./otel-instrument.mjs server.js",
+    "dev": "nodemon --experimental-json-modules --import ./otel-instrument.mjs server.js | pino-pretty --colorize --translateTime 'yyyy-mm-dd HH:MM:ss' --ignore 'pid,hostname,trace_id,span_id,trace_flags'",
     "start": "node --import ./otel-instrument.mjs server.js",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
     "test:watch": "cross-env NODE_ENV=development jest --watch",

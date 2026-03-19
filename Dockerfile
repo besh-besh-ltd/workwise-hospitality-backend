@@ -59,4 +59,4 @@ EXPOSE 8002
 HEALTHCHECK --interval=10s --timeout=5s --start-period=45s --retries=3 \
   CMD curl -sf http://localhost:8002/api/health || exit 1
 
-CMD ["node", "server.js"]
+CMD ["node", "--import", "./otel-instrument.mjs", "server.js"]
