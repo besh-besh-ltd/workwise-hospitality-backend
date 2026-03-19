@@ -44,7 +44,7 @@ const sdk = new NodeSDK({
       '@opentelemetry/instrumentation-pg': { enabled: true },
       '@opentelemetry/instrumentation-express': { enabled: true },
       '@opentelemetry/instrumentation-http': { enabled: true },
-      '@opentelemetry/instrumentation-pino': { enabled: true },
+      '@opentelemetry/instrumentation-pino': { enabled: false },
       '@opentelemetry/instrumentation-winston': { enabled: false },
       '@opentelemetry/instrumentation-fs': { enabled: false },
       '@opentelemetry/instrumentation-dns': { enabled: false },
