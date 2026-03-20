@@ -1833,6 +1833,8 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
         SELECT DISTINCT u.id
         FROM tbl_users u
         JOIN tbl_user_role_scopes urs ON u.id = urs.user_id AND urs.role_id = $1
+          AND urs.company_id = $2
+          AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
         JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
         JOIN tbl_user_department ud ON u.id = ud.user_id
           AND (ud.department_id = $5 OR ud.department_id IN (SELECT id FROM tbl_department WHERE access_type = 'ALL'))
@@ -1851,6 +1853,8 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
         SELECT DISTINCT u.id
         FROM tbl_users u
         JOIN tbl_user_role_scopes urs ON u.id = urs.user_id AND urs.role_id = $1
+          AND urs.company_id = $2
+          AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
         JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
         WHERE u.status = 1
           AND hum.hospitality_company_id = $2
