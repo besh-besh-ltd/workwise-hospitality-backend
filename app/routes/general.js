@@ -13,11 +13,11 @@ const GeneralRoutes = Router();
 
 
 GeneralRoutes.get(
-  '/states',
+  '/states/:id',
   generalController.getStates
 );
 GeneralRoutes.get(
-  '/cities/:id?',
+  '/cities/:id',
   generalController.getCities
 );
 GeneralRoutes.get(

@@ -35,15 +35,19 @@ import db from '../../config/dbConn.js';
 const generalController = {
   getStates: async (req, res, next) => {
     try {
-      const country_id = req.query.country_id;
+      const country_id = req.params.id;
 
-      let states;
-      if (country_id) {
-        // Convert country_id to integer (optional, based on your DB setup)
-        states = await generalModel.getCountryStates(country_id);
-      } else {
-        states = await generalModel.getStates();
+      if (!country_id) {
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'country_id is required'
+          })
+          .end();
       }
+
+      const states = await generalModel.getCountryStates(country_id);
 
       res
         .status(200)
@@ -65,6 +69,17 @@ const generalController = {
   },
   getCities: async (req, res, next) => {
     const state_id = req.params.id;
+
+    if (!state_id) {
+      return res
+        .status(400)
+        .json({
+          status: 0,
+          message: 'state_id is required'
+        })
+        .end();
+    }
+
     try {
       const cities = await generalModel.getCities(state_id);
       res

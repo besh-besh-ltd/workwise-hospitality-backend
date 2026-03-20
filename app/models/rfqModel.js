@@ -2207,14 +2207,13 @@ WHERE NOT EXISTS (
         )
       ) AS is_quotes_present,
 
-      (SELECT COUNT(*)
+      ${user_type == 3 ? `(SELECT COUNT(*)
      FROM tbl_query_messages TQM
-     WHERE TQM.receiver_id = ${user_id}
+     WHERE TQM.receiver_id = $2
      AND TQM.rfq_id = RFQ.id
      AND TQM.is_seen = false
-    ) AS "unseen_query_count",
-    -- Fetching global_payment_term, global_comment and gstin from tbl_quotes (for update quote autofill)
-    (
+    )` : `0`} AS "unseen_query_count",
+    ${user_type == 3 ? `(
       SELECT json_build_object(
         'is_regret', TQ.is_regret,
         'regret_reason', TQ.regret_reason,
@@ -2224,11 +2223,11 @@ WHERE NOT EXISTS (
       )
       FROM tbl_quotes TQ
       WHERE TQ.rfq_id = RFQ.id
-        AND TQ.created_by = ${user_id}
+        AND TQ.created_by = $2
       LIMIT 1
-    ) AS "quote_details",
+    )` : `NULL`} AS "quote_details",
 
-    (
+    ${user_type == 3 ? `(
       SELECT json_agg(json_build_object(
         'file_url', TQF.file_url
       ))
@@ -2237,11 +2236,11 @@ WHERE NOT EXISTS (
         SELECT TQ.id
         FROM tbl_quotes TQ
         WHERE TQ.rfq_id = RFQ.id
-          AND TQ.created_by = ${user_id}
+          AND TQ.created_by = $2
         LIMIT 1
       )
         AND TQF.file_type = 'term_and_condition'
-    ) AS "terms_and_conditions_files",
+    )` : `NULL`} AS "terms_and_conditions_files",
     
     ARRAY(
       SELECT json_build_object(
@@ -2259,10 +2258,10 @@ WHERE NOT EXISTS (
       FROM tbl_rfq_files RF
       WHERE RF.rfq_id = RFQ.id AND RF.file_type = 'term_and_condition'
     ) AS "TERM_files",
-    ARRAY(
+    ${user_type == 3 ? `ARRAY(
     SELECT json_build_object('id', TQ.id, 'timestamp', TQ.timestamp, 'status', TQ.status, 'created_by', TQ.created_by,'is_regret', TQ.is_regret,
 
-    -- payment term list 
+    -- payment term list
     'payment_terms', COALESCE(
       (
         SELECT json_agg(
@@ -2311,8 +2310,14 @@ WHERE NOT EXISTS (
           FROM tbl_quote_items TQI
           WHERE CAST(TQ.id AS INTEGER) = TQI.quote_id
         )
-      ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = ${user_id}
-    ) AS "quotations"
+      ) FROM tbl_quotes TQ WHERE TQ.rfq_id = RFQ.id AND TQ.created_by = $2
+    )` : `ARRAY[]::json[]`} AS "quotations"
+      ${user_type == 3 ? `,(
+        SELECT VP.payment_status
+        FROM tbl_vendor_payments VP
+        WHERE VP.vendor_id = $2 AND VP.rfq_id = RFQ.id AND VP.payment_type = 'tender'
+        ORDER BY VP.id DESC LIMIT 1
+      ) AS "vendor_payment_status"` : ''}
 FROM tbl_rfq RFQ
 LEFT JOIN tbl_hospitality_company_hotels H
   ON H.id = RFQ.hotel_id
@@ -2320,10 +2325,7 @@ LEFT JOIN tbl_hospitality_company_hotels H
 LEFT JOIN tbl_department D_DEPT
   ON D_DEPT.id = RFQ.department_id
 WHERE RFQ.id = $1
-
-
-
-ORDER BY RFQ.id DESC   
+ORDER BY RFQ.id DESC
 LIMIT 1;`;
 
     const productQuery = `
@@ -2345,13 +2347,13 @@ LIMIT 1;`;
             WHERE RPF.rfq_product_id = RFQ_P.id
               AND RPF.file_type = 'SPEC'
         ) AS spec_file,
-          'latest_target_price', (
+          'latest_target_price', ${user_type == 3 ? `(
             SELECT tptp.target_price
             FROM tbl_rfq_product_target_price tptp
-            WHERE tptp.tbl_rfq_product_id = RFQ_P.id and vendor_id = ${user_id}
+            WHERE tptp.tbl_rfq_product_id = RFQ_P.id and vendor_id = $2
             ORDER BY tptp.created_at DESC
             LIMIT 1
-            ),
+            )` : `NULL`},
         (
             SELECT json_agg(RPF.file_url)
             FROM tbl_rfq_product_files RPF
@@ -2412,7 +2414,7 @@ LIMIT 1;`;
                     SELECT 1 AS is_accepted
                     FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
                     JOIN tech_eval TE ON TECV.tbl_rfq_product_tech_evaluation_id = TE.tech_eval_id
-                    WHERE TECV.vendor_id = ${user_id} AND TECV.status = 1
+                    WHERE TECV.vendor_id = $2 AND TECV.status = 1
                     LIMIT 1
                 )`
                     : ``
@@ -2535,7 +2537,7 @@ LIMIT 1;`;
                 ),
                 resolved_vendor AS (
                     SELECT CASE
-                        WHEN ${user_type} = 3 THEN ${user_id}
+                        WHEN $3 = 3 THEN $2
                         ELSE COALESCE(
                             (SELECT vendor_id FROM accepted_vendor),
                             (SELECT vendor_id FROM completed_vendor),
@@ -2676,20 +2678,14 @@ LIMIT 1;`;
         RFQ_P.id;
   `;
 
-    return new Promise(function (resolve, reject) {
-      db.query(q, [id])
-        .then(async function (data) {
-          const products = await db.query(productQuery, [id, user_id]);
-          if (data && products) {
-            data[0].products = products;
-          }
-          resolve(data);
-        })
-        .catch(function (err) {
-          let error = new Error(err);
-          reject(error);
-        });
-    });
+    const [data, products] = await Promise.all([
+      db.query(q, [id, user_id]),
+      db.query(productQuery, [id, user_id, user_type]),
+    ]);
+    if (data && data[0] && products) {
+      data[0].products = products;
+    }
+    return data;
   },
 
   /**
