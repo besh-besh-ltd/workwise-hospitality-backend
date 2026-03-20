@@ -279,7 +279,7 @@ const publishRfq = async (rfq, txContext = null) => {
       `SELECT RFQ.id, RFQ.rfq_no, RFQ.is_tender, RFQ.title, RFQ.created_by,
               RFQ.bid_end_date,
               H.name AS hotel_name,
-              HC.company_name AS hospitality_company_name
+              HC.name AS hospitality_company_name
        FROM tbl_rfq RFQ
        LEFT JOIN tbl_hospitality_company_hotels H ON H.id = RFQ.hotel_id
        LEFT JOIN tbl_hospitality_companies HC ON HC.id = RFQ.hospitality_company_id
