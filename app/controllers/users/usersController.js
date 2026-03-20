@@ -900,6 +900,84 @@ create_buyer_company_users: async (req, res, next) => {
     });
   }
 },
+get_company_users_detailed: async (req, res, next) => {
+  try {
+    const { company_id: companyID } = req.user;
+    const {
+      page = 1,
+      limit = 10,
+      search = '',
+      status,
+      company_id: filterCompanyId,
+      hotel_id: filterHotelId
+    } = req.query;
+
+    const userTypeMap = {
+      7: "Admin",
+      8: "Management",
+      2: "Procurement",
+      9: "Engineering",
+      10: "Finance"
+    };
+
+    const [result, stats] = await Promise.all([
+      userModel.getCompanyUsersDetailed(companyID, {
+        page: parseInt(page, 10),
+        limit: parseInt(limit, 10),
+        search,
+        status,
+        companyFilter: filterCompanyId ? parseInt(filterCompanyId, 10) : null,
+        hotelFilter: filterHotelId ? parseInt(filterHotelId, 10) : null
+      }),
+      userModel.getCompanyUsersStats(companyID)
+    ]);
+
+    const formattedUsers = result.users.map(user => ({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      mobile: user.mobile,
+      role: user.user_type,
+      role_name: userTypeMap[user.user_type] || "Unknown",
+      status: user.status === 1 ? "active" : "inactive",
+      created_at: user.created_at,
+      employee_type: user.employee_type,
+      employee_code: user.employee_code,
+      designation: user.designation,
+      payroll_company_id: user.payroll_company_id,
+      departments: user.departments,
+      role_scopes: user.role_scopes,
+      mappings: user.mappings
+    }));
+
+    res.status(200).json({
+      status: true,
+      message: "Company users retrieved successfully",
+      data: {
+        users: formattedUsers,
+        pagination: {
+          page: parseInt(page, 10),
+          limit: parseInt(limit, 10),
+          total: result.total
+        },
+        stats: {
+          total_count: parseInt(stats.total_count, 10),
+          active_count: parseInt(stats.active_count, 10),
+          inactive_count: parseInt(stats.inactive_count, 10),
+          mapped_count: parseInt(stats.mapped_count, 10)
+        }
+      }
+    }).end();
+
+  } catch (err) {
+    logError(err);
+    res.status(400).json({
+      status: false,
+      message: err.message || Config.errorText.value
+    }).end();
+  }
+},
+
 // Changes by Agnij 14-01-2025 [Added controller method to get company users]
 get_company_users: async (req, res, next) => {
   try {

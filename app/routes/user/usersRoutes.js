@@ -57,6 +57,13 @@ UsersRoutes.get(
   UsersController.get_company_users
 );
 
+UsersRoutes.get(
+  '/company-users-detailed',
+  passportSignIn,
+  acl([7]),
+  UsersController.get_company_users_detailed
+);
+
 UsersRoutes.post(
   '/user-registration',
   validateBody(schemas.user_register),
