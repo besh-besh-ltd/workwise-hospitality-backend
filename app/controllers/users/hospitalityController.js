@@ -22,7 +22,11 @@ const HospitalityController = {
   listCompanies: async (req, res) => {
     try {
       const company = req.companyDetails;
-      const companies = await hospitalityModel.getCompaniesByBuyer(company.id);
+      const includeHotels = req.query.include === 'hotels';
+
+      const companies = includeHotels
+        ? await hospitalityModel.getCompaniesWithHotelsByBuyer(company.id)
+        : await hospitalityModel.getCompaniesByBuyer(company.id);
 
       return res.status(200).json({
         status: 1,
@@ -906,10 +910,12 @@ const HospitalityController = {
         });
       }
 
+      const includeAll = req.query.include_all === 'true' && mappingType === null;
       const mappings = await hospitalityModel.getUserMappingsForCompany(
         hospitalityCompanyId,
         mappingType,
-        mappingType === 1 ? hotelId : null
+        mappingType === 1 ? hotelId : null,
+        includeAll
       );
 
       return res.status(200).json({

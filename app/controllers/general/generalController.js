@@ -9,6 +9,7 @@ import generalModel, {
   getApprovalInstanceDetails,
   getApprovalInstanceById,
   getApprovalPolicies,
+  getApprovalPoliciesWithSteps,
   getApprovalPolicyWithSteps,
   insertPolicySteps,
   submitApprovalAction,
@@ -438,15 +439,18 @@ const hospitalityApprovalController = {
    */
   async getApprovalPolicies(req, res) {
     try {
-      const { hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive } = req.query;
-      const data = await getApprovalPolicies({
+      const { hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive, include } = req.query;
+      const filters = {
         hospitality_company_id: hospitality_company_id ? parseInt(hospitality_company_id) : undefined,
         hotel_id: hotel_id ? parseInt(hotel_id) : undefined,
         department_id: department_id ? parseInt(department_id) : undefined,
         entity_type,
         process_id: process_id ? parseInt(process_id) : undefined,
         include_inactive: include_inactive === 'true'
-      });
+      };
+      const data = include === 'steps'
+        ? await getApprovalPoliciesWithSteps(filters)
+        : await getApprovalPolicies(filters);
       res.json({ status: 1, data });
     } catch (e) {
       logError(e);
