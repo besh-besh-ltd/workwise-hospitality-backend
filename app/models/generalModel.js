@@ -1,6 +1,6 @@
 import db from '../config/dbConn.js';
 import { sendApprovalNotification, sendPONotificationToVendor } from '../controllers/po/purchaseOrderEmails.js';
-import { APPROVAL_DECISIONS, PO_STATUSES, DEPARTMENT_SCOPED_ENTITY_TYPES } from '../util/constants.js';
+import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 
 // Maps entity_type to the permission resource used in tbl_permissions
@@ -1472,7 +1472,8 @@ export async function createApprovalPolicy({
   process_id = null,
   created_by,
   is_active = true,
-  is_master = false
+  is_master = false,
+  is_department_scoped = true
 }) {
   if (!entity_type || !hospitality_company_id || !created_by) {
     throw new Error('entity_type, hospitality_company_id, and created_by are required');
@@ -1518,9 +1519,9 @@ export async function createApprovalPolicy({
 
   return db.one(
     `INSERT INTO tbl_approval_policies
-     (entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active, is_master)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-    [entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active, is_master]
+     (entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active, is_master, is_department_scoped)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+    [entity_type, hospitality_company_id, hotel_id, department_id, process_id, created_by, is_active, is_master, is_department_scoped]
   );
 }
 
@@ -1530,7 +1531,7 @@ export async function createApprovalPolicy({
 export async function updateApprovalPolicy(id, patch) {
   if (!id) throw new Error('Policy ID is required');
 
-  const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'process_id', 'is_active', 'is_master'];
+  const allowedFields = ['entity_type', 'hospitality_company_id', 'hotel_id', 'department_id', 'process_id', 'is_active', 'is_master', 'is_department_scoped'];
   const sets = [];
   const vals = [];
   let idx = 1;
@@ -2024,10 +2025,10 @@ export async function createApprovalInstance({
     const resolvedSteps = [];
     let stepNumber = 0; // Track sequential step numbering
 
-    // For commercial entity types (NEGOTIATION, NEGOTIATION_QUOTE, PO, ARC),
-    // skip department filtering — all company/hotel users with the role should be approvers.
+    // Use the policy's is_department_scoped flag to determine department filtering.
+    // When false, all company/hotel users with the role should be approvers.
     // The original department_id is still stored in the instance row for audit.
-    const isDeptScoped = DEPARTMENT_SCOPED_ENTITY_TYPES.includes(entity_type);
+    const isDeptScoped = policy.is_department_scoped === true;
     const resolveDeptId = isDeptScoped ? department_id : null;
 
     // Look up department access type for department-aware approver resolution
@@ -2206,8 +2207,8 @@ export async function checkIfUserIsFinalApprover(userId, entity_type, hospitalit
     return false;
   }
 
-  // For commercial entity types, skip department filtering
-  const isDeptScoped = DEPARTMENT_SCOPED_ENTITY_TYPES.includes(entity_type);
+  // Use the policy's is_department_scoped flag to determine department filtering
+  const isDeptScoped = policy.is_department_scoped === true;
   const resolveDeptId = isDeptScoped ? department_id : null;
 
   // Look up department access type
@@ -2595,7 +2596,11 @@ export async function submitApprovalAction({
     if (!hasHospAccess) {
       throw new Error('User does not belong to the approval policy scope');
     }
-    const isDeptScopedEntity = DEPARTMENT_SCOPED_ENTITY_TYPES.includes(instance.entity_type);
+    const policy = await t.oneOrNone(
+      'SELECT is_department_scoped FROM tbl_approval_policies WHERE id = $1',
+      [instance.approval_policy_id]
+    );
+    const isDeptScopedEntity = policy?.is_department_scoped === true;
     if (isDeptScopedEntity && instance.department_id) {
       const deptRow = await t.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [instance.department_id]);
       const deptAccessType = deptRow?.access_type || 'INDIVIDUAL';

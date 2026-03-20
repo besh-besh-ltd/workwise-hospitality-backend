@@ -1,4 +1,5 @@
 import rbacModel from "../../models/rbacModel.js";
+import { DEPARTMENT_SCOPED_RESOURCES } from "../../util/constants.js";
 
 const rbacController = {
 
@@ -280,11 +281,21 @@ const rbacController = {
         req.query.hotel_id ||
         null;
 
+        let departmentId = null;
+        if (req.headers["x-department-id"]) {
+            const id = parseInt(req.headers["x-department-id"], 10);
+            if (!isNaN(id) && id > 0) departmentId = id;
+        } else if (req.query.department_id) {
+            const id = parseInt(req.query.department_id, 10);
+            if (!isNaN(id) && id > 0) departmentId = id;
+        }
+
         const permissions =
         await rbacModel.getUserPermissions(
             userId,
             companyId,
-            hotelId
+            hotelId,
+            departmentId
         );
 
         /**
@@ -328,7 +339,7 @@ const rbacController = {
   getMyPermissionsForHotels: async (req, res) => {
     try {
       const userId = req.user.id;
-      const { hotel_ids, key } = req.body;
+      const { hotel_ids, key, department_id } = req.body;
 
       // Validation: hotel_ids must be a non-empty array
       if (!hotel_ids || !Array.isArray(hotel_ids)) {
@@ -373,10 +384,16 @@ const rbacController = {
       }
 
       // Step 2: Get permissions for valid hotels (optionally filtered by key)
+      // Only pass department_id for department-scoped resources
+      const effectiveDeptId = (key && DEPARTMENT_SCOPED_RESOURCES.includes(key))
+        ? (department_id ? parseInt(department_id, 10) : null)
+        : null;
+
       const permissions = await rbacModel.getUserPermissionsForHotels(
         userId,
         validHotelIds,
-        key || null
+        key || null,
+        effectiveDeptId
       );
 
       // Step 3: Group permissions by resource

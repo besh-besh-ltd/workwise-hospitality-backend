@@ -24,7 +24,7 @@ import generalModel, {
   getDepartmentSubGraphPreview,
   recordLifecycleEvent
 } from '../../models/generalModel.js';
-import { AVAILABLE_HIERARCHY_TYPES } from '../../util/constants.js';
+import { AVAILABLE_HIERARCHY_TYPES, DEPARTMENT_SCOPED_ENTITY_TYPES } from '../../util/constants.js';
 import { handleRFQPostApproval, handleRFQRejection } from '../rfq/rfqController.js';
 import { handleNegotiationPostApproval } from '../negotiation/negotiationController.js';
 import { draftPO } from '../po/purchaseOrderController.js';
@@ -360,6 +360,7 @@ const hospitalityApprovalController = {
         process_id,
         is_active,
         is_master,
+        is_department_scoped,
         steps,
         id
       } = req.body;
@@ -379,7 +380,10 @@ const hospitalityApprovalController = {
           department_id,
           process_id,
           is_active,
-          is_master
+          is_master,
+          is_department_scoped: is_department_scoped !== undefined
+            ? is_department_scoped
+            : undefined
         });
         if (steps && steps.length > 0) {
           await deletePolicySteps(id);
@@ -410,7 +414,10 @@ const hospitalityApprovalController = {
           process_id: process_id ? parseInt(process_id) : null,
           created_by,
           is_active,
-          is_master: is_master || false
+          is_master: is_master || false,
+          is_department_scoped: is_department_scoped !== undefined
+            ? is_department_scoped
+            : DEPARTMENT_SCOPED_ENTITY_TYPES.includes(entity_type)
         });
         if (steps && steps.length > 0) {
           await insertPolicySteps(steps, policy.id);
