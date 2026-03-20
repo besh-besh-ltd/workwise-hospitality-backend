@@ -7,6 +7,7 @@ const cryptr = new Cryptr(Config.cryptR.secret);
 
 import JWT from 'jsonwebtoken';
 import db from '../config/dbConn.js';
+import { DEPARTMENT_SCOPED_RESOURCES } from '../util/constants.js';
 
 /**
  * RBAC permission middleware
@@ -51,6 +52,16 @@ export const can = (permKey, needEvery = false) => {
         if (!isNaN(id) && id > 0) hotelIds = [id];
       }
 
+      // Parse department_id from header or query
+      let departmentId = null;
+      if (req.headers["x-department-id"]) {
+        const id = parseInt(req.headers["x-department-id"], 10);
+        if (!isNaN(id) && id > 0) departmentId = id;
+      } else if (req.query.department_id) {
+        const id = parseInt(req.query.department_id, 10);
+        if (!isNaN(id) && id > 0) departmentId = id;
+      }
+
       // Multi-permission support: normalize to array
       const permKeys = Array.isArray(permKey) ? permKey : [permKey];
 
@@ -61,6 +72,13 @@ export const can = (permKey, needEvery = false) => {
           throw new Error(`Invalid permission key format: ${key}`);
         }
       }
+
+      // Only apply department filter when ALL requested permissions are for department-scoped resources
+      const allDeptScoped = permKeys.every(key => {
+        const [resource] = key.split(".");
+        return DEPARTMENT_SCOPED_RESOURCES.includes(resource);
+      });
+      const effectiveDeptId = allDeptScoped ? departmentId : null;
 
       let hasPermission;
 
@@ -80,10 +98,18 @@ export const can = (permKey, needEvery = false) => {
               ${hotelIds.length > 0 ? 'OR urs.hotel_id = ANY($3::int[])' : ''}
             )
             AND (p.resource || '.' || p.action) = ANY($4::text[])
+            AND (
+              $6::int IS NULL
+              OR urs.department_id = $6
+              OR (
+                urs.department_id IS NULL
+                AND EXISTS (SELECT 1 FROM tbl_user_department ud WHERE ud.user_id = urs.user_id AND ud.department_id = $6)
+              )
+            )
           GROUP BY urs.user_id
           HAVING COUNT(DISTINCT (p.resource || '.' || p.action)) = $5
           `,
-          [userId, companyId, hotelIds.length > 0 ? hotelIds : null, permKeys, permKeys.length]
+          [userId, companyId, hotelIds.length > 0 ? hotelIds : null, permKeys, permKeys.length, effectiveDeptId]
         );
       } else {
         // OR logic: user needs ANY one of the permissions
@@ -100,9 +126,17 @@ export const can = (permKey, needEvery = false) => {
               ${hotelIds.length > 0 ? 'OR urs.hotel_id = ANY($3::int[])' : ''}
             )
             AND (p.resource || '.' || p.action) = ANY($4::text[])
+            AND (
+              $5::int IS NULL
+              OR urs.department_id = $5
+              OR (
+                urs.department_id IS NULL
+                AND EXISTS (SELECT 1 FROM tbl_user_department ud WHERE ud.user_id = urs.user_id AND ud.department_id = $5)
+              )
+            )
           LIMIT 1
           `,
-          [userId, companyId, hotelIds.length > 0 ? hotelIds : null, permKeys]
+          [userId, companyId, hotelIds.length > 0 ? hotelIds : null, permKeys, effectiveDeptId]
         );
       }
 
@@ -114,7 +148,7 @@ export const can = (permKey, needEvery = false) => {
       }
 
       // Attach context to request for downstream use
-      req.permissionContext = { hotelIds, permKeys, needEvery };
+      req.permissionContext = { hotelIds, permKeys, needEvery, departmentId: effectiveDeptId };
 
       return next();
     } catch (err) {

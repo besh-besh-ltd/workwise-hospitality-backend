@@ -99,7 +99,7 @@ const rbacModel = {
       )
     );
   },
-  getUserPermissions: async (userId, companyId, hotelId = null) => {
+  getUserPermissions: async (userId, companyId, hotelId = null, departmentId = null) => {
     return db.any(
       `
       SELECT DISTINCT
@@ -116,8 +116,19 @@ const rbacModel = {
           urs.hotel_id IS NULL
           OR urs.hotel_id = $3
         )
+        AND (
+          $4::int IS NULL
+          OR urs.department_id = $4
+          OR (
+            urs.department_id IS NULL
+            AND EXISTS (
+              SELECT 1 FROM tbl_user_department ud
+              WHERE ud.user_id = urs.user_id AND ud.department_id = $4
+            )
+          )
+        )
       `,
-      [userId, companyId, hotelId]
+      [userId, companyId, hotelId, departmentId]
     );
   },
 
@@ -128,18 +139,23 @@ const rbacModel = {
    * @param {number[]} hotelIds - Array of hotel IDs to check permissions for
    * @param {string|null} key - Optional resource/module filter (e.g., "tender")
    */
-  getUserPermissionsForHotels: async (userId, hotelIds = [], key = null) => {
+  getUserPermissionsForHotels: async (userId, hotelIds = [], key = null, departmentId = null) => {
     if (!hotelIds || hotelIds.length === 0) {
       return [];
     }
 
     const params = [userId, hotelIds];
     let moduleFilter = '';
+    let paramIdx = 3;
 
     if (key) {
-      moduleFilter = 'AND p.resource = $3';
+      moduleFilter = `AND p.resource = $${paramIdx}`;
       params.push(key);
+      paramIdx++;
     }
+
+    const deptParamIdx = paramIdx;
+    params.push(departmentId);
 
     return db.any(
       `
@@ -170,6 +186,17 @@ const rbacModel = {
           OR urs.hotel_id IN ($2:csv)
         )
         ${moduleFilter}
+        AND (
+          $${deptParamIdx}::int IS NULL
+          OR urs.department_id = $${deptParamIdx}
+          OR (
+            urs.department_id IS NULL
+            AND EXISTS (
+              SELECT 1 FROM tbl_user_department ud
+              WHERE ud.user_id = urs.user_id AND ud.department_id = $${deptParamIdx}
+            )
+          )
+        )
       `,
       params
     );
