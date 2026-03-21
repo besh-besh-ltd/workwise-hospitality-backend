@@ -5,6 +5,11 @@ on:
     branches:
       - qa
   workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Specific commit SHA to deploy (leave empty for latest)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -16,6 +21,7 @@ concurrency:
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REPOSITORY: ${{ secrets.BACKEND_ECR_REPOSITORY }}
+  DEPLOY_SHA: ${{ inputs.commit_sha || github.sha }}
 
 jobs:
   build-and-push:
@@ -26,6 +32,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -43,7 +51,7 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
-          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${DEPLOY_SHA}"
 
           docker build \
             -t "${IMAGE_URI}" \
@@ -76,7 +84,7 @@ jobs:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         env:
-          IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.BACKEND_ECR_REPOSITORY }}:${{ github.sha }}
+          IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.BACKEND_ECR_REPOSITORY }}:${{ env.DEPLOY_SHA }}
         with:
           host: ${{ secrets.STAGING_SSH_HOST }}
           username: ${{ secrets.WORKWISE_SSH_USER }}
