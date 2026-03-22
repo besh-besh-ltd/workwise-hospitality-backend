@@ -10239,22 +10239,83 @@ ORDER BY tq.timestamp DESC;
     return new Promise(function (resolve, reject) {
       let dynamicJoins = '';
       let dynamicConditions = '';
+      let dynamicWhereFilters = '';
+      let dynamicSelectColumns = '';
 
       if (tech_eval) {
         dynamicJoins +=
           'JOIN tbl_rfq_product_tech_evaluation RFQ_T_E ON RFQ.id = RFQ_T_E.rfq_id';
         dynamicConditions +=
           'GROUP BY RFQ.id, P.name, H.name HAVING COUNT(RFQ_T_E.id) > 0';
+        // te_completed = true when ALL products have >= 5 cleared vendors
+        dynamicSelectColumns += `,
+          (
+            SELECT BOOL_AND(cleared_count >= 5)
+            FROM (
+              SELECT rpe.tbl_rfq_product_id, COUNT(*) FILTER (WHERE rpe.is_complete) AS cleared_count
+              FROM tbl_rfq_product_tech_evaluation rpe
+              WHERE rpe.rfq_id = RFQ.id
+              GROUP BY rpe.tbl_rfq_product_id
+            ) _te_product_counts
+          ) AS te_completed`;
+        // Filter out RFQs where user lacks te.read permission for the RFQ's hotel + department
+        // When role scope has hotel_id/department_id NULL (company-wide), verify user is
+        // explicitly mapped to the RFQ's hotel and department
+        dynamicWhereFilters += `
+          AND EXISTS (
+            SELECT 1
+            FROM tbl_user_role_scopes urs
+            JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+            JOIN tbl_permissions p ON p.id = rp.permission_id
+            JOIN tbl_hospitality_company_hotels hch ON hch.id = RFQ.hotel_id AND hch.is_deleted = 0
+            WHERE urs.user_id = ${user_id}
+              AND urs.company_id = hch.hospitality_company_id
+              AND p.resource = 'te'
+              AND p.action = 'read'
+              AND (
+                urs.hotel_id = RFQ.hotel_id
+                OR (
+                  urs.hotel_id IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM tbl_hospitality_user_mappings hum
+                    WHERE hum.user_id = ${user_id}
+                      AND (
+                        hum.hospitality_hotel_id = RFQ.hotel_id
+                        OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL
+                            AND hum.hospitality_company_id = hch.hospitality_company_id)
+                      )
+                  )
+                )
+              )
+              AND (
+                RFQ.department_id IS NULL
+                OR urs.department_id = RFQ.department_id
+                OR (
+                  urs.department_id IS NULL
+                  AND EXISTS (
+                    SELECT 1 FROM tbl_user_department ud
+                    WHERE ud.user_id = ${user_id} AND ud.department_id = RFQ.department_id
+                  )
+                )
+              )
+          )`;
       }
 
       if (po) {
         if(user_type == 3) {
-          dynamicJoins += 
+          dynamicJoins +=
            `JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id AND TRPO.finalized_vendor_id = ${user_id}`
         } else {
           dynamicJoins +=
             'JOIN tbl_rfq_purchase_order TRPO ON RFQ.id = TRPO.rfq_id';
         }
+        // po_completed = true only when ALL POs for this RFQ are fully approved or beyond
+        dynamicSelectColumns += `,
+          (
+            SELECT BOOL_AND(_po_chk.status IN ('approved', 'sent', 'dispatched', 'GRN', 'completed', 'invoice_raised'))
+            FROM tbl_rfq_purchase_order _po_chk
+            WHERE _po_chk.rfq_id = RFQ.id
+          ) AS po_completed`;
       }
 
       let q = `
@@ -10304,6 +10365,7 @@ ORDER BY tq.timestamp DESC;
           WHERE _tq_active.rfq_id = RFQ.id
             AND (_tq_active.is_regret IS NULL OR _tq_active.is_regret != 1)
         ) AS active_quote_count
+        ${dynamicSelectColumns}
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
       LEFT JOIN tbl_hospitality_company_hotels H
@@ -10348,6 +10410,7 @@ ORDER BY tq.timestamp DESC;
         `
           : ''
       }
+      ${dynamicWhereFilters}
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
       AND (RFQ.id = $5 OR $5 IS NULL)
