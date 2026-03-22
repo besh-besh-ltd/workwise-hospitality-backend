@@ -3894,6 +3894,124 @@ publishProfileReviews: async (reviewObj) => {
     });
   },
 
+  getCompanyUsersDetailed: async (company_id, { page = 1, limit = 10, search = '', status, companyFilter, hotelFilter } = {}) => {
+    const values = [company_id];
+    let paramIndex = 2;
+    let statusClause = '';
+    let searchClause = '';
+    let companyClause = '';
+    let hotelClause = '';
+
+    if (status === 'active' || status === 'inactive') {
+      statusClause = `AND tu.status = $${paramIndex}`;
+      values.push(status === 'active' ? 1 : 0);
+      paramIndex++;
+    }
+
+    if (search && search.trim()) {
+      const q = `%${search.trim()}%`;
+      searchClause = `AND (tu.name ILIKE $${paramIndex} OR tu.email ILIKE $${paramIndex} OR tu.employee_code ILIKE $${paramIndex})`;
+      values.push(q);
+      paramIndex++;
+    }
+
+    if (companyFilter) {
+      companyClause = `AND EXISTS (SELECT 1 FROM tbl_hospitality_user_mappings hum_f WHERE hum_f.user_id = tu.id AND hum_f.hospitality_company_id = $${paramIndex})`;
+      values.push(companyFilter);
+      paramIndex++;
+    }
+
+    if (hotelFilter) {
+      hotelClause = `AND EXISTS (SELECT 1 FROM tbl_hospitality_user_mappings hum_f WHERE hum_f.user_id = tu.id AND hum_f.hospitality_hotel_id = $${paramIndex})`;
+      values.push(hotelFilter);
+      paramIndex++;
+    }
+
+    const whereClause = `
+      WHERE tu.company_id = $1
+        AND tu.is_deleted = 0
+        AND tu.user_type != 7
+        ${statusClause}
+        ${searchClause}
+        ${companyClause}
+        ${hotelClause}
+    `;
+
+    const countQuery = `SELECT COUNT(*) AS total FROM tbl_users tu ${whereClause}`;
+
+    const dataQuery = `
+      SELECT
+        tu.id, tu.name, tu.email, tu.mobile, tu.user_type, tu.status,
+        tu.created_at, tu.employee_type, tu.employee_code, tu.designation,
+        tu.payroll_company_id,
+        COALESCE(
+          (SELECT json_agg(json_build_object('id', d.id, 'title', d.title) ORDER BY d.title)
+           FROM tbl_user_department ud
+           JOIN tbl_department d ON d.id = ud.department_id
+           WHERE ud.user_id = tu.id
+          ), '[]'::json
+        ) AS departments,
+        COALESCE(
+          (SELECT json_agg(json_build_object(
+            'id', urs.id,
+            'role_id', urs.role_id,
+            'role_title', r.title,
+            'company_id', urs.company_id,
+            'hotel_id', urs.hotel_id,
+            'department_id', urs.department_id
+          ) ORDER BY r.title)
+           FROM tbl_user_role_scopes urs
+           JOIN tbl_roles r ON r.id = urs.role_id
+           WHERE urs.user_id = tu.id
+          ), '[]'::json
+        ) AS role_scopes,
+        COALESCE(
+          (SELECT json_agg(json_build_object(
+            'id', hum.id,
+            'mapping_type', hum.mapping_type,
+            'hospitality_company_id', hum.hospitality_company_id,
+            'hospitality_hotel_id', hum.hospitality_hotel_id,
+            'auto_map_projects', hum.auto_map_projects,
+            'company_name', hc.name,
+            'hotel_name', hh.name
+          ))
+           FROM tbl_hospitality_user_mappings hum
+           JOIN tbl_hospitality_companies hc ON hc.id = hum.hospitality_company_id AND hc.is_deleted = 0
+           LEFT JOIN tbl_hospitality_company_hotels hh ON hh.id = hum.hospitality_hotel_id AND (hh.is_deleted = 0 OR hh.id IS NULL)
+           WHERE hum.user_id = tu.id
+          ), '[]'::json
+        ) AS mappings
+      FROM tbl_users tu
+      ${whereClause}
+      ORDER BY tu.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+
+    const offset = (page - 1) * limit;
+    const dataValues = [...values, limit, offset];
+
+    const [countResult, users] = await Promise.all([
+      db.one(countQuery, values),
+      db.any(dataQuery, dataValues)
+    ]);
+
+    return { users, total: parseInt(countResult.total, 10) };
+  },
+
+  getCompanyUsersStats: async (company_id) => {
+    const query = `
+      SELECT
+        COUNT(DISTINCT tu.id) FILTER (WHERE tu.status = 1) AS active_count,
+        COUNT(DISTINCT tu.id) FILTER (WHERE tu.status != 1) AS inactive_count,
+        COUNT(DISTINCT tu.id) AS total_count,
+        COUNT(DISTINCT hum.user_id) AS mapped_count
+      FROM tbl_users tu
+      LEFT JOIN tbl_hospitality_user_mappings hum ON hum.user_id = tu.id
+      WHERE tu.company_id = $1 AND tu.is_deleted = 0 AND tu.user_type != 7
+    `;
+    return db.one(query, [company_id]);
+  },
+
   // Changes by Agnij 28-05-2025 [Added function to get users by company ID]
   getCompanyUsers: async (company_id) => {
     return new Promise(function (resolve, reject) {

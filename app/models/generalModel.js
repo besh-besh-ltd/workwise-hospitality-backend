@@ -1688,6 +1688,39 @@ export async function findBestMatchingPolicy({ entity_type, hospitality_company_
 }
 
 /**
+ * Get all policies matching filters with their steps in a single batch query.
+ * Used by ?include=steps to avoid N+1 per-policy step fetches.
+ */
+export async function getApprovalPoliciesWithSteps(filters) {
+  const policies = await getApprovalPolicies(filters);
+  if (!policies.length) return [];
+
+  const policyIds = policies.map(p => p.id);
+  const steps = await db.any(`
+    SELECT s.*,
+           CASE
+             WHEN s.approver_source_type = 'USER' THEN (SELECT name FROM tbl_users WHERE id = s.approver_source_id)
+             WHEN s.approver_source_type = 'ROLE' THEN (SELECT title FROM tbl_roles WHERE id = s.approver_source_id)
+             WHEN s.approver_source_type = 'DEPARTMENT' THEN (SELECT title FROM tbl_department WHERE id = s.approver_source_id)
+             ELSE NULL
+           END as approver_source_name
+    FROM tbl_approval_policy_steps s
+    WHERE s.approval_policy_id = ANY($1::int[])
+    ORDER BY s.approval_policy_id, s.step_order ASC
+  `, [policyIds]);
+
+  const stepsByPolicy = {};
+  for (const step of steps) {
+    if (!stepsByPolicy[step.approval_policy_id]) {
+      stepsByPolicy[step.approval_policy_id] = [];
+    }
+    stepsByPolicy[step.approval_policy_id].push(step);
+  }
+
+  return policies.map(p => ({ ...p, steps: stepsByPolicy[p.id] || [] }));
+}
+
+/**
  * Get a policy with all its steps
  */
 export async function getApprovalPolicyWithSteps(id) {
@@ -1833,6 +1866,8 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
         SELECT DISTINCT u.id
         FROM tbl_users u
         JOIN tbl_user_role_scopes urs ON u.id = urs.user_id AND urs.role_id = $1
+          AND urs.company_id = $2
+          AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
         JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
         JOIN tbl_user_department ud ON u.id = ud.user_id
           AND (ud.department_id = $5 OR ud.department_id IN (SELECT id FROM tbl_department WHERE access_type = 'ALL'))
@@ -1851,6 +1886,8 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
         SELECT DISTINCT u.id
         FROM tbl_users u
         JOIN tbl_user_role_scopes urs ON u.id = urs.user_id AND urs.role_id = $1
+          AND urs.company_id = $2
+          AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
         JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
         WHERE u.status = 1
           AND hum.hospitality_company_id = $2

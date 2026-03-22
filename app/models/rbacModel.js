@@ -251,6 +251,22 @@ const rbacModel = {
     );
   },
 
+  getUserRoleScopesBatch: (userIds) => {
+    return db.any(
+      `
+      SELECT urs.id, urs.user_id, urs.role_id,
+        r.title AS role_title,
+        urs.company_id, urs.hotel_id, urs.department_id
+      FROM tbl_user_role_scopes urs
+      JOIN tbl_roles r
+        ON r.id = urs.role_id
+      WHERE urs.user_id = ANY($1::int[])
+      ORDER BY urs.user_id, r.title
+      `,
+      [userIds]
+    );
+  },
+
   /* -------------------- ROLES -------------------- */
 
   getRoles: (user) => {
