@@ -75,6 +75,12 @@ router.get(
   rbacController.getUserRoleScopes
 );
 router.get(
+  '/users/batch-departments',
+  passportSignIn,
+  acl([7, 2]),
+  rbacController.getBatchUserDepartments
+);
+router.get(
   '/users/:userId/departments',
   passportSignIn,
   acl([7, 2]),

@@ -278,6 +278,44 @@ const rbacController = {
       });
     }
   },
+  getBatchUserDepartments: async (req, res) => {
+    try {
+      const userIdsParam = req.query.user_ids;
+      if (!userIdsParam) {
+        return res.status(400).json({
+          status: false,
+          message: 'user_ids query parameter is required'
+        });
+      }
+      const userIds = userIdsParam.split(',').map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+      if (!userIds.length) {
+        return res.status(400).json({
+          status: false,
+          message: 'No valid user IDs provided'
+        });
+      }
+
+      const departments = await rbacModel.getUserDepartmentsBatch(userIds);
+
+      const grouped = {};
+      for (const dept of departments) {
+        if (!grouped[dept.user_id]) {
+          grouped[dept.user_id] = [];
+        }
+        grouped[dept.user_id].push(dept);
+      }
+
+      return res.json({
+        status: true,
+        data: grouped
+      });
+    } catch (err) {
+      return res.status(500).json({
+        status: false,
+        message: err.message
+      });
+    }
+  },
   getAllPermissionsGrouped: async (req, res) => {
     try {
       const permissions = await rbacModel.getAllPermissions();

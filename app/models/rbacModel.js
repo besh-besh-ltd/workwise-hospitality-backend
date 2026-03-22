@@ -73,6 +73,19 @@ const rbacModel = {
     );
   },
 
+  getUserDepartmentsBatch: (userIds) => {
+    return db.any(
+      `
+      SELECT ud.user_id, d.id, d.title
+      FROM tbl_user_department ud
+      JOIN tbl_department d ON d.id = ud.department_id
+      WHERE ud.user_id = ANY($1::int[])
+      ORDER BY ud.user_id, d.title
+      `,
+      [userIds]
+    );
+  },
+
   /* -------------------- ROLES & SCOPES -------------------- */
 
   assignUserRoleScopes: (scopes = []) => {
