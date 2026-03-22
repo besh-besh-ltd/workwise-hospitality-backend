@@ -74,9 +74,9 @@ jobs:
         env:
           ENV_CONTENT: ${{ secrets.ENV_PRODUCTION }}
         with:
-          host: ${{ secrets.PRODUCTION_SSH_HOST }}
+          host: ${{ secrets.WORKWISE_SSH_HOST }}
           username: ${{ secrets.WORKWISE_SSH_USER }}
-          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          key: ${{ secrets.WORKWISE_SSH_KEY }}
           port: 22
           envs: ENV_CONTENT
           script: printf '%s\n' "$ENV_CONTENT" > "$HOME/.env"
@@ -86,9 +86,9 @@ jobs:
         env:
           IMAGE_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.BACKEND_ECR_REPOSITORY }}:${{ env.DEPLOY_SHA }}
         with:
-          host: ${{ secrets.PRODUCTION_SSH_HOST }}
+          host: ${{ secrets.WORKWISE_SSH_HOST }}
           username: ${{ secrets.WORKWISE_SSH_USER }}
-          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          key: ${{ secrets.WORKWISE_SSH_KEY }}
           port: 22
           script_stop: true
           command_timeout: 10m
