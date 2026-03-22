@@ -754,7 +754,8 @@ create_buyer_company_users: async (req, res, next) => {
       payroll_company_id,
       designation,
       department_ids = [],
-      roles = []
+      roles = [],
+      mappings = []
     } = req.body;
 
     const { company_id: companyID, id: loginUserID } = req.user;
@@ -811,6 +812,38 @@ create_buyer_company_users: async (req, res, next) => {
       }));
 
       await rbacModel.assignUserRoleScopes(roleScopes);
+    }
+
+    /* -------------------- USER ↔ HOSPITALITY MAPPINGS -------------------- */
+    if (company?.is_hospitality && Array.isArray(mappings) && mappings.length) {
+      try {
+        const mappingRows = [];
+        for (const m of mappings) {
+          const companyId = parseInt(m.company_id || m.companyId, 10);
+          const mappingLevel = m.mapping_level || m.mappingLevel || "company";
+          const mappingTypeValue = mappingLevel === "company" ? 0 : 1;
+          const hotelIdValue = mappingLevel !== "company" && (m.hotel_id || m.hotelId)
+            ? parseInt(m.hotel_id || m.hotelId, 10)
+            : null;
+
+          if (!companyId) continue;
+
+          mappingRows.push({
+            user_id: createdUser.id,
+            hospitality_company_id: companyId,
+            hospitality_hotel_id: hotelIdValue,
+            mapping_type: mappingTypeValue,
+            auto_map_projects: m.auto_map_projects ?? m.autoMapProjects ?? true,
+            created_by: loginUserID
+          });
+        }
+
+        if (mappingRows.length) {
+          await hospitalityModel.insertUserMappings(mappingRows);
+        }
+      } catch (mapErr) {
+        console.error("Hospitality mapping failed (user was created):", mapErr.message);
+      }
     }
 
     /* -------------------- SUBSCRIPTION LOGIC (non-critical) -------------------- */
@@ -888,7 +921,8 @@ create_buyer_company_users: async (req, res, next) => {
 
     return res.status(200).json({
       status: true,
-      message: "User account created successfully"
+      message: "User account created successfully",
+      data: { id: createdUser.id }
     });
 
   } catch (err) {

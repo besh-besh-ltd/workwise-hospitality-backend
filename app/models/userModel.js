@@ -4001,9 +4001,9 @@ publishProfileReviews: async (reviewObj) => {
   getCompanyUsersStats: async (company_id) => {
     const query = `
       SELECT
-        COUNT(*) FILTER (WHERE tu.status = 1) AS active_count,
-        COUNT(*) FILTER (WHERE tu.status != 1) AS inactive_count,
-        COUNT(*) AS total_count,
+        COUNT(DISTINCT tu.id) FILTER (WHERE tu.status = 1) AS active_count,
+        COUNT(DISTINCT tu.id) FILTER (WHERE tu.status != 1) AS inactive_count,
+        COUNT(DISTINCT tu.id) AS total_count,
         COUNT(DISTINCT hum.user_id) AS mapped_count
       FROM tbl_users tu
       LEFT JOIN tbl_hospitality_user_mappings hum ON hum.user_id = tu.id
