@@ -69,7 +69,7 @@ const hospitalityModel = {
 
   getCompaniesByBuyer: async (buyerCompanyId) => {
     return db.any(
-      `SELECT 
+      `SELECT
         hc.*,
         COALESCE(hotel_stats.total_hotels, 0) AS total_hotels
        FROM tbl_hospitality_companies hc
@@ -79,6 +79,33 @@ const hospitalityModel = {
          WHERE hh.hospitality_company_id = hc.id
            AND hh.is_deleted = 0
        ) AS hotel_stats ON true
+       WHERE hc.buyer_company_id = $1
+         AND hc.is_deleted = 0
+       ORDER BY hc.created_at DESC`,
+      [buyerCompanyId]
+    );
+  },
+
+  getCompaniesWithHotelsByBuyer: async (buyerCompanyId) => {
+    return db.any(
+      `SELECT
+        hc.*,
+        COALESCE(
+          (SELECT json_agg(
+            json_build_object(
+              'id', hh.id,
+              'name', hh.name,
+              'city', hh.city,
+              'state', hh.state,
+              'status', hh.status
+            ) ORDER BY hh.name
+          )
+          FROM tbl_hospitality_company_hotels hh
+          WHERE hh.hospitality_company_id = hc.id
+            AND hh.is_deleted = 0
+          ), '[]'::json
+        ) AS hotels
+       FROM tbl_hospitality_companies hc
        WHERE hc.buyer_company_id = $1
          AND hc.is_deleted = 0
        ORDER BY hc.created_at DESC`,
@@ -425,7 +452,8 @@ const hospitalityModel = {
   getUserMappingsForCompany: async (
     companyId,
     mappingType = null,
-    hotelId = null
+    hotelId = null,
+    includeAll = false
   ) => {
     const params = [companyId];
     let idx = 2;
@@ -443,11 +471,12 @@ const hospitalityModel = {
       idx += 1;
     }
 
-    // When no mapping_type filter is set, deduplicate by user_id
-    // so users with both company-level and hotel-level access appear only once
-    const distinctClause = mappingType === null
-      ? 'DISTINCT ON (hum.user_id)' : '';
-    const orderClause = mappingType === null
+    // When no mapping_type filter is set and includeAll is not requested,
+    // deduplicate by user_id so users with both company-level and hotel-level access appear only once.
+    // When includeAll is true, return all rows without deduplication.
+    const useDistinct = mappingType === null && !includeAll;
+    const distinctClause = useDistinct ? 'DISTINCT ON (hum.user_id)' : '';
+    const orderClause = useDistinct
       ? 'ORDER BY hum.user_id, hum.mapping_type ASC, hum.created_at DESC'
       : 'ORDER BY hum.created_at DESC';
 

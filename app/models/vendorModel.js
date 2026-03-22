@@ -1347,10 +1347,10 @@ getSpocDetails: async (id, rfq_id = null, filterByStatus = true) => {
               const spocContent = `
                 <div style="font-size:16px; font-family: 'Roboto', sans-serif;">
                   <p>You have been added as a <strong>${spoc.role}</strong> for <strong>${creatorOrganizationName}</strong>.</p> 
-                  <p>You will now receive all related communication from Workwise.</p> 
-                  </br> 
+                  <p>You will now receive all related communication from Phileein Hospitality.</p>
+                  </br>
                   <p>Regards,</p>
-                  <p>Workwise Team</p>
+                  <p>Phileein Hospitality Team</p>
                 </div>`;
 
               const spocTemplate = generateEmailTemplate(spocHeader, spocContent);
@@ -1370,9 +1370,9 @@ getSpocDetails: async (id, rfq_id = null, filterByStatus = true) => {
                 <li><strong>Mobile:</strong> ${spoc.mobile}</li>
                 <li><strong>Role:</strong> ${spoc.role}</li>
                 </ul>
-                </br> 
+                </br>
                 <p>Regards,</p>
-                <p>Workwise Team</p>
+                <p>Phileein Hospitality Team</p>
                 </div>`;
 
               const creatorTemplate = generateEmailTemplate(creatorHeader, creatorContent);

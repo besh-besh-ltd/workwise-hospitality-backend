@@ -3,6 +3,7 @@ import pg from 'pg-promise';
 import dotenv from 'dotenv';
 import Config from '../config/app.config.js';
 import { sendMail } from '../helper/common.js';
+import { logger } from '../util/logger.js';
 
 // env config
 dotenv.config();
@@ -52,10 +53,10 @@ const db = pgp(cn); // database instance;
 db.connect()
   .then((obj) => {
     obj.done(); // success, release the connection;
-    console.log(" ************** DATABASE CONNECT HAI **************** ")
+    logger.info("Database has been connected at port > 5432")
   })
   .catch((error) => {
-    console.log('ERROR:', error.message || error);
+    logger.error('ERROR:', error.message || error);
   });
 
 export { pgp, db as default };

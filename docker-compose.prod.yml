@@ -1,0 +1,21 @@
+services:
+  backend:
+    image: ${BACKEND_IMAGE:-backend:latest}
+    container_name: prod-backend
+    ports:
+      - "0.0.0.0:8002:8002"
+    env_file: .env
+    volumes:
+      - backend-storage:/app/storage
+      - backend-uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8002/api/health').then(r=>{if(!r.ok)throw r;process.exit(0)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    restart: unless-stopped
+
+volumes:
+  backend-storage:
+  backend-uploads:

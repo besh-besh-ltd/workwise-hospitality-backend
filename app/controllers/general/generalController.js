@@ -9,6 +9,7 @@ import generalModel, {
   getApprovalInstanceDetails,
   getApprovalInstanceById,
   getApprovalPolicies,
+  getApprovalPoliciesWithSteps,
   getApprovalPolicyWithSteps,
   insertPolicySteps,
   submitApprovalAction,
@@ -35,15 +36,19 @@ import db from '../../config/dbConn.js';
 const generalController = {
   getStates: async (req, res, next) => {
     try {
-      const country_id = req.query.country_id;
+      const country_id = req.params.id;
 
-      let states;
-      if (country_id) {
-        // Convert country_id to integer (optional, based on your DB setup)
-        states = await generalModel.getCountryStates(country_id);
-      } else {
-        states = await generalModel.getStates();
+      if (!country_id) {
+        return res
+          .status(400)
+          .json({
+            status: 0,
+            message: 'country_id is required'
+          })
+          .end();
       }
+
+      const states = await generalModel.getCountryStates(country_id);
 
       res
         .status(200)
@@ -65,6 +70,17 @@ const generalController = {
   },
   getCities: async (req, res, next) => {
     const state_id = req.params.id;
+
+    if (!state_id) {
+      return res
+        .status(400)
+        .json({
+          status: 0,
+          message: 'state_id is required'
+        })
+        .end();
+    }
+
     try {
       const cities = await generalModel.getCities(state_id);
       res
@@ -438,15 +454,18 @@ const hospitalityApprovalController = {
    */
   async getApprovalPolicies(req, res) {
     try {
-      const { hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive } = req.query;
-      const data = await getApprovalPolicies({
+      const { hospitality_company_id, hotel_id, department_id, entity_type, process_id, include_inactive, include } = req.query;
+      const filters = {
         hospitality_company_id: hospitality_company_id ? parseInt(hospitality_company_id) : undefined,
         hotel_id: hotel_id ? parseInt(hotel_id) : undefined,
         department_id: department_id ? parseInt(department_id) : undefined,
         entity_type,
         process_id: process_id ? parseInt(process_id) : undefined,
         include_inactive: include_inactive === 'true'
-      });
+      };
+      const data = include === 'steps'
+        ? await getApprovalPoliciesWithSteps(filters)
+        : await getApprovalPolicies(filters);
       res.json({ status: 1, data });
     } catch (e) {
       logError(e);

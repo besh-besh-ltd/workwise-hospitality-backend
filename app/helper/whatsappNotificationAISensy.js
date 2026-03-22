@@ -35,7 +35,7 @@ const whatsappNotificationAISensy = {
         `${payload.rfq_no}`,
         `dashboard/buyer/rfq-management-details?type=buyer-view&id=${payload.rfq_id}`
       ],
-      source: 'Workwise Platform',
+      source: 'Phileein Hospitality Platform',
       media: {},
       buttons: [],
       carouselCards: [],
@@ -76,7 +76,7 @@ const whatsappNotificationAISensy = {
         `${payload.productDetails}`,
         `dashboard/vendor/inquiries-details?id=${payload.rfq_id}&token=${payload.token}`
       ],
-      source: 'Workwise Platform',
+      source: 'Phileein Hospitality Platform',
       media: {},
       buttons: [],
       carouselCards: [],
@@ -189,7 +189,7 @@ const whatsappNotificationAISensy = {
         `${payload.rfq_no}`,
         `dashboard/vendor/inquiries-details?id=${payload.rfq_id}&token=${payload.token}`
       ],
-      source: 'Workwise Platform',
+      source: 'Phileein Hospitality Platform',
       media: {},
       buttons: [],
       carouselCards: [],

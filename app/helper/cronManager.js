@@ -276,7 +276,14 @@ const publishRfq = async (rfq, txContext = null) => {
   // Send publish notification emails
   try {
     const rfqDetails = await dbConn.oneOrNone(
-      'SELECT id, rfq_no, is_tender, title, created_by FROM tbl_rfq WHERE id = $1',
+      `SELECT RFQ.id, RFQ.rfq_no, RFQ.is_tender, RFQ.title, RFQ.created_by,
+              RFQ.bid_end_date,
+              H.name AS hotel_name,
+              HC.name AS hospitality_company_name
+       FROM tbl_rfq RFQ
+       LEFT JOIN tbl_hospitality_company_hotels H ON H.id = RFQ.hotel_id
+       LEFT JOIN tbl_hospitality_companies HC ON HC.id = RFQ.hospitality_company_id
+       WHERE RFQ.id = $1`,
       [id]
     );
 
@@ -304,7 +311,7 @@ const publishRfq = async (rfq, txContext = null) => {
 
       if (publishUsers.length > 0) {
         await sendRfqPublishedNotification({
-          rfqDetails: { id, rfq_no, is_tender, title: rfqDetails.title },
+          rfqDetails: { id, rfq_no, is_tender, title: rfqDetails.title, bid_end_date: rfqDetails.bid_end_date, hotel_name: rfqDetails.hotel_name, hospitality_company_name: rfqDetails.hospitality_company_name },
           users: publishUsers
         });
       } else {
@@ -351,6 +358,10 @@ const publishRfq = async (rfq, txContext = null) => {
           rfq_id: id,
           rfq_no,
           is_tender,
+          title: rfqDetails.title,
+          bid_end_date: rfqDetails.bid_end_date,
+          hotel_name: rfqDetails.hotel_name,
+          hospitality_company_name: rfqDetails.hospitality_company_name,
           buyerName,
           vendors: vendorsWithTokens
         });

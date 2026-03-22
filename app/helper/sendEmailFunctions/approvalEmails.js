@@ -89,7 +89,7 @@ export const sendRfqCreationNotification = async ({
           </div>
 
           <p style="text-align:center; margin-top:30px;">
-            <strong>— Workwise Team</strong>
+            <strong>— Phileein Hospitality Team</strong>
           </p>
         </div>`;
 
@@ -173,7 +173,7 @@ export const sendApprovalStepNotification = async ({
           </div>
 
           <p style="text-align:center; margin-top:30px;">
-            <strong>— Workwise Team</strong>
+            <strong>— Phileein Hospitality Team</strong>
           </p>
         </div>`;
 
@@ -242,7 +242,7 @@ export const sendRfqReadyToPublishNotification = async ({ rfqDetails, users }) =
           </div>
 
           <p style="text-align:center; margin-top:30px;">
-            <strong>— Workwise Team</strong>
+            <strong>— Phileein Hospitality Team</strong>
           </p>
         </div>`;
 
@@ -277,9 +277,13 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
       return false;
     }
 
-    const { id: rfq_id, rfq_no, is_tender, title } = rfqDetails || {};
+    const { id: rfq_id, rfq_no, is_tender, title, bid_end_date, hotel_name, hospitality_company_name } = rfqDetails || {};
     const entityLabel = is_tender === 1 ? 'Tender' : 'RFQ';
     const viewUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?type=buyer-view&id=${rfq_id}`;
+
+    const bidEndFormatted = bid_end_date
+      ? new Date(bid_end_date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
+      : null;
 
     const subject = `${entityLabel} #${rfq_no} — Now Published`;
     console.log(`[Published Email] Sending to ${users.length} users for ${entityLabel} #${rfq_no}. Recipients:`, users.map(u => u.email));
@@ -299,7 +303,10 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
 
           <ul style="list-style:none; padding-left:0; margin-top:16px;">
             <li style="padding:4px 0;"><strong>${entityLabel} Number:</strong> ${rfq_no}</li>
-            ${title ? `<li style="padding:4px 0;"><strong>Title:</strong> ${title}</li>` : ''}
+            ${title ? `<li style="padding:4px 0;"><strong>${entityLabel} Title:</strong> ${title}</li>` : ''}
+            ${hospitality_company_name ? `<li style="padding:4px 0;"><strong>Company Name:</strong> ${hospitality_company_name}</li>` : ''}
+            ${hotel_name ? `<li style="padding:4px 0;"><strong>Business Unit:</strong> ${hotel_name}</li>` : ''}
+            ${bidEndFormatted ? `<li style="padding:4px 0;"><strong>Quote Submission End Date & Time:</strong> ${bidEndFormatted}</li>` : ''}
           </ul>
 
           <div style="text-align:center; margin-top:24px;">
@@ -310,7 +317,7 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
           </div>
 
           <p style="text-align:center; margin-top:30px;">
-            <strong>— Workwise Team</strong>
+            <strong>— Phileein Hospitality Team</strong>
           </p>
         </div>`;
 
@@ -342,11 +349,15 @@ export const sendRfqPublishedNotification = async ({ rfqDetails, users }) => {
  * @param {string} params.buyerName - Buyer company/organization name
  * @param {Array} params.vendors - Array of { user_id, name, email, token, products: [string] }
  */
-export const sendVendorRfqNotification = async ({ rfq_id, rfq_no, is_tender, buyerName, vendors }) => {
+export const sendVendorRfqNotification = async ({ rfq_id, rfq_no, is_tender, title, bid_end_date, hotel_name, hospitality_company_name, buyerName, vendors }) => {
   try {
     if (!vendors || vendors.length === 0) return false;
 
     const entityLabel = is_tender === 1 ? 'Tender' : 'RFQ';
+
+    const bidEndFormatted = bid_end_date
+      ? new Date(bid_end_date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
+      : null;
 
     for (const vendor of vendors) {
       const sendQuoteUrl = `${process.env.FRONT_END_WEBSITE}/dashboard/vendor/send-quote?id=${rfq_id}&token=${vendor.token}`;
@@ -369,7 +380,11 @@ export const sendVendorRfqNotification = async ({ rfq_id, rfq_no, is_tender, buy
 
           <ul style="list-style:none; padding-left:0; margin-top:16px;">
             <li style="padding:4px 0;"><strong>${entityLabel} Number:</strong> #${rfq_no}</li>
+            ${title ? `<li style="padding:4px 0;"><strong>${entityLabel} Title:</strong> ${title}</li>` : ''}
+            ${hospitality_company_name ? `<li style="padding:4px 0;"><strong>Company Name:</strong> ${hospitality_company_name}</li>` : ''}
+            ${hotel_name ? `<li style="padding:4px 0;"><strong>Business Unit:</strong> ${hotel_name}</li>` : ''}
             <li style="padding:4px 0;"><strong>From:</strong> ${buyerName}</li>
+            ${bidEndFormatted ? `<li style="padding:4px 0;"><strong>Quote Submission End Date & Time:</strong> ${bidEndFormatted}</li>` : ''}
           </ul>
 
           ${productListHTML ? `
@@ -396,7 +411,7 @@ export const sendVendorRfqNotification = async ({ rfq_id, rfq_no, is_tender, buy
           </p>
 
           <p style="text-align:center; margin-top:30px;">
-            <strong>— Workwise Team</strong>
+            <strong>— Phileein Hospitality Team</strong>
           </p>
         </div>`;
 

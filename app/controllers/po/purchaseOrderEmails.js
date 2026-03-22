@@ -56,7 +56,7 @@ export const sendApprovalNotification = async (purchaseOrder, userId) => {
 
             <p style="text-align:center; margin-top: 30px;">
             Thank you for staying proactive.<br/>
-            <strong>— Workwise Team</strong>
+            <strong>— Phileein Hospitality Team</strong>
             </p>
         </div>`;
 
@@ -124,7 +124,7 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
 
             <p style="text-align:center; margin-top: 30px;">
                 Thank you for your continued partnership.<br/>
-                <strong>— Team Workwise</strong>
+                <strong>— Phileein Hospitality Team</strong>
             </p>
             </div>
             `;
@@ -138,7 +138,7 @@ export const sendPONotificationToVendor = async (purchaseOrder, user) => {
         const spocList = await vendorModel.getSpocDetails(purchaseOrder.finalized_vendor_id);
 
         let mailRecipients = {
-            from: `${company.company_name} <hello@letsworkwise.com>`,
+            from: `${company.company_name} ${config.masterEmail}`,
             to: vendor.email,
             subject: `Purchase Order Confirmed — PO #${purchaseOrder.po_number}`, // Subject line
             html: dynamicHTML,

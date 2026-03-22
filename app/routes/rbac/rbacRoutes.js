@@ -63,10 +63,22 @@ router.post(
   rbacController.getMyPermissionsForHotels
 );
 router.get(
+  '/users/batch-roles',
+  passportSignIn,
+  acl([7, 2]),
+  rbacController.getBatchUserRoleScopes
+);
+router.get(
   '/users/:userId/roles',
   passportSignIn,
   acl([7, 2]),
   rbacController.getUserRoleScopes
+);
+router.get(
+  '/users/batch-departments',
+  passportSignIn,
+  acl([7, 2]),
+  rbacController.getBatchUserDepartments
 );
 router.get(
   '/users/:userId/departments',
