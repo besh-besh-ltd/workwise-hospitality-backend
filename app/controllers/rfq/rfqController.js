@@ -7073,9 +7073,9 @@ const rfqController = {
 
     if (withoutLoginUserToken) {
       // Check if the token exists
-      const tokenData = await rfqModel.checkIfExists(
-        'tbl_vendor_rfq_tokens_non_login',
-        `token = '${withoutLoginUserToken}'`
+      const tokenData = await db.any(
+        'SELECT * FROM tbl_vendor_rfq_tokens_non_login WHERE token = $1',
+        [withoutLoginUserToken]
       );
 
       if (!tokenData || tokenData.length === 0) {
@@ -7090,9 +7090,9 @@ const rfqController = {
       }
 
       // Retrieve user data associated with the token
-      const userData = await rfqModel.checkIfExists(
-        'tbl_users',
-        `id = ${tokenData[0].vendor_id}`
+      const userData = await db.any(
+        'SELECT * FROM tbl_users WHERE id = $1',
+        [tokenData[0].vendor_id]
       );
 
       if (!userData || userData.length === 0) {
@@ -7155,22 +7155,19 @@ const rfqController = {
         includeVendors
       );
 
-      // Add tender payment status for vendor viewers
-      if (rfQItem && rfQItem.is_tender === 1 && rfQItem.tender_fees > 0 && req.user.user_type == 3) {
-        const paymentRow = await db.oneOrNone(
-          `SELECT payment_status FROM tbl_vendor_payments 
-           WHERE vendor_id = $1 AND rfq_id = $2 AND payment_type = 'tender'
-           ORDER BY id DESC LIMIT 1`,
-          [req.user.id, id]
-        );
-        rfQItem.has_paid_tender_fees = paymentRow?.payment_status === 'success';
+      const rfqData = rfQItem && rfQItem.length > 0 ? rfQItem[0] : rfQItem;
+
+      // Add tender payment status for vendor viewers (sourced from main query)
+      if (rfqData && rfqData.is_tender === 1 && rfqData.tender_fees > 0 && req.user.user_type == 3) {
+        rfqData.has_paid_tender_fees = rfqData.vendor_payment_status === 'success';
+        delete rfqData.vendor_payment_status;
       }
 
       res
         .status(200)
         .json({
           status: 1,
-          data: rfQItem.length > 0 ? rfQItem[0] : rfQItem
+          data: rfqData
         })
         .end();
     } catch (error) {
