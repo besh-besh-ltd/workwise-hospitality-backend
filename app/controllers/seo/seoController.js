@@ -254,7 +254,7 @@ const seoController = {
 
     // --- Launch puppeteer and create PDF ---
     const browser = await puppeteer.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
       headless: true
     });
 

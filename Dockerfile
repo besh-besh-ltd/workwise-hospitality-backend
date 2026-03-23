@@ -38,9 +38,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
   && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
+# Create non-root user with home directory
 RUN groupadd --system --gid 1001 appuser && \
-    useradd --system --uid 1001 --gid appuser appuser
+    useradd --system --uid 1001 --gid appuser --create-home appuser
 
 # Copy node_modules from deps stage
 COPY --from=deps /app/node_modules ./node_modules
