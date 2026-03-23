@@ -45,12 +45,16 @@ RUN groupadd --system --gid 1001 appuser && \
 # Copy node_modules from deps stage
 COPY --from=deps /app/node_modules ./node_modules
 
+# Copy Puppeteer's Chrome browser from deps stage
+# (npm ci downloads Chrome to /root/.cache/puppeteer via postinstall)
+COPY --from=deps /root/.cache/puppeteer /home/appuser/.cache/puppeteer
+
 # Copy application code
 COPY . .
 
-# Create required directories
+# Create required directories and fix ownership
 RUN mkdir -p app/storage/logs app/storage/internal app/storage/invoices app/uploads && \
-    chown -R appuser:appuser /app
+    chown -R appuser:appuser /app /home/appuser/.cache
 
 USER appuser
 
