@@ -143,7 +143,7 @@ export const generateAwardDocument = async (rfq_product_id, txContext = null) =>
 
     // Generate PDF using Puppeteer
     const browser = await puppeteer.launch({
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
       headless: true
     });
 

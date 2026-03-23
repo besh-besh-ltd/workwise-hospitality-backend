@@ -3663,7 +3663,7 @@ publish_profile_reviews: async (req, res, next) => {
 
       const browser = await puppeteer.launch({
         headless: 'new',
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
       });
       const page = await browser.newPage();
       await page.setContent(htmlPdf, { waitUntil: 'networkidle0' });
@@ -4548,7 +4548,8 @@ publish_profile_reviews: async (req, res, next) => {
 </table>`;
 
           const browser = await puppeteer.launch({
-            headless: 'new'
+            headless: 'new',
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
           });
           const page = await browser.newPage();
           let pdfOptions = { format: 'A4' };
