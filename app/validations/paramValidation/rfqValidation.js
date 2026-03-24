@@ -127,9 +127,6 @@ let store_clarification_upload_file = multerS3({
 // })
 
 const today = new Date();
-const tomorrow = new Date(today);
-tomorrow.setDate(tomorrow.getDate() + 1);
-const tomorrowString = tomorrow.toISOString().slice(0, 10); // Format as YYYY-MM-DD
 
 // Get today's date at the beginning of the day for comparison
 const todayForComparison = new Date(today);
@@ -167,10 +164,13 @@ export const rfqSchemas = {
       .allow(null)
       .allow('')
       .custom((value, helpers) => {
-        if (value && new Date(value) <= tomorrow) {
-          return helpers.message(
-            `bid_end_date must be greater than ${tomorrowString}`
-          );
+        if (value) {
+          const minAllowed = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours from now
+          if (new Date(value) < minAllowed) {
+            return helpers.message(
+              'Quote Submission End Date must be at least 2 hours from now'
+            );
+          }
         }
         return value;
       }),
@@ -262,7 +262,18 @@ export const rfqSchemas = {
     is_tender: Joi.number().required(),
     tender_fees: Joi.number().integer().min(0).optional().allow(null),
     tender_publish_date: Joi.string().optional().allow(null).allow(''),
-    vendor_clarification_date: Joi.string().optional().allow(null).allow(''),
+    vendor_clarification_date: Joi.string().optional().allow(null).allow('')
+      .custom((value, helpers) => {
+        if (value) {
+          const { bid_end_date } = helpers.state.ancestors[0];
+          if (bid_end_date && new Date(value) >= new Date(bid_end_date)) {
+            return helpers.message(
+              'Vendor Clarification End Date must be before the Quote Submission End Date'
+            );
+          }
+        }
+        return value;
+      }),
     hospitality_company_id: Joi.number().integer().optional().allow(null),
     hotel_id: Joi.number().integer().optional().allow(null),
     hotel_ids: Joi.array().items(Joi.number()).optional().allow(null),
@@ -276,10 +287,13 @@ export const rfqSchemas = {
       .allow(null)
       .allow('')
       .custom((value, helpers) => {
-        if (value && new Date(value) <= tomorrow) {
-          return helpers.message(
-            `bid_end_date must be greater than ${tomorrowString}`
-          );
+        if (value) {
+          const minAllowed = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours from now
+          if (new Date(value) < minAllowed) {
+            return helpers.message(
+              'Quote Submission End Date must be at least 2 hours from now'
+            );
+          }
         }
         return value;
       }),
