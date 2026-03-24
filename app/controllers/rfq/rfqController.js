@@ -7334,7 +7334,7 @@ const rfqController = {
         offset = 0;
       }
 
-      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender } = req.body;
+      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender, completed_status } = req.body;
       if (project_id == -1) {
         project_id = null;
       }
@@ -7349,6 +7349,10 @@ const rfqController = {
       } else {
         is_tender = is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0;
       }
+      // Normalize completed_status: 'completed', 'active', or undefined (no filter)
+      if (completed_status && !['completed', 'active'].includes(completed_status)) {
+        completed_status = undefined;
+      }
 
       const listRfq = await rfqModel.getAllBuyerRfq(
         limit,
@@ -7359,7 +7363,8 @@ const rfqController = {
         reverse_auction,
         rfq_type,
         rfq_no,
-        is_tender
+        is_tender,
+        completed_status
       );
 
       let count = await rfqModel.getBuyerRfqCount(
@@ -7368,7 +7373,8 @@ const rfqController = {
         rfq_type,
         reverse_auction,
         rfq_no,
-        is_tender
+        is_tender,
+        completed_status
       );
       res
         .status(200)
