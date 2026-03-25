@@ -607,7 +607,7 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                   FROM tbl_purchase_order_product TPOP
                   WHERE TPOP.purchase_order_id = po.id
                 ) AS total_value,
-                VENDOR.organization_name AS finalized_vendor_name,
+                COALESCE(VENDOR_COMPANY.company_name, VENDOR.organization_name, VENDOR.name) AS finalized_vendor_name,
                 PRJ.name AS project_name,
                 TU.name AS initiated_by,
                 -- Check if user is approver (supports both old and new workflows)
@@ -693,6 +693,7 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
            ON tai.id = po.approval_instance_id
         JOIN tbl_users TU ON TU.id = po.initiated_by
         JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
+        LEFT JOIN tbl_company VENDOR_COMPANY ON VENDOR_COMPANY.id = VENDOR.company_id
          ${whereClause}
          ORDER BY po.created_at DESC
          LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`
@@ -761,7 +762,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                       'name', PD.name
                   )
                 ELSE NULL END AS project_details,
-              COALESCE(VENDOR.organization_name, VENDOR.name) AS finalized_vendor_name,
+              COALESCE(VENDOR_COMPANY.company_name, VENDOR.organization_name, VENDOR.name) AS finalized_vendor_name,
               VENDOR.email AS finalized_vendor_email,
               VENDOR.mobile AS finalized_vendor_phone,
               -- Buyer company details
@@ -1034,6 +1035,7 @@ export const getPODetailsById = async (po_id, user_id) => {
        LEFT JOIN tbl_users trx_user ON trx_user.id = trx.current_approver_id
        JOIN tbl_users TU ON TU.id = po.initiated_by
        JOIN tbl_users VENDOR ON VENDOR.id = po.finalized_vendor_id
+       LEFT JOIN tbl_company VENDOR_COMPANY ON VENDOR_COMPANY.id = VENDOR.company_id
        LEFT JOIN tbl_users LOGGED_IN_USER ON LOGGED_IN_USER.id = $2
        LEFT JOIN tbl_approval_hierarchy_history TAHH ON trx.id = TAHH.approval_transaction_id AND TAHH.action = 'approved'
        LEFT JOIN tbl_company TC ON TC.id = po.company_id

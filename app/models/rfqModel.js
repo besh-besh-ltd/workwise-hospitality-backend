@@ -3113,7 +3113,8 @@ LIMIT 2;
     reverse_auction,
     rfq_type,
     rfq_no,
-    is_tender
+    is_tender,
+    completed_status
   ) => {
     return new Promise(function (resolve, reject) {
       let q = `
@@ -3132,8 +3133,8 @@ LIMIT 2;
                 WHEN COUNT(*) = 0 THEN false
                 ELSE
                   (
-                    SELECT COUNT(*) 
-                      FROM tbl_rfq_products _rpv 
+                    SELECT COUNT(*)
+                      FROM tbl_rfq_products _rpv
                       WHERE _rpv.rfq_id = RFQ.id
                   ) = (
                     SELECT COUNT(*)
@@ -3144,6 +3145,43 @@ LIMIT 2;
             FROM tbl_quotes tq
             WHERE tq.rfq_id = RFQ.id
           ) AS is_finalized,
+          -- po_completed: ALL products have an approved (or beyond) PO
+          (
+            SELECT CASE
+              WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
+              ELSE (
+                SELECT BOOL_AND(has_approved)
+                FROM (
+                  SELECT EXISTS (
+                    SELECT 1 FROM tbl_rfq_purchase_order _po2
+                    JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
+                    WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
+                      AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                  ) AS has_approved
+                  FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id
+                ) _chk
+              )
+            END
+          ) AS po_completed,
+          -- po_partially_completed: at least one product has approved PO, but not all
+          (
+            SELECT CASE
+              WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
+              ELSE (
+                SELECT COUNT(*) FILTER (WHERE has_approved) > 0
+                  AND COUNT(*) FILTER (WHERE NOT has_approved) > 0
+                FROM (
+                  SELECT EXISTS (
+                    SELECT 1 FROM tbl_rfq_purchase_order _po3
+                    JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
+                    WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
+                      AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+                  ) AS has_approved
+                  FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id
+                ) _chk2
+              )
+            END
+          ) AS po_partially_completed,
           ARRAY(
               SELECT json_build_object('id', TQ.id)
               FROM tbl_quotes TQ
@@ -3243,6 +3281,50 @@ LIMIT 2;
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
       AND (RFQ.rfq_no::text LIKE '%$6%' OR $6 IS NULL) -- Filter by rfq_no if provided
       ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0}` : ''}
+      ${completed_status === 'completed' ? `AND (
+        (SELECT CASE
+          WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
+          ELSE (SELECT BOOL_AND(_has_appr) FROM (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order _po2
+              JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
+              WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
+                AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+            ) AS _has_appr FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c)
+        END) = true
+        OR (SELECT CASE
+          WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
+          ELSE (SELECT COUNT(*) FILTER (WHERE _has_appr) > 0 AND COUNT(*) FILTER (WHERE NOT _has_appr) > 0
+            FROM (SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order _po3
+              JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
+              WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
+                AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+            ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2)
+        END) = true
+      )` : ''}
+      ${completed_status === 'active' ? `AND (
+        (SELECT CASE
+          WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN true
+          ELSE (SELECT BOOL_OR(NOT _has_appr) FROM (
+            SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order _po2
+              JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
+              WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
+                AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+            ) AS _has_appr FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c)
+        END) = true
+        AND NOT (SELECT CASE
+          WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
+          ELSE (SELECT COUNT(*) FILTER (WHERE _has_appr) > 0 AND COUNT(*) FILTER (WHERE NOT _has_appr) > 0
+            FROM (SELECT EXISTS (
+              SELECT 1 FROM tbl_rfq_purchase_order _po3
+              JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
+              WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
+                AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+            ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2)
+        END)
+      )` : ''}
       ORDER BY RFQ.timestamp ${sort ?? ''}
       LIMIT $5 OFFSET $4;`;
 
@@ -3262,7 +3344,8 @@ LIMIT 2;
     rfq_type,
     reverse_auction,
     rfq_no,
-    is_tender
+    is_tender,
+    completed_status
   ) => {
     return new Promise(function (resolve, reject) {
       let isTenderFilter = '';
@@ -3287,8 +3370,31 @@ LIMIT 2;
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
         AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL) -- Filter by rfq_no if provided
-        ${isTenderFilter};
-        `,
+        ${isTenderFilter}
+        ${completed_status === 'completed' ? `AND (
+          (SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
+          ELSE (SELECT BOOL_AND(_ha) FROM (SELECT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po2
+            JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
+            WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
+            AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+          ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c) END) = true
+          OR (SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
+          ELSE (SELECT COUNT(*) FILTER (WHERE _ha) > 0 AND COUNT(*) FILTER (WHERE NOT _ha) > 0
+            FROM (SELECT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po3
+            JOIN tbl_purchase_order_product _pop3 ON _pop3.purchase_order_id = _po3.id
+            WHERE _po3.rfq_id = RFQ.id AND _pop3.rfq_product_id = _rp3.id
+            AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+          ) AS _ha FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2) END) = true
+        )` : ''}
+        ${completed_status === 'active' ? `AND NOT (
+          (SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
+          ELSE (SELECT BOOL_AND(_ha) FROM (SELECT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po2
+            JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
+            WHERE _po2.rfq_id = RFQ.id AND _pop2.rfq_product_id = _rp2.id
+            AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+          ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c) END) = true
+        )` : ''}
+        ;`,
         [project_id, rfq_type, reverse_auction, rfq_no]
       )
         .then(function (data) {
@@ -8036,6 +8142,7 @@ ORDER BY m.created_at;
                                     'is_passed', deduped.is_passed,
                                     'has_marks', deduped.has_marks,
                                     'quote_price', deduped.quote_price,
+                                    'has_quoted', deduped.has_quoted,
                                     'rank', deduped.rank,
                                     'is_replaced', EXISTS (
                                         SELECT 1 FROM vendor_replacements vrx
@@ -8062,6 +8169,7 @@ ORDER BY m.created_at;
                                       vs.is_passed AS is_passed,
                                       COALESCE(vs.has_marks, false) AS has_marks,
                               COALESCE(tqi.total_price, 999999999) AS quote_price,
+                              (tq.id IS NOT NULL) AS has_quoted,
                                       ROW_NUMBER() OVER (
                                           PARTITION BY te.rfq_id, te.tbl_rfq_product_id, tu.id
                                           ORDER BY te.id
@@ -10364,7 +10472,120 @@ ORDER BY tq.timestamp DESC;
           FROM tbl_quotes _tq_active
           WHERE _tq_active.rfq_id = RFQ.id
             AND (_tq_active.is_regret IS NULL OR _tq_active.is_regret != 1)
-        ) AS active_quote_count
+        ) AS active_quote_count,
+        -- finalization_approval_completed: all finalized products have their approval fully done
+        (
+          SELECT CASE
+            WHEN NOT EXISTS (SELECT 1 FROM tbl_quote_finalization _f WHERE _f.rfq_id = RFQ.id)
+              THEN false
+            WHEN RFQ.is_tender = 1 THEN (
+              -- Tender: all products finalized AND ARC approval done
+              (
+                SELECT CASE
+                  WHEN COUNT(*) = 0 THEN false
+                  ELSE (SELECT COUNT(*) FROM tbl_rfq_products _rpv WHERE _rpv.rfq_id = RFQ.id) = COUNT(*)
+                END
+                FROM tbl_quote_finalization _tqf_chk WHERE _tqf_chk.rfq_id = RFQ.id
+              )
+              AND (
+                NOT EXISTS (
+                  SELECT 1 FROM tbl_approval_instances _ai_arc
+                  WHERE _ai_arc.entity_type = 'ARC'
+                    AND (_ai_arc.metadata->>'rfq_id')::INTEGER = RFQ.id
+                )
+                OR EXISTS (
+                  SELECT 1 FROM tbl_approval_instances _ai_arc2
+                  WHERE _ai_arc2.entity_type = 'ARC'
+                    AND (_ai_arc2.metadata->>'rfq_id')::INTEGER = RFQ.id
+                    AND _ai_arc2.status = 'APPROVED'
+                )
+              )
+            )
+            ELSE (
+              -- RFQ: per-product NEGOTIATION_QUOTE approval check
+              SELECT BOOL_AND(
+                NOT EXISTS (
+                  SELECT 1 FROM tbl_approval_instances _ai
+                  WHERE _ai.entity_type = 'NEGOTIATION_QUOTE'
+                    AND _ai.entity_id = _rp_fin.id
+                    AND _ai.status = 'PENDING'
+                )
+                AND (
+                  NOT EXISTS (
+                    SELECT 1 FROM tbl_approval_instances _ai2
+                    WHERE _ai2.entity_type = 'NEGOTIATION_QUOTE' AND _ai2.entity_id = _rp_fin.id
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM tbl_approval_instances _ai3
+                    WHERE _ai3.entity_type = 'NEGOTIATION_QUOTE'
+                      AND _ai3.entity_id = _rp_fin.id AND _ai3.status = 'APPROVED'
+                  )
+                )
+              )
+              FROM tbl_rfq_products _rp_fin
+              JOIN tbl_quote_finalization _qf_fin ON _qf_fin.rfq_id = RFQ.id
+                AND _qf_fin.product_variant_id = _rp_fin.product_variant_id
+                AND _qf_fin.variant = _rp_fin.variant
+              WHERE _rp_fin.rfq_id = RFQ.id
+            )
+          END
+        ) AS finalization_approval_completed,
+        -- finalization_partially_approved: some products approved, some not
+        (
+          SELECT CASE
+            WHEN NOT EXISTS (SELECT 1 FROM tbl_quote_finalization _f WHERE _f.rfq_id = RFQ.id) THEN false
+            WHEN RFQ.is_tender = 1 THEN (
+              -- Tender partial: all products finalized but ARC still PENDING
+              (
+                SELECT CASE
+                  WHEN COUNT(*) = 0 THEN false
+                  ELSE (SELECT COUNT(*) FROM tbl_rfq_products _rpv WHERE _rpv.rfq_id = RFQ.id) = COUNT(*)
+                END
+                FROM tbl_quote_finalization _tqf_chk WHERE _tqf_chk.rfq_id = RFQ.id
+              )
+              AND EXISTS (
+                SELECT 1 FROM tbl_approval_instances _ai_arc_p
+                WHERE _ai_arc_p.entity_type = 'ARC'
+                  AND (_ai_arc_p.metadata->>'rfq_id')::INTEGER = RFQ.id
+                  AND _ai_arc_p.status = 'PENDING'
+              )
+            )
+            ELSE (
+              -- RFQ partial: at least one product approved, but not all
+              SELECT
+                COUNT(*) FILTER (WHERE _is_approved) > 0
+                AND (
+                  COUNT(*) FILTER (WHERE NOT _is_approved) > 0
+                  OR (SELECT COUNT(*) FROM tbl_rfq_products _rp_all WHERE _rp_all.rfq_id = RFQ.id) > COUNT(*)
+                )
+              FROM (
+                SELECT (
+                  NOT EXISTS (
+                    SELECT 1 FROM tbl_approval_instances _ai
+                    WHERE _ai.entity_type = 'NEGOTIATION_QUOTE'
+                      AND _ai.entity_id = _rp_fin2.id AND _ai.status = 'PENDING'
+                  )
+                  AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM tbl_approval_instances _ai2
+                      WHERE _ai2.entity_type = 'NEGOTIATION_QUOTE' AND _ai2.entity_id = _rp_fin2.id
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM tbl_approval_instances _ai3
+                      WHERE _ai3.entity_type = 'NEGOTIATION_QUOTE'
+                        AND _ai3.entity_id = _rp_fin2.id AND _ai3.status = 'APPROVED'
+                    )
+                  )
+                ) AS _is_approved
+                FROM tbl_rfq_products _rp_fin2
+                JOIN tbl_quote_finalization _qf_fin2 ON _qf_fin2.rfq_id = RFQ.id
+                  AND _qf_fin2.product_variant_id = _rp_fin2.product_variant_id
+                  AND _qf_fin2.variant = _rp_fin2.variant
+                WHERE _rp_fin2.rfq_id = RFQ.id
+              ) _partial
+            )
+          END
+        ) AS finalization_partially_approved
         ${dynamicSelectColumns}
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
