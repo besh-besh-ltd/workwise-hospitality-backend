@@ -3262,7 +3262,18 @@ LIMIT 2;
               )
               FROM tbl_rfq_products RFQ_P
               WHERE RFQ.id = RFQ_P.rfq_id
-          ) AS "products"
+          ) AS "products",
+          -- can_edit: user has 'update' permission for this RFQ's hotel + resource type
+          EXISTS (
+            SELECT 1 FROM tbl_user_role_scopes _urs
+            JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
+            JOIN tbl_permissions _p ON _p.id = _rp.permission_id
+            WHERE _urs.user_id = ${user_id}
+              AND _p.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+              AND _p.action = 'update'
+              AND _urs.company_id = RFQ.hospitality_company_id
+              AND (_urs.hotel_id IS NULL OR _urs.hotel_id = RFQ.hotel_id)
+          ) AS can_edit
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id  -- Join on project_id to get project_name
       WHERE (RFQ.created_by = ${user_id} OR EXISTS (
@@ -3276,6 +3287,17 @@ LIMIT 2;
               AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
         )
       )) AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
+      -- Permission filter: only RFQs the user has read access for
+      AND EXISTS (
+        SELECT 1 FROM tbl_user_role_scopes _urs2
+        JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+        JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+        WHERE _urs2.user_id = ${user_id}
+          AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+          AND _p2.action = 'read'
+          AND _urs2.company_id = RFQ.hospitality_company_id
+          AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+      )
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
       AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -3366,6 +3388,17 @@ LIMIT 2;
                 AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
           )
         )) AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
+        -- Permission filter: only RFQs the user has read access for
+        AND EXISTS (
+          SELECT 1 FROM tbl_user_role_scopes _urs2
+          JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+          JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+          WHERE _urs2.user_id = ${user_id}
+            AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+            AND _p2.action = 'read'
+            AND _urs2.company_id = RFQ.hospitality_company_id
+            AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+        )
         AND (RFQ.project_id = $1 OR $1 IS NULL)
         AND (RFQ.rfq_type = $2 OR $2 IS NULL)  -- Filter by rfq_type if provided
         AND (RFQ.reverse_auction = $3 OR $3 IS NULL)  -- Filter by reverse_auction if provided
@@ -3542,7 +3575,18 @@ LIMIT 2;
               )
               FROM tbl_rfq_products RFQ_P
               WHERE RFQ.id = RFQ_P.rfq_id
-          ) AS "products"
+          ) AS "products",
+          -- can_edit: user has 'update' permission for this RFQ's hotel + resource type
+          EXISTS (
+            SELECT 1 FROM tbl_user_role_scopes _urs
+            JOIN tbl_role_permissions _rp ON _rp.role_id = _urs.role_id
+            JOIN tbl_permissions _p ON _p.id = _rp.permission_id
+            WHERE _urs.user_id = ${user_id}
+              AND _p.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+              AND _p.action = 'update'
+              AND _urs.company_id = RFQ.hospitality_company_id
+              AND (_urs.hotel_id IS NULL OR _urs.hotel_id = RFQ.hotel_id)
+          ) AS can_edit
       FROM tbl_rfq RFQ
       LEFT JOIN tbl_projects P ON RFQ.project_id = P.id
       WHERE EXISTS (

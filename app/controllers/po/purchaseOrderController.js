@@ -397,14 +397,6 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
       WHERE id = $1
     `, [po_id]);
 
-    // Send vendor notification
-    const user = await userModel.getUserById(approver_user_id);
-    if (user && user[0]) {
-      sendPONotificationToVendor(purchaseOrder, user[0]).catch(err => {
-        console.error('Failed to send PO notification to vendor:', err);
-      });
-    }
-
     // Record lifecycle event
     await recordLifecycleEvent({
       entity_type: 'PO',
@@ -427,10 +419,18 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
 
       // Get RFQ details
       const rfqDetails = await t.oneOrNone(`
-        SELECT r.id, r.rfq_no, r.title, r.timestamp, r.hospitality_company_id, r.hotel_id
+        SELECT r.id, r.rfq_no, r.title, r.timestamp, r.hospitality_company_id, r.hotel_id, r.created_by
         FROM tbl_rfq r
         WHERE r.id = $1
       `, [purchaseOrder.rfq_id]);
+
+      // Send vendor notification with RFQ creator as buyer info (not the approver)
+      const rfqCreator = await userModel.getUserById(rfqDetails?.created_by);
+      if (rfqCreator && rfqCreator[0]) {
+        sendPONotificationToVendor(purchaseOrder, rfqCreator[0]).catch(err => {
+          console.error('Failed to send PO notification to vendor:', err);
+        });
+      }
 
       // Get product names from tbl_purchase_order_product (normalized table)
       const products = await t.any(`
@@ -451,15 +451,24 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
         SELECT name AS company_name FROM tbl_hospitality_companies WHERE id = $1
       `, [rfqDetails?.hospitality_company_id]);
 
-      // Get ALL users mapped to this hospitality company
-      const userMappings = await hospitalityModel.getUserMappingsForCompany(
-        rfqDetails?.hospitality_company_id
+      // Get users mapped to this specific hotel + company-level admins
+      const hotelUsers = await hospitalityModel.getUserMappingsForCompany(
+        rfqDetails?.hospitality_company_id,
+        1,  // mapping_type = 1 (hotel-level)
+        rfqDetails?.hotel_id
       );
-      const usersToNotify = userMappings.map(m => ({
-        id: m.user_id,
-        name: m.name,
-        email: m.email
-      }));
+      const companyAdmins = await hospitalityModel.getUserMappingsForCompany(
+        rfqDetails?.hospitality_company_id,
+        0   // mapping_type = 0 (company-level)
+      );
+      // Deduplicate by user_id
+      const userMap = new Map();
+      [...hotelUsers, ...companyAdmins].forEach(m => {
+        if (!userMap.has(m.user_id)) {
+          userMap.set(m.user_id, { id: m.user_id, name: m.name, email: m.email });
+        }
+      });
+      const usersToNotify = Array.from(userMap.values());
 
       // Build approval history from action_history
       const approvalHistory = instanceDetails?.action_history?.map(action => ({
