@@ -599,13 +599,17 @@ const formatTimestamp = (date) => {
   const d = new Date(date);
   if (isNaN(d.getTime())) return null;
 
-  // Format: DD/MM/YYYY - HH:MM AM/PM
-  const day = String(d.getDate()).padStart(2, '0');
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const year = d.getFullYear();
+  // Convert UTC to IST (UTC+5:30) before formatting
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const ist = new Date(d.getTime() + IST_OFFSET_MS);
 
-  let hours = d.getHours();
-  const minutes = String(d.getMinutes()).padStart(2, '0');
+  // Format: DD/MM/YYYY - HH:MM AM/PM (IST)
+  const day = String(ist.getUTCDate()).padStart(2, '0');
+  const month = String(ist.getUTCMonth() + 1).padStart(2, '0');
+  const year = ist.getUTCFullYear();
+
+  let hours = ist.getUTCHours();
+  const minutes = String(ist.getUTCMinutes()).padStart(2, '0');
   const ampm = hours >= 12 ? 'PM' : 'AM';
   hours = hours % 12;
   hours = hours ? hours : 12; // 0 should be 12

@@ -197,6 +197,16 @@ export const approvePO = async (req, res) => {
             comment: remarks || ''
           });
 
+          // Regenerate PO document on every approval step to update approver statuses
+          // Must happen BEFORE post-approval so the emailed PDF includes the latest approver
+          if (decision === 'approved') {
+            try {
+              await regeneratePODocument(po_id, t);
+            } catch (err) {
+              console.error('Failed to regenerate PO document:', err);
+            }
+          }
+
           // Handle post-approval actions
           if (actionResult.instance_status === 'APPROVED') {
             await handlePOPostApproval(po.approval_instance_id, userId, t);
@@ -208,15 +218,6 @@ export const approvePO = async (req, res) => {
 
             // Handle rejection cleanup (move finalization to history)
             await handlePORejection(po, userId, t);
-          }
-
-          // Regenerate PO document on every approval step to update approver statuses
-          if (decision === 'approved') {
-            try {
-              await regeneratePODocument(po_id, t);
-            } catch (err) {
-              console.error('Failed to regenerate PO document:', err);
-            }
           }
 
           return res.status(200).json({
@@ -267,13 +268,8 @@ export const approvePO = async (req, res) => {
           t,
         });
 
-        const purchaseOrder = await t.oneOrNone(`
-          SELECT * FROM tbl_rfq_purchase_order trpo
-            JOIN tbl_approval_hierarchy_transactions taht ON taht.id = $1
-          WHERE trpo.id = taht.target_entity_id`,
-        [trx.id])
-
         // Regenerate PO document to update approval section (on each successful approval)
+        // Must happen BEFORE fetching purchaseOrder so notification gets the latest po_pdf_url
         if (decision === 'approved') {
           try {
             await regeneratePODocument(po_id, t);
@@ -281,6 +277,12 @@ export const approvePO = async (req, res) => {
             console.error('Failed to regenerate PO document:', err);
           }
         }
+
+        const purchaseOrder = await t.oneOrNone(`
+          SELECT * FROM tbl_rfq_purchase_order trpo
+            JOIN tbl_approval_hierarchy_transactions taht ON taht.id = $1
+          WHERE trpo.id = taht.target_entity_id`,
+        [trx.id])
 
         if (result && (!result.approval_required || result.is_rejected)) {
           await markPOStatusChange(po_id, t, result.is_rejected, req.user);
