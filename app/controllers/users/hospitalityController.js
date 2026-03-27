@@ -778,21 +778,6 @@ const HospitalityController = {
     }
   },
 
-  getUserMappings: async (req, res) => {
-    try {
-      const userId = parseInt(req?.query?.userId, 10) || req.user.id;
-      const mappings = await hospitalityModel.getUserMappings(userId);
-
-      return res.status(200).json({
-        status: 1,
-        data: mappings
-      });
-    } catch (error) {
-      logError(error);
-      return formatErrorResponse(res, error);
-    }
-  },
-
   deleteProjectMapping: async (req, res) => {
     try {
       const company = req.companyDetails;

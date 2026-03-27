@@ -153,12 +153,6 @@ HospitalityRoutes.get(
   hospitalityController.getProjectMappings
 );
 
-HospitalityRoutes.get(
-  '/user/mappings',
-  passportSignIn,
-  hospitalityMiddleware.checkHospitality(false),
-  hospitalityController.getUserMappings
-);
 
 HospitalityRoutes.delete(
   '/project/:project_id/mapping',
