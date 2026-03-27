@@ -17,6 +17,7 @@ const ENTITY_APPROVE_RESOURCE_MAP = {
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import s3Client from "../config/s3config.js";
 import fs from "fs";
+import { logger } from '../util/logger.js';
 
 const generalModel = {
   // 25-05-2025 Mukul jatav
@@ -2970,6 +2971,42 @@ export async function getRfqIdsWithPendingApprovals(user_id, entityTypes, rfqIds
   `, [user_id, entityTypes, intRfqIds]);
 
   return rows.map(r => parseInt(r.rfq_id));
+}
+
+/**
+ * Get counts of pending approvals grouped by entity_type for a user.
+ * Lightweight query for navigation badge polling — no metadata/name JOINs.
+ */
+export async function getPendingApprovalCountsByEntityType(user_id, { hospitality_company_id, hotel_id } = {}) {
+  const conditions = [
+    'i.status = \'PENDING\'',
+    'sa.approver_user_id = $1',
+    'sa.status = \'PENDING\'',
+    's.step_order = i.current_step',
+    'i.created_at >= NOW() - INTERVAL \'7 days\''
+  ];
+  const params = [user_id];
+  let paramIdx = 2;
+
+  if (hospitality_company_id) {
+    conditions.push(`i.hospitality_company_id = $${paramIdx++}`);
+    params.push(hospitality_company_id);
+  }
+  if (hotel_id) {
+    conditions.push(`(i.hotel_id IS NULL OR i.hotel_id = $${paramIdx++})`);
+    params.push(hotel_id);
+  }
+
+  const query = `
+    SELECT i.entity_type, COUNT(*)::INTEGER as count
+    FROM tbl_approval_instances i
+    JOIN tbl_approval_instance_steps s ON s.approval_instance_id = i.id
+    JOIN tbl_approval_step_approvers sa ON sa.approval_instance_step_id = s.id
+    WHERE ${conditions.join(' AND ')}
+    GROUP BY i.entity_type
+  `;
+
+  return db.any(query, params);
 }
 
 // --- Hospitality Approval Engine: End ---

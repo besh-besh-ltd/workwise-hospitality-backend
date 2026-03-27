@@ -156,6 +156,11 @@ GeneralRoutes.get(
   hospitalityApprovalController.getPendingApprovals
 );
 GeneralRoutes.get(
+  '/hospitality/approval/pending/counts',
+  passportSignIn,
+  hospitalityApprovalController.getPendingApprovalCounts
+);
+GeneralRoutes.get(
   '/hospitality/approval/instance/:id',
   passportSignIn,
   hospitalityApprovalController.getApprovalInstance

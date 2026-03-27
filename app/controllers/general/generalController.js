@@ -18,6 +18,7 @@ import generalModel, {
   getApprovalInstancesByEntity,
   cancelApprovalInstance,
   getPendingApprovalsForUser,
+  getPendingApprovalCountsByEntityType,
   createApprovalProcess,
   getApprovalProcesses,
   updateApprovalProcess,
@@ -797,6 +798,31 @@ const hospitalityApprovalController = {
         hospitality_company_id: hospitality_company_id ? parseInt(hospitality_company_id) : undefined,
         hotel_id: hotel_id ? parseInt(hotel_id) : undefined,
         entity_type
+      });
+
+      res.json({ status: 1, data });
+    } catch (e) {
+      logError(e);
+      res.status(400).json({ status: 3, message: e.message });
+    }
+  },
+
+  /**
+   * Get pending approval counts grouped by entity type for nav indicators
+   * GET /hospitality/approval/pending/counts
+   */
+  async getPendingApprovalCounts(req, res) {
+    try {
+      const user_id = req.user?.id;
+      const { hospitality_company_id, hotel_id } = req.query;
+
+      if (!user_id) {
+        return res.status(401).json({ status: 3, message: 'User authentication required' });
+      }
+
+      const data = await getPendingApprovalCountsByEntityType(user_id, {
+        hospitality_company_id: hospitality_company_id ? parseInt(hospitality_company_id) : undefined,
+        hotel_id: hotel_id ? parseInt(hotel_id) : undefined,
       });
 
       res.json({ status: 1, data });
