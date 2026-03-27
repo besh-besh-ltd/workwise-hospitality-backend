@@ -467,30 +467,6 @@ const projectController = {
         .end();
     }
   },
-  getIdAndNameOfProjects: async (req, res, next) => {
-    try {
-      const user_id = req.user.id;
-      const user_type = req.user.user_type;
-
-      let projects;
-
-      projects = await projectModel.getIdAndNameOfProjects(user_id);
-
-      res.status(200).json({
-        status: true,
-        data: projects
-      });
-    } catch (err) {
-      logError(err);
-      res
-        .status(400)
-        .json({
-          status: false,
-          message: Config.errorText.value
-        })
-        .end();
-    }
-  },
 
   saveProjectFiles: async (req, res) => {
     const { project_id, file_type } = req.body;
