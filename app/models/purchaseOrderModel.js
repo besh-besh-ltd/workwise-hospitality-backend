@@ -875,7 +875,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                     WHERE AIS.approval_instance_id = tai.id
                   ),
                   'initiated_by', tai.initiated_by,
-                  'created_at', tai.created_at,
+                  'created_at', tai.created_at AT TIME ZONE 'UTC',
                   'pending_approvers', (
                     SELECT COALESCE(JSON_AGG(
                       JSON_BUILD_OBJECT(
@@ -899,7 +899,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                   'current_approver_id', trx.current_approver_id,
                   'current_approver_name', trx_user.name,
                   'final_decision_by', trx.final_decision_by,
-                  'created_at', trx.created_at
+                  'created_at', trx.created_at AT TIME ZONE 'UTC'
                 )
                 ELSE NULL
               END AS approval_status,
@@ -913,7 +913,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                         'id', taa.id,
                         'action', taa.action,
                         'remarks', taa.comment,
-                        'created_at', taa.created_at,
+                        'created_at', taa.created_at AT TIME ZONE 'UTC',
                         'approved_by', taa.approver_user_id,
                         'approved_by_name', COALESCE(action_user.name, 'Unknown'),
                         'step_number', tais_action.step_order
@@ -934,7 +934,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                           'id', H.id,
                           'action', H.action,
                           'remarks', H.remarks,
-                          'created_at', H.created_at,
+                          'created_at', H.created_at AT TIME ZONE 'UTC',
                           'approved_by', H.approved_by,
                           'approved_by_name', COALESCE(U.name, 'Site Representative')
                         )
