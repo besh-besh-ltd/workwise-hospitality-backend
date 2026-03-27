@@ -225,19 +225,23 @@ const seoController = {
 
     if (data.created_at) {
       const createdInDate = new Date(data.created_at);
-      // Pad single digits with zero for day and month
-      const day = String(createdInDate.getDate()).padStart(2, '0');
-      const month = String(createdInDate.getMonth() + 1).padStart(2, '0'); // Months are zero-based
-      const year = createdInDate.getFullYear();
+      // Convert UTC to IST (UTC+5:30)
+      const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+      const ist = new Date(createdInDate.getTime() + IST_OFFSET_MS);
+      const day = String(ist.getUTCDate()).padStart(2, '0');
+      const month = String(ist.getUTCMonth() + 1).padStart(2, '0');
+      const year = ist.getUTCFullYear();
       data.created_at = `${day}/${month}/${year}`;
     }
 
     if (data.timestamp) {
       const createdInDate = new Date(data.timestamp);
-      // Pad single digits with zero for day and month
-      const day = String(createdInDate.getDate()).padStart(2, '0');
-      const month = String(createdInDate.getMonth() + 1).padStart(2, '0'); // Months are zero-based
-      const year = createdInDate.getFullYear();
+      // Convert UTC to IST (UTC+5:30)
+      const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+      const ist = new Date(createdInDate.getTime() + IST_OFFSET_MS);
+      const day = String(ist.getUTCDate()).padStart(2, '0');
+      const month = String(ist.getUTCMonth() + 1).padStart(2, '0');
+      const year = ist.getUTCFullYear();
       data.timestamp = `${day}/${month}/${year}`;
     }
 

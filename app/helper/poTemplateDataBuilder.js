@@ -305,25 +305,23 @@ const calculatePricingBreakdown = (items, buyerState, supplierState) => {
 };
 
 /**
- * Deduplicate evaluation entries by product name.
- * Merges evaluators and approvers when the same product appears in multiple instances.
+ * Flatten evaluation entries: club all evaluators and approvers across all products
+ * into single deduplicated lists.
+ * Returns { evaluators: string[], approvers: string[] }
  */
-const deduplicateByProduct = (evaluations) => {
-  const byProduct = new Map();
+const flattenEvaluations = (evaluations) => {
+  const evaluatorSet = new Set();
+  const approverSet = new Set();
   for (const e of evaluations) {
-    const key = e.productName || 'Unknown';
-    if (!byProduct.has(key)) {
-      byProduct.set(key, { productName: key, evaluators: new Set(), approvers: new Set() });
+    if (e.evaluatorName) evaluatorSet.add(e.evaluatorName);
+    for (const a of (e.approvers || [])) {
+      if (a.name) approverSet.add(a.name);
     }
-    const entry = byProduct.get(key);
-    if (e.evaluatorName) entry.evaluators.add(e.evaluatorName);
-    for (const a of e.approvers) entry.approvers.add(a.name);
   }
-  return Array.from(byProduct.values()).map(e => ({
-    productName: e.productName,
-    evaluators: Array.from(e.evaluators),
-    approvers: Array.from(e.approvers)
-  }));
+  return {
+    evaluators: Array.from(evaluatorSet),
+    approvers: Array.from(approverSet)
+  };
 };
 
 /**
@@ -468,13 +466,12 @@ const getApprovalDataForPO = async (po_id, poData, conn = db) => {
       });
     }
 
-    result.commercialEvaluations = deduplicateByProduct(rawCommercial);
+    result.commercialEvaluations = rawCommercial;
   }
 
-  // Also deduplicate tech evaluations
-  if (result.techEvaluations.length > 0) {
-    result.techEvaluations = deduplicateByProduct(result.techEvaluations);
-  }
+  // Flatten evaluations: club all evaluators and approvers across products
+  result.techEvaluations = flattenEvaluations(result.techEvaluations);
+  result.commercialEvaluations = flattenEvaluations(result.commercialEvaluations);
 
   // 5. Get PO Approvers - ALL approvers with their status
   if (poData.approval_instance_id) {
@@ -485,10 +482,10 @@ const getApprovalDataForPO = async (po_id, poData, conn = db) => {
         AIS.step_order,
         AIS.decision_rule,
         AIS.status AS step_status,
-        AIS.completed_at AS step_completed_at,
+        AIS.completed_at AT TIME ZONE 'UTC' AS step_completed_at,
         SA.approver_user_id,
         SA.status AS approver_status,
-        SA.acted_at,
+        SA.acted_at AT TIME ZONE 'UTC' AS acted_at,
         U.name,
         U.designation
       FROM tbl_approval_instance_steps AIS
@@ -546,7 +543,7 @@ const getApprovalDataForPO = async (po_id, poData, conn = db) => {
           U.name,
           U.designation,
           H.decision AS action,
-          H.created_at AS acted_at
+          H.created_at AT TIME ZONE 'UTC' AS acted_at
         FROM tbl_approval_hierarchy AH
         JOIN tbl_users U ON U.id = AH.user_id
         LEFT JOIN tbl_approval_hierarchy_history H ON H.approver_id = AH.user_id
@@ -599,13 +596,17 @@ const formatTimestamp = (date) => {
   const d = new Date(date);
   if (isNaN(d.getTime())) return null;
 
-  // Format: DD/MM/YYYY - HH:MM AM/PM
-  const day = String(d.getDate()).padStart(2, '0');
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const year = d.getFullYear();
+  // Convert UTC to IST (UTC+5:30) before formatting
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const ist = new Date(d.getTime() + IST_OFFSET_MS);
 
-  let hours = d.getHours();
-  const minutes = String(d.getMinutes()).padStart(2, '0');
+  // Format: DD/MM/YYYY - HH:MM AM/PM (IST)
+  const day = String(ist.getUTCDate()).padStart(2, '0');
+  const month = String(ist.getUTCMonth() + 1).padStart(2, '0');
+  const year = ist.getUTCFullYear();
+
+  let hours = ist.getUTCHours();
+  const minutes = String(ist.getUTCMinutes()).padStart(2, '0');
   const ampm = hours >= 12 ? 'PM' : 'AM';
   hours = hours % 12;
   hours = hours ? hours : 12; // 0 should be 12

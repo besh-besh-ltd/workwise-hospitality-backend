@@ -9069,15 +9069,8 @@ const rfqController = {
             }
           }
           
-          await sendWinningNotificaion(
-            vendorNonLoginRfqAccessToken,
-            vendor_id,
-            rfQItem,
-            winning_product,
-            winning_vendor_organization,
-            winning_vendor_email,
-            winning_vendor_name
-          );
+          // Vendor finalization email removed — PO approval email already notifies the vendor
+          // with full PO details and document attachment, making a separate finalization email redundant.
 
           if (reFinalized) {
             const lostVendorDetails = await userModel.user_profile_detail(

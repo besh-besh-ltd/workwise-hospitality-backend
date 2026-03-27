@@ -2451,7 +2451,9 @@ export async function getApprovalInstanceDetails(instance_id, user_id = null) {
   // Get action history
   const actionHistory = await db.any(`
     SELECT
-      a.*,
+      a.id, a.approval_instance_id, a.approval_instance_step_id,
+      a.approver_user_id, a.action, a.comment,
+      a.created_at AT TIME ZONE 'UTC' AS created_at,
       u.name as actor_name,
       u.email as actor_email
     FROM tbl_approval_actions a
