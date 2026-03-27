@@ -8462,15 +8462,9 @@ ORDER BY m.created_at;
 
       const rfqId = rfqResult[0].rfq_id;
 
-      // Check if user has access to this RFQ (either as creator or team member)
-      const hasAccess = await userModel.user_rfq_access_review(
-        rfqId,
-        user_id,
-        user_type
-      );
       let commentsResult;
 
-      if (hasAccess && user_type != '3') {
+      if (user_type != '3') {
         // Buyer/internal user: show all comments involving the specified vendor (receiver_id)
         commentsResult = await db.query(fetchAllCommentsQuery, [
           clause_id,
@@ -8487,7 +8481,7 @@ ORDER BY m.created_at;
       const data = [];
 
       for (const comment of commentsResult) {
-        const { comment_id, comment_text, created_by } = comment;
+        const { comment_id, comment_text, created_by, created_at } = comment;
 
         // Fetch files associated with the comment
         let filesResult = [];
@@ -8513,6 +8507,7 @@ ORDER BY m.created_at;
           comment_id,
           comment_text,
           created_by,
+          created_at,
           comment_files: filesResult.map((file) => file.file_url) || []
         });
       }

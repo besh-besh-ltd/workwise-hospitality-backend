@@ -1,5 +1,16 @@
 import db, { pgp } from '../config/dbConn.js';
 
+// Helper: parse date strings as UTC when no timezone suffix is present
+// PostgreSQL returns timestamp without time zone as bare strings (e.g. "2026-03-27 18:54:00")
+// which new Date() would incorrectly interpret as local time
+const parseAsUTC = (dateValue) => {
+  if (!dateValue) return null;
+  if (dateValue instanceof Date) return dateValue;
+  const str = String(dateValue);
+  if (str.includes('+') || str.includes('Z')) return new Date(str);
+  return new Date(str.replace(' ', 'T') + 'Z');
+};
+
 const negotiationModel = {
   // ============= NEGOTIATION ROUNDS =============
 
@@ -341,7 +352,7 @@ const negotiationModel = {
     if (!result) return null;
 
     const now = new Date();
-    const endDate = new Date(result.end_date);
+    const endDate = parseAsUTC(result.end_date);
     return {
       expired: now > endDate,
       endDate: result.end_date,
@@ -390,7 +401,7 @@ const negotiationModel = {
     );
 
     const now = new Date();
-    const endDate = new Date(latestRound.end_date);
+    const endDate = parseAsUTC(latestRound.end_date);
     const isExpired = now > endDate;
     const isActive = latestRound.status === 'ACTIVE' && !isExpired;
 
@@ -432,7 +443,7 @@ const negotiationModel = {
 
     return latestRounds.map(round => {
       const now = new Date();
-      const endDate = new Date(round.end_date);
+      const endDate = parseAsUTC(round.end_date);
       const isExpired = now > endDate;
       return {
         ...round,

@@ -552,7 +552,7 @@ RfqRoutes.post('/get-summarised-deviation',
 )
 
 RfqRoutes.post('/get-deviation-previews',
-  passportSignIn,
+  noLogin.customer_auth,
   rfqController.getDeviationPreviews
 )
 

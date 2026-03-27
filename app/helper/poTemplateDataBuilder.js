@@ -269,20 +269,17 @@ const calculatePricingBreakdown = (items, buyerState, supplierState) => {
   const isSameState = buyerState && supplierState &&
     buyerState.toLowerCase().trim() === supplierState.toLowerCase().trim();
 
-  const taxPercent = basicAmount > 0 ? (totalTax / basicAmount) * 100 : 0;
-
   if (isSameState) {
     // Intra-state: Split into CGST + SGST (equal halves)
     const halfTax = totalTax / 2;
-    const halfPercent = taxPercent / 2;
     return {
       basicAmount: basicAmount.toFixed(2),
       totalFreight: totalFreight > 0 ? totalFreight.toFixed(2) : null,
       totalPackage: totalPackage > 0 ? totalPackage.toFixed(2) : null,
       sgstAmount: halfTax > 0 ? halfTax.toFixed(2) : null,
-      sgstPercent: halfPercent > 0 ? halfPercent.toFixed(1) : null,
+      sgstPercent: null,
       cgstAmount: halfTax > 0 ? halfTax.toFixed(2) : null,
-      cgstPercent: halfPercent > 0 ? halfPercent.toFixed(1) : null,
+      cgstPercent: null,
       igstAmount: null,
       igstPercent: null,
       totalPrice: (basicAmount + totalFreight + totalPackage + totalTax).toFixed(2)
@@ -298,7 +295,7 @@ const calculatePricingBreakdown = (items, buyerState, supplierState) => {
       cgstAmount: null,
       cgstPercent: null,
       igstAmount: totalTax > 0 ? totalTax.toFixed(2) : null,
-      igstPercent: taxPercent > 0 ? taxPercent.toFixed(1) : null,
+      igstPercent: null,
       totalPrice: (basicAmount + totalFreight + totalPackage + totalTax).toFixed(2)
     };
   }

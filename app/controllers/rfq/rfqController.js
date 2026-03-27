@@ -7659,18 +7659,8 @@ const rfqController = {
         const raEndDate = safeParseDate(rfqDetails[0].ra_end_date);
         const isReverseAuction = rfqDetails[0].reverse_auction === 1;
 
-        // Create end of day date for bid end date (to match frontend logic)
-        const bidEndDateEndOfDay = bidEndDate
-          ? new Date(
-              bidEndDate.getFullYear(),
-              bidEndDate.getMonth(),
-              bidEndDate.getDate(),
-              23,
-              59,
-              59,
-              999
-            )
-          : null;
+        // Use exact bid_end_date time for deadline enforcement
+        const bidEndDateTime = bidEndDate;
 
         // Check if RFQ is closed (highest priority)
         if (rfqDetails[0].status === 2) {
@@ -7713,10 +7703,10 @@ const rfqController = {
           }
 
           // Check if past bid end date - but allow if there are active negotiation rounds
-          if (bidEndDateEndOfDay && now > bidEndDateEndOfDay) {
+          if (bidEndDateTime && now > bidEndDateTime) {
             // Check if any active negotiation round exists for this RFQ
             const activeNegotiationRounds = await db.any(
-              `SELECT id FROM tbl_negotiation_rounds WHERE rfq_id = $1 AND status = 'ACTIVE' AND end_date > NOW()`,
+              `SELECT id, rfq_product_id FROM tbl_negotiation_rounds WHERE rfq_id = $1 AND status = 'ACTIVE' AND end_date > NOW()`,
               [rfq_id]
             );
 
@@ -7743,7 +7733,33 @@ const rfqController = {
                 })
                 .end();
             }
-            // Active negotiation rounds exist - allow quote submission to continue
+
+            // Active negotiation rounds exist - validate per-product
+            const activeNegotiationProductIds = new Set(
+              activeNegotiationRounds.map(r => r.rfq_product_id)
+            );
+
+            // Verify submitted products are limited to those with active negotiation rounds
+            if (products && products.length > 0) {
+              for (const product of products) {
+                if (!product.product_id || (product.unit_price === '' || product.unit_price == 0)) continue;
+
+                const rfqProductResult = await db.oneOrNone(
+                  `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2`,
+                  [rfq_id, product.product_id]
+                );
+
+                if (rfqProductResult && !activeNegotiationProductIds.has(rfqProductResult.id)) {
+                  return res
+                    .status(400)
+                    .json({
+                      status: 3,
+                      message: `Bidding period has ended. This product cannot be quoted as it does not have an active negotiation round.`
+                    })
+                    .end();
+                }
+              }
+            }
           }
         }
 
@@ -12325,18 +12341,8 @@ sendFollowUpEmails: async (req, res) => {
         : null;
       const isReverseAuction = rfqDetails[0].reverse_auction === 1;
 
-      // Create end of day date for bid end date (to match frontend logic)
-      const bidEndDateEndOfDay = bidEndDate
-        ? new Date(
-            bidEndDate.getFullYear(),
-            bidEndDate.getMonth(),
-            bidEndDate.getDate(),
-            23,
-            59,
-            59,
-            999
-          )
-        : null;
+      // Use exact bid_end_date time for deadline enforcement
+      const bidEndDateTime = bidEndDate;
 
       // Check if RFQ is closed (highest priority)
       if (rfqDetails[0].status === 2) {
@@ -12372,25 +12378,60 @@ sendFollowUpEmails: async (req, res) => {
           });
         }
 
-        // Check if past bid end date
-        if (bidEndDateEndOfDay && now > bidEndDateEndOfDay) {
-          // Different messages based on reverse auction status
-          let message = 'Bidding Period has Ended';
+        // Check if past bid end date - but allow if there are active negotiation rounds
+        if (bidEndDateTime && now > bidEndDateTime) {
+          // Check if any active negotiation round exists for this RFQ
+          const activeNegotiationRounds = await db.any(
+            `SELECT id, rfq_product_id FROM tbl_negotiation_rounds WHERE rfq_id = $1 AND status = 'ACTIVE' AND end_date > NOW()`,
+            [quoteExists[0].rfq_id]
+          );
 
-          if (isReverseAuction) {
-            if (raEndDate && now > raEndDate) {
-              message = 'Reverse Auction has Ended';
-            } else if (raStartDate && now < raStartDate) {
-              message = 'Bidding Period Ended (Reverse Auction Pending)';
-            } else if (!raStartDate || !raEndDate) {
-              message = 'Bidding Period Ended (RA Dates Invalid)';
+          // Only block if there are NO active negotiation rounds
+          if (!activeNegotiationRounds || activeNegotiationRounds.length === 0) {
+            // Different messages based on reverse auction status
+            let message = 'Bidding Period has Ended';
+
+            if (isReverseAuction) {
+              if (raEndDate && now > raEndDate) {
+                message = 'Reverse Auction has Ended';
+              } else if (raStartDate && now < raStartDate) {
+                message = 'Bidding Period Ended (Reverse Auction Pending)';
+              } else if (!raStartDate || !raEndDate) {
+                message = 'Bidding Period Ended (RA Dates Invalid)';
+              }
             }
+
+            return res.status(400).json({
+              status: 3,
+              message: message
+            });
           }
 
-          return res.status(400).json({
-            status: 3,
-            message: message
-          });
+          // Active negotiation rounds exist - validate per-product
+          const activeNegotiationProductIds = new Set(
+            activeNegotiationRounds.map(r => r.rfq_product_id)
+          );
+
+          // Verify submitted products are limited to those with active negotiation rounds
+          if (products && products.length > 0) {
+            for (const product of products) {
+              if (!product.product_id) continue;
+              // Skip products with no meaningful quote data
+              if (product.comment === '' && (!product.document_files || product.document_files.length <= 0) && (product.unit_price === '' || product.unit_price == 0)) continue;
+
+              const rfqProductResult = await db.oneOrNone(
+                `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2`,
+                [quoteExists[0].rfq_id, product.product_id]
+              );
+
+              if (rfqProductResult && !activeNegotiationProductIds.has(rfqProductResult.id)) {
+                return res.status(400).json({
+                  status: 3,
+                  message: `Bidding period has ended. This product cannot be updated as it does not have an active negotiation round.`
+                });
+              }
+            }
+          }
         }
 
         // Check if RFQ has no bid end date
@@ -13639,6 +13680,39 @@ getClauses: async (req, res) => {
       if (!rfq_product_id) {
         return res.status(400).json({ status: 0, message: 'rfq_product_id is required' });
       }
+
+      // Token-based auth for non-login vendors (same pattern as getTechComments)
+      const withoutLoginUserToken = !req.is_verified ? req.query.token : null;
+
+      if (withoutLoginUserToken) {
+        const tokenData = await rfqModel.checkIfExists(
+          'tbl_vendor_rfq_tokens_non_login',
+          `token = '${withoutLoginUserToken}'`
+        );
+
+        if (!tokenData || tokenData.length === 0) {
+          return res
+            .status(400)
+            .json({ status: 0, message: 'Invalid or expired token!' })
+            .end();
+        }
+
+        const userData = await rfqModel.checkIfExists(
+          'tbl_users',
+          `id = ${tokenData[0].vendor_id}`
+        );
+
+        if (!userData || userData.length === 0) {
+          return res
+            .status(404)
+            .json({ status: 0, message: 'User not found!' })
+            .end();
+        }
+
+        const { password, ...userWithoutPassword } = userData[0];
+        req.user = userWithoutPassword;
+      }
+
       const result = await rfqModel.getDeviationPreviews(rfq_product_id, user_id || null);
       res.status(200).json({ status: 1, data: result });
     } catch (error) {

@@ -2960,10 +2960,12 @@ export async function getRfqIdsWithPendingApprovals(user_id, entityTypes, rfqIds
     JOIN tbl_approval_step_approvers sa
       ON sa.approval_instance_step_id = s.id
     WHERE i.status = 'PENDING'
+      AND s.status = 'PENDING'
       AND sa.approver_user_id = $1
       AND sa.status = 'PENDING'
       AND s.step_order = i.current_step
       AND i.entity_type IN ($2:csv)
+      AND i.metadata->>'rfq_id' IS NOT NULL
       AND (i.metadata->>'rfq_id')::INTEGER IN ($3:csv)
   `, [user_id, entityTypes, intRfqIds]);
 
