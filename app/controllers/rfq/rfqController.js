@@ -7376,6 +7376,18 @@ const rfqController = {
         is_tender,
         completed_status
       );
+
+      // Fetch approval instances for each RFQ when completed_status is 'completed'
+      if (completed_status === 'completed' && listRfq.length > 0) {
+        const approvalPromises = listRfq.map(rfq =>
+          getApprovalInstancesByEntity('RFQ', rfq.id)
+        );
+        const approvalResults = await Promise.all(approvalPromises);
+        listRfq.forEach((rfq, index) => {
+          rfq.approval = approvalResults[index] || [];
+        });
+      }
+
       res
         .status(200)
         .json({
