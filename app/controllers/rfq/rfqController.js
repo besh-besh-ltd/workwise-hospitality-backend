@@ -6811,7 +6811,7 @@ const rfqController = {
 
   refreshVendors: async (req, res) => {
     try {
-      const rfq_id = req.body.rfq_id;
+      const { rfq_id, preview } = req.body;
       if (!rfq_id) {
         return res.status(400).json({ status: 0, message: 'rfq_id is required' });
       }
@@ -6822,9 +6822,6 @@ const rfqController = {
       );
       if (!rfqRecord) {
         return res.status(404).json({ status: 2, message: 'RFQ not found' });
-      }
-      if (rfqRecord.is_published === 1) {
-        return res.status(400).json({ status: 0, message: 'Cannot refresh vendors for a published RFQ/Tender' });
       }
 
       const hotelMappings = await db.any(
@@ -6837,7 +6834,14 @@ const rfqController = {
         return res.status(400).json({ status: 0, message: 'No business units mapped to this RFQ. Please select business units first.' });
       }
 
-      const result = await hospitalityModel.addMissingVendorsForRfq(rfq_id, hotel_ids);
+      const result = await hospitalityModel.addMissingVendorsForRfq(rfq_id, hotel_ids, { preview: !!preview });
+
+      if (preview) {
+        return res.status(200).json({
+          status: 1,
+          data: { totalAvailable: result.uniqueVendorCount }
+        });
+      }
 
       return res.status(200).json({
         status: 1,
@@ -7349,8 +7353,8 @@ const rfqController = {
       } else {
         is_tender = is_tender === '1' || is_tender === 1 || is_tender === true ? 1 : 0;
       }
-      // Normalize completed_status: 'completed', 'active', or undefined (no filter)
-      if (completed_status && !['completed', 'active'].includes(completed_status)) {
+      // Normalize completed_status: 'completed', 'active', 'closed', or undefined (no filter)
+      if (completed_status && !['completed', 'active', 'closed'].includes(completed_status)) {
         completed_status = undefined;
       }
 

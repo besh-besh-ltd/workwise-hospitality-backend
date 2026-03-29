@@ -1938,11 +1938,11 @@ WHERE NOT EXISTS (
               CASE
                 WHEN tsp.plan_name ILIKE '%Enterprise%'
                   AND tus.status = 1
-                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  AND tus.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND tus.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
                   THEN 2
                 WHEN tsp.plan_name ILIKE '%Premium%'
                   AND tus.status = 1
-                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  AND tus.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND tus.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
                   THEN 1
                 ELSE 0
               END
@@ -3325,7 +3325,8 @@ LIMIT 2;
             ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2)
         END) = true
       )` : ''}
-      ${completed_status === 'active' ? `AND (
+      ${completed_status === 'closed' ? `AND RFQ.status = 2` : ''}
+      ${completed_status === 'active' ? `AND RFQ.status != 2 AND (
         (SELECT CASE
           WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN true
           ELSE (SELECT BOOL_OR(NOT _has_appr) FROM (
@@ -3419,7 +3420,8 @@ LIMIT 2;
             AND _po3.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
           ) AS _ha FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2) END) = true
         )` : ''}
-        ${completed_status === 'active' ? `AND NOT (
+        ${completed_status === 'closed' ? `AND RFQ.status = 2` : ''}
+        ${completed_status === 'active' ? `AND RFQ.status != 2 AND NOT (
           (SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po WHERE _po.rfq_id = RFQ.id) THEN false
           ELSE (SELECT BOOL_AND(_ha) FROM (SELECT EXISTS (SELECT 1 FROM tbl_rfq_purchase_order _po2
             JOIN tbl_purchase_order_product _pop2 ON _pop2.purchase_order_id = _po2.id
@@ -4873,13 +4875,13 @@ LIMIT 2;
           AND vhcs_cat.item_type = 'category'
           AND vhcs_cat.item_id = pc.category_id
           AND vhcs_cat.status = 'active'
-          AND CURRENT_DATE BETWEEN vhcs_cat.start_date AND vhcs_cat.end_date
+          AND vhcs_cat.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND vhcs_cat.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
         JOIN tbl_vendor_hotel_category_subscription vhcs_hotel
           ON vhcs_hotel.vendor_id = pvvm.vendor_id
           AND vhcs_hotel.item_type = 'hotel'
           AND vhcs_hotel.item_id = ANY(${hotelIdsParam})
           AND vhcs_hotel.status = 'active'
-          AND CURRENT_DATE BETWEEN vhcs_hotel.start_date AND vhcs_hotel.end_date
+          AND vhcs_hotel.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND vhcs_hotel.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
         WHERE pvvm.status = TRUE
           AND pvvm.is_approved = TRUE
         GROUP BY pvvm.product_variant_id, pc.category_id
@@ -5324,11 +5326,11 @@ WHERE row_num_by_name_category = 1
               CASE
                 WHEN tsp.plan_name ILIKE '%Enterprise%'
                   AND tus.status = 1
-                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  AND tus.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND tus.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
                   THEN 2
                 WHEN tsp.plan_name ILIKE '%Premium%'
                   AND tus.status = 1
-                  AND CURRENT_DATE BETWEEN tus.start_date AND tus.end_date
+                  AND tus.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND tus.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
                   THEN 1
                 ELSE 0
               END
