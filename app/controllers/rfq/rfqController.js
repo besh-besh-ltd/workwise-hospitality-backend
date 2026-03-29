@@ -4004,9 +4004,9 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     throw new Error('No vendors have been evaluated for this technical evaluation');
   }
 
-  // Prepare vendor data for metadata - use has_marks (based on score_timestamp) to distinguish evaluated from not-evaluated
-  const evaluatedVendors = vendorScores.filter(v => v.has_marks === true);
-  const notEvaluatedVendors = vendorScores.filter(v => !v.has_marks);
+  // Only include vendors who are fully evaluated (all clauses scored) — partially scored vendors are excluded
+  const evaluatedVendors = vendorScores.filter(v => v.is_fully_evaluated === true);
+  const notEvaluatedVendors = vendorScores.filter(v => !v.is_fully_evaluated);
   const passedVendors = evaluatedVendors.filter(v => v.is_passed === true);
   const failedVendors = evaluatedVendors.filter(v => v.is_passed === false);
   const currentRound = techEval.current_round || 1;
@@ -8685,26 +8685,11 @@ const rfqController = {
           .end();
       }
 
-      const isTender = result.rfq_details.is_tender === 1;
-
-      // For tenders, hide vendor names and show vendor codes instead
-      const sanitizedVendors = (result.vendors || []).map((vendor, index) => ({
-        user_id: vendor.user_id,
-        // For tenders: show vendor code, for RFQs: show vendor name
-        vendor_name: isTender ? `VEN-${vendor.rfq_product_vendor_id || vendor.user_id}` : vendor.vendor_name,
-        vendor_code: `VEN-${vendor.rfq_product_vendor_id || vendor.user_id}`,
-        // Hide email for tenders
-        email: isTender ? null : vendor.email,
-        remainingProducts: vendor.remainingProducts || []
-      }));
-
       return res
         .status(200)
         .json({
           status: 1,
-          data: sanitizedVendors,
-          is_tender: isTender,
-          vendor_count: sanitizedVendors.length
+          vendor_count: (result.vendors || []).length
         })
         .end();
     } catch (error) {
@@ -8728,23 +8713,12 @@ const rfqController = {
     const { id } = req.user;
 
     try {
-      if (
-        !vendor_ids ||
-        !Array.isArray(vendor_ids) ||
-        vendor_ids.length === 0
-      ) {
-        return res
-          .status(400)
-          .json({
-            status: 1,
-            message: 'Please select at least one vendor!'
-          })
-          .end();
-      }
+      // If vendor_ids not provided, send to all pending vendors
+      const filterIds = Array.isArray(vendor_ids) && vendor_ids.length > 0 ? vendor_ids : [];
 
       const result = await rfqModel.getVendorsForReminder(
         rfq_id,
-        vendor_ids,
+        filterIds,
         { includeContactDetails: true }
       );
 

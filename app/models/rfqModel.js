@@ -8081,6 +8081,7 @@ ORDER BY m.created_at;
                                             vr.buyer_id,
                                             vr.buyer_marks,
                                             vr.buyer_remark,
+                                            vr.timestamp AS response_timestamp,
                                             vr.score_timestamp,
                                             COALESCE(vrf.files, '[]')                     AS vendor_response_files
                                       FROM tbl_rfq_product_tech_evaluation_vendors_response vr
@@ -8096,6 +8097,7 @@ ORDER BY m.created_at;
                                                                     'buyer_id', buyer_id,
                                                                     'buyer_marks', buyer_marks,
                                                                     'buyer_remark', buyer_remark,
+                                                                    'response_timestamp', response_timestamp,
                                                                     'score_timestamp', score_timestamp
                                                             )
                                                     ) AS vendor_responses
@@ -8107,22 +8109,23 @@ ORDER BY m.created_at;
                     te.rfq_id,
                     te.tbl_rfq_product_id AS rfq_product_id,
                     vr.vendor_id,
-                    COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
+                    COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0) AS total_marks,
                     COALESCE(SUM(c.weightage), 0) AS total_weightage,
-                    -- Check if buyer has actually scored (score_timestamp indicates marks were saved)
-                    BOOL_OR(vr.score_timestamp IS NOT NULL) AS has_marks,
+                    -- has_marks: true if ANY clause has been actually scored (score_timestamp differs from creation timestamp)
+                    BOOL_OR(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) AS has_marks,
                     CASE
+                        WHEN NOT BOOL_OR(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
                         WHEN COALESCE(SUM(c.weightage), 0) > 0
-                        THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
+                        THEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
                         ELSE 0
                     END AS calculated_score,
                     te.minimum_passing_score,
-                    -- Only calculate is_passed if marks have been given (score_timestamp exists)
+                    -- is_passed: only calculated when ALL clauses are scored
                     CASE
-                        WHEN NOT BOOL_OR(vr.score_timestamp IS NOT NULL) THEN NULL
+                        WHEN NOT BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
                         WHEN COALESCE(SUM(c.weightage), 0) > 0
                         THEN CASE
-                            WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE(te.minimum_passing_score, 0)
+                            WHEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE(te.minimum_passing_score, 0)
                             THEN true
                             ELSE false
                         END
@@ -8398,121 +8401,32 @@ ORDER BY m.created_at;
     user_id,
     user_type
   ) => {
-    const validateClauseQuery = `
-      SELECT EXISTS (SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
-      WHERE id = $1) AS clause_exists;
-    `;
-
-    const getRfqIdFromClauseQuery = `
-      SELECT te.rfq_id
-      FROM tbl_rfq_product_tech_evaluation_clauses c
-      JOIN tbl_rfq_product_tech_evaluation te ON c.tbl_rfq_product_tech_evaluation_id = te.id
-      WHERE c.id = $1;
-    `;
-
-    const fetchCommentsQuery = `
-      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by, timestamp AS created_at
-      FROM tbl_rfq_product_tech_evaluation_comments
-      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
-        AND (
-          (sender_id = $2 AND receiver_id = $3) OR  -- Buyer to Vendor
-          (sender_id = $3 AND receiver_id = $2)    -- Vendor to Buyer
-      )
-      ORDER BY timestamp ASC;
-    `;
-
-    const fetchAllCommentsQuery = `
-      SELECT id AS comment_id, text AS comment_text, sender_id AS created_by, timestamp AS created_at
-      FROM tbl_rfq_product_tech_evaluation_comments
-      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1
-      AND (
-          (sender_id = $2) OR  -- Buyer to Vendor
-          (receiver_id = $2)    -- Vendor to Buyer
-      )
-      ORDER BY timestamp ASC;
-    `;
-
-    const fetchCommentFilesQuery = `
-      SELECT file_url
-      FROM tbl_rfq_product_tech_evaluation_comments_files
-      WHERE tbl_rfq_product_tech_evaluation_comments_id = $1
-        AND user_id = $2;
-    `;
-
     try {
-      // Validate clause existence
-      const clauseResult = await db.query(validateClauseQuery, [clause_id]);
+      // Determine the vendor user id for filtering
+      const vendorUserId = user_type != '3' ? receiver_id : sender_id;
 
-      if (!clauseResult[0].clause_exists) {
-        throw {
-          status: 0,
-          message: 'Invalid clause ID. Clause does not exist.'
-        };
-      }
+      // Single query: validate clause, fetch comments with sender info and aggregated files
+      const data = await db.any(`
+        SELECT
+          c.id AS comment_id,
+          c.text AS comment_text,
+          c.sender_id AS created_by,
+          c.timestamp AS created_at,
+          u.name AS sender_name,
+          u.user_type AS sender_user_type,
+          COALESCE(
+            (SELECT json_agg(cf.file_url)
+             FROM tbl_rfq_product_tech_evaluation_comments_files cf
+             WHERE cf.tbl_rfq_product_tech_evaluation_comments_id = c.id),
+            '[]'::json
+          ) AS comment_files
+        FROM tbl_rfq_product_tech_evaluation_comments c
+        LEFT JOIN tbl_users u ON u.id = c.sender_id
+        WHERE c.tbl_rfq_product_tech_evaluation_clauses_id = $1
+          AND (c.sender_id = $2 OR c.receiver_id = $2)
+        ORDER BY c.timestamp ASC
+      `, [clause_id, vendorUserId]);
 
-      // Get RFQ ID from clause to check access
-      const rfqResult = await db.query(getRfqIdFromClauseQuery, [clause_id]);
-
-      if (rfqResult.length === 0) {
-        throw {
-          status: 0,
-          message: 'Unable to find RFQ for this clause.'
-        };
-      }
-
-      const rfqId = rfqResult[0].rfq_id;
-
-      let commentsResult;
-
-      if (user_type != '3') {
-        // Buyer/internal user: show all comments involving the specified vendor (receiver_id)
-        commentsResult = await db.query(fetchAllCommentsQuery, [
-          clause_id,
-          receiver_id
-        ]);
-      } else {
-        // Vendor: show all comments where vendor is sender or receiver
-        commentsResult = await db.query(fetchAllCommentsQuery, [
-          clause_id,
-          sender_id
-        ]);
-      }
-
-      const data = [];
-
-      for (const comment of commentsResult) {
-        const { comment_id, comment_text, created_by, created_at } = comment;
-
-        // Fetch files associated with the comment
-        let filesResult = [];
-        try {
-          filesResult = await db.query(fetchCommentFilesQuery, [
-            comment_id,
-            created_by
-          ]);
-        } catch (fileError) {
-          console.error(
-            `Error fetching files for comment ID: ${comment_id}`,
-            fileError.message
-          );
-          throw {
-            status: 0,
-            message: 'Failed to fetch files for comments.',
-            error: fileError.message
-          };
-        }
-
-        // Add comment and files to the response
-        data.push({
-          comment_id,
-          comment_text,
-          created_by,
-          created_at,
-          comment_files: filesResult.map((file) => file.file_url) || []
-        });
-      }
-
-      // Return success response
       return {
         status: 1,
         message: 'Comments fetched successfully.',
@@ -8520,7 +8434,7 @@ ORDER BY m.created_at;
       };
     } catch (error) {
       console.error('Error:', error.message);
-      throw error; // Rethrow the error for the caller to handle
+      throw error;
     }
   },
   getSummarisedDeviation: async (rfq_id) => {
@@ -10404,7 +10318,43 @@ ORDER BY tq.timestamp DESC;
               WHERE rpe.rfq_id = RFQ.id
               GROUP BY rpe.tbl_rfq_product_id
             ) _te_product_counts
-          ) AS te_completed`;
+          ) AS te_completed,
+          -- has_pending_evaluation: vendors submitted quotes but not yet evaluated for a product
+          EXISTS (
+            SELECT 1 FROM tbl_rfq_product_tech_evaluation rpe
+            WHERE rpe.rfq_id = RFQ.id AND NOT rpe.is_complete
+              AND EXISTS (
+                SELECT 1 FROM tbl_quotes _q_te
+                WHERE _q_te.rfq_id = RFQ.id
+                  AND (_q_te.is_regret IS NULL OR _q_te.is_regret != 1)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
+                    WHERE _cv.tbl_rfq_product_tech_evaluation_id = rpe.id
+                      AND _cv.vendor_id = _q_te.created_by
+                  )
+              )
+          ) AS has_pending_evaluation,
+          -- te_approval_rejected: latest TECHNICAL approval is REJECTED with no newer PENDING/APPROVED
+          EXISTS (
+            SELECT 1 FROM tbl_approval_instances ai_rej
+            WHERE ai_rej.entity_type = 'TECHNICAL'
+              AND (ai_rej.metadata->>'rfq_id')::INTEGER = RFQ.id
+              AND ai_rej.status = 'REJECTED'
+              AND NOT EXISTS (
+                SELECT 1 FROM tbl_approval_instances ai_newer
+                WHERE ai_newer.entity_type = 'TECHNICAL'
+                  AND (ai_newer.metadata->>'rfq_id')::INTEGER = RFQ.id
+                  AND ai_newer.status IN ('PENDING', 'APPROVED')
+                  AND ai_newer.created_at > ai_rej.created_at
+              )
+          ) AS te_approval_rejected,
+          -- has_pending_te_approval: any PENDING TECHNICAL approval exists for this RFQ
+          EXISTS (
+            SELECT 1 FROM tbl_approval_instances ai_te
+            WHERE ai_te.entity_type = 'TECHNICAL'
+              AND (ai_te.metadata->>'rfq_id')::INTEGER = RFQ.id
+              AND ai_te.status = 'PENDING'
+          ) AS has_pending_te_approval`;
         // Filter out RFQs where user lacks te.read permission for the RFQ's hotel + department
         // When role scope has hotel_id/department_id NULL (company-wide), verify user is
         // explicitly mapped to the RFQ's hotel and department
@@ -10462,7 +10412,19 @@ ORDER BY tq.timestamp DESC;
             SELECT BOOL_AND(_po_chk.status IN ('approved', 'sent', 'dispatched', 'GRN', 'completed', 'invoice_raised'))
             FROM tbl_rfq_purchase_order _po_chk
             WHERE _po_chk.rfq_id = RFQ.id
-          ) AS po_completed`;
+          ) AS po_completed,
+          -- has_draft_po: any PO in draft status
+          EXISTS (
+            SELECT 1 FROM tbl_rfq_purchase_order po_draft
+            WHERE po_draft.rfq_id = RFQ.id AND po_draft.status = 'draft'
+          ) AS has_draft_po,
+          -- has_pending_po_approval: any PO approval is PENDING
+          EXISTS (
+            SELECT 1 FROM tbl_approval_instances ai_po
+            WHERE ai_po.entity_type = 'PO'
+              AND (ai_po.metadata->>'rfq_id')::INTEGER = RFQ.id
+              AND ai_po.status = 'PENDING'
+          ) AS has_pending_po_approval`;
       }
 
       let q = `
@@ -12148,22 +12110,24 @@ ORDER BY tq.timestamp DESC;
         tu.name AS vendor_name,
         tu.email AS vendor_email,
         COALESCE(tc.company_name, tu.organization_name) AS company_name,
-        COUNT(CASE WHEN vr.score_timestamp IS NOT NULL THEN 1 END) AS evaluated_clauses_count,
-        BOOL_OR(vr.score_timestamp IS NOT NULL) AS has_marks,
-        COALESCE(SUM(vr.buyer_marks), 0) AS total_marks,
+        COUNT(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN 1 END) AS evaluated_clauses_count,
+        COUNT(c.id) AS total_clauses_count,
+        BOOL_OR(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) AS has_marks,
+        BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) AS is_fully_evaluated,
+        COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0) AS total_marks,
         COALESCE(SUM(c.weightage), 0) AS total_weightage,
         CASE
-          WHEN NOT BOOL_OR(vr.score_timestamp IS NOT NULL) THEN NULL
+          WHEN NOT BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
           WHEN COALESCE(SUM(c.weightage), 0) > 0
-          THEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
+          THEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2)
           ELSE 0
         END AS calculated_score,
         $2::NUMERIC AS minimum_passing_score,
         CASE
-          WHEN NOT BOOL_OR(vr.score_timestamp IS NOT NULL) THEN NULL
+          WHEN NOT BOOL_AND(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) THEN NULL
           WHEN COALESCE(SUM(c.weightage), 0) > 0
           THEN CASE
-            WHEN ROUND((COALESCE(SUM(vr.buyer_marks), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE($2::NUMERIC, 0)
+            WHEN ROUND((COALESCE(SUM(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN vr.buyer_marks ELSE 0 END), 0)::NUMERIC / COALESCE(SUM(c.weightage), 0)::NUMERIC) * 100, 2) >= COALESCE($2::NUMERIC, 0)
             THEN true
             ELSE false
           END
