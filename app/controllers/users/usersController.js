@@ -1779,34 +1779,15 @@ get_company_users: async (req, res, next) => {
           dynamic_html = dynamic_html.replaceAll(replace_var, replace_char);
         }
 
-
-
-        const spocList = await vendorModel.getSpocDetails(user_detail[0]?.id)
-
-        // console.log(" user contoller 630 spoc console ", user_detail[0]?.id, spocList)
-
         let mailRecipients = {
+          to:  user_detail[0].email,
           from: Config.webmasterMail,
           subject: `Work wise | Forgot Password OTP`,
           html: dynamic_html,
           is_otp: true
         };
 
-        if (spocList && spocList.length > 0) {
-          mailRecipients.to = spocList.map(spoc => spoc.email);
-          mailRecipients.cc = user_detail[0].email;
-        } else {
-          mailRecipients.to = user_detail[0].email;
-        }
-
         sendMail(mailRecipients);
-
-        // sendMail({
-        //   from: Config.webmasterMail, // sender address
-        //   to: email, // list of receivers
-        //   subject: `Work wise | Forgot Password OTP `, // Subject line
-        //   html: dynamic_html // plain text body
-        // });
 
         let updateOtp = {
           otp: otpseq,
@@ -2148,7 +2129,11 @@ update_user_detail: async (req, res, next) => {
         // return false;
         user.vendor_approve = vendor_arr;
         user.spoc = spoc;
-        
+
+        // Fetch user-to-company/hotel mappings
+        const userMappings = await hospitalityModel.getUserMappings(user_id);
+        user.hospitality_mappings = userMappings || [];
+
         // Add user_key for hospitality payments
         user.user_key = cryptr.encrypt(user_id.toString());
         
