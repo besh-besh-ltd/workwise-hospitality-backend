@@ -265,40 +265,13 @@ const calculatePricingBreakdown = (items, buyerState, supplierState) => {
     }
   });
 
-  // Determine tax type based on state comparison
-  const isSameState = buyerState && supplierState &&
-    buyerState.toLowerCase().trim() === supplierState.toLowerCase().trim();
-
-  if (isSameState) {
-    // Intra-state: Split into CGST + SGST (equal halves)
-    const halfTax = totalTax / 2;
-    return {
-      basicAmount: basicAmount.toFixed(2),
-      totalFreight: totalFreight > 0 ? totalFreight.toFixed(2) : null,
-      totalPackage: totalPackage > 0 ? totalPackage.toFixed(2) : null,
-      sgstAmount: halfTax > 0 ? halfTax.toFixed(2) : null,
-      sgstPercent: null,
-      cgstAmount: halfTax > 0 ? halfTax.toFixed(2) : null,
-      cgstPercent: null,
-      igstAmount: null,
-      igstPercent: null,
-      totalPrice: (basicAmount + totalFreight + totalPackage + totalTax).toFixed(2)
-    };
-  } else {
-    // Inter-state: Use IGST only
-    return {
-      basicAmount: basicAmount.toFixed(2),
-      totalFreight: totalFreight > 0 ? totalFreight.toFixed(2) : null,
-      totalPackage: totalPackage > 0 ? totalPackage.toFixed(2) : null,
-      sgstAmount: null,
-      sgstPercent: null,
-      cgstAmount: null,
-      cgstPercent: null,
-      igstAmount: totalTax > 0 ? totalTax.toFixed(2) : null,
-      igstPercent: null,
-      totalPrice: (basicAmount + totalFreight + totalPackage + totalTax).toFixed(2)
-    };
-  }
+  return {
+    basicAmount: basicAmount.toFixed(2),
+    totalFreight: totalFreight > 0 ? totalFreight.toFixed(2) : null,
+    totalPackage: totalPackage > 0 ? totalPackage.toFixed(2) : null,
+    gstAmount: totalTax > 0 ? totalTax.toFixed(2) : null,
+    totalPrice: (basicAmount + totalFreight + totalPackage + totalTax).toFixed(2)
+  };
 };
 
 /**

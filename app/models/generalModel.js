@@ -1918,11 +1918,8 @@ async function resolveApprovers(step, hospitality_company_id, hotel_id = null, d
     userIds.push(...users.map(u => u.id));
   }
 
-  // Remove duplicates and filter out the creator (maker-checker pattern)
+  // Remove duplicates (initiator is no longer filtered out — auto-approved by caller instead)
   let finalApprovers = [...new Set(userIds)];
-  if (initiatedBy) {
-    finalApprovers = finalApprovers.filter(id => id !== initiatedBy);
-  }
   return finalApprovers;
 }
 
@@ -2091,7 +2088,7 @@ export async function createApprovalInstance({
       // Resolve approvers for this step with department access type awareness
       const approverUserIds = await resolveApprovers(policyStep, hospitality_company_id, hotel_id, resolveDeptId, departmentAccessType, t, initiated_by);
 
-      // Skip step if no approvers remain after excluding creator
+      // Skip step if no approvers were resolved at all
       if (approverUserIds.length === 0) {
         continue;
       }
@@ -2101,7 +2098,8 @@ export async function createApprovalInstance({
       resolvedSteps.push({
         policyStep,
         approverUserIds,
-        stepOrder: stepNumber
+        stepOrder: stepNumber,
+        isInitiatorInStep: approverUserIds.includes(initiated_by)
       });
     }
 
@@ -2129,11 +2127,11 @@ export async function createApprovalInstance({
       };
     }
 
-    // 7. Create instance steps and approvers
+    // 7. Create instance steps and approvers, auto-approving initiator where present
     const instanceSteps = [];
 
     for (const resolvedStep of resolvedSteps) {
-      const { policyStep, approverUserIds, stepOrder } = resolvedStep;
+      const { policyStep, approverUserIds, stepOrder, isInitiatorInStep } = resolvedStep;
 
       const instanceStep = await t.one(`
         INSERT INTO tbl_approval_instance_steps
@@ -2143,37 +2141,105 @@ export async function createApprovalInstance({
 
       // Insert approvers for this step
       for (const userId of approverUserIds) {
-        await t.none(`
-          INSERT INTO tbl_approval_step_approvers
-          (approval_instance_step_id, approver_user_id, status)
-          VALUES ($1, $2, 'PENDING')
-        `, [instanceStep.id, userId]);
+        if (userId === initiated_by) {
+          // Initiator: insert as already APPROVED with system remark
+          await t.none(`
+            INSERT INTO tbl_approval_step_approvers
+            (approval_instance_step_id, approver_user_id, status, acted_at, comment)
+            VALUES ($1, $2, 'APPROVED', NOW(), 'Auto approved by system')
+          `, [instanceStep.id, userId]);
+
+          // Record in audit trail
+          await t.none(`
+            INSERT INTO tbl_approval_actions
+            (approval_instance_id, approval_instance_step_id, approver_user_id, action, comment)
+            VALUES ($1, $2, $3, 'APPROVE', 'Auto approved by system')
+          `, [instance.id, instanceStep.id, userId]);
+        } else {
+          // Normal approver: insert as PENDING
+          await t.none(`
+            INSERT INTO tbl_approval_step_approvers
+            (approval_instance_step_id, approver_user_id, status)
+            VALUES ($1, $2, 'PENDING')
+          `, [instanceStep.id, userId]);
+        }
       }
 
-      instanceSteps.push({ ...instanceStep, approverCount: approverUserIds.length });
+      // Evaluate if this step auto-completes due to initiator's approval
+      let stepAutoCompleted = false;
+      if (isInitiatorInStep) {
+        const nonInitiatorCount = approverUserIds.filter(id => id !== initiated_by).length;
+        if (policyStep.decision_rule === 'ANY') {
+          // ANY: one approval suffices → initiator's auto-approval completes the step
+          stepAutoCompleted = true;
+        } else if (policyStep.decision_rule === 'ALL' && nonInitiatorCount === 0) {
+          // ALL: only complete if initiator was the sole approver
+          stepAutoCompleted = true;
+        }
+      }
+
+      if (stepAutoCompleted) {
+        await t.none(`
+          UPDATE tbl_approval_instance_steps
+          SET status = 'APPROVED', completed_at = NOW()
+          WHERE id = $1
+        `, [instanceStep.id]);
+        instanceStep.status = 'APPROVED';
+      }
+
+      instanceSteps.push({ ...instanceStep, approverCount: approverUserIds.length, autoCompleted: stepAutoCompleted });
     }
 
-    // Send notification to step 1 approvers (fire-and-forget)
-    try {
-      const firstStep = instanceSteps[0];
-      if (firstStep) {
-        const step1Approvers = await t.any(`
-          SELECT sa.approver_user_id as user_id, u.name as user_name, u.email as user_email
-          FROM tbl_approval_step_approvers sa
-          JOIN tbl_users u ON sa.approver_user_id = u.id
-          WHERE sa.approval_instance_step_id = $1 AND sa.status = 'PENDING'
-        `, [firstStep.id]);
+    // 8. Determine the first PENDING step (may not be step 1 if early steps auto-completed)
+    const firstPendingStep = instanceSteps.find(s => s.status === 'PENDING');
 
+    if (!firstPendingStep) {
+      // ALL steps auto-completed (initiator was sole/ANY-rule approver everywhere)
+      await t.none(`
+        UPDATE tbl_approval_instances
+        SET status = 'APPROVED', current_step = 0, completed_at = NOW()
+        WHERE id = $1
+      `, [instance.id]);
+
+      return {
+        instance: { ...instance, status: 'APPROVED', current_step: 0 },
+        policy: { id: policy.id, entity_type: policy.entity_type },
+        steps: instanceSteps,
+        totalSteps: instanceSteps.length,
+        autoApproved: true
+      };
+    }
+
+    // Update current_step to the first pending step (may be > 1 if earlier steps auto-completed)
+    if (firstPendingStep.step_order !== 1) {
+      await t.none(`
+        UPDATE tbl_approval_instances
+        SET current_step = $1
+        WHERE id = $2
+      `, [firstPendingStep.step_order, instance.id]);
+      instance.current_step = firstPendingStep.step_order;
+    }
+
+    // 9. Send notification to first pending step approvers (fire-and-forget)
+    try {
+      const pendingApprovers = await t.any(`
+        SELECT sa.approver_user_id as user_id, u.name as user_name, u.email as user_email
+        FROM tbl_approval_step_approvers sa
+        JOIN tbl_users u ON sa.approver_user_id = u.id
+        WHERE sa.approval_instance_step_id = $1 AND sa.status = 'PENDING'
+      `, [firstPendingStep.id]);
+
+      if (pendingApprovers.length > 0) {
         const initiator = await t.oneOrNone('SELECT name FROM tbl_users WHERE id = $1', [initiated_by]);
 
         sendApprovalStepNotification({
           entityType: entity_type,
           entityId: entity_id,
           entityIdentifier: metadata?.rfq_number || metadata?.po_number || `ID-${entity_id}`,
-          stepOrder: 1,
+          stepOrder: firstPendingStep.step_order,
           totalSteps: instanceSteps.length,
           initiatorName: initiator?.name || 'Unknown',
-          approvers: step1Approvers,
+          approvers: pendingApprovers,
           extraContext: { rfq_id: metadata?.rfq_id || entity_id }
         });
       }
@@ -2747,7 +2813,8 @@ export async function submitApprovalAction({
       ORDER BY step_order ASC
     `, [approval_instance_id]);
 
-    const nextStep = allSteps.find(s => s.step_order === currentStep.step_order + 1);
+    // Find the next PENDING step (skip over steps that were auto-completed at creation)
+    const nextStep = allSteps.find(s => s.step_order > currentStep.step_order && s.status !== 'APPROVED');
 
     if (nextStep) {
       // Move to next step
