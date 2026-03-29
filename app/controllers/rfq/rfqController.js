@@ -15253,6 +15253,37 @@ getClauses: async (req, res) => {
   },
 
   /**
+   * getTechEvalDashboard
+   *
+   * Returns a summary of technical evaluation progress for an RFQ.
+   *
+   * @route GET /api/v1/rfq/technical/dashboard/:rfq_id
+   */
+  getTechEvalDashboard: async (req, res) => {
+    try {
+      const rfq_id = parseInt(req.params.rfq_id, 10);
+      const dashboard = await rfqModel.getTechEvalDashboard(rfq_id);
+
+      return res.status(200).json({
+        status: 1,
+        data: {
+          total_products: parseInt(dashboard.total_products, 10),
+          products_completed: parseInt(dashboard.products_completed, 10),
+          products_in_progress: parseInt(dashboard.products_in_progress, 10),
+          vendors_passed: parseInt(dashboard.vendors_passed, 10),
+          vendors_failed: parseInt(dashboard.vendors_failed, 10)
+        }
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: Config.errorText.value
+      });
+    }
+  },
+
+  /**
    * techEvalApprovalAction
    *
    * Custom approval action endpoint for TECHNICAL evaluations.

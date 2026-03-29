@@ -12275,6 +12275,41 @@ ORDER BY tq.timestamp DESC;
   },
 
   /**
+   * Get technical evaluation dashboard summary for an RFQ
+   * @param {number} rfq_id - RFQ ID
+   * @returns {Promise<Object>} - Dashboard summary
+   */
+  getTechEvalDashboard: async (rfq_id) => {
+    return db.one(
+      `SELECT
+        COUNT(te.id) AS total_products,
+        COUNT(te.id) FILTER (WHERE te.is_complete = true) AS products_completed,
+        COUNT(te.id) FILTER (
+          WHERE te.is_complete = false
+          AND EXISTS (
+            SELECT 1 FROM tbl_tech_evaluation_rounds r
+            WHERE r.tbl_rfq_product_tech_evaluation_id = te.id
+          )
+        ) AS products_in_progress,
+        COALESCE(SUM(passed.cnt), 0) AS vendors_passed,
+        COALESCE(SUM(failed.cnt), 0) AS vendors_failed
+      FROM tbl_rfq_product_tech_evaluation te
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS cnt
+        FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+        WHERE cv.tbl_rfq_product_tech_evaluation_id = te.id AND cv.status = 1
+      ) passed ON true
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS cnt
+        FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+        WHERE cv.tbl_rfq_product_tech_evaluation_id = te.id AND cv.status = 0
+      ) failed ON true
+      WHERE te.rfq_id = $1`,
+      [rfq_id]
+    );
+  },
+
+  /**
    * Count passed verified vendors for a tech evaluation
    * @param {number} tech_evaluation_id - Tech evaluation ID
    * @param {Object} txContext - Optional transaction context

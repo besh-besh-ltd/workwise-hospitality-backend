@@ -654,6 +654,13 @@ RfqRoutes.get('/tech-eval/history/:rfq_product_id',
   rfqController.getTechEvalHistory
 );
 
+// Tech Evaluation Dashboard - Summary of evaluation progress for an RFQ
+RfqRoutes.get('/technical/dashboard/:rfq_id',
+  passportSignIn,
+  acl([2, 8, 10]),
+  rfqController.getTechEvalDashboard
+);
+
 // Tech Evaluation Approval Action - Custom approve/reject endpoint
 // This triggers post-approval processing (auto-replace failed vendors, etc.)
 RfqRoutes.post('/tech-eval/approval/action',
