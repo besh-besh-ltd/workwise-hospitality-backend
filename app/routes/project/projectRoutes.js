@@ -38,13 +38,6 @@ projectRoutes.get(
     projectController.getProjectsByHospitalityContext
 )
 
-// route for getting all projects of the user with projectid and projectName
-projectRoutes.get(
-    '/name/list',
-    passportSignIn,
-    // acl([2, 7]),
-    projectController.getIdAndNameOfProjects
-)
 
 // Route for getting all projects where the current user is a team member
 projectRoutes.get(
