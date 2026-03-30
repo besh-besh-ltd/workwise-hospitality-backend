@@ -163,6 +163,14 @@ HospitalityRoutes.delete(
   hospitalityController.deleteProjectMapping
 );
 
+HospitalityRoutes.get(
+  '/user/:user_id/mappings',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  hospitalityController.getUserMappingsById
+);
+
 HospitalityRoutes.delete(
   '/user/:user_id/mapping',
   passportSignIn,
