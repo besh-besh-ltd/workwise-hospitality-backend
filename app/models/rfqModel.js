@@ -8169,7 +8169,7 @@ ORDER BY m.created_at;
             ),
 
             vendor_replacements AS (
-                SELECT rfq_id, rfq_product_id, old_vendor_id, new_vendor_id
+                SELECT rfq_id, rfq_product_id, old_vendor_id, new_vendor_id, created_at AS replaced_at
                 FROM tbl_rfq_product_tech_eval_vendor_replacements
                 WHERE rfq_id = $1
             ),
@@ -8193,11 +8193,19 @@ ORDER BY m.created_at;
                                     'quote_price', deduped.quote_price,
                                     'has_quoted', deduped.has_quoted,
                                     'rank', deduped.rank,
+                                    'evaluation_round', deduped.evaluation_round,
+                                    'reject_message', deduped.reject_message,
                                     'is_replaced', EXISTS (
                                         SELECT 1 FROM vendor_replacements vrx
                                         WHERE vrx.rfq_id = deduped.rfq_id
                                           AND vrx.rfq_product_id = deduped.rfq_product_id
                                           AND vrx.new_vendor_id = deduped.vendor_id
+                                    ),
+                                    'is_replaced_out', EXISTS (
+                                        SELECT 1 FROM vendor_replacements vrx
+                                        WHERE vrx.rfq_id = deduped.rfq_id
+                                          AND vrx.rfq_product_id = deduped.rfq_product_id
+                                          AND vrx.old_vendor_id = deduped.vendor_id
                                     )
                             )
                             ORDER BY deduped.rank
@@ -8211,6 +8219,8 @@ ORDER BY m.created_at;
                                       tu.email AS vendor_email,
                                       rc.status AS is_cleared,
                                       rc.is_verified AS is_verified,
+                                      rc.evaluation_round AS evaluation_round,
+                                      rc.reject_message AS reject_message,
                                       _TU.name AS evaluated_by,
                                       _APPROVER.name AS approved_by,
                                       rpv.id AS rfq_product_vendor_id,
@@ -8271,13 +8281,8 @@ ORDER BY m.created_at;
                       ) deduped
                       WHERE deduped.row_num = 1
                           AND (
-                              -- L1-L5 vendors that have NOT been replaced
-                              (deduped.rank <= 5 AND NOT EXISTS (
-                                  SELECT 1 FROM vendor_replacements vrx
-                                  WHERE vrx.rfq_id = deduped.rfq_id
-                                    AND vrx.rfq_product_id = deduped.rfq_product_id
-                                    AND vrx.old_vendor_id = deduped.vendor_id
-                              ))
+                              -- Top ranked vendors
+                              deduped.rank <= 5
                               OR
                               -- Replacement vendors (included regardless of rank)
                               EXISTS (
@@ -8285,6 +8290,14 @@ ORDER BY m.created_at;
                                   WHERE vrx.rfq_id = deduped.rfq_id
                                     AND vrx.rfq_product_id = deduped.rfq_product_id
                                     AND vrx.new_vendor_id = deduped.vendor_id
+                              )
+                              OR
+                              -- Replaced (failed) vendors — keep visible for audit
+                              EXISTS (
+                                  SELECT 1 FROM vendor_replacements vrx
+                                  WHERE vrx.rfq_id = deduped.rfq_id
+                                    AND vrx.rfq_product_id = deduped.rfq_product_id
+                                    AND vrx.old_vendor_id = deduped.vendor_id
                               )
                           )
                 GROUP BY deduped.rfq_id, deduped.rfq_product_id
