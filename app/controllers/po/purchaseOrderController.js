@@ -852,10 +852,72 @@ export const updateTaskController = async (req, res) => {
 export const deleteTaskController = async (req, res) => {
   try {
     const deleted = await deleteTask(req.params.id, req.user);
-    
+
     return res.status(200).json({ success: true, data: deleted });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const regeneratePO = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+
+    const newUrl = await regeneratePODocument(po_id);
+
+    if (newUrl) {
+      return res.json({
+        status: 1,
+        message: "PO document regenerated successfully",
+        data: { po_pdf_url: newUrl }
+      });
+    }
+
+    return res.status(500).json({
+      status: 0,
+      message: "Failed to regenerate PO document"
+    });
+  } catch (error) {
+    logError(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || "An error occurred while regenerating the PO document.",
+      error
+    });
+  }
+};
+
+export const uploadPODocument = async (req, res) => {
+  try {
+    const { po_id } = req.params;
+
+    if (!req.file || !req.file.location) {
+      return res.status(400).json({
+        status: 0,
+        message: "No file uploaded"
+      });
+    }
+
+    const s3Url = req.file.location;
+
+    await db.none(`
+      UPDATE tbl_rfq_purchase_order
+      SET po_pdf_url = $1, updated_at = NOW()
+      WHERE id = $2
+    `, [s3Url, po_id]);
+
+    return res.json({
+      status: 1,
+      message: "PO document uploaded successfully",
+      data: { po_pdf_url: s3Url }
+    });
+  } catch (error) {
+    logError(error);
+    return res.status(500).json({
+      status: 0,
+      message: error.message || "An error occurred while uploading the PO document.",
+      error
+    });
   }
 };

@@ -153,12 +153,6 @@ HospitalityRoutes.get(
   hospitalityController.getProjectMappings
 );
 
-HospitalityRoutes.get(
-  '/user/mappings',
-  passportSignIn,
-  hospitalityMiddleware.checkHospitality(false),
-  hospitalityController.getUserMappings
-);
 
 HospitalityRoutes.delete(
   '/project/:project_id/mapping',
@@ -167,6 +161,14 @@ HospitalityRoutes.delete(
   hospitalityMiddleware.requireHospitality,
   validateBody(schemas.deleteMapping),
   hospitalityController.deleteProjectMapping
+);
+
+HospitalityRoutes.get(
+  '/user/:user_id/mappings',
+  passportSignIn,
+  acl([7]),
+  hospitalityMiddleware.requireHospitality,
+  hospitalityController.getUserMappingsById
 );
 
 HospitalityRoutes.delete(

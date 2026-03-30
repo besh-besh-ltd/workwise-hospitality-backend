@@ -918,35 +918,12 @@ const hospitalityModel = {
  */
 getEligibleVendorsForVariant: async (variantId, hotelIds) => {
   return db.any(
-    `WITH vp AS (
-    SELECT product_id
-    FROM tbl_product_variant
-    WHERE id = $1
-      AND is_deleted = 0
-),
-
-variant_vendors AS (
+    `WITH variant_vendors AS (
     SELECT DISTINCT vendor_id
     FROM tbl_product_variant_vendor_mapping
     WHERE product_variant_id = $1
-),
-
-product_categories AS (
-    SELECT DISTINCT pc.category_id
-    FROM tbl_product_categories pc
-    JOIN vp ON vp.product_id = pc.product_id
-),
-
-eligible_category_vendors AS (
-    SELECT DISTINCT s.vendor_id
-    FROM tbl_vendor_hotel_category_subscription s
-    JOIN product_categories pc
-        ON pc.category_id = s.item_id
-    JOIN variant_vendors vv
-        ON vv.vendor_id = s.vendor_id
-    WHERE s.item_type = 'category'
-      AND s.status = 'active'
-      AND CURRENT_DATE BETWEEN s.start_date AND s.end_date
+      AND status = true
+      AND is_approved = true
 ),
 
 eligible_hotel_vendors AS (
@@ -957,12 +934,11 @@ eligible_hotel_vendors AS (
     WHERE s.item_type = 'hotel'
       AND s.item_id = ANY ($2)
       AND s.status = 'active'
-      AND CURRENT_DATE BETWEEN s.start_date AND s.end_date
+      AND s.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND s.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
 )
 
 SELECT vv.vendor_id
 FROM variant_vendors vv
-JOIN eligible_category_vendors ecv ON ecv.vendor_id = vv.vendor_id
 JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id;
 `,
     [variantId, hotelIds]
@@ -1139,7 +1115,7 @@ recomputeVendorsForRfq: async (rfq_id, hotel_ids, txContext) => {
  * Non-destructive vendor refresh for an RFQ.
  * Adds any missing eligible vendors to each product but never removes existing ones.
  */
-addMissingVendorsForRfq: async (rfq_id, hotel_ids) => {
+addMissingVendorsForRfq: async (rfq_id, hotel_ids, options = {}) => {
   const rfqProducts = await db.any(
     `SELECT rp.id AS rfq_product_id, rp.product_variant_id, rp.variant,
             COALESCE(pv.name, '') AS product_name
@@ -1152,6 +1128,7 @@ addMissingVendorsForRfq: async (rfq_id, hotel_ids) => {
   const results = [];
   const productsWithNoVendors = [];
   let totalAdded = 0;
+  const uniqueVendorsAdded = new Set();
 
   for (const product of rfqProducts) {
     const eligibleRows = await hospitalityModel.getEligibleVendorsForVariant(
@@ -1169,16 +1146,19 @@ addMissingVendorsForRfq: async (rfq_id, hotel_ids) => {
 
     const toAdd = [...eligibleVendorIds].filter(id => !currentVendorIds.has(id));
 
-    for (const vendorId of toAdd) {
-      await db.none(
-        `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT DO NOTHING`,
-        [rfq_id, product.product_variant_id, vendorId, product.variant]
-      );
+    if (!options.preview) {
+      for (const vendorId of toAdd) {
+        await db.none(
+          `INSERT INTO tbl_rfq_product_vendors (rfq_id, product_variant_id, user_id, variant)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT DO NOTHING`,
+          [rfq_id, product.product_variant_id, vendorId, product.variant]
+        );
+      }
     }
 
     totalAdded += toAdd.length;
+    toAdd.forEach(id => uniqueVendorsAdded.add(id));
     const remaining = currentVendorIds.size + toAdd.length;
 
     results.push({
@@ -1196,7 +1176,7 @@ addMissingVendorsForRfq: async (rfq_id, hotel_ids) => {
     }
   }
 
-  return { refreshed: true, products: results, productsWithNoVendors, totalAdded };
+  return { refreshed: true, products: results, productsWithNoVendors, totalAdded, uniqueVendorCount: uniqueVendorsAdded.size };
 },
 
 /**
@@ -1238,18 +1218,14 @@ getVendorHotelCategoryMappings: async (vendorId) => {
       END AS parent_category_name
     FROM tbl_vendor_hotel_category_subscription s
     LEFT JOIN tbl_hospitality_company_hotels h
-      ON h.id = s.item_id AND s.item_type = 'hotel' AND h.is_deleted = 0
+      ON h.id = s.item_id AND s.item_type = 'hotel'
     LEFT JOIN tbl_category c
-      ON c.id = s.item_id AND s.item_type = 'category' AND c.is_deleted = 0
+      ON c.id = s.item_id AND s.item_type = 'category'
     LEFT JOIN tbl_category parent
-      ON parent.id = c.parent_id AND parent.is_deleted = 0
+      ON parent.id = c.parent_id
     WHERE s.vendor_id = $1
       AND s.status = 'active'
-      AND CURRENT_DATE BETWEEN s.start_date AND s.end_date
-      AND (
-        (s.item_type = 'hotel' AND h.id IS NOT NULL) OR
-        (s.item_type = 'category' AND c.id IS NOT NULL)
-      )
+      AND s.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND s.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
     ORDER BY s.item_type, item_name
     `,
     [vendorId]
@@ -1449,11 +1425,11 @@ getVendorHotelCategoryMappings: async (vendorId) => {
     return db.any(
       `SELECT
         s.vendor_id,
-        COUNT(*) FILTER (WHERE s.item_type = 'category' AND s.status = 'active' AND CURRENT_DATE BETWEEN s.start_date AND s.end_date) AS active_categories,
-        COUNT(*) FILTER (WHERE s.item_type = 'subcategory' AND s.status = 'active' AND CURRENT_DATE BETWEEN s.start_date AND s.end_date) AS active_subcategories,
-        COUNT(*) FILTER (WHERE s.item_type = 'hotel' AND s.status = 'active' AND CURRENT_DATE BETWEEN s.start_date AND s.end_date) AS active_hotels,
+        COUNT(*) FILTER (WHERE s.item_type = 'category' AND s.status = 'active' AND s.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND s.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date) AS active_categories,
+        COUNT(*) FILTER (WHERE s.item_type = 'subcategory' AND s.status = 'active' AND s.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND s.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date) AS active_subcategories,
+        COUNT(*) FILTER (WHERE s.item_type = 'hotel' AND s.status = 'active' AND s.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND s.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date) AS active_hotels,
         CASE
-          WHEN COUNT(*) FILTER (WHERE s.status = 'active' AND CURRENT_DATE BETWEEN s.start_date AND s.end_date) > 0 THEN 'active'
+          WHEN COUNT(*) FILTER (WHERE s.status = 'active' AND s.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND s.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date) > 0 THEN 'active'
           WHEN COUNT(*) FILTER (WHERE s.status = 'pending') > 0 THEN 'pending'
           WHEN COUNT(*) FILTER (WHERE s.end_date < CURRENT_DATE) > 0 THEN 'expired'
           ELSE 'none'

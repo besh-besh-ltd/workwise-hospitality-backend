@@ -200,22 +200,10 @@
             <td class="right">{{totalPackage}}</td>
           </tr>
           {{/if}}
-          {{#if sgstAmount}}
+          {{#if gstAmount}}
           <tr>
-            <td>SGST {{sgstPercent}}%</td>
-            <td class="right">{{sgstAmount}}</td>
-          </tr>
-          {{/if}}
-          {{#if cgstAmount}}
-          <tr>
-            <td>CGST {{cgstPercent}}%</td>
-            <td class="right">{{cgstAmount}}</td>
-          </tr>
-          {{/if}}
-          {{#if igstAmount}}
-          <tr>
-            <td>IGST {{igstPercent}}%</td>
-            <td class="right">{{igstAmount}}</td>
+            <td>GST (Taxes)</td>
+            <td class="right">{{gstAmount}}</td>
           </tr>
           {{/if}}
           <tr class="bold">

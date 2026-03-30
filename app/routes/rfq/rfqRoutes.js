@@ -552,7 +552,7 @@ RfqRoutes.post('/get-summarised-deviation',
 )
 
 RfqRoutes.post('/get-deviation-previews',
-  passportSignIn,
+  noLogin.customer_auth,
   rfqController.getDeviationPreviews
 )
 
@@ -652,6 +652,13 @@ RfqRoutes.get('/tech-eval/history/:rfq_product_id',
   passportSignIn,
   acl([2, 8, 10]),
   rfqController.getTechEvalHistory
+);
+
+// Tech Evaluation Dashboard - Summary of evaluation progress for an RFQ
+RfqRoutes.get('/technical/dashboard/:rfq_id',
+  passportSignIn,
+  acl([2, 8, 10]),
+  rfqController.getTechEvalDashboard
 );
 
 // Tech Evaluation Approval Action - Custom approve/reject endpoint

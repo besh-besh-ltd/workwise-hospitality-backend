@@ -78,8 +78,8 @@
     <tr>
       <td class="center bold" colspan="3" style="font-size: 16px; padding-bottom: 10px;">
         PURCHASE ORDER
-        {{#if supplier.name}}
-          <br/><span style="font-size: 13px;">{{supplier.name}}</span>
+        {{#if buyer_business_unit_name}}
+          <br/><span style="font-size: 13px;">{{buyer_business_unit_name}}</span>
         {{/if}}
         {{#if project_name}}
           <br/><span style="font-size: 13px;">{{project_name}}</span>
@@ -209,22 +209,10 @@
             <td class="right">{{totalPackage}}</td>
           </tr>
           {{/if}}
-          {{#if sgstAmount}}
+          {{#if gstAmount}}
           <tr>
-            <td>SGST {{sgstPercent}}%</td>
-            <td class="right">{{sgstAmount}}</td>
-          </tr>
-          {{/if}}
-          {{#if cgstAmount}}
-          <tr>
-            <td>CGST {{cgstPercent}}%</td>
-            <td class="right">{{cgstAmount}}</td>
-          </tr>
-          {{/if}}
-          {{#if igstAmount}}
-          <tr>
-            <td>IGST {{igstPercent}}%</td>
-            <td class="right">{{igstAmount}}</td>
+            <td>GST (Taxes)</td>
+            <td class="right">{{gstAmount}}</td>
           </tr>
           {{/if}}
           <tr class="bold">

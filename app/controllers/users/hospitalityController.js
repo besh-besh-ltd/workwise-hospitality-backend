@@ -778,21 +778,6 @@ const HospitalityController = {
     }
   },
 
-  getUserMappings: async (req, res) => {
-    try {
-      const userId = parseInt(req?.query?.userId, 10) || req.user.id;
-      const mappings = await hospitalityModel.getUserMappings(userId);
-
-      return res.status(200).json({
-        status: 1,
-        data: mappings
-      });
-    } catch (error) {
-      logError(error);
-      return formatErrorResponse(res, error);
-    }
-  },
-
   deleteProjectMapping: async (req, res) => {
     try {
       const company = req.companyDetails;
@@ -837,6 +822,20 @@ const HospitalityController = {
     } catch (error) {
       logError(error);
       return formatErrorResponse(res, error);
+    }
+  },
+
+  getUserMappingsById: async (req, res) => {
+    try {
+      const userId = parseInt(req.params.user_id, 10);
+      if (!userId) {
+        return res.status(400).json({ status: 0, message: 'user_id is required' });
+      }
+      const mappings = await hospitalityModel.getUserMappings(userId);
+      return res.status(200).json({ status: 1, data: mappings });
+    } catch (error) {
+      console.error('Error fetching user mappings:', error);
+      return res.status(500).json({ status: 3, message: 'Failed to fetch user mappings' });
     }
   },
 
