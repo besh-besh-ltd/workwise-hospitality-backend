@@ -29,7 +29,7 @@ import generalModel, { createApprovalInstance, recordLifecycleEvent, getApproval
 import moment from 'moment-timezone';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
-import { draftPO } from '../po/purchaseOrderController.js';
+import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { sendApprovalNotification } from '../po/purchaseOrderEmails.js';
 import UsersController from '../users/usersController.js';
 import { summaries } from '../../util/constants.js';
@@ -9039,7 +9039,8 @@ const rfqController = {
                       });
                     } else if (approvalResult && approvalResult.autoApproved) {
                       // Auto-approved (no approvers or creator-only) - create PO immediately
-                      result = await draftPO({...req.body, quote_id: quote_item_id}, req.user, t);
+                      const authPayload = await buildAuthoritativePOPayload({...req.body, quote_id: quote_item_id}, t);
+                      result = await draftPO(authPayload, req.user, t);
                       approvalTriggered = true;
                     }
                   }
@@ -9059,7 +9060,8 @@ const rfqController = {
 
             // Fallback: if no approval was triggered, create PO directly
             if (!approvalTriggered) {
-              result = await draftPO({...req.body, quote_id: quote_item_id}, req.user, t);
+              const authPayload = await buildAuthoritativePOPayload({...req.body, quote_id: quote_item_id}, t);
+              result = await draftPO(authPayload, req.user, t);
             }
           }
           

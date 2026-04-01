@@ -29,7 +29,7 @@ import generalModel, {
 import { AVAILABLE_HIERARCHY_TYPES, DEPARTMENT_SCOPED_ENTITY_TYPES } from '../../util/constants.js';
 import { handleRFQPostApproval, handleRFQRejection } from '../rfq/rfqController.js';
 import { handleNegotiationPostApproval } from '../negotiation/negotiationController.js';
-import { draftPO } from '../po/purchaseOrderController.js';
+import { draftPO, buildAuthoritativePOPayload } from '../po/purchaseOrderController.js';
 import { initiatePurchaseOrder } from '../../models/purchaseOrderModel.js';
 import rfqModel from '../../models/rfqModel.js';
 import db from '../../config/dbConn.js';
@@ -629,7 +629,8 @@ const hospitalityApprovalController = {
               if (metadata.po_payload && metadata.po_user) {
                 // Path A: PO payload stored by rfqController.finalize
                 await db.tx(async (t) => {
-                  const poResult = await draftPO(metadata.po_payload, metadata.po_user, t);
+                  const authPayload = await buildAuthoritativePOPayload(metadata.po_payload, t);
+                  const poResult = await draftPO(authPayload, metadata.po_user, t);
 
                   const entityType = metadata.is_tender === 1 ? 'TENDER' : 'RFQ';
                   await recordLifecycleEvent({
