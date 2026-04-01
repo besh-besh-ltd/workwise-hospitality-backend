@@ -3898,24 +3898,24 @@ LIMIT 2;
     }
 
     return new Promise(function (resolve, reject) {
-      // Filter for technically accepted vendors only (RFQ-level)
-      // If ANY product in the RFQ has tech eval, vendor must have passed at least one product's tech eval
-      // If NO product in the RFQ has tech eval, show all vendors
+      // Filter for technically accepted vendors only (product-level)
+      // If THIS product has no tech eval, all vendors are allowed for it
+      // If THIS product has tech eval, only show vendors who passed for THIS product
       const vendorCondition = `
         AND (
-          -- No tech evaluation exists for ANY product in this RFQ, so all vendors are allowed
+          -- No tech evaluation exists for THIS product, so all vendors are allowed
           NOT EXISTS (
             SELECT 1
             FROM tbl_rfq_product_tech_evaluation TEC
-            WHERE TEC.rfq_id = $1
+            WHERE TEC.tbl_rfq_product_id = TRP.id
           )
           OR
-          -- RFQ has tech eval, vendor must have passed in at least one product
+          -- Vendor passed tech eval for THIS specific product
           EXISTS (
             SELECT 1
             FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
             JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
-            WHERE TEC.rfq_id = $1
+            WHERE TEC.tbl_rfq_product_id = TRP.id
               AND TECV.vendor_id = TQ.created_by
               AND TECV.status = 1
           )
@@ -4270,26 +4270,25 @@ LIMIT 2;
     }
 
     return new Promise(function (resolve, reject) {
-      // Filter for technically accepted vendors only (RFQ-level)
-      // If ANY product in the RFQ has tech eval, vendor must have passed at least one product's tech eval
-      // If NO product in the RFQ has tech eval, show all vendors
+      // Filter for technically accepted vendors only (product-level)
+      // If THIS product has no tech eval, all vendors are allowed for it
+      // If THIS product has tech eval, only show vendors who passed for THIS product
       const vendorCondition = `
       AND (
-        -- No tech evaluation exists for ANY product in this RFQ, so all vendors are allowed
+        -- No tech evaluation exists for THIS product, so all vendors are allowed
         NOT EXISTS (
           SELECT 1
           FROM tbl_rfq_product_tech_evaluation TEC
-          WHERE TEC.rfq_id = $1
+          WHERE TEC.tbl_rfq_product_id = TRF.id
         )
         OR
-        -- RFQ has tech eval, vendor must have passed in at least one product
+        -- Vendor passed tech eval for THIS specific product
         EXISTS (
           SELECT 1
-          FROM tbl_quotes TQ
-          JOIN tbl_rfq_product_tech_evaluation_cleared_vendors TECV ON TQ.created_by = TECV.vendor_id
+          FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
           JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
-          WHERE TEC.rfq_id = $1
-            AND TQ.id = TQI.quote_id
+          WHERE TEC.tbl_rfq_product_id = TRF.id
+            AND TECV.vendor_id = TQ.created_by
             AND TECV.status = 1
         )
       )`;
@@ -10440,6 +10439,37 @@ ORDER BY tq.timestamp DESC;
               AND (ai_po.metadata->>'rfq_id')::INTEGER = RFQ.id
               AND ai_po.status = 'PENDING'
           ) AS has_pending_po_approval`;
+
+        // Only show RFQs where user has awarding.read permission for the RFQ's business unit
+        if (user_type != 3) {
+          dynamicWhereFilters += `
+            AND EXISTS (
+              SELECT 1
+              FROM tbl_user_role_scopes urs
+              JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+              JOIN tbl_permissions p ON p.id = rp.permission_id
+              JOIN tbl_hospitality_company_hotels hch ON hch.id = RFQ.hotel_id AND hch.is_deleted = 0
+              WHERE urs.user_id = ${user_id}
+                AND urs.company_id = hch.hospitality_company_id
+                AND p.resource = 'awarding'
+                AND p.action = 'read'
+                AND (
+                  urs.hotel_id = RFQ.hotel_id
+                  OR (
+                    urs.hotel_id IS NULL
+                    AND EXISTS (
+                      SELECT 1 FROM tbl_hospitality_user_mappings hum
+                      WHERE hum.user_id = ${user_id}
+                        AND (
+                          hum.hospitality_hotel_id = RFQ.hotel_id
+                          OR (hum.mapping_type = 0 AND hum.hospitality_hotel_id IS NULL
+                              AND hum.hospitality_company_id = hch.hospitality_company_id)
+                        )
+                    )
+                  )
+                )
+            )`;
+        }
       }
 
       let q = `
@@ -10618,11 +10648,13 @@ ORDER BY tq.timestamp DESC;
         ${
           po
             ? `
-          SELECT 1 
-            FROM tbl_company TC 
-            JOIN tbl_users _TU ON _TU.id = RFQ.created_by 
-            JOIN tbl_users _TU1 ON _TU1.id = ${user_id} 
-            WHERE _TU.company_id = _TU1.company_id
+          SELECT 1 FROM tbl_hospitality_user_mappings HUM
+          WHERE HUM.user_id = ${user_id}
+            AND (
+              HUM.hospitality_hotel_id = RFQ.hotel_id
+              OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                  AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
+            )
           `
             : `
           SELECT 1 FROM tbl_project_team PT WHERE PT.project_id = RFQ.project_id AND PT.user_id = ${user_id}

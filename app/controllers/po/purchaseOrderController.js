@@ -73,6 +73,53 @@ export const updatePO = async (req, res) => {
   }
 };
 
+/**
+ * Replaces product_info.charges_meta with authoritative values from tbl_quote_items.
+ * Prevents frontend normalization or stale data from corrupting PO charges.
+ */
+export const buildAuthoritativePOPayload = async (poInfo, txn) => {
+  const dbCtx = txn || db;
+  const quoteItemId = poInfo.quote_item_id || poInfo.quote_id;
+
+  if (!quoteItemId || !poInfo.product_info) {
+    return poInfo;
+  }
+
+  try {
+    const dbRow = await dbCtx.oneOrNone(
+      `SELECT qi.freight_price, qi.freight_mode,
+              qi.package_price, qi.package_mode,
+              qi.tax, qi.tax_mode
+       FROM tbl_quote_items qi
+       WHERE qi.id = $1`,
+      [quoteItemId]
+    );
+
+    if (!dbRow) {
+      console.warn(`buildAuthoritativePOPayload: Quote item ${quoteItemId} not found, using payload as-is`);
+      return poInfo;
+    }
+
+    return {
+      ...poInfo,
+      product_info: {
+        ...poInfo.product_info,
+        charges_meta: {
+          freight_price: dbRow.freight_price,
+          freight_mode: dbRow.freight_mode,
+          package_price: dbRow.package_price,
+          package_mode: dbRow.package_mode,
+          tax: dbRow.tax,
+          tax_mode: dbRow.tax_mode
+        }
+      }
+    };
+  } catch (err) {
+    console.error('buildAuthoritativePOPayload error, using payload as-is:', err.message);
+    return poInfo;
+  }
+};
+
 export const draftPO = async (poInfo, user, txn) => {
   try {
     const { rfq_id, project_id, total_value, product_info, quote_item_id, existing_po_id, selected_hierarchy } = poInfo;
