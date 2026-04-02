@@ -3898,26 +3898,36 @@ LIMIT 2;
     }
 
     return new Promise(function (resolve, reject) {
-      // Filter for technically accepted vendors only (product-level)
-      // If THIS product has no tech eval, all vendors are allowed for it
-      // If THIS product has tech eval, only show vendors who passed for THIS product
+      // Filter for technically accepted vendors only
+      // Two conditions ANDed: (1) vendor passed at least 1 product in RFQ, (2) vendor passed THIS product
+      // Each condition falls through if no tech eval exists at that level
       const vendorCondition = `
         AND (
-          -- No tech evaluation exists for THIS product, so all vendors are allowed
+          -- Condition 1: Vendor passed at least one product in this RFQ (or no tech eval in RFQ)
           NOT EXISTS (
-            SELECT 1
-            FROM tbl_rfq_product_tech_evaluation TEC
-            WHERE TEC.tbl_rfq_product_id = TRP.id
+            SELECT 1 FROM tbl_rfq_product_tech_evaluation _TEC_rfq WHERE _TEC_rfq.rfq_id = $1
           )
-          OR
-          -- Vendor passed tech eval for THIS specific product
-          EXISTS (
+          OR EXISTS (
             SELECT 1
-            FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
-            JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
-            WHERE TEC.tbl_rfq_product_id = TRP.id
-              AND TECV.vendor_id = TQ.created_by
-              AND TECV.status = 1
+            FROM tbl_rfq_product_tech_evaluation_cleared_vendors _TECV_rfq
+            JOIN tbl_rfq_product_tech_evaluation _TEC_rfq2 ON _TECV_rfq.tbl_rfq_product_tech_evaluation_id = _TEC_rfq2.id
+            WHERE _TEC_rfq2.rfq_id = $1
+              AND _TECV_rfq.vendor_id = TQ.created_by
+              AND _TECV_rfq.status = 1
+          )
+        )
+        AND (
+          -- Condition 2: Vendor passed THIS product (or this product has no tech eval)
+          NOT EXISTS (
+            SELECT 1 FROM tbl_rfq_product_tech_evaluation _TEC_prod WHERE _TEC_prod.tbl_rfq_product_id = TRP.id
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM tbl_rfq_product_tech_evaluation_cleared_vendors _TECV_prod
+            JOIN tbl_rfq_product_tech_evaluation _TEC_prod2 ON _TECV_prod.tbl_rfq_product_tech_evaluation_id = _TEC_prod2.id
+            WHERE _TEC_prod2.tbl_rfq_product_id = TRP.id
+              AND _TECV_prod.vendor_id = TQ.created_by
+              AND _TECV_prod.status = 1
           )
         )`;
 
@@ -4270,26 +4280,36 @@ LIMIT 2;
     }
 
     return new Promise(function (resolve, reject) {
-      // Filter for technically accepted vendors only (product-level)
-      // If THIS product has no tech eval, all vendors are allowed for it
-      // If THIS product has tech eval, only show vendors who passed for THIS product
+      // Filter for technically accepted vendors only
+      // Two conditions ANDed: (1) vendor passed at least 1 product in RFQ, (2) vendor passed THIS product
+      // Each condition falls through if no tech eval exists at that level
       const vendorCondition = `
       AND (
-        -- No tech evaluation exists for THIS product, so all vendors are allowed
+        -- Condition 1: Vendor passed at least one product in this RFQ (or no tech eval in RFQ)
         NOT EXISTS (
-          SELECT 1
-          FROM tbl_rfq_product_tech_evaluation TEC
-          WHERE TEC.tbl_rfq_product_id = TRF.id
+          SELECT 1 FROM tbl_rfq_product_tech_evaluation _TEC_rfq WHERE _TEC_rfq.rfq_id = $1
         )
-        OR
-        -- Vendor passed tech eval for THIS specific product
-        EXISTS (
+        OR EXISTS (
           SELECT 1
-          FROM tbl_rfq_product_tech_evaluation_cleared_vendors TECV
-          JOIN tbl_rfq_product_tech_evaluation TEC ON TECV.tbl_rfq_product_tech_evaluation_id = TEC.id
-          WHERE TEC.tbl_rfq_product_id = TRF.id
-            AND TECV.vendor_id = TQ.created_by
-            AND TECV.status = 1
+          FROM tbl_rfq_product_tech_evaluation_cleared_vendors _TECV_rfq
+          JOIN tbl_rfq_product_tech_evaluation _TEC_rfq2 ON _TECV_rfq.tbl_rfq_product_tech_evaluation_id = _TEC_rfq2.id
+          WHERE _TEC_rfq2.rfq_id = $1
+            AND _TECV_rfq.vendor_id = TQ.created_by
+            AND _TECV_rfq.status = 1
+        )
+      )
+      AND (
+        -- Condition 2: Vendor passed THIS product (or this product has no tech eval)
+        NOT EXISTS (
+          SELECT 1 FROM tbl_rfq_product_tech_evaluation _TEC_prod WHERE _TEC_prod.tbl_rfq_product_id = TRF.id
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM tbl_rfq_product_tech_evaluation_cleared_vendors _TECV_prod
+          JOIN tbl_rfq_product_tech_evaluation _TEC_prod2 ON _TECV_prod.tbl_rfq_product_tech_evaluation_id = _TEC_prod2.id
+          WHERE _TEC_prod2.tbl_rfq_product_id = TRF.id
+            AND _TECV_prod.vendor_id = TQ.created_by
+            AND _TECV_prod.status = 1
         )
       )`;
 
