@@ -12680,7 +12680,17 @@ ORDER BY tq.timestamp DESC;
           rpv.user_id AS vendor_id,
           tu.name AS vendor_name,
           tu.email AS vendor_email,
-          COALESCE(tc.company_name, tu.organization_name) AS company_name
+          COALESCE(tc.company_name, tu.organization_name) AS company_name,
+          EXISTS (
+            SELECT 1
+            FROM tbl_quotes tq
+            JOIN tbl_quote_items tqi ON tqi.quote_id = tq.id
+            WHERE tq.rfq_id = $1
+              AND tq.created_by = rpv.user_id
+              AND tqi.product_variant_id = $2
+              AND COALESCE(tqi.variant, 0) = COALESCE($3, 0)
+              AND tqi.total_price > 0
+          ) AS has_submitted_quote
        FROM tbl_rfq_product_vendors rpv
        JOIN tbl_users tu ON tu.id = rpv.user_id
        LEFT JOIN tbl_company tc ON tc.id = tu.company_id
@@ -12820,7 +12830,8 @@ ORDER BY tq.timestamp DESC;
           vendor_name: v.vendor_name,
           vendor_email: v.vendor_email,
           company_name: v.company_name,
-          rfq_product_vendor_id: v.rfq_product_vendor_id
+          rfq_product_vendor_id: v.rfq_product_vendor_id,
+          has_submitted_quote: v.has_submitted_quote || false
         })),
         passed_verified: passedVerified.map(v => ({
           vendor_id: v.vendor_id,
