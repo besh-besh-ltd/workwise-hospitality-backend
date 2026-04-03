@@ -12,6 +12,7 @@ import { schema_posts } from '../../validations/paramValidation/productValidatio
 import { projectSchemas } from '../../validations/paramValidation/projectValidation.js';
 import { can } from '../../middleware/auth.js';
 import verifySchedulerRequest from '../../helper/schedulerAuth.js';
+import hospitalityMiddleware from '../../middleware/hospitality.js';
 
 
 const RfqRoutes = Router();
@@ -119,6 +120,7 @@ RfqRoutes.post(
 RfqRoutes.get(
   '/getRfqById/:id',
   noLogin.customer_auth,
+  hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   // validateDbBody.rfq_access_check_req_body,
   rfqController.getRfqById
 );
@@ -196,14 +198,14 @@ RfqRoutes.get(
 RfqRoutes.post(
   '/quote/create',
   noLogin.customer_auth,
-
+  hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   rfqController.createQuote
 );
 
 RfqRoutes.put(
   '/quote/update/:quoteId',
   noLogin.customer_auth,
-
+  hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   rfqController.updateQuoteItems
 );
 
@@ -235,6 +237,7 @@ RfqRoutes.get(
   '/get-quote-history',
   passportSignIn,
   acl([3]),
+  hospitalityMiddleware.requireActiveSubscription,
   validateDbBody.user_id_profileexists,
   rfqController.getQuoteHistoryForvendor
 );
@@ -433,7 +436,8 @@ RfqRoutes.get('/draft-sheet-wise',
 RfqRoutes.post(
   '/send-query-message',
   noLogin.customer_auth,
-  rfqSchemas.queryMessageFileUploadHandler, 
+  hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
+  rfqSchemas.queryMessageFileUploadHandler,
 
   validateBody(rfqSchemas.sendMessage),
   rfqController.sendQueryMessage
@@ -574,6 +578,7 @@ RfqRoutes.post('/get-vendor-responses',
 // vendor side
 RfqRoutes.post('/add-vendor-response',
   noLogin.customer_auth,
+  hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   validateBody(rfqSchemas.addVendorResponse),
   rfqController.addVendorResponse
 )
@@ -609,6 +614,7 @@ RfqRoutes.get('/get-rfqs',
   passportSignIn,
   validateDbBody.user_id_profileexists,
   acl([2, 3, 8, 9, 10]),
+  hospitalityMiddleware.requireActiveSubscription,
   validateGetRfqsQuery,
   rfqController.getRfqs
 )
@@ -768,6 +774,7 @@ RfqRoutes.post(
 RfqRoutes.post(
   '/clarification/raise',
   noLogin.customer_auth,
+  hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   rfqSchemas.clarificationFileUploadHandler,
 
   validateBody(rfqSchemas.raiseClarification),
@@ -778,6 +785,7 @@ RfqRoutes.post(
 RfqRoutes.post(
   '/clarification/message',
   noLogin.customer_auth,
+  hospitalityMiddleware.requireActiveSubscriptionIfAuthenticated,
   rfqSchemas.clarificationFileUploadHandler,
   validateBody(rfqSchemas.sendClarificationMessage),
   rfqController.sendClarificationMessage

@@ -4880,6 +4880,8 @@ LIMIT 2;
           OR similarity(p.name, $1) > 0.1
         )`;
 
+    // Include vendors with active OR expired subscriptions in vendor count.
+    // Expired vendors are included in RFQs but blocked from actions until they renew.
     const vendorCountCte = hotelIdsParam
       ? `
       vendor_counts AS (
@@ -4893,14 +4895,12 @@ LIMIT 2;
           ON vhcs_cat.vendor_id = pvvm.vendor_id
           AND vhcs_cat.item_type = 'category'
           AND vhcs_cat.item_id = pc.category_id
-          AND vhcs_cat.status = 'active'
-          AND vhcs_cat.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND vhcs_cat.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+          AND vhcs_cat.status IN ('active', 'expired')
         JOIN tbl_vendor_hotel_category_subscription vhcs_hotel
           ON vhcs_hotel.vendor_id = pvvm.vendor_id
           AND vhcs_hotel.item_type = 'hotel'
           AND vhcs_hotel.item_id = ANY(${hotelIdsParam})
-          AND vhcs_hotel.status = 'active'
-          AND vhcs_hotel.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND vhcs_hotel.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+          AND vhcs_hotel.status IN ('active', 'expired')
         WHERE pvvm.status = TRUE
           AND pvvm.is_approved = TRUE
         GROUP BY pvvm.product_variant_id, pc.category_id

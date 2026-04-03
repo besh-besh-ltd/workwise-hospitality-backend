@@ -123,9 +123,83 @@ const attachHospitalityContext = () => {
   };
 };
 
+/**
+ * Middleware to block hospitality vendors with expired/no subscription.
+ * Non-hospitality vendors and non-vendor users pass through unaffected.
+ * Use after passportSignIn on endpoints that require active subscription.
+ */
+const requireActiveSubscription = async (req, res, next) => {
+  try {
+    if (!req.user || !req.user.id) {
+      return next(); // Let auth middleware handle this
+    }
+
+    const userId = req.user.id;
+
+    // Check if user is a vendor (user_type === 3). Buyers/admins pass through.
+    const userInfo = await userModel.userinfo(userId);
+    const userType = userInfo?.user_type || (Array.isArray(userInfo) ? userInfo[0]?.user_type : null);
+    if (userType !== 3 && userType !== '3') {
+      return next(); // Not a vendor, no subscription check needed
+    }
+
+    const companyDetails = await userModel.getCompanyDetail(userId);
+    if (!companyDetails || companyDetails.length === 0) {
+      return next();
+    }
+
+    const company = companyDetails[0];
+    const isHospitality =
+      company.is_hospitality === 1 || company.is_hospitality === '1';
+
+    // Only restrict hospitality vendors
+    if (!isHospitality) {
+      return next();
+    }
+
+    const hasValidSub = await hospitalityModel.hasValidPaidSubscription(userId);
+    if (hasValidSub) {
+      return next();
+    }
+
+    return res.status(403).json({
+      status: 0,
+      message: 'Your subscription has expired. Please renew to continue.',
+      subscription_expired: true
+    });
+  } catch (error) {
+    logError(error);
+    return res.status(400).json({
+      status: 3,
+      message: Config.errorText.value
+    });
+  }
+};
+
+/**
+ * Variant for noLogin.customer_auth endpoints (quote submission etc.)
+ * Only checks subscription if user is authenticated (req.user exists).
+ * Unauthenticated requests pass through (handled by other logic).
+ */
+const requireActiveSubscriptionIfAuthenticated = async (req, res, next) => {
+  try {
+    if (!req.user || !req.user.id) {
+      return next(); // Not authenticated, skip subscription check
+    }
+
+    // Delegate to the main middleware
+    return requireActiveSubscription(req, res, next);
+  } catch (error) {
+    logError(error);
+    return next();
+  }
+};
+
 export default {
   checkHospitality,
   requireHospitality,
   attachHospitalityContext,
+  requireActiveSubscription,
+  requireActiveSubscriptionIfAuthenticated,
 };
 

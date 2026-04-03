@@ -2138,13 +2138,26 @@ update_user_detail: async (req, res, next) => {
         user.user_key = cryptr.encrypt(user_id.toString());
         
         // Check hospitality subscription status for vendors
-        if (user.user_type === 3 && (user.is_hospitality === 1 || user.is_hospitality === '1')) {
+        console.log('[get_profile] user_type:', user.user_type, typeof user.user_type, '| is_hospitality:', user.is_hospitality, typeof user.is_hospitality);
+        if (user.user_type == 3 && user.is_hospitality == 1) {
           const hasValidSubscription = await hospitalityModel.hasValidPaidSubscription(user_id);
+          console.log('[get_profile] hasValidSubscription:', hasValidSubscription);
           user.has_valid_hospitality_subscription = hasValidSubscription;
           
           // Get pending subscriptions for payment initiation
           if (!hasValidSubscription) {
-            const pendingSubs = await hospitalityModel.getPendingSubscriptionsForVendor(user_id);
+            // Mark any stale expired subscriptions
+            await hospitalityModel.markExpiredSubscriptions(user_id);
+
+            let pendingSubs = await hospitalityModel.getPendingSubscriptionsForVendor(user_id);
+
+            // Fallback: if no pending subs, check expired subs to enable renewal
+            let isRenewal = false;
+            if (!pendingSubs || pendingSubs.length === 0) {
+              pendingSubs = await hospitalityModel.getExpiredSubscriptionsForVendor(user_id);
+              isRenewal = pendingSubs && pendingSubs.length > 0;
+            }
+
             if (pendingSubs && pendingSubs.length > 0) {
               const categories = [];
               const subcategories = [];
@@ -2152,6 +2165,8 @@ update_user_detail: async (req, res, next) => {
               for (const sub of pendingSubs) {
                 if (sub.item_type === 'category' && !categories.includes(sub.item_id)) {
                   categories.push(sub.item_id);
+                } else if (sub.item_type === 'subcategory' && !subcategories.includes(sub.item_id)) {
+                  subcategories.push(sub.item_id);
                 } else if (sub.item_type === 'hotel' && !hotels.includes(sub.item_id)) {
                   hotels.push(sub.item_id);
                 }
@@ -2159,6 +2174,7 @@ update_user_detail: async (req, res, next) => {
               user.pending_hospitality_categories = categories;
               user.pending_hospitality_subcategories = subcategories;
               user.pending_hospitality_hotels = hotels;
+              user.is_subscription_renewal = isRenewal;
             }
           }
         }
@@ -3262,11 +3278,15 @@ publish_profile_reviews: async (req, res, next) => {
           message: 'Only vendors can purchase hospitality subscriptions'
         });
       }
+      // Only block if vendor already has an active (non-expired) subscription
       if (userRecord.status === 1) {
-        return res.status(400).json({
-          status: 2,
-          message: 'User already approved'
-        });
+        const hasActiveSub = await hospitalityModel.hasValidPaidSubscription(decryptedUserId);
+        if (hasActiveSub) {
+          return res.status(400).json({
+            status: 2,
+            message: 'You already have an active subscription'
+          });
+        }
       }
 
       const companyDetails = await userModel.getCompanyDetail(decryptedUserId);
@@ -3293,21 +3313,41 @@ publish_profile_reviews: async (req, res, next) => {
       const fyEndDateStr = fyEnd.format('YYYY-MM-DD');
 
       // Check for existing pending subscriptions
-      const existingPendingSubs = await hospitalityModel.getPendingSubscriptionsForVendor(decryptedUserId);
-      
+      let existingPendingSubs = await hospitalityModel.getPendingSubscriptionsForVendor(decryptedUserId);
+
       // If we have existing pending subscriptions but no categories/subcategories/hotels in request, use existing ones
       let categoryIds = Array.isArray(categories) ? categories : [];
       let subcategoryIds = Array.isArray(subcategories) ? subcategories : [];
       let hotelIds = Array.isArray(hotels) ? hotels : [];
-      
+
       // Only use existing subscriptions if user hasn't provided any categories, subcategories, or hotels
-      if (existingPendingSubs && existingPendingSubs.length > 0 && (!categoryIds.length && !subcategoryIds.length && !hotelIds.length)) {
-        // Extract from existing subscriptions
-        for (const sub of existingPendingSubs) {
-          if (sub.item_type === 'category' && !categoryIds.includes(sub.item_id)) {
-            categoryIds.push(sub.item_id);
-          } else if (sub.item_type === 'hotel' && !hotelIds.includes(sub.item_id)) {
-            hotelIds.push(sub.item_id);
+      if (!categoryIds.length && !subcategoryIds.length && !hotelIds.length) {
+        // First try pending subscriptions
+        if (existingPendingSubs && existingPendingSubs.length > 0) {
+          for (const sub of existingPendingSubs) {
+            if (sub.item_type === 'category' && !categoryIds.includes(sub.item_id)) {
+              categoryIds.push(sub.item_id);
+            } else if (sub.item_type === 'subcategory' && !subcategoryIds.includes(sub.item_id)) {
+              subcategoryIds.push(sub.item_id);
+            } else if (sub.item_type === 'hotel' && !hotelIds.includes(sub.item_id)) {
+              hotelIds.push(sub.item_id);
+            }
+          }
+        }
+
+        // Fallback: if still empty, try expired subscriptions (renewal scenario)
+        if (!categoryIds.length && !hotelIds.length) {
+          const expiredSubs = await hospitalityModel.getExpiredSubscriptionsForVendor(decryptedUserId);
+          if (expiredSubs && expiredSubs.length > 0) {
+            for (const sub of expiredSubs) {
+              if (sub.item_type === 'category' && !categoryIds.includes(sub.item_id)) {
+                categoryIds.push(sub.item_id);
+              } else if (sub.item_type === 'subcategory' && !subcategoryIds.includes(sub.item_id)) {
+                subcategoryIds.push(sub.item_id);
+              } else if (sub.item_type === 'hotel' && !hotelIds.includes(sub.item_id)) {
+                hotelIds.push(sub.item_id);
+              }
+            }
           }
         }
       }
@@ -3378,7 +3418,8 @@ publish_profile_reviews: async (req, res, next) => {
       };
       let response = await razorpay.orders.create(options);
 
-      // Record vendor payment before actual payment happens
+      // Record vendor payment with subscription metadata
+      // Subscription rows are only created after successful payment
       const vendorPayment = await hospitalityModel.createVendorPayment({
         vendor_id: decryptedUserId,
         razorpay_order_id: response.id,
@@ -3386,28 +3427,12 @@ publish_profile_reviews: async (req, res, next) => {
         razorpay_signature: null,
         amount: totalAmount,
         currency: 'INR',
-        payment_status: 'created'
+        payment_status: 'created',
+        metadata: {
+          subscription_items: subscriptionRows,
+          fy_end_date: fyEndDateStr
+        }
       });
-
-      // If we have existing pending subscriptions, update them to link to new payment
-      // Otherwise, create new subscriptions
-      if (existingPendingSubs && existingPendingSubs.length > 0) {
-        // Update existing subscriptions to link to new payment_id
-        await hospitalityModel.updatePendingSubscriptionsPaymentId(
-          decryptedUserId,
-          vendorPayment.id
-        );
-      } else {
-        // Insert new subscriptions for each selected item, linked to this payment
-        const subscriptionsWithPayment = subscriptionRows.map((row) => ({
-          ...row,
-          payment_id: vendorPayment.id,
-          status: 'active'
-        }));
-        await hospitalityModel.createVendorHotelCategorySubscription(
-          subscriptionsWithPayment
-        );
-      }
 
       res
         .status(200)
@@ -3689,6 +3714,8 @@ publish_profile_reviews: async (req, res, next) => {
     }
   },
 
+  // DEPRECATED: Use POST /api/v1/hospitality/verify-payment instead (validates Razorpay signature)
+  // This endpoint is kept for backward compatibility with in-flight payments
   test_razorpay_webhook: async (req, res) => {
     try {
       const { order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
@@ -3722,10 +3749,22 @@ publish_profile_reviews: async (req, res, next) => {
           [razorpay_payment_id || null, razorpay_signature || null, order_id]
         );
 
-        // Link any subscriptions without payment_id to this successful payment
+        // Create subscription rows from payment metadata (rows only created after payment succeeds)
+        const metadata = typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata;
+        if (metadata && metadata.subscription_items && metadata.subscription_items.length > 0) {
+          const subscriptionRows = metadata.subscription_items.map(row => ({
+            ...row,
+            vendor_id: userId,
+            payment_id: payment.id,
+            status: 'active'
+          }));
+          await hospitalityModel.createVendorHotelCategorySubscription(subscriptionRows);
+        }
+
+        // Also link any subscriptions without payment_id (legacy registration flow)
         await db.none(
           `UPDATE tbl_vendor_hotel_category_subscription
-           SET payment_id = $1
+           SET payment_id = $1, status = 'active'
            WHERE vendor_id = $2
              AND payment_id IS NULL
              AND status = 'active'`,
@@ -4079,16 +4118,28 @@ publish_profile_reviews: async (req, res, next) => {
           const payment = vendorPayment[0];
           const userId = payment.vendor_id;
           
-          // Link any subscriptions without payment_id to this successful payment
+          // Create subscription rows from payment metadata (rows only created after payment succeeds)
+          const metadata = typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata;
+          if (metadata && metadata.subscription_items && metadata.subscription_items.length > 0) {
+            const subscriptionRows = metadata.subscription_items.map(row => ({
+              ...row,
+              vendor_id: userId,
+              payment_id: payment.id,
+              status: 'active'
+            }));
+            await hospitalityModel.createVendorHotelCategorySubscription(subscriptionRows);
+          }
+
+          // Also link any subscriptions without payment_id (legacy registration flow)
           await db.none(
             `UPDATE tbl_vendor_hotel_category_subscription
-             SET payment_id = $1
+             SET payment_id = $1, status = 'active'
              WHERE vendor_id = $2
                AND payment_id IS NULL
                AND status = 'active'`,
             [payment.id, userId]
           );
-          
+
           // Always approve hospitality vendor after successful payment
           await userModel.updateUserAccount(userId, { status: 1 });
 

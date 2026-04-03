@@ -162,14 +162,13 @@ const schemas = {
     user_key: Joi.string().required(),
     categories: Joi.array()
       .items(Joi.number().integer().positive())
-      .min(1)
-      .required(),
+      .default([]),
     subcategories: Joi.array()
       .items(Joi.number().integer().positive())
       .optional(),
     hotels: Joi.array()
       .items(Joi.number().integer().positive())
-      .min(1)
+      .default([])
       .allow(null),
   }),
   deleteMapping: Joi.object().keys({

@@ -2,11 +2,98 @@ import db from './app/config/dbConn.js';
 import Config from './app/config/app.config.js';
 import { logError, sendMail, notificationMail } from './app/helper/common.js';
 import { sendNotification } from './app/services/notificationService.js';
+import { generateEmailTemplate } from './app/helper/notificationEmailLayout.js';
 import notificationModel from './app/models/notificationModel.js';
 import vendorModel from './app/models/vendorModel.js';
 import Moment from 'moment';
 import dateFormat from 'dateformat';
 import fs from 'fs';
+
+// Mark all expired hospitality vendor subscriptions
+async function markExpiredHospitalitySubscriptions() {
+  try {
+    const result = await db.result(
+      `UPDATE tbl_vendor_hotel_category_subscription
+       SET status = 'expired'
+       WHERE status = 'active'
+         AND end_date < CURRENT_DATE
+         AND payment_id IN (
+           SELECT id FROM tbl_vendor_payments
+           WHERE payment_status IN ('paid', 'success')
+         )`
+    );
+    if (result.rowCount > 0) {
+      console.log(`Marked ${result.rowCount} hospitality vendor subscriptions as expired`);
+    }
+  } catch (err) {
+    logError('Error marking expired hospitality subscriptions:', err);
+  }
+}
+
+// Send expiry notifications to hospitality vendors
+async function expireHospitalityVendorNotification(date, days) {
+  try {
+    const query = `
+      SELECT DISTINCT ON (vhcs.vendor_id)
+        vhcs.vendor_id, vhcs.end_date,
+        u.name, u.email, u.endpoint
+      FROM tbl_vendor_hotel_category_subscription vhcs
+      JOIN tbl_users u ON u.id = vhcs.vendor_id
+      JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
+      WHERE vhcs.status = 'active'
+        AND vp.payment_status IN ('paid', 'success')
+        AND vhcs.end_date = $1
+      ORDER BY vhcs.vendor_id, vhcs.end_date DESC
+    `;
+    const expiringVendors = await db.any(query, [date]);
+
+    for (const vendor of expiringVendors) {
+      const message = days !== 'today'
+        ? `Your hospitality vendor subscription will expire in ${days} days. Please renew from your dashboard.`
+        : `Your hospitality vendor subscription expires today. Please renew from your dashboard to continue accessing vendor features.`;
+
+      const emailHeader = `<h2>Dear ${vendor.name},</h2>`;
+      const emailContent = `
+        <p style="font-size: 16px; line-height: 1.6; color: #333;">${message}</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${process.env.FRONT_END_WEBSITE || ''}/dashboard/vendor"
+             style="background-color: #158993; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: 600;">
+            Renew Subscription
+          </a>
+        </div>
+      `;
+      const dynamicHTML = generateEmailTemplate(emailHeader, emailContent);
+
+      sendMail({
+        from: Config.webmasterMail,
+        to: vendor.email,
+        subject: `Phileein Hospitality | Subscription ${days === 'today' ? 'Expiring Today' : 'Expiry Reminder'}`,
+        html: dynamicHTML
+      });
+
+      if (vendor.endpoint) {
+        try {
+          const notificationData = {
+            type: 'Subscription Expire Soon',
+            title: 'Subscription Expire Soon',
+            message: message,
+            additional_data: { user_type: 3 }
+          };
+          const payload = {
+            title: `Hello ${vendor.name}`,
+            body: message
+          };
+          const ss = JSON.parse(vendor.endpoint);
+          sendNotification(1, vendor.vendor_id, notificationData, payload, ss);
+        } catch (pushErr) {
+          // Silently ignore push notification errors
+        }
+      }
+    }
+  } catch (err) {
+    logError('Error sending hospitality vendor expiry notification:', err);
+  }
+}
 
 async function expireDayNotification(date, days) {
   let query = `SELECT tus.* ,users.user_type,users.name,users.email,users.endpoint
@@ -216,6 +303,19 @@ try {
   //today notification
   const todayDate = startDate;
   expireDayNotification(todayDate.format('YYYY-MM-DD'), 'today');
+
+  // --- Hospitality Vendor Subscriptions ---
+  // Mark expired hospitality vendor subscriptions
+  markExpiredHospitalitySubscriptions();
+
+  // Send expiry notifications to hospitality vendors (same intervals as buyer subscriptions)
+  expireHospitalityVendorNotification(sevenEndDate.format('YYYY-MM-DD'), 'seven');
+  expireHospitalityVendorNotification(fiveEndDate.format('YYYY-MM-DD'), 'five');
+  expireHospitalityVendorNotification(fourEndDate.format('YYYY-MM-DD'), 'four');
+  expireHospitalityVendorNotification(threeEndDate.format('YYYY-MM-DD'), 'three');
+  expireHospitalityVendorNotification(secondEndDate.format('YYYY-MM-DD'), 'two');
+  expireHospitalityVendorNotification(oneDate.format('YYYY-MM-DD'), 'one');
+  expireHospitalityVendorNotification(todayDate.format('YYYY-MM-DD'), 'today');
 } catch (err) {
   sendMail({
     from: Config.webmasterMail, // sender address
