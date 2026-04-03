@@ -11,6 +11,7 @@ import { validateDbBody } from '../../validations/dbValidation/productDbValidati
 import passport from '../../middleware/passport.js';
 import handle_auth from '../../helper/handleAuth.js';
 import { acl } from '../../helper/common.js';
+import hospitalityMiddleware from '../../middleware/hospitality.js';
 
 // const passportLogIn = passport.authenticate("jwtAdm", { session: false });
 
@@ -66,6 +67,7 @@ ProductsRoutes.post(
   '/vendor-product-add',
   passportSignIn,
   acl([3, 4]),
+  hospitalityMiddleware.requireActiveSubscription,
   // schema_posts.add_vendor_product,
   validateDbBody.add_vendor_product,
   ProductsController.vendorProductAdd
@@ -74,6 +76,7 @@ ProductsRoutes.put(
   '/vendor-product-edit/:id',
   passportSignIn,
   acl([3, 4]),
+  hospitalityMiddleware.requireActiveSubscription,
   validateParam(schemas.id),
   validateDbBody.checkVariant,
   // schema_posts.add_vendor_product,
@@ -113,6 +116,7 @@ ProductsRoutes.delete(
   '/vendor-product-delete/:id',
   passportSignIn,
   acl([3, 4]),
+  hospitalityMiddleware.requireActiveSubscription,
   validateParam(schemas.id),
   validateDbBody.check_product,
   ProductsController.vendorProductDelete
