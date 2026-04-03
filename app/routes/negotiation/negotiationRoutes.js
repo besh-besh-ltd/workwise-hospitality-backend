@@ -92,6 +92,7 @@ NegotiationRoutes.get(
 NegotiationRoutes.post(
   '/rounds/:id/quote',
   passportSignIn,
+  hospitalityMiddleware.requireActiveSubscription,
   negotiationController.submitVendorQuote
 );
 

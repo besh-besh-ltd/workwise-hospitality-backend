@@ -620,8 +620,8 @@ const hospitalityModel = {
   createVendorPayment: async (paymentObj) => {
     return db.one(
       `INSERT INTO tbl_vendor_payments
-         (vendor_id, razorpay_order_id, razorpay_payment_id, razorpay_signature, amount, currency, payment_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (vendor_id, razorpay_order_id, razorpay_payment_id, razorpay_signature, amount, currency, payment_status, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id`,
       [
         paymentObj.vendor_id,
@@ -630,7 +630,8 @@ const hospitalityModel = {
         paymentObj.razorpay_signature,
         paymentObj.amount,
         paymentObj.currency,
-        paymentObj.payment_status
+        paymentObj.payment_status,
+        paymentObj.metadata ? JSON.stringify(paymentObj.metadata) : null
       ]
     );
   },
@@ -687,17 +688,18 @@ const hospitalityModel = {
   },
 
   hasValidPaidSubscription: async (vendorId) => {
-    // Check if vendor has any successful payment AND active subscriptions that haven't expired
-    // Subscriptions expire on March 31st of the financial year
+    // Check if vendor has active subscriptions whose linked payment is actually successful
     const result = await db.oneOrNone(
-      `SELECT 
-         (SELECT COUNT(*) FROM tbl_vendor_payments 
-          WHERE vendor_id = $1 AND payment_status IN ('paid', 'success')) as payment_count,
-         (SELECT COUNT(*) FROM tbl_vendor_hotel_category_subscription 
-          WHERE vendor_id = $1 AND status = 'active' AND end_date >= CURRENT_DATE) as subscription_count`,
+      `SELECT COUNT(*) as count
+       FROM tbl_vendor_hotel_category_subscription vhcs
+       JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
+       WHERE vhcs.vendor_id = $1
+         AND vhcs.status = 'active'
+         AND vhcs.end_date >= CURRENT_DATE
+         AND vp.payment_status IN ('paid', 'success')`,
       [vendorId]
     );
-    return result && parseInt(result.payment_count) > 0 && parseInt(result.subscription_count) > 0;
+    return result && parseInt(result.count) > 0;
   },
 
   updatePendingSubscriptionsPaymentId: async (vendorId, newPaymentId) => {
@@ -711,6 +713,70 @@ const hospitalityModel = {
              AND payment_status IN ('created', 'pending')
          )`,
       [newPaymentId, vendorId]
+    );
+  },
+
+  getExpiredSubscriptionsForVendor: async (vendorId) => {
+    return db.any(
+      `SELECT vhcs.*, vp.payment_status
+       FROM tbl_vendor_hotel_category_subscription vhcs
+       LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
+       WHERE vhcs.vendor_id = $1
+         AND vhcs.status IN ('active', 'expired')
+         AND vhcs.end_date < CURRENT_DATE
+         AND vp.payment_status IN ('paid', 'success')
+       ORDER BY vhcs.end_date DESC, vhcs.id DESC`,
+      [vendorId]
+    );
+  },
+
+  getVendorSubscriptionStatus: async (vendorId) => {
+    return db.any(
+      `SELECT
+        vhcs.id AS subscription_id, vhcs.item_type, vhcs.item_id,
+        vhcs.fee_amount, vhcs.start_date, vhcs.end_date, vhcs.status,
+        CASE
+          WHEN vhcs.item_type = 'category' THEN c.title
+          WHEN vhcs.item_type = 'subcategory' THEN c.title
+          WHEN vhcs.item_type = 'hotel' THEN h.name
+        END AS item_name,
+        vp.payment_status, vp.amount AS total_paid,
+        vp.razorpay_payment_id, vp.razorpay_order_id
+       FROM tbl_vendor_hotel_category_subscription vhcs
+       LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
+       LEFT JOIN tbl_category c ON vhcs.item_type IN ('category', 'subcategory') AND c.id = vhcs.item_id
+       LEFT JOIN tbl_hospitality_company_hotels h ON vhcs.item_type = 'hotel' AND h.id = vhcs.item_id
+       WHERE vhcs.vendor_id = $1
+       ORDER BY vhcs.end_date DESC, vhcs.id DESC`,
+      [vendorId]
+    );
+  },
+
+  markExpiredSubscriptions: async (vendorId) => {
+    return db.result(
+      `UPDATE tbl_vendor_hotel_category_subscription
+       SET status = 'expired'
+       WHERE vendor_id = $1
+         AND status = 'active'
+         AND end_date < CURRENT_DATE
+         AND payment_id IN (
+           SELECT id FROM tbl_vendor_payments
+           WHERE payment_status IN ('paid', 'success')
+         )`,
+      [vendorId]
+    );
+  },
+
+  markAllExpiredSubscriptions: async () => {
+    return db.result(
+      `UPDATE tbl_vendor_hotel_category_subscription
+       SET status = 'expired'
+       WHERE status = 'active'
+         AND end_date < CURRENT_DATE
+         AND payment_id IN (
+           SELECT id FROM tbl_vendor_payments
+           WHERE payment_status IN ('paid', 'success')
+         )`
     );
   },
 
@@ -917,6 +983,9 @@ const hospitalityModel = {
  * Vendors failing any of the above conditions are excluded.
  */
 getEligibleVendorsForVariant: async (variantId, hotelIds) => {
+  // Include ALL vendors mapped to the hotel, regardless of subscription expiry.
+  // Expired vendors are included in RFQs but blocked from taking actions (sending quotes)
+  // until they renew. This ensures they appear in search results and can receive RFQs.
   return db.any(
     `WITH variant_vendors AS (
     SELECT DISTINCT vendor_id
@@ -933,8 +1002,7 @@ eligible_hotel_vendors AS (
         ON vv.vendor_id = s.vendor_id
     WHERE s.item_type = 'hotel'
       AND s.item_id = ANY ($2)
-      AND s.status = 'active'
-      AND s.start_date::date <= (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND s.end_date::date >= (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+      AND s.status IN ('active', 'expired')
 )
 
 SELECT vv.vendor_id

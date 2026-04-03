@@ -4,6 +4,7 @@ import { poUploadMiddleware } from "../../validations/paramValidation/poValidati
 import passport from '../../middleware/passport.js';
 import { acl, noAcl } from "../../helper/common.js";
 import auth from "../../middleware/auth.js";
+import hospitalityMiddleware from '../../middleware/hospitality.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -18,8 +19,8 @@ PORoutes.post('/regenerate/:po_id', passportSignIn, regeneratePO);
 PORoutes.post('/upload-pdf/:po_id', passportSignIn, poUploadMiddleware, uploadPODocument);
 PORoutes.post('/updateGST/:po_id', passportSignIn, updateGST);
 PORoutes.post('/updateHSN/:po_id', passportSignIn, updateHSNForProduct);
-PORoutes.post('/raiseInvoice', passportSignIn, acl([3]), raiseInvoice);
-PORoutes.post('/markDispatched', passportSignIn, acl([3]), markDispatched);
+PORoutes.post('/raiseInvoice', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscription, raiseInvoice);
+PORoutes.post('/markDispatched', passportSignIn, acl([3]), hospitalityMiddleware.requireActiveSubscription, markDispatched);
 PORoutes.post('/addSiteRepresentative', passportSignIn, noAcl([3]), addSiteRepresentative);
 PORoutes.post('/markGRN', auth.authUserOrGRNToken, noAcl([3]), markGRN);
 

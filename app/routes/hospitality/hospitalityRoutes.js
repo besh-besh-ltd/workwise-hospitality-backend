@@ -265,6 +265,39 @@ HospitalityRoutes.get(
   hospitalityController.getVendorMappings
 );
 
+/**
+ * @route GET /api/v1/hospitality/vendor/subscription-status
+ * @description Get vendor's full subscription state (active/expired/pending, categories, hotels, expiry)
+ * @access Private (Vendors only - authenticated via JWT)
+ */
+HospitalityRoutes.get(
+  '/vendor/subscription-status',
+  passportSignIn,
+  hospitalityController.getVendorSubscriptionStatus
+);
+
+/**
+ * @route POST /api/v1/hospitality/renew-subscription
+ * @description Renew an expired hospitality subscription. Auto-populates from previous subscription.
+ * @access Private (Vendors only - authenticated via JWT)
+ */
+HospitalityRoutes.post(
+  '/renew-subscription',
+  passportSignIn,
+  hospitalityController.renewSubscription
+);
+
+/**
+ * @route POST /api/v1/hospitality/verify-payment
+ * @description Verify Razorpay payment with signature validation (replaces insecure test webhook)
+ * @access Private (Vendors only - authenticated via JWT)
+ */
+HospitalityRoutes.post(
+  '/verify-payment',
+  passportSignIn,
+  hospitalityController.verifyPayment
+);
+
 export default HospitalityRoutes;
 
 
