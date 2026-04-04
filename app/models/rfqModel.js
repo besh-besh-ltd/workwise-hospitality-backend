@@ -1,6 +1,6 @@
 import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
-import generalModel from './generalModel.js';
+import generalModel, { getApprovalInstanceDetails } from './generalModel.js';
 import userModel from './userModel.js';
 import cmsModel from './cmsModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
@@ -3570,7 +3570,7 @@ LIMIT 2;
         if (rfqApprovalIds.length > 0) {
           params.push(rfqApprovalIds);
           cteParts.push(`
-            SELECT ai.entity_id AS rfq_id, u.id AS user_id, u.name, u.email
+            SELECT ai.entity_id AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -3585,7 +3585,7 @@ LIMIT 2;
         if (techApprovingIds.length > 0) {
           params.push(techApprovingIds);
           cteParts.push(`
-            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -3601,7 +3601,7 @@ LIMIT 2;
         if (quoteApprovalIds.length > 0) {
           params.push(quoteApprovalIds);
           cteParts.push(`
-            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -3617,7 +3617,7 @@ LIMIT 2;
         if (poApprovalIds.length > 0) {
           params.push(poApprovalIds);
           cteParts.push(`
-            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email, ais.decision_rule
             FROM tbl_approval_instances ai
             JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
             JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
@@ -3637,10 +3637,10 @@ LIMIT 2;
           // Group by rfq_id
           const grouped = {};
           for (const row of rows) {
-            if (!grouped[row.rfq_id]) grouped[row.rfq_id] = [];
+            if (!grouped[row.rfq_id]) grouped[row.rfq_id] = { users: [], decision_rule: row.decision_rule || null };
             // Deduplicate by user_id
-            if (!grouped[row.rfq_id].some(u => u.id === row.user_id)) {
-              grouped[row.rfq_id].push({ id: row.user_id, name: row.name, email: row.email });
+            if (!grouped[row.rfq_id].users.some(u => u.id === row.user_id)) {
+              grouped[row.rfq_id].users.push({ id: row.user_id, name: row.name, email: row.email });
             }
           }
 
@@ -3648,12 +3648,13 @@ LIMIT 2;
             result[rfq.id] = {
               type: 'approval',
               label: APPROVAL_LABEL,
-              users: grouped[rfq.id] || []
+              users: grouped[rfq.id]?.users || [],
+              decision_rule: grouped[rfq.id]?.decision_rule || null
             };
           }
         } else {
           for (const rfq of approvalRfqs) {
-            result[rfq.id] = { type: 'approval', label: APPROVAL_LABEL, users: [] };
+            result[rfq.id] = { type: 'approval', label: APPROVAL_LABEL, users: [], decision_rule: null };
           }
         }
       } catch (err) {
@@ -3716,6 +3717,552 @@ LIMIT 2;
     }
 
     return result;
+  },
+
+  /**
+   * Get complete lifecycle summary for a single RFQ.
+   * Returns 4 logical phases with full detail:
+   *   1. RFQ Approval (with expired/auto-published handling)
+   *   2. Technical Phase (evaluation + approval combined, per-product clause scores)
+   *   3. Commercial Phase (finalization + negotiation + quotation approval)
+   *   4. PO Phase (PO creation + approval + completion)
+   *
+   * @param {number} rfqId - RFQ ID
+   * @param {number} userId - Current user ID (for can_user_approve)
+   * @returns {Object} { rfq_id, current_stage, phases: [...] }
+   */
+  getLifecycleSummary: async (rfqId, userId) => {
+    // Phase mapping from raw lifecycle stages
+    const PHASE_MAP = {
+      RFQ_APPROVAL: 'rfq_approval',
+      TECHNICAL_EVALUATING: 'technical',
+      TECHNICAL_APPROVING: 'technical',
+      TECHNICAL_REJECTED: 'technical',
+      COMMERCIAL_EVALUATION: 'commercial',
+      NEGOTIATION_ONGOING: 'commercial',
+      QUOTATION_APPROVAL: 'commercial',
+      AWAITING_PO: 'purchase_order',
+      PO_APPROVAL: 'purchase_order',
+      APPROVED_COMPLETED: 'purchase_order',
+    };
+
+    const PHASES_ORDERED = ['rfq_approval', 'technical', 'commercial', 'purchase_order'];
+
+    try {
+      // 1. Get RFQ basic info + current lifecycle stage
+      const rfqBasic = await db.oneOrNone(`
+        SELECT id, is_published, status, is_tender, hotel_id, department_id FROM tbl_rfq WHERE id = $1
+      `, [rfqId]);
+      if (!rfqBasic) return { rfq_id: rfqId, current_stage: null, phases: [] };
+
+      const lifecycleMap = await rfqModel.computeLifecycleStages([rfqId]);
+      const currentStage = lifecycleMap[rfqId] || null;
+      const currentPhase = currentStage ? PHASE_MAP[currentStage] : null;
+      const currentPhaseIndex = currentPhase ? PHASES_ORDERED.indexOf(currentPhase) : -1;
+
+      // Resolve action holders for the current stage (who needs to act)
+      let currentActionHolders = null;
+      if (currentStage) {
+        const actionMap = await rfqModel.getActionHoldersForRFQs([rfqBasic], lifecycleMap);
+        currentActionHolders = actionMap[parseInt(rfqId)] || null;
+      }
+
+      // 2. Fetch all data in parallel
+      const [
+        rfqApprovalInstanceIds,
+        techApprovalInstanceIds,
+        quoteApprovalInstanceIds,
+        poApprovalInstanceIds,
+        techEvalProducts,
+        techEvalClauseData,
+        techEvalClearedVendors,
+        negotiationRounds,
+        finalizationData,
+        poData,
+        evaluators,
+      ] = await Promise.all([
+        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type IN ('RFQ','TENDER') AND entity_id = $1 ORDER BY created_at ASC`, [rfqId]).catch(() => []),
+        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'TECHNICAL' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(() => []),
+        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'NEGOTIATION_QUOTE' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(() => []),
+        db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type = 'PO' AND metadata->>'rfq_id' IS NOT NULL AND (metadata->>'rfq_id')::int = $1 ORDER BY created_at ASC`, [rfqId]).catch(() => []),
+
+        // Tech eval: per-product summary
+        db.any(`
+          SELECT te.id AS tech_eval_id, te.tbl_rfq_product_id AS product_id,
+            COALESCE(pv.name, 'Product ' || te.tbl_rfq_product_id) AS product_name,
+            te.minimum_passing_score, te.round_number AS current_round,
+            (SELECT COUNT(DISTINCT rpv.vendor_id) FROM tbl_rfq_product_vendors rpv WHERE rpv.rfq_product_id = te.tbl_rfq_product_id) AS total_vendors
+          FROM tbl_rfq_product_tech_evaluation te
+          LEFT JOIN tbl_rfq_products rp ON rp.id = te.tbl_rfq_product_id
+          LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+          WHERE te.rfq_id = $1
+          ORDER BY te.tbl_rfq_product_id
+        `, [rfqId]).catch(() => []),
+
+        // Tech eval: clause-level scores per vendor per product
+        db.any(`
+          SELECT
+            c.tbl_rfq_product_tech_evaluation_id AS tech_eval_id,
+            c.id AS clause_id, c.clause_text, c.clause_type, c.weightage,
+            vr.vendor_id, u_vendor.name AS vendor_name,
+            COALESCE(u_vendor.company_name, u_vendor.organization_name) AS vendor_company,
+            vr.vendor_response, vr.buyer_marks, vr.buyer_remark,
+            vr.score_timestamp
+          FROM tbl_rfq_product_tech_evaluation_clauses c
+          JOIN tbl_rfq_product_tech_evaluation te ON te.id = c.tbl_rfq_product_tech_evaluation_id
+          LEFT JOIN tbl_rfq_product_tech_evaluation_vendors_response vr ON vr.tbl_rfq_product_tech_evaluation_clauses_id = c.id
+          LEFT JOIN tbl_users u_vendor ON u_vendor.id = vr.vendor_id
+          WHERE te.rfq_id = $1
+          ORDER BY c.tbl_rfq_product_tech_evaluation_id, c.id, vr.vendor_id
+        `, [rfqId]).catch(() => []),
+
+        // Tech eval: cleared vendors (pass/fail)
+        db.any(`
+          SELECT cv.tbl_rfq_product_tech_evaluation_id AS tech_eval_id,
+            cv.vendor_id, cv.status, cv.reject_message, cv.evaluation_round,
+            cv.created_by AS evaluated_by_id, cv.timestamp AS evaluated_at,
+            u_vendor.name AS vendor_name,
+            COALESCE(u_vendor.company_name, u_vendor.organization_name) AS vendor_company,
+            u_evaluator.name AS evaluated_by_name
+          FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+          JOIN tbl_rfq_product_tech_evaluation te ON te.id = cv.tbl_rfq_product_tech_evaluation_id
+          LEFT JOIN tbl_users u_vendor ON u_vendor.id = cv.vendor_id
+          LEFT JOIN tbl_users u_evaluator ON u_evaluator.id = cv.created_by
+          WHERE te.rfq_id = $1
+          ORDER BY cv.tbl_rfq_product_tech_evaluation_id, cv.vendor_id
+        `, [rfqId]).catch(() => []),
+
+        // Negotiation rounds with vendor quotes
+        db.any(`
+          SELECT nr.id, nr.rfq_product_id, nr.round_number, nr.status, nr.end_date, nr.target_price,
+            COALESCE(pv.name, 'Product') AS product_name,
+            nrv.vendor_id, u_v.name AS vendor_name,
+            COALESCE(u_v.company_name, u_v.organization_name) AS vendor_company,
+            nrq.quoted_price, nrq.submitted_at AS quote_submitted_at
+          FROM tbl_negotiation_rounds nr
+          LEFT JOIN tbl_rfq_products rp ON rp.id = nr.rfq_product_id
+          LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+          LEFT JOIN tbl_negotiation_round_vendors nrv ON nrv.negotiation_round_id = nr.id
+          LEFT JOIN tbl_users u_v ON u_v.id = nrv.vendor_id
+          LEFT JOIN tbl_negotiation_round_quotes nrq ON nrq.negotiation_round_id = nr.id AND nrq.vendor_id = nrv.vendor_id
+          WHERE nr.rfq_id = $1
+          ORDER BY nr.round_number, nrv.vendor_id
+        `, [rfqId]).catch(() => []),
+
+        // Finalization data
+        db.any(`
+          SELECT qf.product_variant_id, qf.vendor_id,
+            COALESCE(pv.name, 'Product') AS product_name, rp.variant,
+            u_vendor.name AS finalized_vendor_name,
+            COALESCE(u_vendor.company_name, u_vendor.organization_name) AS finalized_vendor_company,
+            qi.unit_price AS finalized_price, qi.total_price AS total_price,
+            u_buyer.name AS finalized_by_name,
+            qf.created_at AS finalized_at
+          FROM tbl_quote_finalization qf
+          LEFT JOIN tbl_rfq_products rp ON rp.id = qf.product_variant_id
+          LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+          LEFT JOIN tbl_users u_vendor ON u_vendor.id = qf.vendor_id
+          LEFT JOIN tbl_users u_buyer ON u_buyer.id = qf.created_by
+          LEFT JOIN tbl_quote_items qi ON qi.quote_id = qf.quote_id AND qi.rfq_product_id = qf.product_variant_id
+          WHERE qf.rfq_id = $1
+          ORDER BY qf.created_at
+        `, [rfqId]).catch(() => []),
+
+        // PO data
+        db.any(`
+          SELECT po.id, po.po_number, po.status, po.total_amount,
+            u_vendor.name AS vendor_name,
+            COALESCE(u_vendor.company_name, u_vendor.organization_name) AS vendor_company,
+            po.created_at
+          FROM tbl_rfq_purchase_order po
+          LEFT JOIN tbl_users u_vendor ON u_vendor.id = po.vendor_id
+          WHERE po.rfq_id = $1
+          ORDER BY po.created_at
+        `, [rfqId]).catch(() => []),
+
+        // Evaluator names
+        db.any(`
+          SELECT DISTINCT u.id, u.name FROM tbl_rfq_product_tech_evaluation te
+          JOIN tbl_users u ON u.id = te.created_by WHERE te.rfq_id = $1
+        `, [rfqId]).catch(() => []),
+      ]);
+
+      // 3. Fetch detailed approval instances
+      const fetchDetails = async (rows) => {
+        if (!rows?.length) return [];
+        const details = [];
+        for (const row of rows) {
+          try {
+            const d = await getApprovalInstanceDetails(row.id, userId);
+            if (d) details.push(d);
+          } catch { /* skip */ }
+        }
+        return details;
+      };
+
+      const [rfqApprovalDetails, techApprovalDetails, quoteApprovalDetails, poApprovalDetails] = await Promise.all([
+        fetchDetails(rfqApprovalInstanceIds),
+        fetchDetails(techApprovalInstanceIds),
+        fetchDetails(quoteApprovalInstanceIds),
+        fetchDetails(poApprovalInstanceIds),
+      ]);
+
+      // 3b. Enrich NEGOTIATION_QUOTE instances with product info (entity_id = rfq_product_id)
+      if (quoteApprovalDetails.length > 0) {
+        // Collect product IDs from entity_id AND metadata.rfq_product_id
+        const productIds = [...new Set(
+          quoteApprovalDetails.flatMap(d => [d.entity_id, d.metadata?.rfq_product_id]).filter(Boolean).map(Number)
+        )];
+        if (productIds.length > 0) {
+          const productInfo = await db.any(`
+            SELECT rp.id, COALESCE(pv.name, 'Product ' || rp.id) AS product_name, rp.variant
+            FROM tbl_rfq_products rp
+            LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+            WHERE rp.id = ANY($1::int[])
+          `, [productIds]).catch(() => []);
+          const prodMap = {};
+          productInfo.forEach(p => { prodMap[parseInt(p.id)] = p; });
+          for (const inst of quoteApprovalDetails) {
+            const pid = parseInt(inst.metadata?.rfq_product_id || inst.entity_id);
+            if (pid && prodMap[pid]) {
+              const p = prodMap[pid];
+              inst.metadata = inst.metadata || {};
+              inst.metadata.product_name = p.product_name + (p.variant && p.variant !== '0' ? ` (${p.variant})` : '');
+              inst.metadata.rfq_product_id = pid;
+            }
+          }
+        }
+      }
+
+      // 3c. Enrich PO instances with PO number (entity_id = po_id)
+      if (poApprovalDetails.length > 0) {
+        const poIds = [...new Set(poApprovalDetails.map(d => d.entity_id).filter(Boolean))];
+        if (poIds.length > 0) {
+          const poInfo = await db.any(`
+            SELECT id, po_number FROM tbl_rfq_purchase_order WHERE id = ANY($1::int[])
+          `, [poIds]).catch(() => []);
+          const poMap = {};
+          poInfo.forEach(p => { poMap[p.id] = p; });
+          for (const inst of poApprovalDetails) {
+            if (inst.entity_id && poMap[inst.entity_id]) {
+              inst.metadata = inst.metadata || {};
+              inst.metadata.po_number = poMap[inst.entity_id].po_number;
+            }
+          }
+        }
+      }
+
+      // 4. Helper: format approval instances
+      const formatApprovalInstances = (details) => {
+        if (!details?.length) return null;
+        return details.map(d => ({
+          id: d.id, status: d.status,
+          entity_type: d.entity_type, entity_id: d.entity_id,
+          current_step: d.current_step, total_steps: d.total_steps,
+          can_user_approve: d.can_user_approve || false,
+          user_approval_step_id: d.user_approval_step_id || null,
+          initiated_by: d.initiated_by || null,
+          metadata: d.metadata || null,
+          created_at: d.created_at, completed_at: d.completed_at,
+          steps: (d.steps || []).map(s => ({
+            step_order: s.step_order, decision_rule: s.decision_rule,
+            status: s.status, completed_at: s.completed_at,
+            approvers: (s.approvers || []).map(a => ({
+              user_id: a.user_id, user_name: a.user_name, user_email: a.user_email,
+              user_designation: a.user_designation, user_department: a.user_department,
+              employee_code: a.employee_code,
+              status: a.status, acted_at: a.acted_at, comment: a.comment,
+            })),
+          })),
+        }));
+      };
+
+      // 5. Build tech eval detailed structure: per-product → vendors → clauses
+      const buildTechEvalDetail = () => {
+        if (!techEvalProducts.length) return null;
+
+        return techEvalProducts.map(prod => {
+          const teId = prod.tech_eval_id;
+          // Get cleared vendors for this product
+          const vendors = techEvalClearedVendors
+            .filter(cv => cv.tech_eval_id === teId)
+            .map(cv => {
+              // Get clause scores for this vendor
+              const clauseScores = techEvalClauseData
+                .filter(c => c.tech_eval_id === teId && c.vendor_id === cv.vendor_id)
+                .map(c => ({
+                  clause_text: c.clause_text,
+                  clause_type: c.clause_type,
+                  weightage: c.weightage ? parseFloat(c.weightage) : null,
+                  vendor_response: c.vendor_response,
+                  buyer_marks: c.buyer_marks != null ? parseFloat(c.buyer_marks) : null,
+                  buyer_remark: c.buyer_remark,
+                }));
+
+              const totalMarks = clauseScores.reduce((sum, c) => sum + (c.buyer_marks || 0), 0);
+              const maxMarks = clauseScores.reduce((sum, c) => sum + (c.weightage || 0), 0);
+
+              return {
+                vendor_id: cv.vendor_id,
+                vendor_name: cv.vendor_name,
+                vendor_company: cv.vendor_company,
+                status: cv.status === 1 ? 'PASSED' : 'FAILED',
+                reject_message: cv.reject_message,
+                evaluation_round: cv.evaluation_round,
+                evaluated_by: cv.evaluated_by_name,
+                evaluated_at: cv.evaluated_at,
+                total_marks: totalMarks,
+                max_marks: maxMarks,
+                score_percentage: maxMarks > 0 ? Math.round((totalMarks / maxMarks) * 100) : null,
+                clause_scores: clauseScores,
+              };
+            });
+
+          const passed = vendors.filter(v => v.status === 'PASSED').length;
+          const failed = vendors.filter(v => v.status === 'FAILED').length;
+
+          return {
+            product_id: prod.product_id,
+            product_name: prod.product_name,
+            minimum_passing_score: prod.minimum_passing_score ? parseFloat(prod.minimum_passing_score) : null,
+            current_round: parseInt(prod.current_round || 1),
+            total_vendors: parseInt(prod.total_vendors || 0),
+            passed, failed,
+            vendors,
+          };
+        });
+      };
+
+      // 6. Build negotiation detail: grouped by round
+      // 6b. Build commercial data grouped by product (finalization + negotiation combined)
+      const buildCommercialProducts = () => {
+        const productMap = {};
+
+        // Add finalization data
+        for (const f of finalizationData) {
+          const key = f.product_variant_id;
+          if (!productMap[key]) {
+            productMap[key] = {
+              product_id: f.product_variant_id,
+              product_name: f.product_name + (f.variant && f.variant !== '0' ? ` (${f.variant})` : ''),
+              finalization: null,
+              negotiation_rounds: [],
+            };
+          }
+          productMap[key].finalization = {
+            vendor_name: f.finalized_vendor_name || 'Unknown',
+            vendor_company: f.finalized_vendor_company,
+            finalized_price: f.finalized_price ? parseFloat(f.finalized_price) : null,
+            total_price: f.total_price ? parseFloat(f.total_price) : null,
+            finalized_by: f.finalized_by_name,
+            finalized_at: f.finalized_at,
+          };
+        }
+
+        // Add negotiation rounds grouped by product
+        const roundMap = {};
+        for (const row of negotiationRounds) {
+          if (!roundMap[row.id]) {
+            roundMap[row.id] = {
+              round_number: row.round_number, status: row.status,
+              rfq_product_id: row.rfq_product_id,
+              product_name: row.product_name, end_date: row.end_date,
+              target_price: row.target_price ? parseFloat(row.target_price) : null,
+              vendors: [],
+            };
+          }
+          if (row.vendor_id) {
+            roundMap[row.id].vendors.push({
+              vendor_name: row.vendor_name, vendor_company: row.vendor_company,
+              quoted_price: row.quoted_price ? parseFloat(row.quoted_price) : null,
+              submitted_at: row.quote_submitted_at,
+            });
+          }
+        }
+        for (const round of Object.values(roundMap)) {
+          const key = round.rfq_product_id;
+          if (!productMap[key]) {
+            productMap[key] = {
+              product_id: key,
+              product_name: round.product_name,
+              finalization: null,
+              negotiation_rounds: [],
+            };
+          }
+          productMap[key].negotiation_rounds.push({
+            round_number: round.round_number, status: round.status,
+            end_date: round.end_date, target_price: round.target_price,
+            vendors: round.vendors,
+          });
+        }
+
+        // Sort negotiation rounds oldest first within each product
+        for (const prod of Object.values(productMap)) {
+          prod.negotiation_rounds.sort((a, b) => a.round_number - b.round_number);
+        }
+
+        const result = Object.values(productMap);
+        return result.length > 0 ? result : null;
+      };
+
+      // 8. Build PO detail
+      const buildPODetail = () => {
+        if (!poData.length) return null;
+        return poData.map(po => ({
+          id: po.id, po_number: po.po_number, status: po.status,
+          vendor_name: po.vendor_name, vendor_company: po.vendor_company,
+          total_amount: po.total_amount ? parseFloat(po.total_amount) : null,
+          created_at: po.created_at,
+        }));
+      };
+
+      // 9. Determine phase statuses
+      const getPhaseStatus = (phaseKey) => {
+        const phaseIndex = PHASES_ORDERED.indexOf(phaseKey);
+        if (phaseIndex < 0) return 'upcoming';
+        if (phaseKey === currentPhase) return 'current';
+        if (phaseIndex < currentPhaseIndex) return 'completed';
+        return 'upcoming';
+      };
+
+      const hasPhaseData = (phaseKey) => {
+        switch (phaseKey) {
+          case 'rfq_approval': return rfqApprovalDetails.length > 0;
+          case 'technical': return techEvalProducts.length > 0 || techApprovalDetails.length > 0;
+          case 'commercial': return finalizationData.length > 0 || negotiationRounds.length > 0 || quoteApprovalDetails.length > 0;
+          case 'purchase_order': return poData.length > 0 || poApprovalDetails.length > 0;
+          default: return false;
+        }
+      };
+
+      // 10. Build phases
+      const isPublished = rfqBasic.is_published === 1 || rfqBasic.status === 1;
+      const phases = [];
+
+      // Phase 1: RFQ Approval
+      {
+        let status = getPhaseStatus('rfq_approval');
+        const hasData = rfqApprovalDetails.length > 0;
+        if (!hasData && status === 'completed') status = 'skipped';
+
+        const latestInstance = rfqApprovalDetails.length > 0 ? rfqApprovalDetails[rfqApprovalDetails.length - 1] : null;
+        // Expired: RFQ is published but approval is still PENDING
+        const isExpired = isPublished && latestInstance?.status === 'PENDING';
+
+        let summary = null;
+        if (isExpired) {
+          summary = 'Auto-published — approval was not completed in time';
+          status = 'expired';
+        } else if (latestInstance?.status === 'APPROVED') {
+          const names = [];
+          (latestInstance.steps || []).forEach(s => (s.approvers || []).forEach(a => { if (a.status === 'APPROVED' && a.user_name) names.push(a.user_name); }));
+          summary = names.length > 0 ? `Approved by ${names.join(', ')}` : 'Approved';
+        } else if (!hasData) {
+          summary = 'No approval configured';
+        }
+
+        phases.push({
+          key: 'rfq_approval', label: 'RFQ Approval', status, summary,
+          completed_at: latestInstance?.completed_at || null,
+          approval_instances: hasData ? formatApprovalInstances(rfqApprovalDetails) : null,
+        });
+      }
+
+      // Phase 2: Technical (Evaluation + Approval combined)
+      {
+        let status = getPhaseStatus('technical');
+        const hasData = hasPhaseData('technical');
+        if (!hasData && status === 'completed') status = 'skipped';
+
+        const techProducts = buildTechEvalDetail();
+        const totalPassed = techProducts ? techProducts.reduce((s, p) => s + p.passed, 0) : 0;
+        const totalFailed = techProducts ? techProducts.reduce((s, p) => s + p.failed, 0) : 0;
+        const totalVendors = techProducts ? techProducts.reduce((s, p) => s + p.total_vendors, 0) : 0;
+
+        let summary = null;
+        if (hasData && techProducts?.length > 0) {
+          summary = `${totalPassed} passed, ${totalFailed} failed out of ${totalVendors} vendors across ${techProducts.length} product${techProducts.length === 1 ? '' : 's'}`;
+        }
+
+        // Determine sub-status based on current raw stage
+        let subStatus = null;
+        if (currentStage === 'TECHNICAL_EVALUATING') subStatus = 'evaluating';
+        else if (currentStage === 'TECHNICAL_APPROVING') subStatus = 'approving';
+        else if (currentStage === 'TECHNICAL_REJECTED') subStatus = 'rejected';
+
+        phases.push({
+          key: 'technical', label: 'Technical Evaluation', status, summary, sub_status: subStatus,
+          evaluators: evaluators.map(e => ({ id: e.id, name: e.name })),
+          products: techProducts,
+          approval_instances: techApprovalDetails.length > 0 ? formatApprovalInstances(techApprovalDetails) : null,
+          action_holders: status === 'current' ? currentActionHolders : null,
+        });
+      }
+
+      // Phase 3: Commercial (Finalization + Negotiation + Quote Approval) — product-centric
+      {
+        let status = getPhaseStatus('commercial');
+        const hasData = hasPhaseData('commercial');
+        if (!hasData && status === 'completed') status = 'skipped';
+
+        const commercialProducts = buildCommercialProducts();
+
+        let summary = null;
+        const finalizedCount = commercialProducts?.filter(p => p.finalization)?.length || 0;
+        if (finalizedCount > 0) {
+          summary = `${finalizedCount} product${finalizedCount === 1 ? '' : 's'} finalized`;
+        }
+        const totalRounds = commercialProducts?.reduce((s, p) => s + p.negotiation_rounds.length, 0) || 0;
+        if (totalRounds > 0) {
+          summary = (summary ? summary + ' · ' : '') + `${totalRounds} negotiation round${totalRounds === 1 ? '' : 's'}`;
+        }
+
+        let subStatus = null;
+        if (currentStage === 'COMMERCIAL_EVALUATION') subStatus = 'evaluating';
+        else if (currentStage === 'NEGOTIATION_ONGOING') subStatus = 'negotiating';
+        else if (currentStage === 'QUOTATION_APPROVAL') subStatus = 'approving';
+
+        phases.push({
+          key: 'commercial', label: 'Commercial Evaluation', status, summary, sub_status: subStatus,
+          products: commercialProducts,
+          approval_instances: quoteApprovalDetails.length > 0 ? formatApprovalInstances(quoteApprovalDetails) : null,
+          action_holders: status === 'current' ? currentActionHolders : null,
+        });
+      }
+
+      // Phase 4: Purchase Order (PO + Approval + Completion)
+      {
+        let status = getPhaseStatus('purchase_order');
+        const hasData = hasPhaseData('purchase_order');
+        if (!hasData && status === 'completed') status = 'skipped';
+
+        const purchaseOrders = buildPODetail();
+        const totalAmount = purchaseOrders ? purchaseOrders.reduce((s, po) => s + (po.total_amount || 0), 0) : 0;
+
+        let summary = null;
+        if (purchaseOrders?.length > 0) {
+          summary = `${purchaseOrders.length} PO${purchaseOrders.length === 1 ? '' : 's'}`;
+          if (totalAmount > 0) summary += ` · ₹${totalAmount.toLocaleString('en-IN')}`;
+        }
+
+        let subStatus = null;
+        if (currentStage === 'AWAITING_PO') subStatus = 'awaiting_creation';
+        else if (currentStage === 'PO_APPROVAL') subStatus = 'approving';
+        else if (currentStage === 'APPROVED_COMPLETED') subStatus = 'completed';
+
+        phases.push({
+          key: 'purchase_order', label: 'Purchase Order', status, summary, sub_status: subStatus,
+          purchase_orders: purchaseOrders,
+          approval_instances: poApprovalDetails.length > 0 ? formatApprovalInstances(poApprovalDetails) : null,
+          action_holders: status === 'current' ? currentActionHolders : null,
+        });
+      }
+
+      return { rfq_id: rfqId, current_stage: currentStage, current_phase: currentPhase, phases };
+    } catch (err) {
+      console.error('getLifecycleSummary error:', err);
+      return { rfq_id: rfqId, current_stage: null, phases: [] };
+    }
   },
 
   getBuyerRfqCount: async (

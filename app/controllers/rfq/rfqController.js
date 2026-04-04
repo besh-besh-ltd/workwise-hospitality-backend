@@ -7093,6 +7093,28 @@ const rfqController = {
         .end();
     }
   },
+  getLifecycleSummary: async (req, res, next) => {
+    try {
+      const rfqId = parseInt(req.params.rfqId);
+      const userId = req.user?.id || null;
+
+      if (!rfqId || isNaN(rfqId)) {
+        return res.status(200).json({ status: 0, message: 'Invalid RFQ ID' });
+      }
+
+      const data = await rfqModel.getLifecycleSummary(rfqId, userId);
+
+      if (!data || !data.current_stage) {
+        return res.status(200).json({ status: 2, message: 'RFQ not found or lifecycle not available' });
+      }
+
+      return res.status(200).json({ status: 1, data });
+    } catch (err) {
+      console.error('getLifecycleSummary error:', err);
+      return res.status(200).json({ status: 3, message: 'Error fetching lifecycle summary' });
+    }
+  },
+
   getRfqById: async (req, res, next) => {
     let id = req.params.id;
     // Determine the user ID to check based on the verification status
