@@ -6,6 +6,7 @@ import cmsModel from './cmsModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 import { PO_STATUSES } from '../util/constants.js';
+import rbacModel from './rbacModel.js';
 
 
 const generateReminderTokenValue = () => {
@@ -3361,6 +3362,362 @@ LIMIT 2;
         });
     });
   },
+  /**
+   * Compute lifecycle stage for a batch of RFQ IDs.
+   * Returns an object mapping rfq_id → lifecycle_stage string.
+   *
+   * Stages (evaluated most-advanced first):
+   *  APPROVED_COMPLETED, PO_APPROVAL, AWAITING_PO, QUOTATION_APPROVAL,
+   *  NEGOTIATION_ONGOING, COMMERCIAL_EVALUATION, TECHNICAL_REJECTED,
+   *  TECHNICAL_APPROVING, TECHNICAL_EVALUATING, RFQ_APPROVAL
+   */
+  computeLifecycleStages: async (rfqIds) => {
+    if (!rfqIds || rfqIds.length === 0) return {};
+
+    const q = `
+      WITH rfq_data AS (
+        SELECT id, status, is_published
+        FROM tbl_rfq
+        WHERE id = ANY($1::int[])
+      ),
+      product_counts AS (
+        SELECT rfq_id, COUNT(*)::int AS total_products
+        FROM tbl_rfq_products
+        WHERE rfq_id = ANY($1::int[])
+        GROUP BY rfq_id
+      ),
+      -- Latest TECHNICAL approval per RFQ
+      tech_approval AS (
+        SELECT
+          (metadata->>'rfq_id')::int AS rfq_id,
+          status,
+          ROW_NUMBER() OVER (PARTITION BY (metadata->>'rfq_id')::int ORDER BY created_at DESC) AS rn
+        FROM tbl_approval_instances
+        WHERE entity_type = 'TECHNICAL'
+          AND metadata->>'rfq_id' IS NOT NULL
+          AND (metadata->>'rfq_id')::int = ANY($1::int[])
+      ),
+      tech_latest AS (
+        SELECT rfq_id, status FROM tech_approval WHERE rn = 1
+      ),
+      -- Products with at least 1 cleared vendor
+      products_with_cleared AS (
+        SELECT te.rfq_id, COUNT(DISTINCT te.tbl_rfq_product_id)::int AS products_cleared
+        FROM tbl_rfq_product_tech_evaluation te
+        JOIN tbl_rfq_product_tech_evaluation_cleared_vendors cv
+          ON cv.tbl_rfq_product_tech_evaluation_id = te.id AND cv.status = 1
+        WHERE te.rfq_id = ANY($1::int[])
+        GROUP BY te.rfq_id
+      ),
+      -- Active negotiation rounds
+      active_negotiations AS (
+        SELECT DISTINCT rfq_id
+        FROM tbl_negotiation_rounds
+        WHERE rfq_id = ANY($1::int[])
+          AND status = 'ACTIVE'
+          AND end_date > NOW()
+      ),
+      -- Pending NEGOTIATION_QUOTE approvals (per RFQ)
+      neg_quote_pending AS (
+        SELECT DISTINCT (metadata->>'rfq_id')::int AS rfq_id
+        FROM tbl_approval_instances
+        WHERE entity_type = 'NEGOTIATION_QUOTE'
+          AND status = 'PENDING'
+          AND metadata->>'rfq_id' IS NOT NULL
+          AND (metadata->>'rfq_id')::int = ANY($1::int[])
+      ),
+      -- Approved NEGOTIATION_QUOTE count per RFQ (distinct products)
+      neg_quote_approved AS (
+        SELECT
+          (metadata->>'rfq_id')::int AS rfq_id,
+          COUNT(DISTINCT entity_id)::int AS approved_products
+        FROM tbl_approval_instances
+        WHERE entity_type = 'NEGOTIATION_QUOTE'
+          AND status = 'APPROVED'
+          AND metadata->>'rfq_id' IS NOT NULL
+          AND (metadata->>'rfq_id')::int = ANY($1::int[])
+        GROUP BY (metadata->>'rfq_id')::int
+      ),
+      -- PO data per RFQ
+      po_data AS (
+        SELECT
+          rfq_id,
+          COUNT(*)::int AS total_pos,
+          COUNT(*) FILTER (WHERE status = 'pending_approval')::int AS pending_approval_pos,
+          COUNT(*) FILTER (WHERE status IN ('approved','sent','dispatched','GRN','completed','invoice_raised'))::int AS approved_pos
+        FROM tbl_rfq_purchase_order
+        WHERE rfq_id = ANY($1::int[])
+        GROUP BY rfq_id
+      )
+      SELECT
+        rd.id AS rfq_id,
+        CASE
+          -- Stage 10: Approved & Completed (all POs approved/beyond)
+          WHEN pd.total_pos > 0 AND pd.total_pos = pd.approved_pos
+            THEN 'APPROVED_COMPLETED'
+          -- Stage 9: Purchase Order Approval
+          WHEN COALESCE(pd.pending_approval_pos, 0) > 0
+            THEN 'PO_APPROVAL'
+          -- Stage 8: Awaiting PO Initiation (all products have approved quotes)
+          WHEN nqa.approved_products IS NOT NULL
+            AND pc.total_products IS NOT NULL
+            AND nqa.approved_products >= pc.total_products
+            THEN 'AWAITING_PO'
+          -- Stage 7: Quotation Approval
+          WHEN nqp.rfq_id IS NOT NULL
+            THEN 'QUOTATION_APPROVAL'
+          -- Stage 6: Negotiation Ongoing
+          WHEN an.rfq_id IS NOT NULL
+            THEN 'NEGOTIATION_ONGOING'
+          -- Stage 5: Commercial Evaluation (all products have cleared vendors)
+          WHEN pwc.products_cleared IS NOT NULL
+            AND pc.total_products IS NOT NULL
+            AND pwc.products_cleared >= pc.total_products
+            THEN 'COMMERCIAL_EVALUATION'
+          -- Stage 4: Technical Approver Rejected
+          WHEN tl.status = 'REJECTED'
+            THEN 'TECHNICAL_REJECTED'
+          -- Stage 3: Technical Approving
+          WHEN tl.status = 'PENDING'
+            THEN 'TECHNICAL_APPROVING'
+          -- Stage 2: Technical Evaluating (published, no TECHNICAL approval yet)
+          WHEN rd.is_published = 1 AND rd.status = 1 AND tl.rfq_id IS NULL
+            THEN 'TECHNICAL_EVALUATING'
+          -- Stage 1: RFQ Approval (ready to publish / pending approval)
+          WHEN rd.status IN (3, 4) OR (rd.is_published = 0 AND rd.status != 1)
+            THEN 'RFQ_APPROVAL'
+          ELSE NULL
+        END AS lifecycle_stage
+      FROM rfq_data rd
+      LEFT JOIN product_counts pc ON pc.rfq_id = rd.id
+      LEFT JOIN tech_latest tl ON tl.rfq_id = rd.id
+      LEFT JOIN products_with_cleared pwc ON pwc.rfq_id = rd.id
+      LEFT JOIN active_negotiations an ON an.rfq_id = rd.id
+      LEFT JOIN neg_quote_pending nqp ON nqp.rfq_id = rd.id
+      LEFT JOIN neg_quote_approved nqa ON nqa.rfq_id = rd.id
+      LEFT JOIN po_data pd ON pd.rfq_id = rd.id
+    `;
+
+    try {
+      const rows = await db.any(q, [rfqIds]);
+      const result = {};
+      rows.forEach(row => {
+        result[row.rfq_id] = row.lifecycle_stage;
+      });
+      return result;
+    } catch (err) {
+      console.error('computeLifecycleStages error:', err);
+      return {};
+    }
+  },
+
+  /**
+   * Batch-resolve "who can act" for a list of RFQs based on their lifecycle stage.
+   *
+   * Approval stages  → current-step pending approvers from tbl_approval_instances
+   * Permission stages → users with the required module permissions (via RBAC)
+   * No-action stages  → null
+   *
+   * @param {Array} rfqList  - RFQ rows (must include id, hotel_id, department_id, is_tender)
+   * @param {Object} lifecycleMap - { rfq_id: lifecycle_stage } from computeLifecycleStages
+   * @returns {Object} { [rfq_id]: { type, label, users: [{id, name, email}] } | null }
+   */
+  getActionHoldersForRFQs: async (rfqList, lifecycleMap) => {
+    if (!rfqList || rfqList.length === 0) return {};
+
+    const APPROVAL_STAGES = ['RFQ_APPROVAL', 'TECHNICAL_APPROVING', 'QUOTATION_APPROVAL', 'PO_APPROVAL'];
+    const PERMISSION_STAGE_CONFIG = {
+      TECHNICAL_EVALUATING:  { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      TECHNICAL_REJECTED:    { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      COMMERCIAL_EVALUATION: { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
+      AWAITING_PO:           { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
+    };
+    const APPROVAL_LABEL = 'Pending Approvers';
+
+    const result = {};
+
+    // --- Categorize RFQs ---
+    const approvalRfqs = [];  // { id, is_tender, stage }
+    const permissionRfqs = []; // { id, hotel_id, department_id, stage }
+
+    for (const rfq of rfqList) {
+      const rfqId = parseInt(rfq.id);
+      const stage = lifecycleMap[rfqId] || null;
+      if (!stage) { result[rfqId] = null; continue; }
+
+      if (APPROVAL_STAGES.includes(stage)) {
+        approvalRfqs.push({ id: rfqId, is_tender: rfq.is_tender, stage });
+      } else if (PERMISSION_STAGE_CONFIG[stage]) {
+        permissionRfqs.push({ id: rfqId, hotel_id: rfq.hotel_id, department_id: rfq.department_id, stage });
+      } else {
+        result[rfqId] = null; // NEGOTIATION_ONGOING, APPROVED_COMPLETED, etc.
+      }
+    }
+
+    // --- 1. Batch resolve approval-stage action holders ---
+    if (approvalRfqs.length > 0) {
+      try {
+        const rfqApprovalIds = approvalRfqs.filter(r => r.stage === 'RFQ_APPROVAL').map(r => r.id);
+        const techApprovingIds = approvalRfqs.filter(r => r.stage === 'TECHNICAL_APPROVING').map(r => r.id);
+        const quoteApprovalIds = approvalRfqs.filter(r => r.stage === 'QUOTATION_APPROVAL').map(r => r.id);
+        const poApprovalIds = approvalRfqs.filter(r => r.stage === 'PO_APPROVAL').map(r => r.id);
+
+        // Build UNION query for all approval types at once
+        const cteParts = [];
+        const params = [];
+        let paramIdx = 1;
+
+        if (rfqApprovalIds.length > 0) {
+          params.push(rfqApprovalIds);
+          cteParts.push(`
+            SELECT ai.entity_id AS rfq_id, u.id AS user_id, u.name, u.email
+            FROM tbl_approval_instances ai
+            JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
+            JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
+            JOIN tbl_users u ON u.id = asa.approver_user_id
+            WHERE ai.entity_type IN ('RFQ', 'TENDER')
+              AND ai.entity_id = ANY($${paramIdx}::int[])
+              AND ai.status = 'PENDING'
+          `);
+          paramIdx++;
+        }
+
+        if (techApprovingIds.length > 0) {
+          params.push(techApprovingIds);
+          cteParts.push(`
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email
+            FROM tbl_approval_instances ai
+            JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
+            JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
+            JOIN tbl_users u ON u.id = asa.approver_user_id
+            WHERE ai.entity_type = 'TECHNICAL'
+              AND ai.status = 'PENDING'
+              AND metadata->>'rfq_id' IS NOT NULL
+              AND (ai.metadata->>'rfq_id')::int = ANY($${paramIdx}::int[])
+          `);
+          paramIdx++;
+        }
+
+        if (quoteApprovalIds.length > 0) {
+          params.push(quoteApprovalIds);
+          cteParts.push(`
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email
+            FROM tbl_approval_instances ai
+            JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
+            JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
+            JOIN tbl_users u ON u.id = asa.approver_user_id
+            WHERE ai.entity_type = 'NEGOTIATION_QUOTE'
+              AND ai.status = 'PENDING'
+              AND metadata->>'rfq_id' IS NOT NULL
+              AND (ai.metadata->>'rfq_id')::int = ANY($${paramIdx}::int[])
+          `);
+          paramIdx++;
+        }
+
+        if (poApprovalIds.length > 0) {
+          params.push(poApprovalIds);
+          cteParts.push(`
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email
+            FROM tbl_approval_instances ai
+            JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
+            JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
+            JOIN tbl_users u ON u.id = asa.approver_user_id
+            WHERE ai.entity_type = 'PO'
+              AND ai.status = 'PENDING'
+              AND metadata->>'rfq_id' IS NOT NULL
+              AND (ai.metadata->>'rfq_id')::int = ANY($${paramIdx}::int[])
+          `);
+          paramIdx++;
+        }
+
+        if (cteParts.length > 0) {
+          const sql = cteParts.join(' UNION ') + ' ORDER BY rfq_id, name';
+          const rows = await db.any(sql, params);
+
+          // Group by rfq_id
+          const grouped = {};
+          for (const row of rows) {
+            if (!grouped[row.rfq_id]) grouped[row.rfq_id] = [];
+            // Deduplicate by user_id
+            if (!grouped[row.rfq_id].some(u => u.id === row.user_id)) {
+              grouped[row.rfq_id].push({ id: row.user_id, name: row.name, email: row.email });
+            }
+          }
+
+          for (const rfq of approvalRfqs) {
+            result[rfq.id] = {
+              type: 'approval',
+              label: APPROVAL_LABEL,
+              users: grouped[rfq.id] || []
+            };
+          }
+        } else {
+          for (const rfq of approvalRfqs) {
+            result[rfq.id] = { type: 'approval', label: APPROVAL_LABEL, users: [] };
+          }
+        }
+      } catch (err) {
+        console.error('getActionHoldersForRFQs approval error:', err);
+        for (const rfq of approvalRfqs) {
+          result[rfq.id] = null;
+        }
+      }
+    }
+
+    // --- 2. Batch resolve permission-stage action holders ---
+    if (permissionRfqs.length > 0) {
+      try {
+        // Deduplicate by (hotel_id, department_id|null, resource)
+        const lookupMap = new Map();
+        for (const rfq of permissionRfqs) {
+          const config = PERMISSION_STAGE_CONFIG[rfq.stage];
+          const deptId = config.useDepartment && rfq.department_id ? parseInt(rfq.department_id) : null;
+          const key = `${rfq.hotel_id}|${deptId}|${config.resource}`;
+
+          if (!lookupMap.has(key)) {
+            lookupMap.set(key, {
+              hotelIds: [parseInt(rfq.hotel_id)],
+              resource: config.resource,
+              actions: config.actions,
+              departmentId: deptId,
+              label: config.label,
+              rfqIds: []
+            });
+          }
+          lookupMap.get(key).rfqIds.push(rfq.id);
+        }
+
+        // Execute all unique lookups in parallel
+        const lookupResults = await Promise.all(
+          [...lookupMap.values()].map(async (lookup) => {
+            const users = await rbacModel.getUsersWithModuleActionsForHotels(
+              lookup.hotelIds, lookup.resource, lookup.actions, lookup.departmentId
+            );
+            return { rfqIds: lookup.rfqIds, label: lookup.label, users };
+          })
+        );
+
+        // Map results back to RFQ IDs
+        for (const lr of lookupResults) {
+          for (const rfqId of lr.rfqIds) {
+            result[rfqId] = {
+              type: 'permission',
+              label: lr.label,
+              users: lr.users.map(u => ({ id: u.id, name: u.name, email: u.email }))
+            };
+          }
+        }
+      } catch (err) {
+        console.error('getActionHoldersForRFQs permission error:', err);
+        for (const rfq of permissionRfqs) {
+          result[rfq.id] = null;
+        }
+      }
+    }
+
+    return result;
+  },
+
   getBuyerRfqCount: async (
     user_id,
     project_id,
@@ -8100,6 +8457,7 @@ ORDER BY m.created_at;
                                             vr.vendor_id,
                                             vr.vendor_response,
                                             vr.buyer_id,
+                                            scorer.name AS scorer_name,
                                             vr.buyer_marks,
                                             vr.buyer_remark,
                                             vr.timestamp AS response_timestamp,
@@ -8107,7 +8465,9 @@ ORDER BY m.created_at;
                                             COALESCE(vrf.files, '[]')                     AS vendor_response_files
                                       FROM tbl_rfq_product_tech_evaluation_vendors_response vr
                                               LEFT JOIN vendor_response_files vrf
-                                                        ON vr.id = vrf.vendor_response_id),
+                                                        ON vr.id = vrf.vendor_response_id
+                                              LEFT JOIN tbl_users scorer
+                                                        ON scorer.id = vr.buyer_id),
 
             vendor_responses_aggregated AS (SELECT clause_id,
                                                     JSON_AGG(
@@ -8116,6 +8476,7 @@ ORDER BY m.created_at;
                                                                     'vendor_response', vendor_response,
                                                                     'vendor_response_files', vendor_response_files,
                                                                     'buyer_id', buyer_id,
+                                                                    'scorer_name', scorer_name,
                                                                     'buyer_marks', buyer_marks,
                                                                     'buyer_remark', buyer_remark,
                                                                     'response_timestamp', response_timestamp,
@@ -8277,6 +8638,7 @@ ORDER BY m.created_at;
                                                           AND rc.vendor_id = tu.id
                                             LEFT JOIN tbl_tech_evaluation_rounds _TER
                                                       ON _TER.tbl_rfq_product_tech_evaluation_id = te.id
+                                                      AND _TER.round_number = COALESCE(rc.evaluation_round, 1)
                                             LEFT JOIN tbl_approval_instances _AI ON _AI.id = _TER.approval_instance_id
                                             LEFT JOIN tbl_users _TU ON _TU.id = _AI.initiated_by
                                             LEFT JOIN LATERAL (
@@ -11984,14 +12346,10 @@ ORDER BY tq.timestamp DESC;
    */
   createTechEvalRound: async (tech_evaluation_id, round_number, created_by, txContext = null) => {
     const dbContext = txContext || db;
-    // Use ON CONFLICT to handle duplicate key - return existing record if already exists
-    // Update created_at to itself as a no-op to make RETURNING work
     return dbContext.one(
       `INSERT INTO tbl_tech_evaluation_rounds
        (tbl_rfq_product_tech_evaluation_id, round_number, status, created_by, created_at)
        VALUES ($1, $2, 'PENDING', $3, NOW())
-       ON CONFLICT (tbl_rfq_product_tech_evaluation_id, round_number)
-       DO UPDATE SET status = EXCLUDED.status, created_at = NOW()
        RETURNING *`,
       [tech_evaluation_id, round_number, created_by]
     );
@@ -12177,6 +12535,7 @@ ORDER BY tq.timestamp DESC;
         tu.name AS vendor_name,
         tu.email AS vendor_email,
         COALESCE(tc.company_name, tu.organization_name) AS company_name,
+        MAX(rpv.id) AS rfq_product_vendor_id,
         COUNT(CASE WHEN vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp THEN 1 END) AS evaluated_clauses_count,
         COUNT(c.id) AS total_clauses_count,
         BOOL_OR(vr.score_timestamp IS NOT NULL AND vr.score_timestamp != vr.timestamp) AS has_marks,
@@ -12205,7 +12564,21 @@ ORDER BY tq.timestamp DESC;
         ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
       LEFT JOIN tbl_users tu ON tu.id = vr.vendor_id
       LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+      LEFT JOIN tbl_rfq_product_tech_evaluation te_ref ON te_ref.id = c.tbl_rfq_product_tech_evaluation_id
+      LEFT JOIN tbl_rfq_products trp_ref ON trp_ref.id = te_ref.tbl_rfq_product_id
+      LEFT JOIN tbl_rfq_product_vendors rpv
+        ON rpv.rfq_id = te_ref.rfq_id
+        AND rpv.user_id = vr.vendor_id
+        AND rpv.product_variant_id = trp_ref.product_variant_id
+        AND rpv.variant = trp_ref.variant
       WHERE c.tbl_rfq_product_tech_evaluation_id = $1
+        -- Exclude vendors already verified (approved) in a previous round
+        AND NOT EXISTS (
+          SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+          WHERE cv.tbl_rfq_product_tech_evaluation_id = $1
+            AND cv.vendor_id = vr.vendor_id
+            AND cv.is_verified = true
+        )
       GROUP BY vr.vendor_id, tu.name, tu.email, tc.company_name, tu.organization_name
       HAVING vr.vendor_id IS NOT NULL`,
       [tech_evaluation_id, minimum_passing_score]
@@ -12507,18 +12880,53 @@ ORDER BY tq.timestamp DESC;
       [techEval.id]
     );
 
+    // Get selected vendors for this RFQ product so consumers can show the full roster,
+    // including vendors who have not started responding yet.
+    const selectedVendors = await dbContext.any(
+      `SELECT
+          rpv.id AS rfq_product_vendor_id,
+          rpv.user_id AS vendor_id,
+          tu.name AS vendor_name,
+          tu.email AS vendor_email,
+          COALESCE(tc.company_name, tu.organization_name) AS company_name,
+          EXISTS (
+            SELECT 1
+            FROM tbl_quotes tq
+            JOIN tbl_quote_items tqi ON tqi.quote_id = tq.id
+            WHERE tq.rfq_id = $1
+              AND tq.created_by = rpv.user_id
+              AND tqi.product_variant_id = $2
+              AND COALESCE(tqi.variant, 0) = COALESCE($3, 0)
+              AND tqi.total_price > 0
+          ) AS has_submitted_quote
+       FROM tbl_rfq_product_vendors rpv
+       JOIN tbl_users tu ON tu.id = rpv.user_id
+       LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+       WHERE rpv.rfq_id = $1
+         AND rpv.product_variant_id = $2
+         AND COALESCE(rpv.variant, 0) = COALESCE($3, 0)
+         AND tu.status = 1
+       ORDER BY rpv.id ASC`,
+      [techEval.rfq_id, techEval.product_variant_id, techEval.variant]
+    );
+
     // Get passed verified vendors
     const passedVerified = await dbContext.any(
       `SELECT cv.*, tu.name AS vendor_name, tu.email AS vendor_email,
               COALESCE(tc.company_name, tu.organization_name) AS company_name
+              , rpv.id AS rfq_product_vendor_id
        FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
        JOIN tbl_users tu ON tu.id = cv.vendor_id
        LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+       LEFT JOIN tbl_rfq_product_vendors rpv ON rpv.rfq_id = $2
+         AND rpv.user_id = cv.vendor_id
+         AND rpv.product_variant_id = $3
+         AND COALESCE(rpv.variant, 0) = COALESCE($4, 0)
        WHERE cv.tbl_rfq_product_tech_evaluation_id = $1
          AND cv.status = 1
          AND cv.is_verified = true
        ORDER BY cv.evaluation_round ASC`,
-      [techEval.id]
+      [techEval.id, techEval.rfq_id, techEval.product_variant_id, techEval.variant]
     );
 
     // Get failed verified vendors
@@ -12526,11 +12934,16 @@ ORDER BY tq.timestamp DESC;
       `SELECT cv.*, tu.name AS vendor_name, tu.email AS vendor_email,
               COALESCE(tc.company_name, tu.organization_name) AS company_name,
               ru.name AS replaced_by_vendor_name,
+              rpv_failed.id AS rfq_product_vendor_id,
               rpv_replaced.id AS replaced_by_rfq_product_vendor_id
        FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
        JOIN tbl_users tu ON tu.id = cv.vendor_id
        LEFT JOIN tbl_company tc ON tc.id = tu.company_id
        LEFT JOIN tbl_users ru ON ru.id = cv.replaced_by_vendor_id
+       LEFT JOIN tbl_rfq_product_vendors rpv_failed ON rpv_failed.rfq_id = $2
+         AND rpv_failed.user_id = cv.vendor_id
+         AND rpv_failed.product_variant_id = $3
+         AND COALESCE(rpv_failed.variant, 0) = COALESCE($4, 0)
        LEFT JOIN tbl_rfq_product_vendors rpv_replaced ON rpv_replaced.rfq_id = $2
          AND rpv_replaced.user_id = cv.replaced_by_vendor_id
          AND rpv_replaced.product_variant_id = $3
@@ -12545,18 +12958,48 @@ ORDER BY tq.timestamp DESC;
     // Get pending evaluation vendors (those with responses but not in cleared table or not verified)
     const pendingEvaluation = await dbContext.any(
       `SELECT DISTINCT vr.vendor_id, tu.name AS vendor_name, tu.email AS vendor_email,
-              COALESCE(tc.company_name, tu.organization_name) AS company_name
+              COALESCE(tc.company_name, tu.organization_name) AS company_name,
+              rpv.id AS rfq_product_vendor_id
        FROM tbl_rfq_product_tech_evaluation_vendors_response vr
        JOIN tbl_rfq_product_tech_evaluation_clauses c ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
        JOIN tbl_users tu ON tu.id = vr.vendor_id
        LEFT JOIN tbl_company tc ON tc.id = tu.company_id
+       LEFT JOIN tbl_rfq_product_vendors rpv ON rpv.rfq_id = $2
+         AND rpv.user_id = vr.vendor_id
+         AND rpv.product_variant_id = $3
+         AND COALESCE(rpv.variant, 0) = COALESCE($4, 0)
        LEFT JOIN tbl_rfq_product_tech_evaluation_cleared_vendors cv
          ON cv.tbl_rfq_product_tech_evaluation_id = c.tbl_rfq_product_tech_evaluation_id
          AND cv.vendor_id = vr.vendor_id
        WHERE c.tbl_rfq_product_tech_evaluation_id = $1
          AND (cv.id IS NULL OR cv.is_verified = false)`,
-      [techEval.id]
+      [techEval.id, techEval.rfq_id, techEval.product_variant_id, techEval.variant]
     );
+
+    const latestRound = rounds.length > 0 ? rounds[rounds.length - 1] : null;
+    let currentPendingApprovers = [];
+
+    if (latestRound?.approval_instance_id && latestRound?.approval_status === 'PENDING') {
+      currentPendingApprovers = await dbContext.any(
+        `SELECT DISTINCT
+            u.id AS user_id,
+            u.name AS user_name,
+            u.email AS user_email
+         FROM tbl_approval_instances ai
+         JOIN tbl_approval_instance_steps ais
+           ON ais.approval_instance_id = ai.id
+         JOIN tbl_approval_step_approvers asa
+           ON asa.approval_instance_step_id = ais.id
+         JOIN tbl_users u
+           ON u.id = asa.approver_user_id
+         WHERE ai.id = $1
+           AND ai.status = 'PENDING'
+           AND ais.step_order = ai.current_step
+           AND asa.status = 'PENDING'
+         ORDER BY u.name ASC`,
+        [latestRound.approval_instance_id]
+      );
+    }
 
     // Use actual passed verified count as source of truth (more reliable than stored field)
     const actualPassedVerifiedCount = passedVerified.length;
@@ -12584,12 +13027,26 @@ ORDER BY tq.timestamp DESC;
         submitted_at: r.submitted_at,
         completed_at: r.completed_at
       })),
+      current_pending_approvers: currentPendingApprovers.map((approver) => ({
+        user_id: approver.user_id,
+        user_name: approver.user_name,
+        user_email: approver.user_email
+      })),
       vendors: {
+        selected: selectedVendors.map(v => ({
+          vendor_id: v.vendor_id,
+          vendor_name: v.vendor_name,
+          vendor_email: v.vendor_email,
+          company_name: v.company_name,
+          rfq_product_vendor_id: v.rfq_product_vendor_id,
+          has_submitted_quote: v.has_submitted_quote || false
+        })),
         passed_verified: passedVerified.map(v => ({
           vendor_id: v.vendor_id,
           vendor_name: v.vendor_name,
           vendor_email: v.vendor_email,
           company_name: v.company_name,
+          rfq_product_vendor_id: v.rfq_product_vendor_id,
           calculated_score: v.calculated_score,
           evaluation_round: v.evaluation_round,
           is_verified: v.is_verified
@@ -12599,6 +13056,7 @@ ORDER BY tq.timestamp DESC;
           vendor_name: v.vendor_name,
           vendor_email: v.vendor_email,
           company_name: v.company_name,
+          rfq_product_vendor_id: v.rfq_product_vendor_id,
           calculated_score: v.calculated_score,
           reject_message: v.reject_message,
           evaluation_round: v.evaluation_round,
@@ -12612,11 +13070,13 @@ ORDER BY tq.timestamp DESC;
           vendor_name: v.vendor_name,
           vendor_email: v.vendor_email,
           company_name: v.company_name,
+          rfq_product_vendor_id: v.rfq_product_vendor_id,
           evaluation_round: techEval.current_round || 1,
           is_verified: false
         }))
       },
       summary: {
+        selected_vendor_count: selectedVendors.length,
         passed_verified_count: passedVerified.length,
         failed_verified_count: failedVerified.length,
         pending_count: pendingEvaluation.length,

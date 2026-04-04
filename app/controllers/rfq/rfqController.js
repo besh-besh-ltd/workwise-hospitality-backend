@@ -4004,16 +4004,32 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     throw new Error('No vendors have been evaluated for this technical evaluation');
   }
 
-  // Only include vendors who are fully evaluated (all clauses scored) — partially scored vendors are excluded
-  const evaluatedVendors = vendorScores.filter(v => v.is_fully_evaluated === true);
-  const notEvaluatedVendors = vendorScores.filter(v => !v.is_fully_evaluated);
+  // Defense-in-depth: exclude vendors already verified in previous approved rounds
+  // (getVendorScoresForTechEval already filters these via NOT EXISTS, but we double-check)
+  const verifiedVendors = await dbContext.any(
+    `SELECT vendor_id FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+     WHERE tbl_rfq_product_tech_evaluation_id = $1 AND is_verified = true`,
+    [techEval.id]
+  );
+  const verifiedIds = new Set(verifiedVendors.map(v => v.vendor_id));
+
+  // Only include vendors who are fully evaluated (all clauses scored) and not already verified
+  const evaluatedVendors = vendorScores.filter(v => v.is_fully_evaluated === true && !verifiedIds.has(v.vendor_id));
+  const notEvaluatedVendors = vendorScores.filter(v => !v.is_fully_evaluated || verifiedIds.has(v.vendor_id));
   const passedVendors = evaluatedVendors.filter(v => v.is_passed === true);
   const failedVendors = evaluatedVendors.filter(v => v.is_passed === false);
-  const currentRound = techEval.current_round || 1;
 
-  // Ensure at least one vendor has actually been evaluated (has buyer marks)
+  // Compute next round number from DB (not from techEval.current_round which may be stale)
+  const lastRound = await dbContext.oneOrNone(
+    `SELECT MAX(round_number) AS max_round FROM tbl_tech_evaluation_rounds
+     WHERE tbl_rfq_product_tech_evaluation_id = $1`,
+    [techEval.id]
+  );
+  const currentRound = (lastRound?.max_round || 0) + 1;
+
+  // Ensure at least one NEW vendor has been evaluated for this round
   if (evaluatedVendors.length === 0) {
-    throw new Error('No vendors have been evaluated for this technical evaluation. Please score at least one vendor before submitting.');
+    throw new Error('No new vendors have been evaluated for this round. Please score at least one vendor before submitting.');
   }
 
   // Create round record FIRST to get round_id
@@ -4024,11 +4040,17 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     dbContext
   );
 
+  // Keep current_round in sync for display purposes
+  await rfqModel.updateTechEvalStatus(techEval.id, {
+    current_round: currentRound
+  }, dbContext);
+
   // Prepare vendors metadata for approval (only include evaluated vendors)
   const vendorsMetadata = evaluatedVendors.map(v => ({
     vendor_id: v.vendor_id,
     vendor_name: v.vendor_name || v.company_name,
     vendor_email: v.vendor_email,
+    rfq_product_vendor_id: v.rfq_product_vendor_id || null,
     calculated_score: parseFloat(v.calculated_score) || 0,
     is_passed: v.is_passed,
     status: v.is_passed === true ? 'PASSED' : 'FAILED'
@@ -4039,6 +4061,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     vendor_id: v.vendor_id,
     vendor_name: v.vendor_name || v.company_name,
     vendor_email: v.vendor_email,
+    rfq_product_vendor_id: v.rfq_product_vendor_id || null,
     calculated_score: null,
     is_passed: null,
     status: 'NOT_EVALUATED'
@@ -7161,6 +7184,59 @@ const rfqController = {
 
       const rfqData = rfQItem && rfQItem.length > 0 ? rfQItem[0] : rfQItem;
 
+      let lifecycleMap = {};
+      if (rfqData?.id) {
+        lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
+        rfqData.lifecycle_stage = lifecycleMap[parseInt(rfqData.id)] || null;
+      }
+
+      // Enrich with action holders (who can act at current lifecycle stage)
+      if (rfqData?.id && rfqData.lifecycle_stage) {
+        try {
+          const actionHoldersMap = await rfqModel.getActionHoldersForRFQs([rfqData], lifecycleMap);
+          rfqData.action_holders = actionHoldersMap[parseInt(rfqData.id)] || null;
+        } catch (err) {
+          console.error('Error fetching action holders for RFQ detail:', err);
+          rfqData.action_holders = null;
+        }
+      }
+
+      if (rfqData?.hotel_id) {
+        const hotelIds = [parseInt(rfqData.hotel_id)];
+        const deptId = rfqData.department_id ? parseInt(rfqData.department_id) : null;
+        try {
+          // Technical evaluators: scoped to BU + Department
+          rfqData.technical_evaluators = await rbacModel.getUsersWithModuleActionsForHotels(
+            hotelIds, 'te', ['read', 'create'], deptId
+          );
+        } catch (evaluatorError) {
+          console.error('Error fetching technical evaluators for RFQ detail:', evaluatorError);
+          rfqData.technical_evaluators = [];
+        }
+        try {
+          // Commercial evaluators: scoped to BU only (no department)
+          rfqData.commercial_evaluators = await rbacModel.getUsersWithModuleActionsForHotels(
+            hotelIds, 'quote-compare', ['read', 'create'], null
+          );
+        } catch (err) {
+          console.error('Error fetching commercial evaluators for RFQ detail:', err);
+          rfqData.commercial_evaluators = [];
+        }
+        try {
+          // PO initiators: scoped to BU only (no department)
+          rfqData.po_initiators = await rbacModel.getUsersWithModuleActionsForHotels(
+            hotelIds, 'awarding', ['read', 'create'], null
+          );
+        } catch (err) {
+          console.error('Error fetching PO initiators for RFQ detail:', err);
+          rfqData.po_initiators = [];
+        }
+      } else {
+        rfqData.technical_evaluators = [];
+        rfqData.commercial_evaluators = [];
+        rfqData.po_initiators = [];
+      }
+
       // Add tender payment status for vendor viewers (sourced from main query)
       if (rfqData && rfqData.is_tender === 1 && rfqData.tender_fees > 0 && req.user.user_type == 3) {
         rfqData.has_paid_tender_fees = rfqData.vendor_payment_status === 'success';
@@ -7380,6 +7456,29 @@ const rfqController = {
         is_tender,
         completed_status
       );
+
+      // Enrich with lifecycle stage
+      let lifecycleMap = {};
+      if (listRfq && listRfq.length > 0) {
+        const rfqIds = listRfq.map(r => parseInt(r.id));
+        lifecycleMap = await rfqModel.computeLifecycleStages(rfqIds);
+        for (const rfq of listRfq) {
+          rfq.lifecycle_stage = lifecycleMap[parseInt(rfq.id)] || null;
+        }
+      }
+
+      // Enrich with action holders (who can act at current lifecycle stage)
+      if (listRfq && listRfq.length > 0) {
+        try {
+          const actionHoldersMap = await rfqModel.getActionHoldersForRFQs(listRfq, lifecycleMap);
+          for (const rfq of listRfq) {
+            rfq.action_holders = actionHoldersMap[parseInt(rfq.id)] || null;
+          }
+        } catch (err) {
+          console.error('Error fetching action holders:', err);
+        }
+      }
+
       res
         .status(200)
         .json({
@@ -7449,6 +7548,29 @@ const rfqController = {
         rfq_no,
         is_tender
       );
+
+      // Enrich with lifecycle stage
+      let lifecycleMap = {};
+      if (listRfq && listRfq.length > 0) {
+        const rfqIds = listRfq.map(r => parseInt(r.id));
+        lifecycleMap = await rfqModel.computeLifecycleStages(rfqIds);
+        for (const rfq of listRfq) {
+          rfq.lifecycle_stage = lifecycleMap[parseInt(rfq.id)] || null;
+        }
+      }
+
+      // Enrich with action holders (who can act at current lifecycle stage)
+      if (listRfq && listRfq.length > 0) {
+        try {
+          const actionHoldersMap = await rfqModel.getActionHoldersForRFQs(listRfq, lifecycleMap);
+          for (const rfq of listRfq) {
+            rfq.action_holders = actionHoldersMap[parseInt(rfq.id)] || null;
+          }
+        } catch (err) {
+          console.error('Error fetching action holders:', err);
+        }
+      }
+
       res
         .status(200)
         .json({

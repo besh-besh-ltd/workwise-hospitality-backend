@@ -417,6 +417,66 @@ const rbacModel = {
       `,
       params
     );
+  },
+
+  /**
+   * Get users who have all required actions for a module/resource within hotel + department scope.
+   * This mirrors the permission evaluation used by the frontend `useModulePermissions` hook.
+   */
+  getUsersWithModuleActionsForHotels: async (hotelIds = [], resource = null, actions = [], departmentId = null) => {
+    if (!hotelIds || hotelIds.length === 0 || !resource || !actions.length) {
+      return [];
+    }
+
+    const requiredPermissionKeys = actions.map((action) => `${resource}.${action}`);
+    const params = [hotelIds, requiredPermissionKeys, departmentId, requiredPermissionKeys.length];
+
+    return db.any(
+      `
+      WITH hotel_companies AS (
+        SELECT DISTINCT
+          h.id AS hotel_id,
+          h.hospitality_company_id
+        FROM tbl_hospitality_company_hotels h
+        WHERE h.id IN ($1:csv)
+          AND h.is_deleted = 0
+      )
+      SELECT DISTINCT
+        u.id,
+        u.name,
+        u.email
+      FROM tbl_users u
+      JOIN tbl_user_role_scopes urs ON urs.user_id = u.id
+      JOIN tbl_role_permissions rp ON rp.role_id = urs.role_id
+      JOIN tbl_permissions p ON p.id = rp.permission_id
+      WHERE u.is_deleted = 0
+        AND u.status = 1
+        AND urs.company_id IN (SELECT hospitality_company_id FROM hotel_companies)
+        AND (
+          urs.hotel_id IS NULL
+          OR urs.hotel_id IN ($1:csv)
+        )
+        AND (
+          $3::int IS NULL
+          OR urs.department_id = $3
+          OR (
+            urs.department_id IS NULL
+            AND EXISTS (
+              SELECT 1
+              FROM tbl_user_department ud
+              WHERE ud.user_id = u.id
+                AND ud.department_id = $3
+            )
+          )
+        )
+      GROUP BY u.id, u.name, u.email
+      HAVING COUNT(DISTINCT CASE
+        WHEN (p.resource || '.' || p.action) IN ($2:csv) THEN (p.resource || '.' || p.action)
+      END) = $4
+      ORDER BY u.name ASC
+      `,
+      params
+    );
   }
 
 };
