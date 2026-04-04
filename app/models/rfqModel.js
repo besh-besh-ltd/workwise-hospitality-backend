@@ -6,6 +6,7 @@ import cmsModel from './cmsModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
 import { notifyBuyerOnPersistenceViaEmail } from '../controllers/rfq/rfqController.js';
 import { PO_STATUSES } from '../util/constants.js';
+import rbacModel from './rbacModel.js';
 
 
 const generateReminderTokenValue = () => {
@@ -3508,6 +3509,213 @@ LIMIT 2;
       console.error('computeLifecycleStages error:', err);
       return {};
     }
+  },
+
+  /**
+   * Batch-resolve "who can act" for a list of RFQs based on their lifecycle stage.
+   *
+   * Approval stages  → current-step pending approvers from tbl_approval_instances
+   * Permission stages → users with the required module permissions (via RBAC)
+   * No-action stages  → null
+   *
+   * @param {Array} rfqList  - RFQ rows (must include id, hotel_id, department_id, is_tender)
+   * @param {Object} lifecycleMap - { rfq_id: lifecycle_stage } from computeLifecycleStages
+   * @returns {Object} { [rfq_id]: { type, label, users: [{id, name, email}] } | null }
+   */
+  getActionHoldersForRFQs: async (rfqList, lifecycleMap) => {
+    if (!rfqList || rfqList.length === 0) return {};
+
+    const APPROVAL_STAGES = ['RFQ_APPROVAL', 'TECHNICAL_APPROVING', 'QUOTATION_APPROVAL', 'PO_APPROVAL'];
+    const PERMISSION_STAGE_CONFIG = {
+      TECHNICAL_EVALUATING:  { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      TECHNICAL_REJECTED:    { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      COMMERCIAL_EVALUATION: { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
+      AWAITING_PO:           { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
+    };
+    const APPROVAL_LABEL = 'Pending Approvers';
+
+    const result = {};
+
+    // --- Categorize RFQs ---
+    const approvalRfqs = [];  // { id, is_tender, stage }
+    const permissionRfqs = []; // { id, hotel_id, department_id, stage }
+
+    for (const rfq of rfqList) {
+      const rfqId = parseInt(rfq.id);
+      const stage = lifecycleMap[rfqId] || null;
+      if (!stage) { result[rfqId] = null; continue; }
+
+      if (APPROVAL_STAGES.includes(stage)) {
+        approvalRfqs.push({ id: rfqId, is_tender: rfq.is_tender, stage });
+      } else if (PERMISSION_STAGE_CONFIG[stage]) {
+        permissionRfqs.push({ id: rfqId, hotel_id: rfq.hotel_id, department_id: rfq.department_id, stage });
+      } else {
+        result[rfqId] = null; // NEGOTIATION_ONGOING, APPROVED_COMPLETED, etc.
+      }
+    }
+
+    // --- 1. Batch resolve approval-stage action holders ---
+    if (approvalRfqs.length > 0) {
+      try {
+        const rfqApprovalIds = approvalRfqs.filter(r => r.stage === 'RFQ_APPROVAL').map(r => r.id);
+        const techApprovingIds = approvalRfqs.filter(r => r.stage === 'TECHNICAL_APPROVING').map(r => r.id);
+        const quoteApprovalIds = approvalRfqs.filter(r => r.stage === 'QUOTATION_APPROVAL').map(r => r.id);
+        const poApprovalIds = approvalRfqs.filter(r => r.stage === 'PO_APPROVAL').map(r => r.id);
+
+        // Build UNION query for all approval types at once
+        const cteParts = [];
+        const params = [];
+        let paramIdx = 1;
+
+        if (rfqApprovalIds.length > 0) {
+          params.push(rfqApprovalIds);
+          cteParts.push(`
+            SELECT ai.entity_id AS rfq_id, u.id AS user_id, u.name, u.email
+            FROM tbl_approval_instances ai
+            JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
+            JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
+            JOIN tbl_users u ON u.id = asa.approver_user_id
+            WHERE ai.entity_type IN ('RFQ', 'TENDER')
+              AND ai.entity_id = ANY($${paramIdx}::int[])
+              AND ai.status = 'PENDING'
+          `);
+          paramIdx++;
+        }
+
+        if (techApprovingIds.length > 0) {
+          params.push(techApprovingIds);
+          cteParts.push(`
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email
+            FROM tbl_approval_instances ai
+            JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
+            JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
+            JOIN tbl_users u ON u.id = asa.approver_user_id
+            WHERE ai.entity_type = 'TECHNICAL'
+              AND ai.status = 'PENDING'
+              AND metadata->>'rfq_id' IS NOT NULL
+              AND (ai.metadata->>'rfq_id')::int = ANY($${paramIdx}::int[])
+          `);
+          paramIdx++;
+        }
+
+        if (quoteApprovalIds.length > 0) {
+          params.push(quoteApprovalIds);
+          cteParts.push(`
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email
+            FROM tbl_approval_instances ai
+            JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
+            JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
+            JOIN tbl_users u ON u.id = asa.approver_user_id
+            WHERE ai.entity_type = 'NEGOTIATION_QUOTE'
+              AND ai.status = 'PENDING'
+              AND metadata->>'rfq_id' IS NOT NULL
+              AND (ai.metadata->>'rfq_id')::int = ANY($${paramIdx}::int[])
+          `);
+          paramIdx++;
+        }
+
+        if (poApprovalIds.length > 0) {
+          params.push(poApprovalIds);
+          cteParts.push(`
+            SELECT (ai.metadata->>'rfq_id')::int AS rfq_id, u.id AS user_id, u.name, u.email
+            FROM tbl_approval_instances ai
+            JOIN tbl_approval_instance_steps ais ON ais.approval_instance_id = ai.id AND ais.step_order = ai.current_step
+            JOIN tbl_approval_step_approvers asa ON asa.approval_instance_step_id = ais.id AND asa.status = 'PENDING'
+            JOIN tbl_users u ON u.id = asa.approver_user_id
+            WHERE ai.entity_type = 'PO'
+              AND ai.status = 'PENDING'
+              AND metadata->>'rfq_id' IS NOT NULL
+              AND (ai.metadata->>'rfq_id')::int = ANY($${paramIdx}::int[])
+          `);
+          paramIdx++;
+        }
+
+        if (cteParts.length > 0) {
+          const sql = cteParts.join(' UNION ') + ' ORDER BY rfq_id, name';
+          const rows = await db.any(sql, params);
+
+          // Group by rfq_id
+          const grouped = {};
+          for (const row of rows) {
+            if (!grouped[row.rfq_id]) grouped[row.rfq_id] = [];
+            // Deduplicate by user_id
+            if (!grouped[row.rfq_id].some(u => u.id === row.user_id)) {
+              grouped[row.rfq_id].push({ id: row.user_id, name: row.name, email: row.email });
+            }
+          }
+
+          for (const rfq of approvalRfqs) {
+            result[rfq.id] = {
+              type: 'approval',
+              label: APPROVAL_LABEL,
+              users: grouped[rfq.id] || []
+            };
+          }
+        } else {
+          for (const rfq of approvalRfqs) {
+            result[rfq.id] = { type: 'approval', label: APPROVAL_LABEL, users: [] };
+          }
+        }
+      } catch (err) {
+        console.error('getActionHoldersForRFQs approval error:', err);
+        for (const rfq of approvalRfqs) {
+          result[rfq.id] = null;
+        }
+      }
+    }
+
+    // --- 2. Batch resolve permission-stage action holders ---
+    if (permissionRfqs.length > 0) {
+      try {
+        // Deduplicate by (hotel_id, department_id|null, resource)
+        const lookupMap = new Map();
+        for (const rfq of permissionRfqs) {
+          const config = PERMISSION_STAGE_CONFIG[rfq.stage];
+          const deptId = config.useDepartment && rfq.department_id ? parseInt(rfq.department_id) : null;
+          const key = `${rfq.hotel_id}|${deptId}|${config.resource}`;
+
+          if (!lookupMap.has(key)) {
+            lookupMap.set(key, {
+              hotelIds: [parseInt(rfq.hotel_id)],
+              resource: config.resource,
+              actions: config.actions,
+              departmentId: deptId,
+              label: config.label,
+              rfqIds: []
+            });
+          }
+          lookupMap.get(key).rfqIds.push(rfq.id);
+        }
+
+        // Execute all unique lookups in parallel
+        const lookupResults = await Promise.all(
+          [...lookupMap.values()].map(async (lookup) => {
+            const users = await rbacModel.getUsersWithModuleActionsForHotels(
+              lookup.hotelIds, lookup.resource, lookup.actions, lookup.departmentId
+            );
+            return { rfqIds: lookup.rfqIds, label: lookup.label, users };
+          })
+        );
+
+        // Map results back to RFQ IDs
+        for (const lr of lookupResults) {
+          for (const rfqId of lr.rfqIds) {
+            result[rfqId] = {
+              type: 'permission',
+              label: lr.label,
+              users: lr.users.map(u => ({ id: u.id, name: u.name, email: u.email }))
+            };
+          }
+        }
+      } catch (err) {
+        console.error('getActionHoldersForRFQs permission error:', err);
+        for (const rfq of permissionRfqs) {
+          result[rfq.id] = null;
+        }
+      }
+    }
+
+    return result;
   },
 
   getBuyerRfqCount: async (

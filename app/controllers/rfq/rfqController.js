@@ -7426,11 +7426,24 @@ const rfqController = {
       );
 
       // Enrich with lifecycle stage
+      let lifecycleMap = {};
       if (listRfq && listRfq.length > 0) {
         const rfqIds = listRfq.map(r => parseInt(r.id));
-        const lifecycleMap = await rfqModel.computeLifecycleStages(rfqIds);
+        lifecycleMap = await rfqModel.computeLifecycleStages(rfqIds);
         for (const rfq of listRfq) {
           rfq.lifecycle_stage = lifecycleMap[parseInt(rfq.id)] || null;
+        }
+      }
+
+      // Enrich with action holders (who can act at current lifecycle stage)
+      if (listRfq && listRfq.length > 0) {
+        try {
+          const actionHoldersMap = await rfqModel.getActionHoldersForRFQs(listRfq, lifecycleMap);
+          for (const rfq of listRfq) {
+            rfq.action_holders = actionHoldersMap[parseInt(rfq.id)] || null;
+          }
+        } catch (err) {
+          console.error('Error fetching action holders:', err);
         }
       }
 
@@ -7505,11 +7518,24 @@ const rfqController = {
       );
 
       // Enrich with lifecycle stage
+      let lifecycleMap = {};
       if (listRfq && listRfq.length > 0) {
         const rfqIds = listRfq.map(r => parseInt(r.id));
-        const lifecycleMap = await rfqModel.computeLifecycleStages(rfqIds);
+        lifecycleMap = await rfqModel.computeLifecycleStages(rfqIds);
         for (const rfq of listRfq) {
           rfq.lifecycle_stage = lifecycleMap[parseInt(rfq.id)] || null;
+        }
+      }
+
+      // Enrich with action holders (who can act at current lifecycle stage)
+      if (listRfq && listRfq.length > 0) {
+        try {
+          const actionHoldersMap = await rfqModel.getActionHoldersForRFQs(listRfq, lifecycleMap);
+          for (const rfq of listRfq) {
+            rfq.action_holders = actionHoldersMap[parseInt(rfq.id)] || null;
+          }
+        } catch (err) {
+          console.error('Error fetching action holders:', err);
         }
       }
 
