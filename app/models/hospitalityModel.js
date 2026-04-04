@@ -688,15 +688,17 @@ const hospitalityModel = {
   },
 
   hasValidPaidSubscription: async (vendorId) => {
-    // Check if vendor has active subscriptions whose linked payment is actually successful
+    // Check if vendor has active subscriptions that are either:
+    // 1. Linked to a successful payment (paid subscription)
+    // 2. Have no payment_id (admin-assigned subscription)
     const result = await db.oneOrNone(
       `SELECT COUNT(*) as count
        FROM tbl_vendor_hotel_category_subscription vhcs
-       JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
+       LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
        WHERE vhcs.vendor_id = $1
          AND vhcs.status = 'active'
          AND vhcs.end_date >= CURRENT_DATE
-         AND vp.payment_status IN ('paid', 'success')`,
+         AND (vp.payment_status IN ('paid', 'success') OR vhcs.payment_id IS NULL)`,
       [vendorId]
     );
     return result && parseInt(result.count) > 0;
@@ -724,7 +726,7 @@ const hospitalityModel = {
        WHERE vhcs.vendor_id = $1
          AND vhcs.status IN ('active', 'expired')
          AND vhcs.end_date < CURRENT_DATE
-         AND vp.payment_status IN ('paid', 'success')
+         AND (vp.payment_status IN ('paid', 'success') OR vhcs.payment_id IS NULL)
        ORDER BY vhcs.end_date DESC, vhcs.id DESC`,
       [vendorId]
     );
@@ -759,9 +761,12 @@ const hospitalityModel = {
        WHERE vendor_id = $1
          AND status = 'active'
          AND end_date < CURRENT_DATE
-         AND payment_id IN (
-           SELECT id FROM tbl_vendor_payments
-           WHERE payment_status IN ('paid', 'success')
+         AND (
+           payment_id IN (
+             SELECT id FROM tbl_vendor_payments
+             WHERE payment_status IN ('paid', 'success')
+           )
+           OR payment_id IS NULL
          )`,
       [vendorId]
     );
@@ -773,9 +778,12 @@ const hospitalityModel = {
        SET status = 'expired'
        WHERE status = 'active'
          AND end_date < CURRENT_DATE
-         AND payment_id IN (
-           SELECT id FROM tbl_vendor_payments
-           WHERE payment_status IN ('paid', 'success')
+         AND (
+           payment_id IN (
+             SELECT id FROM tbl_vendor_payments
+             WHERE payment_status IN ('paid', 'success')
+           )
+           OR payment_id IS NULL
          )`
     );
   },

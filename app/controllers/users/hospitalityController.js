@@ -2049,16 +2049,17 @@ const HospitalityController = {
       const allSubs = await hospitalityModel.getVendorSubscriptionStatus(vendorId);
 
       // Separate current (active/non-expired) and expired subscriptions
+      // A subscription is valid if paid (success) OR admin-assigned (payment_id NULL → payment_status NULL)
       const now = Moment().startOf('day');
-      const isPaidStatus = (s) => s.payment_status === 'paid' || s.payment_status === 'success';
+      const isValidSub = (s) => s.payment_status === 'paid' || s.payment_status === 'success' || !s.payment_status;
       const activeSubs = allSubs.filter(s =>
-        Moment(s.end_date).isSameOrAfter(now, 'day') && isPaidStatus(s)
+        Moment(s.end_date).isSameOrAfter(now, 'day') && isValidSub(s)
       );
       const expiredSubs = allSubs.filter(s =>
-        Moment(s.end_date).isBefore(now, 'day') && isPaidStatus(s)
+        Moment(s.end_date).isBefore(now, 'day') && isValidSub(s)
       );
       const pendingSubs = allSubs.filter(s =>
-        !s.payment_status || s.payment_status === 'created' || s.payment_status === 'pending'
+        s.payment_status === 'created' || s.payment_status === 'pending'
         || s.status === 'pending'
       );
 
