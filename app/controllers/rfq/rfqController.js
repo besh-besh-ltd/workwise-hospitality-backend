@@ -7184,25 +7184,57 @@ const rfqController = {
 
       const rfqData = rfQItem && rfQItem.length > 0 ? rfQItem[0] : rfQItem;
 
+      let lifecycleMap = {};
       if (rfqData?.id) {
-        const lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
+        lifecycleMap = await rfqModel.computeLifecycleStages([parseInt(rfqData.id)]);
         rfqData.lifecycle_stage = lifecycleMap[parseInt(rfqData.id)] || null;
       }
 
-      if (rfqData?.hotel_id) {
+      // Enrich with action holders (who can act at current lifecycle stage)
+      if (rfqData?.id && rfqData.lifecycle_stage) {
         try {
+          const actionHoldersMap = await rfqModel.getActionHoldersForRFQs([rfqData], lifecycleMap);
+          rfqData.action_holders = actionHoldersMap[parseInt(rfqData.id)] || null;
+        } catch (err) {
+          console.error('Error fetching action holders for RFQ detail:', err);
+          rfqData.action_holders = null;
+        }
+      }
+
+      if (rfqData?.hotel_id) {
+        const hotelIds = [parseInt(rfqData.hotel_id)];
+        const deptId = rfqData.department_id ? parseInt(rfqData.department_id) : null;
+        try {
+          // Technical evaluators: scoped to BU + Department
           rfqData.technical_evaluators = await rbacModel.getUsersWithModuleActionsForHotels(
-            [parseInt(rfqData.hotel_id)],
-            'te',
-            ['read', 'create'],
-            rfqData.department_id ? parseInt(rfqData.department_id) : null
+            hotelIds, 'te', ['read', 'create'], deptId
           );
         } catch (evaluatorError) {
           console.error('Error fetching technical evaluators for RFQ detail:', evaluatorError);
           rfqData.technical_evaluators = [];
         }
+        try {
+          // Commercial evaluators: scoped to BU only (no department)
+          rfqData.commercial_evaluators = await rbacModel.getUsersWithModuleActionsForHotels(
+            hotelIds, 'quote-compare', ['read', 'create'], null
+          );
+        } catch (err) {
+          console.error('Error fetching commercial evaluators for RFQ detail:', err);
+          rfqData.commercial_evaluators = [];
+        }
+        try {
+          // PO initiators: scoped to BU only (no department)
+          rfqData.po_initiators = await rbacModel.getUsersWithModuleActionsForHotels(
+            hotelIds, 'awarding', ['read', 'create'], null
+          );
+        } catch (err) {
+          console.error('Error fetching PO initiators for RFQ detail:', err);
+          rfqData.po_initiators = [];
+        }
       } else {
         rfqData.technical_evaluators = [];
+        rfqData.commercial_evaluators = [];
+        rfqData.po_initiators = [];
       }
 
       // Add tender payment status for vendor viewers (sourced from main query)
