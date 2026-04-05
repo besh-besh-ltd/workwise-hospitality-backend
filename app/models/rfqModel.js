@@ -1,6 +1,6 @@
 import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
-import generalModel, { getApprovalInstanceDetails } from './generalModel.js';
+import generalModel, { getApprovalInstanceDetails, findBestMatchingPolicy, resolveApprovers } from './generalModel.js';
 import userModel from './userModel.js';
 import cmsModel from './cmsModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
@@ -3448,6 +3448,14 @@ LIMIT 2;
         FROM tbl_rfq_purchase_order
         WHERE rfq_id = ANY($1::int[])
         GROUP BY rfq_id
+      ),
+      -- Whether tech eval is configured for this RFQ
+      has_tech_eval AS (
+        SELECT DISTINCT rfq_id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
+      ),
+      -- Whether any quotes have been received
+      has_quotes AS (
+        SELECT rfq_id FROM tbl_quotes WHERE rfq_id = ANY($1::int[]) GROUP BY rfq_id HAVING COUNT(*) > 0
       )
       SELECT
         rd.id AS rfq_id,
@@ -3469,10 +3477,11 @@ LIMIT 2;
           -- Stage 6: Negotiation Ongoing
           WHEN an.rfq_id IS NOT NULL
             THEN 'NEGOTIATION_ONGOING'
-          -- Stage 5: Commercial Evaluation (all products have cleared vendors)
-          WHEN pwc.products_cleared IS NOT NULL
-            AND pc.total_products IS NOT NULL
-            AND pwc.products_cleared >= pc.total_products
+          -- Stage 5: Commercial Evaluation
+          --   (a) TE flow: all products have cleared vendors (approver approved, in cleared table)
+          --   (b) No-TE flow: quotes received, no tech eval configured → straight to commercial
+          WHEN (pwc.products_cleared IS NOT NULL AND pc.total_products IS NOT NULL AND pwc.products_cleared >= pc.total_products)
+            OR (hte.rfq_id IS NULL AND hq.rfq_id IS NOT NULL)
             THEN 'COMMERCIAL_EVALUATION'
           -- Stage 4: Technical Approver Rejected
           WHEN tl.status = 'REJECTED'
@@ -3480,9 +3489,13 @@ LIMIT 2;
           -- Stage 3: Technical Approving
           WHEN tl.status = 'PENDING'
             THEN 'TECHNICAL_APPROVING'
-          -- Stage 2: Technical Evaluating (published, no TECHNICAL approval yet)
+          -- Stage 2: Technical Evaluating (quotes received, tech eval configured, awaiting buyer evaluation)
           WHEN rd.is_published = 1 AND rd.status = 1 AND tl.rfq_id IS NULL
+            AND hte.rfq_id IS NOT NULL AND hq.rfq_id IS NOT NULL
             THEN 'TECHNICAL_EVALUATING'
+          -- Stage 1.5: Awaiting Quotes (published, open, no quotes received yet)
+          WHEN rd.is_published = 1 AND rd.status = 1 AND hq.rfq_id IS NULL
+            THEN 'AWAITING_QUOTES'
           -- Stage 1: RFQ Approval (ready to publish / pending approval)
           WHEN rd.status IN (3, 4) OR (rd.is_published = 0 AND rd.status != 1)
             THEN 'RFQ_APPROVAL'
@@ -3496,6 +3509,8 @@ LIMIT 2;
       LEFT JOIN neg_quote_pending nqp ON nqp.rfq_id = rd.id
       LEFT JOIN neg_quote_approved nqa ON nqa.rfq_id = rd.id
       LEFT JOIN po_data pd ON pd.rfq_id = rd.id
+      LEFT JOIN has_tech_eval hte ON hte.rfq_id = rd.id
+      LEFT JOIN has_quotes hq ON hq.rfq_id = rd.id
     `;
 
     try {
@@ -3735,6 +3750,7 @@ LIMIT 2;
     // Phase mapping from raw lifecycle stages
     const PHASE_MAP = {
       RFQ_APPROVAL: 'rfq_approval',
+      AWAITING_QUOTES: 'commercial',  // No tech eval → skip technical phase, land in commercial
       TECHNICAL_EVALUATING: 'technical',
       TECHNICAL_APPROVING: 'technical',
       TECHNICAL_REJECTED: 'technical',
@@ -3751,7 +3767,7 @@ LIMIT 2;
     try {
       // 1. Get RFQ basic info + current lifecycle stage
       const rfqBasic = await db.oneOrNone(`
-        SELECT id, is_published, status, is_tender, hotel_id, department_id FROM tbl_rfq WHERE id = $1
+        SELECT id, is_published, status, is_tender, hotel_id, department_id, hospitality_company_id, process_id FROM tbl_rfq WHERE id = $1
       `, [rfqId]);
       if (!rfqBasic) return { rfq_id: rfqId, current_stage: null, phases: [] };
 
@@ -3887,17 +3903,13 @@ LIMIT 2;
         `, [rfqId]).catch(() => []),
       ]);
 
-      // 3. Fetch detailed approval instances
+      // 3. Fetch detailed approval instances (parallel)
       const fetchDetails = async (rows) => {
         if (!rows?.length) return [];
-        const details = [];
-        for (const row of rows) {
-          try {
-            const d = await getApprovalInstanceDetails(row.id, userId);
-            if (d) details.push(d);
-          } catch { /* skip */ }
-        }
-        return details;
+        const results = await Promise.allSettled(
+          rows.map(row => getApprovalInstanceDetails(row.id, userId))
+        );
+        return results.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
       };
 
       const [rfqApprovalDetails, techApprovalDetails, quoteApprovalDetails, poApprovalDetails] = await Promise.all([
@@ -4257,6 +4269,65 @@ LIMIT 2;
           action_holders: status === 'current' ? currentActionHolders : null,
         });
       }
+
+      // 11. Resolve upcoming actors (who will evaluate/approve in future phases)
+      const UPCOMING_PERMISSION_CONFIG = {
+        technical: { resource: 'te', actions: ['read', 'create'], useDepartment: true },
+        commercial: { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false },
+        purchase_order: { resource: 'awarding', actions: ['read', 'create'], useDepartment: false },
+      };
+      const UPCOMING_ENTITY_TYPE_MAP = {
+        rfq_approval: rfqBasic.is_tender === 1 ? 'TENDER' : 'RFQ',
+        technical: 'TECHNICAL',
+        commercial: 'NEGOTIATION_QUOTE',
+        purchase_order: 'PO',
+      };
+
+      // Resolve actors for upcoming + current phases (in parallel)
+      const companyId = parseInt(rfqBasic.hospitality_company_id);
+      const hotelId = rfqBasic.hotel_id ? parseInt(rfqBasic.hotel_id) : null;
+      const deptId = rfqBasic.department_id ? parseInt(rfqBasic.department_id) : null;
+      const processId = rfqBasic.process_id ? parseInt(rfqBasic.process_id) : null;
+      const hotelIds = hotelId ? [hotelId] : [];
+
+      const resolvePhaseActors = async (phase) => {
+        const actors = { evaluators: null, approver_steps: null };
+
+        // Permission-based evaluators
+        const permConfig = UPCOMING_PERMISSION_CONFIG[phase.key];
+        if (permConfig && hotelIds.length > 0) {
+          const pd = permConfig.useDepartment ? deptId : null;
+          const users = await rbacModel.getUsersWithModuleActionsForHotels(hotelIds, permConfig.resource, permConfig.actions, pd).catch(() => []);
+          if (users.length > 0) actors.evaluators = users.map(u => ({ id: u.id, name: u.name }));
+        }
+
+        // Policy-based approvers
+        const entityType = UPCOMING_ENTITY_TYPE_MAP[phase.key];
+        if (entityType) {
+          try {
+            const policy = await findBestMatchingPolicy({ entity_type: entityType, hospitality_company_id: companyId, hotel_id: hotelId, department_id: deptId, process_id: processId });
+            if (policy) {
+              const policySteps = await db.any('SELECT * FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 ORDER BY step_order ASC', [policy.id]);
+              const stepResults = await Promise.allSettled(
+                policySteps.map(async (step) => {
+                  const ids = await resolveApprovers(step, companyId, hotelId, deptId, null, db, null);
+                  if (!ids?.length) return null;
+                  const names = await db.any('SELECT id, name FROM tbl_users WHERE id = ANY($1::int[])', [ids]);
+                  return { step_order: step.step_order, decision_rule: step.decision_rule || 'ANY', approvers: names.map(u => ({ id: u.id, name: u.name })) };
+                })
+              );
+              const resolved = stepResults.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
+              if (resolved.length > 0) actors.approver_steps = resolved;
+            }
+          } catch (e) { console.error(`Policy resolution failed for ${entityType}:`, e.message); }
+        }
+
+        if (actors.evaluators || actors.approver_steps) phase.upcoming_actors = actors;
+      };
+
+      await Promise.allSettled(
+        phases.filter(p => p.status === 'upcoming' || p.status === 'current').map(resolvePhaseActors)
+      );
 
       return { rfq_id: rfqId, current_stage: currentStage, current_phase: currentPhase, phases };
     } catch (err) {
