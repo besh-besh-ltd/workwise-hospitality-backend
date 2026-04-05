@@ -1839,7 +1839,7 @@ export async function deletePolicySteps(approval_policy_id) {
  * @param {number|null} department_id - Department ID for filtering (optional)
  * @returns {Array<number>} Array of user IDs
  */
-async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, departmentAccessType = null, t = db, initiatedBy = null) {
+export async function resolveApprovers(step, hospitality_company_id, hotel_id = null, department_id = null, departmentAccessType = null, t = db, initiatedBy = null) {
   const userIds = [];
 
   if (step.approver_source_type === 'USER') {
