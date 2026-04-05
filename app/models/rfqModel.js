@@ -3449,6 +3449,15 @@ LIMIT 2;
         WHERE rfq_id = ANY($1::int[])
         GROUP BY rfq_id
       ),
+      -- Distinct products covered by approved POs
+      po_products_approved AS (
+        SELECT po.rfq_id, COUNT(DISTINCT pop.rfq_product_id)::int AS products_with_approved_po
+        FROM tbl_rfq_purchase_order po
+        JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+        WHERE po.rfq_id = ANY($1::int[])
+          AND po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+        GROUP BY po.rfq_id
+      ),
       -- Whether tech eval is configured for this RFQ
       has_tech_eval AS (
         SELECT DISTINCT rfq_id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
@@ -3460,8 +3469,10 @@ LIMIT 2;
       SELECT
         rd.id AS rfq_id,
         CASE
-          -- Stage 10: Approved & Completed (all POs approved/beyond)
-          WHEN pd.total_pos > 0 AND pd.total_pos = pd.approved_pos
+          -- Stage 10: Approved & Completed (all products have approved POs)
+          WHEN ppa.products_with_approved_po IS NOT NULL
+            AND pc.total_products IS NOT NULL
+            AND ppa.products_with_approved_po >= pc.total_products
             THEN 'APPROVED_COMPLETED'
           -- Stage 9: Purchase Order Approval
           WHEN COALESCE(pd.pending_approval_pos, 0) > 0
@@ -3493,7 +3504,10 @@ LIMIT 2;
           WHEN rd.is_published = 1 AND rd.status = 1 AND tl.rfq_id IS NULL
             AND hte.rfq_id IS NOT NULL AND hq.rfq_id IS NOT NULL
             THEN 'TECHNICAL_EVALUATING'
-          -- Stage 1.5: Awaiting Quotes (published, open, no quotes received yet)
+          -- Stage 1.75: Tech eval configured but no quotes yet — lifecycle is in technical phase
+          WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NOT NULL AND hq.rfq_id IS NULL
+            THEN 'TECHNICAL_AWAITING_QUOTES'
+          -- Stage 1.5: Awaiting Quotes (published, open, NO tech eval configured)
           WHEN rd.is_published = 1 AND rd.status = 1 AND hq.rfq_id IS NULL
             THEN 'AWAITING_QUOTES'
           -- Stage 1: RFQ Approval (ready to publish / pending approval)
@@ -3509,6 +3523,7 @@ LIMIT 2;
       LEFT JOIN neg_quote_pending nqp ON nqp.rfq_id = rd.id
       LEFT JOIN neg_quote_approved nqa ON nqa.rfq_id = rd.id
       LEFT JOIN po_data pd ON pd.rfq_id = rd.id
+      LEFT JOIN po_products_approved ppa ON ppa.rfq_id = rd.id
       LEFT JOIN has_tech_eval hte ON hte.rfq_id = rd.id
       LEFT JOIN has_quotes hq ON hq.rfq_id = rd.id
     `;
@@ -3751,6 +3766,7 @@ LIMIT 2;
     const PHASE_MAP = {
       RFQ_APPROVAL: 'rfq_approval',
       AWAITING_QUOTES: 'commercial',  // No tech eval → skip technical phase, land in commercial
+      TECHNICAL_AWAITING_QUOTES: 'technical',  // Tech eval configured but no quotes yet
       TECHNICAL_EVALUATING: 'technical',
       TECHNICAL_APPROVING: 'technical',
       TECHNICAL_REJECTED: 'technical',
@@ -3773,8 +3789,14 @@ LIMIT 2;
 
       const lifecycleMap = await rfqModel.computeLifecycleStages([rfqId]);
       const currentStage = lifecycleMap[rfqId] || null;
-      const currentPhase = currentStage ? PHASE_MAP[currentStage] : null;
-      const currentPhaseIndex = currentPhase ? PHASES_ORDERED.indexOf(currentPhase) : -1;
+      let currentPhase = currentStage ? PHASE_MAP[currentStage] : null;
+      let currentPhaseIndex = currentPhase ? PHASES_ORDERED.indexOf(currentPhase) : -1;
+
+      // APPROVED_COMPLETED means all phases are done — no "current" phase
+      if (currentStage === 'APPROVED_COMPLETED') {
+        currentPhase = null;
+        currentPhaseIndex = PHASES_ORDERED.length; // Beyond all phases → all show as 'completed'
+      }
 
       // Resolve action holders for the current stage (who needs to act)
       let currentActionHolders = null;
@@ -3884,12 +3906,19 @@ LIMIT 2;
           ORDER BY qf.created_at
         `, [rfqId]).catch(() => []),
 
-        // PO data
+        // PO data (with product names)
         db.any(`
           SELECT po.id, po.po_number, po.status, po.total_amount,
             u_vendor.name AS vendor_name,
             COALESCE(u_vendor.company_name, u_vendor.organization_name) AS vendor_company,
-            po.created_at
+            po.created_at,
+            (
+              SELECT STRING_AGG(COALESCE(pv.name, 'Product ' || pop.rfq_product_id), ', ' ORDER BY pop.id)
+              FROM tbl_purchase_order_product pop
+              LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+              LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+              WHERE pop.purchase_order_id = po.id
+            ) AS product_names
           FROM tbl_rfq_purchase_order po
           LEFT JOIN tbl_users u_vendor ON u_vendor.id = po.vendor_id
           WHERE po.rfq_id = $1
@@ -3902,6 +3931,13 @@ LIMIT 2;
           JOIN tbl_users u ON u.id = te.created_by WHERE te.rfq_id = $1
         `, [rfqId]).catch(() => []),
       ]);
+
+      // Override phase mapping: AWAITING_QUOTES defaults to 'commercial',
+      // but when tech eval IS configured, the next step should be 'technical'.
+      if (currentStage === 'AWAITING_QUOTES' && techEvalProducts.length > 0) {
+        currentPhase = 'technical';
+        currentPhaseIndex = PHASES_ORDERED.indexOf('technical');
+      }
 
       // 3. Fetch detailed approval instances (parallel)
       const fetchDetails = async (rows) => {
@@ -3946,12 +3982,18 @@ LIMIT 2;
         }
       }
 
-      // 3c. Enrich PO instances with PO number (entity_id = po_id)
+      // 3c. Enrich PO instances with PO number + product names (entity_id = po_id)
       if (poApprovalDetails.length > 0) {
         const poIds = [...new Set(poApprovalDetails.map(d => d.entity_id).filter(Boolean))];
         if (poIds.length > 0) {
           const poInfo = await db.any(`
-            SELECT id, po_number FROM tbl_rfq_purchase_order WHERE id = ANY($1::int[])
+            SELECT po.id, po.po_number,
+              (SELECT STRING_AGG(COALESCE(pv.name, 'Product ' || pop.rfq_product_id), ', ' ORDER BY pop.id)
+               FROM tbl_purchase_order_product pop
+               LEFT JOIN tbl_rfq_products rp ON rp.id = pop.rfq_product_id
+               LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+               WHERE pop.purchase_order_id = po.id) AS product_names
+            FROM tbl_rfq_purchase_order po WHERE po.id = ANY($1::int[])
           `, [poIds]).catch(() => []);
           const poMap = {};
           poInfo.forEach(p => { poMap[p.id] = p; });
@@ -3959,6 +4001,7 @@ LIMIT 2;
             if (inst.entity_id && poMap[inst.entity_id]) {
               inst.metadata = inst.metadata || {};
               inst.metadata.po_number = poMap[inst.entity_id].po_number;
+              inst.metadata.product_names = poMap[inst.entity_id].product_names;
             }
           }
         }
@@ -4124,6 +4167,7 @@ LIMIT 2;
           id: po.id, po_number: po.po_number, status: po.status,
           vendor_name: po.vendor_name, vendor_company: po.vendor_company,
           total_amount: po.total_amount ? parseFloat(po.total_amount) : null,
+          product_names: po.product_names || null,
           created_at: po.created_at,
         }));
       };
@@ -4169,12 +4213,15 @@ LIMIT 2;
           const names = [];
           (latestInstance.steps || []).forEach(s => (s.approvers || []).forEach(a => { if (a.status === 'APPROVED' && a.user_name) names.push(a.user_name); }));
           summary = names.length > 0 ? `Approved by ${names.join(', ')}` : 'Approved';
+        } else if (latestInstance?.status === 'CANCELLED') {
+          summary = 'Approval was cancelled';
         } else if (!hasData) {
           summary = 'No approval configured';
         }
 
         phases.push({
           key: 'rfq_approval', label: 'RFQ Approval', status, summary,
+          is_cancelled: latestInstance?.status === 'CANCELLED',
           completed_at: latestInstance?.completed_at || null,
           approval_instances: hasData ? formatApprovalInstances(rfqApprovalDetails) : null,
         });
@@ -4198,12 +4245,16 @@ LIMIT 2;
 
         // Determine sub-status based on current raw stage
         let subStatus = null;
-        if (currentStage === 'TECHNICAL_EVALUATING') subStatus = 'evaluating';
+        if (currentStage === 'TECHNICAL_AWAITING_QUOTES') subStatus = 'awaiting_quotes';
+        else if (currentStage === 'TECHNICAL_EVALUATING') subStatus = 'evaluating';
         else if (currentStage === 'TECHNICAL_APPROVING') subStatus = 'approving';
         else if (currentStage === 'TECHNICAL_REJECTED') subStatus = 'rejected';
 
+        const latestTechInstance = techApprovalDetails.length > 0 ? techApprovalDetails[techApprovalDetails.length - 1] : null;
+
         phases.push({
           key: 'technical', label: 'Technical Evaluation', status, summary, sub_status: subStatus,
+          is_cancelled: latestTechInstance?.status === 'CANCELLED',
           evaluators: evaluators.map(e => ({ id: e.id, name: e.name })),
           products: techProducts,
           approval_instances: techApprovalDetails.length > 0 ? formatApprovalInstances(techApprovalDetails) : null,
@@ -4234,8 +4285,11 @@ LIMIT 2;
         else if (currentStage === 'NEGOTIATION_ONGOING') subStatus = 'negotiating';
         else if (currentStage === 'QUOTATION_APPROVAL') subStatus = 'approving';
 
+        const latestQuoteInstance = quoteApprovalDetails.length > 0 ? quoteApprovalDetails[quoteApprovalDetails.length - 1] : null;
+
         phases.push({
           key: 'commercial', label: 'Commercial Evaluation', status, summary, sub_status: subStatus,
+          is_cancelled: latestQuoteInstance?.status === 'CANCELLED',
           products: commercialProducts,
           approval_instances: quoteApprovalDetails.length > 0 ? formatApprovalInstances(quoteApprovalDetails) : null,
           action_holders: status === 'current' ? currentActionHolders : null,
@@ -4262,8 +4316,11 @@ LIMIT 2;
         else if (currentStage === 'PO_APPROVAL') subStatus = 'approving';
         else if (currentStage === 'APPROVED_COMPLETED') subStatus = 'completed';
 
+        const latestPOInstance = poApprovalDetails.length > 0 ? poApprovalDetails[poApprovalDetails.length - 1] : null;
+
         phases.push({
           key: 'purchase_order', label: 'Purchase Order', status, summary, sub_status: subStatus,
+          is_cancelled: latestPOInstance?.status === 'CANCELLED',
           purchase_orders: purchaseOrders,
           approval_instances: poApprovalDetails.length > 0 ? formatApprovalInstances(poApprovalDetails) : null,
           action_holders: status === 'current' ? currentActionHolders : null,
