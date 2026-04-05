@@ -32,10 +32,10 @@ const defaultEmailTemplate = {
   address: `1st Floor, 271 Business Park, Model Industrial Estate, near Virwani Industrial Estate <br/>
       off Western Express Highway, Vishveshwar Nagar, Goregaon, Mumbai, Maharashtra 400063`,
   displayAddress: false,
-  primaryColor: '#2D2D2D',
-  primaryTextColor: '#000000',
-  seconderyColor: '#ffffff',
-  seconderyTextColor: '#000000'
+  primaryColor: '#1A5C7E',
+  primaryTextColor: '#FFFFFF',
+  seconderyColor: '#8BB92E',
+  seconderyTextColor: '#FFFFFF'
 };
 
 /**
@@ -62,15 +62,19 @@ function generateEmailTemplate(headerContent, containerContent, userID = null) {
       }
     : defaultEmailTemplate;
 
-  const headerBackground = userID && (companyObj.find((c) => c.userID === userID))
-    ? primaryColor
-    : '#3A3A3A';
-
   const isCompanySpecific = Boolean(userID && companyObj.find((c) => c.userID === userID));
 
+  const outerBackground = isCompanySpecific
+    ? primaryColor
+    : `linear-gradient(135deg, #0F4C6B 0%, #1A5C7E 40%, #2E7A5A 75%, #6B9E35 100%)`;
+
+  const headerBg = isCompanySpecific
+    ? primaryColor
+    : `linear-gradient(135deg, #134A66 0%, #1A5C7E 60%, #3A7A50 100%)`;
+
   return `
-    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background: ${primaryColor}; color: ${primaryTextColor}; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
-        <div style="background: ${headerBackground}; padding: 32px 28px; border-radius: 16px; text-align: center; margin-bottom: 16px;">
+    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background: ${outerBackground}; background-color: ${primaryColor}; color: ${primaryTextColor}; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
+        <div style="background: ${headerBg}; background-color: #134A66; padding: 32px 28px; border-radius: 16px; text-align: center; margin-bottom: 16px;">
             <img style="width: 190px; max-width: 100%; height: auto; display: inline-block; margin: 0 auto;" src="${logo}" alt="Phileein Hospitality" />
         </div>
         <hr style="border-color: ${seconderyColor}" />
@@ -82,8 +86,8 @@ function generateEmailTemplate(headerContent, containerContent, userID = null) {
 
         <hr style="border-color: ${seconderyColor}" />
         <div style="text-align: center; padding: 8px 0 0;">
-          <p style="font-size: 16px; color: #D1D5DB; margin: 0; font-weight: 500;">If you need assistance, contact us at <a href="mailto:support@phileeinhospitality.com" style="color: #D1D5DB; text-decoration: underline;">support@phileeinhospitality.com</a></p>
-          <p style="font-size: 14px; color: #D1D5DB; margin: 6px 0 0; font-weight: 500;">© Phileein Hospitality Procurement Platform. All Rights Reserved.</p>
+          <p style="font-size: 16px; color: #E0F0F8; margin: 0; font-weight: 500;">If you need assistance, contact us at <a href="mailto:support@phileeinhospitality.com" style="color: #E0F0F8; text-decoration: underline;">support@phileeinhospitality.com</a></p>
+          <p style="font-size: 14px; color: #E0F0F8; margin: 6px 0 0; font-weight: 500;">&copy; Phileein Hospitality Procurement Platform. All Rights Reserved.</p>
         </div>
     </div>
     `;
