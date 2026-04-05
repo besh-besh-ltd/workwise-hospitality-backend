@@ -2659,6 +2659,12 @@ LIMIT 1;`;
         `
             : ''
         }
+        ,EXISTS (
+            SELECT 1 FROM tbl_rfq_purchase_order _po
+            JOIN tbl_purchase_order_product _pop ON _pop.purchase_order_id = _po.id
+            WHERE _po.rfq_id = RFQ_P.rfq_id AND _pop.rfq_product_id = RFQ_P.id
+              AND _po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+        ) AS has_approved_po
 
     FROM
         tbl_rfq_products RFQ_P
@@ -3287,7 +3293,7 @@ LIMIT 2;
           OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
               AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
         )
-      )) AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
+      )) AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4))
       -- Permission filter: only RFQs the user has read access for
       AND EXISTS (
         SELECT 1 FROM tbl_user_role_scopes _urs2
@@ -4363,7 +4369,7 @@ LIMIT 2;
             OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
                 AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
           )
-        )) AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
+        )) AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4))
         -- Permission filter: only RFQs the user has read access for
         AND EXISTS (
           SELECT 1 FROM tbl_user_role_scopes _urs2
@@ -5609,6 +5615,24 @@ LIMIT 2;
         SET status = ${parseInt(2)}, updated_by = ${user_id}
         WHERE id=$1 RETURNING *`,
         [id]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  withdrawRFQPublish: async (id, user_id, status) => {
+    return new Promise(function (resolve, reject) {
+      db.query(
+        `UPDATE tbl_rfq
+        SET status = $1, updated_by = $2
+        WHERE id = $3 RETURNING *`,
+        [status, user_id, id]
       )
         .then(function (data) {
           resolve(data);
@@ -10783,7 +10807,7 @@ ORDER BY m.created_at;
         OR RFQ.project_id IN (
           SELECT project_id FROM tbl_project_team WHERE user_id = ${user_id}
         )
-      ) AND (RFQ.is_published = 0 AND RFQ.status NOT IN (3, 4))
+      ) AND (RFQ.is_published = 0 AND RFQ.status NOT IN (2, 3, 4))
       ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
       ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
       ${
@@ -10799,7 +10823,7 @@ ORDER BY m.created_at;
       const countQuery = `
         SELECT COUNT(*) AS total_count
         FROM tbl_rfq RFQ
-        WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 0
+        WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 0 AND RFQ.status != 2
         ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
         ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
         ${

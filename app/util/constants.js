@@ -31,7 +31,8 @@ export const RFQ_STATUSES = {
   OPEN: 1,                  // Published and active
   CLOSED: 2,                // Closed
   PENDING_APPROVAL: 3,      // Newly created, awaiting approval
-  READY_TO_PUBLISH: 4       // Approved, waiting for publish date
+  READY_TO_PUBLISH: 4,      // Approved, waiting for publish date
+  WITHDRAWN: 5              // Publish request withdrawn by creator
 }
 
 export const INVALID_PO_STATUSES_FOR_VENDOR = ['draft', 'pending_approval', 'cancelled', 'rejected']

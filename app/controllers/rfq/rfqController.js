@@ -5028,6 +5028,36 @@ const rfqController = {
           }
         }
 
+        // Block edits to products that have approved POs
+        const poApprovedProducts = await t.any(
+          `SELECT rp.id FROM tbl_rfq_products rp
+           WHERE rp.rfq_id = $1
+           AND EXISTS (
+             SELECT 1 FROM tbl_rfq_purchase_order po
+             JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+             WHERE po.rfq_id = rp.rfq_id AND pop.rfq_product_id = rp.id
+             AND po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+           )`,
+          [rfq_id]
+        );
+        if (poApprovedProducts.length > 0) {
+          const lockedIds = new Set(poApprovedProducts.map(p => p.id));
+          const updatable = data.updatableData || {};
+          const updatableProducts = updatable.products || {};
+
+          // Check if any locked product is being modified or deleted
+          const modifiedLockedProducts = Object.keys(updatableProducts.updatable || {}).filter(id => lockedIds.has(parseInt(id)));
+          const deletedLockedProducts = (updatableProducts.deletable || []).filter(id => lockedIds.has(parseInt(id)));
+
+          if (modifiedLockedProducts.length > 0 || deletedLockedProducts.length > 0) {
+            throw {
+              isValidationError: true,
+              errors: [{ field: 'products', message: 'Cannot edit products with approved Purchase Orders' }],
+              message: 'Cannot edit products with approved Purchase Orders'
+            };
+          }
+        }
+
         // List of keys to populate from prev if not already present
         const fieldsToPopulate = [
           'company_name',
@@ -8668,6 +8698,17 @@ const rfqController = {
     const { id } = req.user;
 
     try {
+      const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+      if (!rfqDetails) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found' });
+      }
+      if (String(rfqDetails.created_by) !== String(id)) {
+        return res.status(403).json({ status: 0, message: 'Only the RFQ creator can close this RFQ' });
+      }
+      if (String(rfqDetails.status) !== '1') {
+        return res.status(400).json({ status: 0, message: 'Only open RFQs can be closed' });
+      }
+
       const rfQItem = await rfqModel.changeRFQStatus(rfq_id, id);
       const vendorList = await rfqModel.getRfqVendorListAlongWithSPOC(rfq_id);
 
@@ -8689,6 +8730,193 @@ const rfqController = {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+
+  withdrawPublish: async (req, res, next) => {
+    const rfq_id = req.params.id;
+    const { id: user_id } = req.user;
+
+    try {
+      const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+      if (!rfqDetails) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found' });
+      }
+      if (String(rfqDetails.created_by) !== String(user_id)) {
+        return res.status(403).json({ status: 0, message: 'Only the RFQ creator can withdraw the publish request' });
+      }
+
+      const currentStatus = parseInt(rfqDetails.status);
+      if (currentStatus !== 3 && currentStatus !== 4) {
+        return res.status(400).json({ status: 0, message: 'RFQ must be in Pending Approval or Ready to Publish status to withdraw' });
+      }
+
+      const entityType = rfqDetails.is_tender === 1 ? 'TENDER' : 'RFQ';
+
+      // Update RFQ status to WITHDRAWN (5) and cancel pending approvals
+      await db.tx(async t => {
+        await t.none(
+          'UPDATE tbl_rfq SET status = 5, updated_by = $1 WHERE id = $2',
+          [user_id, rfq_id]
+        );
+
+        // Cancel any pending approval instances
+        const pendingInstances = await t.any(
+          `SELECT id FROM tbl_approval_instances
+           WHERE entity_type = $1 AND entity_id = $2 AND status = 'PENDING'`,
+          [entityType, rfq_id]
+        );
+
+        for (const instance of pendingInstances) {
+          await t.none(
+            `UPDATE tbl_approval_instances
+             SET status = 'CANCELLED', completed_at = NOW()
+             WHERE id = $1`,
+            [instance.id]
+          );
+          await t.none(
+            `UPDATE tbl_approval_instance_steps
+             SET status = 'CANCELLED', completed_at = NOW()
+             WHERE approval_instance_id = $1 AND status = 'PENDING'`,
+            [instance.id]
+          );
+          await t.none(
+            `INSERT INTO tbl_approval_actions
+             (approval_instance_id, approver_user_id, action, comment)
+             VALUES ($1, $2, 'REJECT', $3)`,
+            [instance.id, user_id, '[CANCELLED] Publish request withdrawn by creator']
+          );
+        }
+      });
+
+      // Cancel EventBridge schedule (outside transaction — non-critical)
+      try {
+        const { removeRfqPublishJob } = await import('../../helper/cronManager.js');
+        await removeRfqPublishJob(rfq_id);
+      } catch (scheduleErr) {
+        console.error(`Failed to remove publish schedule for RFQ ${rfq_id}:`, scheduleErr.message);
+      }
+
+      // Record lifecycle event
+      await recordLifecycleEvent({
+        entity_type: entityType,
+        entity_id: parseInt(rfq_id),
+        stage: 'WITHDRAWN',
+        action: 'PUBLISH_WITHDRAWN',
+        performed_by: user_id,
+        metadata: { previous_status: currentStatus },
+        remarks: 'Publish request withdrawn by creator'
+      });
+
+      // Record quote activity for audit trail
+      await rfqModel.insertIntoQuoteActivity({
+        rfq_id: rfq_id,
+        current_status: '5',
+        created_by: user_id
+      });
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Publish request withdrawn successfully',
+        data: { rfq_id, new_status: 5 }
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message || Config.errorText.value
+      });
+    }
+  },
+
+  terminateRFQ: async (req, res, next) => {
+    const rfq_id = req.params.id;
+    const { id: user_id } = req.user;
+
+    try {
+      const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+      if (!rfqDetails) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found' });
+      }
+      if (String(rfqDetails.created_by) !== String(user_id)) {
+        return res.status(403).json({ status: 0, message: 'Only the RFQ creator can terminate this RFQ' });
+      }
+
+      const currentStatus = parseInt(rfqDetails.status);
+      if (currentStatus !== 3 && currentStatus !== 4) {
+        return res.status(400).json({ status: 0, message: 'RFQ must be in Pending Approval or Ready to Publish status to terminate' });
+      }
+
+      const entityType = rfqDetails.is_tender === 1 ? 'TENDER' : 'RFQ';
+
+      await db.tx(async t => {
+        await t.none(
+          'UPDATE tbl_rfq SET status = 2, is_published = 0, updated_by = $1 WHERE id = $2',
+          [user_id, rfq_id]
+        );
+
+        const pendingInstances = await t.any(
+          `SELECT id FROM tbl_approval_instances
+           WHERE entity_type = $1 AND entity_id = $2 AND status = 'PENDING'`,
+          [entityType, rfq_id]
+        );
+
+        for (const instance of pendingInstances) {
+          await t.none(
+            `UPDATE tbl_approval_instances
+             SET status = 'CANCELLED', completed_at = NOW()
+             WHERE id = $1`,
+            [instance.id]
+          );
+          await t.none(
+            `UPDATE tbl_approval_instance_steps
+             SET status = 'CANCELLED', completed_at = NOW()
+             WHERE approval_instance_id = $1 AND status = 'PENDING'`,
+            [instance.id]
+          );
+          await t.none(
+            `INSERT INTO tbl_approval_actions
+             (approval_instance_id, approver_user_id, action, comment)
+             VALUES ($1, $2, 'REJECT', $3)`,
+            [instance.id, user_id, '[CANCELLED] RFQ terminated by creator']
+          );
+        }
+      });
+
+      try {
+        const { removeRfqPublishJob } = await import('../../helper/cronManager.js');
+        await removeRfqPublishJob(rfq_id);
+      } catch (scheduleErr) {
+        console.error(`Failed to remove publish schedule for RFQ ${rfq_id}:`, scheduleErr.message);
+      }
+
+      await recordLifecycleEvent({
+        entity_type: entityType,
+        entity_id: parseInt(rfq_id),
+        stage: 'TERMINATED',
+        action: 'RFQ_TERMINATED',
+        performed_by: user_id,
+        metadata: { previous_status: currentStatus },
+        remarks: 'RFQ terminated by creator'
+      });
+
+      await rfqModel.insertIntoQuoteActivity({
+        rfq_id: rfq_id,
+        current_status: '2',
+        created_by: user_id
+      });
+
+      return res.status(200).json({
+        status: 1,
+        message: 'RFQ terminated successfully',
+        data: { rfq_id, new_status: 2 }
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message || Config.errorText.value
+      });
     }
   },
 
