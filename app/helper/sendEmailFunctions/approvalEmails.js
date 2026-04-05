@@ -144,26 +144,44 @@ export const sendApprovalStepNotification = async ({
     const linkPath = linkFn ? linkFn(entityId, extraContext) : `/dashboard`;
     const actionUrl = `${process.env.FRONT_END_WEBSITE}${linkPath}`;
 
-    const subject = `Action Required: Approve ${label} #${entityIdentifier} (Step ${stepOrder}/${totalSteps})`;
+    const isNegotiationType = entityType === 'NEGOTIATION' || entityType === 'NEGOTIATION_QUOTE';
+    const rfqTitle = extraContext?.rfq_title || '';
+
+    const subject = isNegotiationType
+      ? `Action Required: Approve ${label} — RFQ #${entityIdentifier}${rfqTitle ? ` ${rfqTitle}` : ''} (Step ${stepOrder}/${totalSteps})`
+      : `Action Required: Approve ${label} #${entityIdentifier} (Step ${stepOrder}/${totalSteps})`;
 
     for (const approver of approvers) {
       const headerContent = `<h2>Hello ${approver.user_name || 'Approver'},</h2>`;
 
+      const detailsList = isNegotiationType
+        ? `<ul style="list-style:none; padding-left:0; margin-top:16px;">
+            <li style="padding:4px 0;"><strong>Type:</strong> ${label}</li>
+            <li style="padding:4px 0;"><strong>RFQ Number:</strong> #${entityIdentifier}</li>
+            ${rfqTitle ? `<li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle}</li>` : ''}
+            <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
+          </ul>`
+        : `<ul style="list-style:none; padding-left:0; margin-top:16px;">
+            <li style="padding:4px 0;"><strong>Type:</strong> ${label}</li>
+            <li style="padding:4px 0;"><strong>Identifier:</strong> #${entityIdentifier}</li>
+            <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
+          </ul>`;
+
+      const approvalDescription = isNegotiationType
+        ? `<strong>${label}</strong> for <strong>RFQ #${entityIdentifier}${rfqTitle ? ` — ${rfqTitle}` : ''}</strong>`
+        : `<strong>${label} #${entityIdentifier}</strong>`;
+
       const containerContent = `
         <div style="font-size:16px; font-family:'Roboto', sans-serif; color:#333;">
           <p>
-            Your approval is required for <strong>${label} #${entityIdentifier}</strong>.
+            Your approval is required for ${approvalDescription}.
           </p>
 
           <div style="background-color:#EFF6FF; border-left:4px solid #3B82F6; padding:12px 16px; margin:16px 0; border-radius:4px;">
             <span style="color:#1E40AF; font-weight:600;">Step ${stepOrder} of ${totalSteps}</span>
           </div>
 
-          <ul style="list-style:none; padding-left:0; margin-top:16px;">
-            <li style="padding:4px 0;"><strong>Type:</strong> ${label}</li>
-            <li style="padding:4px 0;"><strong>Identifier:</strong> #${entityIdentifier}</li>
-            <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
-          </ul>
+          ${detailsList}
 
           <div style="text-align:center; margin-top:24px;">
             <a href="${actionUrl}"
