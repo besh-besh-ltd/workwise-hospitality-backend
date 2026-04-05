@@ -176,6 +176,28 @@ WHERE NOT EXISTS (
     }
   },
 
+  checkProductVendors: async (rfq_id, selectedSheets) => {
+    try {
+      const sheetFilter = (selectedSheets && Array.isArray(selectedSheets) && selectedSheets.length > 0)
+        ? `AND rp.sheet_id IN (${selectedSheets.map(Number).join(',')})` : '';
+      const rows = await db.any(`
+        SELECT rp.id, COALESCE(pv.name, 'Product ' || rp.id) AS product_name
+        FROM tbl_rfq_products rp
+        LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+        WHERE rp.rfq_id = $1 ${sheetFilter}
+          AND NOT EXISTS (
+            SELECT 1 FROM tbl_rfq_product_vendors rpv
+            WHERE rpv.rfq_id = rp.rfq_id
+              AND rpv.product_variant_id = rp.product_variant_id
+              AND rpv.variant = rp.variant
+          )
+      `, [rfq_id]);
+      return rows;
+    } catch (error) {
+      throw error;
+    }
+  },
+
   getSheetsForDraftRfq: async (rfq_id, is_processed, sheet_id) => {
     try {
       const condition = `rfq_id = ${rfq_id} ${

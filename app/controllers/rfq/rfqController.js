@@ -4784,7 +4784,20 @@ const rfqController = {
           })
           .end();
       }
-      // const products = await rfqModel.getProductsByRfqId(rfq_id);
+      // Defence-in-depth: ensure every product has at least one vendor
+      const productsWithoutVendors = await rfqModel.checkProductVendors(rfq_id, selectedSheets);
+      if (productsWithoutVendors.length > 0) {
+        const names = productsWithoutVendors.map(p => p.product_name).join(', ');
+        return res
+          .status(400)
+          .json({
+            status: 2,
+            errors: {
+              vendors: `At least one vendor is required for each product. Products without vendors: ${names}`
+            }
+          })
+          .end();
+      }
 
       await rfqModel.removeRFQData(rfq_id, selectedSheets);
 
