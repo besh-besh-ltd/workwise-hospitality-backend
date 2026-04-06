@@ -1,6 +1,6 @@
 import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
-import generalModel, { getApprovalInstanceDetails, findBestMatchingPolicy, resolveApprovers } from './generalModel.js';
+import generalModel, { getApprovalInstanceDetails, findBestMatchingPolicy, resolveApprovers, roleHasReadAndApprovePermission, ENTITY_APPROVE_RESOURCE_MAP } from './generalModel.js';
 import userModel from './userModel.js';
 import cmsModel from './cmsModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
@@ -3587,10 +3587,11 @@ LIMIT 2;
 
     const APPROVAL_STAGES = ['RFQ_APPROVAL', 'TECHNICAL_APPROVING', 'QUOTATION_APPROVAL', 'PO_APPROVAL'];
     const PERMISSION_STAGE_CONFIG = {
-      TECHNICAL_EVALUATING:  { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
-      TECHNICAL_REJECTED:    { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
-      COMMERCIAL_EVALUATION: { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
-      AWAITING_PO:           { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
+      TECHNICAL_AWAITING_QUOTES: { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      TECHNICAL_EVALUATING:      { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      TECHNICAL_REJECTED:        { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      COMMERCIAL_EVALUATION:     { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
+      AWAITING_PO:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
     };
     const APPROVAL_LABEL = 'Pending Approvers';
 
@@ -4406,8 +4407,15 @@ LIMIT 2;
               }
 
               const policySteps = await db.any('SELECT * FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 ORDER BY step_order ASC', [policy.id]);
+              const resourceForEntity = ENTITY_APPROVE_RESOURCE_MAP[entityType] || entityType.toLowerCase();
               const stepResults = await Promise.allSettled(
                 policySteps.map(async (step) => {
+                  // Mirror the createApprovalInstance filter: a ROLE step is only valid
+                  // if the role has BOTH read AND approve permissions for this entity's resource.
+                  if (step.approver_source_type === 'ROLE') {
+                    const hasBoth = await roleHasReadAndApprovePermission(step.approver_source_id, resourceForEntity, db);
+                    if (!hasBoth) return null;
+                  }
                   const ids = await resolveApprovers(step, companyId, hotelId, resolveDeptId, departmentAccessType, db, null);
                   if (!ids?.length) return null;
                   const names = await db.any('SELECT id, name FROM tbl_users WHERE id = ANY($1::int[])', [ids]);

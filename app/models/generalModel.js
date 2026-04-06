@@ -4,7 +4,7 @@ import { APPROVAL_DECISIONS, PO_STATUSES } from '../util/constants.js';
 import { sendApprovalStepNotification } from '../helper/sendEmailFunctions/approvalEmails.js';
 
 // Maps entity_type to the permission resource used in tbl_permissions
-const ENTITY_APPROVE_RESOURCE_MAP = {
+export const ENTITY_APPROVE_RESOURCE_MAP = {
   'RFQ': 'rfq',
   'TENDER': 'tender',
   'TECHNICAL': 'te',
@@ -1830,6 +1830,24 @@ export async function deletePolicySteps(approval_policy_id) {
 // ============= APPROVAL INSTANCES =============
 
 /**
+ * Checks if a role has BOTH read and approve permissions for a given resource.
+ * Used to filter ROLE-based policy steps — a role with only `approve` (no `read`)
+ * cannot meaningfully act, since it has no access to view the entity.
+ */
+export async function roleHasReadAndApprovePermission(roleId, resource, t = db) {
+  if (!roleId || !resource) return false;
+  const result = await t.oneOrNone(`
+    SELECT COUNT(DISTINCT p.action) AS cnt
+    FROM tbl_role_permissions rp
+    JOIN tbl_permissions p ON rp.permission_id = p.id
+    WHERE rp.role_id = $1
+      AND p.resource = $2
+      AND p.action IN ('read', 'approve')
+  `, [roleId, resource]);
+  return Number(result?.cnt || 0) === 2;
+}
+
+/**
  * Resolve approver user IDs based on source type
  * Uses tbl_hospitality_user_mappings for company/hotel scoping
  * Uses tbl_user_department for department membership
@@ -1946,12 +1964,9 @@ async function isUserFinalApprover(userId, policy, policySteps, hospitality_comp
     approverSteps = [];
     for (const step of policySteps) {
       if (step.approver_source_type === 'ROLE') {
-        const hasApprovePermission = await t.oneOrNone(`
-          SELECT 1 FROM tbl_role_permissions rp
-          JOIN tbl_permissions p ON rp.permission_id = p.id
-          WHERE rp.role_id = $1 AND p.resource = $2 AND p.action = 'approve'
-        `, [step.approver_source_id, ENTITY_APPROVE_RESOURCE_MAP[entity_type] || entity_type.toLowerCase()]);
-        if (!hasApprovePermission) continue;
+        const resource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || entity_type.toLowerCase();
+        const hasBoth = await roleHasReadAndApprovePermission(step.approver_source_id, resource, t);
+        if (!hasBoth) continue;
       }
       approverSteps.push(step);
     }
@@ -2074,15 +2089,13 @@ export async function createApprovalInstance({
     }
 
     for (const policyStep of policySteps) {
-      // For ROLE-based steps, skip if the role lacks approve permission for this entity type
+      // For ROLE-based steps, skip if the role lacks BOTH read AND approve permissions
+      // for this entity type. A role with only `approve` cannot meaningfully act since
+      // it has no access to view the entity.
       if (policyStep.approver_source_type === 'ROLE') {
-        const hasApprovePermission = await t.oneOrNone(`
-          SELECT 1 FROM tbl_role_permissions rp
-          JOIN tbl_permissions p ON rp.permission_id = p.id
-          WHERE rp.role_id = $1 AND p.resource = $2 AND p.action = 'approve'
-          LIMIT 1
-        `, [policyStep.approver_source_id, ENTITY_APPROVE_RESOURCE_MAP[entity_type] || entity_type.toLowerCase()]);
-        if (!hasApprovePermission) continue;
+        const resource = ENTITY_APPROVE_RESOURCE_MAP[entity_type] || entity_type.toLowerCase();
+        const hasBoth = await roleHasReadAndApprovePermission(policyStep.approver_source_id, resource, t);
+        if (!hasBoth) continue;
       }
 
       // Resolve approvers for this step with department access type awareness
@@ -2372,14 +2385,11 @@ export async function getDepartmentSubGraphPreview(policyId, hospitality_company
   for (const dept of individualDepts) {
     const deptSteps = [];
     for (const step of steps) {
-      // For ROLE-based steps, skip if the role lacks approve permission for this entity type
+      // For ROLE-based steps, skip if the role lacks BOTH read AND approve permissions
       if (step.approver_source_type === 'ROLE') {
-        const hasApprovePermission = await db.oneOrNone(`
-          SELECT 1 FROM tbl_role_permissions rp
-          JOIN tbl_permissions p ON rp.permission_id = p.id
-          WHERE rp.role_id = $1 AND p.resource = $2 AND p.action = 'approve'
-        `, [step.approver_source_id, ENTITY_APPROVE_RESOURCE_MAP[policy.entity_type] || policy.entity_type.toLowerCase()]);
-        if (!hasApprovePermission) continue;
+        const resource = ENTITY_APPROVE_RESOURCE_MAP[policy.entity_type] || policy.entity_type.toLowerCase();
+        const hasBoth = await roleHasReadAndApprovePermission(step.approver_source_id, resource, db);
+        if (!hasBoth) continue;
       }
 
       const approvers = await resolveApprovers(
