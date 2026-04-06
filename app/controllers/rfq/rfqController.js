@@ -6232,6 +6232,7 @@ const rfqController = {
       const reverse_auction = req.body.reverse_auction || '-1';
       const rfq_type = req.body.rfq_type || '';
       const rfq_no = req.body.rfq_no || null;
+      const hotel_ids = req.body.hotel_ids || [];
 
       const result = await rfqModel.getAllDraftRfqs(
         limit,
@@ -6241,7 +6242,8 @@ const rfqController = {
         sort,
         reverse_auction,
         rfq_type,
-        rfq_no
+        rfq_no,
+        hotel_ids
       );
 
       res.status(200).json({
@@ -7479,7 +7481,7 @@ const rfqController = {
         offset = 0;
       }
 
-      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender, completed_status } = req.body;
+      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender, completed_status, hotel_ids } = req.body;
       if (project_id == -1) {
         project_id = null;
       }
@@ -7509,7 +7511,8 @@ const rfqController = {
         rfq_type,
         rfq_no,
         is_tender,
-        completed_status
+        completed_status,
+        hotel_ids
       );
 
       let count = await rfqModel.getBuyerRfqCount(
@@ -7519,7 +7522,8 @@ const rfqController = {
         reverse_auction,
         rfq_no,
         is_tender,
-        completed_status
+        completed_status,
+        hotel_ids
       );
 
       // Enrich with lifecycle stage

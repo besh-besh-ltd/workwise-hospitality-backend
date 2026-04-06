@@ -3143,7 +3143,8 @@ LIMIT 2;
     rfq_type,
     rfq_no,
     is_tender,
-    completed_status
+    completed_status,
+    hotel_ids
   ) => {
     return new Promise(function (resolve, reject) {
       let q = `
@@ -3377,6 +3378,7 @@ LIMIT 2;
             ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2)
         END)
       )` : ''}
+      ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
       ORDER BY RFQ.timestamp ${sort ?? ''}
       LIMIT $5 OFFSET $4;`;
 
@@ -4392,10 +4394,21 @@ LIMIT 2;
           try {
             const policy = await findBestMatchingPolicy({ entity_type: entityType, hospitality_company_id: companyId, hotel_id: hotelId, department_id: deptId, process_id: processId });
             if (policy) {
+              // Mirror the createApprovalInstance pattern: honor policy.is_department_scoped.
+              // If true → filter approvers by RFQ's department (using tbl_department.access_type).
+              // If false → ignore department, return all role-holders in the business unit.
+              const isDeptScoped = policy.is_department_scoped === true;
+              const resolveDeptId = isDeptScoped ? deptId : null;
+              let departmentAccessType = null;
+              if (resolveDeptId) {
+                const deptRow = await db.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [resolveDeptId]);
+                departmentAccessType = deptRow?.access_type || 'INDIVIDUAL';
+              }
+
               const policySteps = await db.any('SELECT * FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 ORDER BY step_order ASC', [policy.id]);
               const stepResults = await Promise.allSettled(
                 policySteps.map(async (step) => {
-                  const ids = await resolveApprovers(step, companyId, hotelId, deptId, null, db, null);
+                  const ids = await resolveApprovers(step, companyId, hotelId, resolveDeptId, departmentAccessType, db, null);
                   if (!ids?.length) return null;
                   const names = await db.any('SELECT id, name FROM tbl_users WHERE id = ANY($1::int[])', [ids]);
                   return { step_order: step.step_order, decision_rule: step.decision_rule || 'ANY', approvers: names.map(u => ({ id: u.id, name: u.name })) };
@@ -4428,7 +4441,8 @@ LIMIT 2;
     reverse_auction,
     rfq_no,
     is_tender,
-    completed_status
+    completed_status,
+    hotel_ids
   ) => {
     return new Promise(function (resolve, reject) {
       let isTenderFilter = '';
@@ -4489,6 +4503,7 @@ LIMIT 2;
             AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
           ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c) END) = true
         )` : ''}
+        ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
         ;`,
         [project_id, rfq_type, reverse_auction, rfq_no]
       )
@@ -10856,7 +10871,8 @@ ORDER BY m.created_at;
     sort,
     reverse_auction,
     rfq_type,
-    rfq_no
+    rfq_no,
+    hotel_ids
   ) => {
     return new Promise(function (resolve, reject) {
       let q = `
@@ -10897,6 +10913,7 @@ ORDER BY m.created_at;
       ${
         rfq_no == null ? '' : ` AND CAST(RFQ.rfq_no AS TEXT) LIKE '%${rfq_no}%'`
       }
+      ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
       ORDER BY RFQ.id ${sort ? sort : 'ASC'} LIMIT ${limit} OFFSET ${offset}`;
 
       const countQuery = `
@@ -10915,6 +10932,7 @@ ORDER BY m.created_at;
             ? ''
             : ` AND CAST(RFQ.rfq_no AS TEXT) LIKE '%${rfq_no}%'`
         }
+        ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
       `;
 
       db.tx((t) => {
