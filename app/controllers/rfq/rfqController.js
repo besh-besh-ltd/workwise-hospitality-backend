@@ -15406,6 +15406,7 @@ getClauses: async (req, res) => {
         data: {
           total_products: parseInt(dashboard.total_products, 10),
           products_completed: parseInt(dashboard.products_completed, 10),
+          completed_product_ids: dashboard.completed_product_ids || [],
           products_in_progress: parseInt(dashboard.products_in_progress, 10),
           vendors_passed: parseInt(dashboard.vendors_passed, 10),
           vendors_failed: parseInt(dashboard.vendors_failed, 10)
