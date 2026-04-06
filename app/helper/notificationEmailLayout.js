@@ -77,7 +77,7 @@ function generateEmailTemplate(headerContent, containerContent, userID = null) {
         <div style="background: ${headerBg}; background-color: #134A66; padding: 32px 28px; border-radius: 16px; text-align: center; margin-bottom: 16px;">
             <img style="width: 190px; max-width: 100%; height: auto; display: inline-block; margin: 0 auto;" src="${logo}" alt="Phileein Hospitality" />
         </div>
-        <hr style="border-color: ${seconderyColor}" />
+  
         <div style="border-radius: 24px; padding: 32px 16px; margin-bottom: 24px; background-color: #ffffff; color: #333333; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
             ${headerContent}
             ${containerContent}
