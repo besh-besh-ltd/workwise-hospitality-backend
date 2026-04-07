@@ -64,27 +64,23 @@ function generateEmailTemplate(headerContent, containerContent, userID = null) {
 
   const isCompanySpecific = Boolean(userID && companyObj.find((c) => c.userID === userID));
 
-  const outerBackground = isCompanySpecific
-    ? primaryColor
-    : `linear-gradient(135deg, #0F4C6B 0%, #1A5C7E 40%, #2E7A5A 75%, #6B9E35 100%)`;
+  const outerBackground = isCompanySpecific ? primaryColor : `#151B2B`;
 
-  const headerBg = isCompanySpecific
-    ? primaryColor
-    : `linear-gradient(135deg, #134A66 0%, #1A5C7E 60%, #3A7A50 100%)`;
+  const headerBg = isCompanySpecific ? primaryColor : `#151B2B`;
 
   return `
-    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background: ${outerBackground}; background-color: ${primaryColor}; color: ${primaryTextColor}; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
-        <div style="background: ${headerBg}; background-color: #134A66; padding: 32px 28px; border-radius: 16px; text-align: center; margin-bottom: 16px;">
-            <img style="width: 190px; max-width: 100%; height: auto; display: inline-block; margin: 0 auto;" src="${logo}" alt="Phileein Hospitality" />
+    <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; background: ${outerBackground}; background-color: #151B2B; color: ${primaryTextColor}; width: 100%; max-width: 768px; border-radius: 20px; margin: 0 auto; padding: 40px; box-sizing: border-box;">
+        <div style="background: ${headerBg}; background-color: #151B2B; padding: 32px 28px; border-radius: 16px; text-align: center; margin-bottom: 16px;">
+            <img style="width: 260px; max-width: 100%; height: auto; display: inline-block; margin: 0 auto; background-color: #151B2B;" src="${logo}" alt="Phileein Hospitality" />
         </div>
-  
+
         <div style="border-radius: 24px; padding: 32px 16px; margin-bottom: 24px; background-color: #ffffff; color: #333333; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
             ${headerContent}
             ${containerContent}
             </div>
-            
 
-        <hr style="border-color: ${seconderyColor}" />
+
+        <hr style="border-color: #fff" />
         <div style="text-align: center; padding: 8px 0 0;">
           <p style="font-size: 16px; color: #E0F0F8; margin: 0; font-weight: 500;">If you need assistance, contact us at <a href="mailto:support@phileeinhospitality.com" style="color: #E0F0F8; text-decoration: underline;">support@phileeinhospitality.com</a></p>
           <p style="font-size: 14px; color: #E0F0F8; margin: 6px 0 0; font-weight: 500;">&copy; Phileein Hospitality Procurement Platform. All Rights Reserved.</p>
