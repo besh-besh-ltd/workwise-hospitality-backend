@@ -2153,6 +2153,19 @@ const productController = {
         productId
       );
 
+      // On approval, retroactively map every vendor with a touching category/subcategory
+      // subscription to this product's variants. Closes the gap where vendors registered
+      // before the product existed (or while it was in review) never got the mapping.
+      // Failures here are non-fatal — log and continue so the approval response still
+      // succeeds.
+      if (status === '1') {
+        try {
+          await productModel.backfillVendorMappingsForProduct(productId);
+        } catch (backfillError) {
+          logError(backfillError);
+        }
+      }
+
       return res.status(200).json({
         status: 1,
         message: `Product successfully ${status == 0 ? 'Disapproved' : 'Approved'}`
@@ -2205,7 +2218,19 @@ const productController = {
         };
         
         await productModel.updateProductVariant(variantObj, productId);
-        
+
+        // On approval, retroactively map every vendor with a touching category/subcategory
+        // subscription to this variant. See backfillVendorMappingsForProduct above for the
+        // motivation. Note: `productId` here is actually the variant id (the route param
+        // is named productId for historical reasons — see updateProductVariant signature).
+        if (status === '1') {
+          try {
+            await productModel.backfillVendorMappingsForVariant(productId);
+          } catch (backfillError) {
+            logError(backfillError);
+          }
+        }
+
         return res.status(200).json({
           status: 1,
           message: `Variant successfully ${status === '0' ? 'Disapproved' : 'Approved'}`

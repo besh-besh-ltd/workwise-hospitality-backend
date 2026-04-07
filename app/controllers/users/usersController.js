@@ -169,10 +169,10 @@ const bulkMapVendorVariantsFromCategories = async (
       return;
     }
 
-    const variants = await rfqModel.getProductsByCategories(
+    const variants = await rfqModel.getAllVariantsByCategoriesForMapping(
       allIds.map((id) => ({ id }))
     );
-    
+
     console.log('[BULK_MAP] Found variants:', variants?.length || 0);
 
     if (!variants || !variants.length) {
@@ -493,9 +493,9 @@ const UsersController = {
               try {
                 const subcategoryIds = subcategories.filter(id => id && !isNaN(parseInt(id, 10))).map(id => parseInt(id, 10));
                 if (subcategoryIds.length > 0) {
-                  // Get all product variants for these subcategories
-                  const variants = await rfqModel.getProductsByCategories(subcategoryIds.map(id => ({ id })));
-                  
+                  // Get all product variants for these subcategories — including disapproved/disabled/in-review
+                  const variants = await rfqModel.getAllVariantsByCategoriesForMapping(subcategoryIds.map(id => ({ id })));
+
                   if (variants && variants.length > 0) {
                     // Prepare mappings for bulk insert
                     const mappings = variants.map(v => ({

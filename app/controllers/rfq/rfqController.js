@@ -3073,15 +3073,11 @@ RETURNING id;
       const productIdMap = {};
 
       for (const product of rfqProducts) {
-        // Check vendor eligibility for THIS specific hotel
-        const eligibleVendors = await hospitalityModel.getEligibleVendorsForVariant(
-          product.product_variant_id, [hotel_id]
-        );
-
-        // Skip this product entirely if no vendors are eligible for this hotel
-        // Downstream steps (files, specs, tech eval) auto-skip via productIdMap
-        if (eligibleVendors.length === 0) continue;
-
+        // Always create the product row in the child RFQ — even if zero vendors
+        // are eligible for this hotel. Silently skipping means buyers can't see
+        // that the product was supposed to be in the RFQ but had no vendors. The
+        // existing "no vendors" UI flag (`vendor_count === 0`) is the right place
+        // to surface that, not a silent drop.
         const { id: newProductId } = await t.one(
           `
           INSERT INTO tbl_rfq_products (
@@ -3171,10 +3167,13 @@ RETURNING id;
 
       // -------------------------  7 Duplicate PRODUCT VENDORS (per-hotel eligible vendors only)  -------------------------
 
-      // Instead of bulk-copying all vendors, insert only eligible vendors per product
+      // Insert only eligible vendors per product. Products with zero eligible vendors
+      // are still copied (see step 4 above) — they just end up with no vendor rows and
+      // are surfaced via the existing "no vendors" UI warning.
       for (const product of rfqProducts) {
         const newProductId = productIdMap[product.id];
-        // Skip products that were not duplicated (no eligible vendors for this hotel)
+        // Defensive: every product should now have a newProductId (zero-vendor skip
+        // was removed in step 4 above), but guard anyway.
         if (!newProductId) continue;
 
         const eligibleVendors = await hospitalityModel.getEligibleVendorsForVariant(

@@ -991,32 +991,37 @@ const hospitalityModel = {
  * Vendors failing any of the above conditions are excluded.
  */
 getEligibleVendorsForVariant: async (variantId, hotelIds) => {
-  // Include ALL vendors mapped to the hotel, regardless of subscription expiry.
-  // Expired vendors are included in RFQs but blocked from taking actions (sending quotes)
-  // until they renew. This ensures they appear in search results and can receive RFQs.
+  // RFQ visibility rule (intentionally permissive — see plan vendor-rfq-mapping):
+  //   A vendor is eligible for a (variant, hotel set) iff
+  //     (a) they have ANY row in tbl_product_variant_vendor_mapping for the variant
+  //         (the row's existence is the mapping; status / is_approved are NOT gating
+  //          flags here), AND
+  //     (b) they have ANY hotel-type subscription row touching one of the RFQ's hotels
+  //         (regardless of subscription status, start/end date, or payment state — the
+  //          subscription table is the persistent business-unit membership; expiry &
+  //          payment only gate the vendor's ability to ACT, not their visibility).
+  //
+  // Subscription expiry / payment status are enforced separately by hasValidPaidSubscription
+  // when the vendor tries to submit a quote. Do not re-add filters here without revisiting
+  // that contract — vendors silently dropping out of RFQs has cost real orders.
   return db.any(
-    `WITH variant_vendors AS (
-    SELECT DISTINCT vendor_id
-    FROM tbl_product_variant_vendor_mapping
-    WHERE product_variant_id = $1
-      AND status = true
-      AND is_approved = true
-),
-
-eligible_hotel_vendors AS (
-    SELECT DISTINCT s.vendor_id
-    FROM tbl_vendor_hotel_category_subscription s
-    JOIN variant_vendors vv
-        ON vv.vendor_id = s.vendor_id
-    WHERE s.item_type = 'hotel'
-      AND s.item_id = ANY ($2)
-      AND s.status IN ('active', 'expired')
-)
-
-SELECT vv.vendor_id
-FROM variant_vendors vv
-JOIN eligible_hotel_vendors ehv ON ehv.vendor_id = vv.vendor_id;
-`,
+    `
+    WITH variant_vendors AS (
+      SELECT DISTINCT vendor_id
+      FROM tbl_product_variant_vendor_mapping
+      WHERE product_variant_id = $1
+    ),
+    bu_vendors AS (
+      SELECT DISTINCT s.vendor_id
+      FROM tbl_vendor_hotel_category_subscription s
+      JOIN variant_vendors vv ON vv.vendor_id = s.vendor_id
+      WHERE s.item_type = 'hotel'
+        AND s.item_id = ANY ($2)
+    )
+    SELECT vv.vendor_id
+    FROM variant_vendors vv
+    JOIN bu_vendors bv ON bv.vendor_id = vv.vendor_id;
+    `,
     [variantId, hotelIds]
   );
 },

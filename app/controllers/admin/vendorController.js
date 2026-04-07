@@ -1609,7 +1609,8 @@ if (Array.isArray(spocs) && spocs.length > 0) {
 
       if (allCategoryIds.length > 0) {
         try {
-          const variants = await rfqModel.getProductsByCategories(
+          // Use the mapping-aware variant fetcher: includes disapproved/disabled/in-review variants.
+          const variants = await rfqModel.getAllVariantsByCategoriesForMapping(
             allCategoryIds.map(id => ({ id }))
           );
           if (variants && variants.length > 0) {
@@ -1659,53 +1660,17 @@ if (Array.isArray(spocs) && spocs.length > 0) {
 
   deleteSubscription: async (req, res) => {
     try {
-      const vendorId = parseInt(req.params.id);
       const { sub_id } = req.params;
-
-      // Get subscription details before deleting to know what to unmap
-      const subscription = await hospitalityModel.getSubscriptionById(sub_id);
 
       const rowCount = await hospitalityModel.deleteVendorSubscription(sub_id);
       if (rowCount === 0) {
         return res.status(404).json({ status: 2, message: 'Subscription not found' });
       }
 
-      // If it was a category or subcategory subscription, clean up variant mappings
-      if (subscription && (subscription.item_type === 'category' || subscription.item_type === 'subcategory')) {
-        try {
-          const categoryId = subscription.item_id;
-          const variants = await rfqModel.getProductsByCategories([{ id: categoryId }]);
-
-          if (variants && variants.length > 0) {
-            const variantIds = variants.map(v => parseInt(v.variant_id)).filter(Boolean);
-
-            // Check which variants are covered by OTHER active category subscriptions
-            const otherActiveCategories = await hospitalityModel.getActiveCategorySubscriptions(vendorId, categoryId);
-
-            if (otherActiveCategories.length > 0) {
-              const otherCategoryIds = otherActiveCategories.map(c => c.item_id);
-              const coveredVariants = await rfqModel.getProductsByCategories(
-                otherCategoryIds.map(id => ({ id }))
-              );
-              const coveredVariantIds = new Set(
-                coveredVariants.map(v => parseInt(v.variant_id))
-              );
-              // Only remove variants NOT covered by other active categories
-              const uncoveredVariantIds = variantIds.filter(id => !coveredVariantIds.has(id));
-
-              if (uncoveredVariantIds.length > 0) {
-                await productModel.removeVariantMappingsForVendor(vendorId, uncoveredVariantIds);
-              }
-            } else {
-              // No other active categories covering these variants - remove all
-              await productModel.removeVariantMappingsForVendor(vendorId, variantIds);
-            }
-          }
-        } catch (mappingError) {
-          logError(mappingError);
-          // Don't fail deletion if variant cleanup fails
-        }
-      }
+      // Intentionally do NOT touch tbl_product_variant_vendor_mapping here.
+      // Variant mappings persist beyond any single subscription lifecycle — see plan
+      // vendor-rfq-mapping (Bug 5). Removing a vendor's product visibility must be an
+      // explicit admin action, not a side effect of deleting a subscription row.
 
       res.status(200).json({ status: 1, message: 'Subscription deleted' });
     } catch (error) {

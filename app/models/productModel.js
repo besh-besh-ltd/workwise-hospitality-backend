@@ -231,9 +231,12 @@ const productModel = {
             WHERE m.id IS NULL
           ),
           ins AS (
+            -- Insert as already-approved. The previous two-step (insert is_approved=false,
+            -- then a follow-up autoApproveVariantMappings) created a race window where a
+            -- failed/missing follow-up left mappings invisible to RFQ resolution.
             INSERT INTO tbl_product_variant_vendor_mapping
               (product_variant_id, vendor_id, created_at, updated_at, status, is_approved, created_by, updated_by)
-            SELECT variant_id, vendor_id, NOW(), NOW(), true, false, $2, $2
+            SELECT variant_id, vendor_id, NOW(), NOW(), true, true, $2, $2
             FROM missing
             RETURNING id, product_variant_id, vendor_id
           ),
@@ -1127,13 +1130,21 @@ const productModel = {
 
         // Use explicit parameterized query for safety
         const query = `
-          INSERT INTO tbl_product_variant(${columns}) 
-          VALUES(${placeholders}) 
+          INSERT INTO tbl_product_variant(${columns})
+          VALUES(${placeholders})
           RETURNING id
         `;
-        
+
         db.one(query, values)
-          .then(function (data) {
+          .then(async function (data) {
+            // Retroactively map every vendor with a touching category/subcategory
+            // subscription to this new variant. Non-fatal: failures are logged but
+            // do not block variant creation.
+            try {
+              await productModel.backfillVendorMappingsForVariant(data.id);
+            } catch (backfillErr) {
+              console.error("Backfill failed for new variant", data.id, backfillErr);
+            }
             resolve({id: data.id});
           })
           .catch(function (err) {
@@ -3149,13 +3160,21 @@ getProductTechSpecByID: async (productId) => {
 
         // Use explicit parameterized query for safety
         const query = `
-          INSERT INTO tbl_product_variant(${columns}) 
-          VALUES(${placeholders}) 
+          INSERT INTO tbl_product_variant(${columns})
+          VALUES(${placeholders})
           RETURNING id
         `;
-        
+
         db.one(query, values)
-          .then(function (data) {
+          .then(async function (data) {
+            // Retroactively map every vendor with a touching category/subcategory
+            // subscription to this new variant. Non-fatal: failures are logged but
+            // do not block variant creation.
+            try {
+              await productModel.backfillVendorMappingsForVariant(data.id);
+            } catch (backfillErr) {
+              console.error("Backfill failed for new variant", data.id, backfillErr);
+            }
             resolve({id: data.id});
           })
           .catch(function (err) {
@@ -3168,7 +3187,7 @@ getProductTechSpecByID: async (productId) => {
       }
     });
   },
-  
+
   getProductVariants: async (productId) => {
     return new Promise(function (resolve, reject) {
       // Changes by Agnij May 02, 2025 [Fixed column names and return type to ensure always array]
@@ -4787,6 +4806,69 @@ WHERE m.id = $1;
          AND product_variant_id = ANY($2::int[])`,
       [vendorId, variantIds]
     );
+  },
+
+  /**
+   * Backfill mappings for a single variant against every vendor that has a touching
+   * category/subcategory subscription. Used when a new variant is created or when an
+   * existing variant transitions out of review/approval, so that vendors who registered
+   * BEFORE the variant existed still get mapped to it. Idempotent — uses a LEFT JOIN
+   * miss check rather than ON CONFLICT to avoid requiring a unique constraint.
+   */
+  backfillVendorMappingsForVariant: async (variantId) => {
+    if (!variantId) return { inserted: 0 };
+    const result = await db.result(
+      `
+      INSERT INTO tbl_product_variant_vendor_mapping
+        (product_variant_id, vendor_id, created_at, updated_at, status, is_approved, created_by, updated_by)
+      SELECT pv.id, s.vendor_id, NOW(), NOW(), true, true, NULL, NULL
+      FROM tbl_product_variant pv
+      JOIN tbl_product p              ON p.id  = pv.product_id
+      JOIN tbl_product_categories pc  ON pc.product_id = p.id
+      JOIN tbl_vendor_hotel_category_subscription s
+        ON s.item_id = pc.category_id
+       AND s.item_type IN ('category', 'subcategory')
+      LEFT JOIN tbl_product_variant_vendor_mapping m
+        ON m.product_variant_id = pv.id
+       AND m.vendor_id = s.vendor_id
+      WHERE pv.id = $1
+        AND p.is_deleted = 0
+        AND m.id IS NULL
+      `,
+      [variantId]
+    );
+    return { inserted: result.rowCount };
+  },
+
+  /**
+   * Backfill mappings for every variant under a product, against every vendor with a
+   * touching category/subcategory subscription. Called when a product is approved or
+   * its is_review flag flips off. Same idempotency pattern as
+   * backfillVendorMappingsForVariant.
+   */
+  backfillVendorMappingsForProduct: async (productId) => {
+    if (!productId) return { inserted: 0 };
+    const result = await db.result(
+      `
+      INSERT INTO tbl_product_variant_vendor_mapping
+        (product_variant_id, vendor_id, created_at, updated_at, status, is_approved, created_by, updated_by)
+      SELECT pv.id, s.vendor_id, NOW(), NOW(), true, true, NULL, NULL
+      FROM tbl_product_variant pv
+      JOIN tbl_product p              ON p.id  = pv.product_id
+      JOIN tbl_product_categories pc  ON pc.product_id = p.id
+      JOIN tbl_vendor_hotel_category_subscription s
+        ON s.item_id = pc.category_id
+       AND s.item_type IN ('category', 'subcategory')
+      LEFT JOIN tbl_product_variant_vendor_mapping m
+        ON m.product_variant_id = pv.id
+       AND m.vendor_id = s.vendor_id
+      WHERE pv.product_id = $1
+        AND p.is_deleted = 0
+        AND m.id IS NULL
+      `,
+      [productId]
+    );
+    return { inserted: result.rowCount };
   }
 };
 

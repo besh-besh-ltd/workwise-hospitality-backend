@@ -2141,7 +2141,7 @@ WHERE NOT EXISTS (
           LEFT JOIN tbl_company_location tcl ON tu.company_id = tcl.company_id
           LEFT JOIN tbl_buyer_private_vendors_mapping bvm 
               ON tu.id = bvm.vendor_id AND bvm.company_id = ${companyId}
-          JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id AND pvvm.status = TRUE AND pvvm.is_approved = TRUE
+          JOIN tbl_product_variant_vendor_mapping pvvm ON pvvm.product_variant_id = tpv.id AND pvvm.vendor_id = tu.id
           JOIN tbl_company tc ON tu.company_id = tc.id
 
           ${dynamicJoin}
@@ -5934,8 +5934,15 @@ LIMIT 2;
           OR similarity(p.name, $1) > 0.1
         )`;
 
-    // Include vendors with active OR expired subscriptions in vendor count.
-    // Expired vendors are included in RFQs but blocked from actions until they renew.
+    // Vendor count must mirror getEligibleVendorsForVariant exactly, otherwise the
+    // search-result badge ("X vendors mapped") diverges from what the buyer actually
+    // gets when they create an RFQ. The eligibility rule is:
+    //   variant mapping exists  AND  vendor has any hotel subscription touching the
+    //   target hotel set.
+    // No subscription status / payment / mapping is_approved / mapping status filters.
+    // Per-category grouping is preserved for the UI; the category subscription join
+    // (which used to require a vendor be subscribed to the product's category) is
+    // removed because BU membership is hotel-derived in the new model.
     const vendorCountCte = hotelIdsParam
       ? `
       vendor_counts AS (
@@ -5945,18 +5952,10 @@ LIMIT 2;
         FROM tbl_product_variant_vendor_mapping pvvm
         JOIN matched_variants mv ON mv.variant_id = pvvm.product_variant_id
         JOIN product_categories pc ON pc.product_id = mv.product_id
-        JOIN tbl_vendor_hotel_category_subscription vhcs_cat
-          ON vhcs_cat.vendor_id = pvvm.vendor_id
-          AND vhcs_cat.item_type = 'category'
-          AND vhcs_cat.item_id = pc.category_id
-          AND vhcs_cat.status IN ('active', 'expired')
         JOIN tbl_vendor_hotel_category_subscription vhcs_hotel
           ON vhcs_hotel.vendor_id = pvvm.vendor_id
           AND vhcs_hotel.item_type = 'hotel'
           AND vhcs_hotel.item_id = ANY(${hotelIdsParam})
-          AND vhcs_hotel.status IN ('active', 'expired')
-        WHERE pvvm.status = TRUE
-          AND pvvm.is_approved = TRUE
         GROUP BY pvvm.product_variant_id, pc.category_id
       )`
       : `
@@ -5966,8 +5965,6 @@ LIMIT 2;
                COUNT(DISTINCT pvvm.vendor_id)::int AS vendor_count
         FROM tbl_product_variant_vendor_mapping pvvm
         JOIN matched_variants mv ON mv.variant_id = pvvm.product_variant_id
-        WHERE pvvm.status = TRUE
-          AND pvvm.is_approved = TRUE
         GROUP BY pvvm.product_variant_id
       )`;
 
@@ -6222,7 +6219,7 @@ WITH RankedProducts AS (
       AND p.is_deleted = 0
       AND p.is_review = 0
 )
-SELECT 
+SELECT
     product_id, product_name, variant_id, variant_name, description, category_name, category_id, slug
 FROM RankedProducts
 WHERE row_num_by_name_category = 1
@@ -6240,6 +6237,41 @@ WHERE row_num_by_name_category = 1
         });
     });
   },
+
+  /**
+   * Returns every variant under the given categories — including variants whose
+   * parent product is disapproved, disabled, or in review. Only soft-deleted
+   * products are excluded. Used by vendor → product mapping paths so that a
+   * vendor's product visibility does not depend on the product's review/approval
+   * lifecycle.
+   *
+   * Do NOT use this for buyer-facing search/listing — use getProductsByCategories
+   * which keeps the status filters.
+   */
+  getAllVariantsByCategoriesForMapping: async (categories) => {
+    const categoryIds = (categories || [])
+      .map((c) => (typeof c === 'object' ? c.id : c))
+      .filter(Boolean);
+    if (categoryIds.length === 0) return [];
+
+    return db.any(
+      `
+      SELECT DISTINCT ON (pv.id)
+             pv.id   AS variant_id,
+             pv.name AS variant_name,
+             p.id    AS product_id,
+             p.name  AS product_name,
+             pc.category_id
+      FROM tbl_product_variant pv
+      JOIN tbl_product p             ON p.id = pv.product_id
+      JOIN tbl_product_categories pc ON pc.product_id = p.id
+      WHERE pc.category_id IN ($1:csv)
+        AND p.is_deleted = 0
+      `,
+      [categoryIds]
+    );
+  },
+
   // 25-05-2025 mukul jatav, product make added
   searchVendor: async (
     buyerId,
