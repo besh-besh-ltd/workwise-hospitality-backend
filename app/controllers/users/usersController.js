@@ -556,7 +556,8 @@ const UsersController = {
           subcategories
         );
         
-        // Create subscriptions during registration (with payment_id = NULL) so they're available during login
+        // Create pending subscriptions during registration so the vendor can
+        // complete payment later without being treated as active prematurely.
         if (is_hospitality && (categories.length > 0 || subcategories.length > 0 || hotels.length > 0)) {
           try {
             const startDate = Moment();
@@ -570,18 +571,22 @@ const UsersController = {
             
             const subscriptionRows = [];
             const uniqueCategoryIds = [...new Set(categories)];
+            const hotelIds = hotels
+              .filter(id => id && !isNaN(parseInt(id, 10)))
+              .map(id => parseInt(id, 10));
             
             if (uniqueCategoryIds.length) {
               const dbCategories = await productModel.getCategoriesByIds(uniqueCategoryIds);
+              const hotelMultiplier = hotelIds.length > 0 ? hotelIds.length : 1;
               for (const row of dbCategories) {
                 subscriptionRows.push({
                   vendor_id: user_id,
                   item_type: 'category',
                   item_id: row.id,
-                  fee_amount: row.fee_amount || 500,
+                  fee_amount: (row.fee_amount || 500) * hotelMultiplier,
                   start_date: startDate.format('YYYY-MM-DD'),
                   end_date: fyEndDateStr,
-                  status: 'active',
+                  status: 'pending',
                   payment_id: null // No payment yet
                 });
               }
@@ -599,29 +604,26 @@ const UsersController = {
                   fee_amount: 0,
                   start_date: startDate.format('YYYY-MM-DD'),
                   end_date: fyEndDateStr,
-                  status: 'active',
+                  status: 'pending',
                   payment_id: null
                 });
               }
             }
 
-            if (hotels.length) {
-              const hotelIds = hotels.filter(id => id && !isNaN(parseInt(id, 10))).map(id => parseInt(id, 10));
-              if (hotelIds.length > 0) {
-                const dbHotels = await hospitalityModel.getHotelsByIds(hotelIds);
-                for (const row of dbHotels) {
-                  subscriptionRows.push({
-                    vendor_id: user_id,
-                    item_type: 'hotel',
-                    item_id: row.id,
-                    // Hotels should not carry independent cost for registration pricing
-                    fee_amount: 0,
-                    start_date: startDate.format('YYYY-MM-DD'),
-                    end_date: fyEndDateStr,
-                    status: 'active',
-                    payment_id: null // No payment yet
-                  });
-                }
+            if (hotelIds.length > 0) {
+              const dbHotels = await hospitalityModel.getHotelsByIds(hotelIds);
+              for (const row of dbHotels) {
+                subscriptionRows.push({
+                  vendor_id: user_id,
+                  item_type: 'hotel',
+                  item_id: row.id,
+                  // Hotels should not carry independent cost for registration pricing
+                  fee_amount: 0,
+                  start_date: startDate.format('YYYY-MM-DD'),
+                  end_date: fyEndDateStr,
+                  status: 'pending',
+                  payment_id: null // No payment yet
+                });
               }
             }
             
@@ -3761,16 +3763,6 @@ publish_profile_reviews: async (req, res, next) => {
           await hospitalityModel.createVendorHotelCategorySubscription(subscriptionRows);
         }
 
-        // Also link any subscriptions without payment_id (legacy registration flow)
-        await db.none(
-          `UPDATE tbl_vendor_hotel_category_subscription
-           SET payment_id = $1, status = 'active'
-           WHERE vendor_id = $2
-             AND payment_id IS NULL
-             AND status = 'active'`,
-          [payment.id, userId]
-        );
-
         // Always approve hospitality vendor after successful payment
         await userModel.updateUserAccount(userId, { status: 1 });
 
@@ -3814,7 +3806,7 @@ publish_profile_reviews: async (req, res, next) => {
                LEFT JOIN tbl_category c ON vhcs.item_type = 'category' AND c.id = vhcs.item_id
                LEFT JOIN tbl_hospitality_company_hotels h ON vhcs.item_type = 'hotel' AND h.id = vhcs.item_id
                WHERE vhcs.vendor_id = $1
-                 AND (vhcs.payment_id = $2 OR vhcs.payment_id IS NULL)
+                 AND vhcs.payment_id = $2
                  AND vhcs.status = 'active'`,
               [userId, payment.id]
             );
@@ -4130,16 +4122,6 @@ publish_profile_reviews: async (req, res, next) => {
             await hospitalityModel.createVendorHotelCategorySubscription(subscriptionRows);
           }
 
-          // Also link any subscriptions without payment_id (legacy registration flow)
-          await db.none(
-            `UPDATE tbl_vendor_hotel_category_subscription
-             SET payment_id = $1, status = 'active'
-             WHERE vendor_id = $2
-               AND payment_id IS NULL
-               AND status = 'active'`,
-            [payment.id, userId]
-          );
-
           // Always approve hospitality vendor after successful payment
           await userModel.updateUserAccount(userId, { status: 1 });
 
@@ -4164,7 +4146,7 @@ publish_profile_reviews: async (req, res, next) => {
                  LEFT JOIN tbl_category c ON vhcs.item_type = 'category' AND c.id = vhcs.item_id
                  LEFT JOIN tbl_hospitality_company_hotels h ON vhcs.item_type = 'hotel' AND h.id = vhcs.item_id
                  WHERE vhcs.vendor_id = $1
-                   AND (vhcs.payment_id = $2 OR vhcs.payment_id IS NULL)
+                   AND vhcs.payment_id = $2
                    AND vhcs.status = 'active'`,
                 [userId, payment.id]
               );

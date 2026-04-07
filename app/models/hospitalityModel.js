@@ -661,7 +661,12 @@ const hospitalityModel = {
     const query =
       pgp.helpers.insert(rows, columnSet) +
       ` ON CONFLICT (vendor_id, item_type, item_id, end_date)
-        DO UPDATE SET fee_amount = EXCLUDED.fee_amount
+        DO UPDATE SET
+          fee_amount = EXCLUDED.fee_amount,
+          start_date = EXCLUDED.start_date,
+          end_date = EXCLUDED.end_date,
+          status = EXCLUDED.status,
+          payment_id = EXCLUDED.payment_id
         RETURNING *`;
     return db.any(query);
   },
@@ -677,7 +682,7 @@ const hospitalityModel = {
        FROM tbl_vendor_hotel_category_subscription vhcs
        LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
        WHERE vhcs.vendor_id = $1
-         AND vhcs.status = 'active'
+         AND vhcs.status = 'pending'
          AND (
            vp.id IS NULL 
            OR vp.payment_status IN ('created', 'pending')
@@ -688,17 +693,22 @@ const hospitalityModel = {
   },
 
   hasValidPaidSubscription: async (vendorId) => {
-    // Check if vendor has active subscriptions that are either:
-    // 1. Linked to a successful payment (paid subscription)
-    // 2. Have no payment_id (admin-assigned subscription)
+    // A subscription is valid when it is:
+    // 1. Paid successfully, or
+    // 2. Manually assigned by admin (active row with no payment_id on an approved vendor).
+    // Pending self-registration rows must not count as active.
     const result = await db.oneOrNone(
       `SELECT COUNT(*) as count
        FROM tbl_vendor_hotel_category_subscription vhcs
+       JOIN tbl_users u ON u.id = vhcs.vendor_id
        LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
        WHERE vhcs.vendor_id = $1
          AND vhcs.status = 'active'
          AND vhcs.end_date >= CURRENT_DATE
-         AND (vp.payment_status IN ('paid', 'success') OR vhcs.payment_id IS NULL)`,
+         AND (
+           vp.payment_status IN ('paid', 'success')
+           OR (vhcs.payment_id IS NULL AND u.status = 1)
+         )`,
       [vendorId]
     );
     return result && parseInt(result.count) > 0;
@@ -722,11 +732,15 @@ const hospitalityModel = {
     return db.any(
       `SELECT vhcs.*, vp.payment_status
        FROM tbl_vendor_hotel_category_subscription vhcs
+       JOIN tbl_users u ON u.id = vhcs.vendor_id
        LEFT JOIN tbl_vendor_payments vp ON vp.id = vhcs.payment_id
        WHERE vhcs.vendor_id = $1
          AND vhcs.status IN ('active', 'expired')
          AND vhcs.end_date < CURRENT_DATE
-         AND (vp.payment_status IN ('paid', 'success') OR vhcs.payment_id IS NULL)
+         AND (
+           vp.payment_status IN ('paid', 'success')
+           OR (vhcs.payment_id IS NULL AND u.status = 1)
+         )
        ORDER BY vhcs.end_date DESC, vhcs.id DESC`,
       [vendorId]
     );
@@ -736,7 +750,7 @@ const hospitalityModel = {
     return db.any(
       `SELECT
         vhcs.id AS subscription_id, vhcs.item_type, vhcs.item_id,
-        vhcs.fee_amount, vhcs.start_date, vhcs.end_date, vhcs.status,
+        vhcs.fee_amount, vhcs.start_date, vhcs.end_date, vhcs.status, vhcs.payment_id,
         CASE
           WHEN vhcs.item_type = 'category' THEN c.title
           WHEN vhcs.item_type = 'subcategory' THEN c.title
@@ -766,7 +780,9 @@ const hospitalityModel = {
              SELECT id FROM tbl_vendor_payments
              WHERE payment_status IN ('paid', 'success')
            )
-           OR payment_id IS NULL
+           OR payment_id IS NULL AND EXISTS (
+             SELECT 1 FROM tbl_users u WHERE u.id = $1 AND u.status = 1
+           )
          )`,
       [vendorId]
     );
@@ -783,7 +799,11 @@ const hospitalityModel = {
              SELECT id FROM tbl_vendor_payments
              WHERE payment_status IN ('paid', 'success')
            )
-           OR payment_id IS NULL
+           OR payment_id IS NULL AND EXISTS (
+             SELECT 1 FROM tbl_users u
+             WHERE u.id = tbl_vendor_hotel_category_subscription.vendor_id
+               AND u.status = 1
+           )
          )`
     );
   },
@@ -1541,5 +1561,4 @@ getVendorHotelCategoryMappings: async (vendorId) => {
 };
 
 export default hospitalityModel;
-
 
