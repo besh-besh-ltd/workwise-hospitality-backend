@@ -1880,16 +1880,36 @@ export async function resolveApprovers(step, hospitality_company_id, hotel_id = 
     }
   } else if (step.approver_source_type === 'ROLE') {
     if (departmentAccessType === 'INDIVIDUAL' && department_id) {
-      // INDIVIDUAL: users with this role who belong to the specific department OR any ALL-access department
+      // INDIVIDUAL: a user qualifies as holding this role *for this department* iff
+      //   1. their role grant is explicitly scoped to this department, OR
+      //   2. their role grant is unrestricted (urs.department_id IS NULL) AND they
+      //      are a member of this department (or of an access_type='ALL' admin dept), OR
+      //   3. their role grant is itself scoped to an ALL-access admin department.
+      // Mirrors rbacModel.getUserPermissions / middleware/auth.js can() semantics.
       const users = await t.any(`
         SELECT DISTINCT u.id
         FROM tbl_users u
-        JOIN tbl_user_role_scopes urs ON u.id = urs.user_id AND urs.role_id = $1
-          AND urs.company_id = $2
-          AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+        JOIN tbl_user_role_scopes urs
+          ON urs.user_id = u.id
+         AND urs.role_id = $1
+         AND urs.company_id = $2
+         AND (urs.hotel_id IS NULL OR urs.hotel_id = $3)
+         AND (
+           urs.department_id = $5
+           OR (
+             urs.department_id IS NULL
+             AND EXISTS (
+               SELECT 1 FROM tbl_user_department ud2
+               WHERE ud2.user_id = u.id
+                 AND (
+                   ud2.department_id = $5
+                   OR ud2.department_id IN (SELECT id FROM tbl_department WHERE access_type = 'ALL')
+                 )
+             )
+           )
+           OR urs.department_id IN (SELECT id FROM tbl_department WHERE access_type = 'ALL')
+         )
         JOIN tbl_hospitality_user_mappings hum ON u.id = hum.user_id
-        JOIN tbl_user_department ud ON u.id = ud.user_id
-          AND (ud.department_id = $5 OR ud.department_id IN (SELECT id FROM tbl_department WHERE access_type = 'ALL'))
         WHERE u.status = 1
           AND hum.hospitality_company_id = $2
           AND (
@@ -1976,20 +1996,47 @@ async function isUserFinalApprover(userId, policy, policySteps, hospitality_comp
     return false;
   }
 
-  const lastStep = approverSteps[approverSteps.length - 1];
+  // C.1: createApprovalInstance skips any step that resolves to zero approvers, so the
+  // *effective* last step may not be the literal last one in the policy. Walk backward
+  // until we find a step that actually resolves to approvers.
+  let lastNonEmptyStep = null;
+  let lastNonEmptyApprovers = [];
+  for (let i = approverSteps.length - 1; i >= 0; i--) {
+    const ids = await resolveApprovers(
+      approverSteps[i],
+      hospitality_company_id,
+      hotel_id,
+      department_id,
+      departmentAccessType,
+      t,
+      null
+    );
+    const approverIds = Array.isArray(ids) ? ids : [];
+    if (approverIds.length > 0) {
+      lastNonEmptyStep = approverSteps[i];
+      lastNonEmptyApprovers = approverIds;
+      break;
+    }
+  }
 
-  const finalStepApprovers = await resolveApprovers(
-    lastStep,
-    hospitality_company_id,
-    hotel_id,
-    department_id,
-    departmentAccessType,
-    t,
-    null
-  );
+  if (!lastNonEmptyStep) {
+    return false;
+  }
 
-  const approverIds = Array.isArray(finalStepApprovers) ? finalStepApprovers : [];
-  return approverIds.includes(userId);
+  if (!lastNonEmptyApprovers.includes(userId)) {
+    return false;
+  }
+
+  // C.2: This function answers "would this user's single approval complete the entire
+  // workflow?" — used at creation time to short-circuit the workflow. Under decision_rule
+  // 'ALL', every approver in the step must approve, so a single approval only completes
+  // the step (and thus the workflow) when the user is the *sole* resolved approver.
+  const rule = (lastNonEmptyStep.decision_rule || 'ANY').toUpperCase();
+  if (rule === 'ALL' && !(lastNonEmptyApprovers.length === 1 && lastNonEmptyApprovers[0] === userId)) {
+    return false;
+  }
+
+  return true;
 }
 
 /**
