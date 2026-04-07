@@ -3492,9 +3492,20 @@ LIMIT 2;
       has_tech_eval AS (
         SELECT DISTINCT rfq_id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
       ),
-      -- Whether any quotes have been received
-      has_quotes AS (
-        SELECT rfq_id FROM tbl_quotes WHERE rfq_id = ANY($1::int[]) GROUP BY rfq_id HAVING COUNT(*) > 0
+      -- Whether any non-regret quotes have been received (= eligible vendors)
+      has_eligible_vendors AS (
+        SELECT rfq_id FROM tbl_quotes
+        WHERE rfq_id = ANY($1::int[])
+          AND (is_regret IS NULL OR is_regret != 1)
+        GROUP BY rfq_id HAVING COUNT(*) > 0
+      ),
+      -- Whether the bid submission deadline has passed.
+      -- bid_end_date is stored as text in ISO format (e.g. '2026-03-14T11:00'), so cast it.
+      bid_status AS (
+        SELECT id AS rfq_id,
+               (bid_end_date IS NOT NULL AND bid_end_date != ''
+                  AND bid_end_date::timestamp < NOW()::timestamp) AS bid_ended
+        FROM tbl_rfq WHERE id = ANY($1::int[])
       )
       SELECT
         rd.id AS rfq_id,
@@ -3518,27 +3529,42 @@ LIMIT 2;
           -- Stage 6: Negotiation Ongoing
           WHEN an.rfq_id IS NOT NULL
             THEN 'NEGOTIATION_ONGOING'
-          -- Stage 5: Commercial Evaluation
-          --   (a) TE flow: all products have cleared vendors (approver approved, in cleared table)
-          --   (b) No-TE flow: quotes received, no tech eval configured → straight to commercial
-          WHEN (pwc.products_cleared IS NOT NULL AND pc.total_products IS NOT NULL AND pwc.products_cleared >= pc.total_products)
-            OR (hte.rfq_id IS NULL AND hq.rfq_id IS NOT NULL)
+          -- Stage 5a: Commercial Evaluation (TE flow — all products have cleared vendors)
+          WHEN pwc.products_cleared IS NOT NULL AND pc.total_products IS NOT NULL
+            AND pwc.products_cleared >= pc.total_products
             THEN 'COMMERCIAL_EVALUATION'
+          -- Stage 5b: Commercial Evaluation (no-TE flow — only after deadline AND eligible vendors exist)
+          WHEN hte.rfq_id IS NULL AND COALESCE(bs.bid_ended, false) = true
+            AND he.rfq_id IS NOT NULL
+            THEN 'COMMERCIAL_EVALUATION'
+          -- Stage 5c (NEW): Stuck at Commercial — no-TE flow, deadline passed, zero eligible vendors
+          WHEN hte.rfq_id IS NULL AND COALESCE(bs.bid_ended, false) = true
+            AND he.rfq_id IS NULL
+            AND rd.is_published = 1 AND rd.status = 1
+            THEN 'RFQ_STUCK_COMMERCIAL'
           -- Stage 4: Technical Approver Rejected
           WHEN tl.status = 'REJECTED'
             THEN 'TECHNICAL_REJECTED'
           -- Stage 3: Technical Approving
           WHEN tl.status = 'PENDING'
             THEN 'TECHNICAL_APPROVING'
-          -- Stage 2: Technical Evaluating (quotes received, tech eval configured, awaiting buyer evaluation)
+          -- Stage 2: Technical Evaluating — TE configured, deadline passed, AND ≥1 eligible vendor
           WHEN rd.is_published = 1 AND rd.status = 1 AND tl.rfq_id IS NULL
-            AND hte.rfq_id IS NOT NULL AND hq.rfq_id IS NOT NULL
+            AND hte.rfq_id IS NOT NULL
+            AND COALESCE(bs.bid_ended, false) = true
+            AND he.rfq_id IS NOT NULL
             THEN 'TECHNICAL_EVALUATING'
-          -- Stage 1.75: Tech eval configured but no quotes yet — lifecycle is in technical phase
-          WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NOT NULL AND hq.rfq_id IS NULL
+          -- Stage 1.9 (NEW): Stuck at Technical — TE configured, deadline passed, zero eligible vendors
+          WHEN rd.is_published = 1 AND rd.status = 1 AND tl.rfq_id IS NULL
+            AND hte.rfq_id IS NOT NULL
+            AND COALESCE(bs.bid_ended, false) = true
+            AND he.rfq_id IS NULL
+            THEN 'RFQ_STUCK_TECHNICAL'
+          -- Stage 1.75: Tech eval configured, bid window still open (with or without early quotes)
+          WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NOT NULL
             THEN 'TECHNICAL_AWAITING_QUOTES'
-          -- Stage 1.5: Awaiting Quotes (published, open, NO tech eval configured)
-          WHEN rd.is_published = 1 AND rd.status = 1 AND hq.rfq_id IS NULL
+          -- Stage 1.5: Awaiting Quotes (published, open, NO tech eval configured, bid window still open)
+          WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NULL
             THEN 'AWAITING_QUOTES'
           -- Stage 1: RFQ Approval (ready to publish / pending approval)
           WHEN rd.status IN (3, 4) OR (rd.is_published = 0 AND rd.status != 1)
@@ -3555,7 +3581,8 @@ LIMIT 2;
       LEFT JOIN po_data pd ON pd.rfq_id = rd.id
       LEFT JOIN po_products_approved ppa ON ppa.rfq_id = rd.id
       LEFT JOIN has_tech_eval hte ON hte.rfq_id = rd.id
-      LEFT JOIN has_quotes hq ON hq.rfq_id = rd.id
+      LEFT JOIN has_eligible_vendors he ON he.rfq_id = rd.id
+      LEFT JOIN bid_status bs ON bs.rfq_id = rd.id
     `;
 
     try {
@@ -3801,7 +3828,9 @@ LIMIT 2;
       TECHNICAL_EVALUATING: 'technical',
       TECHNICAL_APPROVING: 'technical',
       TECHNICAL_REJECTED: 'technical',
+      RFQ_STUCK_TECHNICAL: 'technical',  // Bid ended, no eligible vendors — stuck in technical phase
       COMMERCIAL_EVALUATION: 'commercial',
+      RFQ_STUCK_COMMERCIAL: 'commercial', // Bid ended, no eligible vendors (no-TE flow) — stuck in commercial phase
       NEGOTIATION_ONGOING: 'commercial',
       QUOTATION_APPROVAL: 'commercial',
       AWAITING_PO: 'purchase_order',
@@ -11438,7 +11467,8 @@ ORDER BY tq.timestamp DESC;
     rfq_no,
     sort,
     is_tender,
-    rfq_id
+    rfq_id,
+    hotel_id = null
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicJoins = '';
@@ -11463,19 +11493,35 @@ ORDER BY tq.timestamp DESC;
             ) _te_product_counts
           ) AS te_completed,
           -- has_pending_evaluation: vendors submitted quotes but not yet evaluated for a product
-          EXISTS (
-            SELECT 1 FROM tbl_rfq_product_tech_evaluation rpe
-            WHERE rpe.rfq_id = RFQ.id AND NOT rpe.is_complete
-              AND EXISTS (
-                SELECT 1 FROM tbl_quotes _q_te
-                WHERE _q_te.rfq_id = RFQ.id
-                  AND (_q_te.is_regret IS NULL OR _q_te.is_regret != 1)
-                  AND NOT EXISTS (
-                    SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
-                    WHERE _cv.tbl_rfq_product_tech_evaluation_id = rpe.id
-                      AND _cv.vendor_id = _q_te.created_by
-                  )
-              )
+          -- Strict: excludes products that have a PENDING TECHNICAL approval (those are the
+          -- approver's action, not the evaluator's). Also requires bid end date to have passed.
+          -- bid_end_date is stored as text in ISO format (e.g. '2026-03-14T11:00'), so cast it.
+          (
+            RFQ.bid_end_date IS NOT NULL
+            AND RFQ.bid_end_date != ''
+            AND RFQ.bid_end_date::timestamp < NOW()::timestamp
+            AND EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation rpe
+              WHERE rpe.rfq_id = RFQ.id AND NOT rpe.is_complete
+                AND NOT EXISTS (
+                  -- Exclude products currently waiting on a technical approver
+                  SELECT 1 FROM tbl_approval_instances ai_pte
+                  WHERE ai_pte.entity_type = 'TECHNICAL'
+                    AND ai_pte.status = 'PENDING'
+                    AND ai_pte.metadata->>'rfq_product_id' IS NOT NULL
+                    AND (ai_pte.metadata->>'rfq_product_id')::INTEGER = rpe.tbl_rfq_product_id
+                )
+                AND EXISTS (
+                  SELECT 1 FROM tbl_quotes _q_te
+                  WHERE _q_te.rfq_id = RFQ.id
+                    AND (_q_te.is_regret IS NULL OR _q_te.is_regret != 1)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
+                      WHERE _cv.tbl_rfq_product_tech_evaluation_id = rpe.id
+                        AND _cv.vendor_id = _q_te.created_by
+                    )
+                )
+            )
           ) AS has_pending_evaluation,
           -- te_approval_rejected: latest TECHNICAL approval is REJECTED with no newer PENDING/APPROVED
           EXISTS (
@@ -11606,6 +11652,7 @@ ORDER BY tq.timestamp DESC;
         DISTINCT
         RFQ.id,
         RFQ.rfq_no,
+        RFQ.status,
         RFQ.timestamp,
         RFQ.hospitality_company_id,
         RFQ.hotel_id,
@@ -11812,12 +11859,13 @@ ORDER BY tq.timestamp DESC;
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
       AND (RFQ.id = $5 OR $5 IS NULL)
+      AND (RFQ.hotel_id = $6 OR $6 IS NULL)
       ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender ? 1 : 0}` : ''}
       ${dynamicConditions}
       ORDER BY RFQ.timestamp ${sort || 'DESC'}
       LIMIT $3 OFFSET $2;`;
 
-      db.any(q, [project_id, offset, limit, rfq_no, rfq_id])
+      db.any(q, [project_id, offset, limit, rfq_no, rfq_id, hotel_id])
         .then(function (data) {
           resolve(data);
         })
