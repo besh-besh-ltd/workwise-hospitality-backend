@@ -9097,67 +9097,71 @@ ORDER BY m.created_at;
   },
 
   removeClause: async (tbl_rfq_product_tech_evaluation_clauses_id) => {
-    const checkClauseExistsQuery = `
-      SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
-      WHERE id = $1;
-    `;
-    const deleteClauseQuery = `
-      DELETE FROM tbl_rfq_product_tech_evaluation_clauses
-      WHERE id = $1;
-    `;
-
-    // Cleanup queries to delete related evaluation data
-    const deleteVendorResponsesQuery = `
-      DELETE FROM tbl_rfq_product_tech_evaluation_vendors_response
-      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
-    `;
-
-    const deleteCommentsQuery = `
-      DELETE FROM tbl_rfq_product_tech_evaluation_comments
-      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
-    `;
-
-    const deleteClearedVendorsQuery = `
-      DELETE FROM tbl_rfq_product_tech_evaluation_cleared_vendors
-      WHERE tbl_rfq_product_tech_evaluation_id = (
-        SELECT tbl_rfq_product_tech_evaluation_id
-        FROM tbl_rfq_product_tech_evaluation_clauses
-        WHERE id = $1
+    return db.tx(async (t) => {
+      // 1. Verify the clause exists and capture its parent tech_evaluation row.
+      const row = await t.oneOrNone(
+        `SELECT tbl_rfq_product_tech_evaluation_id AS parent_id
+           FROM tbl_rfq_product_tech_evaluation_clauses
+          WHERE id = $1`,
+        [tbl_rfq_product_tech_evaluation_clauses_id]
       );
-    `;
+      if (!row) {
+        throw new Error('Clause not found.');
+      }
+      const parentId = row.parent_id;
 
-    return new Promise((resolve, reject) => {
-      //Checking if the clause exists
-      db.query(checkClauseExistsQuery, [
-        tbl_rfq_product_tech_evaluation_clauses_id
-      ])
-        .then(async (result) => {
-          if (result.length === 0) {
-            return reject(new Error('Clause not found.'));
-          }
+      // 2. Cascade-clean child data tied to this clause + reset cleared vendors
+      //    on the parent (existing behaviour: any clause edit invalidates the
+      //    evaluation since scoring needs to be redone).
+      await t.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_vendors_response
+          WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1`,
+        [tbl_rfq_product_tech_evaluation_clauses_id]
+      );
+      await t.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_comments
+          WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1`,
+        [tbl_rfq_product_tech_evaluation_clauses_id]
+      );
+      await t.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+          WHERE tbl_rfq_product_tech_evaluation_id = $1`,
+        [parentId]
+      );
 
-          // Delete all related evaluation data before deleting the clause
-          await db.query(deleteVendorResponsesQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
-          await db.query(deleteCommentsQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
-          await db.query(deleteClearedVendorsQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
+      // 3. Delete the clause itself (clause_files cascade automatically).
+      await t.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_clauses WHERE id = $1`,
+        [tbl_rfq_product_tech_evaluation_clauses_id]
+      );
 
-          //Deleting the clause (clause_files will be deleted automatically due to ON DELETE CASCADE)
-          db.query(deleteClauseQuery, [
-            tbl_rfq_product_tech_evaluation_clauses_id
-          ])
-            .then(() => {
-              resolve({
-                success: true,
-                message: 'Clause and all associated data deleted successfully.'
-              });
-            })
-            .catch((error) => {
-              reject(new Error(error));
-            });
-        })
-        .catch((error) => {
-          reject(new Error(error));
-        });
+      // 4. If this was the LAST clause for the parent, delete the parent row
+      //    too. Otherwise the product gets stuck — there's a tech_evaluation
+      //    row but no clauses left to score, so the lifecycle treats it as
+      //    "tech eval configured" forever and quote-compare hides the vendors.
+      const remaining = await t.one(
+        `SELECT COUNT(*)::int AS count
+           FROM tbl_rfq_product_tech_evaluation_clauses
+          WHERE tbl_rfq_product_tech_evaluation_id = $1`,
+        [parentId]
+      );
+
+      let parentDeleted = false;
+      if (remaining.count === 0) {
+        await t.none(
+          `DELETE FROM tbl_rfq_product_tech_evaluation WHERE id = $1`,
+          [parentId]
+        );
+        parentDeleted = true;
+      }
+
+      return {
+        success: true,
+        parent_deleted: parentDeleted,
+        message: parentDeleted
+          ? 'Last clause removed; technical evaluation cleared for this product.'
+          : 'Clause and all associated data deleted successfully.',
+      };
     });
   },
 
@@ -12125,47 +12129,46 @@ ORDER BY tq.timestamp DESC;
   updateMinimumPassingScore: async (rfq_id, rfq_product_id, minimum_passing_score) => {
     return new Promise(async (resolve, reject) => {
       try {
-        // First, check if technical evaluation record exists
-        const checkQuery = `
-          SELECT id FROM tbl_rfq_product_tech_evaluation
-          WHERE rfq_id = $1 AND tbl_rfq_product_id = $2;
+        // Require at least one clause to exist before allowing a minimum passing
+        // score to be set. This prevents the orphan-row stuck-product bug:
+        // setting a score used to INSERT an empty parent row, leaving the product
+        // with a tech_evaluation row but no clauses to score — the lifecycle
+        // treated it as "tech eval configured" forever and quote-compare hid the
+        // vendors. The companion guarantee (removeClause deletes the parent row
+        // when the last clause is removed) is enforced in removeClause.
+        const clauseCheckQuery = `
+          SELECT te.id
+            FROM tbl_rfq_product_tech_evaluation te
+            JOIN tbl_rfq_product_tech_evaluation_clauses c
+              ON c.tbl_rfq_product_tech_evaluation_id = te.id
+           WHERE te.rfq_id = $1 AND te.tbl_rfq_product_id = $2
+           LIMIT 1;
         `;
-        const existingRecord = await db.query(checkQuery, [rfq_id, rfq_product_id]);
+        const clauseCheck = await db.query(clauseCheckQuery, [rfq_id, rfq_product_id]);
 
-        // If record doesn't exist, create it
-        if (existingRecord.length === 0) {
-          const insertQuery = `
-            INSERT INTO tbl_rfq_product_tech_evaluation (rfq_id, tbl_rfq_product_id, minimum_passing_score, timestamp)
-            VALUES ($1, $2, $3, NOW())
-            RETURNING id;
-          `;
-          const insertResult = await db.query(insertQuery, [rfq_id, rfq_product_id, minimum_passing_score]);
-          
-          if (insertResult.length > 0) {
-            resolve({
-              status: 1,
-              message: 'Minimum passing score set successfully.'
-            });
-            return;
-          }
-        } else {
-          // Record exists, update it
-          const updateQuery = `
-            UPDATE tbl_rfq_product_tech_evaluation
-            SET minimum_passing_score = $1
-            WHERE rfq_id = $2 AND tbl_rfq_product_id = $3
-            RETURNING id;
-          `;
+        if (clauseCheck.length === 0) {
+          resolve({
+            status: 0,
+            message: 'Add at least one clause before setting a minimum passing score.'
+          });
+          return;
+        }
 
-          const result = await db.query(updateQuery, [minimum_passing_score, rfq_id, rfq_product_id]);
+        // Update the existing parent row.
+        const updateQuery = `
+          UPDATE tbl_rfq_product_tech_evaluation
+             SET minimum_passing_score = $1
+           WHERE rfq_id = $2 AND tbl_rfq_product_id = $3
+           RETURNING id;
+        `;
+        const result = await db.query(updateQuery, [minimum_passing_score, rfq_id, rfq_product_id]);
 
-          if (result.length > 0) {
-            resolve({
-              status: 1,
-              message: 'Minimum passing score updated successfully.'
-            });
-            return;
-          }
+        if (result.length > 0) {
+          resolve({
+            status: 1,
+            message: 'Minimum passing score updated successfully.'
+          });
+          return;
         }
 
         resolve({
