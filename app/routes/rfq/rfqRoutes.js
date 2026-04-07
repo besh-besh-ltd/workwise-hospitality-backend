@@ -256,6 +256,20 @@ RfqRoutes.get(
 
   rfqController.closeRFQ
 );
+RfqRoutes.post(
+  '/withdraw-publish/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  rfqController.withdrawPublish
+);
+RfqRoutes.post(
+  '/terminate/:id',
+  passportSignIn,
+  validateDbBody.user_id_profileexists,
+  acl([2, 8]),
+  rfqController.terminateRFQ
+);
 RfqRoutes.get(
   '/send-reminder/:id',
   passportSignIn,

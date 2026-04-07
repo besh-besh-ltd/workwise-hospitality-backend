@@ -147,6 +147,7 @@ const startApprovalForNegotiation = async (rfqProductId, roundId, roundNumber, r
         round_number: roundNumber,
         rfq_id: rfqId,
         rfq_number: rfqData.rfq_no,
+        rfq_title: rfqData.title || '',
         is_tender: rfqData.is_tender,
         rfq_product_id: rfqProductId
       },
@@ -189,7 +190,8 @@ const startApprovalForNegotiationQuotes = async (rfqProductId, rfqId, selectedQu
       initiated_by: userId,
       metadata: {
         rfq_id: rfqId,
-        rfq_no: rfqData.rfq_no,
+        rfq_number: rfqData.rfq_no,
+        rfq_title: rfqData.title || '',
         rfq_product_id: rfqProductId,
         is_tender: rfqData.is_tender,
         selected_quotes: selectedQuotes.map(q => ({
