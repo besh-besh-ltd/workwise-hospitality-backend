@@ -400,6 +400,11 @@ export const publishRfqById = async (rfqId, rfq_no) => {
       return { skipped: true, reason: 'already_published' };
     }
 
+    if (rfq.status === 5) {
+      console.log(`[RFQ Publisher] Skipping - RFQ ${rfq_no} (ID: ${rfqId}) publish request was withdrawn`);
+      return { skipped: true, reason: 'withdrawn' };
+    }
+
     // Track if we auto-approved
     let wasAutoApproved = false;
 
