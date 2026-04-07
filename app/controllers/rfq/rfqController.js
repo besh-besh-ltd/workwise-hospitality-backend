@@ -39,7 +39,7 @@ import negotiationModel from '../../models/negotiationModel.js';
 import rbacModel from '../../models/rbacModel.js';
 import { sendTechEvalCompletionNotification, sendVendorTechAcceptanceNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
 import { sendTenderFeePaymentConfirmation } from '../../helper/sendEmailFunctions/tenderFeeEmails.js';
-import { sendRfqCreationNotification, sendRfqReadyToPublishNotification, sendRfqPublishedNotification, sendVendorRfqNotification } from '../../helper/sendEmailFunctions/approvalEmails.js';
+import { sendRfqCreationNotification, sendRfqReadyToPublishNotification, sendRfqPublishedNotification, sendVendorRfqNotification, sendRfqClosedHeadsUpNotification, sendApprovalCancelledNotification } from '../../helper/sendEmailFunctions/approvalEmails.js';
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -1199,98 +1199,6 @@ const sendQuoteNotificationToVendor = async (req) => {
     await whatsappNotificationAISensy.sendQuoteSubmissionNotification(whatsappPayload)
   }
 
-};
-
-const sendRFQClosedMail = async (buyerInfo, rfqItem, vendorList) => {
-  const { name, email, organization_name, company_name } = buyerInfo;
-  const buyerCompanyName = company_name || organization_name || name;
-
-  // Get project members for CC
-  const projectMemberEmails = await getProjectMemberEmailsForRFQ(rfqItem.id);
-
-  // Define email content based on user role
-  const headerContent = `<div>
-                           <h2>Hello ${name},</h2>
-                          </div>`;
-
-  const buyerContainerContent = `<div style="font-size:16px;">
-        You've marked your RFQ as closed. Here are the details for your records:<br>
-        <strong>RFQ Number:</strong> ${rfqItem.rfq_no}<br>
-        <strong>Closed By:</strong> ${name}<br>
-        <br>
-        <a href="${process.env.FRONT_END_WEBSITE}/dashboard/buyer/rfq-management-details?type=buyer-view&id=${rfqItem.id}"
-           style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-          View Closed RFQs
-        </a>
-           <br>
-        <p>
-        Keep moving forward with Phileein Hospitality!
-        </p>
-      </div>`;
-
-  const dynamicHTML = generateEmailTemplate(
-    headerContent,
-    buyerContainerContent
-  );
-
-  // Send email to the buyer
-  let buyerMailRecipients = {
-    from: Config.webmasterMail,
-    to: email,
-    subject: `RFQ Marked as Closed for #${rfqItem.rfq_no}`,
-    html: dynamicHTML
-  };
-
-  // Add project members to CC
-  addProjectMembersToCC(buyerMailRecipients, projectMemberEmails);
-
-  sendMail(buyerMailRecipients);
-
-  // Send email to all vendors and their SPOCs
-  for (const vendor of vendorList) {
-    const headerContentVendor = `<div>
-          <h2>Hello ${vendor.user_name},</h2>
-         </div>`;
-
-    const vendorContainerContent = `<div style="font-size:16px;">
-         The RFQ for <strong>${rfqItem.rfq_no}</strong> has been marked as closed by the buyer.<br>
-         Thank you for your participation, and we look forward to more opportunities to work with you.<br>
-         <br>
-
-         <a href="${process.env.FRONT_END_WEBSITE}/dashboard/vendor/inquiries-details?id=${rfqItem.id}"
-            style="background-color: #059669; color: white; font-family: 'Roboto', sans-serif; text-align: center; padding: 10px 24px; display: block; border-radius: 9999px; width: 100%; max-width: 192px; margin: 0 auto; text-decoration: none;">
-           Explore New RFQs
-         </a>
-          <br>
-         <p>
-          Tip: Regularly check for new RFQs to stay ahead and grow your business through Phileein Hospitality.
-         </p>
-
-         </div>`;
-
-    const dynamicHTMLVendor = generateEmailTemplate(
-      headerContentVendor,
-      vendorContainerContent
-    );
-
-    const spocList = vendor.spocs;
-
-    let mailRecipients = {
-      from: `${buyerCompanyName} ${Config.masterEmail}`,
-      subject: `RFQ Marked as Closed for #${rfqItem.rfq_no}`,
-      html: dynamicHTMLVendor
-    };
-
-    if (spocList && spocList.length > 0) {
-      mailRecipients.to = spocList.map((spoc) => spoc.spoc_email);
-    } else {
-      mailRecipients.to = vendor.user_email;
-    }
-
-    // NOTE: Do NOT add project members to CC for vendor emails to prevent data leakage
-
-    sendMail(mailRecipients);
-  }
 };
 
 const sendReminderRFQMAIL = async (vendor, org_name, rfq_id, rfqBasicDetails) => {
@@ -4788,13 +4696,21 @@ const rfqController = {
       const productsWithoutVendors = await rfqModel.checkProductVendors(rfq_id, selectedSheets);
       if (productsWithoutVendors.length > 0) {
         const names = productsWithoutVendors.map(p => p.product_name).join(', ');
+        const message = `At least one vendor is required for each product. Missing: ${names}`;
+        const details = productsWithoutVendors.map(p => ({
+          rfqProductId: p.id,
+          productName: p.product_name
+        }));
         return res
           .status(400)
           .json({
             status: 2,
+            message,
             errors: {
-              vendors: `At least one vendor is required for each product. Products without vendors: ${names}`
-            }
+              vendors: message,
+              details
+            },
+            details
           })
           .end();
       }
@@ -5037,6 +4953,36 @@ const rfqController = {
               isValidationError: true,
               errors: validationErrors,
               message: 'Tender update validation failed'
+            };
+          }
+        }
+
+        // Block edits to products that have approved POs
+        const poApprovedProducts = await t.any(
+          `SELECT rp.id FROM tbl_rfq_products rp
+           WHERE rp.rfq_id = $1
+           AND EXISTS (
+             SELECT 1 FROM tbl_rfq_purchase_order po
+             JOIN tbl_purchase_order_product pop ON pop.purchase_order_id = po.id
+             WHERE po.rfq_id = rp.rfq_id AND pop.rfq_product_id = rp.id
+             AND po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+           )`,
+          [rfq_id]
+        );
+        if (poApprovedProducts.length > 0) {
+          const lockedIds = new Set(poApprovedProducts.map(p => p.id));
+          const updatable = data.updatableData || {};
+          const updatableProducts = updatable.products || {};
+
+          // Check if any locked product is being modified or deleted
+          const modifiedLockedProducts = Object.keys(updatableProducts.updatable || {}).filter(id => lockedIds.has(parseInt(id)));
+          const deletedLockedProducts = (updatableProducts.deletable || []).filter(id => lockedIds.has(parseInt(id)));
+
+          if (modifiedLockedProducts.length > 0 || deletedLockedProducts.length > 0) {
+            throw {
+              isValidationError: true,
+              errors: [{ field: 'products', message: 'Cannot edit products with approved Purchase Orders' }],
+              message: 'Cannot edit products with approved Purchase Orders'
             };
           }
         }
@@ -6202,6 +6148,7 @@ const rfqController = {
       const reverse_auction = req.body.reverse_auction || '-1';
       const rfq_type = req.body.rfq_type || '';
       const rfq_no = req.body.rfq_no || null;
+      const hotel_ids = req.body.hotel_ids || [];
 
       const result = await rfqModel.getAllDraftRfqs(
         limit,
@@ -6211,7 +6158,8 @@ const rfqController = {
         sort,
         reverse_auction,
         rfq_type,
-        rfq_no
+        rfq_no,
+        hotel_ids
       );
 
       res.status(200).json({
@@ -7449,7 +7397,7 @@ const rfqController = {
         offset = 0;
       }
 
-      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender, completed_status } = req.body;
+      let { project_id, sort, reverse_auction, rfq_type, rfq_no, is_tender, completed_status, hotel_ids } = req.body;
       if (project_id == -1) {
         project_id = null;
       }
@@ -7479,7 +7427,8 @@ const rfqController = {
         rfq_type,
         rfq_no,
         is_tender,
-        completed_status
+        completed_status,
+        hotel_ids
       );
 
       let count = await rfqModel.getBuyerRfqCount(
@@ -7489,7 +7438,8 @@ const rfqController = {
         reverse_auction,
         rfq_no,
         is_tender,
-        completed_status
+        completed_status,
+        hotel_ids
       );
 
       // Enrich with lifecycle stage
@@ -8681,16 +8631,201 @@ const rfqController = {
     const { id } = req.user;
 
     try {
-      const rfQItem = await rfqModel.changeRFQStatus(rfq_id, id);
-      const vendorList = await rfqModel.getRfqVendorListAlongWithSPOC(rfq_id);
+      const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+      if (!rfqDetails) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found' });
+      }
+      if (String(rfqDetails.created_by) !== String(id)) {
+        return res.status(403).json({ status: 0, message: 'Only the RFQ creator can close this RFQ' });
+      }
+      if (String(rfqDetails.status) !== '1') {
+        return res.status(400).json({ status: 0, message: 'Only open RFQs can be closed' });
+      }
 
-      sendRFQClosedMail(req.user, rfQItem[0], vendorList);
+      const entityType = rfqDetails.is_tender === 1 ? 'TENDER' : 'RFQ';
+      const cancelReason = `${entityType} closed by creator`;
+
+      // Captured inside the transaction, used outside the tx for emails.
+      let cancelledInstances = [];
+      let cancelledRoundCount = 0;
+
+      // Update RFQ status to CLOSED (2) and cancel ALL pending approvals tied to this RFQ.
+      await db.tx(async t => {
+        await t.none(
+          'UPDATE tbl_rfq SET status = 2, updated_by = $1 WHERE id = $2',
+          [id, rfq_id]
+        );
+
+        // Cancel any ACTIVE negotiation rounds — vendors should not be able to
+        // keep submitting new quotes against a closed RFQ.
+        const cancelledRoundsResult = await t.result(
+          `UPDATE tbl_negotiation_rounds
+              SET status = 'CANCELLED', closed_at = NOW()
+            WHERE rfq_id = $1 AND status = 'ACTIVE'`,
+          [rfq_id]
+        );
+        cancelledRoundCount = cancelledRoundsResult.rowCount;
+
+        // Bulletproof lookup: an approval can be linked to an RFQ via several
+        // shapes depending on the entity_type. We catch every shape:
+        //   • RFQ/TENDER:        entity_id = rfq_id
+        //   • PO:                entity_id = po_id (FK to tbl_rfq_purchase_order)
+        //   • NEGOTIATION:       entity_id = rfq_product_id (FK to tbl_rfq_products)
+        //   • NEGOTIATION_QUOTE: entity_id = rfq_product_id
+        //   • ARC:               entity_id = rfq_product_id
+        //   • TECHNICAL:         entity_id = tech_evaluation round id (FK to tbl_rfq_product_tech_evaluation)
+        //   • Catch-all:         metadata->>'rfq_id' = rfq_id (covers any new entity_type that
+        //                        consistently sets this field)
+        const pendingInstances = await t.any(
+          `SELECT id, entity_type, entity_id, metadata
+             FROM tbl_approval_instances
+            WHERE status = 'PENDING'
+              AND (
+                (entity_type IN ('RFQ','TENDER') AND entity_id = $1)
+                OR (
+                  entity_type = 'PO'
+                  AND entity_id IN (SELECT id FROM tbl_rfq_purchase_order WHERE rfq_id = $1)
+                )
+                OR (
+                  entity_type IN ('NEGOTIATION','NEGOTIATION_QUOTE','ARC')
+                  AND entity_id IN (SELECT id FROM tbl_rfq_products WHERE rfq_id = $1)
+                )
+                OR (
+                  entity_type = 'TECHNICAL'
+                  AND entity_id IN (SELECT id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = $1)
+                )
+                OR (
+                  metadata->>'rfq_id' IS NOT NULL
+                  AND (metadata->>'rfq_id')::int = $1
+                )
+              )`,
+          [rfq_id]
+        );
+
+        for (const instance of pendingInstances) {
+          // Capture current pending approvers BEFORE we cancel the steps,
+          // so we can email them after the transaction commits.
+          const approvers = await t.any(
+            `SELECT u.id AS user_id, u.name AS user_name, u.email AS user_email
+               FROM tbl_approval_instance_steps ais
+               JOIN tbl_approval_step_approvers asa
+                 ON asa.approval_instance_step_id = ais.id
+               JOIN tbl_users u ON u.id = asa.approver_user_id
+              WHERE ais.approval_instance_id = $1
+                AND ais.status = 'PENDING'
+                AND asa.status = 'PENDING'
+                AND u.email IS NOT NULL
+                AND u.email <> ''`,
+            [instance.id]
+          );
+
+          await t.none(
+            `UPDATE tbl_approval_instances
+                SET status = 'CANCELLED', completed_at = NOW()
+              WHERE id = $1`,
+            [instance.id]
+          );
+          await t.none(
+            `UPDATE tbl_approval_instance_steps
+                SET status = 'CANCELLED', completed_at = NOW()
+              WHERE approval_instance_id = $1 AND status = 'PENDING'`,
+            [instance.id]
+          );
+          await t.none(
+            `INSERT INTO tbl_approval_actions
+               (approval_instance_id, approver_user_id, action, comment)
+             VALUES ($1, $2, 'REJECT', $3)`,
+            [instance.id, id, `[CANCELLED] ${cancelReason}`]
+          );
+
+          cancelledInstances.push({
+            id: instance.id,
+            entity_type: instance.entity_type,
+            entity_id: instance.entity_id,
+            metadata: instance.metadata,
+            approvers
+          });
+        }
+      });
+
+      console.log(`[closeRFQ] RFQ ${rfq_id}: cancelled ${cancelledInstances.length} pending approval instance(s) and ${cancelledRoundCount} active negotiation round(s)`);
+
+      // Re-fetch the RFQ row so the response shape stays the same as before
+      const rfQItem = await rfqModel.getRfqDetailsById(rfq_id);
+
+      // Fetch all business unit members mapped to this RFQ's hotel.
+      // Includes both hotel-specific (mapping_type = 1) and company-wide
+      // (mapping_type = 0) mappings, deduped by user id.
+      let buMembers = [];
+      try {
+        buMembers = await db.any(
+          `SELECT DISTINCT u.id, u.name, u.email
+             FROM tbl_users u
+             JOIN tbl_hospitality_user_mappings hum ON hum.user_id = u.id
+            WHERE u.is_deleted = 0
+              AND u.status = 1
+              AND u.email IS NOT NULL
+              AND u.email <> ''
+              AND (
+                (hum.mapping_type = 1 AND hum.hospitality_hotel_id = $1)
+                OR (hum.mapping_type = 0 AND hum.hospitality_company_id = $2)
+              )`,
+          [rfQItem.hotel_id, rfQItem.hospitality_company_id]
+        );
+      } catch (buErr) {
+        console.error(`[closeRFQ] Failed to fetch BU members for RFQ ${rfq_id}:`, buErr.message);
+      }
+
+      // Send heads-up email to all BU members (replaces the legacy vendor-targeted close email).
+      sendRfqClosedHeadsUpNotification({
+        rfqDetails: {
+          id: rfQItem.id,
+          rfq_no: rfQItem.rfq_no,
+          is_tender: rfQItem.is_tender,
+          title: rfQItem.title,
+          hotel_name: rfqDetails.hotel_name || null,
+          company_name: rfqDetails.company_name || null,
+        },
+        closedByName: req.user.name,
+        users: buMembers,
+      });
+
+      // Notify each instance's current approvers that their approval is no longer needed.
+      for (const inst of cancelledInstances) {
+        if (!inst.approvers || inst.approvers.length === 0) continue;
+        sendApprovalCancelledNotification({
+          entityType: inst.entity_type,
+          entityIdentifier: rfQItem.rfq_no,
+          reason: cancelReason,
+          approvers: inst.approvers,
+          extraContext: { rfq_id: parseInt(rfq_id) },
+        });
+      }
+
+      // Record lifecycle event (non-blocking — failure shouldn't break close)
+      try {
+        await recordLifecycleEvent({
+          entity_type: entityType,
+          entity_id: parseInt(rfq_id),
+          stage: 'CLOSED',
+          action: 'RFQ_CLOSED',
+          performed_by: id,
+          metadata: {
+            previous_status: 1,
+            cancelled_approval_count: cancelledInstances.length,
+            cancelled_negotiation_round_count: cancelledRoundCount,
+          },
+          remarks: 'RFQ closed by creator'
+        });
+      } catch (lifecycleErr) {
+        console.error(`Failed to record lifecycle event for closed RFQ ${rfq_id}:`, lifecycleErr.message);
+      }
 
       res
         .status(200)
         .json({
           status: 1,
-          data: rfQItem
+          data: [rfQItem]
         })
         .end();
     } catch (error) {
@@ -8702,6 +8837,193 @@ const rfqController = {
           message: Config.errorText.value
         })
         .end();
+    }
+  },
+
+  withdrawPublish: async (req, res, next) => {
+    const rfq_id = req.params.id;
+    const { id: user_id } = req.user;
+
+    try {
+      const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+      if (!rfqDetails) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found' });
+      }
+      if (String(rfqDetails.created_by) !== String(user_id)) {
+        return res.status(403).json({ status: 0, message: 'Only the RFQ creator can withdraw the publish request' });
+      }
+
+      const currentStatus = parseInt(rfqDetails.status);
+      if (currentStatus !== 3 && currentStatus !== 4) {
+        return res.status(400).json({ status: 0, message: 'RFQ must be in Pending Approval or Ready to Publish status to withdraw' });
+      }
+
+      const entityType = rfqDetails.is_tender === 1 ? 'TENDER' : 'RFQ';
+
+      // Update RFQ status to WITHDRAWN (5) and cancel pending approvals
+      await db.tx(async t => {
+        await t.none(
+          'UPDATE tbl_rfq SET status = 5, updated_by = $1 WHERE id = $2',
+          [user_id, rfq_id]
+        );
+
+        // Cancel any pending approval instances
+        const pendingInstances = await t.any(
+          `SELECT id FROM tbl_approval_instances
+           WHERE entity_type = $1 AND entity_id = $2 AND status = 'PENDING'`,
+          [entityType, rfq_id]
+        );
+
+        for (const instance of pendingInstances) {
+          await t.none(
+            `UPDATE tbl_approval_instances
+             SET status = 'CANCELLED', completed_at = NOW()
+             WHERE id = $1`,
+            [instance.id]
+          );
+          await t.none(
+            `UPDATE tbl_approval_instance_steps
+             SET status = 'CANCELLED', completed_at = NOW()
+             WHERE approval_instance_id = $1 AND status = 'PENDING'`,
+            [instance.id]
+          );
+          await t.none(
+            `INSERT INTO tbl_approval_actions
+             (approval_instance_id, approver_user_id, action, comment)
+             VALUES ($1, $2, 'REJECT', $3)`,
+            [instance.id, user_id, '[CANCELLED] Publish request withdrawn by creator']
+          );
+        }
+      });
+
+      // Cancel EventBridge schedule (outside transaction — non-critical)
+      try {
+        const { removeRfqPublishJob } = await import('../../helper/cronManager.js');
+        await removeRfqPublishJob(rfq_id);
+      } catch (scheduleErr) {
+        console.error(`Failed to remove publish schedule for RFQ ${rfq_id}:`, scheduleErr.message);
+      }
+
+      // Record lifecycle event
+      await recordLifecycleEvent({
+        entity_type: entityType,
+        entity_id: parseInt(rfq_id),
+        stage: 'WITHDRAWN',
+        action: 'PUBLISH_WITHDRAWN',
+        performed_by: user_id,
+        metadata: { previous_status: currentStatus },
+        remarks: 'Publish request withdrawn by creator'
+      });
+
+      // Record quote activity for audit trail
+      await rfqModel.insertIntoQuoteActivity({
+        rfq_id: rfq_id,
+        current_status: '5',
+        created_by: user_id
+      });
+
+      return res.status(200).json({
+        status: 1,
+        message: 'Publish request withdrawn successfully',
+        data: { rfq_id, new_status: 5 }
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message || Config.errorText.value
+      });
+    }
+  },
+
+  terminateRFQ: async (req, res, next) => {
+    const rfq_id = req.params.id;
+    const { id: user_id } = req.user;
+
+    try {
+      const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+      if (!rfqDetails) {
+        return res.status(404).json({ status: 2, message: 'RFQ not found' });
+      }
+      if (String(rfqDetails.created_by) !== String(user_id)) {
+        return res.status(403).json({ status: 0, message: 'Only the RFQ creator can terminate this RFQ' });
+      }
+
+      const currentStatus = parseInt(rfqDetails.status);
+      if (currentStatus !== 3 && currentStatus !== 4) {
+        return res.status(400).json({ status: 0, message: 'RFQ must be in Pending Approval or Ready to Publish status to terminate' });
+      }
+
+      const entityType = rfqDetails.is_tender === 1 ? 'TENDER' : 'RFQ';
+
+      await db.tx(async t => {
+        await t.none(
+          'UPDATE tbl_rfq SET status = 2, is_published = 0, updated_by = $1 WHERE id = $2',
+          [user_id, rfq_id]
+        );
+
+        const pendingInstances = await t.any(
+          `SELECT id FROM tbl_approval_instances
+           WHERE entity_type = $1 AND entity_id = $2 AND status = 'PENDING'`,
+          [entityType, rfq_id]
+        );
+
+        for (const instance of pendingInstances) {
+          await t.none(
+            `UPDATE tbl_approval_instances
+             SET status = 'CANCELLED', completed_at = NOW()
+             WHERE id = $1`,
+            [instance.id]
+          );
+          await t.none(
+            `UPDATE tbl_approval_instance_steps
+             SET status = 'CANCELLED', completed_at = NOW()
+             WHERE approval_instance_id = $1 AND status = 'PENDING'`,
+            [instance.id]
+          );
+          await t.none(
+            `INSERT INTO tbl_approval_actions
+             (approval_instance_id, approver_user_id, action, comment)
+             VALUES ($1, $2, 'REJECT', $3)`,
+            [instance.id, user_id, '[CANCELLED] RFQ terminated by creator']
+          );
+        }
+      });
+
+      try {
+        const { removeRfqPublishJob } = await import('../../helper/cronManager.js');
+        await removeRfqPublishJob(rfq_id);
+      } catch (scheduleErr) {
+        console.error(`Failed to remove publish schedule for RFQ ${rfq_id}:`, scheduleErr.message);
+      }
+
+      await recordLifecycleEvent({
+        entity_type: entityType,
+        entity_id: parseInt(rfq_id),
+        stage: 'TERMINATED',
+        action: 'RFQ_TERMINATED',
+        performed_by: user_id,
+        metadata: { previous_status: currentStatus },
+        remarks: 'RFQ terminated by creator'
+      });
+
+      await rfqModel.insertIntoQuoteActivity({
+        rfq_id: rfq_id,
+        current_status: '2',
+        created_by: user_id
+      });
+
+      return res.status(200).json({
+        status: 1,
+        message: 'RFQ terminated successfully',
+        data: { rfq_id, new_status: 2 }
+      });
+    } catch (error) {
+      logError(error);
+      return res.status(400).json({
+        status: 3,
+        message: error.message || Config.errorText.value
+      });
     }
   },
 
@@ -14581,7 +14903,7 @@ getClauses: async (req, res) => {
     try {
       const user_id = req.user.id;
       const user_type = req.user.user_type;
-      
+
       let {
         tech_eval,
         po = 'false',
@@ -14592,7 +14914,8 @@ getClauses: async (req, res) => {
         rfq_id,
         sort = 'DESC',
         is_tender,
-        module_keys
+        module_keys,
+        hotel_id
       } = req.query;
 
       // Convert string query parameters to proper types
@@ -14604,6 +14927,7 @@ getClauses: async (req, res) => {
       project_id = project_id ? parseInt(project_id) : null;
       rfq_no = rfq_no ? parseInt(rfq_no) : null;
       rfq_id = rfq_id ? parseInt(rfq_id) : null;
+      hotel_id = hotel_id ? parseInt(hotel_id) : null;
       is_tender = is_tender !== undefined && is_tender !== null ? (is_tender === 'true' || is_tender === true || is_tender === '1' || is_tender === 1) : null;
 
       // Parse module_keys into array of uppercase entity types
@@ -14632,7 +14956,8 @@ getClauses: async (req, res) => {
         rfq_no,
         sort,
         is_tender,
-        rfq_id
+        rfq_id,
+        hotel_id
       );
 
       // Enrich each RFQ with approval_required flag

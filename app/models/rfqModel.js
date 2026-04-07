@@ -1,6 +1,6 @@
 import db, { pgp } from '../config/dbConn.js';
 import Config from '../config/app.config.js';
-import generalModel, { getApprovalInstanceDetails, findBestMatchingPolicy, resolveApprovers } from './generalModel.js';
+import generalModel, { getApprovalInstanceDetails, findBestMatchingPolicy, resolveApprovers, roleHasReadAndApprovePermission, ENTITY_APPROVE_RESOURCE_MAP } from './generalModel.js';
 import userModel from './userModel.js';
 import cmsModel from './cmsModel.js';
 import { logError, PERSISTENCE_STATUSES } from '../helper/common.js';
@@ -2681,6 +2681,12 @@ LIMIT 1;`;
         `
             : ''
         }
+        ,EXISTS (
+            SELECT 1 FROM tbl_rfq_purchase_order _po
+            JOIN tbl_purchase_order_product _pop ON _pop.purchase_order_id = _po.id
+            WHERE _po.rfq_id = RFQ_P.rfq_id AND _pop.rfq_product_id = RFQ_P.id
+              AND _po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
+        ) AS has_approved_po
 
     FROM
         tbl_rfq_products RFQ_P
@@ -3137,7 +3143,8 @@ LIMIT 2;
     rfq_type,
     rfq_no,
     is_tender,
-    completed_status
+    completed_status,
+    hotel_ids
   ) => {
     return new Promise(function (resolve, reject) {
       let q = `
@@ -3309,7 +3316,7 @@ LIMIT 2;
           OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
               AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
         )
-      )) AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
+      )) AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4))
       -- Permission filter: only RFQs the user has read access for
       AND EXISTS (
         SELECT 1 FROM tbl_user_role_scopes _urs2
@@ -3371,6 +3378,7 @@ LIMIT 2;
             ) AS _has_appr FROM tbl_rfq_products _rp3 WHERE _rp3.rfq_id = RFQ.id) _c2)
         END)
       )` : ''}
+      ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
       ORDER BY RFQ.timestamp ${sort ?? ''}
       LIMIT $5 OFFSET $4;`;
 
@@ -3484,9 +3492,20 @@ LIMIT 2;
       has_tech_eval AS (
         SELECT DISTINCT rfq_id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
       ),
-      -- Whether any quotes have been received
-      has_quotes AS (
-        SELECT rfq_id FROM tbl_quotes WHERE rfq_id = ANY($1::int[]) GROUP BY rfq_id HAVING COUNT(*) > 0
+      -- Whether any non-regret quotes have been received (= eligible vendors)
+      has_eligible_vendors AS (
+        SELECT rfq_id FROM tbl_quotes
+        WHERE rfq_id = ANY($1::int[])
+          AND (is_regret IS NULL OR is_regret != 1)
+        GROUP BY rfq_id HAVING COUNT(*) > 0
+      ),
+      -- Whether the bid submission deadline has passed.
+      -- bid_end_date is stored as text in ISO format (e.g. '2026-03-14T11:00'), so cast it.
+      bid_status AS (
+        SELECT id AS rfq_id,
+               (bid_end_date IS NOT NULL AND bid_end_date != ''
+                  AND bid_end_date::timestamp < NOW()::timestamp) AS bid_ended
+        FROM tbl_rfq WHERE id = ANY($1::int[])
       )
       SELECT
         rd.id AS rfq_id,
@@ -3510,27 +3529,42 @@ LIMIT 2;
           -- Stage 6: Negotiation Ongoing
           WHEN an.rfq_id IS NOT NULL
             THEN 'NEGOTIATION_ONGOING'
-          -- Stage 5: Commercial Evaluation
-          --   (a) TE flow: all products have cleared vendors (approver approved, in cleared table)
-          --   (b) No-TE flow: quotes received, no tech eval configured → straight to commercial
-          WHEN (pwc.products_cleared IS NOT NULL AND pc.total_products IS NOT NULL AND pwc.products_cleared >= pc.total_products)
-            OR (hte.rfq_id IS NULL AND hq.rfq_id IS NOT NULL)
+          -- Stage 5a: Commercial Evaluation (TE flow — all products have cleared vendors)
+          WHEN pwc.products_cleared IS NOT NULL AND pc.total_products IS NOT NULL
+            AND pwc.products_cleared >= pc.total_products
             THEN 'COMMERCIAL_EVALUATION'
+          -- Stage 5b: Commercial Evaluation (no-TE flow — only after deadline AND eligible vendors exist)
+          WHEN hte.rfq_id IS NULL AND COALESCE(bs.bid_ended, false) = true
+            AND he.rfq_id IS NOT NULL
+            THEN 'COMMERCIAL_EVALUATION'
+          -- Stage 5c (NEW): Stuck at Commercial — no-TE flow, deadline passed, zero eligible vendors
+          WHEN hte.rfq_id IS NULL AND COALESCE(bs.bid_ended, false) = true
+            AND he.rfq_id IS NULL
+            AND rd.is_published = 1 AND rd.status = 1
+            THEN 'RFQ_STUCK_COMMERCIAL'
           -- Stage 4: Technical Approver Rejected
           WHEN tl.status = 'REJECTED'
             THEN 'TECHNICAL_REJECTED'
           -- Stage 3: Technical Approving
           WHEN tl.status = 'PENDING'
             THEN 'TECHNICAL_APPROVING'
-          -- Stage 2: Technical Evaluating (quotes received, tech eval configured, awaiting buyer evaluation)
+          -- Stage 2: Technical Evaluating — TE configured, deadline passed, AND ≥1 eligible vendor
           WHEN rd.is_published = 1 AND rd.status = 1 AND tl.rfq_id IS NULL
-            AND hte.rfq_id IS NOT NULL AND hq.rfq_id IS NOT NULL
+            AND hte.rfq_id IS NOT NULL
+            AND COALESCE(bs.bid_ended, false) = true
+            AND he.rfq_id IS NOT NULL
             THEN 'TECHNICAL_EVALUATING'
-          -- Stage 1.75: Tech eval configured but no quotes yet — lifecycle is in technical phase
-          WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NOT NULL AND hq.rfq_id IS NULL
+          -- Stage 1.9 (NEW): Stuck at Technical — TE configured, deadline passed, zero eligible vendors
+          WHEN rd.is_published = 1 AND rd.status = 1 AND tl.rfq_id IS NULL
+            AND hte.rfq_id IS NOT NULL
+            AND COALESCE(bs.bid_ended, false) = true
+            AND he.rfq_id IS NULL
+            THEN 'RFQ_STUCK_TECHNICAL'
+          -- Stage 1.75: Tech eval configured, bid window still open (with or without early quotes)
+          WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NOT NULL
             THEN 'TECHNICAL_AWAITING_QUOTES'
-          -- Stage 1.5: Awaiting Quotes (published, open, NO tech eval configured)
-          WHEN rd.is_published = 1 AND rd.status = 1 AND hq.rfq_id IS NULL
+          -- Stage 1.5: Awaiting Quotes (published, open, NO tech eval configured, bid window still open)
+          WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NULL
             THEN 'AWAITING_QUOTES'
           -- Stage 1: RFQ Approval (ready to publish / pending approval)
           WHEN rd.status IN (3, 4) OR (rd.is_published = 0 AND rd.status != 1)
@@ -3547,7 +3581,8 @@ LIMIT 2;
       LEFT JOIN po_data pd ON pd.rfq_id = rd.id
       LEFT JOIN po_products_approved ppa ON ppa.rfq_id = rd.id
       LEFT JOIN has_tech_eval hte ON hte.rfq_id = rd.id
-      LEFT JOIN has_quotes hq ON hq.rfq_id = rd.id
+      LEFT JOIN has_eligible_vendors he ON he.rfq_id = rd.id
+      LEFT JOIN bid_status bs ON bs.rfq_id = rd.id
     `;
 
     try {
@@ -3579,10 +3614,11 @@ LIMIT 2;
 
     const APPROVAL_STAGES = ['RFQ_APPROVAL', 'TECHNICAL_APPROVING', 'QUOTATION_APPROVAL', 'PO_APPROVAL'];
     const PERMISSION_STAGE_CONFIG = {
-      TECHNICAL_EVALUATING:  { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
-      TECHNICAL_REJECTED:    { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
-      COMMERCIAL_EVALUATION: { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
-      AWAITING_PO:           { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
+      TECHNICAL_AWAITING_QUOTES: { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      TECHNICAL_EVALUATING:      { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      TECHNICAL_REJECTED:        { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      COMMERCIAL_EVALUATION:     { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
+      AWAITING_PO:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
     };
     const APPROVAL_LABEL = 'Pending Approvers';
 
@@ -3792,7 +3828,9 @@ LIMIT 2;
       TECHNICAL_EVALUATING: 'technical',
       TECHNICAL_APPROVING: 'technical',
       TECHNICAL_REJECTED: 'technical',
+      RFQ_STUCK_TECHNICAL: 'technical',  // Bid ended, no eligible vendors — stuck in technical phase
       COMMERCIAL_EVALUATION: 'commercial',
+      RFQ_STUCK_COMMERCIAL: 'commercial', // Bid ended, no eligible vendors (no-TE flow) — stuck in commercial phase
       NEGOTIATION_ONGOING: 'commercial',
       QUOTATION_APPROVAL: 'commercial',
       AWAITING_PO: 'purchase_order',
@@ -4386,10 +4424,28 @@ LIMIT 2;
           try {
             const policy = await findBestMatchingPolicy({ entity_type: entityType, hospitality_company_id: companyId, hotel_id: hotelId, department_id: deptId, process_id: processId });
             if (policy) {
+              // Mirror the createApprovalInstance pattern: honor policy.is_department_scoped.
+              // If true → filter approvers by RFQ's department (using tbl_department.access_type).
+              // If false → ignore department, return all role-holders in the business unit.
+              const isDeptScoped = policy.is_department_scoped === true;
+              const resolveDeptId = isDeptScoped ? deptId : null;
+              let departmentAccessType = null;
+              if (resolveDeptId) {
+                const deptRow = await db.oneOrNone('SELECT access_type FROM tbl_department WHERE id = $1', [resolveDeptId]);
+                departmentAccessType = deptRow?.access_type || 'INDIVIDUAL';
+              }
+
               const policySteps = await db.any('SELECT * FROM tbl_approval_policy_steps WHERE approval_policy_id = $1 ORDER BY step_order ASC', [policy.id]);
+              const resourceForEntity = ENTITY_APPROVE_RESOURCE_MAP[entityType] || entityType.toLowerCase();
               const stepResults = await Promise.allSettled(
                 policySteps.map(async (step) => {
-                  const ids = await resolveApprovers(step, companyId, hotelId, deptId, null, db, null);
+                  // Mirror the createApprovalInstance filter: a ROLE step is only valid
+                  // if the role has BOTH read AND approve permissions for this entity's resource.
+                  if (step.approver_source_type === 'ROLE') {
+                    const hasBoth = await roleHasReadAndApprovePermission(step.approver_source_id, resourceForEntity, db);
+                    if (!hasBoth) return null;
+                  }
+                  const ids = await resolveApprovers(step, companyId, hotelId, resolveDeptId, departmentAccessType, db, null);
                   if (!ids?.length) return null;
                   const names = await db.any('SELECT id, name FROM tbl_users WHERE id = ANY($1::int[])', [ids]);
                   return { step_order: step.step_order, decision_rule: step.decision_rule || 'ANY', approvers: names.map(u => ({ id: u.id, name: u.name })) };
@@ -4422,7 +4478,8 @@ LIMIT 2;
     reverse_auction,
     rfq_no,
     is_tender,
-    completed_status
+    completed_status,
+    hotel_ids
   ) => {
     return new Promise(function (resolve, reject) {
       let isTenderFilter = '';
@@ -4442,7 +4499,7 @@ LIMIT 2;
             OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
                 AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
           )
-        )) AND (RFQ.is_published = 1 OR RFQ.status IN (3, 4))
+        )) AND (RFQ.is_published = 1 OR RFQ.status IN (2, 3, 4))
         -- Permission filter: only RFQs the user has read access for
         AND EXISTS (
           SELECT 1 FROM tbl_user_role_scopes _urs2
@@ -4483,6 +4540,7 @@ LIMIT 2;
             AND _po2.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
           ) AS _ha FROM tbl_rfq_products _rp2 WHERE _rp2.rfq_id = RFQ.id) _c) END) = true
         )` : ''}
+        ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
         ;`,
         [project_id, rfq_type, reverse_auction, rfq_no]
       )
@@ -5688,6 +5746,24 @@ LIMIT 2;
         SET status = ${parseInt(2)}, updated_by = ${user_id}
         WHERE id=$1 RETURNING *`,
         [id]
+      )
+        .then(function (data) {
+          resolve(data);
+        })
+        .catch(function (err) {
+          let error = new Error(err);
+          reject(error);
+        });
+    });
+  },
+
+  withdrawRFQPublish: async (id, user_id, status) => {
+    return new Promise(function (resolve, reject) {
+      db.query(
+        `UPDATE tbl_rfq
+        SET status = $1, updated_by = $2
+        WHERE id = $3 RETURNING *`,
+        [status, user_id, id]
       )
         .then(function (data) {
           resolve(data);
@@ -9021,67 +9097,71 @@ ORDER BY m.created_at;
   },
 
   removeClause: async (tbl_rfq_product_tech_evaluation_clauses_id) => {
-    const checkClauseExistsQuery = `
-      SELECT 1 FROM tbl_rfq_product_tech_evaluation_clauses
-      WHERE id = $1;
-    `;
-    const deleteClauseQuery = `
-      DELETE FROM tbl_rfq_product_tech_evaluation_clauses
-      WHERE id = $1;
-    `;
-
-    // Cleanup queries to delete related evaluation data
-    const deleteVendorResponsesQuery = `
-      DELETE FROM tbl_rfq_product_tech_evaluation_vendors_response
-      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
-    `;
-
-    const deleteCommentsQuery = `
-      DELETE FROM tbl_rfq_product_tech_evaluation_comments
-      WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1;
-    `;
-
-    const deleteClearedVendorsQuery = `
-      DELETE FROM tbl_rfq_product_tech_evaluation_cleared_vendors
-      WHERE tbl_rfq_product_tech_evaluation_id = (
-        SELECT tbl_rfq_product_tech_evaluation_id
-        FROM tbl_rfq_product_tech_evaluation_clauses
-        WHERE id = $1
+    return db.tx(async (t) => {
+      // 1. Verify the clause exists and capture its parent tech_evaluation row.
+      const row = await t.oneOrNone(
+        `SELECT tbl_rfq_product_tech_evaluation_id AS parent_id
+           FROM tbl_rfq_product_tech_evaluation_clauses
+          WHERE id = $1`,
+        [tbl_rfq_product_tech_evaluation_clauses_id]
       );
-    `;
+      if (!row) {
+        throw new Error('Clause not found.');
+      }
+      const parentId = row.parent_id;
 
-    return new Promise((resolve, reject) => {
-      //Checking if the clause exists
-      db.query(checkClauseExistsQuery, [
-        tbl_rfq_product_tech_evaluation_clauses_id
-      ])
-        .then(async (result) => {
-          if (result.length === 0) {
-            return reject(new Error('Clause not found.'));
-          }
+      // 2. Cascade-clean child data tied to this clause + reset cleared vendors
+      //    on the parent (existing behaviour: any clause edit invalidates the
+      //    evaluation since scoring needs to be redone).
+      await t.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_vendors_response
+          WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1`,
+        [tbl_rfq_product_tech_evaluation_clauses_id]
+      );
+      await t.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_comments
+          WHERE tbl_rfq_product_tech_evaluation_clauses_id = $1`,
+        [tbl_rfq_product_tech_evaluation_clauses_id]
+      );
+      await t.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_cleared_vendors
+          WHERE tbl_rfq_product_tech_evaluation_id = $1`,
+        [parentId]
+      );
 
-          // Delete all related evaluation data before deleting the clause
-          await db.query(deleteVendorResponsesQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
-          await db.query(deleteCommentsQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
-          await db.query(deleteClearedVendorsQuery, [tbl_rfq_product_tech_evaluation_clauses_id]);
+      // 3. Delete the clause itself (clause_files cascade automatically).
+      await t.none(
+        `DELETE FROM tbl_rfq_product_tech_evaluation_clauses WHERE id = $1`,
+        [tbl_rfq_product_tech_evaluation_clauses_id]
+      );
 
-          //Deleting the clause (clause_files will be deleted automatically due to ON DELETE CASCADE)
-          db.query(deleteClauseQuery, [
-            tbl_rfq_product_tech_evaluation_clauses_id
-          ])
-            .then(() => {
-              resolve({
-                success: true,
-                message: 'Clause and all associated data deleted successfully.'
-              });
-            })
-            .catch((error) => {
-              reject(new Error(error));
-            });
-        })
-        .catch((error) => {
-          reject(new Error(error));
-        });
+      // 4. If this was the LAST clause for the parent, delete the parent row
+      //    too. Otherwise the product gets stuck — there's a tech_evaluation
+      //    row but no clauses left to score, so the lifecycle treats it as
+      //    "tech eval configured" forever and quote-compare hides the vendors.
+      const remaining = await t.one(
+        `SELECT COUNT(*)::int AS count
+           FROM tbl_rfq_product_tech_evaluation_clauses
+          WHERE tbl_rfq_product_tech_evaluation_id = $1`,
+        [parentId]
+      );
+
+      let parentDeleted = false;
+      if (remaining.count === 0) {
+        await t.none(
+          `DELETE FROM tbl_rfq_product_tech_evaluation WHERE id = $1`,
+          [parentId]
+        );
+        parentDeleted = true;
+      }
+
+      return {
+        success: true,
+        parent_deleted: parentDeleted,
+        message: parentDeleted
+          ? 'Last clause removed; technical evaluation cleared for this product.'
+          : 'Clause and all associated data deleted successfully.',
+      };
     });
   },
 
@@ -10832,7 +10912,8 @@ ORDER BY m.created_at;
     sort,
     reverse_auction,
     rfq_type,
-    rfq_no
+    rfq_no,
+    hotel_ids
   ) => {
     return new Promise(function (resolve, reject) {
       let q = `
@@ -10862,7 +10943,7 @@ ORDER BY m.created_at;
         OR RFQ.project_id IN (
           SELECT project_id FROM tbl_project_team WHERE user_id = ${user_id}
         )
-      ) AND (RFQ.is_published = 0 AND RFQ.status NOT IN (3, 4))
+      ) AND (RFQ.is_published = 0 AND RFQ.status NOT IN (2, 3, 4))
       ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
       ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
       ${
@@ -10873,12 +10954,13 @@ ORDER BY m.created_at;
       ${
         rfq_no == null ? '' : ` AND CAST(RFQ.rfq_no AS TEXT) LIKE '%${rfq_no}%'`
       }
+      ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
       ORDER BY RFQ.id ${sort ? sort : 'ASC'} LIMIT ${limit} OFFSET ${offset}`;
 
       const countQuery = `
         SELECT COUNT(*) AS total_count
         FROM tbl_rfq RFQ
-        WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 0
+        WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 0 AND RFQ.status != 2
         ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
         ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
         ${
@@ -10891,6 +10973,7 @@ ORDER BY m.created_at;
             ? ''
             : ` AND CAST(RFQ.rfq_no AS TEXT) LIKE '%${rfq_no}%'`
         }
+        ${Array.isArray(hotel_ids) && hotel_ids.length > 0 ? `AND EXISTS (SELECT 1 FROM tbl_rfq_hotel_mappings rhm WHERE rhm.rfq_id = RFQ.id AND rhm.hotel_id IN (${hotel_ids.map(id => parseInt(id)).filter(Number.isFinite).join(',')}))` : ''}
       `;
 
       db.tx((t) => {
@@ -11388,7 +11471,8 @@ ORDER BY tq.timestamp DESC;
     rfq_no,
     sort,
     is_tender,
-    rfq_id
+    rfq_id,
+    hotel_id = null
   ) => {
     return new Promise(function (resolve, reject) {
       let dynamicJoins = '';
@@ -11413,19 +11497,35 @@ ORDER BY tq.timestamp DESC;
             ) _te_product_counts
           ) AS te_completed,
           -- has_pending_evaluation: vendors submitted quotes but not yet evaluated for a product
-          EXISTS (
-            SELECT 1 FROM tbl_rfq_product_tech_evaluation rpe
-            WHERE rpe.rfq_id = RFQ.id AND NOT rpe.is_complete
-              AND EXISTS (
-                SELECT 1 FROM tbl_quotes _q_te
-                WHERE _q_te.rfq_id = RFQ.id
-                  AND (_q_te.is_regret IS NULL OR _q_te.is_regret != 1)
-                  AND NOT EXISTS (
-                    SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
-                    WHERE _cv.tbl_rfq_product_tech_evaluation_id = rpe.id
-                      AND _cv.vendor_id = _q_te.created_by
-                  )
-              )
+          -- Strict: excludes products that have a PENDING TECHNICAL approval (those are the
+          -- approver's action, not the evaluator's). Also requires bid end date to have passed.
+          -- bid_end_date is stored as text in ISO format (e.g. '2026-03-14T11:00'), so cast it.
+          (
+            RFQ.bid_end_date IS NOT NULL
+            AND RFQ.bid_end_date != ''
+            AND RFQ.bid_end_date::timestamp < NOW()::timestamp
+            AND EXISTS (
+              SELECT 1 FROM tbl_rfq_product_tech_evaluation rpe
+              WHERE rpe.rfq_id = RFQ.id AND NOT rpe.is_complete
+                AND NOT EXISTS (
+                  -- Exclude products currently waiting on a technical approver
+                  SELECT 1 FROM tbl_approval_instances ai_pte
+                  WHERE ai_pte.entity_type = 'TECHNICAL'
+                    AND ai_pte.status = 'PENDING'
+                    AND ai_pte.metadata->>'rfq_product_id' IS NOT NULL
+                    AND (ai_pte.metadata->>'rfq_product_id')::INTEGER = rpe.tbl_rfq_product_id
+                )
+                AND EXISTS (
+                  SELECT 1 FROM tbl_quotes _q_te
+                  WHERE _q_te.rfq_id = RFQ.id
+                    AND (_q_te.is_regret IS NULL OR _q_te.is_regret != 1)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors _cv
+                      WHERE _cv.tbl_rfq_product_tech_evaluation_id = rpe.id
+                        AND _cv.vendor_id = _q_te.created_by
+                    )
+                )
+            )
           ) AS has_pending_evaluation,
           -- te_approval_rejected: latest TECHNICAL approval is REJECTED with no newer PENDING/APPROVED
           EXISTS (
@@ -11556,6 +11656,7 @@ ORDER BY tq.timestamp DESC;
         DISTINCT
         RFQ.id,
         RFQ.rfq_no,
+        RFQ.status,
         RFQ.timestamp,
         RFQ.hospitality_company_id,
         RFQ.hotel_id,
@@ -11762,12 +11863,13 @@ ORDER BY tq.timestamp DESC;
       AND (RFQ.project_id = $1 OR $1 IS NULL)
       AND (RFQ.rfq_no::text LIKE '%$4%' OR $4 IS NULL)
       AND (RFQ.id = $5 OR $5 IS NULL)
+      AND (RFQ.hotel_id = $6 OR $6 IS NULL)
       ${is_tender !== null && is_tender !== undefined ? `AND RFQ.is_tender = ${is_tender ? 1 : 0}` : ''}
       ${dynamicConditions}
       ORDER BY RFQ.timestamp ${sort || 'DESC'}
       LIMIT $3 OFFSET $2;`;
 
-      db.any(q, [project_id, offset, limit, rfq_no, rfq_id])
+      db.any(q, [project_id, offset, limit, rfq_no, rfq_id, hotel_id])
         .then(function (data) {
           resolve(data);
         })
@@ -12027,47 +12129,46 @@ ORDER BY tq.timestamp DESC;
   updateMinimumPassingScore: async (rfq_id, rfq_product_id, minimum_passing_score) => {
     return new Promise(async (resolve, reject) => {
       try {
-        // First, check if technical evaluation record exists
-        const checkQuery = `
-          SELECT id FROM tbl_rfq_product_tech_evaluation
-          WHERE rfq_id = $1 AND tbl_rfq_product_id = $2;
+        // Require at least one clause to exist before allowing a minimum passing
+        // score to be set. This prevents the orphan-row stuck-product bug:
+        // setting a score used to INSERT an empty parent row, leaving the product
+        // with a tech_evaluation row but no clauses to score — the lifecycle
+        // treated it as "tech eval configured" forever and quote-compare hid the
+        // vendors. The companion guarantee (removeClause deletes the parent row
+        // when the last clause is removed) is enforced in removeClause.
+        const clauseCheckQuery = `
+          SELECT te.id
+            FROM tbl_rfq_product_tech_evaluation te
+            JOIN tbl_rfq_product_tech_evaluation_clauses c
+              ON c.tbl_rfq_product_tech_evaluation_id = te.id
+           WHERE te.rfq_id = $1 AND te.tbl_rfq_product_id = $2
+           LIMIT 1;
         `;
-        const existingRecord = await db.query(checkQuery, [rfq_id, rfq_product_id]);
+        const clauseCheck = await db.query(clauseCheckQuery, [rfq_id, rfq_product_id]);
 
-        // If record doesn't exist, create it
-        if (existingRecord.length === 0) {
-          const insertQuery = `
-            INSERT INTO tbl_rfq_product_tech_evaluation (rfq_id, tbl_rfq_product_id, minimum_passing_score, timestamp)
-            VALUES ($1, $2, $3, NOW())
-            RETURNING id;
-          `;
-          const insertResult = await db.query(insertQuery, [rfq_id, rfq_product_id, minimum_passing_score]);
-          
-          if (insertResult.length > 0) {
-            resolve({
-              status: 1,
-              message: 'Minimum passing score set successfully.'
-            });
-            return;
-          }
-        } else {
-          // Record exists, update it
-          const updateQuery = `
-            UPDATE tbl_rfq_product_tech_evaluation
-            SET minimum_passing_score = $1
-            WHERE rfq_id = $2 AND tbl_rfq_product_id = $3
-            RETURNING id;
-          `;
+        if (clauseCheck.length === 0) {
+          resolve({
+            status: 0,
+            message: 'Add at least one clause before setting a minimum passing score.'
+          });
+          return;
+        }
 
-          const result = await db.query(updateQuery, [minimum_passing_score, rfq_id, rfq_product_id]);
+        // Update the existing parent row.
+        const updateQuery = `
+          UPDATE tbl_rfq_product_tech_evaluation
+             SET minimum_passing_score = $1
+           WHERE rfq_id = $2 AND tbl_rfq_product_id = $3
+           RETURNING id;
+        `;
+        const result = await db.query(updateQuery, [minimum_passing_score, rfq_id, rfq_product_id]);
 
-          if (result.length > 0) {
-            resolve({
-              status: 1,
-              message: 'Minimum passing score updated successfully.'
-            });
-            return;
-          }
+        if (result.length > 0) {
+          resolve({
+            status: 1,
+            message: 'Minimum passing score updated successfully.'
+          });
+          return;
         }
 
         resolve({
