@@ -13384,9 +13384,20 @@ ORDER BY tq.timestamp DESC;
     return db.one(
       `SELECT
         COUNT(te.id) AS total_products,
-        COUNT(te.id) FILTER (WHERE te.is_complete = true) AS products_completed,
         COUNT(te.id) FILTER (
-          WHERE te.is_complete = false
+          WHERE response_vendors.cnt > 0
+          AND response_vendors.cnt = COALESCE(evaluated_vendors.cnt, 0)
+        ) AS products_completed,
+        COALESCE(
+          ARRAY_AGG(te.tbl_rfq_product_id) FILTER (
+            WHERE response_vendors.cnt > 0
+            AND response_vendors.cnt = COALESCE(evaluated_vendors.cnt, 0)
+          ),
+          '{}'::int[]
+        ) AS completed_product_ids,
+        COUNT(te.id) FILTER (
+          WHERE response_vendors.cnt > 0
+          AND COALESCE(evaluated_vendors.cnt, 0) < response_vendors.cnt
           AND EXISTS (
             SELECT 1 FROM tbl_tech_evaluation_rounds r
             WHERE r.tbl_rfq_product_tech_evaluation_id = te.id
@@ -13395,6 +13406,18 @@ ORDER BY tq.timestamp DESC;
         COALESCE(SUM(passed.cnt), 0) AS vendors_passed,
         COALESCE(SUM(failed.cnt), 0) AS vendors_failed
       FROM tbl_rfq_product_tech_evaluation te
+      LEFT JOIN LATERAL (
+        SELECT COUNT(DISTINCT vr.vendor_id) AS cnt
+        FROM tbl_rfq_product_tech_evaluation_vendors_response vr
+        JOIN tbl_rfq_product_tech_evaluation_clauses c
+          ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+        WHERE c.tbl_rfq_product_tech_evaluation_id = te.id
+      ) response_vendors ON true
+      LEFT JOIN LATERAL (
+        SELECT COUNT(DISTINCT cv.vendor_id) AS cnt
+        FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+        WHERE cv.tbl_rfq_product_tech_evaluation_id = te.id
+      ) evaluated_vendors ON true
       LEFT JOIN LATERAL (
         SELECT COUNT(*) AS cnt
         FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
