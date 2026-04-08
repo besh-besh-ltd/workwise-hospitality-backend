@@ -28,8 +28,14 @@ const formatErrorResponse = (res, error) => {
 /**
  * Handle NEGOTIATION post-approval actions (add quotes to finalization)
  * Called after NEGOTIATION approval instance is fully approved
+ *
+ * @param {number} approval_instance_id
+ * @param {number} approver_user_id
+ * @param {Object} [options]
+ * @param {Object} [options.txContext] - Optional transaction context to participate in
  */
-const handleNegotiationPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
+const handleNegotiationPostApproval = async (approval_instance_id, approver_user_id, options = {}) => {
+  const txContext = options?.txContext ?? null;
   const t = txContext || db;
   
   try {

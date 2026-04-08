@@ -25,7 +25,8 @@ import productModel from '../../models/productModel.js';
 import generativeAI, { extractDatasheetSummary } from '../../helper/processBOQWithAI.js';
 import db from '../../config/dbConn.js';
 import { raSchedulerForBuyer, raSchedulerForVendor  } from '../../helper/sendEmailFunctions/raEmailScheduler.js';
-import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, submitApprovalAction, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
+import generalModel, { createApprovalInstance, recordLifecycleEvent, getApprovalInstancesByEntity, getApprovalInstanceById, cancelApprovalInstance, checkIfUserIsFinalApprover, getApprovalWorkflowUsers, getRfqIdsWithPendingApprovals } from '../../models/generalModel.js';
+import { executeApprovalAction } from '../../services/approvalActionService.js';
 import moment from 'moment-timezone';
 import { deleteSchedule } from '../../helper/createSchedule.js';
 import { scheduleRfqPublish } from '../../helper/cronManager.js';
@@ -3556,10 +3557,12 @@ const startApprovalForRfq = async (rfqId, userId, txContext = null) => {
  *
  * @param {number} approval_instance_id - The approval instance ID
  * @param {number} approver_user_id - The user who performed the final approval
- * @param {Object} txContext - Optional transaction context
+ * @param {Object} [options] - Optional options
+ * @param {Object} [options.txContext] - Optional transaction context to participate in
  * @returns {Promise<Object|null>} - Updated RFQ or null if not found
  */
-export const handleRFQPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
+export const handleRFQPostApproval = async (approval_instance_id, approver_user_id, options = {}) => {
+  const txContext = options?.txContext ?? null;
   const t = txContext || db;
 
   try {
@@ -3758,11 +3761,14 @@ export const handleRFQPostApproval = async (approval_instance_id, approver_user_
  *
  * @param {number} approval_instance_id - The approval instance ID
  * @param {number} rejector_user_id - The user who rejected
- * @param {string} rejection_reason - Optional rejection reason/comment
- * @param {Object} txContext - Optional transaction context
+ * @param {Object} [options] - Optional options
+ * @param {string} [options.comment] - Optional rejection reason/comment
+ * @param {Object} [options.txContext] - Optional transaction context to participate in
  * @returns {Promise<Object|null>} - RFQ info or null if not found
  */
-export const handleRFQRejection = async (approval_instance_id, rejector_user_id, rejection_reason = null, txContext = null) => {
+export const handleRFQRejection = async (approval_instance_id, rejector_user_id, options = {}) => {
+  const rejection_reason = options?.comment ?? null;
+  const txContext = options?.txContext ?? null;
   const t = txContext || db;
 
   try {
@@ -4050,7 +4056,8 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
  * 8. If not complete, auto-replace failed vendors with next L5+ vendors
  * 9. If no more vendors available, set blocked_insufficient_vendors=TRUE
  */
-const handleTechnicalPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
+const handleTechnicalPostApproval = async (approval_instance_id, approver_user_id, options = {}) => {
+  const txContext = options?.txContext ?? null;
   const t = txContext || db;
 
   try {
@@ -4411,9 +4418,32 @@ const startApprovalForArc = async (rfqId, userId, txContext = null) => {
   return result;
 };
 
+/**
+ * Handle TECHNICAL rejection — transition the round to REJECTED so the
+ * evaluator can resubmit. Mirrors the inline rejection logic that previously
+ * lived in generalController.js and rfqController.js (the dedicated tech-eval
+ * approval action endpoint), now extracted so the centralized
+ * approvalActionService dispatcher can call it uniformly.
+ *
+ * @param {number} approval_instance_id
+ * @param {number} _approver_user_id - currently unused, kept for handler signature parity
+ * @param {Object} [ctx]
+ * @param {Object} [ctx.instance] - pre-loaded approval instance, optional
+ */
+const handleTechnicalRejection = async (approval_instance_id, _approver_user_id, ctx = {}) => {
+  const instance = ctx.instance || await getApprovalInstanceById(approval_instance_id);
+  if (!instance || instance.entity_type !== 'TECHNICAL' || instance.status !== 'REJECTED') {
+    return;
+  }
+  await rfqModel.updateTechEvalRound(instance.entity_id, {
+    status: 'REJECTED',
+    completed_at: new Date()
+  });
+};
 
-// Export the helper function for use in general controller
-export { handleTechnicalPostApproval };
+
+// Export the helper functions for use in general controller and the approval action service
+export { handleTechnicalPostApproval, handleTechnicalRejection };
 
 const rfqController = {
   createTenderPaymentOrder: async (req, res) => {
@@ -15803,39 +15833,17 @@ getClauses: async (req, res) => {
         });
       }
 
-      // Submit the approval action
-      const result = await submitApprovalAction({
+      // Submit the approval action via the centralized service. The dispatcher
+      // automatically invokes handleTechnicalPostApproval / handleTechnicalRejection
+      // based on the resulting instance_status, so the explicit post-action calls
+      // that previously lived here are no longer needed.
+      const result = await executeApprovalAction({
         approval_instance_id: parseInt(approval_instance_id),
         approval_instance_step_id: approval_instance_step_id ? parseInt(approval_instance_step_id) : null,
         approver_user_id: user_id,
         action: action.toUpperCase(),
         comment
       });
-
-      // If fully approved, trigger post-approval processing
-      if (action.toUpperCase() === 'APPROVE' && result.instance_status === 'APPROVED') {
-        try {
-          await handleTechnicalPostApproval(approval_instance_id, user_id);
-        } catch (postApprovalError) {
-          // Log but don't fail the approval
-          console.error('Error in TECHNICAL post-approval processing:', postApprovalError);
-        }
-      }
-
-      // If rejected, update the round status so evaluator can resubmit
-      if (action.toUpperCase() === 'REJECT' && result.instance_status === 'REJECTED') {
-        try {
-          const rejectedInstance = await getApprovalInstanceById(approval_instance_id);
-          if (rejectedInstance && rejectedInstance.entity_id) {
-            await rfqModel.updateTechEvalRound(rejectedInstance.entity_id, {
-              status: 'REJECTED',
-              completed_at: new Date()
-            });
-          }
-        } catch (postRejectionError) {
-          console.error('Error in TECHNICAL post-rejection processing:', postRejectionError);
-        }
-      }
 
       return res.status(200).json({
         status: 1,
@@ -15938,29 +15946,16 @@ getClauses: async (req, res) => {
         });
       }
 
-      // Submit the approval action
-      const result = await submitApprovalAction({
+      // Submit the approval action via the centralized service. The dispatcher
+      // automatically invokes handleRFQPostApproval / handleRFQRejection based
+      // on the resulting instance_status.
+      const result = await executeApprovalAction({
         approval_instance_id: parseInt(approval_instance_id),
         approval_instance_step_id: approval_instance_step_id ? parseInt(approval_instance_step_id) : null,
         approver_user_id: user_id,
         action: action.toUpperCase(),
         comment
       });
-
-      // Handle post-approval or rejection processing
-      if (result.instance_status === 'APPROVED') {
-        try {
-          await handleRFQPostApproval(approval_instance_id, user_id);
-        } catch (postApprovalError) {
-          console.error('Error in RFQ post-approval processing:', postApprovalError);
-        }
-      } else if (result.instance_status === 'REJECTED') {
-        try {
-          await handleRFQRejection(approval_instance_id, user_id, comment);
-        } catch (rejectionError) {
-          console.error('Error in RFQ rejection processing:', rejectionError);
-        }
-      }
 
       return res.status(200).json({
         status: 1,
