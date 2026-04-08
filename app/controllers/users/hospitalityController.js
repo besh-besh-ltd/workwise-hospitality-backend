@@ -2048,10 +2048,15 @@ const HospitalityController = {
       const hasActiveSub = await hospitalityModel.hasValidPaidSubscription(vendorId);
       const allSubs = await hospitalityModel.getVendorSubscriptionStatus(vendorId);
 
-      // Separate current (active/non-expired) and expired subscriptions
-      // A subscription is valid if paid (success) OR admin-assigned (payment_id NULL → payment_status NULL)
+      // Separate current (active/non-expired), expired, and pending subscriptions.
+      // Unpaid self-registration rows stay in pending state; only paid or admin-assigned
+      // active rows on approved vendors count as active.
       const now = Moment().startOf('day');
-      const isValidSub = (s) => s.payment_status === 'paid' || s.payment_status === 'success' || !s.payment_status;
+      const isVendorApproved = req.user?.status === 1 || req.user?.status === '1';
+      const isValidSub = (s) =>
+        s.payment_status === 'paid' ||
+        s.payment_status === 'success' ||
+        (s.status === 'active' && !s.payment_id && isVendorApproved);
       const activeSubs = allSubs.filter(s =>
         Moment(s.end_date).isSameOrAfter(now, 'day') && isValidSub(s)
       );
@@ -2318,16 +2323,6 @@ const HospitalityController = {
         await hospitalityModel.createVendorHotelCategorySubscription(subscriptionRows);
       }
 
-      // Also link any subscriptions without payment_id (legacy registration flow)
-      await db.none(
-        `UPDATE tbl_vendor_hotel_category_subscription
-         SET payment_id = $1, status = 'active'
-         WHERE vendor_id = $2
-           AND payment_id IS NULL
-           AND status = 'active'`,
-        [payment.id, userId]
-      );
-
       // Approve vendor if not already approved
       await userModel.updateUserAccount(userId, { status: 1 });
 
@@ -2512,5 +2507,4 @@ const HospitalityController = {
 };
 
 export default HospitalityController;
-
 
