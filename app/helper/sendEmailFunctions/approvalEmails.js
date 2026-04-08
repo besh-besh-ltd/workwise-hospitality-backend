@@ -149,7 +149,7 @@ export const sendApprovalStepNotification = async ({
 
     const subject = isNegotiationType
       ? `Action Required: Approve ${label} — RFQ #${entityIdentifier}${rfqTitle ? ` ${rfqTitle}` : ''} (Step ${stepOrder}/${totalSteps})`
-      : `Action Required: Approve ${label} #${entityIdentifier} (Step ${stepOrder}/${totalSteps})`;
+      : `Action Required: Approve ${label} #${entityIdentifier}${rfqTitle ? ` ${rfqTitle}` : ''} (Step ${stepOrder}/${totalSteps})`;
 
     for (const approver of approvers) {
       const headerContent = `<h2>Hello ${approver.user_name || 'Approver'},</h2>`;
@@ -164,6 +164,7 @@ export const sendApprovalStepNotification = async ({
         : `<ul style="list-style:none; padding-left:0; margin-top:16px;">
             <li style="padding:4px 0;"><strong>Type:</strong> ${label}</li>
             <li style="padding:4px 0;"><strong>Identifier:</strong> #${entityIdentifier}</li>
+            ${rfqTitle ? `<li style="padding:4px 0;"><strong>RFQ Title:</strong> ${rfqTitle}</li>` : ''}
             <li style="padding:4px 0;"><strong>Initiated By:</strong> ${initiatorName || 'N/A'}</li>
           </ul>`;
 

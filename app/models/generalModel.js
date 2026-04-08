@@ -2295,7 +2295,7 @@ export async function createApprovalInstance({
         sendApprovalStepNotification({
           entityType: entity_type,
           entityId: entity_id,
-          entityIdentifier: metadata?.rfq_number || metadata?.po_number || `ID-${entity_id}`,
+          entityIdentifier: metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${entity_id}`,
           stepOrder: firstPendingStep.step_order,
           totalSteps: instanceSteps.length,
           initiatorName: initiator?.name || 'Unknown',
@@ -2953,7 +2953,7 @@ export async function submitApprovalAction({
         sendApprovalStepNotification({
           entityType: instance.entity_type,
           entityId: instance.entity_id,
-          entityIdentifier: metadata?.rfq_number || metadata?.po_number || `ID-${instance.entity_id}`,
+          entityIdentifier: metadata?.rfq_number || metadata?.rfq_no || metadata?.po_number || `ID-${instance.entity_id}`,
           stepOrder: result.next_step,
           totalSteps: parseInt(totalSteps.count),
           initiatorName: initiator?.name || 'Unknown',
