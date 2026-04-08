@@ -846,6 +846,172 @@ WHERE NOT EXISTS (
     });
   },
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // WH-69: Denormalised RFQ read used by the snapshot-diff update flow.
+  //
+  // Returns one object containing every field that the edit page can change,
+  // shaped exactly like the snapshot the frontend sends back. The diff helper
+  // compares the two by walking the same keys.
+  //
+  // Hotels are exposed read-only (display-only on the edit page).
+  // Returns null if the RFQ does not exist.
+  // ─────────────────────────────────────────────────────────────────────────
+  getFullRfqForEdit: async (rfq_id, db_con = db) => {
+    const rfq = await db_con.oneOrNone(
+      `SELECT
+         id, rfq_no, title, comment, response_email, contact_name, contact_number,
+         bid_end_date, location, is_published, created_by, status, rfq_type,
+         tender_publish_date, vendor_clarification_date, tender_fees, reverse_auction,
+         is_tender, ra_start_date, ra_end_date, project_id, hospitality_company_id,
+         hotel_id, department_id, process_id, technical_evaluation_by, company_name
+       FROM tbl_rfq
+       WHERE id = $1`,
+      [rfq_id]
+    );
+    if (!rfq) return null;
+
+    const [hotelRows, termRows, productRows] = await Promise.all([
+      db_con.any(
+        `SELECT hotel_id FROM tbl_rfq_hotel_mappings WHERE rfq_id = $1 ORDER BY hotel_id`,
+        [rfq_id]
+      ),
+      db_con.any(
+        `SELECT terms_id FROM tbl_rfq_terms_map WHERE rfq_id = $1 ORDER BY terms_id`,
+        [rfq_id]
+      ),
+      db_con.any(
+        `SELECT
+           rp.id,
+           rp.product_variant_id,
+           rp.variant,
+           rp.comment,
+           pv.name AS product_name
+         FROM tbl_rfq_products rp
+         LEFT JOIN tbl_product_variant pv ON pv.id = rp.product_variant_id
+         WHERE rp.rfq_id = $1
+         ORDER BY rp.id`,
+        [rfq_id]
+      )
+    ]);
+
+    // Load specs / files / vendors for all products in three batched queries
+    let specsByKey = {};
+    let filesByProduct = {};
+    let vendorsByKey = {};
+    let techEvalByProduct = {};
+
+    if (productRows.length > 0) {
+      const productIds = productRows.map((p) => p.id);
+
+      const [specRows, fileRows, vendorRows, techRows] = await Promise.all([
+        db_con.any(
+          `SELECT rfq_id, product_variant_id, variant, title, value
+           FROM tbl_rfq_products_specs
+           WHERE rfq_id = $1`,
+          [rfq_id]
+        ),
+        db_con.any(
+          `SELECT rfq_product_id, file_type, file_url
+           FROM tbl_rfq_product_files
+           WHERE rfq_product_id = ANY($1::int[])
+           ORDER BY id`,
+          [productIds]
+        ),
+        db_con.any(
+          `SELECT rpv.product_variant_id, rpv.variant, rpv.user_id,
+                  u.name, u.email
+           FROM tbl_rfq_product_vendors rpv
+           LEFT JOIN tbl_users u ON u.id = rpv.user_id
+           WHERE rpv.rfq_id = $1
+           ORDER BY rpv.user_id`,
+          [rfq_id]
+        ),
+        db_con.any(
+          `SELECT te.tbl_rfq_product_id AS rfq_product_id,
+                  json_agg(
+                    json_build_object(
+                      'id', tec.id,
+                      'clause_text', tec.clause_text,
+                      'clause_type', tec.clause_type,
+                      'weightage', tec.weightage
+                    ) ORDER BY tec.id
+                  ) FILTER (WHERE tec.id IS NOT NULL) AS clauses
+           FROM tbl_rfq_product_tech_evaluation te
+           LEFT JOIN tbl_rfq_product_tech_evaluation_clauses tec
+             ON tec.tbl_rfq_product_tech_evaluation_id = te.id
+           WHERE te.rfq_id = $1
+           GROUP BY te.tbl_rfq_product_id`,
+          [rfq_id]
+        )
+      ]);
+
+      // Specs are keyed by product_variant_id+variant
+      for (const s of specRows) {
+        const k = `${s.product_variant_id}:${s.variant}`;
+        if (!specsByKey[k]) specsByKey[k] = {};
+        specsByKey[k][s.title] = s.value;
+      }
+
+      // Files keyed by rfq_product_id with categorised buckets
+      for (const f of fileRows) {
+        if (!filesByProduct[f.rfq_product_id]) {
+          filesByProduct[f.rfq_product_id] = {
+            qap_file: [],
+            spec_file: [],
+            datasheet_file: []
+          };
+        }
+        const bucket =
+          f.file_type === 'QAP' ? 'qap_file'
+          : f.file_type === 'SPEC' ? 'spec_file'
+          : f.file_type === 'TDS' ? 'datasheet_file'
+          : null;
+        if (bucket) filesByProduct[f.rfq_product_id][bucket].push(f.file_url);
+      }
+
+      // Vendors keyed by product_variant_id+variant
+      for (const v of vendorRows) {
+        const k = `${v.product_variant_id}:${v.variant}`;
+        if (!vendorsByKey[k]) vendorsByKey[k] = [];
+        vendorsByKey[k].push({
+          user_id: v.user_id,
+          name: v.name,
+          email: v.email
+        });
+      }
+
+      for (const t of techRows) {
+        techEvalByProduct[t.rfq_product_id] = t.clauses || [];
+      }
+    }
+
+    const products = productRows.map((p) => {
+      const key = `${p.product_variant_id}:${p.variant}`;
+      return {
+        id: p.id,
+        product_variant_id: p.product_variant_id,
+        variant: p.variant,
+        product_name: p.product_name,
+        comment: p.comment ?? '',
+        specs: specsByKey[key] || {},
+        files: filesByProduct[p.id] || {
+          qap_file: [],
+          spec_file: [],
+          datasheet_file: []
+        },
+        vendors: vendorsByKey[key] || [],
+        tech_eval_clauses: techEvalByProduct[p.id] || []
+      };
+    });
+
+    return {
+      ...rfq,
+      hotel_ids: hotelRows.map((h) => h.hotel_id),
+      terms: termRows.map((t) => t.terms_id),
+      products
+    };
+  },
+
 
   //  mukul need to delete
   getLastRfQNumber: async () => {
