@@ -5905,6 +5905,71 @@ LIMIT 2;
     });
   },
 
+  getQuoteVisibilityLockedProductsByRfqId: async (id, rfq_product_id) => {
+    if (rfq_product_id) {
+      rfq_product_id = rfq_product_id.split(',').map(Number);
+    }
+
+    const query = `
+      SELECT
+        TRF.id,
+        TRF.rfq_id,
+        TRF.product_variant_id,
+        TRF.variant,
+        ARRAY(
+          SELECT json_build_object(
+            'rfq_no', TR.rfq_no,
+            'response_email', TR.response_email,
+            'contact_name', TR.contact_name,
+            'contact_number', TR.contact_number,
+            'project_id', TR.project_id,
+            'status', TR.status
+          )
+          FROM tbl_rfq TR
+          WHERE TR.id = $1
+        ) AS "rfq",
+        ARRAY(
+          SELECT json_build_object(
+            'product_name', COALESCE(PV.name, P.name),
+            'rfq_details', (
+              SELECT json_agg(
+                json_build_object(
+                  'title', TPS.title,
+                  'value', TPS.value
+                )
+              )
+              FROM tbl_rfq_products_specs TPS
+              WHERE TPS.product_variant_id = TRF.product_variant_id
+                AND COALESCE(TPS.variant, 0) = COALESCE(TRF.variant, 0)
+                AND TPS.rfq_id = $1
+            )
+          )
+          FROM tbl_product_variant PV
+          LEFT JOIN tbl_product P ON P.id = PV.product_id
+          WHERE PV.id = TRF.product_variant_id
+        ) AS "product_details",
+        ARRAY(
+          SELECT json_build_object('title', TPS.title, 'value', TPS.value)
+          FROM tbl_rfq_products_specs TPS
+          WHERE TPS.product_variant_id = TRF.product_variant_id
+            AND COALESCE(TPS.variant, 0) = COALESCE(TRF.variant, 0)
+            AND TPS.rfq_id = $1
+        ) AS "product_specs",
+        '[]'::json AS "quotations",
+        '[]'::json AS "all_vendors",
+        '[]'::json AS "finalization_history",
+        NULL::json AS "last_purchase_rate",
+        NULL::json AS "last_quote_rate",
+        NULL::numeric AS "latest_target_price"
+      FROM tbl_rfq_products TRF
+      WHERE TRF.rfq_id = $1
+      ${rfq_product_id ? 'AND TRF.id = ANY($2)' : ''}
+      ORDER BY TRF.id ASC;
+    `;
+
+    return db.any(query, rfq_product_id ? [id, rfq_product_id] : [id]);
+  },
+
   changeRFQStatus: async (id, user_id) => {
     return new Promise(function (resolve, reject) {
       db.query(

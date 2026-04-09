@@ -53,6 +53,11 @@ import rbacModel from '../../models/rbacModel.js';
 import { sendTechEvalCompletionNotification, sendVendorTechAcceptanceNotification } from '../../helper/sendEmailFunctions/techEvalEmails.js';
 import { sendTenderFeePaymentConfirmation } from '../../helper/sendEmailFunctions/tenderFeeEmails.js';
 import { sendRfqCreationNotification, sendRfqReadyToPublishNotification, sendRfqPublishedNotification, sendVendorRfqNotification, sendRfqClosedHeadsUpNotification, sendApprovalCancelledNotification } from '../../helper/sendEmailFunctions/approvalEmails.js';
+import {
+  buildQuoteVisibilityMeta,
+  createQuoteVisibilityError,
+  sanitizeQuoteProductsForLockedState,
+} from '../../helper/quoteVisibility.js';
 
 const REMINDER_SEND_YIELD_THRESHOLD = 20;
 const yieldReminderEventLoop = () =>
@@ -71,6 +76,12 @@ const VENDORS_FILTER_KEYS = [
   'productMakes',
   'subscription_type',
 ];
+
+const getQuoteVisibilityForRfq = async (rfq_id) => {
+  const rfqDetails = await rfqModel.getRfqDetailsById(rfq_id);
+  const quoteVisibility = buildQuoteVisibilityMeta(rfqDetails);
+  return { rfqDetails, quoteVisibility };
+};
 
 /**
  * Helper function to get project member emails for an RFQ
@@ -7934,14 +7945,25 @@ const rfqController = {
     const { id, company_id } = req.user;
 
     try {
-      let rfQItem = await rfqModel.getQuotesByRfqById2(
-        rfq_id,
-        id,
-        company_id,
-        TA_Vendors,
-        no_freight,
-        rfq_product_id
-      );
+      const { quoteVisibility } = await getQuoteVisibilityForRfq(rfq_id);
+      let rfQItem;
+
+      if (quoteVisibility.locked) {
+        const lockedProducts = await rfqModel.getQuoteVisibilityLockedProductsByRfqId(
+          rfq_id,
+          rfq_product_id
+        );
+        rfQItem = sanitizeQuoteProductsForLockedState(lockedProducts, quoteVisibility);
+      } else {
+        rfQItem = await rfqModel.getQuotesByRfqById2(
+          rfq_id,
+          id,
+          company_id,
+          TA_Vendors,
+          no_freight,
+          rfq_product_id
+        );
+      }
       // rfQItem = processQuotations(rfQItem);
        if (pageSource === "quote_compare") {
       // 👇 Check if an entry already exists
@@ -7968,7 +7990,10 @@ const rfqController = {
         .status(200)
         .json({
           status: 1,
-          data: rfQItem
+          data: rfQItem,
+          meta: {
+            quoteVisibility,
+          }
         })
         .end();
     } catch (error) {
@@ -8021,6 +8046,14 @@ const rfqController = {
     const { id, company_id } = req.user;
 
     try {
+      const { quoteVisibility } = await getQuoteVisibilityForRfq(rfq_id);
+      if (quoteVisibility.locked) {
+        throw createQuoteVisibilityError(
+          quoteVisibility,
+          'Quote export is locked until the quote submission deadline has passed in IST.'
+        );
+      }
+
       let rfQItem = await rfqModel.getQuotesByRfqByIdByProduct(
         rfq_id,
         id,
@@ -8077,10 +8110,11 @@ const rfqController = {
     } catch (error) {
       logError(error);
       res
-        .status(400)
+        .status(error.statusCode || 400)
         .json({
           status: 3,
-          message: Config.errorText.value
+          message: error.message || Config.errorText.value,
+          meta: error.quoteVisibility ? { quoteVisibility: error.quoteVisibility } : undefined
         })
         .end();
     }
@@ -14232,6 +14266,13 @@ getClauses: async (req, res) => {
       for (let i = 0; i < rfqDetails.length; i++) {
         for (let j = 0; j < rfqDetails[i].rfq_details.length; j++) {
           const rfqId = rfqDetails[i].rfq_details[j].rfq_id;
+          const { quoteVisibility } = await getQuoteVisibilityForRfq(rfqId);
+          if (quoteVisibility.locked) {
+            throw createQuoteVisibilityError(
+              quoteVisibility,
+              `Project report export is locked because RFQ #${rfqDetails[i].rfq_details[j].rfq_no || rfqId} has not yet passed its quote submission deadline in IST.`
+            );
+          }
           let quoteDetails = await rfqModel.getQuotesByRfqById2(
             rfqId,
             company_id,
@@ -14245,10 +14286,11 @@ getClauses: async (req, res) => {
       res.status(200).json({ quoteList: quoteList, rfqDetails: rfqDetails });
     } catch (error) {
       console.error('Error fetching project report:', error);
-      res.status(500).json({
+      res.status(error.statusCode || 500).json({
         success: false,
-        message: 'Error processing RFQ details',
-        error: error.toString()
+        message: error.message || 'Error processing RFQ details',
+        error: error.toString(),
+        meta: error.quoteVisibility ? { quoteVisibility: error.quoteVisibility } : undefined
       });
     }
   },
