@@ -29,6 +29,7 @@ import generalModel, { createApprovalInstance, recordLifecycleEvent, getApproval
 import rfqHistoryModel from '../../models/rfqHistoryModel.js';
 import {
   assertEditAllowed,
+  assertEditDateConstraints,
   diffRfqSnapshot,
   applyRfqFieldChanges,
   applyProductChanges,
@@ -5301,6 +5302,14 @@ const rfqController = {
             );
           }
         }
+
+        // 3b. Date-window constraints (IST):
+        //   - bid_end_date >= now + 2h
+        //   - vendor_clarification_date <= bid_end_date - 1h
+        //   - vendor_clarification_date > tender_publish_date
+        // Computed in IST epoch-ms so server timezone drift can't shift
+        // the windows around. See assertEditDateConstraints.
+        assertEditDateConstraints({ snapshot, current });
 
         // 4. PO-locked products — load once for use during apply
         const poLocked = await t.any(

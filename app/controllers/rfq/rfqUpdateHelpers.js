@@ -54,6 +54,107 @@ export function httpError(status, message) {
   return err;
 }
 
+/**
+ * Parse a wall-clock-IST datetime string ("2026-04-09 11:11", "2026-04-09T11:11",
+ * "2026-04-09T11:11:00", or "2026-04-09") into an absolute epoch-ms.
+ *
+ * Critical: RFQ form dates flow through the API as wall-clock IST (no
+ * timezone suffix). To compare them against `Date.now()` reliably we have
+ * to anchor them to the IST offset BEFORE constructing the JS Date,
+ * otherwise the comparison would be skewed by however the server happens
+ * to be configured (UTC, IST, somewhere else). Mirror of the frontend
+ * helper at frontend/utils/sharedFunctions.js → parseIstWallTimeToEpoch.
+ *
+ * Returns null when the input cannot be parsed.
+ */
+export function parseIstWallTimeToEpoch(raw) {
+  if (raw == null || raw === '') return null;
+  if (raw instanceof Date) return raw.getTime();
+  let s = String(raw).trim();
+  if (!s) return null;
+  // Strip any trailing timezone suffix to avoid double-offsetting.
+  s = s.replace(/([+-]\d{2}:?\d{2}|Z)$/i, '');
+  s = s.replace(' ', 'T');
+  if (!/T/.test(s)) s += 'T00:00:00';
+  else if (/T\d{2}:\d{2}$/.test(s)) s += ':00';
+  const d = new Date(`${s}+05:30`);
+  return Number.isNaN(d.getTime()) ? null : d.getTime();
+}
+
+/**
+ * Cross-cutting validation: enforces the bid_end_date 2-hour rule and the
+ * vendor_clarification_date 1-hour buffer + post-publish constraint. Used
+ * by the update controller before any DB mutation runs.
+ *
+ *   - bid_end_date >= now + 2h (IST)
+ *   - vendor_clarification_date <= bid_end_date - 1h
+ *   - vendor_clarification_date > tender_publish_date (when both present)
+ *
+ * The "effective" date is taken from the snapshot when present, falling
+ * back to the current row when the snapshot doesn't carry the field. This
+ * lets a partial edit (e.g. changing only `bid_end_date`) still validate
+ * against the existing clarification date in the DB.
+ */
+export function assertEditDateConstraints({ snapshot, current }) {
+  const eff = (key) => (snapshot && snapshot[key] !== undefined && snapshot[key] !== null && snapshot[key] !== ''
+    ? snapshot[key]
+    : current?.[key] ?? null);
+
+  const bidEndRaw = eff('bid_end_date');
+  const clarRaw = eff('vendor_clarification_date');
+  const pubRaw = eff('tender_publish_date');
+
+  // 2-hour minimum on bid_end_date — only re-validated when the snapshot
+  // is actually trying to set the field. We don't want to retroactively
+  // reject the existing value if the user is editing something unrelated.
+  if (snapshot && snapshot.bid_end_date !== undefined && snapshot.bid_end_date !== null && snapshot.bid_end_date !== '') {
+    const bidMs = parseIstWallTimeToEpoch(bidEndRaw);
+    if (bidMs == null) {
+      throw httpError(400, 'Invalid Quote Submission Deadline.');
+    }
+    const minMs = Date.now() + 2 * 60 * 60 * 1000;
+    if (bidMs < minMs) {
+      throw httpError(
+        400,
+        'Quote Submission Deadline must be at least 2 hours from now (IST).'
+      );
+    }
+  }
+
+  // Vendor clarification deadline rules — re-validated whenever the
+  // snapshot touches either the clarification date OR the bid_end_date,
+  // because changing one affects the buffer with the other.
+  const touchesClarOrBid =
+    snapshot &&
+    (snapshot.vendor_clarification_date !== undefined ||
+      snapshot.bid_end_date !== undefined);
+
+  if (touchesClarOrBid && clarRaw) {
+    const clarMs = parseIstWallTimeToEpoch(clarRaw);
+    if (clarMs == null) {
+      throw httpError(400, 'Invalid Vendor Clarification Deadline.');
+    }
+    if (bidEndRaw) {
+      const bidMs = parseIstWallTimeToEpoch(bidEndRaw);
+      if (bidMs != null && bidMs - clarMs < 60 * 60 * 1000) {
+        throw httpError(
+          400,
+          'Vendor Clarification Deadline must be at least 1 hour before the Quote Submission Deadline.'
+        );
+      }
+    }
+    if (pubRaw) {
+      const pubMs = parseIstWallTimeToEpoch(pubRaw);
+      if (pubMs != null && clarMs <= pubMs) {
+        throw httpError(
+          400,
+          'Vendor Clarification Deadline must be after the Tender Publish Date.'
+        );
+      }
+    }
+  }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // 2. diffRfqSnapshot
 // ──────────────────────────────────────────────────────────────────────────
