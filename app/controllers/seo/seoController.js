@@ -100,6 +100,8 @@ const seoController = {
       }
       return options.inverse(this);
     });
+    // numeric add helper (used for sequential numbering with offsets)
+    Handlebars.registerHelper('add', (a, b) => Number(a) + Number(b));
 
     // --- Dynamic Template Selection ---
     // If po_id and company context are provided, use dynamic template selection

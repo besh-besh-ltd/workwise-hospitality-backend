@@ -61,6 +61,7 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
       RFQ.id AS rfq_id,
       RFQ.rfq_no,
       RFQ.title AS rfq_title,
+      RFQ.comment AS rfq_comment,
       RFQ.hospitality_company_id,
       RFQ.hotel_id,
       PROJ.name AS project_name,
@@ -183,6 +184,56 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     WHERE RTM.rfq_id = $1
     ORDER BY RTM.id
   `, [poData.rfq_id]);
+
+  // 6a. Parse the rfq.comment HTML and merge into rfqTerms.
+  //  - Starts with list (no preceding text) → flatten each <li> as its own row
+  //  - Plain text (no list)                 → one numbered row
+  //  - Text then list                       → text is the row, list nests under it
+  //  - Trailing text after a list           → next numbered row
+  if (poData.rfq_comment) {
+    const html = poData.rfq_comment.trim();
+
+    // Split into ordered segments: { type: 'text'|'list', html }
+    const segments = [];
+    const listBlockRegex = /<(ul|ol)[^>]*>[\s\S]*?<\/\1>/gi;
+    let lastIndex = 0;
+    let blockMatch;
+    while ((blockMatch = listBlockRegex.exec(html)) !== null) {
+      const before = html.substring(lastIndex, blockMatch.index).trim();
+      if (before) segments.push({ type: 'text', html: before });
+      segments.push({ type: 'list', html: blockMatch[0] });
+      lastIndex = blockMatch.index + blockMatch[0].length;
+    }
+    const trailing = html.substring(lastIndex).trim();
+    if (trailing) segments.push({ type: 'text', html: trailing });
+
+    // Walk segments and build rfqTerms entries
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+
+      if (seg.type === 'text') {
+        const next = segments[i + 1];
+        if (next && next.type === 'list') {
+          // Text + list → merge into one row; convert <ul> to <ol> for numbering
+          const numberedList = next.html
+            .replace(/<ul([^>]*)>/gi, '<ol$1>')
+            .replace(/<\/ul>/gi, '</ol>');
+          rfqTerms.push({ id: null, term_content: seg.html + numberedList });
+          i++; // skip the list segment
+        } else {
+          rfqTerms.push({ id: null, term_content: seg.html });
+        }
+      } else {
+        // List without preceding text → flatten each <li>
+        const liRegex = /<li[^>]*>([\s\S]*?)<\/li>/gi;
+        let liMatch;
+        while ((liMatch = liRegex.exec(seg.html)) !== null) {
+          const inner = liMatch[1].trim();
+          if (inner) rfqTerms.push({ id: null, term_content: inner });
+        }
+      }
+    }
+  }
 
   const approvalData = await getApprovalDataForPO(po_id, poData, conn);
 

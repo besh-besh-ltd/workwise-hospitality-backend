@@ -3891,7 +3891,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
 
   // Fetch RFQ details
   const rfq = await dbContext.oneOrNone(
-    `SELECT id, rfq_no, hospitality_company_id, hotel_id, department_id, process_id, is_tender, company_name
+    `SELECT id, rfq_no, title, hospitality_company_id, hotel_id, department_id, process_id, is_tender, company_name
      FROM tbl_rfq WHERE id = $1`,
     [rfqId]
   );
@@ -4029,6 +4029,7 @@ const startApprovalForTechEval = async (rfqProductId, rfqId, userId, txContext =
     metadata: {
       rfq_id: rfqId,
       rfq_number: rfq.rfq_no,
+      rfq_title: rfq.title || '',
       rfq_product_id: rfqProductId,
       tech_evaluation_id: techEval.id,
       is_tender: rfq.is_tender,
@@ -9029,7 +9030,8 @@ const rfqController = {
                       initiated_by: req.user.id,
                       metadata: {
                         rfq_id,
-                        rfq_no,
+                        rfq_number: rfq_no,
+                        rfq_title: rfqData.title || '',
                         rfq_product_id: rfqProduct.id,
                         is_tender: rfqData.is_tender || 0,
                         product_variant_id,
