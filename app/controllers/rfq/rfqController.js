@@ -2287,10 +2287,16 @@ const saveRfqDraft = async (user_id, reqBody, { isDraft = false } = {}) => {
   // Normalize reverse_auction to ensure consistent comparison
   const isReverseAuction = reverse_auction === 1 || reverse_auction === '1' || reverse_auction === true;
 
-  // Helper to normalize date values - convert empty strings to null
+  // Helper to normalize date values - convert empty strings to null,
+  // and ensure bare YYYY-MM-DD dates get a T00:00:00 time component
+  // so they don't look artificially changed when later edited with time.
   const normalizeDate = (dateValue) => {
     if (!dateValue || dateValue === '' || dateValue === 'null' || dateValue === 'undefined') {
       return null;
+    }
+    // If the value is a bare date (YYYY-MM-DD) without time, append T00:00:00
+    if (typeof dateValue === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateValue.trim())) {
+      return dateValue.trim() + 'T00:00:00';
     }
     return dateValue;
   };
@@ -4367,18 +4373,24 @@ const handleTechnicalPostApproval = async (approval_instance_id, approver_user_i
 
         console.log(`Prepared ${nextVendors.length} replacement vendors for round ${evaluation_round + 1}`);
       } else {
-        // No more vendors available
+        // No more replacement vendors available — all eligible vendors
+        // have been evaluated, so mark as complete even if the passed
+        // count is below the configured threshold.
         await rfqModel.updateTechEvalStatus(techEval.id, {
+          is_complete: true,
           blocked_insufficient_vendors: true,
           total_passed_verified: totalPassedVerified
         }, t);
-        console.log(`Tech evaluation ${techEval.id} blocked - insufficient vendors available`);
+        console.log(`Tech evaluation ${techEval.id} complete (all eligible vendors evaluated, ${totalPassedVerified} passed)`);
       }
     } else {
-      // All vendors passed, update status
+      // All vendors passed — if no failed vendors remain, all eligible
+      // vendors are evaluated. Mark complete regardless of threshold.
       await rfqModel.updateTechEvalStatus(techEval.id, {
+        is_complete: true,
         total_passed_verified: totalPassedVerified
       }, t);
+      console.log(`Tech evaluation ${techEval.id} complete (all vendors passed, ${totalPassedVerified} total)`);
     }
 
     console.log(`Post-approval complete for tech eval round ${round_id}: ${passedVendors.length} passed, ${failedVendors.length} failed`);
@@ -5941,7 +5953,7 @@ const rfqController = {
           contact_number: user.mobile || '',
           comment: req.body.comment || '',
           bid_end_date:
-            req.body.bid_end_date || bidEndDate.toISOString().split('T')[0],
+            req.body.bid_end_date || bidEndDate.toISOString().split('T')[0] + 'T00:00:00',
           location: req.body.location || '',
           is_published: 0,
           created_by: user_id,

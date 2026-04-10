@@ -703,14 +703,16 @@ export async function applyProductChanges(t, rfqId, productDiff, poLockedIds, rf
     }
 
     if (u.techEvalChanged) {
-      // We don't deep-write tech eval here — that has its own dedicated
-      // controller endpoints. Just record the high-level change so it shows
-      // up in history; the actual tech eval rows are managed elsewhere.
+      // Tech eval clauses are saved by their own dedicated endpoints
+      // (addClause / updateClause / removeClause) BEFORE the RFQ update
+      // flow runs, so u.current (fetched from DB) already reflects the NEW
+      // state while u.snapshot (from the frontend) still holds the OLD
+      // state. Swap them so old_value/new_value are correct in history.
       history.push({
         entity_type: 'PRODUCT_TECH_EVAL', entity_id: u.id, entity_label: label,
         field_name: 'clauses', change_type: 'UPDATE',
-        old_value: u.current.tech_eval_clauses,
-        new_value: u.snapshot.tech_eval_clauses,
+        old_value: u.snapshot.tech_eval_clauses,
+        new_value: u.current.tech_eval_clauses,
         is_material: true
       });
     }
