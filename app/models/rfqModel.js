@@ -10943,7 +10943,60 @@ ORDER BY m.created_at;
         OR RFQ.project_id IN (
           SELECT project_id FROM tbl_project_team WHERE user_id = ${user_id}
         )
+        OR EXISTS (
+          -- Business unit visibility (fallback): users mapped to the draft's scalar hotel_id
+          -- (covers older rows where RFQ.hotel_id / hospitality_company_id are populated)
+          SELECT 1 FROM tbl_hospitality_user_mappings HUM
+          WHERE HUM.user_id = ${user_id}
+            AND (
+              HUM.hospitality_hotel_id = RFQ.hotel_id
+              OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                  AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
+            )
+        )
+        OR EXISTS (
+          -- Business unit visibility (primary): users mapped to ANY hotel the draft
+          -- is associated with via tbl_rfq_hotel_mappings (the source of truth for saveDraft)
+          SELECT 1
+          FROM tbl_rfq_hotel_mappings rhm
+          JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+          JOIN tbl_hospitality_user_mappings HUM ON HUM.user_id = ${user_id}
+            AND (
+              HUM.hospitality_hotel_id = rhm.hotel_id
+              OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                  AND HUM.hospitality_company_id = hch.hospitality_company_id)
+            )
+          WHERE rhm.rfq_id = RFQ.id
+        )
       ) AND (RFQ.is_published = 0 AND RFQ.status NOT IN (2, 3, 4))
+      -- Permission filter: only drafts the user has read access for.
+      -- Passes if the user has rfq/boq read on the draft's scalar company (fallback)
+      -- OR on any company derived from tbl_rfq_hotel_mappings (primary).
+      AND (
+        EXISTS (
+          SELECT 1 FROM tbl_user_role_scopes _urs2
+          JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+          JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+          WHERE _urs2.user_id = ${user_id}
+            AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+            AND _p2.action = 'read'
+            AND _urs2.company_id = RFQ.hospitality_company_id
+            AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM tbl_rfq_hotel_mappings rhm
+          JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+          JOIN tbl_user_role_scopes _urs3 ON _urs3.user_id = ${user_id}
+            AND _urs3.company_id = hch.hospitality_company_id
+            AND (_urs3.hotel_id IS NULL OR _urs3.hotel_id = rhm.hotel_id)
+          JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
+          JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
+          WHERE rhm.rfq_id = RFQ.id
+            AND _p3.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+            AND _p3.action = 'read'
+        )
+      )
       ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
       ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
       ${
@@ -10960,7 +11013,58 @@ ORDER BY m.created_at;
       const countQuery = `
         SELECT COUNT(*) AS total_count
         FROM tbl_rfq RFQ
-        WHERE RFQ.created_by = ${user_id} AND RFQ.is_published = 0 AND RFQ.status != 2
+        WHERE (
+          RFQ.created_by = ${user_id}
+          OR RFQ.project_id IN (
+            SELECT project_id FROM tbl_project_team WHERE user_id = ${user_id}
+          )
+          OR EXISTS (
+            SELECT 1 FROM tbl_hospitality_user_mappings HUM
+            WHERE HUM.user_id = ${user_id}
+              AND (
+                HUM.hospitality_hotel_id = RFQ.hotel_id
+                OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                    AND HUM.hospitality_company_id = RFQ.hospitality_company_id)
+              )
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM tbl_rfq_hotel_mappings rhm
+            JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+            JOIN tbl_hospitality_user_mappings HUM ON HUM.user_id = ${user_id}
+              AND (
+                HUM.hospitality_hotel_id = rhm.hotel_id
+                OR (HUM.mapping_type = 0 AND HUM.hospitality_hotel_id IS NULL
+                    AND HUM.hospitality_company_id = hch.hospitality_company_id)
+              )
+            WHERE rhm.rfq_id = RFQ.id
+          )
+        ) AND (RFQ.is_published = 0 AND RFQ.status NOT IN (2, 3, 4))
+        AND (
+          EXISTS (
+            SELECT 1 FROM tbl_user_role_scopes _urs2
+            JOIN tbl_role_permissions _rp2 ON _rp2.role_id = _urs2.role_id
+            JOIN tbl_permissions _p2 ON _p2.id = _rp2.permission_id
+            WHERE _urs2.user_id = ${user_id}
+              AND _p2.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+              AND _p2.action = 'read'
+              AND _urs2.company_id = RFQ.hospitality_company_id
+              AND (_urs2.hotel_id IS NULL OR _urs2.hotel_id = RFQ.hotel_id)
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM tbl_rfq_hotel_mappings rhm
+            JOIN tbl_hospitality_company_hotels hch ON hch.id = rhm.hotel_id
+            JOIN tbl_user_role_scopes _urs3 ON _urs3.user_id = ${user_id}
+              AND _urs3.company_id = hch.hospitality_company_id
+              AND (_urs3.hotel_id IS NULL OR _urs3.hotel_id = rhm.hotel_id)
+            JOIN tbl_role_permissions _rp3 ON _rp3.role_id = _urs3.role_id
+            JOIN tbl_permissions _p3 ON _p3.id = _rp3.permission_id
+            WHERE rhm.rfq_id = RFQ.id
+              AND _p3.resource = (CASE WHEN RFQ.is_tender = 1 THEN 'boq' ELSE 'rfq' END)::resource_type
+              AND _p3.action = 'read'
+          )
+        )
         ${project_id == -1 ? '' : ` AND RFQ.project_id = ${project_id}`}
         ${rfq_type == '' ? '' : ` AND RFQ.rfq_type = '${rfq_type}'`}
         ${
