@@ -2620,9 +2620,31 @@ const HospitalityController = {
         });
       }
 
-      // ---------- Existing registration / renewal branch ----------
-      // Create subscription rows from payment metadata (rows are only created after payment succeeds)
+      // ---------- Existing registration / renewal / extension branch ----------
+      // Before creating new subscription rows, cancel any existing active rows
+      // for this vendor that belong to the previous period. This prevents
+      // duplicate rows (old + new) from showing up in the frontend.
       if (metadata && metadata.subscription_items && metadata.subscription_items.length > 0) {
+        const isExtension = metadata.kind === 'extension';
+        const isRenewalPayment = payment.receipt && payment.receipt.startsWith('RNW');
+
+        if (isExtension || isRenewalPayment) {
+          // Cancel all current active subscription rows that have a DIFFERENT
+          // end_date than the new rows (i.e. they belong to the old period).
+          const newEndDate = metadata.fy_end_date || metadata.subscription_items[0]?.end_date;
+          if (newEndDate) {
+            await db.none(
+              `UPDATE tbl_vendor_hotel_category_subscription
+                  SET status = 'expired',
+                      cancelled_at = NOW()
+                WHERE vendor_id = $1
+                  AND status = 'active'
+                  AND end_date::text != $2`,
+              [userId, newEndDate]
+            );
+          }
+        }
+
         const subscriptionRows = metadata.subscription_items.map(row => ({
           ...row,
           vendor_id: userId,
@@ -2965,6 +2987,32 @@ const HospitalityController = {
       // ---------- FREE PATH (no charge) ----------
       if (netCost === 0) {
         const todayStr = Moment().format('YYYY-MM-DD');
+
+        // Create a $0 payment record so the modification appears in payment history
+        let freePaymentId = null;
+        try {
+          freePaymentId = await hospitalityModel.createVendorPayment({
+            vendor_id: vendorId,
+            razorpay_order_id: null,
+            razorpay_payment_id: null,
+            razorpay_signature: null,
+            amount: 0,
+            currency: 'INR',
+            payment_status: 'success',
+            metadata: {
+              type: 'modification',
+              shared_end_date,
+              added_category_names: addedCategoryNames,
+              added_subcategory_names: addedSubcategoryNames,
+              added_hotel_names: addedHotelNames,
+              removed_category_names: removedCategoryNames,
+              removed_subcategory_names: removedSubcategoryNames,
+              removed_hotel_names: removedHotelNames
+            }
+          });
+        } catch (payErr) {
+          logError('Free modification payment record creation failed (non-fatal):', payErr);
+        }
 
         await db.tx(async t => {
           // Soft-cancel explicit removals
@@ -3611,15 +3659,19 @@ const _computeModificationPreview = async (vendorId, body) => {
   const cost_added_hotels = sumFee(survivingCats) * addedHotelIds.length;
   const additions_cost = cost_added_cats + cost_added_hotels;
 
-  const swap_credit_cats = sumFee(removedCats) * newTotalHotelsCount;
-  const swap_credit_hotels = sumFee(survivingCats) * removedHotelIds.length;
-  const swap_credit = Math.min(additions_cost, swap_credit_cats + swap_credit_hotels);
+  // No swap credit — removals do not offset the cost of new additions.
+  // Vendors must pay full price for every new category/hotel regardless
+  // of what they remove, to prevent the loophole of rotating categories
+  // within a financial year without paying.
+  const swap_credit_cats = 0;
+  const swap_credit_hotels = 0;
+  const swap_credit = 0;
 
-  const net_cost = Math.max(0, additions_cost - swap_credit);
+  const net_cost = Math.max(0, additions_cost);
 
   const warnings = [];
   if (removedCategoryIds.length > 0 || removedHotelIds.length > 0) {
-    warnings.push('Removals do not earn refunds. This is a one-way change.');
+    warnings.push('Removals do not earn refunds or credits. New categories are charged separately at full price');
   }
   if (cascadedSubs.length > 0) {
     warnings.push(
