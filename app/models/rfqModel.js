@@ -521,7 +521,8 @@ WHERE NOT EXISTS (
           const nextMonth = new Date(today);
           nextMonth.setMonth(today.getMonth() + 1);
 
-          const formattedDate = nextMonth.toISOString().split('T')[0];
+          // Always include time so later edits don't create artificial diffs
+          const formattedDate = nextMonth.toISOString().split('T')[0] + 'T00:00:00';
 
           const rfqValues = [
             nextRFQNumber,
@@ -3596,13 +3597,35 @@ LIMIT 2;
       tech_latest AS (
         SELECT rfq_id, status FROM tech_approval WHERE rn = 1
       ),
-      -- Products with at least 1 cleared vendor
+      -- Products where tech eval is done: all eligible (responded) vendors
+      -- have been evaluated (exist in cleared_vendors, passed or failed).
       products_with_cleared AS (
         SELECT te.rfq_id, COUNT(DISTINCT te.tbl_rfq_product_id)::int AS products_cleared
         FROM tbl_rfq_product_tech_evaluation te
-        JOIN tbl_rfq_product_tech_evaluation_cleared_vendors cv
-          ON cv.tbl_rfq_product_tech_evaluation_id = te.id AND cv.status = 1
         WHERE te.rfq_id = ANY($1::int[])
+          AND (
+            te.is_complete = true
+            OR (
+              -- At least 1 vendor evaluated
+              EXISTS (
+                SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv
+                WHERE cv.tbl_rfq_product_tech_evaluation_id = te.id
+              )
+              -- AND no responded vendor left unevaluated
+              AND NOT EXISTS (
+                SELECT DISTINCT vr.vendor_id
+                FROM tbl_rfq_product_tech_evaluation_vendors_response vr
+                JOIN tbl_rfq_product_tech_evaluation_clauses c
+                  ON c.id = vr.tbl_rfq_product_tech_evaluation_clauses_id
+                WHERE c.tbl_rfq_product_tech_evaluation_id = te.id
+                  AND NOT EXISTS (
+                    SELECT 1 FROM tbl_rfq_product_tech_evaluation_cleared_vendors cv2
+                    WHERE cv2.tbl_rfq_product_tech_evaluation_id = te.id
+                      AND cv2.vendor_id = vr.vendor_id
+                  )
+              )
+            )
+          )
         GROUP BY te.rfq_id
       ),
       -- Active negotiation rounds
@@ -3654,9 +3677,14 @@ LIMIT 2;
           AND po.status IN ('approved','sent','dispatched','GRN','completed','invoice_raised')
         GROUP BY po.rfq_id
       ),
-      -- Whether tech eval is configured for this RFQ
+      -- Whether tech eval is configured for this RFQ (+ count of TE products)
       has_tech_eval AS (
         SELECT DISTINCT rfq_id FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
+      ),
+      tech_eval_product_count AS (
+        SELECT rfq_id, COUNT(DISTINCT tbl_rfq_product_id)::int AS te_products
+        FROM tbl_rfq_product_tech_evaluation WHERE rfq_id = ANY($1::int[])
+        GROUP BY rfq_id
       ),
       -- Whether any non-regret quotes have been received (= eligible vendors)
       has_eligible_vendors AS (
@@ -3695,9 +3723,9 @@ LIMIT 2;
           -- Stage 6: Negotiation Ongoing
           WHEN an.rfq_id IS NOT NULL
             THEN 'NEGOTIATION_ONGOING'
-          -- Stage 5a: Commercial Evaluation (TE flow — all products have cleared vendors)
-          WHEN pwc.products_cleared IS NOT NULL AND pc.total_products IS NOT NULL
-            AND pwc.products_cleared >= pc.total_products
+          -- Stage 5a: Commercial Evaluation (TE flow — all TE-configured products have been evaluated)
+          WHEN pwc.products_cleared IS NOT NULL AND tepc.te_products IS NOT NULL
+            AND pwc.products_cleared >= tepc.te_products
             THEN 'COMMERCIAL_EVALUATION'
           -- Stage 5b: Commercial Evaluation (no-TE flow — only after deadline AND eligible vendors exist)
           WHEN hte.rfq_id IS NULL AND COALESCE(bs.bid_ended, false) = true
@@ -3714,23 +3742,28 @@ LIMIT 2;
           -- Stage 3: Technical Approving
           WHEN tl.status = 'PENDING'
             THEN 'TECHNICAL_APPROVING'
-          -- Stage 2: Technical Evaluating — TE configured, deadline passed, AND ≥1 eligible vendor
-          WHEN rd.is_published = 1 AND rd.status = 1 AND tl.rfq_id IS NULL
+          -- Stage 2: Technical Evaluating — TE configured, deadline passed, ≥1 eligible vendor
+          -- Also matches when latest approval is APPROVED but not all products cleared yet
+          WHEN rd.is_published = 1 AND rd.status = 1
+            AND (tl.rfq_id IS NULL OR tl.status = 'APPROVED')
             AND hte.rfq_id IS NOT NULL
             AND COALESCE(bs.bid_ended, false) = true
             AND he.rfq_id IS NOT NULL
             THEN 'TECHNICAL_EVALUATING'
-          -- Stage 1.9 (NEW): Stuck at Technical — TE configured, deadline passed, zero eligible vendors
-          WHEN rd.is_published = 1 AND rd.status = 1 AND tl.rfq_id IS NULL
+          -- Stage 1.9: Stuck at Technical — TE configured, deadline passed, zero eligible vendors
+          WHEN rd.is_published = 1 AND rd.status = 1
+            AND (tl.rfq_id IS NULL OR tl.status = 'APPROVED')
             AND hte.rfq_id IS NOT NULL
             AND COALESCE(bs.bid_ended, false) = true
             AND he.rfq_id IS NULL
             THEN 'RFQ_STUCK_TECHNICAL'
           -- Stage 1.75: Tech eval configured, bid window still open (with or without early quotes)
           WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NOT NULL
+            AND COALESCE(bs.bid_ended, false) = false
             THEN 'TECHNICAL_AWAITING_QUOTES'
           -- Stage 1.5: Awaiting Quotes (published, open, NO tech eval configured, bid window still open)
           WHEN rd.is_published = 1 AND rd.status = 1 AND hte.rfq_id IS NULL
+            AND COALESCE(bs.bid_ended, false) = false
             THEN 'AWAITING_QUOTES'
           -- Stage 1: RFQ Approval (ready to publish / pending approval)
           WHEN rd.status IN (3, 4) OR (rd.is_published = 0 AND rd.status != 1)
@@ -3747,6 +3780,7 @@ LIMIT 2;
       LEFT JOIN po_data pd ON pd.rfq_id = rd.id
       LEFT JOIN po_products_approved ppa ON ppa.rfq_id = rd.id
       LEFT JOIN has_tech_eval hte ON hte.rfq_id = rd.id
+      LEFT JOIN tech_eval_product_count tepc ON tepc.rfq_id = rd.id
       LEFT JOIN has_eligible_vendors he ON he.rfq_id = rd.id
       LEFT JOIN bid_status bs ON bs.rfq_id = rd.id
     `;
@@ -4514,7 +4548,6 @@ LIMIT 2;
         const parts = [
           `${stats.participated} participated`,
           `${stats.sent_quotes} quote${stats.sent_quotes === 1 ? '' : 's'}`,
-          `${stats.technical_only} technical only`,
         ];
         if (stats.regrets > 0) {
           parts.push(`${stats.regrets} regret${stats.regrets === 1 ? '' : 's'}`);
