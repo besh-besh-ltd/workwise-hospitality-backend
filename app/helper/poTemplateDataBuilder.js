@@ -20,6 +20,7 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
       RFQ.id AS rfq_id,
       RFQ.rfq_no,
       RFQ.title AS rfq_title,
+      RFQ.comment AS rfq_comment,
       RFQ.hospitality_company_id,
       RFQ.hotel_id,
 
@@ -155,6 +156,33 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
     WHERE RTM.rfq_id = $1
     ORDER BY RTM.id
   `, [poData.rfq_id]);
+
+  // 6a. Flatten the rich-text rfq.comment into individual term rows so its
+  // items continue the sequential numbering instead of nesting under one row.
+  // The comment is HTML (e.g. <ol><li>…</li></ol>); extract each <li> and
+  // append as its own term. Falls back to a single row if no list is found.
+  if (poData.rfq_comment) {
+    const liRegex = /<li[^>]*>([\s\S]*?)<\/li>/gi;
+    const liItems = [];
+    let liMatch;
+    while ((liMatch = liRegex.exec(poData.rfq_comment)) !== null) {
+      const inner = liMatch[1].trim();
+      if (inner) liItems.push(inner);
+    }
+
+    if (liItems.length > 0) {
+      liItems.forEach((item) => {
+        rfqTerms.push({ id: null, term_content: item });
+      });
+    } else {
+      // No <li> elements — keep the comment as a single additional row so
+      // free-form HTML (paragraphs, headings, etc.) still appears.
+      const stripped = poData.rfq_comment.replace(/<\/?(html|body)[^>]*>/gi, '').trim();
+      if (stripped) {
+        rfqTerms.push({ id: null, term_content: stripped });
+      }
+    }
+  }
 
   // 7. Get Approval Data
   const approvalData = await getApprovalDataForPO(po_id, poData, conn);

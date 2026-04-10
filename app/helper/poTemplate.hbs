@@ -68,6 +68,78 @@
       font-weight: bold;
       text-align: center;
     }
+    .term-number {
+      width: 22px;
+      vertical-align: top;
+      font-weight: bold;
+      white-space: nowrap;
+      text-align: right;
+      padding-right: 6px;
+    }
+    .term-content {
+      font-size: 10px;
+      line-height: 1.4;
+      word-wrap: break-word;
+    }
+    .term-content p {
+      margin: 0 0 4px 0;
+    }
+    .term-content p:last-child {
+      margin-bottom: 0;
+    }
+    .term-content ul,
+    .term-content ol {
+      margin: 4px 0;
+      padding-left: 18px;
+    }
+    .term-content li {
+      margin-bottom: 2px;
+    }
+    .term-content strong,
+    .term-content b {
+      font-weight: bold;
+    }
+    .term-content em,
+    .term-content i {
+      font-style: italic;
+    }
+    .term-content u {
+      text-decoration: underline;
+    }
+    .term-content h1,
+    .term-content h2,
+    .term-content h3,
+    .term-content h4,
+    .term-content h5,
+    .term-content h6 {
+      margin: 6px 0 4px 0;
+      font-weight: bold;
+    }
+    .term-content h1 { font-size: 13px; }
+    .term-content h2 { font-size: 12px; }
+    .term-content h3,
+    .term-content h4,
+    .term-content h5,
+    .term-content h6 { font-size: 11px; }
+    .term-content a {
+      color: #1a73e8;
+      text-decoration: underline;
+      word-break: break-all;
+    }
+    .term-content table {
+      width: auto;
+      border-collapse: collapse;
+      margin: 4px 0;
+    }
+    .term-content table td,
+    .term-content table th {
+      border: 1px solid #ccc;
+      padding: 3px 6px;
+    }
+    .term-content img {
+      max-width: 100%;
+      height: auto;
+    }
   </style>
 </head>
 
@@ -276,20 +348,20 @@
   <br/>
   {{/if}}
 
-  <!-- TERMS AND CONDITIONS - With Checkboxes -->
+  <!-- TERMS AND CONDITIONS - Numbered List -->
   <div class="section-title">TERMS AND CONDITIONS</div>
 
   <table class="small" style="margin-top: 8px;">
     {{#if deliveryterms}}
     <tr>
-      <td style="width: 20px;"><span class="checkbox checked">✓</span></td>
+      <td class="term-number">1.</td>
       <td><strong>Delivery Terms:</strong> {{deliveryterms}} days</td>
     </tr>
     {{/if}}
     {{#each rfqTerms}}
     <tr>
-      <td style="width: 20px;"><span class="checkbox checked">✓</span></td>
-      <td><strong>{{term_content}}:</strong></td>
+      <td class="term-number">{{#if ../deliveryterms}}{{add @index 2}}{{else}}{{add @index 1}}{{/if}}.</td>
+      <td><div class="term-content">{{{term_content}}}</div></td>
     </tr>
     {{/each}}
   </table>
