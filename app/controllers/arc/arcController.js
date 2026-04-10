@@ -2,15 +2,22 @@ import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
 import rfqModel from '../../models/rfqModel.js';
 import negotiationModel from '../../models/negotiationModel.js';
-import { getLifecycleHistory, getApprovalInstancesByEntity, submitApprovalAction, cancelApprovalInstance, getApprovalInstanceById, recordLifecycleEvent, uploadToS3, resetQuoteFinalizationForSendback } from '../../models/generalModel.js';
+import { getLifecycleHistory, getApprovalInstancesByEntity, cancelApprovalInstance, getApprovalInstanceById, recordLifecycleEvent, uploadToS3, resetQuoteFinalizationForSendback } from '../../models/generalModel.js';
+import { executeApprovalAction } from '../../services/approvalActionService.js';
 import { generateAwardDocument, sendAwardDocumentToVendor } from './arcDocumentController.js';
 import db from '../../config/dbConn.js';
 
 /**
  * Handle ARC post-approval actions (document generation and email)
  * Called after ARC approval instance is fully approved
+ *
+ * @param {number} approval_instance_id
+ * @param {number} approver_user_id
+ * @param {Object} [options]
+ * @param {Object} [options.txContext] - Optional transaction context to participate in
  */
-const handleArcPostApproval = async (approval_instance_id, approver_user_id, txContext = null) => {
+const handleArcPostApproval = async (approval_instance_id, approver_user_id, options = {}) => {
+  const txContext = options?.txContext ?? null;
   const t = txContext || db;
 
   try {
@@ -349,18 +356,16 @@ const ArcController = {
         const actionType = action.toUpperCase() === 'APPROVE' ? 'APPROVE' : 'REJECT';
 
         try {
-          result = await submitApprovalAction({
+          // executeApprovalAction wraps submitApprovalAction and centrally
+          // dispatches handleArcPostApproval on APPROVED, so the explicit
+          // post-action call that previously lived here is no longer needed.
+          result = await executeApprovalAction({
             approval_instance_id: instanceId,
             approval_instance_step_id: approval_instance_step_id || null,
             approver_user_id: user_id,
             action: actionType,
             comment: remarks || null
           });
-
-          // Handle ARC post-approval actions (document generation) if fully approved
-          if (actionType === 'APPROVE' && result.instance_status === 'APPROVED') {
-            await handleArcPostApproval(instanceId, user_id);
-          }
 
           // If ARC is rejected, undo vendor finalization so vendors don't see it
           if (actionType === 'REJECT') {

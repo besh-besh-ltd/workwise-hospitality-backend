@@ -78,6 +78,9 @@ RfqRoutes.post(
   rfqController.refreshVendors
 );
 
+// @deprecated since WH-69 — adding products is now staged on the frontend and
+// persisted as part of the snapshot in PUT /rfq/update. Route kept temporarily
+// in case any external caller still hits it; remove after one release cycle.
 RfqRoutes.post(
   '/add-product-to-rfq',
   passportSignIn,
@@ -94,6 +97,15 @@ RfqRoutes.put(
 
   validateBody(rfqSchemas.update),
   rfqController.update
+);
+
+// WH-69: edit history feed for the new "Edit History" panel on rfq-management-details
+RfqRoutes.get(
+  '/:id/edit-history',
+  passportSignIn,
+  acl([2, 8]),
+  validateParam(rfqSchemas.id),
+  rfqController.getEditHistory
 );
 
 
