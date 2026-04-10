@@ -7380,8 +7380,8 @@ const rfqController = {
                 if (!product.product_id || (product.unit_price === '' || product.unit_price == 0)) continue;
 
                 const rfqProductResult = await db.oneOrNone(
-                  `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2`,
-                  [rfq_id, product.product_id]
+                  `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+                  [rfq_id, product.product_id, product.variant]
                 );
 
                 if (rfqProductResult && !activeNegotiationProductIds.has(rfqProductResult.id)) {
@@ -12426,8 +12426,8 @@ sendFollowUpEmails: async (req, res) => {
               if (product.comment === '' && (!product.document_files || product.document_files.length <= 0) && (product.unit_price === '' || product.unit_price == 0)) continue;
 
               const rfqProductResult = await db.oneOrNone(
-                `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2`,
-                [quoteExists[0].rfq_id, product.product_id]
+                `SELECT id FROM tbl_rfq_products WHERE rfq_id = $1 AND product_variant_id = $2 AND variant = $3`,
+                [quoteExists[0].rfq_id, product.product_id, product.variant]
               );
 
               if (rfqProductResult && !activeNegotiationProductIds.has(rfqProductResult.id)) {

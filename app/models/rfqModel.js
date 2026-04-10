@@ -3670,7 +3670,7 @@ LIMIT 2;
       bid_status AS (
         SELECT id AS rfq_id,
                (bid_end_date IS NOT NULL AND bid_end_date != ''
-                  AND bid_end_date::timestamp < NOW()::timestamp) AS bid_ended
+                  AND bid_end_date::timestamp < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')) AS bid_ended
         FROM tbl_rfq WHERE id = ANY($1::int[])
       )
       SELECT
@@ -4009,7 +4009,7 @@ LIMIT 2;
     try {
       // 1. Get RFQ basic info + current lifecycle stage
       const rfqBasic = await db.oneOrNone(`
-        SELECT id, is_published, status, is_tender, hotel_id, department_id, hospitality_company_id, process_id FROM tbl_rfq WHERE id = $1
+        SELECT id, is_published, status, is_tender, hotel_id, department_id, hospitality_company_id, process_id, bid_end_date FROM tbl_rfq WHERE id = $1
       `, [rfqId]);
       if (!rfqBasic) return { rfq_id: rfqId, current_stage: null, phases: [] };
 
@@ -4043,6 +4043,7 @@ LIMIT 2;
         negotiationRounds,
         finalizationData,
         poData,
+        awaitingQuoteStats,
         evaluators,
       ] = await Promise.all([
         db.any(`SELECT id FROM tbl_approval_instances WHERE entity_type IN ('RFQ','TENDER') AND entity_id = $1 ORDER BY created_at ASC`, [rfqId]).catch(() => []),
@@ -4150,6 +4151,105 @@ LIMIT 2;
           WHERE po.rfq_id = $1
           ORDER BY po.created_at
         `, [rfqId]).catch(() => []),
+
+        db.one(`
+          WITH assigned_products AS (
+            SELECT DISTINCT
+              rpv.user_id,
+              rpv.product_variant_id,
+              COALESCE(rpv.variant::text, '0') AS variant_key
+            FROM tbl_rfq_product_vendors rpv
+            WHERE rpv.rfq_id = $1
+          ),
+          vendor_regrets AS (
+            SELECT DISTINCT q.created_by AS user_id
+            FROM tbl_quotes q
+            WHERE q.rfq_id = $1
+              AND q.is_regret = 1
+          ),
+          product_responses AS (
+            SELECT
+              ap.user_id,
+              ap.product_variant_id,
+              ap.variant_key,
+              BOOL_OR(
+                q.id IS NOT NULL
+                AND (
+                  COALESCE(qi.unit_price, 0) > 0
+                  OR NULLIF(BTRIM(COALESCE(qi.comment, '')), '') IS NOT NULL
+                  OR NULLIF(BTRIM(COALESCE(qi.delivery_period::text, '')), '') IS NOT NULL
+                  OR EXISTS (
+                    SELECT 1
+                    FROM tbl_quote_item_files qif
+                    WHERE qif.quote_item_id = qi.id
+                  )
+                )
+              ) AS has_any_submission,
+              BOOL_OR(
+                q.id IS NOT NULL
+                AND COALESCE(qi.unit_price, 0) > 0
+              ) AS has_commercial_submission
+            FROM assigned_products ap
+            LEFT JOIN tbl_quotes q
+              ON q.rfq_id = $1
+             AND q.created_by = ap.user_id
+             AND COALESCE(q.is_regret, 0) != 1
+            LEFT JOIN tbl_quote_items qi
+              ON qi.quote_id = q.id
+             AND qi.rfq_id = $1
+             AND qi.product_variant_id = ap.product_variant_id
+             AND COALESCE(qi.variant::text, '0') = ap.variant_key
+            GROUP BY ap.user_id, ap.product_variant_id, ap.variant_key
+          ),
+          vendor_rollup AS (
+            SELECT
+              ap.user_id,
+              COUNT(*)::int AS assigned_products,
+              COUNT(*) FILTER (WHERE pr.has_any_submission)::int AS submitted_products,
+              COUNT(*) FILTER (WHERE pr.has_commercial_submission)::int AS quoted_products,
+              BOOL_OR(vr.user_id IS NOT NULL) AS has_regret
+            FROM assigned_products ap
+            LEFT JOIN product_responses pr
+              ON pr.user_id = ap.user_id
+             AND pr.product_variant_id = ap.product_variant_id
+             AND pr.variant_key = ap.variant_key
+            LEFT JOIN vendor_regrets vr
+              ON vr.user_id = ap.user_id
+            GROUP BY ap.user_id
+          )
+          SELECT
+            COUNT(*)::int AS total_invited,
+            COUNT(*) FILTER (
+              WHERE NOT has_regret
+                AND assigned_products > 0
+                AND submitted_products = assigned_products
+            )::int AS participated,
+            COUNT(*) FILTER (
+              WHERE NOT has_regret
+                AND assigned_products > 0
+                AND submitted_products = assigned_products
+                AND quoted_products > 0
+            )::int AS sent_quotes,
+            COUNT(*) FILTER (
+              WHERE NOT has_regret
+                AND assigned_products > 0
+                AND submitted_products = assigned_products
+                AND quoted_products = 0
+            )::int AS technical_only,
+            COUNT(*) FILTER (WHERE has_regret)::int AS regrets,
+            COUNT(*) FILTER (
+              WHERE NOT has_regret
+                AND submitted_products < assigned_products
+            )::int AS remaining
+          FROM vendor_rollup
+        `, [rfqId]).catch(() => ({
+          total_invited: 0,
+          participated: 0,
+          sent_quotes: 0,
+          technical_only: 0,
+          regrets: 0,
+          remaining: 0,
+        })),
 
         // Evaluator names
         db.any(`
@@ -4398,6 +4498,30 @@ LIMIT 2;
         }));
       };
 
+      const buildAwaitingQuotesSnapshot = () => ({
+        total_invited: parseInt(awaitingQuoteStats?.total_invited || 0, 10),
+        participated: parseInt(awaitingQuoteStats?.participated || 0, 10),
+        sent_quotes: parseInt(awaitingQuoteStats?.sent_quotes || 0, 10),
+        technical_only: parseInt(awaitingQuoteStats?.technical_only || 0, 10),
+        regrets: parseInt(awaitingQuoteStats?.regrets || 0, 10),
+        remaining: parseInt(awaitingQuoteStats?.remaining || 0, 10),
+        bid_end_date: rfqBasic.bid_end_date || null,
+      });
+
+      const buildAwaitingQuotesSummary = (stats) => {
+        if (!stats) return null;
+        const parts = [
+          `${stats.participated} participated`,
+          `${stats.sent_quotes} quote${stats.sent_quotes === 1 ? '' : 's'}`,
+          `${stats.technical_only} technical only`,
+        ];
+        if (stats.regrets > 0) {
+          parts.push(`${stats.regrets} regret${stats.regrets === 1 ? '' : 's'}`);
+        }
+        parts.push(`${stats.remaining} remaining`);
+        return parts.join(' · ');
+      };
+
       // 9. Determine phase statuses
       const getPhaseStatus = (phaseKey) => {
         const phaseIndex = PHASES_ORDERED.indexOf(phaseKey);
@@ -4475,6 +4599,14 @@ LIMIT 2;
         else if (currentStage === 'TECHNICAL_EVALUATING') subStatus = 'evaluating';
         else if (currentStage === 'TECHNICAL_APPROVING') subStatus = 'approving';
         else if (currentStage === 'TECHNICAL_REJECTED') subStatus = 'rejected';
+        else if (currentStage === 'RFQ_STUCK_TECHNICAL') subStatus = 'no_vendors_participated';
+
+        const awaitingQuotes = ['TECHNICAL_AWAITING_QUOTES', 'RFQ_STUCK_TECHNICAL'].includes(currentStage)
+          ? buildAwaitingQuotesSnapshot()
+          : null;
+        if (awaitingQuotes) {
+          summary = buildAwaitingQuotesSummary(awaitingQuotes);
+        }
 
         const latestTechInstance = techApprovalDetails.length > 0 ? techApprovalDetails[techApprovalDetails.length - 1] : null;
 
@@ -4483,6 +4615,7 @@ LIMIT 2;
           is_cancelled: latestTechInstance?.status === 'CANCELLED',
           evaluators: evaluators.map(e => ({ id: e.id, name: e.name })),
           products: techProducts,
+          awaiting_quotes: awaitingQuotes,
           approval_instances: techApprovalDetails.length > 0 ? formatApprovalInstances(techApprovalDetails) : null,
           action_holders: status === 'current' ? currentActionHolders : null,
         });
@@ -4507,9 +4640,18 @@ LIMIT 2;
         }
 
         let subStatus = null;
-        if (currentStage === 'COMMERCIAL_EVALUATION') subStatus = 'evaluating';
+        if (currentStage === 'AWAITING_QUOTES') subStatus = 'awaiting_quotes';
+        else if (currentStage === 'COMMERCIAL_EVALUATION') subStatus = 'evaluating';
         else if (currentStage === 'NEGOTIATION_ONGOING') subStatus = 'negotiating';
         else if (currentStage === 'QUOTATION_APPROVAL') subStatus = 'approving';
+        else if (currentStage === 'RFQ_STUCK_COMMERCIAL') subStatus = 'no_vendors_participated';
+
+        const awaitingQuotes = ['AWAITING_QUOTES', 'RFQ_STUCK_COMMERCIAL'].includes(currentStage)
+          ? buildAwaitingQuotesSnapshot()
+          : null;
+        if (awaitingQuotes) {
+          summary = buildAwaitingQuotesSummary(awaitingQuotes);
+        }
 
         const latestQuoteInstance = quoteApprovalDetails.length > 0 ? quoteApprovalDetails[quoteApprovalDetails.length - 1] : null;
 
@@ -4517,6 +4659,7 @@ LIMIT 2;
           key: 'commercial', label: 'Commercial Evaluation', status, summary, sub_status: subStatus,
           is_cancelled: latestQuoteInstance?.status === 'CANCELLED',
           products: commercialProducts,
+          awaiting_quotes: awaitingQuotes,
           approval_instances: quoteApprovalDetails.length > 0 ? formatApprovalInstances(quoteApprovalDetails) : null,
           action_holders: status === 'current' ? currentActionHolders : null,
         });
@@ -11734,7 +11877,7 @@ ORDER BY tq.timestamp DESC;
           (
             RFQ.bid_end_date IS NOT NULL
             AND RFQ.bid_end_date != ''
-            AND RFQ.bid_end_date::timestamp < NOW()::timestamp
+            AND RFQ.bid_end_date::timestamp < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
             AND EXISTS (
               SELECT 1 FROM tbl_rfq_product_tech_evaluation rpe
               WHERE rpe.rfq_id = RFQ.id AND NOT rpe.is_complete

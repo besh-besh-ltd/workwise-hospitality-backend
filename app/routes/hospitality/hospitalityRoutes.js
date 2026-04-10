@@ -298,6 +298,81 @@ HospitalityRoutes.post(
   hospitalityController.verifyPayment
 );
 
+// ============================================================
+// WH-74: Vendor self-service subscription management
+// ============================================================
+
+/**
+ * @route GET /api/v1/hospitality/vendor/subscription-summary
+ * @description Rich subscription overview: status, active items (categories
+ * with nested sub-categories, hotels), payment history, available actions.
+ * @access Private (Vendors only - authenticated via JWT)
+ */
+HospitalityRoutes.get(
+  '/vendor/subscription-summary',
+  passportSignIn,
+  hospitalityController.getVendorSubscriptionSummary
+);
+
+/**
+ * @route POST /api/v1/hospitality/vendor/subscription/preview
+ * @description Pure-read diff + cost calculator. Accepts target state and
+ * returns added/removed items, pricing breakdown, and validation warnings.
+ * @access Private (Vendors only - authenticated via JWT)
+ */
+HospitalityRoutes.post(
+  '/vendor/subscription/preview',
+  passportSignIn,
+  hospitalityController.previewSubscriptionModification
+);
+
+/**
+ * @route POST /api/v1/hospitality/vendor/subscription/modify
+ * @description Apply subscription changes. Free path commits in a single tx;
+ * paid path creates a Razorpay order whose metadata carries the diff.
+ * @access Private (Vendors only - authenticated via JWT)
+ */
+HospitalityRoutes.post(
+  '/vendor/subscription/modify',
+  passportSignIn,
+  hospitalityController.modifySubscription
+);
+
+/**
+ * @route GET /api/v1/hospitality/vendor/subscription/payment-history
+ * @description Paginated list of past payments with per-payment item breakdown.
+ * @access Private (Vendors only - authenticated via JWT)
+ */
+HospitalityRoutes.get(
+  '/vendor/subscription/payment-history',
+  passportSignIn,
+  hospitalityController.getVendorPaymentHistoryPaginated
+);
+
+/**
+ * @route POST /api/v1/hospitality/vendor/subscription/extend
+ * @description Extend active subscription by 1 financial year. Charges the
+ * same category × hotels pricing for the next FY period.
+ * @access Private (Vendors only - authenticated via JWT)
+ */
+HospitalityRoutes.post(
+  '/vendor/subscription/extend',
+  passportSignIn,
+  hospitalityController.extendSubscription
+);
+
+/**
+ * @route GET /api/v1/hospitality/vendor/subscription/download/:paymentId
+ * @description On-demand download of Tax Invoice or Payment Receipt PDF
+ * for a past payment. Query param: type=invoice|receipt
+ * @access Private (Vendors only - authenticated via JWT)
+ */
+HospitalityRoutes.get(
+  '/vendor/subscription/download/:paymentId',
+  passportSignIn,
+  hospitalityController.downloadPaymentDocument
+);
+
 export default HospitalityRoutes;
 
 

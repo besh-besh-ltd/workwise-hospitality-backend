@@ -619,6 +619,7 @@ export const getPOByRFQId = async (rfq_id, user_id, user_type, page = 1, limit =
                       WHERE tais.approval_instance_id = po.approval_instance_id
                         AND tais.step_order = tai.current_step
                         AND tais.status = 'PENDING'
+                        AND tasa.status = 'PENDING'
                         AND tasa.approver_user_id = $2
                     )
                   )
@@ -789,6 +790,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                     WHERE tais.approval_instance_id = po.approval_instance_id
                       AND tais.step_order = tai.current_step
                       AND tais.status = 'PENDING'
+                      AND tasa.status = 'PENDING'
                       AND tasa.approver_user_id = $2
                   )
                 )
@@ -889,6 +891,7 @@ export const getPODetailsById = async (po_id, user_id) => {
                     WHERE tais.approval_instance_id = tai.id
                       AND tais.step_order = tai.current_step
                       AND tais.status = 'PENDING'
+                      AND tasa.status = 'PENDING'
                   )
                 )
                 WHEN trx.id IS NOT NULL THEN json_build_object(

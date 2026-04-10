@@ -39,6 +39,7 @@ import { generateEmailTemplate } from '../../helper/notificationEmailLayout.js';
 import db, { pgp } from '../../config/dbConn.js';
 import hospitalityModel from '../../models/hospitalityModel.js';
 import rbacModel from '../../models/rbacModel.js';
+import { buildPrimaryCompanyLocationPayload } from '../../helper/companyLocation.js';
 const generatePassword = (password) => {
   var salt = bcrypt.genSaltSync(10);
   var hash = bcrypt.hashSync(password, salt);
@@ -421,10 +422,16 @@ const UsersController = {
             : 0
       };
 
+      const registrationLocation = buildPrimaryCompanyLocationPayload(
+        { address, country, state, city, postal_code },
+        current_user?.id || null
+      );
+
       //  Register company, this model register detail in both tables tbl_user and tbl_company
       const { company_id, user_id } = await userModel.company_registration(
         user_data,
-        company_data
+        company_data,
+        registrationLocation
       );
 
       // user_type 7 is for buyer company registration, 3 is for vendor registration
