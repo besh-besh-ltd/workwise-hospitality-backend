@@ -491,6 +491,7 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
 
       // Get vendor details
       const vendorData = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+      const vendorCompanyData = await userModel.getCompanyDetail(purchaseOrder.finalized_vendor_id);
       const vendorDetails = vendorData?.[0] || {};
 
       // Get company details
@@ -547,7 +548,8 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
           id: vendorDetails.id,
           organization_name: vendorDetails.organization_name,
           name: vendorDetails.name,
-          email: vendorDetails.email
+          email: vendorDetails.email,
+          company_name: vendorCompanyData[0]?.company_name || ''
         },
         productNames,
         approvalHistory,
@@ -593,6 +595,7 @@ const sendLegacyPOApprovalNotification = async (purchaseOrder, transaction) => {
 
     // Get vendor details
     const vendorData = await userModel.getUserById(purchaseOrder.finalized_vendor_id);
+    const vendorCompanyData = await userModel.getCompanyDetail(purchaseOrder.finalized_vendor_id);
     const vendorDetails = vendorData?.[0] || {};
 
     // Get company details (non-hospitality)
@@ -666,7 +669,8 @@ const sendLegacyPOApprovalNotification = async (purchaseOrder, transaction) => {
         id: vendorDetails.id,
         organization_name: vendorDetails.organization_name,
         name: vendorDetails.name,
-        email: vendorDetails.email
+        email: vendorDetails.email,
+        company_name: vendorCompanyData[0]?.company_name || '',
       },
       productNames,
       approvalHistory: formattedHistory,

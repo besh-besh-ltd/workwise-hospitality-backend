@@ -30,7 +30,7 @@ export const sendPOApprovalCompletionNotification = async ({
 
     const { rfq_no, title: rfq_title } = rfqDetails || {};
     const { po_number, total_value, quantity, po_pdf_url } = poDetails || {};
-    const vendorName = vendorDetails?.organization_name || vendorDetails?.name || 'Vendor';
+    const vendorName = vendorDetails?.company_name || vendorDetails?.organization_name || vendorDetails?.name || 'Vendor';
 
     // Format approval history as HTML table rows
     const approvalHistoryHTML = approvalHistory && approvalHistory.length > 0
