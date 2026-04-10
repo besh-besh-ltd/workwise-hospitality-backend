@@ -1778,6 +1778,16 @@ getVendorHotelCategoryMappings: async (vendorId) => {
         ? 'modification'
         : (parsedMeta?.kind || (p.receipt && p.receipt.startsWith('RNW') ? 'renewal' : 'registration'));
 
+      // For modifications, surface the added/removed details from metadata
+      const modification_details = kind === 'modification' && parsedMeta ? {
+        added_categories: parsedMeta.added_category_names || [],
+        removed_categories: parsedMeta.removed_category_names || [],
+        added_subcategories: parsedMeta.added_subcategory_names || [],
+        removed_subcategories: parsedMeta.removed_subcategory_names || [],
+        added_hotels: parsedMeta.added_hotel_names || [],
+        removed_hotels: parsedMeta.removed_hotel_names || [],
+      } : null;
+
       return {
         payment_id: p.id,
         razorpay_order_id: p.razorpay_order_id,
@@ -1788,7 +1798,8 @@ getVendorHotelCategoryMappings: async (vendorId) => {
         receipt: p.receipt,
         created_at: p.created_at,
         type: kind,
-        items: itemsByPayment[p.id] || []
+        items: itemsByPayment[p.id] || [],
+        modification_details,
       };
     });
   },
