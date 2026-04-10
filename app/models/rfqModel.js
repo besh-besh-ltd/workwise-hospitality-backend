@@ -3783,6 +3783,7 @@ LIMIT 2;
       TECHNICAL_AWAITING_QUOTES: { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
       TECHNICAL_EVALUATING:      { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
       TECHNICAL_REJECTED:        { resource: 'te',            actions: ['read', 'create'], useDepartment: true,  label: 'Technical Evaluators' },
+      AWAITING_QUOTES:           { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       COMMERCIAL_EVALUATION:     { resource: 'quote-compare', actions: ['read', 'create'], useDepartment: false, label: 'Commercial Evaluators' },
       AWAITING_PO:               { resource: 'awarding',      actions: ['read', 'create'], useDepartment: false, label: 'PO Initiators' },
     };
@@ -4773,7 +4774,79 @@ LIMIT 2;
         phases.filter(p => p.status === 'upcoming' || p.status === 'current').map(resolvePhaseActors)
       );
 
-      return { rfq_id: rfqId, current_stage: currentStage, current_phase: currentPhase, phases };
+      // Surface top-level approval action info for header buttons.
+      // Scan all phases for an approval instance where the current user can approve.
+      let userCanApprove = false;
+      let userApprovalInstanceId = null;
+      let userApprovalStepId = null;
+      let userApprovalEntityType = null;
+
+      for (const phase of phases) {
+        if (!phase.approval_instances) continue;
+        // Skip expired phases — the approval is stale (e.g. auto-published RFQ)
+        if (phase.status === 'expired') continue;
+        for (const inst of phase.approval_instances) {
+          if (inst.can_user_approve && inst.status === 'PENDING') {
+            userCanApprove = true;
+            userApprovalInstanceId = inst.id;
+            userApprovalStepId = inst.user_approval_step_id;
+            userApprovalEntityType = inst.entity_type;
+            break;
+          }
+        }
+        if (userCanApprove) break;
+      }
+
+      // Determine if the current user needs to take action (approval or evaluation).
+      let userActionRequired = false;
+      let userActionType = null;
+      let userActionLabel = null;
+      let userActionPhase = null;
+
+      // Stages where the user's action is NOT yet required even if they are
+      // an action holder: bid window still open (nothing to evaluate yet) or
+      // bid ended with zero vendor participation (nothing to act on).
+      const NON_ACTIONABLE_STAGES = new Set([
+        'AWAITING_QUOTES',
+        'TECHNICAL_AWAITING_QUOTES',
+        'RFQ_STUCK_TECHNICAL',
+        'RFQ_STUCK_COMMERCIAL',
+      ]);
+
+      if (userCanApprove) {
+        userActionRequired = true;
+        userActionType = 'approval';
+        userActionLabel = 'You have a pending approval action';
+        userActionPhase = phases.find(p => p.approval_instances?.some(i => i.id === userApprovalInstanceId))?.key || null;
+      } else if (
+        currentActionHolders?.users?.length > 0 &&
+        !NON_ACTIONABLE_STAGES.has(currentStage)
+      ) {
+        const isCurrentUserActionHolder = currentActionHolders.users.some(u => parseInt(u.id) === parseInt(userId));
+        if (isCurrentUserActionHolder) {
+          userActionRequired = true;
+          userActionType = currentActionHolders.type === 'permission' ? 'evaluation' : 'approval';
+          userActionLabel = `You are a ${currentActionHolders.label?.toLowerCase() || 'action holder'} for this ${rfqBasic.is_tender === 1 ? 'Tender' : 'RFQ'}`;
+          userActionPhase = currentPhase;
+        }
+      }
+
+      return {
+        rfq_id: rfqId,
+        current_stage: currentStage,
+        current_phase: currentPhase,
+        // Top-level approval action info — for header approve/reject buttons
+        user_can_approve: userCanApprove,
+        user_approval_instance_id: userApprovalInstanceId,
+        user_approval_step_id: userApprovalStepId,
+        user_approval_entity_type: userApprovalEntityType,
+        // Action-required indicator — for visual highlight on the current stage
+        user_action_required: userActionRequired,
+        user_action_type: userActionType,
+        user_action_label: userActionLabel,
+        user_action_phase: userActionPhase,
+        phases,
+      };
     } catch (err) {
       console.error('getLifecycleSummary error:', err);
       return { rfq_id: rfqId, current_stage: null, phases: [] };

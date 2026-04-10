@@ -5276,7 +5276,15 @@ const rfqController = {
       const result = await db.tx(async (t) => {
         // 1. Read the canonical current state and authorise the edit
         const current = await rfqModel.getFullRfqForEdit(rfq_id, t);
-        assertEditAllowed(current, userId);
+
+        // 1b. Check for existing quotes early — needed by assertEditAllowed
+        //     to allow editing when bid window closed but no vendors participated.
+        const hasQuotes = !!(await t.oneOrNone(
+          'SELECT 1 FROM tbl_quotes WHERE rfq_id = $1 LIMIT 1',
+          [rfq_id]
+        ));
+
+        assertEditAllowed(current, userId, { hasQuotes });
 
         // 2. Post-publish field restrictions
         //    Once the RFQ is live, certain fields are off limits regardless
@@ -5299,10 +5307,6 @@ const rfqController = {
         // 3. Quotes-received guard: if any vendor has submitted a quote
         //    we only allow extending bid_end_date and block product mutations
         //    on the products that received quotes.
-        const hasQuotes = !!(await t.oneOrNone(
-          'SELECT 1 FROM tbl_quotes WHERE rfq_id = $1 LIMIT 1',
-          [rfq_id]
-        ));
 
         if (hasQuotes && snapshot.bid_end_date) {
           const newDate = new Date(snapshot.bid_end_date);
@@ -5371,9 +5375,12 @@ const rfqController = {
 
         const hasMaterialChange = allHistory.some((h) => h.is_material);
 
-        // 8. Re-approval if any change is material
+        // 8. Re-approval if any change is material — but NOT if the RFQ is
+        //    already published. Published RFQs (including auto-published ones
+        //    where approval was not completed in time) should not trigger a
+        //    new approval cycle on edit.
         let reapprovalResult = null;
-        if (hasMaterialChange) {
+        if (hasMaterialChange && current.is_published !== 1) {
           reapprovalResult = await cancelAndReissueApproval(
             current,
             userId,
