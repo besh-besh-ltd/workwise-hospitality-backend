@@ -1,6 +1,8 @@
 import admin from 'firebase-admin';
 import fcm from 'fcm-node';
 import accountCredentials from '../config/firebase/service-account.json' assert { type: 'json' };
+import { logger } from '../util/logger.js';
+import { logError } from './common.js';
 
 const certPath = admin.credential.cert(accountCredentials);
 const FCM = new fcm(certPath);
@@ -26,13 +28,13 @@ const sendPushNotification = async (deviceTokens, messageData) => {
           },
           data: messageData.additionalData
         };
-        console.log('------------------- message -----------------');
-        // console.log(message);
+        logger.debug('Sending push notification message');
+        // logger.debug(message);
         FCM.send(message, (err, res) => {
           if (err) {
-            console.log(err);
+            logError('FCM send failed', err);
           } else {
-            console.log(res);
+            logger.info('FCM message sent successfully');
           }
         });
       }

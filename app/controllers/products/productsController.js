@@ -12,11 +12,12 @@ import {
   sendMail,
   arraysHaveSameData
 } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';
 import bcrypt from 'bcryptjs';
-import axios from 'axios';
+import httpClient from '../../util/httpClient.js';
 import FormData from 'form-data';
 import fs from 'fs';
 import { v4 } from 'uuid';
@@ -65,7 +66,7 @@ async function getAllVendorData(vendorList, product_name, cat_id, approve_by) {
 
       return item;
     } catch (error) {
-      console.log('error--', error);
+      logError('getAllVendorData error', error);
       //   return item;
       // return item;
     }
@@ -113,7 +114,7 @@ const ProductsController = {
             })
             .end();
         })
-        .catch((error) => console.error(`Error: ${error.message}`));
+        .catch((error) => logError('getProductSearch error', error));
     } catch (error) {
       logError(error);
       res
@@ -246,7 +247,7 @@ const ProductsController = {
             })
             .end();
         })
-        .catch((error) => console.error(`Error: ${error.message}`));
+        .catch((error) => logError('getVendorSearch error', error));
       /*  res
         .status(200)
         .json({
@@ -794,7 +795,7 @@ const ProductsController = {
         firstHeaderData[0]
       );
       // console.log('headerCheck====', headerCheck);
-      console.log(excelHeaders, firstHeaderData[0]);
+      logger.debug({ excelHeaders, firstHeaderData: firstHeaderData[0] }, 'Excel header comparison');
       if (!headerCheck) {
         err++;
         errors.message = 'Download the sample Excel and check all column name';
@@ -1007,12 +1008,12 @@ const ProductsController = {
                 value['Category']
               );
             }
-            console.log(catNameExists);
+            logger.debug({ catNameExists }, 'Category name exists check');
             let category_id = '';
             if (catNameExists.length > 0) {
               category_id = { id: catNameExists[0].id };
             } else {
-              console.log('test--->', value['Category']);
+              logger.debug({ category: value['Category'] }, 'Creating new category');
               //  return false;
               let catObj = {
                 title: value['Category'],
@@ -1054,7 +1055,7 @@ const ProductsController = {
           })
           .end();
       } else {
-        console.log('productArray==>>>>', productArray);
+        logger.debug({ productArray }, 'Deleting products due to errors');
         for await (let id of productArray) {
           if (id != 0) {
             let productObj = {
@@ -1227,7 +1228,7 @@ nestedCategoryList: async (req, res, next) => {
   try {
     const { parent_id, slug, vendorRequired=true } = req.query;
 
-    console.log("parent_id:", parent_id, "slug:", slug);
+    logger.debug({ parent_id, slug }, 'nestedCategoryList params');
 
     const categoryList = await productModel.getNestedCategoryList(parent_id, slug, vendorRequired);
 
@@ -1237,8 +1238,7 @@ nestedCategoryList: async (req, res, next) => {
       data: categoryList.data,
     });
   } catch (error) {
-    console.log(" nested Categiory List =>", error)
-    logError(error);
+    logError('nested Category List error', error);
     res.status(400).json({
       status: 3,
       message: Config.errorText.value,
@@ -1286,7 +1286,7 @@ randomProductsForCarausel : async (req, res, next) => {
       if (category_id) {
         response = await productModel.getProductBycategory(category_id);
 
-        console.log("-------------------------->",response);
+        logger.debug({ response }, 'getProductBycategory result');
       } else if (product_id) {
         response = await productModel.getProductById(product_id);
       }
@@ -1297,7 +1297,7 @@ randomProductsForCarausel : async (req, res, next) => {
 
       return res.status(200).json({ status: 1, data: response }).end();
     } catch (error) {
-      console.error('Error in searchProductsByCategory:', error);
+      logError('Error in searchProductsByCategory', error);
       return res
         .status(500)
         .json({ error: 'Internal server error. Please try again later.' })
@@ -1328,7 +1328,7 @@ randomProductsForCarausel : async (req, res, next) => {
       return res.status(200).json({ status: 1, data: result }).end();
       
     } catch (error) {
-      console.error('Error in searchProductsByCategory:', error);
+      logError('Error in getProductBySlugAndCategorySlug', error);
       return res
         .status(500)
         .json({ error: 'Internal server error. Please try again later.' })
@@ -1336,7 +1336,7 @@ randomProductsForCarausel : async (req, res, next) => {
     }
   },
 
-   // 25-05-2025 mukul jatav. to fetch unique make list 
+   // 25-05-2025 mukul jatav. to fetch unique make list
   getProductMakeList: async (req, res, next) =>{
     try {
       

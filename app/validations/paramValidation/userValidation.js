@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Config from '../../config/app.config.js';
 import userModel from '../../models/userModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import { S3Client } from '@aws-sdk/client-s3';
 import s3Client from '../../config/s3config.js';
 
@@ -729,7 +730,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('userValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'
@@ -749,12 +750,12 @@ const schema_posts = {
           if (ext == '.png' || ext == '.jpg' || ext == '.jpeg') {
             var validateImage = validatingImage(schemas.agent_profile_image);
             if (validateImage) {
-              console.log('Case 1');
+              logger.debug('agent_profile_image: valid image extension');
 
               cb(null, true);
             }
           } else {
-            console.log('Case 2');
+            logger.debug('agent_profile_image: invalid image extension');
             cb(null, false);
             return cb('Only .png, .jpg, .jpeg format allowed!', null);
           }
@@ -776,7 +777,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('userValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'
@@ -823,7 +824,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('userValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'
@@ -867,7 +868,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('userValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'
@@ -980,7 +981,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('userValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'
@@ -1030,7 +1031,7 @@ const schema_posts = {
             })
             .end();
         } else {
-          console.log('=========', req.files);
+          logger.debug({ files: req.files }, 'uploaded application documents');
           if (req.files && req.files.length > 0) {
             next();
           } else {
@@ -1045,7 +1046,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('ERR========');
+      logError('userValidation upload_application_documents error', err);
       res
         .status(400)
         .json({

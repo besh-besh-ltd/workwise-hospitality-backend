@@ -1,5 +1,6 @@
 import db from "../../config/dbConn.js";
 import { logError } from "../../helper/common.js";
+import { logger } from '../../util/logger.js';
 import { removeMilestoneReminder, rescheduleMilestoneReminder, scheduleMilestoneReminder } from "../../helper/cronManager.js";
 import generalModel, { markPOStatusChange, getApprovalInstanceById, getApprovalInstanceDetails, recordLifecycleEvent, submitApprovalAction } from "../../models/generalModel.js";
 import { createMilestone, createTask, deleteMilestone, deleteTask, getMilestonesByPOId, getPOByRFQId, getPODetailsById, getTasksByPOId, draftPurchaseOrder, updateMilestone, updateTask, initiatePurchaseOrder, updateGSTForPO, updateHSNCode, handleUpdatePO, handleRaiseInvoice, handleMarkDispatched, handleAddSiteRepresentative, handleMarkGRN, regeneratePODocument } from "../../models/purchaseOrderModel.js";
@@ -96,7 +97,7 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
     );
 
     if (!dbRow) {
-      console.warn(`buildAuthoritativePOPayload: Quote item ${quoteItemId} not found, using payload as-is`);
+      logger.warn(`buildAuthoritativePOPayload: Quote item ${quoteItemId} not found, using payload as-is`);
       return poInfo;
     }
 
@@ -115,7 +116,7 @@ export const buildAuthoritativePOPayload = async (poInfo, txn) => {
       }
     };
   } catch (err) {
-    console.error('buildAuthoritativePOPayload error, using payload as-is:', err.message);
+    logError('buildAuthoritativePOPayload error, using payload as-is:', err);
     return poInfo;
   }
 };
@@ -145,7 +146,7 @@ export const draftPO = async (poInfo, user, txn) => {
 
     return result;
   } catch (error) {
-    console.error(error);
+    logError('draftPO failed', error);
     throw error;
   }
 };
@@ -263,7 +264,7 @@ export const approvePO = async (req, res) => {
             try {
               await regeneratePODocument(po_id, t);
             } catch (err) {
-              console.error('Failed to regenerate PO document:', err);
+              logError('Failed to regenerate PO document', err);
             }
           }
 
@@ -334,7 +335,7 @@ export const approvePO = async (req, res) => {
           try {
             await regeneratePODocument(po_id, t);
           } catch (err) {
-            console.error('Failed to regenerate PO document:', err);
+            logError('Failed to regenerate PO document', err);
           }
         }
 
@@ -352,7 +353,7 @@ export const approvePO = async (req, res) => {
           } else {
             // Send company-wide notification for legacy workflow
             sendLegacyPOApprovalNotification(purchaseOrder, trx).catch(err => {
-              console.error('Failed to send legacy PO approval notifications:', err);
+              logError('Failed to send legacy PO approval notifications', err);
             });
           }
         } else if (result && (!result.is_rejected && result.approval_required)) {
@@ -452,7 +453,7 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
     `, [po_id]);
 
     if (!purchaseOrder) {
-      console.error(`PO ${po_id} not found for approval instance ${approval_instance_id}`);
+      logger.error(`PO ${po_id} not found for approval instance ${approval_instance_id}`);
       return;
     }
 
@@ -494,7 +495,7 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
       const rfqCreator = await userModel.getUserById(rfqDetails?.created_by);
       if (rfqCreator && rfqCreator[0]) {
         sendPONotificationToVendor(purchaseOrder, rfqCreator[0]).catch(err => {
-          console.error('Failed to send PO notification to vendor:', err);
+          logError('Failed to send PO notification to vendor', err);
         });
       }
 
@@ -577,17 +578,17 @@ export const handlePOPostApproval = async (approval_instance_id, approver_user_i
           company_name: companyDetails?.company_name
         }
       }).catch(err => {
-        console.error('Failed to send PO approval completion notifications:', err);
+        logError('Failed to send PO approval completion notifications', err);
       });
 
     } catch (notificationError) {
       // Don't fail the approval if notification fails
-      console.error('Error preparing PO approval notifications:', notificationError);
+      logError('Error preparing PO approval notifications', notificationError);
     }
 
-    console.log(`PO ${po_id} approved via new approval workflow`);
+    logger.info(`PO ${po_id} approved via new approval workflow`);
   } catch (error) {
-    console.error('Error handling PO post-approval:', error);
+    logError('Error handling PO post-approval', error);
   }
 };
 
@@ -624,7 +625,7 @@ export const handlePORejectionByInstance = async (approval_instance_id, approver
       `, [po_id]);
 
       if (!purchaseOrder) {
-        console.error(`PO ${po_id} not found for rejected approval instance ${approval_instance_id}`);
+        logger.error(`PO ${po_id} not found for rejected approval instance ${approval_instance_id}`);
         return;
       }
 
@@ -635,7 +636,7 @@ export const handlePORejectionByInstance = async (approval_instance_id, approver
       await handlePORejection(purchaseOrder, approver_user_id, t);
     });
   } catch (error) {
-    console.error('Error handling PO rejection by instance:', error);
+    logError('Error handling PO rejection by instance', error);
   }
 };
 
@@ -748,7 +749,7 @@ const sendLegacyPOApprovalNotification = async (purchaseOrder, transaction) => {
     });
 
   } catch (error) {
-    console.error('Error in sendLegacyPOApprovalNotification:', error);
+    logError('Error in sendLegacyPOApprovalNotification', error);
   }
 };
 
@@ -786,7 +787,7 @@ export const updateHSNForProduct = async (req, res) => {
       data: updatedData
     });
   } catch (error) {
-    console.error(error);
+    logError('updateHSNForProduct failed', error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
@@ -807,7 +808,7 @@ export const raiseInvoice = async (req, res) => {
       data: result
     });
   } catch (error) {
-    console.error(error);
+    logError('raiseInvoice failed', error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
@@ -828,7 +829,7 @@ export const markGRN = async (req, res) => {
       data: result
     });
   } catch (error) {
-    console.error(error);
+    logError('markGRN failed', error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
@@ -849,7 +850,7 @@ export const markDispatched = async (req, res) => {
       data: result
     });
   } catch (error) {
-    console.error(error);
+    logError('markDispatched failed', error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
@@ -870,7 +871,7 @@ export const addSiteRepresentative = async (req, res) => {
       data: result
     });
   } catch (error) {
-    console.error(error);
+    logError('addSiteRepresentative failed', error);
     return res.status(500).json({
       status: 0,
       message: error.message || 'An error occurred while approving the PO.',
@@ -888,7 +889,7 @@ export const getMilestonesController = async (req, res) => {
     const data = await getMilestonesByPOId(req.user.company_id, po_id, user.user_type == '8');
     return res.status(200).json({ success: true, data });
   } catch (error) {
-    console.error(error);
+    logError('getMilestonesController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -902,7 +903,7 @@ export const createMilestoneController = async (req, res) => {
 
     return res.status(201).json({ success: true, data: milestone });
   } catch (error) {
-    console.error(error);
+    logError('createMilestoneController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -914,7 +915,7 @@ export const updateMilestoneController = async (req, res) => {
 
     return res.status(200).json({ success: true, data: updated });
   } catch (error) {
-    console.error(error);
+    logError('updateMilestoneController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -926,7 +927,7 @@ export const deleteMilestoneController = async (req, res) => {
     
     return res.status(200).json({ success: true, data: deleted });
   } catch (error) {
-    console.error(error);
+    logError('deleteMilestoneController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -940,7 +941,7 @@ export const getTasksController = async (req, res) => {
     const [data, count] = await getTasksByPOId(req.user.company_id, po_id, page, limit);
     return res.status(200).json({ success: true, data, total: count });
   } catch (error) {
-    console.error(error);
+    logError('getTasksController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -951,7 +952,7 @@ export const createTaskController = async (req, res) => {
 
     return res.status(201).json({ success: true, data: milestone });
   } catch (error) {
-    console.error(error);
+    logError('createTaskController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -962,7 +963,7 @@ export const updateTaskController = async (req, res) => {
 
     return res.status(200).json({ success: true, data: updated });
   } catch (error) {
-    console.error(error);
+    logError('updateTaskController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -973,7 +974,7 @@ export const deleteTaskController = async (req, res) => {
 
     return res.status(200).json({ success: true, data: deleted });
   } catch (error) {
-    console.error(error);
+    logError('deleteTaskController failed', error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

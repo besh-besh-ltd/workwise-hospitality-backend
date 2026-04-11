@@ -8,6 +8,7 @@ import Config from '../../config/app.config.js';
 import cmsModel from '../../models/cmsModel.js';
 import productModel from '../../models/productModel.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import multerS3 from 'multer-s3';
 import s3Client from '../../config/s3config.js';
 
@@ -263,7 +264,7 @@ let validatingImage = async (schema) => {
     const result = Joi.validate(req.body, schema, {
       abortEarly: false
     });
-    console.log('result', result);
+    logger.debug({ result }, 'validation result');
     if (result.error) {
       let err_msg = {};
       for (let counter in result.error.details) {
@@ -902,7 +903,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('cmsValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'
@@ -952,7 +953,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('cmsValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'
@@ -1002,7 +1003,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('cmsValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'
@@ -1052,7 +1053,7 @@ const schema_posts = {
         }
       });
     } catch (err) {
-      console.log('====>', err);
+      logError('cmsValidation error', err);
       res.status(400).json({
         status: 3,
         message: 'server error'
@@ -1586,7 +1587,7 @@ const schema_posts = {
         next();
       });
     } catch (err) {
-      console.error(err);
+      logError('cmsValidation photo gallery error', err);
       res.status(500).json({
         status: 3,
         message: 'Server error'
@@ -1685,7 +1686,7 @@ const schema_posts = {
         }
       }).single('profile_image')
       upload(req, res, async (err) => {
-        console.log(err)
+        if (err) logger.debug({ err }, 'team member upload error');
         if (err) {
           return res.status(400).json({
             status: 2,

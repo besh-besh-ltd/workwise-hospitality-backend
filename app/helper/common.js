@@ -11,6 +11,7 @@ import { URL } from 'url';
 import { DeleteObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import crypto from 'crypto';
 import { logger } from '../util/logger.js';
+import { trace, SpanStatusCode, context } from '@opentelemetry/api';
 
 // Persistence Statuses
 export const PERSISTENCE_STATUSES = {
@@ -28,7 +29,7 @@ export const PERSISTENCE_STATUSES = {
 const consoleLogData = (...args) => {
   const theEnv = process.env.NODE_ENV;
   if (theEnv == 'development' || theEnv == 'uat') {
-    console.warn(...args);
+    logger.warn(args.length === 1 ? args[0] : args.join(' '));
   }
 };
 
@@ -163,6 +164,13 @@ const logError = (...args) => {
   } else {
     logger.error(logMessage);
   }
+
+  // Record error on active OTel span for SigNoz trace error tracking
+  const span = trace.getSpan(context.active());
+  if (span) {
+    if (err) span.recordException(err);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: logMessage });
+  }
 };
 const currentDateTime = () => {
   let now = calcTime();
@@ -234,29 +242,25 @@ const getErrorText = (err) => {
 
 const sendMail = (mailOptions) => {
   return new Promise((resolve, reject) => {
-    console.log('[MAIL] sendMail called');
-    console.log('[MAIL] To:', mailOptions.to);
-    console.log('[MAIL] From:', mailOptions.from);
-    console.log('[MAIL] Subject:', mailOptions.subject);
+    logger.info('[MAIL] sendMail called');
+    logger.debug({ to: mailOptions.to, from: mailOptions.from, subject: mailOptions.subject }, '[MAIL] Mail options');
 
     if (!mailOptions.to || mailOptions.to === '') {
-      console.log('[MAIL] ERROR: No recipient email provided');
+      logger.error('[MAIL] ERROR: No recipient email provided');
       return resolve(false);
     }
 
-    console.log('[MAIL] Creating transport...');
+    logger.debug('[MAIL] Creating transport...');
     let transporter = nodemailer.createTransport(config.transportConfig);
 
-    console.log('[MAIL] Sending email...');
+    logger.debug('[MAIL] Sending email...');
     transporter.sendMail(mailOptions, function (err, info) {
       if (err) {
-        console.error('[MAIL] ERROR sending email:', err.message);
-        console.error('[MAIL] Full error:', err);
+        logger.error({ err }, '[MAIL] ERROR sending email');
         return resolve(false);
       } else {
-        console.log('[MAIL] Email sent successfully!');
-        console.log('[MAIL] Message ID:', info.messageId);
-        console.log('[MAIL] Response:', info.response);
+        logger.info({ messageId: info.messageId }, '[MAIL] Email sent successfully');
+        logger.debug({ response: info.response }, '[MAIL] Response');
         return resolve(true);
       }
     });
@@ -426,7 +430,7 @@ const getFileNameFromUrl = async (url) => {
     const fileName = segments.pop();
     return fileName;
   } catch (error) {
-    console.error('Invalid URL:', error.message);
+    logger.error({ err: error }, 'Invalid URL');
     return null;
   }
 };
@@ -473,9 +477,9 @@ async function deleteFileFromS3(s3Client, fileUrl) {
 
     const command = new DeleteObjectCommand(params);
     const response = await s3Client.send(command);
-    console.log("✅ File deleted:", response);
+    logger.info('File deleted from S3');
   } catch (error) {
-    console.error("❌ Error deleting file from S3:", error);
+    logger.error({ err: error }, 'Error deleting file from S3');
   }
 }
 

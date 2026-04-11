@@ -1,5 +1,6 @@
 import passport from './passport.js';
 import { validateDbBody } from "../validations/dbValidation/userDbValidation.js";
+import { logger } from '../util/logger.js';
 
 const passportSignIn = passport.authenticate('jwtUsr', { session: false });
 
@@ -13,7 +14,7 @@ const noLogin = {
                 passportSignIn(req, res, (err) => {
                     if (err) {
                         // Pass errors to Express error handler
-                        console.log(err);
+                        logger.debug({ err }, 'noLogin passportSignIn error');
                         return next(err);
                     }
 

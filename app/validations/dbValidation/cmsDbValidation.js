@@ -1,5 +1,6 @@
 import Config from '../../config/app.config.js';
 import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import cmsModel from '../../models/cmsModel.js';
 // import blogModel from '../../models/blogModel.js';
 // import storeModel from '../../models/storeModel.js';
@@ -636,14 +637,14 @@ const validateDbBody = {
               }).end();
             }
           } catch (error) {
-            console.error('Error finding state:', error);
+            logError('Error finding state', error);
             return res.status(500).json({
               status: 3,
               message: 'Internal server error while checking state existence',
             }).end();
           }
         }
-        console.log("error checking 2");
+        logger.debug("error checking 2");
         
   
       // Check if city exists in the state
@@ -665,7 +666,7 @@ const validateDbBody = {
             });
           }
         } catch (error) {
-          console.error("Error checking city existence:", error);
+          logError("Error checking city existence", error);
           return res.status(500).json({
             status: 3,
             message: "Internal server error while checking city existence",
@@ -673,7 +674,7 @@ const validateDbBody = {
         }
       }
     } catch (error) {
-      console.error("Error checking country existence:", error);
+      logError("Error checking country existence", error);
       return res.status(500).json({
         status: 3,
         message: "Internal server error while checking country existence",
@@ -682,7 +683,7 @@ const validateDbBody = {
   
       next(); // No errors, continue to next middleware
     } catch (err) {
-      console.error("Unexpected error:", err);
+      logError("Unexpected error in add_location_isValid", err);
       res.status(500).json({
         status: 3,
         message: "An unexpected error occurred",

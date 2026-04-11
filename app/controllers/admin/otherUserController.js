@@ -4,6 +4,7 @@ import vendorModel from '../../models/vendorModel.js';
 import Config from '../../config/app.config.js';
 // import { logError, currentDateTime, titleToSlug } from '../../helper/common.js';
 import { logError, sendMail, generatePassword } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import jwtHelper from '../../helper/jwtHelper.js';
 import dateFormat from 'dateformat';
 import Cryptr from 'cryptr';

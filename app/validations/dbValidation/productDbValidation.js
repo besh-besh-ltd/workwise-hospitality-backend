@@ -1,4 +1,5 @@
 import Config from '../../config/app.config.js';
+import { logger } from '../../util/logger.js';
 import {
   logError,
   currentDateTime,
@@ -18,8 +19,7 @@ const validateDbBody = {
       let err = 0;
       let cat_id = [];
       let { parent_id, title, slug } = req.body;
-      console.log('parent_id-->', parent_id);
-      console.log('title-->', title);
+      logger.debug({ parent_id, title }, 'parentIdExists validation');
       if (parent_id && parent_id != '0') {
         let parentIdExists = await productModel.parentIdExists(parent_id);
         if (parentIdExists.length > 0) {
@@ -312,7 +312,7 @@ const validateDbBody = {
         /*  if (req.files?.featured && req.files?.featured.length > 0) {
           fs.unlink(req.files.featured[0].path, (unlinkError) => {
             if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
+              logError('Error deleting file', unlinkError);
             }
           });
         }
@@ -320,7 +320,7 @@ const validateDbBody = {
           req.files.gallery.forEach((file) => {
             fs.unlink(file.path, (unlinkError) => {
               if (unlinkError) {
-                console.error('Error deleting file:', unlinkError);
+                logError('Error deleting file', unlinkError);
               }
             });
           });
@@ -368,7 +368,7 @@ const validateDbBody = {
         /*  if (req.files?.featured && req.files?.featured.length > 0) {
           fs.unlink(req.files.featured[0].path, (unlinkError) => {
             if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
+              logError('Error deleting file', unlinkError);
             }
           });
         }
@@ -376,7 +376,7 @@ const validateDbBody = {
           req.files.gallery.forEach((file) => {
             fs.unlink(file.path, (unlinkError) => {
               if (unlinkError) {
-                console.error('Error deleting file:', unlinkError);
+                logError('Error deleting file', unlinkError);
               }
             });
           });
@@ -385,7 +385,7 @@ const validateDbBody = {
           req.files.tds.forEach((file) => {
             fs.unlink(file.path, (unlinkError) => {
               if (unlinkError) {
-                console.error('Error deleting file:', unlinkError);
+                logError('Error deleting file', unlinkError);
               }
             });
           });
@@ -394,7 +394,7 @@ const validateDbBody = {
           req.files.qap.forEach((file) => {
             fs.unlink(file.path, (unlinkError) => {
               if (unlinkError) {
-                console.error('Error deleting file:', unlinkError);
+                logError('Error deleting file', unlinkError);
               }
             });
           });
@@ -469,46 +469,46 @@ const validateDbBody = {
       let productId = req.params.id;
       let { status, reject_reason, reject_reason_id } = req.body;
 
-      console.log(`Validating product approval for ID: ${productId}, status: ${status}`);
+      logger.debug({ productId, status }, 'Validating product approval');
       
       // Validate basic parameters
       if (status === undefined || status === null) {
         err++;
         errors.status = 'Status is required';
-        console.log("Missing status parameter");
+        logger.debug("Missing status parameter");
       }
       
       if (!productId) {
         err++;
         errors.id = 'Product ID is required';
-        console.log("Missing product ID");
+        logger.debug("Missing product ID");
       } else {
         // Check if product or variant exists
         const productIDExists = await productModel.check_product(productId);
-        console.log(`Product search results for ID ${productId}:`, productIDExists?.length || 0);
+        logger.debug({ productId, count: productIDExists?.length || 0 }, 'Product search results');
         
         if (!productIDExists || productIDExists.length === 0) {
           err++;
           errors.id = 'Product or variant not found';
-          console.log(`Product/variant ID ${productId} not found`);
+          logger.debug({ productId }, 'Product/variant ID not found');
         } else {
           // Changes by Agnij May 02, 2025 [Removed check for already approved/rejected items to allow re-approval/re-rejection]
           const item = productIDExists[0];
-          console.log(`Found item of type ${item.product_id ? 'variant' : 'product'}`);
-          
+          logger.debug({ itemType: item.product_id ? 'variant' : 'product' }, 'Found item');
+
           // We no longer block already approved/rejected items to make the UI more forgiving
           if (item && item.is_approve !== undefined) {
             const numericStatus = status === '1' || status === 1 || status === true ? 1 : 0;
-            console.log(`Current approval status: ${item.is_approve}, Requested status: ${numericStatus}`);
-            
+            logger.debug({ currentStatus: item.is_approve, requestedStatus: numericStatus }, 'Approval status check');
+
             // Just log but don't block if it's the same status
             if (numericStatus === 1 && item.is_approve === 1) {
-              console.log("Item is already approved, but allowing re-approval");
+              logger.debug("Item is already approved, but allowing re-approval");
             } else if (numericStatus === 0 && item.is_approve === 0) {
-              console.log("Item is already rejected, but allowing re-rejection");
+              logger.debug("Item is already rejected, but allowing re-rejection");
             }
           } else {
-            console.log(`Item has no is_approve property or is undefined`);
+            logger.debug('Item has no is_approve property or is undefined');
           }
         }
       }
@@ -518,12 +518,12 @@ const validateDbBody = {
         if (!reject_reason_id && !reject_reason) {
           err++;
           errors.reject_reason_id = 'Reject reason is required';
-          console.log("Missing reject reason for rejection");
+          logger.debug("Missing reject reason for rejection");
         }
       }
 
       if (err > 0) {
-        console.log("Validation failed with errors:", errors);
+        logger.debug({ errors }, "Validation failed");
         res
           .status(400)
           .json({
@@ -532,11 +532,11 @@ const validateDbBody = {
           })
           .end();
       } else {
-        console.log("Validation passed");
+        logger.debug("Validation passed");
         next();
       }
     } catch (err) {
-      console.error("Error in product_approve_check:", err);
+      logError("Error in product_approve_check", err);
       logError(err);
       res
         .status(400)
@@ -573,20 +573,20 @@ const validateDbBody = {
         } else {
           // Changes by Agnij May 02, 2025 [Removed check for already approved/rejected items to allow re-approval/re-rejection]
           const item = variantIdExists[0];
-          console.log(`Found item of type ${item.product_id ? 'variant' : 'product'}`);
-          
+          logger.debug({ itemType: item.product_id ? 'variant' : 'product' }, 'Found item');
+
           // We no longer block already approved/rejected items to make the UI more forgiving
           if (item && item.is_approve !== undefined) {
             const numericStatus = status === '1' || status === 1 || status === true ? 1 : 0;
-            
+
             // Just log but don't block if it's the same status
             if (numericStatus === 1 && item.is_approve === 1) {
-              console.log("Item is already approved, but allowing re-approval");
+              logger.debug("Item is already approved, but allowing re-approval");
             } else if (numericStatus === 0 && item.is_approve === 0) {
-              console.log("Item is already rejected, but allowing re-rejection");
+              logger.debug("Item is already rejected, but allowing re-rejection");
             }
           } else {
-            console.log(`Item has no is_approve property or is undefined`);
+            logger.debug('Item has no is_approve property or is undefined');
           }
         }
       }
@@ -601,7 +601,7 @@ const validateDbBody = {
       // }
 
       if (err > 0) {
-        console.log("Validation failed with errors:", errors);
+        logger.debug({ errors }, "Validation failed");
         res
           .status(400)
           .json({
@@ -610,11 +610,11 @@ const validateDbBody = {
           })
           .end();
       } else {
-        console.log("Validation passed");
+        logger.debug("Validation passed");
         next();
       }
     } catch (err) {
-      console.error("Error in variant_approve_check:", err);
+      logError("Error in variant_approve_check", err);
       logError(err);
       res
         .status(400)
@@ -630,7 +630,7 @@ const validateDbBody = {
       let errors = {};
       let err = 0;
       let { name, categories, approved_id, vendor } = req.body;
-      console.log("MESSY ------- ", categories)
+      logger.debug({ categories }, 'add_admin_product categories');
       // categories = JSON.parse(categories);
       /* if (vendor) {
         let checkVendor = await userModel.findActiveVendor(vendor);
@@ -672,7 +672,7 @@ const validateDbBody = {
         /*  if (req.files?.featured && req.files?.featured.length > 0) {
           fs.unlink(req.files.featured[0].path, (unlinkError) => {
             if (unlinkError) {
-              console.error('Error deleting file:', unlinkError);
+              logError('Error deleting file', unlinkError);
             }
           });
         }
@@ -680,7 +680,7 @@ const validateDbBody = {
           req.files.gallery.forEach((file) => {
             fs.unlink(file.path, (unlinkError) => {
               if (unlinkError) {
-                console.error('Error deleting file:', unlinkError);
+                logError('Error deleting file', unlinkError);
               }
             });
           });
@@ -689,7 +689,7 @@ const validateDbBody = {
           req.files.tds.forEach((file) => {
             fs.unlink(file.path, (unlinkError) => {
               if (unlinkError) {
-                console.error('Error deleting file:', unlinkError);
+                logError('Error deleting file', unlinkError);
               }
             });
           });
@@ -698,7 +698,7 @@ const validateDbBody = {
           req.files.qap.forEach((file) => {
             fs.unlink(file.path, (unlinkError) => {
               if (unlinkError) {
-                console.error('Error deleting file:', unlinkError);
+                logError('Error deleting file', unlinkError);
               }
             });
           });

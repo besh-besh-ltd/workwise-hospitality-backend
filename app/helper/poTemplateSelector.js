@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { logger } from '../util/logger.js';
 
 /**
  * Select the most appropriate PO template based on company hierarchy
@@ -39,12 +40,12 @@ export const selectPOTemplate = (company_id, hospitality_company_id, hotel_id) =
   for (const candidate of candidates) {
     const templatePath = path.join(templatesDir, candidate);
     if (fs.existsSync(templatePath)) {
-      console.log(`Selected PO template: ${candidate}`);
+      logger.info({ template: candidate }, 'Selected PO template');
       return templatePath;
     }
   }
 
   // Fallback to default template
-  console.log('Using default PO template');
+  logger.info('Using default PO template');
   return defaultTemplate;
 };

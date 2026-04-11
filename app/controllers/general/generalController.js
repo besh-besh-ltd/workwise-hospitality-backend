@@ -1,5 +1,6 @@
 import Config from '../../config/app.config.js';
 import { logError } from '../../helper/common.js';
+import { logger } from '../../util/logger.js';
 import userModel from '../../models/userModel.js';
 import generalModel, {
   createApprovalInstance,
@@ -85,7 +86,6 @@ const generalController = {
         })
         .end();
     } catch (error) {
-      console.log(error);
       logError(error);
       res
         .status(400)
@@ -108,7 +108,6 @@ const generalController = {
         })
         .end();
     } catch (error) {
-      console.log(error);
       logError(error);
       res
         .status(400)
@@ -740,7 +739,7 @@ const hospitalityApprovalController = {
 
       return res.json({ status: true, data: result });
     } catch (err) {
-      console.error('getDepartmentPreview error:', err);
+      logError('getDepartmentPreview error', err);
       return res.status(err.message.includes('not found') ? 404 : 500).json({
         status: false,
         message: err.message

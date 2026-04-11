@@ -1,4 +1,5 @@
 import db, { pgp } from '../config/dbConn.js';
+import { logger } from '../util/logger.js';
 
 const projectModel = {
   createProject: async (projectObj) => {
@@ -207,7 +208,7 @@ const projectModel = {
       ORDER BY 
         p.created_at DESC;`;
 
-      console.log(' query ', query);
+      logger.debug({ query }, 'getAllProjects query');
 
       db.any(query, [user_id])
         .then((data) => resolve(data))
@@ -257,7 +258,7 @@ ORDER BY
   },
 
   updateProject: async (projectObj) => {
-    console.log('projectObj in updateProject user', projectObj);
+    logger.debug({ projectObj }, 'projectObj in updateProject user');
     return new Promise(function (resolve, reject) {
       db.oneOrNone(
         `UPDATE tbl_projects
@@ -667,7 +668,7 @@ ORDER BY
   },
 
   updateProjectForAdmin: async (projectObj) => {
-    console.log('projectObj in updateProjectForAdmin', projectObj);
+    logger.debug({ projectObj }, 'projectObj in updateProjectForAdmin');
     return new Promise(function (resolve, reject) {
       db.oneOrNone(
         `UPDATE tbl_projects

@@ -6,7 +6,7 @@ import express from 'express';
 import http from 'http';
 import dotenv from 'dotenv';
 import util from './app/util/index.js';
-import { consoleLogData } from './app/helper/common.js';
+import { consoleLogData, logError } from './app/helper/common.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { SocketConfig } from './app/util/socket.js';
@@ -50,7 +50,7 @@ rescheduleAllRfqPublishJobs();
 
 // Clean error handler
 app.use(function onError(err, req, res, next) {
-  console.error('Unhandled error:', err.message || err);
+  logError('Unhandled error in global handler', err);
   res.statusCode = 500;
   res.json({ status: 3, message: 'An internal error has occurred. Please try again later.' });
 });
@@ -116,7 +116,7 @@ function gracefulShutdown(signal) {
 
   // Force exit after 15s if draining hangs
   setTimeout(() => {
-    console.error('Forced shutdown after 15s timeout');
+    logger.error('Forced shutdown after 15s timeout');
     process.exit(1);
   }, 15000).unref();
 }

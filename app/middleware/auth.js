@@ -1,6 +1,7 @@
 import passport from 'passport';
 import Config from '../config/app.config.js';
 import { logError } from '../helper/common.js';
+import { logger } from '../util/logger.js';
 import adminModel from '../models/adminModel.js';
 import Cryptr from 'cryptr';
 const cryptr = new Cryptr(Config.cryptR.secret);
@@ -152,7 +153,7 @@ export const can = (permKey, needEvery = false) => {
 
       return next();
     } catch (err) {
-      console.error("RBAC can() error:", err);
+      logError("RBAC can() error", err);
       return res.status(500).json({
         status: false,
         message: "Authorization check failed"
@@ -220,19 +221,19 @@ const auth = {
   },
   authUserOrGRNToken: (req, res, next) => {
     // Use passport in "custom callback" mode
-    console.log("REQ BODY:", req.body);
+    logger.debug({ body: req.body }, "REQ BODY");
     passport.authenticate(
       "jwtUsr",
       { session: false },
       async (err, user, info) => {
-        console.log("LOGGED IN USING PASSPORT AUTHENTICATE")
+        logger.debug("LOGGED IN USING PASSPORT AUTHENTICATE")
         if (err) {
           return next(err);
         }
 
         // If normal user auth works, proceed as usual
         if (user) {
-          console.log("USER FOUND AUTHENTICATED QUICKLY")
+          logger.debug("USER FOUND AUTHENTICATED QUICKLY")
           req.user = user;
           return next();
         }
@@ -247,7 +248,7 @@ const auth = {
           po_id = req.body.po_id
         }
 
-        console.log("UNAUTHENTICATED TOKEN:", token, " PO ID:", po_id);
+        logger.debug({ token, po_id }, "UNAUTHENTICATED TOKEN");
 
         if (!token || !po_id) {
           // No JWT and no token → unauthorized
@@ -270,10 +271,10 @@ const auth = {
             ["GRN", Number(po_id), token]
           );
 
-          console.log("TOKEN ROW:", tokenRow);
+          logger.debug({ tokenRow }, "TOKEN ROW");
 
           if (!tokenRow) {
-            console.log("TOKEN ROW NOT FOUND!")
+            logger.debug("TOKEN ROW NOT FOUND!")
             return res.status(403).json({
               status: 0,
               message: "Forbidden: invalid or expired GRN token.",
@@ -292,11 +293,11 @@ const auth = {
             is_token_user: true,
           };
 
-          console.log("REQ USER:", req.user);
+          logger.debug({ user: req.user }, "REQ USER");
 
           return next();
         } catch (dbErr) {
-          console.error("Error validating GRN token:", dbErr);
+          logError("Error validating GRN token", dbErr);
           return next(dbErr);
         }
       }
