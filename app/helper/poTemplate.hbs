@@ -354,6 +354,12 @@
         {{else}}
           {{location}}
         {{/if}}
+        {{#if buyer.contact_person}}
+          <div style="border-top: 1px solid #ccc; margin-top: 6px; padding-top: 6px;">
+            <strong>Contact Information:</strong><br/>
+            {{buyer.contact_person}}{{#if buyer.phone}} &nbsp;|&nbsp; {{buyer.phone}}{{/if}}{{#if buyer.email}} &nbsp;|&nbsp; {{buyer.email}}{{/if}}
+          </div>
+        {{/if}}
       </td>
       <td style="width: 50%;">
         <strong>Buyer Details:</strong><br/>

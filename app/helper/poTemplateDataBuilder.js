@@ -77,7 +77,10 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
       THCH.name AS hotel_name,
       THCH.full_address AS hotel_address,
       THCH.gst AS hotel_gstin,
-      RFQ.location AS rfq_delivery_location
+      RFQ.location AS rfq_delivery_location,
+      RFQ.contact_name AS buyer_contact_name,
+      RFQ.contact_number AS buyer_contact_number,
+      RFQ.response_email AS buyer_contact_email
 
     FROM tbl_rfq_purchase_order PO
     JOIN tbl_rfq RFQ ON RFQ.id = PO.rfq_id
@@ -266,7 +269,10 @@ export const buildPOTemplateData = async (po_id, txContext = null) => {
       business_unit_name: poData.hotel_name,
       address: buyerAddress,
       gstin: poData.hotel_gstin || poData.buyer_gstin,
-      state_name: buyerLocation?.state_name || null
+      state_name: buyerLocation?.state_name || null,
+      contact_person: poData.buyer_contact_name || null,
+      phone: poData.buyer_contact_number || null,
+      email: poData.buyer_contact_email || null
     },
     buyer_business_unit_name: poData.hotel_name,
     gstin: poData.hotel_gstin || poData.buyer_gstin,
